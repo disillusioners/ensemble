@@ -212,21 +212,24 @@ def emit_orphan_f1_boot_log() -> None:
 # any live ACTIVE job including the target's own (correctly), and
 # ``NOT has_active_non_deferred_work(project_id, requester_instance_id=
 # <target>)`` returns True. The watchdog detects this blind-spot and
-# either logs (default OFF) or unstucks the row by flipping
-# ``task.is_deferred`` to False (gated, ON).
+# unstucks the row by flipping ``task.is_deferred`` to False
+# (gated, default ON; OFF only when explicitly disabled).
 #
 # Mirrors the f1 kill-switch discipline above: env-only, restart-read,
-# cached for process lifetime, default OFF (safe-by-default — only the
-# WARN fires until the operator explicitly enables the unstick).
+# cached for process lifetime, default ON (the bounded unstick runs
+# by default — explicit ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0`` /
+# ``=false`` / ``=off`` is the operator escape hatch).
 # ─────────────────────────────────────────────────────────────────
 
-# Pattern (g) kill-switch — env-only, default OFF. The brief mandates
+# Pattern (g) kill-switch — env-only, default ON. The brief mandates
 # NO yaml key (the flag is operator-runtime, not config-runtime).
 # Restart-read semantics match the f1 contract (cache once, no
 # mid-flight re-read). Empty-string safe: a blank env var resolves to
-# OFF (the default) — consistent with the safe-by-default posture
-# (an operator who sets ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=`` with
-# no value gets the OFF behaviour, not the auto-promote).
+# ON (the default) — consistent with the new "ON unless explicitly
+# disabled" posture (an operator who sets ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=``
+# with no value gets the ON behaviour, NOT the no-op). Set
+# ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0`` (or ``=false`` / ``=off``)
+# to disable — restart required (cached resolver).
 _DEFER_AUTOPROMOTE_ENABLED_ENV = "ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED"
 _DEFER_AUTOPROMOTE_ENABLED: bool | None = None
 _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED: bool = False
@@ -236,20 +239,28 @@ def _resolve_defer_autopromote_enabled() -> bool:
     """Resolve and cache the Pattern-g defer-autopromote kill-switch.
 
     Returns:
-        ``True`` when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` is set to
-        a truthy value — the bounded unstick is enabled (detector
+        ``True`` (the default) when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED``
+        is unset / blank — the bounded unstick is enabled (detector
         flips ``task.is_deferred=False`` on the matched rows).
-        ``False`` (default) when the env is unset / blank / falsy —
+        ``False`` when the env is explicitly set to a falsy value
+        (``"0"`` / ``"00"`` / ``"-0"`` / ``"0."`` / ``"0x0"`` /
+        ``"false"`` / ``"no"`` / ``"off"``) — the escape hatch;
         detection WARN fires, NO task writes (the OFF=no-writes
         contract).
 
-    Truthy values: ``("1", "true", "yes", "on")``. Falsy values +
-    blank: ``("0", "false", "no", "off", "")``. The blank case falls
-    into the falsy bucket so an unset env var resolves to OFF (the
-    default) — the parser does NOT raise on empty-string, it just treats
-    it as the default-OFF value. Unknown non-blank values fall back to
-    OFF with a one-shot WARN — the safe direction (default OFF, not
-    ON), so a typo cannot accidentally enable the unstick.
+    Truthy values: ``("1", "true", "yes", "on")``. Falsy values include
+    zero-style spellings (``"0"`` / ``"00"`` / ``"-0"`` / ``"0."`` /
+    ``"0x0"``) AND the textual spellings (``"false"`` / ``"no"`` /
+    ``"off"``) — the zero-style variants cover operator intent for
+    forms that are numerically zero but lexically distinct from
+    ``"0"``. The blank case falls into the default-ON bucket — the
+    parser does NOT raise on empty-string, it just treats it as the
+    default-ON value. Unknown non-blank values (incl. the quoted form
+    ``"0"`` with the literal quote characters as part of the value)
+    fall back to ON with a one-shot WARN — the consistent direction
+    under the new default (a typo that does not parse as falsy is
+    still ON, matching the operator's intent to enable the unstick;
+    explicit OFF always wins).
 
     Caching + boot log are independent: this function caches only
     the boolean; the one-shot boot INFO is emitted by
@@ -259,22 +270,28 @@ def _resolve_defer_autopromote_enabled() -> bool:
     global _DEFER_AUTOPROMOTE_ENABLED
     if _DEFER_AUTOPROMOTE_ENABLED is not None:
         return _DEFER_AUTOPROMOTE_ENABLED
-    raw = os.environ.get(_DEFER_AUTOPROMOTE_ENABLED_ENV, "0").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        _DEFER_AUTOPROMOTE_ENABLED = True
-    elif raw in ("0", "false", "no", "off", ""):
-        # Blank → default OFF (matches the "safe-by-default" posture;
-        # an unset env var is NOT the same as an explicit ON).
+    # Default ON: unset env var resolves to True (the bounded unstick
+    # runs by default). Explicit falsy spellings disable; everything
+    # else (truthy spellings, blank, unknowns) resolves to ON.
+    # Falsy set covers both textual (false/no/off) AND zero-style
+    # (0/00/-0/0./0x0) — operator intent for these is unambiguously
+    # "disable"; see MATRIX_A in
+    # tests/job_queue/test_defer_self_witness_watchdog.py.
+    raw = os.environ.get(_DEFER_AUTOPROMOTE_ENABLED_ENV, "1").strip().lower()
+    if raw in ("0", "00", "-0", "0.", "0x0", "false", "no", "off"):
         _DEFER_AUTOPROMOTE_ENABLED = False
+    elif raw in ("1", "true", "yes", "on", ""):
+        _DEFER_AUTOPROMOTE_ENABLED = True
     else:
         logger.warning(
             "%s=%r is not a recognized truthy/falsy value; falling "
-            "back to OFF (the default). Recognized truthy spellings: "
-            "1/true/yes/on.",
+            "back to ON (the default). Recognized falsy spellings: "
+            "0/00/-0/0./0x0/false/no/off — set one of those + "
+            "restart to disable the bounded unstick.",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             raw,
         )
-        _DEFER_AUTOPROMOTE_ENABLED = False
+        _DEFER_AUTOPROMOTE_ENABLED = True
     return _DEFER_AUTOPROMOTE_ENABLED
 
 
@@ -306,20 +323,24 @@ def emit_defer_autopromote_boot_log() -> None:
     enabled = _resolve_defer_autopromote_enabled()
     if enabled:
         logger.info(
-            "Pattern-g defer-self-witness autopromote ENABLED via "
-            "%s=1 — matched deferred PENDING tasks will be unstuck "
-            "by flipping task.is_deferred=false on the drift cadence "
-            "(default OFF; set %s=0 to revert — restart required)",
+            "Pattern-g defer-self-witness autopromote ENABLED "
+            "(default; %s unset or set to a truthy value) — "
+            "matched deferred PENDING tasks in the self-witness "
+            "blind-spot will be unstuck by flipping task.is_deferred="
+            "false on the drift cadence. Set %s=0 (or "
+            "00/-0/0./0x0/false/no/off) + restart to disable the "
+            "bounded unstick",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
         )
     else:
         logger.info(
             "Pattern-g defer-self-witness autopromote DISABLED "
-            "(default; %s=0) — detection WARN fires, deferred "
-            "PENDING tasks in the self-witness blind-spot are "
-            "NOT unstuck. Set %s=1 + restart to enable the "
-            "bounded unstick",
+            "(operator opted-out via %s=0/00/-0/0./0x0/false/no/off) "
+            "— detection WARN fires, deferred PENDING tasks in the "
+            "self-witness blind-spot are NOT unstuck. Unset %s (or set "
+            "it to 1/true/yes/on) + restart to re-enable the bounded "
+            "unstick",
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
             _DEFER_AUTOPROMOTE_ENABLED_ENV,
         )
@@ -1769,10 +1790,12 @@ class JobRecoveryService:
         # target instance, with the WS1 carve-out applied, sees no
         # live non-deferred work AND no other project witnesses for
         # the defer gate (the self-witness blind-spot class). Bounded
-        # unstick: when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=1``,
-        # atomic UPDATE flips task.is_deferred=False so the next
-        # ``claim_pending_task`` cycle picks the row up as a regular
-        # task. When OFF (the default): WARN only, NO task writes.
+        # unstick: when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` is ON
+        # (the default — unset or truthy env), atomic UPDATE flips
+        # task.is_deferred=False so the next ``claim_pending_task``
+        # cycle picks the row up as a regular task. When OFF
+        # (operator-set ``=0``/``=false``/``=off``): WARN only, NO
+        # task writes.
         # Census: writes task state (NOT job_queue_items.admission
         # _state), so the Pattern (g) reconciled contribution is 0
         # and the constitution stays 23/1/0. See
@@ -3205,13 +3228,15 @@ class JobRecoveryService:
 
         Bounded unstick (gated by
         ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` — see
-        :func:`_resolve_defer_autopromote_enabled`): when ON, an
-        atomic UPDATE flips ``task.is_deferred=False`` so the next
-        ``claim_pending_task`` claim cycle picks the row up. The
-        guard (``is_deferred=True AND status='pending'``) makes the
-        flip race-safe against a concurrent claim. When OFF (the
-        default), detection WARN fires, NO task writes — the
-        OFF=no-writes contract pinned by the kill-switch convention.
+        :func:`_resolve_defer_autopromote_enabled`): when ON (the
+        default — unset or truthy env), an atomic UPDATE flips
+        ``task.is_deferred=False`` so the next ``claim_pending_task``
+        claim cycle picks the row up. The guard
+        (``is_deferred=True AND status='pending'``) makes the flip
+        race-safe against a concurrent claim. When OFF (operator-set
+        ``=0``/``=false``/``=off``), detection WARN fires, NO task
+        writes — the OFF=no-writes contract pinned by the kill-switch
+        convention.
 
         Census discipline (WS3 brief §3): the promote path WRITES
         ``task.is_deferred`` — task writes are out of the

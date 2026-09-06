@@ -532,9 +532,11 @@ async def lifespan(app: FastAPI):
     emit_orphan_f1_boot_log()
     # WS3 add-on (WS4 wiring, 2026-09-06): one-shot boot log for the
     # Pattern-g defer-autopromote kill-switch
-    # (ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED, default OFF,
+    # (ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED, default ON,
     # restart-to-flip). WS3 exported this from job_recovery_service
-    # but left the lifespan wiring out of its scope.
+    # but left the lifespan wiring out of its scope. Set the env var
+    # to ``0`` / ``false`` / ``off`` + restart to disable the bounded
+    # unstick (operator escape hatch).
     emit_defer_autopromote_boot_log()
     drift_reconciler_task = asyncio.create_task(
         _periodic_drift_reconcile_loop(
