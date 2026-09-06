@@ -191,6 +191,138 @@ def emit_orphan_f1_boot_log() -> None:
         )
 
 
+# ─────────────────────────────────────────────────────────────────
+# Pattern (g) defer-self-witness watchdog kill-switch (WS3,
+# branch ``fix/defer-self-witness-and-cleanup``).
+#
+# The WS1 carve-out on ``JobRepository.has_active_non_deferred_work``
+# (``requester_instance_id=<target>``) excludes the candidate's own
+# settled mirrors from the defer-gate busy-set — see
+# ``daemon/repositories/job_queue/repository.py:646-799``. The carve-out
+# exists because a deferred message sent to a COMPLETED instance
+# REVIVES it (F7 revive), and the revived instance's own settled
+# mirrors would otherwise hold the gate against ITSELF forever — the
+# held defer task becomes the instance's only work, no turn ever runs.
+#
+# The carve-out, however, introduces a NEW blind-spot class: a deferred
+# PENDING task (``is_deferred=True``) whose target instance is the
+# ONLY active non-deferred work in the project — no live ACTIVE job
+# elsewhere, no settled mirror elsewhere. The carve-out drops the
+# target's own settled mirrors (correctly), the legacy clause catches
+# any live ACTIVE job including the target's own (correctly), and
+# ``NOT has_active_non_deferred_work(project_id, requester_instance_id=
+# <target>)`` returns True. The watchdog detects this blind-spot and
+# either logs (default OFF) or unstucks the row by flipping
+# ``task.is_deferred`` to False (gated, ON).
+#
+# Mirrors the f1 kill-switch discipline above: env-only, restart-read,
+# cached for process lifetime, default OFF (safe-by-default — only the
+# WARN fires until the operator explicitly enables the unstick).
+# ─────────────────────────────────────────────────────────────────
+
+# Pattern (g) kill-switch — env-only, default OFF. The brief mandates
+# NO yaml key (the flag is operator-runtime, not config-runtime).
+# Restart-read semantics match the f1 contract (cache once, no
+# mid-flight re-read). Empty-string safe: a blank env var resolves to
+# OFF (the default) — consistent with the safe-by-default posture
+# (an operator who sets ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=`` with
+# no value gets the OFF behaviour, not the auto-promote).
+_DEFER_AUTOPROMOTE_ENABLED_ENV = "ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED"
+_DEFER_AUTOPROMOTE_ENABLED: bool | None = None
+_DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED: bool = False
+
+
+def _resolve_defer_autopromote_enabled() -> bool:
+    """Resolve and cache the Pattern-g defer-autopromote kill-switch.
+
+    Returns:
+        ``True`` when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` is set to
+        a truthy value — the bounded unstick is enabled (detector
+        flips ``task.is_deferred=False`` on the matched rows).
+        ``False`` (default) when the env is unset / blank / falsy —
+        detection WARN fires, NO task writes (the OFF=no-writes
+        contract).
+
+    Truthy values: ``("1", "true", "yes", "on")``. Falsy values +
+    blank: ``("0", "false", "no", "off", "")``. The blank case falls
+    into the falsy bucket so an unset env var resolves to OFF (the
+    default) — the parser does NOT raise on empty-string, it just treats
+    it as the default-OFF value. Unknown non-blank values fall back to
+    OFF with a one-shot WARN — the safe direction (default OFF, not
+    ON), so a typo cannot accidentally enable the unstick.
+
+    Caching + boot log are independent: this function caches only
+    the boolean; the one-shot boot INFO is emitted by
+    :func:`emit_defer_autopromote_boot_log`. Flipping the env
+    mid-flight has no effect until restart (cached boolean).
+    """
+    global _DEFER_AUTOPROMOTE_ENABLED
+    if _DEFER_AUTOPROMOTE_ENABLED is not None:
+        return _DEFER_AUTOPROMOTE_ENABLED
+    raw = os.environ.get(_DEFER_AUTOPROMOTE_ENABLED_ENV, "0").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        _DEFER_AUTOPROMOTE_ENABLED = True
+    elif raw in ("0", "false", "no", "off", ""):
+        # Blank → default OFF (matches the "safe-by-default" posture;
+        # an unset env var is NOT the same as an explicit ON).
+        _DEFER_AUTOPROMOTE_ENABLED = False
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; falling "
+            "back to OFF (the default). Recognized truthy spellings: "
+            "1/true/yes/on.",
+            _DEFER_AUTOPROMOTE_ENABLED_ENV,
+            raw,
+        )
+        _DEFER_AUTOPROMOTE_ENABLED = False
+    return _DEFER_AUTOPROMOTE_ENABLED
+
+
+def _reset_defer_autopromote_for_tests() -> None:
+    """Reset the Pattern-g kill-switch cache + boot-log flag (tests only)."""
+    global _DEFER_AUTOPROMOTE_ENABLED, _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED
+    _DEFER_AUTOPROMOTE_ENABLED = None
+    _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED = False
+
+
+def emit_defer_autopromote_boot_log() -> None:
+    """One-shot boot INFO naming the resolved defer-autopromote state.
+
+    Mirrors :func:`emit_orphan_f1_boot_log` — fires exactly once per
+    process; restart required to re-evaluate (cached resolver).
+
+    Wired by ``daemon/api.py`` lifespan next to the
+    :func:`emit_orphan_f1_boot_log` call so an operator grepping boot
+    logs sees the resolved state at startup. The wiring is NOT shipped
+    in this WS (it belongs to a separate lifespan-touching change);
+    tests call this function directly to assert emission.
+    """
+    global _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED
+    if _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED:
+        return
+    _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED = True
+    enabled = _resolve_defer_autopromote_enabled()
+    if enabled:
+        logger.info(
+            "Pattern-g defer-self-witness autopromote ENABLED via "
+            "%s=1 — matched deferred PENDING tasks will be unstuck "
+            "by flipping task.is_deferred=false on the drift cadence "
+            "(default OFF; set %s=0 to revert — restart required)",
+            _DEFER_AUTOPROMOTE_ENABLED_ENV,
+            _DEFER_AUTOPROMOTE_ENABLED_ENV,
+        )
+    else:
+        logger.info(
+            "Pattern-g defer-self-witness autopromote DISABLED "
+            "(default; %s=0) — detection WARN fires, deferred "
+            "PENDING tasks in the self-witness blind-spot are "
+            "NOT unstuck. Set %s=1 + restart to enable the "
+            "bounded unstick",
+            _DEFER_AUTOPROMOTE_ENABLED_ENV,
+            _DEFER_AUTOPROMOTE_ENABLED_ENV,
+        )
+
+
 # Alive instance statuses - hoisted to ``daemon.constants`` (see
 # ``daemon/constants.py::ALIVE_INSTANCE_STATUSES`` for the canonical home
 # + member documentation). This module imports it as the single source
@@ -1629,6 +1761,38 @@ class JobRecoveryService:
                 exc_info=True,
             )
 
+        # ── Pattern (g): defer self-witness watchdog (WS3,
+        # ``fix/defer-self-witness-and-cleanup``) ────────────────
+        # Detector: deferred PENDING tasks (is_deferred=True) whose
+        # target instance, with the WS1 carve-out applied, sees no
+        # live non-deferred work AND no other project witnesses for
+        # the defer gate (the self-witness blind-spot class). Bounded
+        # unstick: when ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=1``,
+        # atomic UPDATE flips task.is_deferred=False so the next
+        # ``claim_pending_task`` cycle picks the row up as a regular
+        # task. When OFF (the default): WARN only, NO task writes.
+        # Census: writes task state (NOT job_queue_items.admission
+        # _state), so the Pattern (g) reconciled contribution is 0
+        # and the constitution stays 23/1/0. See
+        # :meth:`_pattern_g_defer_self_witness_watchdog` for the
+        # full predicate + race-safety contract.
+        try:
+            extra = await self._pattern_g_defer_self_witness_watchdog(
+                min_pending_age_seconds=min_pending_age_seconds,
+            )
+            if extra:
+                # Pattern (g) writes task state, NOT job admission
+                # state — ``reconciled`` from the pattern is
+                # intentionally 0 (see the method's W6-style
+                # return). We extend ``details`` only.
+                details.extend(extra.get("details", []))
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (g) check "
+                f"failed: {e}",
+                exc_info=True,
+            )
+
         # Final tally — recount from `details` so the summary line
         # reflects patterns (a/b/d/e/f) accurately. Pattern (c) is
         # log-only — ``stuck_instance_log`` entries land in `details`
@@ -1638,6 +1802,11 @@ class JobRecoveryService:
         # from the ``reconciled`` count (they're observability —
         # log+detail only — the brief says EXPLICIT exclusion
         # healthy shapes must not become reconciled counts).
+        # Pattern (g) (``defer_self_witness_*``) writes task state,
+        # NOT job admission state — the brief §3 census discipline
+        # explicitly carves it OUT of the ``reconciled`` budget
+        # (task writes are out of the KNOWN_ADMISSION_STATE_WRITERS
+        # scope; the constitution stays 23/1/0).
         reconciled = sum(
             1 for d in details if d.get("pattern") in (
                 "P1_dead_instance",
@@ -2992,6 +3161,396 @@ class JobRecoveryService:
         if reconciled == 0 and not details:
             return None
         return {"reconciled": reconciled, "details": details}
+
+    async def _pattern_g_defer_self_witness_watchdog(
+        self,
+        *,
+        min_pending_age_seconds: int,
+    ) -> dict | None:
+        """Pattern (g) — defer self-witness detector + bounded unstick.
+
+        Watchdog for the WS1 self-witness blind-spot class. The WS1
+        carve-out on ``JobRepository.has_active_non_deferred_work``
+        (``requester_instance_id=<target>``) excludes the candidate's
+        OWN settled mirrors from the defer-gate busy-set — see
+        ``daemon/repositories/job_queue/repository.py:646-799``. The
+        carve-out correctly lets a deferred message into a non-terminal
+        instance when the only witnesses would be the candidate's own
+        settled mirrors.
+
+        But the carve-out introduces a new blind-spot: a deferred
+        PENDING task (``is_deferred=True``) whose target instance is
+        the ONLY active non-deferred work in the project — no live
+        ACTIVE JobItem anywhere, no settled mirror from any other
+        instance. The carve-out drops the target's own settled mirrors
+        (correctly), the legacy clause catches any live ACTIVE job
+        including the target's own (correctly), so the predicate
+        returns False (IDLE). Yet the deferred task is still PENDING
+        — the natural admission path missed the cycle (e.g. another
+        worker drained the gate during a brief busy window, the gate
+        closed again on stale mirror, the deferred candidate never
+        got picked up).
+
+        Detector (flag-independent): for every PENDING task with
+        ``is_deferred=True`` older than the grace, look up the
+        instance's ``project_id`` and call the WS1 seam with
+        ``requester_instance_id=<target>``. A ``False`` return means
+        no live non-deferred work AND no other project witnesses for
+        the defer gate — the self-witness blind-spot.
+
+        WARN log naming instance_id + task id fires on every detection
+        (the flag-independent observability contract).
+
+        Bounded unstick (gated by
+        ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` — see
+        :func:`_resolve_defer_autopromote_enabled`): when ON, an
+        atomic UPDATE flips ``task.is_deferred=False`` so the next
+        ``claim_pending_task`` claim cycle picks the row up. The
+        guard (``is_deferred=True AND status='pending'``) makes the
+        flip race-safe against a concurrent claim. When OFF (the
+        default), detection WARN fires, NO task writes — the
+        OFF=no-writes contract pinned by the kill-switch convention.
+
+        Census discipline (WS3 brief §3): the promote path WRITES
+        ``task.is_deferred`` — task writes are out of the
+        ``KNOWN_ADMISSION_STATE_WRITERS`` scope (the census keys
+        ``admission_state`` on ``job_queue_items`` rows). The
+        constitution stays 23/1/0. Drift-guard proof:
+        ``tests/unit/job_state/test_constitution_drift.py`` green.
+
+        Task-liveness verification (brief §1 — FLAG the deviation
+        if task-liveness semantics require more): the WS1 seam
+        ``JobRepository.has_active_non_deferred_work`` is the job-
+        granular predicate. The task-granular sister
+        ``TaskRepository.has_active_non_deferred_work`` is consulted
+        separately by ``claim_pending_task`` for the actual claim
+        gate — a stale PENDING non-deferred Task on the target (P1
+        class) is already flagged by Pattern (a) above, NOT by this
+        watchdog. Per the brief, ONE call to the WS1 seam covers
+        both (a) and (b) — no separate task-side check is needed.
+
+        Args:
+            min_pending_age_seconds: Minimum age (seconds) for a
+                deferred PENDING task to be considered drift-eligible.
+                Same semantics as Patterns (a) / (d) — tasks younger
+                than this grace are left alone to avoid racing with a
+                freshly-enqueued worker. Mirrors the existing
+                ``list_pending_tasks_older_than`` contract
+                (strict less-than on ``created_at``).
+
+        Returns:
+            ``None`` when the watchdog finds no candidates or no
+            detections; otherwise ``{"reconciled": 0, "details": [...]}``
+            — the ``reconciled`` count is intentionally ``0`` because
+            task writes are NOT job admission writes (Pattern (g) is
+            OUT OF the ``reconciled`` budget; the operator reads
+            ``details`` to count watchdog fires).
+
+        Per-candidate isolation: one task's failure MUST NOT abort
+        the sweep. Each per-row block is wrapped in its own
+        ``try/except Exception`` so a transient DB blip on one row
+        only loses that row.
+        """
+        if (
+            self._task_repository is None
+            or self._job_repository is None
+            or self._instance_repository is None
+        ):
+            logger.debug(
+                "_pattern_g_defer_self_witness_watchdog: required "
+                "repositories not wired (task_repository / "
+                "job_repository / instance_repository); pattern (g) "
+                "skipped."
+            )
+            return None
+
+        # Resolve the kill-switch ONCE per sweep — caching is at the
+        # resolver (cached for process lifetime), so this is a cheap
+        # dict lookup after the first call.
+        autopromote_enabled = _resolve_defer_autopromote_enabled()
+
+        details: list[dict[str, Any]] = []
+
+        # 1. Walk the deferred PENDING candidate set. The task-side
+        # query is the canonical ``list_pending_tasks_older_than``
+        # (PENDING + NULL heartbeat + older-than threshold); the
+        # ``is_deferred=True`` filter is applied Python-side because
+        # the helper does not filter on it (the defer class is a
+        # rare subset of the PENDING bucket — Python-side filtering
+        # avoids a second DB roundtrip for a single boolean column).
+        try:
+            pending_tasks = await asyncio.to_thread(
+                self._task_repository.list_pending_tasks_older_than,
+                min_pending_age_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (g) failed to "
+                f"list pending tasks older than "
+                f"{min_pending_age_seconds}s: {e}",
+                exc_info=True,
+            )
+            return None
+
+        # Only ``is_deferred=True`` rows are candidates — the watchdog
+        # is intentionally scoped to the defer-lane blind-spot.
+        deferred_pending = [
+            t for t in (pending_tasks or [])
+            if getattr(t, "is_deferred", False) is True
+        ]
+
+        if not deferred_pending:
+            # No candidates — return ``None`` so the caller does not
+            # emit a noisy empty-sweep detail record.
+            return None
+
+        # 2. Per-candidate evaluation. Per-row isolation: one row's
+        # failure MUST NOT abort the sweep.
+        for task in deferred_pending:
+            try:
+                target_instance_id = getattr(task, "instance_id", None)
+                if not target_instance_id:
+                    # Defensive: a deferred task without an
+                    # ``instance_id`` cannot be classified; skip with
+                    # an observability record (never guess — matches
+                    # the Pattern (f) fail-safe discipline).
+                    logger.warning(
+                        f"reconcile_drift_states: Pattern (g) skip — "
+                        f"deferred PENDING task {task.id} has no "
+                        f"instance_id; cannot classify against the "
+                        # noqa: E501 — long log line is canonical
+                        # for ops forensic readability
+                        f"self-witness predicate"
+                    )
+                    details.append({
+                        "pattern": "defer_self_witness_skipped_no_instance",
+                        "job_id": None,
+                        "task_id": task.id,
+                        "instance_id": None,
+                        "reason": (
+                            "deferred PENDING task has no "
+                            "instance_id — cannot evaluate the "
+                            "self-witness predicate; never guess"
+                        ),
+                    })
+                    continue
+
+                # Look up the instance to resolve project_id for the
+                # WS1 seam call. The instance may have been deleted
+                # out from under the task (orphan class) — skip with
+                # a defensive record rather than guessing.
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, target_instance_id
+                )
+                if instance is None:
+                    logger.warning(
+                        f"reconcile_drift_states: Pattern (g) skip — "
+                        f"deferred PENDING task {task.id} on instance "
+                        f"{target_instance_id[:8]}... but instance "
+                        f"row is missing; cannot evaluate the "
+                        f"self-witness predicate"
+                    )
+                    details.append({
+                        "pattern": "defer_self_witness_skipped_no_instance",
+                        "job_id": None,
+                        "task_id": task.id,
+                        "instance_id": target_instance_id,
+                        "reason": (
+                            "deferred PENDING task's instance row "
+                            "is missing — cannot resolve project_id "
+                            "for the WS1 seam; never guess"
+                        ),
+                    })
+                    continue
+
+                # 3. WS1 seam call — the canonical detector
+                # predicate. ``requester_instance_id=<target>``
+                # enables the carve-out: the candidate's own
+                # settled mirrors are excluded from the busy-set,
+                # the legacy clause catches any live ACTIVE job
+                # including the target's own (untouched by WS1). A
+                # ``False`` return means no live non-deferred work
+                # AND no other project witnesses for the defer
+                # gate — the self-witness blind-spot signature.
+                busy = await asyncio.to_thread(
+                    self._job_repository.has_active_non_deferred_work,
+                    instance.project_id,
+                    target_instance_id,
+                )
+                if busy:
+                    # Not a self-witness blind-spot — there is live
+                    # non-deferred work or another project witness
+                    # holding the gate. The defer queue admission
+                    # is correctly held back. No WARN, no detail
+                    # record — Pattern (g) is silent on the
+                    # non-detected case (matches the Pattern (a)
+                    # alive-instance log-only discipline).
+                    continue
+
+                # 4. DETECTION — WARN fires regardless of the
+                # autopromote flag. The flag-independent
+                # observability contract: the operator must see
+                # the detection even when the unstick is OFF.
+                logger.warning(
+                    f"reconcile_drift_states: Pattern (g) defer "
+                    f"self-witness blind-spot detected — task "
+                    f"{task.id} (work_id="
+                    f"{getattr(task, 'work_id', None)!r}) "
+                    f"is_deferred=True on instance "
+                    f"{target_instance_id[:8]}... "
+                    f"(project_id={instance.project_id!r}); "
+                    f"has_active_non_deferred_work returned False "
+                    f"with the WS1 carve-out — no live "
+                    f"non-deferred work and no other project "
+                    f"witnesses for the defer gate. "
+                    f"autopromote={'ON' if autopromote_enabled else 'OFF'}"
+                )
+
+                if not autopromote_enabled:
+                    # OFF = detection WARN only, NO task writes.
+                    # Pinned contract — see the test
+                    # ``test_autopromote_off_pins_no_task_writes``.
+                    details.append({
+                        "pattern": "defer_self_witness_warned_only",
+                        "job_id": None,
+                        "task_id": task.id,
+                        "instance_id": target_instance_id,
+                        "reason": (
+                            f"self-witness blind-spot detected "
+                            f"(project_id={instance.project_id!r}); "
+                            f"autopromote OFF — no task writes "
+                            f"(set "
+                            f"{_DEFER_AUTOPROMOTE_ENABLED_ENV}=1 "
+                            f"+ restart to enable the unstick)"
+                        ),
+                    })
+                    continue
+
+                # 5. AUTOPROMOTE ON — flip ``task.is_deferred``
+                # to False so the next ``claim_pending_task``
+                # claim cycle picks the row up as a regular task.
+                # Atomic guard (``is_deferred=True AND
+                # status='pending'``) makes the flip race-safe
+                # against a concurrent claim / cancel / reconcile.
+                # Census: the flip WRITES ``task.is_deferred``,
+                # NOT ``job_queue_items.admission_state`` — the
+                # KNOWN_ADMISSION_STATE_WRITERS set is untouched
+                # (23/1/0 preserved).
+                engine = self._task_repository.engine
+                try:
+                    with engine.begin() as conn:
+                        update_result = conn.execute(
+                            text(
+                                """
+                                UPDATE task
+                                SET is_deferred = :is_deferred_false
+                                WHERE id = :task_id
+                                  AND is_deferred = :is_deferred_true
+                                  AND status = :status_pending
+                                """
+                            ),
+                            {
+                                "is_deferred_false": False,
+                                "is_deferred_true": True,
+                                "task_id": task.id,
+                                "status_pending": (
+                                    TaskStatus.PENDING.value
+                                ),
+                            },
+                        )
+                        flipped = update_result.rowcount
+                except Exception as flip_err:
+                    # The flip failed — log + observability
+                    # record, do NOT abort the sweep.
+                    logger.error(
+                        f"reconcile_drift_states: Pattern (g) "
+                        f"autopromote flip failed for task "
+                        f"{task.id} on instance "
+                        f"{target_instance_id[:8]}...: "
+                        f"{flip_err}",
+                        exc_info=True,
+                    )
+                    details.append({
+                        "pattern": "defer_self_witness_flip_failed",
+                        "job_id": None,
+                        "task_id": task.id,
+                        "instance_id": target_instance_id,
+                        "reason": (
+                            f"self-witness detected; flip "
+                            f"failed: {flip_err}"
+                        ),
+                    })
+                    continue
+
+                if flipped == 0:
+                    # The guard rejected the row — another actor
+                    # mutated it between the candidate scan and
+                    # the flip (claim path picked it up, a
+                    # concurrent reconciler flipped it, etc.).
+                    # Not an error; surface as an observability
+                    # record so the operator sees the race was
+                    # lost cleanly.
+                    logger.info(
+                        f"reconcile_drift_states: Pattern (g) "
+                        f"autopromote flip SKIPPED for task "
+                        f"{task.id} — atomic guard rejected "
+                        f"(row no longer matches "
+                        f"is_deferred=True AND status='pending')"
+                    )
+                    details.append({
+                        "pattern": "defer_self_witness_flip_skipped_race",
+                        "job_id": None,
+                        "task_id": task.id,
+                        "instance_id": target_instance_id,
+                        "reason": (
+                            "self-witness detected; atomic guard "
+                            "rejected the flip (row no longer "
+                            "matches is_deferred=True AND "
+                            "status='pending')"
+                        ),
+                    })
+                    continue
+
+                # Flip succeeded.
+                logger.info(
+                    f"reconcile_drift_states: Pattern (g) "
+                    f"autopromote flip OK for task {task.id} "
+                    f"on instance {target_instance_id[:8]}... "
+                    f"— task now claimable as a regular task "
+                    f"(is_deferred=False)"
+                )
+                details.append({
+                    "pattern": "defer_self_witness_autopromoted",
+                    "job_id": None,
+                    "task_id": task.id,
+                    "instance_id": target_instance_id,
+                    "reason": (
+                        f"self-witness detected (project_id="
+                        f"{instance.project_id!r}); flipped "
+                        f"is_deferred=True → False so the next "
+                        f"claim cycle picks the row up as a "
+                        f"regular task"
+                    ),
+                })
+
+            except Exception as row_err:
+                # Per-row isolation — log + continue. The sweep
+                # MUST survive a transient blip on one row.
+                logger.error(
+                    f"reconcile_drift_states: Pattern (g) "
+                    f"check failed for task {task.id}: "
+                    f"{row_err}",
+                    exc_info=True,
+                )
+
+        # W6-style payload rule: return whenever any detail was
+        # observed. The ``reconciled`` counter is intentionally
+        # ``0`` — Pattern (g) writes task state, NOT job
+        # admission state (the ``reconciled`` budget is for job
+        # admission writes per the existing recount logic).
+        if not details:
+            return None
+        return {"reconciled": 0, "details": details}
 
     @staticmethod
     def _parse_job_created_at(value):
