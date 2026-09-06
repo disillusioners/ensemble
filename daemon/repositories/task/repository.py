@@ -1580,7 +1580,35 @@ class TaskRepository:
                               AND {self._active_jobitem_with_inflight_task_sql("j", exclude_task_alias="task")}
                         )
                     )
-                  ORDER BY created_at ASC LIMIT 1
+                    -- ORDER BY (Debug Phase 4 fix #1, terminal-report
+                    -- wake, 2026-09-07): PROCESS_REPORT tasks claim
+                    -- FIRST (wake lane), created_at FIFO within each
+                    -- tier. Incident 7807e521: a parent's completion
+                    -- report Task sat 14m49s in strict FIFO behind
+                    -- older queued partition tasks while the worker
+                    -- pool was saturated (WORKER_POOL_SIZE=4) — the
+                    -- bus is a pure state machine (FIRED watchers are
+                    -- bookkeeping only, never enqueued), so the
+                    -- PROCESS_REPORT claim IS the parent wake; FIFO
+                    -- position therefore directly gated wake latency.
+                    -- Priority is bounded and exactly-once-safe:
+                    --  * every gate above (defer / background /
+                    --    queue-awareness / per-instance / pause /
+                    --    cross-system) still filters candidates BEFORE
+                    --    ranking — the lane only re-orders survivors;
+                    --  * report Tasks are finite (one per child
+                    --    completion), so the lane drains and plain
+                    --    FIFO resumes; no indefinite starvation;
+                    --  * the atomic UPDATE...RETURNING still hands
+                    --    each Task to exactly one worker, and the
+                    --    report_injections PENDING→TASK_DELIVERED /
+                    --    INJECTED guarded flips still arbitrate
+                    --    delivery — wake vs natural-FIFO claim cannot
+                    --    double-deliver.
+                  ORDER BY
+                    CASE WHEN task_type = :report_wake_task_type THEN 0 ELSE 1 END,
+                    created_at ASC
+                  LIMIT 1
                 )
                 AND status = :status_pending
                 RETURNING *
@@ -1602,6 +1630,11 @@ class TaskRepository:
                 "status_paused": TaskStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
                 "process_message_type": TaskType.PROCESS_MESSAGE.value,
+                # PROCESS_REPORT wake lane (Debug Phase 4 fix #1) —
+                # see the ORDER BY comment above for the full
+                # rationale. Enum value (a fixed literal, not user
+                # input); dual-driver safe as a plain string bind.
+                "report_wake_task_type": TaskType.PROCESS_REPORT.value,
                 "now_str": now_str,
                 # Defer queue idle gate (Phase 3 Part B2). Python
                 # booleans so the comparison works on both SQLite
