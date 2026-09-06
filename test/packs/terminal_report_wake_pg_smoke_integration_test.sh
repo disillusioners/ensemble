@@ -190,7 +190,7 @@ SQLModel.metadata.create_all(ENGINE)
 # ── 2. Seed: 4 process_message PENDING tasks (oldest first) + 1 process_report (newest)
 NOW = datetime.now(timezone.utc)
 with ENGINE.begin() as conn:
-    conn.execute(text("DELETE FROM tasks"))
+    conn.execute(text("DELETE FROM task"))
     conn.execute(text("DELETE FROM instances"))
 
 with Session(ENGINE) as s:
@@ -239,7 +239,7 @@ repo = TaskRepository(engine=ENGINE)
 # Find the seeded report task id so we can assert it by identity.
 with Session(ENGINE) as s:
     report_task = s.exec(
-        text("SELECT id FROM tasks WHERE task_type = :tt AND status = :st ORDER BY id ASC LIMIT 1"),
+        text("SELECT id FROM task WHERE task_type = :tt AND status = :st ORDER BY id ASC LIMIT 1"),
         {"tt": TaskType.PROCESS_REPORT.value, "st": TaskStatus.PENDING.value},
     ).first()
     if report_task is None:
