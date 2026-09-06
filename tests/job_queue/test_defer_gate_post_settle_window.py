@@ -69,6 +69,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlmodel import SQLModel
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
@@ -744,18 +745,49 @@ class TestPostSettlePhase2Fix:
                 sql.count("i.status NOT IN :terminal_statuses") == 2
             ), label
 
+        # WS1 (2026-09-06) extended the two-body split to four bodies;
+        # the carve-out bodies carry the per-candidate requester-
+        # instance predicate in the mirror clause. Same mirror clause
+        # shape (settled mirror + non-terminal instance) — the
+        # carve-out just narrows WHICH mirrors count as busy for a
+        # specific candidate.
+        defer_sql_proj_carveout = _norm(
+            _idle_predicate_sql.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
+        )
+        defer_sql_sys_carveout = _norm(
+            _idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
+        )
+        for label, sql in (
+            ("defer-project-carveout", defer_sql_proj_carveout),
+            ("defer-system-carveout", defer_sql_sys_carveout),
+        ):
+            assert "j.job_type = 'message'" in sql, label
+            assert "j.admission_state = 'done'" in sql, label
+            assert "j.instance_id IS NOT NULL" in sql, label
+            # The carve-out predicate is an extra AND inside the
+            # mirror clause — the terminal-status count is still 2
+            # (legacy clause + mirror clause).
+            assert (
+                sql.count("i.status NOT IN :terminal_statuses") == 2
+            ), label
+            assert "j.instance_id != :requester_instance_id" in sql, label
+
         # §4.1 asymmetry, hotfix 2026-09-04 un-collapse: the project-
         # scoped defer body uses a plain :project_id EQUALITY (NO NULL
         # trick — STRING bind, PG infers the type from the comparison
         # column); the system-wide defer body has NO project parameter
         # at all (NULL-typed parameter is impossible by construction);
         # the background body already had no project clause and now
-        # declares no project parameter either.
+        # declares no project parameter either. WS1 carve-out bodies
+        # honor the same two-body discipline.
         assert "j.project_id = :project_id" in defer_sql_proj
+        assert "j.project_id = :project_id" in defer_sql_proj_carveout
         # The old collapsed form is GONE — this is the static regression
         # guard for the incident's SQL shape.
         assert ":project_id IS NULL OR" not in defer_sql_proj
+        assert ":project_id IS NULL OR" not in defer_sql_proj_carveout
         assert ":project_id" not in defer_sql_sys
+        assert ":project_id" not in defer_sql_sys_carveout
         assert ":project_id" not in bg_sql
 
         # Background keeps the Fix-2B deadlock carve-out (queued JobItem
@@ -767,6 +799,8 @@ class TestPostSettlePhase2Fix:
         assert "t.status != 'pending'" in bg_sql
         assert "LEFT JOIN task" not in defer_sql_proj
         assert "LEFT JOIN task" not in defer_sql_sys
+        assert "LEFT JOIN task" not in defer_sql_proj_carveout
+        assert "LEFT JOIN task" not in defer_sql_sys_carveout
 
         # I3 clarifying line lives in the shared module's docstring.
         module_doc = " ".join(
@@ -776,6 +810,20 @@ class TestPostSettlePhase2Fix:
             "a settled mirror of a non-terminal instance counts as live "
             "for the defer/background gate, terminal for everything else"
         ) in module_doc
+
+        # WS1 (2026-09-06) WS1 clarifying line lives in the shared
+        # module's docstring — the self-witness carve-out must be
+        # documented in the module docstring (or this test fails).
+        assert (
+            "a deferred message sent to a COMPLETED instance REVIVES "
+            "it" in module_doc
+            or "self-witness" in module_doc
+            or "requester-instance carve-out" in module_doc
+        ), (
+            "WS1 self-witness carve-out not documented in the "
+            "_idle_predicate_sql module docstring — drift between "
+            "the implementation and its public contract"
+        )
 
     def test_no_bare_param_is_null_comparison_in_busy_bodies(self):
         """Static regression guard for the 2026-09-04 PG incident.
@@ -796,7 +844,17 @@ class TestPostSettlePhase2Fix:
         class is impossible by construction; this test pins that
         invariant.
 
-        The static guard searches the three busy-body constants for any
+        WS1 (2026-09-06) extended the two-body discipline to a four-
+        body split: the requester-instance carve-out introduces two
+        new bodies (``_WITH_CARVEOUT`` variants). Each carve-out body
+        declares a STRING-typed ``:requester_instance_id`` bind (never
+        NULL — the bind is only added when the caller passes a
+        requester instance; otherwise the no-carve-out body is used).
+        The NULL-typed ``!=`` bind trap (a NULL-bound ``!=`` evaluates
+        to NULL, dropping every mirror row) is impossible by
+        construction.
+
+        The static guard searches ALL busy-body constants for any
         ":<name> IS NULL" pattern (parameter-vs-literal-NULL comparison).
         A future refactor that re-introduces the collapse shape — even
         in a different gate, even under a different parameter name —
@@ -810,6 +868,10 @@ class TestPostSettlePhase2Fix:
              _idle_predicate_sql.JOB_DEFER_BUSY_BODY_PROJECT),
             ("JOB_DEFER_BUSY_BODY_SYSTEM",
              _idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM),
+            ("JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT",
+             _idle_predicate_sql.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT),
+            ("JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT",
+             _idle_predicate_sql.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT),
             ("JOB_BACKGROUND_BUSY_BODY",
              _idle_predicate_sql.JOB_BACKGROUND_BUSY_BODY),
         )
@@ -824,6 +886,10 @@ class TestPostSettlePhase2Fix:
             "_idle_predicate_sql.py must hold; collapse back into a "
             "single body with a `:project_id IS NULL OR` scope switch "
             "and PG will reject the SQL with AmbiguousParameter again. "
+            "WS1 extended this discipline to the carve-out bodies "
+            "(the NULL-typed `!=` bind trap is also impossible by "
+            "construction — the carve-out bind is a STRING, never "
+            "NULL). "
             f"violations: {violations}"
         )
 
@@ -1343,6 +1409,513 @@ class TestPostSettlePhase2Fix:
             "does not hold"
         )
 
+    def test_ws1_self_witness_carveout_admits_candidate(
+        self, fb_engine, job_repo
+    ):
+        """WS1 self-witness matrix row: the candidate's OWN settled
+        mirror does NOT witness against the candidate.
+
+        The defer self-witness incident (2026-09-06): a deferred
+        message sent to a COMPLETED instance REVIVES it (F7 revive);
+        the revived instance's non-terminal status + its OWN settled
+        message mirrors would hold the defer busy-gate against ITSELF
+        forever — no turn ever runs, no exit; every reaper is shielded.
+
+        The WS1 requester-instance carve-out excludes the candidate's
+        own settled mirrors from the busy-set, so the defer queue may
+        admit the candidate. The legacy clause stays UNTOUCHED (a live
+        foreground turn yields an ACTIVE job which still witnesses
+        correctly via the legacy clause).
+
+        Scenario:
+
+          * Instance ``inst-self-ws1`` in ``waiting_children``
+            (non-terminal, REVIVED — the defer self-witness incident
+            shape).
+          * A settled message mirror on a parallel queue,
+            ``admission_state='done'``, ``instance_id='inst-self-ws1'``
+            (the parent mission's residual mirror — the self-witness).
+          * No other work anywhere.
+
+        Expected:
+
+          * ``has_active_non_deferred_work(project)`` returns ``True``
+            (the mirror IS busy; no carve-out when ``requester_instance_id``
+            is None — the no-carve-out body is selected).
+          * ``has_active_non_deferred_work(project, 'inst-self-ws1')``
+            returns ``False`` (the WS1 carve-out excludes the
+            candidate's own mirror — gate IDLE for the candidate).
+          * The no-carve-out body never carries a NULL-typed bind —
+            passing ``None`` selects the no-carve-out body variant
+            (the pre-WS1 shape, semantics identical to the prior
+            implementation).
+        """
+        project = "proj-ws1-self-witness"
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-self-ws1",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-par-self-ws1",
+            project_id=project,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-self-ws1",
+            instance_id="inst-self-ws1",
+            project_id=project,
+            queue_id="queue-par-self-ws1",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",  # mirror, per W7 fixture realism
+        )
+
+        # No-carve-out gate (no requester): the mirror IS busy — the
+        # gate sees the parent mission as live, which is correct for
+        # system-scope / non-per-candidate callers.
+        assert job_repo.has_active_non_deferred_work(project) is True, (
+            "no-carve-out gate returned False on a settled mirror + "
+            "non-terminal instance — the post-settle window fix "
+            "regressed; the mirror clause is missing from the "
+            "no-carve-out body"
+        )
+
+        # WS1 carve-out gate (candidate's own instance): the mirror
+        # is carved-out — the gate is IDLE for the candidate, so the
+        # defer queue may admit the candidate's deferred job.
+        assert (
+            job_repo.has_active_non_deferred_work(
+                project, requester_instance_id="inst-self-ws1"
+            )
+            is False
+        ), (
+            "WS1 carve-out returned True on the candidate's OWN "
+            "settled mirror — the requester-instance carve-out does "
+            "not hold; the defer self-witness incident is unfixed"
+        )
+
+    def test_ws1_carveout_excludes_only_self(
+        self, fb_engine, job_repo
+    ):
+        """WS1 cross-instance matrix row: other-instance mirrors
+        STILL witness against the candidate.
+
+        The carve-out is per-candidate — only the candidate's OWN
+        settled mirrors are excluded. Other-instance mirrors continue
+        to witness via the mirror clause (the
+        ``j.instance_id != :requester_instance_id`` predicate is TRUE
+        for non-self mirrors, so they INCLUDE in the busy-set).
+
+        Scenario:
+
+          * Instance ``inst-other-ws1`` in ``waiting_children`` with
+            a settled message mirror (the busy witness).
+          * Instance ``inst-cand-ws1`` in ``waiting_children`` with NO
+            settled mirror (the candidate has nothing to carve out).
+          * Two projects so the project-scoping is observable.
+
+        Expected:
+
+          * ``has_active_non_deferred_work(proj_cand, 'inst-cand-ws1')``
+            returns ``True`` — the other-instance mirror IS a busy
+            witness, the carve-out does not affect it.
+
+        The test pins the structural contract: ``j.instance_id !=
+        :requester_instance_id`` excludes mirrors WHERE the row's
+        instance equals the requester (self-witness carve-out) and
+        INCLUDES mirrors WHERE the row's instance differs (other-
+        instance witnesses continue to block).
+        """
+        proj_other = "proj-ws1-other-witness"
+        proj_cand = "proj-ws1-cand"
+
+        # OTHER instance: a non-terminal mission with a settled mirror
+        # (the busy witness — on a SEPARATE project so the project-
+        # scoping is observable).
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-other-ws1",
+            project_id=proj_other,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-par-other-ws1",
+            project_id=proj_other,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-other-ws1",
+            instance_id="inst-other-ws1",
+            project_id=proj_other,
+            queue_id="queue-par-other-ws1",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+
+        # CANDIDATE instance: non-terminal, no settled mirror (the
+        # candidate has nothing to carve out).
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-cand-ws1",
+            project_id=proj_cand,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+
+        # Project-scoped gate with the candidate's requester:
+        # the other-project mirror is NOT visible (project scope).
+        assert (
+            job_repo.has_active_non_deferred_work(
+                proj_cand, requester_instance_id="inst-cand-ws1"
+            )
+            is False
+        ), (
+            "project-scoped carve-out gate returned True with no "
+            "in-project mirror — a phantom witness appeared; the "
+            "mirror clause is over-firing"
+        )
+
+        # Now seed an IN-PROJECT settled mirror on a different
+        # instance — the cross-instance witness MUST continue to
+        # block the candidate even with the carve-out.
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-other-in-proj",
+            project_id=proj_cand,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-par-other-in-proj",
+            project_id=proj_cand,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-other-in-proj",
+            instance_id="inst-other-in-proj",
+            project_id=proj_cand,
+            queue_id="queue-par-other-in-proj",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+
+        # WS1 carve-out gate with the candidate's requester — the
+        # OTHER-instance mirror (in the SAME project now) is a busy
+        # witness and continues to block the candidate.
+        assert (
+            job_repo.has_active_non_deferred_work(
+                proj_cand, requester_instance_id="inst-cand-ws1"
+            )
+            is True
+        ), (
+            "WS1 carve-out gate returned False on a non-self "
+            "in-project mirror — the carve-out is over-firing; the "
+            "structural contract ``j.instance_id != :requester_instance_id`` "
+            "must INCLUDE non-self mirrors, not exclude them"
+        )
+
+    def test_ws1_no_carveout_with_none_requester_preserves_legacy(
+        self, fb_engine, job_repo
+    ):
+        """WS1 NULL-bind trap guard: ``requester_instance_id=None``
+        degrades to the pre-WS1 shape (no carve-out).
+
+        When ``requester_instance_id`` is None (system-scope and
+        legacy callers), the no-carve-out body is selected — the
+        bind contract does NOT carry a NULL-typed ``:requester_instance_id``.
+        A NULL-bound ``!=`` comparison evaluates to NULL and would
+        drop every mirror row (the NULL-bind trap; the mirror-image
+        of the 2026-09-04 PG ``AmbiguousParameter`` incident).
+
+        The fix: body-variant selection on
+        ``requester_instance_id is not None`` — when None, the
+        no-carve-out body is used (no bindparam declared; semantics
+        identical to the pre-WS1 implementation). When set, the
+        carve-out body is used and the bindparam is bound as a
+        STRING (never NULL).
+
+        Scenario: a settled mirror of a non-terminal instance; the
+        caller passes ``requester_instance_id=None``. The gate
+        returns ``True`` (the mirror IS busy) — identical to the
+        pre-WS1 behavior.
+        """
+        project = "proj-ws1-legacy-none"
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-legacy-ws1",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-par-legacy-ws1",
+            project_id=project,
+            queue_type="parallel",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-mirror-legacy-ws1",
+            instance_id="inst-legacy-ws1",
+            project_id=project,
+            queue_id="queue-par-legacy-ws1",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+
+        # ``requester_instance_id=None`` (the default): the no-carve-
+        # out body is selected, semantics identical to pre-WS1.
+        assert (
+            job_repo.has_active_non_deferred_work(project, None) is True
+        ), (
+            "no-carve-out body returned False when "
+            "requester_instance_id is None — the body variant "
+            "selection is broken; the pre-WS1 shape is no longer "
+            "reachable. Either the body selection ignored the None "
+            "check (NULL-bind trap: NULL != "
+            "``:requester_instance_id`` drops every mirror row) or "
+            "the no-carve-out body lost the mirror clause."
+        )
+
+    def test_ws1_carveout_selects_distinct_body_variants(self):
+        """WS1 body-variant selection sentinel: the four defer gate
+        bodies are distinct and the helper layer selects the right
+        one on the four-way ``(project_id, requester_instance_id)``
+        truth table.
+
+        The four bodies:
+
+          * ``JOB_DEFER_BUSY_BODY_PROJECT`` — project-scoped, no
+            carve-out (default for project-scoped legacy callers).
+          * ``JOB_DEFER_BUSY_BODY_SYSTEM`` — system-wide, no carve-
+            out (default for system-wide legacy callers).
+          * ``JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT`` — project-
+            scoped, WS1 carve-out (Gate A/B with candidate's
+            instance_id).
+          * ``JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT`` — system-
+            wide, WS1 carve-out.
+
+        The bindparam contract must mirror the body selection:
+        project-scoped bodies declare ``:project_id``; carve-out
+        bodies declare ``:requester_instance_id``; the two-body
+        split (no NULL-trick parameter collapse) is preserved on
+        every variant. The static-guard
+        ``test_no_bare_param_is_null_comparison_in_busy_bodies``
+        (below) covers the no-NULL-bind invariant across all four
+        bodies.
+
+        This sentinel catches a future refactor that accidentally
+        selects the wrong body variant (e.g. passing the
+        no-carve-out body when the caller passed a requester
+        instance, or vice versa).
+        """
+        from daemon.repositories.job_queue import _idle_predicate_sql as ips
+
+        # The four bodies are byte-distinct.
+        bodies = (
+            ips.JOB_DEFER_BUSY_BODY_PROJECT,
+            ips.JOB_DEFER_BUSY_BODY_SYSTEM,
+            ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT,
+            ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT,
+        )
+        assert len(set(bodies)) == 4, (
+            f"the four defer gate bodies are not byte-distinct — "
+            f"a body variant was collapsed or duplicated: {set(bodies)!r}"
+        )
+
+        # Carve-out bodies carry the ``:requester_instance_id`` bind;
+        # no-carve-out bodies do not.
+        assert (
+            ":requester_instance_id"
+            in ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
+        )
+        assert (
+            ":requester_instance_id"
+            in ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
+        )
+        assert (
+            ":requester_instance_id"
+            not in ips.JOB_DEFER_BUSY_BODY_PROJECT
+        ), (
+            "JOB_DEFER_BUSY_BODY_PROJECT (no-carve-out) carries the "
+            "WS1 carve-out bind — the no-carve-out body is not the "
+            "pre-WS1 shape; legacy callers would silently flip to "
+            "carve-out semantics"
+        )
+        assert (
+            ":requester_instance_id"
+            not in ips.JOB_DEFER_BUSY_BODY_SYSTEM
+        ), (
+            "JOB_DEFER_BUSY_BODY_SYSTEM (no-carve-out) carries the "
+            "WS1 carve-out bind — the no-carve-out body is not the "
+            "pre-WS1 shape"
+        )
+
+        # Project-scoped bodies carry ``:project_id``; system-wide do not.
+        assert "j.project_id = :project_id" in ips.JOB_DEFER_BUSY_BODY_PROJECT
+        assert (
+            "j.project_id = :project_id"
+            in ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
+        )
+        assert ":project_id" not in ips.JOB_DEFER_BUSY_BODY_SYSTEM
+        assert ":project_id" not in ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
+
+        # Body selection: ``defer_busy_statement`` / ``defer_busy_witness_statement``
+        # pick the right variant on the four-way truth table.
+        def _stmt_pid(stmt):
+            return str(stmt)
+
+        # (project_id, requester_instance_id) -> expected body substring
+        truth_table = (
+            # (proj, req, must_contain, must_not_contain)
+            ("proj-1", None, "j.project_id = :project_id", ":requester_instance_id"),
+            ("proj-1", "inst-1", "j.project_id = :project_id", None),
+            (None, None, None, ":requester_instance_id"),
+            (None, "inst-1", None, "j.project_id = :project_id"),
+        )
+        for proj, req, must_contain, must_not_contain in truth_table:
+            stmt_str = _stmt_pid(
+                _idle_predicate_sql.defer_busy_statement(proj, req)
+            )
+            if must_contain is not None:
+                assert must_contain in stmt_str, (
+                    f"defer_busy_statement({proj!r}, {req!r}) body "
+                    f"missing required substring {must_contain!r}"
+                )
+            if must_not_contain is not None:
+                assert must_not_contain not in stmt_str, (
+                    f"defer_busy_statement({proj!r}, {req!r}) body "
+                    f"carries forbidden substring {must_not_contain!r}"
+                )
+
+            wit_stmt_str = _stmt_pid(
+                _idle_predicate_sql.defer_busy_witness_statement(proj, req)
+            )
+            if must_contain is not None:
+                assert must_contain in wit_stmt_str, (
+                    f"defer_busy_witness_statement({proj!r}, {req!r}) "
+                    f"body missing required substring {must_contain!r}"
+                )
+            if must_not_contain is not None:
+                assert must_not_contain not in wit_stmt_str, (
+                    f"defer_busy_witness_statement({proj!r}, {req!r}) "
+                    f"body carries forbidden substring {must_not_contain!r}"
+                )
+
+    def test_ws1_carveout_witness_body_presence_and_byte_derivation(self):
+        """WS1 carve-out WITNESS bodies are RESERVED for future
+        per-candidate witness enumeration (e.g. WS4 mission-aware
+        cleanup) and MUST keep deriving from their gate-body
+        counterparts via :func:`_unwrap_exists_body` so their bind
+        contract cannot drift from the gate they mirror.
+
+        Three failure classes this pin closes:
+
+          (a) **Deletion**: someone removes one or both constants
+              (``JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT``,
+              ``JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT``)
+              thinking they are unused. The presence check fails.
+          (b) **Hand-typed copy**: someone replaces the
+              ``_unwrap_exists_body(...)`` call with a hand-typed
+              string literal. The byte-derivation check fails —
+              ``_unwrap_exists_body(gate_body)`` is the canonical
+              source of truth, so a hand-typed copy diverges from
+              the gate body as soon as either side is edited.
+          (c) **Bind drift**: someone edits the gate body to add or
+              remove a bindparam (e.g. ``:requester_instance_id``
+              dropping out of the system-wide body) but forgets the
+              witness body. The bind-presence check fails on the
+              witness side.
+
+        The pin is the 11b counterpart to the comment annotation at
+        ``daemon/repositories/job_queue/_idle_predicate_sql.py``
+        lines 644-647 (and per-constant docstrings above each
+        carve-out witness body declaration). Together they document
+        and guard the "RESERVED for future per-candidate witness
+        enumeration, MUST keep deriving via ``_unwrap_exists_body``"
+        contract.
+        """
+        ips = _idle_predicate_sql
+
+        # (a) Presence — both constants must exist on the module.
+        assert hasattr(ips, "JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT"), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT was deleted "
+            "from daemon.repositories.job_queue._idle_predicate_sql — it is "
+            "RESERVED for future per-candidate witness enumeration (WS4); "
+            "remove the WS4 plan first, not the constant"
+        )
+        assert hasattr(ips, "JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT"), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT was deleted "
+            "from daemon.repositories.job_queue._idle_predicate_sql — it is "
+            "RESERVED for future per-candidate witness enumeration (WS4); "
+            "remove the WS4 plan first, not the constant"
+        )
+
+        # (b) Byte-derivation — the witness body is the gate body with
+        # ``EXISTS`` unwrapped. ``_unwrap_exists_body`` is the
+        # deterministic derivation function; if the constant was
+        # hand-typed, equality holds only until the next edit to either
+        # side, so this pin catches the drift class.
+        assert (
+            ips._unwrap_exists_body(ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT)
+            == ips.JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT
+        ), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT is no longer "
+            "byte-derived from JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT via "
+            "_unwrap_exists_body — the witness body drifted from the gate "
+            "body it mirrors; restore the ``_unwrap_exists_body(...)`` call"
+        )
+        assert (
+            ips._unwrap_exists_body(ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT)
+            == ips.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT
+        ), (
+            "JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT is no longer "
+            "byte-derived from JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT via "
+            "_unwrap_exists_body — the witness body drifted from the gate "
+            "body it mirrors; restore the ``_unwrap_exists_body(...)`` call"
+        )
+
+        # (c) Bind drift — the carve-out bind must survive on both the
+        # gate body (the source) and the witness body (the derivation).
+        # If either side drops ``:requester_instance_id`` without the
+        # other side tracking, the carve-out silently loses its
+        # per-candidate narrowing.
+        for label, sql in (
+            ("gate-project", ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT),
+            ("gate-system", ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT),
+            ("witness-project",
+             ips.JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT),
+            ("witness-system",
+             ips.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT),
+        ):
+            assert ":requester_instance_id" in sql, (
+                f"{label} body dropped the :requester_instance_id bind — "
+                f"the WS1 carve-out no longer narrows per-candidate; "
+                f"mirror binds diverge from gate binds"
+            )
+
+        # Sanity: the carve-out predicate clause ``j.instance_id !=
+        # :requester_instance_id`` (the actual narrowing expression)
+        # survives on both gate and witness sides — close-the-loop
+        # against a refactor that rewrites the bindparam token without
+        # rewriting the predicate clause (or vice versa).
+        for label, sql in (
+            ("gate-project", ips.JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT),
+            ("gate-system", ips.JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT),
+            ("witness-project",
+             ips.JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT),
+            ("witness-system",
+             ips.JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT),
+        ):
+            assert "j.instance_id != :requester_instance_id" in sql, (
+                f"{label} body dropped the carve-out predicate clause — "
+                f"the WS1 self-witness carve-out is no longer active"
+            )
+
     def test_dangling_instance_id_done_mirror_drops_to_idle(
         self, fb_engine, job_repo
     ):
@@ -1415,6 +1988,200 @@ class TestPostSettlePhase2Fix:
             "background gate (system-wide) wrongly counted a dangling "
             "done mirror as busy — same NULL ``i.status`` drop, same "
             "docstring pin"
+        )
+
+    def test_gateb_jobleg_error_does_not_skip_task_leg(
+        self, fb_engine, job_repo
+    ):
+        """Gate B fail-CLOSED corner (Phase-4 review Issue #1): a prior
+        candidate's job-leg error must NOT suppress the task-side leg
+        for a later clean candidate.
+
+        The corner (pre-fix): ``_select_next_eligible_job``'s defer arm
+        cached a module-scope ``defer_job_error`` flag and gated the
+        Phase-2 task-side predicate on ``not defer_job_error``. A
+        transient DB error on candidate A's job-leg probe (instance X)
+        set the flag; candidate B (instance Y) with a CLEAN job-leg
+        ``False`` then SKIPPED the task-side leg entirely and was
+        admitted without the Phase-2 second leg — the exact
+        "defer queue silently released by a transient failure" shape
+        the W3 fail-CLOSED rule bans.
+
+        Scenario (file-backed SQLite, real repository stack):
+
+          * Two queued defer candidates A (``inst-cand-a``) and B
+            (``inst-cand-b``), no job-side busy rows (so both job
+            legs evaluate clean-False absent the injected error).
+          * Task-side busy work: a RUNNING non-deferred task on a
+            third instance in the same project → the task-side
+            predicate returns True (Phase-2 second leg).
+          * A delegating repository wrapper raises a real
+            ``OperationalError`` on the FIRST job-leg probe (A) and
+            delegates every later call to the real ``JobRepository``.
+
+        Expected (post-fix): BOTH candidates are held — A on its own
+        error (fail-CLOSED), B because the task-side leg RUNS for its
+        clean job-leg ``False`` and reports busy. The method returns
+        ``None`` and B's ``admission_state`` stays ``queued``.
+
+        Pre-fix this test fails with candidate B ADMITTED — the
+        bug-exercising proof (temporarily revert the one-line guard
+        fix to reproduce).
+        """
+        project = "proj-gateb-failclosed"
+
+        # Candidate instances (non-terminal — the WS1 revive shape).
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-cand-a",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-cand-b",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # Task-side busy witness instance + RUNNING non-deferred task.
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-taskside-busy",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_task(
+            fb_engine,
+            work_id="work-taskside-busy",
+            instance_id="inst-taskside-busy",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+        )
+
+        # The defer lane + two queued task-type defer candidates.
+        # Insertion order fixes created_at ordering: A before B.
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-defer-failclosed",
+            project_id=project,
+            queue_type="defer",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-fc-a",
+            instance_id="inst-cand-a",
+            project_id=project,
+            queue_id="queue-defer-failclosed",
+            admission_state=AdmissionState.QUEUED.value,
+            job_type="task",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-fc-b",
+            instance_id="inst-cand-b",
+            project_id=project,
+            queue_id="queue-defer-failclosed",
+            admission_state=AdmissionState.QUEUED.value,
+            job_type="task",
+        )
+
+        # Sanity: no job-side busy rows — both job legs would be clean
+        # False without the injected error (the queued defer jobs are
+        # excluded by the queue-type arm of the busy-set).
+        assert (
+            job_repo.has_active_non_deferred_work(
+                project, requester_instance_id="inst-cand-b"
+            )
+            is False
+        ), (
+            "job-side busy-set unexpectedly non-empty for candidate B "
+            "— the scenario does not isolate the task-side leg; fix "
+            "the fixture before trusting this pin"
+        )
+        # The task-side leg IS busy (the Phase-2 second leg).
+        task_repo_busy = TaskRepository(fb_engine)
+        assert (
+            task_repo_busy.has_active_non_deferred_work(project) is True
+        ), (
+            "task-side predicate returned False with a RUNNING "
+            "non-deferred task in scope — the scenario lost its "
+            "second-leg busy witness"
+        )
+
+        # Delegating wrapper: OperationalError on the FIRST job-leg
+        # probe (candidate A), clean delegation afterwards (candidate
+        # B's probe sees the real repository).
+        real_repo = job_repo
+        probes: list[str | None] = []
+
+        class _RaisingOnceJobRepo:
+            """Raise once on ``has_active_non_deferred_work``, then
+            delegate everything to the real repository."""
+
+            def has_active_non_deferred_work(
+                self, project_id: str | None,
+                requester_instance_id: str | None = None,
+            ) -> bool:
+                probes.append(requester_instance_id)
+                if len(probes) == 1:
+                    raise OperationalError(
+                        "SELECT EXISTS (…defer busy-body…)",
+                        {},
+                        Exception("simulated transient DB failure"),
+                    )
+                return real_repo.has_active_non_deferred_work(
+                    project_id, requester_instance_id
+                )
+
+            def __getattr__(self, name: str):
+                return getattr(real_repo, name)
+
+        svc = _make_gate_b_service(fb_engine)
+        svc._repository = _RaisingOnceJobRepo()
+
+        pending = job_repo.list_all_pending()
+        assert [j.job_id for j in pending] == [
+            "job-defer-fc-a",
+            "job-defer-fc-b",
+        ], (
+            f"pending order is not [A, B]: {[j.job_id for j in pending]} "
+            "— the per-candidate probe order would not exercise the "
+            "error-then-clean sequence"
+        )
+
+        result = asyncio.run(
+            svc._select_next_eligible_job(pending, project)
+        )
+
+        # Both probes ran, in candidate order: A raised, B delegated.
+        assert probes == ["inst-cand-a", "inst-cand-b"], (
+            f"job-leg probe sequence was {probes!r} — the corner "
+            "scenario did not exercise A-error-then-B-clean"
+        )
+
+        # THE PIN: candidate B must be HELD (task-side leg ran and
+        # reported busy), not admitted on the suppressed second leg.
+        assert result is None, (
+            f"candidate B was ADMITTED ({getattr(result, 'job_id', None)!r}) "
+            "on a clean job-leg False while the task-side predicate was "
+            "suppressed by candidate A's job-leg error — the fail-CLOSED "
+            "corner (Phase-4 review Issue #1) is LIVE: a transient "
+            "job-predicate failure silently releases the defer queue "
+            "from the Phase-2 second leg"
+        )
+
+        # Admission-state read-back: B stays queued (nothing admitted,
+        # nothing mutated).
+        with fb_engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = 'job-defer-fc-b'"
+                )
+            ).one()
+        assert row[0] == AdmissionState.QUEUED.value, (
+            f"candidate B admission_state drifted to {row[0]!r} — the "
+            "held candidate must stay queued"
         )
 
 
@@ -1678,6 +2445,295 @@ class TestIdlePredicatePgSqliteParity:
                     # Parity is the point of the test — spell it out.
                     assert type(sq[key]) is type(pg[key]) is bool
 
+                self._clear_work_tables(sq_engine)
+                self._clear_work_tables(pg_engine)
+        finally:
+            sq_engine.dispose()
+            try:
+                self._clear_work_tables(pg_engine)
+            except Exception:
+                pass
+            pg_engine.dispose()
+
+    def test_ws1_carveout_pg_sqlite_parity(self, tmp_path):
+        """W3 PG-parity rows for the WS1 carve-out bodies.
+
+        The four carve-out bodies landed in WS1 (commit 14502f68):
+
+          * ``JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT``
+          * ``JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT``
+          * (plus their witness-body derivations)
+
+        The two-body split (project vs system) was introduced by the
+        2026-09-04 PG hotfix (commit 6d40a65d) specifically to close
+        the ``psycopg.errors.AmbiguousParameter: could not determine
+        data type of parameter $1`` class that shipped because the
+        PG-parity leg of the previous parity test had been SKIPPED
+        (unprovisioned PG test DB). The carve-out body itself adds a
+        ``:requester_instance_id`` STRING bind that is only declared
+        when a non-None requester is in scope — another dialect-
+        sensitive surface that must evaluate identically on PG and
+        SQLite or the carve-out silently loses its per-candidate
+        narrowing on one dialect.
+
+        This test pins the FULL matrix across both bodies, both
+        requester identities (self-admit and other-block), and both
+        engines (SQLite file-backed + PG ``ensemble_test``):
+
+          ┌─────────────────────┬──────────┬─────────┬──────────────┐
+          │ case                │ scope    │ requester│ expected     │
+          ├─────────────────────┼──────────┼─────────┼──────────────┤
+          │ carveout_proj_self  │ project  │ witness  │ False (idle) │
+          │ carveout_proj_other │ project  │ other    │ True  (busy) │
+          │ carveout_sys_self   │ system   │ witness  │ False (idle) │
+          │ carveout_sys_other  │ system   │ other    │ True  (busy) │
+          └─────────────────────┴──────────┴─────────┴──────────────┘
+
+        Seeding uses inline INSERTs with PG-compatible boolean
+        literals (``FALSE``) so the test runs against BOTH engines
+        without depending on the class-level ``_insert_queue`` /
+        ``_insert_job`` helpers, which bind ``is_system/is_paused``
+        as integers (``1, 0``) — SQLite-tolerated but PG-rejected with
+        ``column "is_system" is of type boolean but expression is of
+        type integer``. The inline form mirrors the hotfix-test
+        pattern at ``test_pg_project_scoped_incident_shape_pin``
+        below.
+
+        The PG connection probe is the same pattern as
+        ``test_idle_predicate_pg_sqlite_parity`` (test class above):
+        try-connect → dispose-on-failure → skip with explicit reason.
+        A successful probe runs the 4-row matrix; a failed probe is a
+        LOUD SKIP with the item name in the skip reason (the gap is
+        LEDGERED as named-open per the audit brief).
+        """
+        # ── PG connection probe (same pattern as the sibling parity test) ──
+        try:
+            pg_engine = create_engine(_PG_URL, pool_pre_ping=True)
+            with pg_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+                has_public = conn.execute(
+                    text(
+                        "SELECT count(*) FROM information_schema.schemata "
+                        "WHERE schema_name = 'public'"
+                    )
+                ).scalar_one()
+        except Exception as e:
+            try:
+                pg_engine.dispose()
+            except Exception:
+                pass
+            pytest.skip(
+                f"[W3 PG-parity rows] PostgreSQL not available at {_PG_URL}: "
+                f"{e}. Static-only coverage: the four carve-out bodies are "
+                f"pinned by "
+                f"test_ws1_carveout_selects_distinct_body_variants + "
+                f"test_ws1_carveout_witness_body_presence_and_byte_derivation "
+                f"(body-variant selection, bind capture, no-NULL-bind); this "
+                f"PG-parity leg is the only unverified surface. TODO: provision "
+                f"ensemble_test PG and re-run."
+            )
+        if not has_public:
+            try:
+                pg_engine.dispose()
+            except Exception:
+                pass
+            pytest.skip(
+                f"[W3 PG-parity rows] PostgreSQL test database at {_PG_URL} "
+                f"is not prepared (no 'public' schema). Static-only coverage "
+                f"via test_ws1_carveout_selects_distinct_body_variants + "
+                f"test_ws1_carveout_witness_body_presence_and_byte_derivation; "
+                f"this PG-parity leg is the only unverified surface. TODO: "
+                f"start the docker-compose.test.yml stack."
+            )
+
+        sq_engine = create_engine(
+            f"sqlite:///{tmp_path / 'carveout_parity.db'}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            # Provision tables — create only missing on PG (we never drop
+            # pre-existing); create all on SQLite (file-backed, fresh per
+            # test).
+            from sqlalchemy import inspect as sa_inspect
+
+            inspector = sa_inspect(pg_engine)
+            missing = [
+                t for t in _PARITY_TABLES
+                if not inspector.has_table(t.name)
+            ]
+            SQLModel.metadata.create_all(pg_engine, tables=missing)
+            SQLModel.metadata.create_all(sq_engine, tables=list(_PARITY_TABLES))
+
+            job_repo_sq = JobRepository(sq_engine)
+            job_repo_pg = JobRepository(pg_engine)
+
+            # Inline PG-compatible seeder. ``is_system`` and ``is_paused``
+            # bound as PG BOOLEAN literals (``FALSE``) — SQLite 3.23+
+            # accepts the same token (maps to 0 via INTEGER affinity), so
+            # the same INSERT works on both dialects without dialect-
+            # switching branches. ``created_at`` / ``updated_at`` ride
+            # the model's native ``str`` affinity on both engines.
+            def seed(engine, *, instance_id, project_id, queue_id,
+                     mirror_job_id, status):
+                now = datetime.now(timezone.utc).isoformat()
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO instances
+                                (instance_id, agent_id, agent_dir, status,
+                                 project_id, created_at, updated_at, version)
+                            VALUES (:instance_id, 'developer',
+                                    'agents/developer', :status, :project_id,
+                                    :created_at, :updated_at, 1)
+                            """
+                        ),
+                        {
+                            "instance_id": instance_id,
+                            "status": status,
+                            "project_id": project_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    )
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO job_queues
+                                (queue_id, project_id, queue_name,
+                                 queue_name_lower, queue_type,
+                                 concurrency_limit, is_system, is_paused,
+                                 description, created_at, updated_at)
+                            VALUES (:queue_id, :project_id, :queue_id,
+                                    :queue_id, :queue_type, 1, FALSE,
+                                    FALSE, NULL, :created_at, :updated_at)
+                            """
+                        ),
+                        {
+                            "queue_id": queue_id,
+                            "project_id": project_id,
+                            "queue_type": "parallel",
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    )
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO job_queue_items
+                                (job_id, agent_id, agent_dir, message, source,
+                                 project_id, queue_id, priority,
+                                 admission_state, created_at, instance_id,
+                                 job_type, retry_count)
+                            VALUES (:job_id, 'developer', 'agents/developer',
+                                    'p', 'api', :project_id, :queue_id, 5,
+                                    :admission_state, :created_at,
+                                    :instance_id, 'message', 0)
+                            """
+                        ),
+                        {
+                            "job_id": mirror_job_id,
+                            "project_id": project_id,
+                            "queue_id": queue_id,
+                            "admission_state": AdmissionState.DONE.value,
+                            "created_at": now,
+                            "instance_id": instance_id,
+                        },
+                    )
+
+            # 4-row matrix — same seed per row on BOTH engines (only the
+            # caller-side ``requester_instance_id`` differs).
+            #
+            #   * ``witness_iid`` is the row's mirror owner (a non-terminal
+            #     ``waiting_children`` instance + its settled mirror).
+            #   * ``requester`` is the candidate's instance_id passed to
+            #     ``has_active_non_deferred_work(..., requester_instance_id=)``.
+            #
+            # For SELF rows: ``requester == witness_iid`` → the mirror's
+            # ``instance_id`` equals the requester → ``j.instance_id !=
+            # :requester_instance_id`` is FALSE → mirror excluded from
+            # busy-set → gate IDLE (False).
+            #
+            # For OTHER rows: ``requester != witness_iid`` → the mirror's
+            # ``instance_id`` differs from the requester → the != predicate
+            # is TRUE → mirror INCLUDED in busy-set → gate BUSY (True).
+            # The "requester" instance does NOT need a row in the DB — the
+            # bind is just a value; the comparison is the mirror's
+            # instance_id (which IS seeded) vs the bind.
+            cases = [
+                # (label, project_id, scope, witness_iid, requester, expected)
+                ("carveout_proj_self", "proj-w3-p-self", "project",
+                 "inst-w3-p-self-wit", "inst-w3-p-self-wit", False),
+                ("carveout_proj_other", "proj-w3-p-other", "project",
+                 "inst-w3-p-other-wit", "inst-w3-p-other-req", True),
+                ("carveout_sys_self", "proj-w3-s-self", "system",
+                 "inst-w3-s-self-wit", "inst-w3-s-self-wit", False),
+                ("carveout_sys_other", "proj-w3-s-other", "system",
+                 "inst-w3-s-other-wit", "inst-w3-s-other-req", True),
+            ]
+
+            for label, project_id, scope, witness_iid, requester, expected in cases:
+                # Same seed on both engines — same scenario, two dialects.
+                for engine in (sq_engine, pg_engine):
+                    seed(
+                        engine,
+                        instance_id=witness_iid,
+                        project_id=project_id,
+                        queue_id=f"queue-par-{label}",
+                        mirror_job_id=f"job-mirror-{label}",
+                        status=InstanceStatus.WAITING_CHILDREN.value,
+                    )
+
+                # System scope passes ``project_id=None``; project scope
+                # passes the seeded project. Both legs pass the carve-out
+                # requester — that's the only thing this test exercises
+                # beyond the baseline parity rows above.
+                if scope == "project":
+                    sq_result = job_repo_sq.has_active_non_deferred_work(
+                        project_id, requester_instance_id=requester
+                    )
+                    pg_result = job_repo_pg.has_active_non_deferred_work(
+                        project_id, requester_instance_id=requester
+                    )
+                else:
+                    sq_result = job_repo_sq.has_active_non_deferred_work(
+                        None, requester_instance_id=requester
+                    )
+                    pg_result = job_repo_pg.has_active_non_deferred_work(
+                        None, requester_instance_id=requester
+                    )
+
+                # Engine-by-engine first — a single-engine failure tells
+                # us which side drifted; the parity assertion below is
+                # the headline.
+                assert sq_result is expected, (
+                    f"[{label}] sqlite returned {sq_result!r}, expected "
+                    f"{expected!r} (scope={scope}, requester={requester!r}, "
+                    f"witness_iid={witness_iid!r})"
+                )
+                assert pg_result is expected, (
+                    f"[{label}] pg returned {pg_result!r}, expected "
+                    f"{expected!r} (scope={scope}, requester={requester!r}, "
+                    f"witness_iid={witness_iid!r}). If this raised "
+                    f"psycopg.errors.AmbiguousParameter the carve-out bind "
+                    f"isn't a typed STRING on the PG path; if it returned "
+                    f"the opposite of expected the WS1 carve-out predicate "
+                    f"``j.instance_id != :requester_instance_id`` diverges "
+                    f"between dialects."
+                )
+                # Parity is the point — spell it out.
+                assert sq_result is pg_result, (
+                    f"[{label}] PG/SQLite parity broken: sqlite={sq_result!r} "
+                    f"pg={pg_result!r} — the carve-out body evaluates "
+                    f"differently on the two dialects"
+                )
+                # Boolean-bind pattern (same discipline as the baseline
+                # parity rows above).
+                assert type(sq_result) is type(pg_result) is bool
+
+                # Reset for the next row — keeps PG-side row counts low
+                # and prevents the project-scope leak that the baseline
+                # parity rows guard against.
                 self._clear_work_tables(sq_engine)
                 self._clear_work_tables(pg_engine)
         finally:

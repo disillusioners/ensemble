@@ -194,6 +194,7 @@ async def lifespan(app: FastAPI):
     from daemon.services.job_recovery_service import (
         JobRecoveryService,
         emit_orphan_f1_boot_log,
+        emit_defer_autopromote_boot_log,
     )
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.sources.credentials import CredentialManager
@@ -529,6 +530,12 @@ async def lifespan(app: FastAPI):
     # One-shot boot log for the Pattern-f1 kill-switch
     # (ENSEMBLE_ORPHAN_F1_ENABLED, default ON, restart-to-flip).
     emit_orphan_f1_boot_log()
+    # WS3 add-on (WS4 wiring, 2026-09-06): one-shot boot log for the
+    # Pattern-g defer-autopromote kill-switch
+    # (ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED, default OFF,
+    # restart-to-flip). WS3 exported this from job_recovery_service
+    # but left the lifespan wiring out of its scope.
+    emit_defer_autopromote_boot_log()
     drift_reconciler_task = asyncio.create_task(
         _periodic_drift_reconcile_loop(
             job_recovery=job_recovery,

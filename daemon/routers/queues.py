@@ -621,25 +621,32 @@ async def get_defer_blocked(
 
     Severity shapes (docs §8.5, display-side reading of the payload):
 
-    * AMBER — some holder has ``kind == "paused"`` (the W2
-      suspended-but-occupying case; operator-actionable).
+    * AMBER — some holder has ``kind == "paused"`` OR
+      ``kind == "stalled"`` (both operator-actionable: paused ⇒
+      resume/terminate; stalled ⇒ force-complete the holder's settled
+      mirrors, the WS4 cleanup mechanic). The FE distinguishes the
+      two kinds in the tooltip wording.
     * INFO — holders exist, all ``kind == "live"`` (the gate is
       honoring ordinary live work).
     * RED anomaly — ``pending_count > 0`` AND ``holders == []``
       (defer work is queued while the gate reports no witness).
 
-    Purity: zero DML on the path; two SELECTs per call (witnesses +
-    defer-lane pending count), flat regardless of witness count.
-    DB errors propagate (queues-family posture — no §8.2 degrade
-    shape): the gate itself fails CLOSED, and this surface never
-    serves a body that could falsely claim the gate is open.
+    Purity: zero DML on the path; ``2 + len(holders)`` SELECTs per
+    call (the witness SELECT + the defer-lane pending count + one
+    WS1 carve-out EXISTS per dedup'd holder for the stall
+    classification), flat-ish as the witness count grows (the stall
+    budget is bounded by the dedup'd holder count, not by raw witness
+    count). DB errors propagate (queues-family posture — no §8.2
+    degrade shape): the gate itself fails CLOSED, and this surface
+    never serves a body that could falsely claim the gate is open.
 
     Args:
         resolver: Injected DeferBlockResolver (via Depends).
 
     Returns:
         :class:`DeferBlockResponse` — hold state, defer-lane pending
-        count, and the enumerated holders (paused first).
+        count, and the enumerated holders (paused > stalled > live,
+        each ascending by instance_id).
     """
     # Sync resolver call inside the async handler — the
     # ``list_missions`` precedent (mission_resolver.resolve_page is

@@ -79,7 +79,7 @@ import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobQueue
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.models import Task, TaskStatus
@@ -181,7 +181,37 @@ def service(
     mgr = MagicMock()
     mgr._instance_repository = instance_repo
     mgr._task_repo = task_repo
-    mgr.terminate_instance = AsyncMock(return_value=None)
+    # WS4 fixture repair (2026-09-06): the C2 change (2026-08-12)
+    # routed Bucket 5 through the FULL ``terminate_instance`` cascade
+    # instead of the raw ``transition_status_if`` UPDATE. A bare
+    # ``AsyncMock(return_value=None)`` swallows the cascade's DB
+    # write, so the assertions that read the instance status back
+    # from the DB could never observe the termination — 6 scenarios
+    # failed at base afd7c387 (attribution proven in a base worktree)
+    # and the suite could not anchor the WS4 mission-lens scenarios.
+    # The side_effect below performs the DB-VISIBLE portion of the
+    # real cascade (the race-safe terminal transition through the
+    # same repo method the pre-C2 code called) while keeping the
+    # graph-task / MCP / child-cascade logic out of scope. The
+    # allowed-from set is the full non-terminal set — mirroring the
+    # cascade's own short-circuit-on-terminal idempotency.
+    _ALL_NON_TERMINAL = (
+        "running", "paused", "idle", "queued", "waiting",
+        "waiting_children", "initializing", "resuming",
+    )
+
+    async def _terminate_like_cascade(instance_id: str) -> None:
+        instance_repo.transition_status_if(
+            instance_id,
+            InstanceStatus.TERMINATED.value,
+            _ALL_NON_TERMINAL,
+        )
+
+    mgr.terminate_instance = AsyncMock(side_effect=_terminate_like_cascade)
+    # Holder actions (WS4) re-enqueue foreground messages through the
+    # manager's public front primitive; tests that exercise the
+    # re-send path override this per-test.
+    mgr.enqueue_message_job = AsyncMock(return_value=None)
     svc._instance_manager = mgr
     svc._retry_engine = None
     svc._dlq_service = None
@@ -248,6 +278,8 @@ def make_job_item(
     job_type: str = "task",
     terminal_reason: str | None = None,
     deleted_at: str | None = None,
+    queue_id: str | None = None,
+    message: str = "test-job",
 ) -> str:
     """Insert a single JobItem row with the given admission_state.
 
@@ -255,6 +287,9 @@ def make_job_item(
     ``admission_state='queued'``) by inserting via a raw SQL UPDATE on
     a freshly-created row. This lets the test seed terminal
     (``done``) and active (``active``) rows directly.
+
+    WS4 additions: ``queue_id`` (lane classification for the mission
+    lens) and ``message`` (the content the re-send action re-enqueues).
 
     Returns:
         ``job_id`` of the inserted JobItem.
@@ -266,7 +301,7 @@ def make_job_item(
             job_id=jid,
             agent_id="developer",
             agent_dir="/tmp/agents/developer",
-            message="test-job",
+            message=message,
             source="test",
             project_id=project_id,
             admission_state=AdmissionState.QUEUED.value,
@@ -275,6 +310,7 @@ def make_job_item(
             terminal_reason=None,
             deleted_at=None,
             created_at=now_iso,
+            queue_id=queue_id,
         )
         s.add(job)
         s.commit()
@@ -307,19 +343,22 @@ def make_task(
     *,
     instance_id: str,
     status: str = TaskStatus.PENDING.value,
+    work_id: str | None = None,
 ) -> int:
     """Insert a Task row with the given status. Returns the task id.
 
     Like :func:`make_job_item`, this uses a raw UPDATE after the
     initial insert so we can pin ``status`` to anything
     (running, paused, etc.) without going through the TaskRepository
-    state machine.
+    state machine. ``work_id`` lets a test pin the Task↔JobItem
+    linkage (``Task.work_id == JobItem.job_id`` on the job-driven
+    path).
     """
-    work_id = f"work-{uuid.uuid4().hex[:12]}"
+    wid = work_id or f"work-{uuid.uuid4().hex[:12]}"
     now_dt = _now_dt()
     with Session(engine) as s:
         task = Task(
-            work_id=work_id,
+            work_id=wid,
             task_type="process_message",
             instance_id=instance_id,
             message_id=None,
@@ -470,6 +509,15 @@ class TestBucket5ZombieReaper:
             admission_state="active",
             project_id=project_id,
         )
+
+        # WS4 fixture note: neutralize Bucket 2 so the scenario
+        # isolates what it documents — the Bucket 5 SCAN protection
+        # an ``active`` row provides. (The fixture repair made
+        # ``terminate_instance`` DB-visible, so the REAL Bucket 2
+        # cancel cascade now legitimately terminates the instance —
+        # correct production behaviour, but it would mask the scan
+        # predicate this scenario exists to pin.)
+        service.cancel_job = AsyncMock(return_value=True)
 
         result = await service.cleanup_non_terminal_jobs()
 
@@ -790,3 +838,1155 @@ class TestBucket5ZombieReaper:
             "terminated_instances": 0,
             "total_processed": 0,
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# WS4 mission lens (fix/defer-self-witness-and-cleanup, 2026-09-06)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def make_queue(
+    engine: Engine,
+    *,
+    project_id: str,
+    queue_type: str = "defer",
+    queue_name: str = "system_defer_queue",
+    queue_id: str | None = None,
+) -> str:
+    """Insert a JobQueue row and return its ``queue_id``."""
+    qid = queue_id or f"queue-{uuid.uuid4().hex[:8]}"
+    now_iso = _now_iso()
+    with Session(engine) as s:
+        s.add(
+            JobQueue(
+                queue_id=qid,
+                project_id=project_id,
+                queue_name=queue_name,
+                queue_name_lower=queue_name.lower(),
+                queue_type=queue_type,
+                concurrency_limit=1 if queue_type in ("defer", "background") else 3,
+                is_system=True,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        )
+        s.commit()
+    return qid
+
+
+def get_job(engine: Engine, job_id: str) -> dict:
+    """Read a JobItem row back as a plain dict (raw SQL, no ORM cache)."""
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT admission_state, terminal_reason FROM job_queue_items "
+                "WHERE job_id = :job_id"
+            ),
+            {"job_id": job_id},
+        ).fetchone()
+    assert row is not None, f"job {job_id} vanished"
+    return {"admission_state": row[0], "terminal_reason": row[1]}
+
+
+class TestWS4MissionLens:
+    """WS4 self-shield exemption + holder actions (integration, real SQL).
+
+    The mission lens: an instance's OWN queued defer-lane rows no
+    longer shield it from the Bucket 5 reaper (the stalled-holder
+    self-shield). Everything else that shielded before STILL shields
+    (fail-CLOSED posture): active rows on any lane, queued rows on
+    non-defer / unknown lanes, live Tasks, live children.
+    """
+
+    @pytest.mark.asyncio
+    async def test_13_stalled_holder_own_defer_mirrors_reaped(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """THE mission lens: stalled holder (only own queued defer
+        mirrors) is reap-eligible — the incident 6bc61f42 shape."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+            message="the deferred message",
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 1
+        assert result["total_processed"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.TERMINATED.value
+        # Mirror protection STAYS: cleanup must NOT have cancelled the
+        # queued defer mirror (start_job's terminal-instance abort path
+        # owns it later).
+        job_after = get_job(engine, _only_job_id(engine))
+        assert job_after["admission_state"] == "queued"
+
+    @pytest.mark.asyncio
+    async def test_14_queued_non_defer_lane_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Fail-CLOSED half of the lens: a queued mirror on a NON-defer
+        lane still shields (bucket 1 skips mirrors; the lens only
+        exempts the defer lane)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=fifo_qid,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_15_active_defer_row_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """An ACTIVE defer-lane row (any job_type) still shields — the
+        exemption is for QUEUED defer rows only."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="active",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_16_unknown_lane_queued_row_still_shields(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """A queued row with NO lane (``queue_id`` NULL → LEFT JOIN
+        miss → ``queue_type IS NULL``) still shields — fail-CLOSED on
+        unknown lanes. (The FK makes a dangling non-null queue_id
+        unconstructible; the NULL lane and the queue-row-deleted lane
+        are the same LEFT-JOIN-miss shape the SQL arm covers.)"""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=None,
+        )
+
+        service.cancel_job = AsyncMock(return_value=True)  # isolate scan
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_17_live_children_still_protect_stalled_holder(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """W1 live-children guard survives the lens: a stalled holder
+        with a non-terminal child is NOT reaped."""
+        parent = make_instance(engine, status="waiting_children", project_id=project_id)
+        child = make_instance(engine, status="running", project_id=project_id)
+        # Point the child at the parent, and give the child a running
+        # Task so it is genuinely live — then the parent's survival is
+        # attributable to the W1 live-children anti-join, not to a
+        # shared zombie shape.
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE instances SET parent_id = :p WHERE instance_id = :c"),
+                {"p": parent.instance_id, "c": child.instance_id},
+            )
+        make_task(engine, instance_id=child.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=parent.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        # Neither parent (stalled + live child) nor child (running, live)
+        parent_after = instance_repo.get(parent.instance_id)
+        assert parent_after.status == InstanceStatus.WAITING_CHILDREN.value
+        assert result["terminated_instances"] == 0
+
+    @pytest.mark.asyncio
+    async def test_18_running_task_still_protects_despite_defer_mirrors(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Genuinely-live mission: own queued defer mirrors AND a
+        running Task → NOT reaped (the task anti-join is independent
+        of the lens)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        make_task(engine, instance_id=inst.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        result = await service.cleanup_non_terminal_jobs()
+
+        assert result["terminated_instances"] == 0
+        inst_after = instance_repo.get(inst.instance_id)
+        assert inst_after.status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_19_preflight_split_reap_vs_live_and_defer_count(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Preflight live-vs-reap split: stalled holder = reap-eligible,
+        running-task mission = will-remain, deferred count = 1."""
+        stalled = make_instance(engine, status="running", project_id=project_id)
+        live = make_instance(engine, status="running", project_id=project_id)
+        make_instance(engine, status="terminated", project_id=project_id)
+        make_task(engine, instance_id=live.instance_id, status="running")
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=stalled.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        reap_ids = set(instance_repo.find_zombie_instances())
+        non_terminal = set(instance_repo.find_non_terminal_instance_ids())
+        live_ids = non_terminal - reap_ids
+
+        assert reap_ids == {stalled.instance_id}
+        assert live_ids == {live.instance_id}
+
+        from daemon.services.defer_block_resolver import _DEFER_PENDING_COUNT_SQL
+
+        with engine.connect() as conn:
+            defer_count = int(conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one())
+        assert defer_count == 1
+
+    @pytest.mark.asyncio
+    async def test_20_force_complete_refused_when_probe_busy(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Guard: a holder with LIVE non-defer work is refused (probe
+        busy → terminated=False; cascade never runs).
+
+        WS4 Round-2 W2 (2026-09-06) — the probe is now
+        ``has_live_work`` (per-instance companion to the bulk zombie
+        scan). A live mirror on a non-defer lane for a DIFFERENT
+        instance must still trigger refusal on the requester
+        (``WS1 carve-out only excludes the REQUESTER's own mirrors``).
+        """
+        inst = make_instance(engine, status="running", project_id=project_id)
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        # Live settled mirror on a NON-defer lane belonging to a
+        # DIFFERENT instance: the WS1 carve-out only excludes the
+        # REQUESTER's own mirrors, so probing with ``inst`` as the
+        # requester sees the other holder's mirror → busy → the guard
+        # must refuse (mixed stalled+live is structurally impossible
+        # per WS2 strict semantics, so a busy probe means NOT stalled).
+        other = make_instance(engine, status="running", project_id=project_id)
+        make_job_item(
+            engine,
+            instance_id=other.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=fifo_qid,
+        )
+
+        # ``has_live_work`` is the new probe — mock it True so the
+        # initial probe refuses. (Real DB would also return True
+        # because the other-instance's settled mirror IS a live
+        # witness on the busy-set, but the mock keeps the assertion
+        # shape crisp.)
+        instance_repo.has_live_work = MagicMock(return_value=True)
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21_force_complete_succeeds_mirrors_only_and_rederives(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Guard success: mirrors-only holder → terminated; the probe
+        ran with the canonical arms (system scope + WS1 carve-out + the
+        Round-2 W2 task/child-instance arms folded into
+        ``has_live_work``), NOT the FE-reported kind."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        # Settled mirror on the DEFER lane: the carve-out excludes the
+        # holder's own settled mirrors → probe False → stalled.
+        make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # WS4 Round-2 (2026-09-06) — the guard now calls
+        # ``instance_repo.has_live_work`` (per-instance companion to
+        # the bulk zombie scan) for BOTH the initial probe AND the
+        # W1 TOCTOU re-check immediately before terminate. The old
+        # WS1 carve-out probe (job-side only) is no longer used.
+        live_work_probe = MagicMock(return_value=False)
+        instance_repo.has_live_work = live_work_probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result["terminated"] is True
+        assert result["probe_busy"] is False
+        # Initial probe + W1 re-check: TWO calls to the same
+        # single-instance companion. The re-check uses the same
+        # bind so a probe→terminate window that lands new live work
+        # is caught (W1 RED→GREEN).
+        assert live_work_probe.call_count == 2
+        assert live_work_probe.call_args_list[0].args == (inst.instance_id,)
+        assert live_work_probe.call_args_list[1].args == (inst.instance_id,)
+        service._instance_manager.terminate_instance.assert_awaited_once_with(
+            inst.instance_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_21a_w1_toctou_recheck_refuses_when_work_appears(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W1 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        RED→GREEN pin: TOCTOU re-check immediately before the
+        terminate. The first probe returns False (clean), but live
+        work appears between the probe and the re-check (e.g. a
+        delegating-repo write that landed). The re-check returns
+        True (busy) → the action is REFUSED, terminate NEVER runs.
+
+        Pin the corner: ``terminated=False, probe_busy=True`` and
+        ``terminate_instance`` is NOT awaited.
+        """
+        inst = make_instance(engine, status="running", project_id=project_id)
+
+        # Probe side-effect sequence: first call False (clean),
+        # second call (the W1 re-check immediately before terminate)
+        # True (busy — work appeared between probe and re-check).
+        live_work_probe = MagicMock(side_effect=[False, True])
+        instance_repo.has_live_work = live_work_probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        # The destructive call was NEVER made — the re-check caught
+        # the racing live work.
+        service._instance_manager.terminate_instance.assert_not_awaited()
+        # Exactly two probe calls: the initial + the W1 re-check.
+        assert live_work_probe.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_21b_w1_recheck_succeeds_when_no_work_appears(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W1 companion pin: when no work appears between
+        the initial probe and the re-check, BOTH probes return False,
+        the terminate runs, ``terminated=True, probe_busy=False``."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+
+        live_work_probe = MagicMock(return_value=False)
+        instance_repo.has_live_work = live_work_probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": True,
+            "probe_busy": False,
+        }
+        # Initial probe + W1 re-check, both False, terminate runs.
+        assert live_work_probe.call_count == 2
+        service._instance_manager.terminate_instance.assert_awaited_once_with(
+            inst.instance_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_21c_w2_holder_with_live_task_no_jobitem_refused(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 (2026-09-06) RED→GREEN pin: holder with a
+        live Task but NO JobItem at all is REFUSED. Pre-W2 the
+        job-side-only probe (``has_active_non_deferred_work``) saw
+        nothing busy and would have terminated the instance,
+        orphaning the live Task. Post-W2 the
+        ``has_live_work(instance_id)`` companion folds in the
+        ``task.status IN (pending, running, paused)`` arm and refuses.
+
+        No mocks — the real ``has_live_work`` runs against the real
+        SQLite engine (file-backed recipe — see the file header).
+        """
+        inst = make_instance(engine, status="running", project_id=project_id)
+        # Live Task with no JobItem at all (the W2 gap shape).
+        make_task(engine, instance_id=inst.instance_id, status="running")
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21d_w2_holder_with_live_child_refused(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 RED→GREEN pin: a parent instance with a
+        NON-TERMINAL CHILD running a Task (child has a Task row, NO
+        JobItems) is REFUSED by force-complete. The third arm of
+        ``has_live_work`` (``instances.child WHERE child.parent_id = i
+        AND child.status NOT IN terminal``) catches it.
+
+        The original dispatcher spec:
+          "holder with a LIVE CHILD running a Task (child has a Task
+          row, NO JobItems) → force-complete REFUSED".
+        """
+        parent = make_instance(
+            engine, status="waiting_children", project_id=project_id
+        )
+        child = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        # Wire the child's parent_id to the holder.
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE instances SET parent_id = :p WHERE instance_id = :c"),
+                {"p": parent.instance_id, "c": child.instance_id},
+            )
+        # Child runs a Task — the W2 "live child running a Task" shape.
+        make_task(engine, instance_id=child.instance_id, status="running")
+
+        result = await service.force_complete_defer_holder(parent.instance_id)
+
+        assert result == {
+            "instance_id": parent.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21e_w2_probe_arms_match_bulk_zombie_scan(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 structural pin: ``has_live_work`` is the
+        single-instance companion to the bulk ``find_zombie_instances``
+        scan — they MUST classify the same instance identically.
+
+        For each instance in the test fixture, ``has_live_work`` is
+        the exact INVERSE of "would this instance appear in
+        ``find_zombie_instances``?". An instance with the SAME live
+        shape (live Task only, live child only, etc.) must return
+        True from ``has_live_work`` AND must NOT appear in the
+        zombie scan.
+        """
+        # Holder with a live Task — ``has_live_work`` True, zombie scan misses.
+        holder = make_instance(engine, status="running", project_id=project_id)
+        make_task(engine, instance_id=holder.instance_id, status="running")
+
+        # Mirror-only holder (defer-lane settled mirror) — ``has_live_work``
+        # False (WS4 mission lens: own defer mirrors don't witness),
+        # zombie scan catches it.
+        mirror_only = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=mirror_only.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Verify the inverse: every instance flagged live by
+        # ``has_live_work`` is NOT in the zombie scan; every instance
+        # NOT live is in the scan.
+        live_ids = {
+            iid for iid in (
+                holder.instance_id, mirror_only.instance_id,
+            )
+            if instance_repo.has_live_work(iid)
+        }
+        zombie_ids = set(instance_repo.find_zombie_instances())
+
+        assert live_ids == {holder.instance_id}
+        assert mirror_only.instance_id in zombie_ids
+        assert holder.instance_id not in zombie_ids
+
+    @pytest.mark.asyncio
+    async def test_22_force_complete_missing_instance_404(
+        self,
+        service: JobQueueService,
+    ):
+        """A missing holder raises LookupError (router maps to 404)."""
+        with pytest.raises(LookupError):
+            await service.force_complete_defer_holder("inst-missing")
+
+    @pytest.mark.asyncio
+    async def test_23_resend_cancels_defer_job_and_reenqueues_foreground(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Re-send-foreground: the queued defer job is cancelled (via
+        the existing cancel path → done/cancelled) and its message
+        content is re-enqueued as a NEW foreground message job through
+        the manager front primitive — NOT a mirror mutation."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        jid = make_job_item(
+            engine,
+            instance_id=inst.instance_id,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+            message="please run the deferred work",
+        )
+        # The mirror's authoritative Task — the job-driven path mints
+        # ``Task.work_id == JobItem.job_id``, so seed the linkage.
+        make_task(engine, instance_id=inst.instance_id, work_id=jid)
+
+        from types import SimpleNamespace
+
+        service._instance_manager.enqueue_message_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="new-job-1", message_id="msg-1")
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["found_defer_jobs"] == 1
+        assert result["cancelled_defer_jobs"] == 1
+        assert result["skipped_empty_content"] == 0
+        assert result["resend_results"][0]["cancelled_job_id"] == jid
+        assert result["resend_results"][0]["job_id"] == "new-job-1"
+        # The authoritative Task was cancelled too (union consistency).
+        assert result["resend_results"][0]["task_cancelled"] is True
+
+        # The cancelled row is terminal (done/cancelled) — the OLD
+        # mirror, mutated through the registered cancel writer.
+        job_after = get_job(engine, jid)
+        assert job_after["admission_state"] == "done"
+        assert job_after["terminal_reason"] == "cancelled"
+
+        # The linked Task is CANCELLED — no bad-state shape minted.
+        with engine.begin() as conn:
+            task_status = conn.execute(
+                text("SELECT status FROM task WHERE work_id = :w"),
+                {"w": jid},
+            ).scalar_one()
+        assert task_status == TaskStatus.CANCELLED.value
+
+        # The NEW foreground job went through the public front
+        # primitive with the original content (is_deferred defaults
+        # False → foreground).
+        service._instance_manager.enqueue_message_job.assert_awaited_once_with(
+            instance_id=inst.instance_id,
+            message="please run the deferred work",
+            source="api",
+        )
+
+    @pytest.mark.asyncio
+    async def test_24_resend_ignores_active_and_non_defer_rows(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Re-send scope = QUEUED defer-lane rows only: active defer
+        rows, queued non-defer rows, and unknown-lane rows are left
+        alone (found=0 → the router maps to 400)."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        fifo_qid = make_queue(
+            engine, project_id=project_id, queue_type="fifo",
+            queue_name="system_parallel_queue",
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="active",
+            job_type="message", project_id=project_id, queue_id=defer_qid,
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id, queue_id=fifo_qid,
+        )
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id,
+            queue_id=None,  # NULL lane — LEFT JOIN miss, fail-closed
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["found_defer_jobs"] == 0
+        assert result["cancelled_defer_jobs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_25_resend_empty_content_cancels_without_reenqueue(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """A queued defer row with empty content is cancelled but
+        contributes nothing to the re-enqueue pass."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine, instance_id=inst.instance_id, admission_state="queued",
+            job_type="message", project_id=project_id, queue_id=defer_qid,
+            message="   ",
+        )
+
+        result = await service.resend_deferred_foreground(inst.instance_id)
+
+        assert result["cancelled_defer_jobs"] == 1
+        assert result["skipped_empty_content"] == 1
+        service._instance_manager.enqueue_message_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_26_resend_missing_instance_raises(self, service: JobQueueService):
+        with pytest.raises(LookupError):
+            await service.resend_deferred_foreground("inst-missing")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Unblock-round ITEM 2 (2026-09-06): real-wiring integration test
+    # for ``GET /api/jobs/cleanup/preflight``'s ``defer_blocked_count``
+    # surface. The previous (round-2) unit test
+    # ``TestCleanupPreflightEndpoint.test_preflight_ws4_live_vs_reap_split_and_defer_count``
+    # HAND-SET ``manager._defer_block_resolver`` and reached
+    # ``defer_resolver._job_repo.engine`` directly — the attribute was
+    # NEVER assigned in production (`api.py:977-978` wires only the
+    # queues.py module-global), so the count was silently 0 in
+    # production, masked behind the MagicMock hand-set. The test below
+    # uses the canonical production-shape wiring (the queues.py
+    # singleton via ``set_defer_block_resolver(...)``) against a real
+    # SQLite engine (file-backed recipe, see file header) and confirms
+    # the count propagates end-to-end through the FastAPI endpoint.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_27_preflight_defer_count_via_real_singleton_wiring(
+        self,
+        engine: Engine,
+        project_id: str,
+        tmp_path,
+    ):
+        """Unblock-round ITEM 2: real-wiring integration proof.
+
+        Production-shape wiring:
+
+        * ``set_defer_block_resolver(DeferBlockResolver(job_repo=...))``
+          — the same ``daemon/api.py:977-978`` lifespan-startup path;
+        * the FastAPI ``cleanup_preflight`` endpoint reads the resolver
+          via ``daemon.routers.queues.get_defer_block_resolver()``;
+        * the resolver's public
+          :meth:`DeferBlockResolver.defer_pending_count` instance
+          method reaches ``self._job_repo.engine`` internally — the
+          router NEVER touches the engine.
+
+        RED→GREEN anchor: this test would FAIL with the round-2
+        wiring shape (``manager._defer_block_resolver`` hand-set,
+        because the production code never assigns that attribute) —
+        the GREEN proof is "test passes with the canonical wiring
+        path". See `test_27b_preflight_defer_count_wiring_regression`
+        for the inverse pin.
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import (
+            set_defer_block_resolver,
+            _defer_block_resolver as queues_resolver_global,
+        )
+        from daemon.services.defer_block_resolver import DeferBlockResolver
+
+        # Seed: a queued defer-lane JobItem — this is the input the
+        # canonical SELECT counts (admission_state='queued' +
+        # queue_type='defer' + deleted_at IS NULL).
+        defer_qid = make_queue(
+            engine, project_id=project_id, queue_type="defer"
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Sanity: the canonical SQL constant returns 2 (the count the
+        # instance method will produce).
+        from daemon.services.defer_block_resolver import (
+            _DEFER_PENDING_COUNT_SQL,
+        )
+        with engine.connect() as conn:
+            raw_count = int(
+                conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
+            )
+        assert raw_count == 2
+
+        # Production-shape wiring: the queues.py module-global. THE
+        # SAME WIRING ``daemon/api.py`` lifespan runs at app startup.
+        job_repo = JobRepository(engine)
+        defer_resolver = DeferBlockResolver(job_repo=job_repo)
+        set_defer_block_resolver(defer_resolver)
+        try:
+            # The preflight endpoint reads the resolver via the
+            # ``get_defer_block_resolver()`` factory — assert it sees
+            # the same instance we just wired (this is the connection
+            # test for the singleton channel).
+            from daemon.routers.queues import get_defer_block_resolver
+            assert get_defer_block_resolver() is defer_resolver
+
+            # Build the FastAPI app with the management router. Use a
+            # ``MagicMock`` manager that has the bare-minimum repo
+            # attributes the preflight resolves (no hand-set on
+            # ``_defer_block_resolver`` — that would re-introduce the
+            # round-2 mask class).
+            manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+            manager._task_repo = TaskRepository(engine)
+            manager._instance_repository = SQLModelInstanceRepository(engine)
+
+            app = FastAPI()
+            app.include_router(management_router)
+            app.state.manager = manager
+
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # The defer count propagated through the singleton →
+            # resolver → instance-method path. Round-2 silently
+            # returned 0 because the wiring was never assigned in
+            # production.
+            assert body["defer_blocked_count"] == 2, (
+                f"defer_blocked_count should be 2 (real wiring); "
+                f"got {body['defer_blocked_count']}. If this is 0, "
+                f"the preflight's wiring regressed — see unblock-round "
+                f"ITEM 2 for the canonical-wiring fix."
+            )
+        finally:
+            # Reset the queues.py module-global — the integration
+            # test must not leak state to siblings. Production uses
+            # idempotent ``set_defer_block_resolver`` at lifespan
+            # startup; tests need explicit teardown.
+            import daemon.routers.queues as queues_module
+            queues_module._defer_block_resolver = None
+            assert queues_resolver_global is None  # global reset
+
+    def test_27b_preflight_defer_count_wiring_regression(
+        self,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Unblock-round ITEM 2 — RED-pin for the original regression.
+
+        The round-2 wiring tried to read ``manager._defer_block_resolver``
+        (``jobs_management.py:675``) but NO production code ever assigns
+        that attribute — ``api.py:977-978`` wires only the
+        ``queues.py`` module-global. Round-2's unit test hand-set
+        ``manager._defer_block_resolver``, masking the regression.
+
+        After the unblock-round canonical fix, the preflight reads
+        ``daemon.routers.queues.get_defer_block_resolver()`` — when
+        the singleton is unwired (test double, partial lifespan, or
+        regression in startup order), the preflight sees ``503`` from
+        the factory, degrades to ``defer_blocked_count = 0``, and the
+        OLD ``manager._defer_block_resolver`` hand-set becomes a
+        silent zero — exactly the failure shape the round-2 mask
+        hid. This test pins the BRAND-NEW behavior: with the
+        production wiring absent, the preflight MUST report 0 (NOT
+        swallow an exception, NOT crash, NOT show a stale value).
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import _defer_block_resolver
+
+        # Seed: queued defer-lane JobItems.
+        defer_qid = make_queue(
+            engine, project_id=project_id, queue_type="defer"
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Ensure the queues.py module-global is unwired (the
+        # regression shape — production's ``set_defer_block_resolver``
+        # never ran).
+        import daemon.routers.queues as queues_module
+        queues_module._defer_block_resolver = None
+        try:
+            manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+            manager._task_repo = TaskRepository(engine)
+            manager._instance_repository = SQLModelInstanceRepository(engine)
+            # NO hand-set on ``_defer_block_resolver`` (the round-2
+            # mask class). NO call to ``set_defer_block_resolver``.
+
+            app = FastAPI()
+            app.include_router(management_router)
+            app.state.manager = manager
+
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # The unwired-singleton path degrades to 0 — pinned so a
+            # future refactor cannot silently swallow the gap.
+            assert body["defer_blocked_count"] == 0
+        finally:
+            queues_module._defer_block_resolver = None
+            assert _defer_block_resolver is None  # global reset
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Unblock-round ITEM 11 (2026-09-06): truth-survivor pin against
+    # the REAL ``SQLModelInstanceRepository.has_real_active_or_queued_work`` —
+    # the JobItem-only EXISTS-shape probe introduced by the unblock
+    # round (it is NOT the WS4 R2 W2 ``has_live_work`` companion used
+    # by the holder-action guard; the two probes share class-level
+    # literal sets but cover different predicate surfaces). The
+    # truth-survivor filter targets a SUBSET — non-mirror ``active``
+    # / ``queued`` JobItems (the Bucket-1 batch + Bucket-2 per-row
+    # cancellable subset; mirror rows excluded by both buckets) —
+    # so a live-Task-only instance IS a truth-survivor (Tasks do
+    # not exclude an instance from the list). Seeds one instance
+    # with a non-mirror ACTIVE JobItem (NOT a zombie per the WS4
+    # lens, but Bucket 2 cancels + cascades it) and one instance
+    # with only a live Task (a TRULY retained instance per the
+    # ITEM 11 spec). Asserts that ``live_instance_ids`` contains
+    # ONLY the truly-retained instance — the active-jobitem holder
+    # is excluded by the post-filter that closes the over-promise
+    # gap.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_28_preflight_truth_survivor_excludes_active_holder(
+        self,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+        tmp_path,
+    ):
+        """ITEM 11 (real-wiring integration pin): the preflight's
+        ``live_instance_ids`` MUST NOT include holders of non-mirror
+        ACTIVE mission JobItems. Seeded with:
+          * ``inst-task-only``: a non-terminal instance with a live
+            Task (PENDING) but NO JobItems at all — a TRULY-
+            retained instance per the ITEM 11 spec (live Task
+            witnesses as non-zombie; no non-mirror ACTIVE/queued
+            JobItem ⇒ passes the truth-survivor filter).
+          * ``inst-active-holder``: a non-terminal instance with a
+            NON-MIRROR ACTIVE JobItem on a non-defer lane — NOT a
+            zombie per WS4 lens, but Bucket 2 cancels + cascades
+            to terminate_instance, so this holder does NOT survive
+            cleanup despite being a non-zombie.
+          * ``inst-reaped``: a zombie (no live work, no Task) —
+            SHOULD be in the reap split, not the live split.
+
+        Reviewer fold-in (ITEMS 7 + 8b, 2026-09-06): the topology
+        is extended with ``inst-child-only`` — a non-terminal
+        PARENT instance that has ONLY a non-terminal child
+        instance (no JobItems, no Tasks). The third arm of the
+        zombie predicate (`NOT EXISTS non-terminal child`)
+        EXCLUDES this instance from the reap set; the truth-
+        survivor filter (no non-mirror ACTIVE/queued JobItem)
+        ALSO passes (no JobItems at all). The instance is a
+        genuine truth-survivor — Bucket 5 reap skips it (the
+        child witnesses) and Bucket 1/2 cancel nothing (no
+        JobItems).
+
+        Then: assert that ``live_instance_ids`` is exactly
+        ``{inst_task_only, inst_child_only}`` (truth-survivor
+        filter) — the round-2 shape (``non-terminal ∖ zombie``)
+        would have included BOTH ``inst-task-only`` AND
+        ``inst-active-holder`` AND failed the canonical
+        sentence (``Every ACTIVE job is cancelled, ...``).
+        The new filter additionally proves ``inst-child-only``
+        is a survivor (proves the JobItem-only probe does
+        NOT over-filter an instance that survives purely on
+        a non-terminal child).
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import _defer_block_resolver
+
+        # Seed: non-defer (parallel) lane for the active-holder's
+        # genuine ACTIVE mission job (no defer lane needed — the
+        # truth-survivor shape uses a Task, not a JobItem, for the
+        # kept instance).
+        non_defer_qid = make_queue(
+            engine,
+            project_id=project_id,
+            queue_type="parallel",
+            queue_name="system_parallel_queue",
+        )
+
+        # TRULY-retained instance: a live Task (PENDING) but no
+        # JobItems at all. Live Task witnesses as non-zombie, and
+        # no non-mirror ACTIVE/queued JobItem → passes the
+        # truth-survivor filter.
+        inst_task_only = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        make_task(
+            engine,
+            instance_id=inst_task_only.instance_id,
+            status="pending",  # lives in _LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN
+        )
+
+        # Active-jobitem holder: ACTIVE job on a NON-DEFER lane.
+        # Not a zombie (the ACTIVE row witnesses), but Bucket 2
+        # cancels + cascade-terminates → excluded by the new filter.
+        inst_active = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        make_job_item(
+            engine,
+            instance_id=inst_active.instance_id,
+            admission_state="active",
+            job_type="task",  # non-mirror
+            project_id=project_id,
+            queue_id=non_defer_qid,
+        )
+
+        # Zombie: no live work, no Task — SHOULD be in reap split.
+        inst_reaped = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        # (no JobItems, no Task — fully zombie)
+
+        # Reviewer fold-in (ITEM 8b, 2026-09-06): a parent
+        # instance with ONLY a non-terminal child — proves the
+        # truth-survivor filter does NOT over-filter an
+        # instance that has child-shape live work but no
+        # JobItems/Task.
+        # The parent's live work comes through the child's
+        # ``status NOT IN terminal`` arm (3rd arm of the zombie
+        # predicate). The truth-survivor filter passes because
+        # the parent has ZERO non-mirror ACTIVE/queued JobItems.
+        inst_child_only_parent = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        inst_child_only_child = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET parent_id = :p "
+                    "WHERE instance_id = :c"
+                ),
+                {
+                    "p": inst_child_only_parent.instance_id,
+                    "c": inst_child_only_child.instance_id,
+                },
+            )
+
+        # Build the FastAPI app with the management router and a real
+        # manager wired with the REAL instance_repo (so the new
+        # ``has_real_active_or_queued_work`` filter does the right
+        # thing against real SQLite).
+        manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+        manager._task_repo = MagicMock()
+        manager._task_repo.count_bad_state_tasks = MagicMock(return_value=0)
+        manager._instance_repository = instance_repo
+
+        app = FastAPI()
+        app.include_router(management_router)
+        app.state.manager = manager
+        try:
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # Sanity: the reap split knows about inst_reaped.
+            assert inst_reaped.instance_id in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Sanity: inst_active is NOT a zombie (its ACTIVE row
+            # witnesses) — round-2 over-promise shape would have
+            # listed it in live_ids.
+            assert inst_active.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Sanity: inst_task_only is NOT a zombie (its live Task
+            # witnesses).
+            assert inst_task_only.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Sanity: inst_child_only_parent is NOT a zombie (its
+            # non-terminal child witnesses — 3rd arm of the
+            # predicate).
+            assert inst_child_only_parent.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Truth-survivor filter: inst_task_only + inst_child_only_parent
+            # both pass (no non-mirror ACTIVE/queued JobItem on
+            # either). inst_active is EXCLUDED because Bucket 2
+            # cancels + cascades.
+            assert body["live_instance_count"] == 2, (
+                f"only TRULY-retained instances should appear; got "
+                f"live_instance_ids={body['live_instance_ids']!r}"
+            )
+            live_ids_set = set(body["live_instance_ids"])
+            assert live_ids_set == {
+                inst_task_only.instance_id,
+                inst_child_only_parent.instance_id,
+            }
+            # Round-2 over-promise: BOTH task-only and active would
+            # appear. The new filter knocks active out.
+            assert inst_active.instance_id not in body["live_instance_ids"]
+            # Zombie predicate counts correctly.
+            assert body["zombie_instance_count"] >= 1
+        finally:
+            # Reset the queues.py module-global (the sibling
+            # defer-resolver tests use the same pattern; production
+            # lifespan startup is idempotent — tests need explicit
+            # teardown).
+            import daemon.routers.queues as queues_module
+            queues_module._defer_block_resolver = None
+            assert _defer_block_resolver is None  # global reset
+
+
+def _only_job_id(engine: Engine) -> str:
+    """Return the single job_queue_items row's job_id (test helper)."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT job_id FROM job_queue_items")).fetchall()
+    assert len(rows) == 1, f"expected exactly 1 job row, got {len(rows)}"
+    return rows[0][0]

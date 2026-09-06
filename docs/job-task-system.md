@@ -1374,24 +1374,49 @@ read service in the `MissionResolver` pattern.
   instance; a legacy-clause witness whose JobItem has NO instance row
   (`j.instance_id IS NULL`) surfaces as its OWN holder with `instance_id=""`,
   `status=""` and `agent` from the JobItem row (dropping it would break the
-  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive — it is
-  `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
-  suspended-but-occupying), `"live"` otherwise. The wire payload does NOT carry
-  severity — the AMBER / INFO / RED severity conjunction is a client-side read of
-  the `(kind, holders.len(), pending_count)` triple, NOT a server-derived property.
-  `status` is the RAW instance status (the gate's truthmaker, not canonicalized).
-  `since` is normalized ISO-8601 (naive → UTC — the `_parse_job_created_at`
-  TEXT-timestamp pattern): `paused_at` for paused holders, falling back through
-  `updated_at` then `created_at`; `last_activity_at` for live holders, falling back
-  through `updated_at` then `created_at`; `JobItem.created_at` for instance-less
-  witnesses (NO instance-side fallback chain — the JobItem's own `created_at` is
-  the sole source; null-or-empty is possible if even that column is NULL).
-  Ordering: paused holders first (AMBER operator-priority), then live, each
-  ascending by `instance_id` — the `_project_holders` sort key is
-  `(kind != "paused", instance_id, agent)`. Holders rows are NOT bounded by a
-  list `LIMIT` — the projection enumerates every witness (`len(witnesses)` is
-  unbounded); the FE renders every row but the render-gate below ensures the
-  affordance is invisible when there is nothing to warn about.
+  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive and
+  takes one of three values (WS2 — `fix/defer-self-witness-and-cleanup` workstream 2):
+
+  - `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
+    suspended-but-occupying). Paused takes precedence over stalled by construction
+    — a paused instance's actionable unblock is always the operator action
+    (resume / terminate), never the mirrors-only `stalled` action (force-complete),
+    so the operator-actionable status wins.
+
+  - `"stalled"` for a non-paused witness whose gate-busy state is EXCLUSIVELY
+    its OWN settled message mirrors. Detected by re-evaluating the WS1
+    requester-instance carve-out gate body with the holder's instance as the
+    requester: `JobRepository.has_active_non_deferred_work(None,
+    requester_instance_id=<holder>)` returns `False` (the carve-out excludes the
+    holder's own settled mirrors; if no OTHER busy witness remains, every row in
+    the no-carve-out busy-set was the holder's own mirrors — the gate is held by
+    mirrors pinning it against an instance with no live work). Stalled is
+    actionable via force-complete of the holder's settled mirrors (the WS4 cleanup
+    mechanic). Instance-less witnesses (`instance_id=""`) cannot be classified as
+    stalled (no instance_id to feed the carve-out bind) and fall through as `"live"`
+    by construction.
+
+  - `"live"` for every other witness (a non-paused instance with genuine non-mirror
+    busy work, OR a legacy-clause witness with no instance row).
+
+  The wire payload does NOT carry severity — the AMBER / INFO / RED severity
+  conjunction is a client-side read of the `(kind, holders.len(), pending_count)`
+  triple, NOT a server-derived property. `status` is the RAW instance status (the
+  gate's truthmaker, not canonicalized). `since` is normalized ISO-8601 (naive → UTC
+  — the `_parse_job_created_at` TEXT-timestamp pattern): `paused_at` for paused
+  holders, falling back through `updated_at` then `created_at`;
+  `last_activity_at` for live AND stalled holders, falling back through
+  `updated_at` then `created_at` (stalled holders have no live task to bump
+  `last_activity_at` recently, so the value is the most-recent prior activity
+  stamp); `JobItem.created_at` for instance-less witnesses (NO instance-side
+  fallback chain — the JobItem's own `created_at` is the sole source; null-or-empty
+  is possible if even that column is NULL). Ordering: paused holders first
+  (operator-priority AMBER witnesses), then stalled (operator-actionable mirrors-only
+  witnesses), then live — each ascending by `instance_id` — the `_project_holders`
+  sort key is `(kind != "paused", kind != "stalled", instance_id, agent)`. Holders
+  rows are NOT bounded by a list `LIMIT` — the projection enumerates every witness
+  (`len(witnesses)` is unbounded); the FE renders every row but the render-gate
+  below ensures the affordance is invisible when there is nothing to warn about.
 
 #### THE invariant — gate-truth == display-truth, by construction
 
@@ -1414,12 +1439,155 @@ fixtures) plus the shared-tail text pin are locked in
 
 | Shape | Condition | Meaning |
 |---|---|---|
-| AMBER | some holder has `kind == "paused"` | a paused instance occupies the gate's busy-set — operator-actionable (resume or terminate it) |
+| AMBER | some holder has `kind == "paused"` OR `kind == "stalled"` | a paused instance occupies the gate's busy-set (`paused` ⇒ operator-actionable via resume/terminate) — OR a non-paused witness is held up by EXCLUSIVELY its own settled message mirrors (`stalled` ⇒ actionable via force-complete of the holder's mirrors). Both are operator-actionable; the FE tooltip wording distinguishes the two kinds. |
 | INFO | holders non-empty, all `kind == "live"` | the gate is honoring ordinary live work |
 | RED anomaly | `pending_count > 0` AND `holders == []` | defer work is queued while the gate reports no witness — investigate |
 
 The severity conjunction is a client-side read of the payload; the surface itself
 carries only the two facts + witnesses.
+
+> **WS4 NOTE (LANDED 2026-09-06, `fix/defer-self-witness-and-cleanup`): cleanup
+> blindness is BY-DESIGN — the unstick lives in the holder actions.** The
+> System Cleanup (`POST /api/jobs/cleanup`) deliberately does NOT cancel the
+> queued defer-lane mirrors: `batch_cancel_queued` excludes
+> `job_type='message'` (constitution-era mirror protection — cancelling a
+> mirror would desync the JobItem receipt from its authoritative Task), and
+> the deferred Task row behind the mirror is not a bad-state row. The live
+> unstick incident (2026-09-06, instance `6bc61f42` / job `47161b1e`) showed
+> the consequence: a System Cleanup press could not relieve a stalled holder because
+> Bucket 1 skipped its queued defer mirrors AND the old Bucket 5 zombie scan
+> let those same mirrors shield the holder from reaping. WS4 resolves the
+> reaping half via the **mission lens**: the zombie predicate no longer lets
+> an instance's OWN queued defer-lane rows shield it (the self-shield
+> exemption — fail-closed on unknown lanes), so idle/stalled holders are
+> reap-eligible while LIVE missions (running/paused Task, ACTIVE JobItem on
+> any lane, queued non-defer job, non-terminal children) are never
+> bulk-terminated — the cleanup preflight lists them as "will remain".
+> The "will remain" listing is the **truth-survivor** set (unblock-round
+> ITEM 11): non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+> JobItem. Bucket 2's per-row `cancel_job` cascade (cancel +
+> `terminate_instance`) terminates every holder of a non-mirror ACTIVE
+> mission JobItem, so the round-2 listing (which listed such holders as
+> "will remain") over-promised survival; the unblock-round post-filter
+> (`SQLModelInstanceRepository.has_real_active_or_queued_work`) excludes
+> them. Instances with only live Tasks (no JobItem), or non-terminal
+> children, or settled-message-mirrors (active mirror protection
+> intact) survive cleanup and stay on the truth-survivor list. The
+> mirror-cancel protection itself STAYS. The defer-specific unstick is the
+> two holder-targeted actions on `POST /api/jobs/defer-holders/{instance_id}/
+> force-complete` (terminates a stalled holder after re-deriving
+> mirrors-only server-side via `SQLModelInstanceRepository.has_live_work` —
+> the single-instance companion to the bulk zombie scan, which folds in
+> the task + child-instance arms the original job-side probe missed —
+> see Round-2 W2 below; a TOCTOU re-check runs immediately before
+> terminate to catch state that lands between the probe and the
+> destructive call — Round-2 W1 below; the FE kind is never trusted)
+> and `POST /api/jobs/defer-holders/{instance_id}/resend-foreground`
+> (cancels the holder's queued defer jobs and re-enqueues their
+> message content through the public `enqueue_message_job` front
+> primitive as NEW foreground message jobs — not mirror mutations).
+> Both reuse registered admission-state writers only; the census stays
+> at 23. The cleanup preflight/dialog copy states the blindness
+> explicitly with the canonical operator copy (single source of truth — the canonical sentence also lives in `daemon/routers/jobs_management.py:cleanup_preflight` and in the FE exported `CLEANUP_TRUTH_SPLIT_COPY` (`frontend/src/app/models/cleanup-preflight.model.ts`); the plain-TS spec at `cleanup-preflight.model.spec.ts` and the docs grep-test in this repo pin the verbatim sentence on every surface, so a drift breaks one of the suites):
+>
+> > **Every ACTIVE job is cancelled, together with its whole subtree. Only missions holding settled mirrors, or running Tasks without JobItems — are kept.**
+>
+> (the single-owner operator term is "stalled mission"; the technical `zombie_instance_count` wire field stays). `defer_blocked_count` is kept SEPARATE from `bad_state_count` (cleanup reconciles bad-state Tasks; it does not touch the defer lane).
+>
+> **Round-2 W1 (2026-09-06, `fix/defer-self-witness-and-cleanup`) —
+> TOCTOU re-check.** The force-complete guard re-derives
+> `has_live_work(instance_id)` TWICE: once at the top of the method
+> and again IMMEDIATELY before `terminate_instance`. The second call
+> closes the probe→terminate window (the gate's predicate evaluates
+> a point-in-time state; between the probe and the destructive
+> call, a delegating-repo write or an injected state could land
+> live work). On a busy re-check the action returns
+> `terminated=False, probe_busy=True` (200, not an exception — the
+> action was evaluated and declined by the guard). The guard is
+> NOT race-proof end-to-end — the docstring no longer claims so —
+> but any remaining window is covered by `terminate_instance`'s
+> idempotency-on-terminal cascade.
+>
+> **Round-2 W2 (2026-09-06, `fix/defer-self-witness-and-cleanup`) —
+> holder-probe scope gap.** The original holder probe
+> (`JobRepository.has_active_non_deferred_work(None, requester_instance_id=<holder>)`)
+> was job-side only. It missed two live-work shapes the bulk zombie
+> scan (`SQLModelInstanceRepository._build_zombie_scan_sql`,
+> `repository.py:1549-1577`) already detected:
+>
+> * a Task in `pending`/`running`/`paused` (no JobItem at all —
+>   direct Task, common for forked helpers / reaper sweep);
+> * a non-terminal child instance (a `waiting_children` parent
+>   whose subtree is still executing).
+>
+> Both shapes would have produced a `False` (probe clean) result
+> and let force-complete terminate an instance with live work. The
+> fix exposes the bulk-scan's three arms (terminal CSV, live-task
+> CSV, live-JobItem CSV) through the new
+> `SQLModelInstanceRepository.has_live_work(instance_id)`
+> per-instance companion and reuses them in
+> `force_complete_defer_holder`. The predicate arms live at the
+> home repo (`repository.py`); the new companion derives from the
+> same CSV constants — derive-don't-reimplement. A holder with a
+> live Task (no JobItem) OR with a non-terminal child is now
+> refused with `terminated=False, probe_busy=True`.
+>
+> **Round-2 S2 (2026-09-06) — double-confirm is FE-dialog state
+> only, belt-and-suspenders.** The FE dialog's double-confirm is a
+> presentation safeguard; the REAL safety is the SQL shields (the
+> bulk zombie scan's three anti-join arms) plus the W1 probe
+> re-derivation. Operators should not interpret the dialog
+> double-confirm as the source of safety — the server re-checks
+> server-side state regardless of what the user clicks.
+>
+> **Round-2 S3 (2026-09-06) — watchdog / Pattern-(a) division.**
+> The job-side watchdog (`Pattern-(g)`) covers stuck JobItems
+> (stuck-active jobs with dead instances, stuck-queued jobs behind
+> dead instances) — the job-queue lifecycle. The task-side recovery
+> (`Pattern-(a)`,
+> `daemon/services/job_recovery_service.py`) covers stuck Tasks
+> (stuck-active Tasks with dead workers, stuck-running Tasks past
+> their worker timeout) — the task lifecycle. The two are
+> complementary, not redundant: a stuck JobItem with a healthy
+> Task is a Pattern-(g) job; a stuck Task with a settled JobItem is
+> a Pattern-(a) task. The Pattern-(g) watchdog does NOT inspect
+> Task state; Pattern-(a) does NOT inspect JobItem state.
+>
+> **Round-2 S7 (2026-09-06) — multi-holder unstick.** A
+> `stalled mission` is single-instance-isolation: the holder's
+> busy-set is EXCLUSIVELY its own settled mirrors. For a
+> multi-holder busy-set (two instances both pinning the gate),
+> each holder's unstick is INDEPENDENT — the operator must iterate
+> the holder actions (force-complete / resend-foreground) per
+> holder; one System Cleanup press does NOT batch-resolve multiple
+> holders.
+>
+> **Round-2 ITEM 7 (2026-09-06) — public `defer_pending_count`
+> surface.** `daemon.services.defer_block_resolver.defer_pending_count(engine)`
+> is the single public surface for the system-wide defer-lane
+> pending count. The preflight (`GET /api/jobs/cleanup/preflight`)
+> calls this helper — NO direct
+> `engine.connect().execute(_DEFER_PENDING_COUNT_SQL)`
+> reach-through from the router. Schema or shape changes to the
+> defer-pending-count SELECT have ONE place to update.
+>
+> **Round-2 S9 (2026-09-06) — `/defer-blocked` over-approximation
+> clarifier.** The witness enumeration is system-wide; a
+> self-witnessed mirror (the legacy-clause's instance-less active
+> JobItem with `j.instance_id IS NULL`) surfaces as its own holder
+> with `instance_id=""` — this is intentional and is the
+> gate-truth == display-truth pin. The FE's render-gate filters
+> `pending_count == 0` (no render), but when the gate IS rendered,
+> the surface may show MORE holders than the operator expected;
+> the over-approximation is the conservative posture.
+>
+> **Round-2 ITEM 8 (2026-09-06) — operator vocabulary.** The
+> operator-facing button label is **"System Cleanup"** (NOT
+> "nuclear press" — that was a developer-internal nickname). The
+> operator-facing holder-action term is **"stalled mission"**. The
+> technical wire field name `zombie_instance_count` STAYS — wire
+> stability. The preflight/dialog copy uses the canonical split
+> sentence above.
 
 **FE render-gate** — the `deferBlockIndicator` helper
 (`frontend/src/app/models/defer-blocked.model.ts`) returns `null` (no render, no
@@ -1434,13 +1602,19 @@ the FE iterates the array to find the first paused holder; with `pending_count
 
 #### Purity, bound, degradation
 
-- **Purity:** zero DML on the path (two SELECTs per call through
+- **Purity:** zero DML on the path (`2 + len(holders)` SELECTs per call through
   `engine.connect()`); census unchanged — the constitution scanner finds no writer
   idiom in the surface (its only `admission_state` occurrences are column references
   inside the imported gate SQL).
-- **Bound:** exactly 2 SELECTs per request — the shared-composition witness SELECT +
-  the defer-lane pending count — flat regardless of witness count (no N+1; pinned via
-  an engine event listener, NOT mock counting).
+- **Bound:** the WS2 stall classification adds one WS1 carve-out EXISTS per
+  dedup'd holder instance (the witness SELECT + the defer-lane pending count + N
+  carve-out probes = `2 + N` SELECTs per request, where `N = len(holders)`
+  post-dedup). Bounded by the number of distinct non-terminal instances with
+  non-defer busy rows (NOT a witness-row N+1 — multiple busy JobItems on the SAME
+  instance collapse to one holder in `_project_holders`, keeping `N` small in
+  practice). On an empty busy-set the budget collapses to the original 2 (no
+  holders to classify). Pinned via an engine event listener in
+  `TestBoundedQueryCount`, NOT mock counting.
 - **Degradation:** none — DB errors propagate (⇒ 500). Queues-family posture (no
   §8.2-style degrade shape on this router family), and the honest choice: the gate
   itself fails CLOSED on DB error, and a surface that serves no body can never

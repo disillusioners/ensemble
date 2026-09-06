@@ -1339,6 +1339,28 @@ class JobQueueService:
         # ``idle``/``queued``/``waiting``/``waiting_children`` even though
         # all of its JobItems and Tasks are gone).
         #
+        # WS4 MISSION LENS (2026-09-06, ``fix/defer-self-witness-and-
+        # cleanup``): an instance's OWN queued defer-lane rows no longer
+        # shield it from this reaper (the self-shield exemption). The
+        # live ops unstick (incident 6bc61f42 / job 47161b1e) proved a
+        # stalled holder — mirrors-only witness, the WS2 ``stalled``
+        # class — survived every cleanup press forever because its own
+        # queued defer mirrors satisfied the old live-JobItem clause.
+        # The exemption lives in the shared scan
+        # (``SQLModelInstanceRepository._build_zombie_scan_sql``) and is
+        # mirrored by the C3 TOCTOU re-check (``_has_live_work``) so the
+        # re-check cannot re-shield what the scan exempted. LIVE
+        # missions are NEVER bulk-terminated here: a running/paused
+        # Task, an ACTIVE JobItem on any lane, a queued job on a
+        # non-defer lane, or non-terminal children all still protect
+        # the instance. The ``terminate_instance`` cascade deletes the
+        # holder's Task rows; its queued defer mirrors stay AS-IS (the
+        # constitution-era mirror protection — cleanup does NOT cancel
+        # mirrors) and are subsequently aborted by the dispatch loop's
+        # queued-message-on-terminal-instance path
+        # (``atomic_transition`` → ``terminal_reason='aborted'``), so
+        # no revive wedge is created.
+        #
         # C2 (2026-08-12): terminate each zombie through the full
         # ``InstanceManager.terminate_instance()`` cascade instead of a
         # raw ``transition_status_if`` UPDATE. The raw UPDATE skipped
@@ -1436,6 +1458,337 @@ class JobQueueService:
             "total_processed": total,
         }
     
+    async def force_complete_defer_holder(self, instance_id: str) -> dict[str, Any]:
+        """Terminate a stalled defer-gate holder instance ("force-complete").
+
+        WS4 holder action (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``) — the PRIMARY unstick path for the WS2 ``stalled``
+        class: a holder whose gate-busy state is EXCLUSIVELY its own
+        settled message mirrors has no live work, so terminating the
+        instance IS the force-complete (the mirrors are already
+        ``admission_state='done'``; the busy-set witness is the
+        instance's non-terminal status, and the
+        ``terminate_instance`` cascade flips exactly that).
+
+        SAFETY GUARD (never trust the caller-reported kind): the
+        mirrors-only state is re-derived at execution time via
+        ``SQLModelInstanceRepository.has_live_work(instance_id)`` —
+        the per-instance companion to the bulk zombie scan, which
+        REUSES the same three predicate arms (terminal CSV, live-task
+        CSV, live-JobItem CSV — see
+        :meth:`daemon.repositories.instance.repository.SQLModelInstanceRepository._build_zombie_scan_sql`).
+        The probe covers ALL live-work shapes the bulk scan would
+        match (active JobItem on any lane, queued JobItem on a
+        non-defer lane, a Task in ``pending``/``running``/``paused``,
+        a non-terminal child instance) — NOT just the job side. The
+        probe is fail-CLOSED (any DB error raises, the caller-side
+        wrapper refuses); a busy probe returns ``probe_busy=True``.
+
+        WS4 Round-2 W1 (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``): the guard is NOT race-proof end-to-end. A small
+        probe→terminate window remains (the probe evaluates a point-
+        in-time predicate; between it and the ``terminate_instance``
+        call, a delegating-repo write or an injected state could
+        land). The guard now re-derives immediately before the
+        terminate call; if the re-check is busy, the action returns
+        ``terminated=False, probe_busy=True`` (200, not an error).
+        Any remaining window is covered by ``terminate_instance``'s
+        own idempotency-on-terminal cascade.
+
+        Census discipline: this method performs NO ``admission_state``
+        write of its own — the termination flows through the existing
+        :meth:`InstanceManager.terminate_instance` cascade (an
+        instances-table writer), so the constitution's writer census
+        stays at 23.
+
+        Args:
+            instance_id: The holder instance to force-complete.
+
+        Returns:
+            ``{"instance_id": str, "terminated": bool, "probe_busy": bool}``
+            where ``terminated=False`` means the guard refused (either
+            the initial probe OR the W1 TOCTOU re-check was busy — the
+            caller should surface a conflict).
+
+        Raises:
+            LookupError: The instance does not exist.
+        """
+        instance_repo = (
+            getattr(self._instance_manager, "_instance_repository", None)
+            if self._instance_manager
+            else None
+        )
+        if instance_repo is None:
+            raise LookupError(
+                "force_complete_defer_holder: instance repository unavailable"
+            )
+        instance = await asyncio.to_thread(instance_repo.get, instance_id)
+        if instance is None:
+            raise LookupError(f"Instance {instance_id} does not exist")
+
+        # WS4 Round-2 W2 (2026-09-06) — fold in the bulk-scan's task +
+        # child-instance arms so the probe is FULL against any live-work
+        # shape, not just the job side. The single-instance companion
+        # ``SQLModelInstanceRepository.has_live_work`` reuses the same
+        # three CSV constants the bulk :meth:`_build_zombie_scan_sql`
+        # bakes into the zombie predicate (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``,
+        # ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``,
+        # ``_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN``) so the per-instance
+        # check CANNOT drift from the bulk scan's "zombie" definition.
+        # Derive-don't-reimplement: the predicate arms live at the
+        # home repo; this method re-evaluates them via the new public
+        # accessor — no hand-duplicated SQL.
+        #
+        # The pre-W2 probe (``has_active_non_deferred_work`` only) was
+        # structurally blind to (a) a Task in pending/running/paused
+        # without a backing JobItem, and (b) a non-terminal child
+        # instance — a ``waiting_children`` parent whose subtree is
+        # still executing. Those were the W2 SCOPE gaps.
+        #
+        # The job-side carve-out for the holder's OWN settled mirrors
+        # (WS4 mission lens: ``admission_state='active'`` OR queue
+        # non-defer / unknown) is preserved INSIDE
+        # ``has_live_work`` so the stalled-only classification still
+        # works.
+        #
+        # WS2 strict semantics make mixed stalled+live holders
+        # structurally impossible; ``has_live_work`` returning True ⇒
+        # NOT stalled ⇒ refuse.
+        #
+        # Fail-CLOSED: a probe error is treated as busy. The
+        # ``instance_repo.has_live_work`` call can raise SQLAlchemyError;
+        # the helper itself does not swallow.
+        def _live_work_probe() -> bool:
+            return bool(instance_repo.has_live_work(instance_id))
+
+        probe_busy = await asyncio.to_thread(_live_work_probe)
+        if probe_busy:
+            logger.warning(
+                "force_complete_defer_holder: REFUSED for %s — "
+                "guard probe reports live work (active JobItem, "
+                "live Task, or non-terminal children); "
+                "force-complete is only safe when the holder has "
+                "no live work (mirrors-only / stalled)",
+                instance_id[:8],
+            )
+            return {
+                "instance_id": instance_id,
+                "terminated": False,
+                "probe_busy": True,
+            }
+
+        # WS4 Round-2 W1 (2026-09-06) — TOCTOU re-check. A small
+        # probe→terminate window remains (the gate's own WS2 strict
+        # semantics hold for state at probe time; between the probe
+        # above and the terminate below, a delegating-repo write or
+        # an injected state could land). Re-derive immediately before
+        # the destructive call; refuse on a busy re-check (NOT an
+        # exception — the action was evaluated and declined by the
+        # guard). The terminate cascade's own idempotency-on-terminal
+        # covers the small remaining window.
+        rechecks_busy = await asyncio.to_thread(_live_work_probe)
+        if rechecks_busy:
+            logger.warning(
+                "force_complete_defer_holder: REFUSED for %s — "
+                "TOCTOU re-check caught live work between the probe "
+                "and the terminate; force-complete aborted to avoid "
+                "destroying live work",
+                instance_id[:8],
+            )
+            return {
+                "instance_id": instance_id,
+                "terminated": False,
+                "probe_busy": True,
+            }
+
+        # Reuse the full termination cascade (C2 lineage) — idempotent
+        # on already-terminal instances, so a TOCTOU loss vs. another
+        # cleanup path is safe.
+        await self._instance_manager.terminate_instance(instance_id)
+        logger.info(
+            "force_complete_defer_holder: terminated stalled holder "
+            "%s (guard probe + TOCTOU re-check both reported no live "
+            "work)",
+            instance_id[:8],
+        )
+        return {
+            "instance_id": instance_id,
+            "terminated": True,
+            "probe_busy": False,
+        }
+
+    async def resend_deferred_foreground(self, instance_id: str) -> dict[str, Any]:
+        """Cancel the holder's queued defer-lane jobs and re-send their
+        message content as FOREGROUND messages.
+
+        WS4 holder action (2026-09-06) — recovers deferred messages a
+        stalled/paused holder is pinning: each queued defer-lane
+        JobItem on the holder's own books is cancelled through the
+        existing single-job :meth:`cancel_job` path, its authoritative
+        Task (``Task.work_id == JobItem.job_id`` on the job-driven
+        path) is cancelled through the existing virtual-job cancel
+        (:meth:`cancel_task_by_work_id` — atomic for PENDING, so the
+        union stays consistent and no bad-state shape is minted), and
+        its ``message`` content is re-enqueued via the public
+        ``enqueue_message_job`` front primitive (the same call
+        ``POST /api/instances/{id}/messages`` makes). The re-enqueue is
+        a NEW foreground message job (``is_deferred=False`` — the
+        default), NOT a mirror mutation: the JobItem side goes through
+        the registered ``create`` writer and the cancelled side through
+        the registered ``cancel_job`` writer, so the census stays at
+        23.
+
+        Live unstick reference (2026-09-06 incident 47161b1e /
+        6bc61f42, ``data/logs/ensemble.log`` 16:22–16:24 UTC): the
+        manual sequence was ``POST /api/jobs/{id}/cancel`` →
+        ``POST /api/jobs/cleanup`` (reaped the idle holder) →
+        ``POST /api/instances/{id}/messages`` (revived + new message
+        job). This method compresses the cancel + re-enqueue legs into
+        one holder-targeted action; the reaper leg stays a cleanup
+        press (or the force-complete action).
+
+        Args:
+            instance_id: The holder instance whose queued defer jobs
+                should be re-sent foreground.
+
+        Returns:
+            ``{"instance_id": str, "found_defer_jobs": int,
+            "cancelled_defer_jobs": int, "resend_results": list[dict],
+            "skipped_empty_content": int}`` — ``resend_results`` rows
+            carry ``cancelled_job_id`` and (on success) the new
+            foreground ``job_id`` / ``message_id``; failures are
+            recorded per-row under ``error`` and do not abort the
+            loop.
+
+        Raises:
+            LookupError: The instance does not exist.
+        """
+        instance_repo = (
+            getattr(self._instance_manager, "_instance_repository", None)
+            if self._instance_manager
+            else None
+        )
+        if instance_repo is None:
+            raise LookupError(
+                "resend_deferred_foreground: instance repository unavailable"
+            )
+        instance = await asyncio.to_thread(instance_repo.get, instance_id)
+        if instance is None:
+            raise LookupError(f"Instance {instance_id} does not exist")
+
+        # The holder's OWN live jobs (queued + active), ordered by
+        # created_at — the defer-lane QUEUED subset is the re-send
+        # scope. ``active`` defer rows are NOT touched (they are
+        # already executing); non-defer lanes are not the defer
+        # unstick's business.
+        live_jobs = await asyncio.to_thread(
+            self._repository.find_jobs_by_instance, instance_id
+        )
+        queue_repo = getattr(self, "_queue_repo", None)
+        defer_jobs: list[Any] = []
+        for job in live_jobs:
+            if job.admission_state != AdmissionState.QUEUED.value:
+                continue
+            queue_type: str | None = None
+            if queue_repo is not None and job.queue_id:
+                try:
+                    queue = await asyncio.to_thread(queue_repo.get, job.queue_id)
+                    queue_type = getattr(queue, "queue_type", None) if queue else None
+                except Exception as exc:  # noqa: BLE001 — classify best-effort
+                    logger.warning(
+                        "resend_deferred_foreground: queue lookup failed "
+                        "for %s (queue %s): %s",
+                        job.job_id[:8], job.queue_id, exc,
+                    )
+            # Fail-CLOSED on unknown lanes: a job whose lane cannot be
+            # proven defer is left alone.
+            if queue_type == "defer":
+                defer_jobs.append(job)
+
+        cancelled = 0
+        skipped_empty = 0
+        resend_results: list[dict[str, Any]] = []
+        for job in defer_jobs:
+            content = (job.message or "").strip()
+            try:
+                cancel_ok = await self.cancel_job(job.job_id)
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": f"cancel failed: {exc}",
+                })
+                continue
+            if not cancel_ok:
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": "cancel returned False (already terminal?)",
+                })
+                continue
+            cancelled += 1
+            # WS4: also cancel the mirror's authoritative Task (the
+            # shared linkage makes ``Task.work_id == JobItem.job_id``
+            # on the job-driven path) so the union stays consistent —
+            # a cancelled mirror over a live PENDING defer Task is
+            # exactly the bad-state shape. Best-effort: a missing
+            # task repo / already-terminal task yields False and is
+            # reported, not raised. Task-level writes are NOT census
+            # writers; this reuses the existing virtual-job cancel.
+            task_cancelled = False
+            try:
+                task_cancelled = await self.cancel_task_by_work_id(job.job_id)
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                logger.warning(
+                    "resend_deferred_foreground: task cancel failed for "
+                    "%s: %s", job.job_id[:8], exc,
+                )
+            if not content:
+                skipped_empty += 1
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
+                    "skipped": "empty message content — nothing to re-send",
+                })
+                continue
+            if self._instance_manager is None:
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
+                    "error": "instance manager unavailable — cannot re-enqueue",
+                })
+                continue
+            try:
+                result = await self._instance_manager.enqueue_message_job(
+                    instance_id=instance_id,
+                    message=content,
+                    source="api",
+                )
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
+                    "job_id": getattr(result, "job_id", None),
+                    "message_id": getattr(result, "message_id", None),
+                })
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
+                    "error": f"re-enqueue failed: {exc}",
+                })
+
+        logger.info(
+            "resend_deferred_foreground: holder=%s found=%d cancelled=%d "
+            "resent=%d skipped_empty=%d",
+            instance_id[:8], len(defer_jobs), cancelled,
+            sum(1 for r in resend_results if r.get("job_id")), skipped_empty,
+        )
+        return {
+            "instance_id": instance_id,
+            "found_defer_jobs": len(defer_jobs),
+            "cancelled_defer_jobs": cancelled,
+            "resend_results": resend_results,
+            "skipped_empty_content": skipped_empty,
+        }
+
     def _is_instance_alive(self, instance_id: str) -> bool:
         """Check if an instance exists and is not in a terminal state.
         
@@ -1523,10 +1876,35 @@ class JobQueueService:
         # the cancel path uses, scoped to one instance_id. The
         # method filters on ``ACTIVE_ADMISSION_STATES`` so we
         # automatically get the live-only predicate.
+        #
+        # WS4 mission lens: the re-check MUST match the scan
+        # predicate (the C3 invariant — "re-check of the SAME
+        # predicates used by the scan"), and the scan now exempts
+        # the instance's OWN queued defer-lane rows (the self-shield
+        # exemption). Without the matching exemption here, every
+        # newly-eligible stalled holder would be re-shielded at this
+        # line by its own mirrors and the lens would never fire.
+        # ``active`` rows of any lane and queued rows on non-defer /
+        # unknown lanes still count as live (fail-CLOSED on unknown
+        # queue ids — same posture as the SQL arm).
         try:
             live_jobs = self._repository.find_jobs_by_instance(instance_id)
             if live_jobs:
-                return True
+                queue_repo = getattr(self, "_queue_repo", None)
+                for job in live_jobs:
+                    if job.admission_state == AdmissionState.ACTIVE.value:
+                        return True
+                    if queue_repo is None:
+                        # Cannot classify the lane — fail CLOSED
+                        # (treat as live; the reaper skips).
+                        return True
+                    queue = queue_repo.get(job.queue_id) if job.queue_id else None
+                    queue_type = (
+                        getattr(queue, "queue_type", None) if queue else None
+                    )
+                    if queue_type is None or queue_type != "defer":
+                        return True
+                    # Queued on a defer lane — does not witness.
         except Exception as exc:  # noqa: BLE001 — best-effort probe
             logger.debug(
                 "cleanup_non_terminal_jobs: "
@@ -2697,6 +3075,7 @@ class JobQueueService:
         self,
         pending: list[JobItem],
         project_id: str,
+        requester_instance_id: str | None = None,
     ) -> JobItem | None:
         """Select the next eligible job from pending list, respecting defer + background semantics.
 
@@ -2709,12 +3088,31 @@ class JobQueueService:
         This ensures defer queues and background queues don't start processing
         while their respective gate lanes are still active.
 
+        **WS1 requester-instance carve-out (2026-09-06):** when the
+        caller passes ``requester_instance_id`` (the candidate instance
+        being admitted), the per-defer-candidate gate check excludes
+        the candidate's OWN settled mirrors from the busy-set. The
+        legacy clause stays UNTOUCHED — a live foreground turn yields
+        an ACTIVE job which still witnesses correctly. When
+        ``requester_instance_id`` is ``None`` (system-scope and legacy
+        callers), the pre-WS1 shape is preserved and the gate is
+        project-scoped only.
+
         Args:
             pending: List of pending jobs (ordered by priority desc, created_at asc).
             project_id: Project ID for the DEFER idle check (project-scoped).
                 The BACKGROUND idle check is system-wide and ignores this
                 argument — the background predicate is always system-wide
                 (Phase 3 background seam, 2026-07-14).
+            requester_instance_id: Optional candidate instance for the
+                WS1 requester-instance carve-out. When ``None`` (the
+                default — system-scope and legacy callers), the
+                no-carve-out body is used and semantics are identical
+                to pre-WS1. When set, each defer candidate is
+                evaluated with its OWN ``instance_id`` (the carve-out
+                is per-candidate) so a self-witnessing candidate is
+                admitted while OTHER candidates with other witnesses
+                remain blocked.
 
         Returns:
             Next eligible JobItem, or None if no eligible jobs.
@@ -2775,70 +3173,101 @@ class JobQueueService:
         )
 
         # DEFER gate: project-scoped check, "is non-deferred work
-        # active in THIS project?". Only computed when at least one
-        # pending job is a defer job — short-circuits the SQL round
-        # trip when the pending list has no defer candidates.
-        non_defer_active = False
-        has_defer_candidate = any(
-            queue_type_map.get(job.queue_id) == "defer" for job in pending
-        )
-        if has_defer_candidate:
-            # Phase 2 (defer-queue idle gate, 2026-07-23): check both
-            # work-tracking tables. The job predicate catches active jobs
-            # between graph turns; the task predicate catches tasks that have
-            # no backing JobItem. A non-bool job result means the repository is
-            # probably a loose Mock, so ignore it and use the task predicate.
-            #
-            # W3 (fail-CLOSED, 2026-07-23): each predicate call is wrapped
-            # in try/except so a transient DB error during the call is
-            # treated as "active" (non_defer_active=True) — the defer
-            # queue MUST NOT be silently released by a transient
-            # failure. Mirrors the JobProcessor._defer_idle_check
-            # posture.
-            repo = getattr(self, "_repository", None)
+        # active in THIS project (excluding the candidate's own
+        # settled mirrors when the WS1 requester-instance carve-out
+        # is in effect)?". Only computed when at least one pending job
+        # is a defer job — short-circuits the SQL round trip when the
+        # pending list has no defer candidates.
+        #
+        # The job-side result is cached PER-CANDIDATE so each defer
+        # candidate is evaluated against the gate using its OWN
+        # ``requester_instance_id`` (the WS1 carve-out is per-
+        # candidate, not per-call). The task-side result is cached
+        # PER-PROJECT (it is project-scoped, not per-candidate).
+        defer_job_results: dict[str | None, bool] = {}
+        defer_task_result: bool | None = None
+
+        async def _resolve_defer_gate(
+            candidate_requester: str | None,
+        ) -> bool:
+            """Resolve the WS1 carve-out gate for ONE defer candidate.
+
+            Returns True iff the gate is BUSY (non-deferred work is
+            active EXCLUDING the candidate's own settled mirrors when
+            ``candidate_requester`` is set). Caches the job-side
+            result per-candidate and the task-side result per-project.
+            Fail-CLOSED on DB error.
+            """
+            nonlocal defer_job_results, defer_task_result
+
+            non_defer_active = False
             job_result: bool | None = None
+            repo = getattr(self, "_repository", None)
             if (
                 repo is not None
                 and hasattr(repo, "has_active_non_deferred_work")
             ):
-                try:
-                    result = await asyncio.to_thread(
-                        repo.has_active_non_deferred_work, project_id
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"_select_next_eligible_job: defer job predicate "
-                        f"raised {e!r} for project_id={project_id!r} — "
-                        f"failing CLOSED (non_defer_active=True)"
-                    )
-                    non_defer_active = True
-                else:
-                    if isinstance(result, bool):
-                        job_result = result
-                        non_defer_active = result
-
-            if not non_defer_active:
-                if task_repo is None:
-                    # If neither predicate can be evaluated, conservatively
-                    # hold defer work back. A valid False from the job
-                    # predicate remains authoritative when task tracking is
-                    # unavailable during partial initialization.
-                    if job_result is None:
-                        non_defer_active = True
+                # Per-candidate cache key (the carve-out is per-candidate).
+                cache_key = candidate_requester
+                if cache_key in defer_job_results:
+                    job_result = defer_job_results[cache_key]
+                    non_defer_active = job_result
                 else:
                     try:
-                        non_defer_active = bool(
+                        result = await asyncio.to_thread(
+                            repo.has_active_non_deferred_work,
+                            project_id,
+                            candidate_requester,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"_select_next_eligible_job: defer job predicate "
+                            f"raised {e!r} for project_id={project_id!r}, "
+                            f"requester_instance_id={candidate_requester!r} — "
+                            f"failing CLOSED (non_defer_active=True)"
+                        )
+                        non_defer_active = True
+                        defer_job_results[cache_key] = True
+                    else:
+                        if isinstance(result, bool):
+                            job_result = result
+                            non_defer_active = result
+                            defer_job_results[cache_key] = result
+
+            # W3 (fail-CLOSED, Phase-4 review Issue #1 fix): the task-
+            # side leg runs for EVERY clean job-leg False. A PRIOR
+            # candidate's job-leg error must NOT suppress this leg —
+            # a skipped second leg would admit the candidate while
+            # task-only non-defer work is active (the exact silent
+            # release the W3 rule bans; pinned by
+            # ``test_gateb_jobleg_error_does_not_skip_task_leg``).
+            # The candidate whose OWN job-leg raised is already held
+            # above (``non_defer_active=True`` short-circuits this
+            # guard).
+            if not non_defer_active:
+                if task_repo is None:
+                    if job_result is None:
+                        non_defer_active = True
+                elif defer_task_result is None:
+                    try:
+                        defer_task_result = bool(
                             await asyncio.to_thread(
-                                task_repo.has_active_non_deferred_work, project_id
+                                task_repo.has_active_non_deferred_work,
+                                project_id,
                             )
                         )
+                        non_defer_active = defer_task_result
                     except Exception as e:
                         logger.warning(
                             f"_select_next_eligible_job: defer task predicate "
                             f"raised {e!r} for project_id={project_id!r} — "
                             f"failing CLOSED (non_defer_active=True)"
                         )
+                        defer_task_result = True
                         non_defer_active = True
+                else:
+                    non_defer_active = defer_task_result
+            return non_defer_active
 
         # BACKGROUND gate: system-wide check, "is non-deferred,
         # non-background work active ANYWHERE?". Only computed when
@@ -2905,17 +3334,43 @@ class JobQueueService:
         # Three-way admission decision:
         #   * FIFO / PARALLEL (and any unknown queue_type — see the
         #     default-fallback comment above): always eligible.
-        #   * DEFER: eligible iff ``non_defer_active`` is False.
+        #   * DEFER: eligible iff the per-candidate gate returns
+        #     False (with the WS1 requester-instance carve-out
+        #     excluding the candidate's own settled mirrors). The
+        #     requester instance is the candidate JobItem's OWN
+        #     ``instance_id`` when present (the per-candidate
+        #     carve-out); otherwise the caller-supplied
+        #     ``requester_instance_id`` (the legacy single-request
+        #     path) or ``None`` (system-scope and legacy callers
+        #     see the pre-WS1 shape).
         #   * BACKGROUND: eligible iff ``non_background_active`` is
         #     False. Background is held back by EITHER non-deferred
         #     work OR other background work anywhere in the system.
         for job in pending:
             queue_type = queue_type_map.get(job.queue_id, "fifo")
             if queue_type == "defer":
-                if not non_defer_active:
-                    return job
-                # Otherwise skip this defer job and continue checking
-                continue
+                # WS1 per-candidate carve-out: prefer the candidate's
+                # own instance_id (when present) so the candidate's
+                # OWN settled mirrors do NOT witness against the
+                # candidate. Fall back to the caller-supplied
+                # requester_instance_id (legacy single-request path)
+                # for the rare case where the candidate has no
+                # instance_id; fall back to ``None`` (system-scope
+                # callers see the pre-WS1 shape).
+                candidate_requester = (
+                    getattr(job, "instance_id", None)
+                    or requester_instance_id
+                )
+                # NB: the gate resolves ONLY inside this arm, so with
+                # no defer candidates in ``pending`` the SQL round trip
+                # is short-circuited structurally (the former explicit
+                # ``has_defer_candidate`` wrapper here was provably
+                # always-True — it is ``any(...)`` over the same
+                # pending list with the same map — and its dead
+                # else-arm was removed; Phase-4 review Issue #3).
+                if await _resolve_defer_gate(candidate_requester):
+                    continue
+                return job
             if queue_type == "background":
                 if not non_background_active:
                     return job
