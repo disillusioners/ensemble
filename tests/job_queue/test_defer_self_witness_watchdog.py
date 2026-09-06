@@ -5,7 +5,7 @@ Branch: ``fix/defer-self-witness-and-cleanup`` @ ``25fbb084`` (WS1 landed).
 This probe file covers the WS3 deliverable:
 
 * **Matrix A** — ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`` env spellings.
-  Parametrize over ``{unset (default OFF), "1", "0", "false", "off",
+  Parametrize over ``{unset (default ON), "1", "0", "false", "off",
   "yes", "true", "on", "" (blank), "garbage"}`` with the resolver cache
   reset per case. Each case drives a genuine self-witness blind-spot
   shape (deferred PENDING task + IDLE instance per WS1 carve-out) through
@@ -14,12 +14,12 @@ This probe file covers the WS3 deliverable:
   - The WARN fires regardless of the flag (the flag-independent
     observability contract — the operator must see the detection even
     when the unstick is OFF).
-  - When ``OFF`` (``unset` / ``"0"`` / ``"false"`` / ``"off"`` /
-    ``""``), the task row's ``is_deferred`` is UNCHANGED
-    (OFF=no-writes contract pinned).
-  - When ``ON`` (``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``), the
-    task row's ``is_deferred`` is flipped to ``False`` (the bounded
-    unstick).
+  - When ``OFF`` (``"0"`` / ``"false"`` / ``"off"`` — the explicit
+    operator escape hatch), the task row's ``is_deferred`` is
+    UNCHANGED (OFF=no-writes contract pinned).
+  - When ``ON`` (unset / ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``
+    / ``""`` — the new default posture), the task row's
+    ``is_deferred`` is flipped to ``False`` (the bounded unstick).
   - Kill-switch flip-back (ON→OFF via test reset) is respected —
     flipping the env via ``monkeypatch`` does NOT auto-pickup
     mid-sweep because the resolver is restart-read.
@@ -32,11 +32,10 @@ This probe file covers the WS3 deliverable:
 
 * **Config parse** — direct truth-table probe of
   ``_resolve_defer_autopromote_enabled``. Empty-string safe: a blank
-  env var resolves to OFF (the default) — the parser does NOT raise
-  on empty-string, it just treats it as the default-OFF value.
-  Unknown non-blank values fall back to OFF with a one-shot WARN —
-  the safe direction (default OFF, not ON), so a typo cannot
-  accidentally enable the unstick.
+  env var resolves to ON (the default) — the parser does NOT raise
+  on empty-string, it just treats it as the default-ON value.
+  Unknown non-blank values fall back to ON with a one-shot WARN —
+  consistent with the new "ON unless explicitly disabled" posture.
 
 * **WS1 seam predicate verification** — the detector calls the WS1
   seam ``has_active_non_deferred_work(project_id, requester_instance_id=
@@ -309,10 +308,11 @@ def _build_defer_watchdog_service(
 
 # Truth table for ``_resolve_defer_autopromote_enabled``. Reference:
 # ``daemon/services/job_recovery_service.py:_resolve_defer_autopromote_enabled``.
-# DEFAULT OFF — the safe-by-default posture.
+# DEFAULT ON — the bounded unstick runs by default; explicit OFF is
+# the operator escape hatch.
 MATRIX_A_TRUTH_TABLE = [
     # (env_value_set, expected_resolved, expected_warn)
-    pytest.param(None, False, False, id="unset-defaults-to-off"),
+    pytest.param(None, True, False, id="unset-defaults-to-on"),
     pytest.param("1", True, False, id="one-is-on"),
     pytest.param("0", False, False, id="zero-is-off"),
     pytest.param("false", False, False, id="false-is-off"),
@@ -321,13 +321,14 @@ MATRIX_A_TRUTH_TABLE = [
     pytest.param("true", True, False, id="true-is-on"),  # bonus row
     pytest.param("yes", True, False, id="yes-is-on"),  # bonus row
     pytest.param("on", True, False, id="on-is-on"),  # bonus row
-    # Empty-string safe: blank env var resolves to OFF (the default),
-    # NOT to ON. The parser must NOT raise on empty-string — it just
-    # treats it as the default-OFF value.
-    pytest.param("", False, False, id="blank-is-off-empty-string-safe"),
-    # Unknown non-blank → OFF with WARN (the safe direction so a typo
-    # cannot accidentally enable the unstick).
-    pytest.param("garbage", False, True, id="garbage-falls-back-off-with-warn"),
+    # Empty-string safe: blank env var resolves to ON (the default),
+    # NOT to a falsy value. The parser must NOT raise on
+    # empty-string — it just treats it as the default-ON value.
+    pytest.param("", True, False, id="blank-is-on-empty-string-safe"),
+    # Unknown non-blank → ON with WARN (consistent with the new
+    # "ON unless explicitly disabled" posture — explicit OFF always
+    # wins; unparseable values fall through to the default).
+    pytest.param("garbage", True, True, id="garbage-falls-through-on-with-warn"),
 ]
 
 
@@ -339,8 +340,9 @@ class TestDeferAutopromoteResolverSyntax:
     so future drift in the resolver does not silently change the
     kill-switch semantics. Mirrors the f1 test shape
     (``tests/job_queue/test_f1_killswitch_tz_matrix.py:333``) but with
-    inverted default (OFF vs f1's ON) and inverted fallback direction
-    (OFF vs f1's ON).
+    inverted default (ON vs f1's ON — same direction, different
+    posture) and inverted fallback direction (ON vs f1's ON — same
+    direction).
     """
 
     @pytest.mark.parametrize(
@@ -387,18 +389,18 @@ class TestDeferAutopromoteResolverSyntax:
 
 
 class TestDeferAutopromoteConfigParse:
-    """Direct config-parse probe — env-only, default OFF, empty-string safe.
+    """Direct config-parse probe — env-only, default ON, empty-string safe.
 
-    The brief §2 acceptance criterion: "env var default OFF, env-only
+    The brief §2 acceptance criterion: "env var default ON, env-only
     resolution (no yaml), empty-string safe." This test pins each
     independent clause:
 
-    * **Default OFF** — ``os.environ.get(..., '0')`` makes unset
-      resolve to False.
+    * **Default ON** — ``os.environ.get(..., '1')`` makes unset
+      resolve to True.
     * **Env-only** — there is NO yaml key. The resolver reads
       ``os.environ`` directly; no yaml / config.py field exists.
-    * **Empty-string safe** — ``os.environ.get(..., '0')`` + blank
-      value must NOT raise; it resolves to OFF.
+    * **Empty-string safe** — ``os.environ.get(..., '1')`` + blank
+      value must NOT raise; it resolves to ON (the default).
     """
 
     def test_default_when_env_unset(self, monkeypatch):
@@ -407,25 +409,26 @@ class TestDeferAutopromoteConfigParse:
         )
         _jrs._reset_defer_autopromote_for_tests()
         try:
-            assert _jrs._resolve_defer_autopromote_enabled() is False, (
-                "Unset env var MUST default to OFF (the safe-by-default "
-                "posture — only the WARN fires until the operator "
-                "explicitly enables the unstick)."
+            assert _jrs._resolve_defer_autopromote_enabled() is True, (
+                "Unset env var MUST default to ON — the bounded "
+                "unstick runs by default (operator decision "
+                "2026-09-06; explicit OFF = 0/false/off is the "
+                "escape hatch)."
             )
         finally:
             _jrs._reset_defer_autopromote_for_tests()
 
-    def test_blank_env_resolves_to_off_not_crash(self, monkeypatch):
+    def test_blank_env_resolves_to_on_not_crash(self, monkeypatch):
         """Empty-string safe: blank env var must NOT raise, must
-        resolve to OFF (NOT ON — the default-OFF posture)."""
+        resolve to ON (NOT OFF — the default-ON posture)."""
         monkeypatch.setenv("ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED", "")
         _jrs._reset_defer_autopromote_for_tests()
         try:
             # The brief says "empty-string safe" — the parser must
-            # not raise. Resolves to OFF (the default), not ON.
+            # not raise. Resolves to ON (the default), not OFF.
             resolved = _jrs._resolve_defer_autopromote_enabled()
-            assert resolved is False, (
-                f"Empty-string env var MUST resolve to OFF (default), "
+            assert resolved is True, (
+                f"Empty-string env var MUST resolve to ON (default), "
                 f"got {resolved}."
             )
         finally:
@@ -472,12 +475,12 @@ class TestDeferAutopromoteConfigParse:
 # Behavior matrix for the reconciler under each env spelling.
 # (env_value_set, expect_detection_warn, expect_is_deferred_flipped)
 MATRIX_B_BEHAVIOR = [
-    # unset (default OFF) → detection WARN fires, is_deferred NOT flipped
-    pytest.param(None, True, False, id="unset-detection-warn-no-flip"),
+    # unset (default ON) → detection WARN fires, is_deferred flipped
+    pytest.param(None, True, True, id="unset-detection-warn-flip"),
     pytest.param("0", True, False, id="zero-detection-warn-no-flip"),
     pytest.param("false", True, False, id="false-detection-warn-no-flip"),
     pytest.param("off", True, False, id="off-detection-warn-no-flip"),
-    pytest.param("", True, False, id="blank-detection-warn-no-flip"),
+    pytest.param("", True, True, id="blank-detection-warn-flip"),
     # truthy ON → detection WARN fires, is_deferred flipped
     pytest.param("1", True, True, id="one-detection-warn-flip"),
     pytest.param("true", True, True, id="true-detection-warn-flip"),
@@ -494,8 +497,11 @@ class TestDeferAutopromoteReconcilerMatrix:
 
     Acceptance criteria pinned:
     * WARN fires with instance_id + task id named (flag-independent).
-    * OFF (default): ``is_deferred`` NOT flipped — OFF=no-writes contract.
-    * ON: ``is_deferred`` flipped to False — the bounded unstick.
+    * OFF (explicit ``=0`` / ``=false`` / ``=off``): ``is_deferred``
+      NOT flipped — OFF=no-writes contract pinned (the operator
+      escape hatch).
+    * ON (unset default / ``=1`` / ``=true`` / ``=yes`` / ``=on`` /
+      blank): ``is_deferred`` flipped to False — the bounded unstick.
     * Kill-switch flip-back (ON→OFF via test reset) is respected
       (the resolver is restart-read).
     """
@@ -786,7 +792,7 @@ class TestDeferSelfWitnessDetector:
         self, defer_watchdog_engine, monkeypatch,
     ):
         """Target is the ONLY thing in the project → predicate False
-        → WARN fires (OFF=no-writes contract)."""
+        → WARN fires (ON-with-writes default)."""
         monkeypatch.delenv(
             "ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED", raising=False,
         )
@@ -814,23 +820,26 @@ class TestDeferSelfWitnessDetector:
                 min_orphan_age_seconds=900,
             )
 
-            # Detection record landed (warned_only — OFF path).
+            # Detection record landed (autopromoted — ON path; default
+            # posture after the 2026-09-06 operator decision).
             detection_records = [
                 d for d in (stats.get("details") or [])
                 if d.get("task_id") == task_id
                 and d.get("instance_id") == target_instance_id
-                and d.get("pattern") == "defer_self_witness_warned_only"
+                and d.get("pattern") == "defer_self_witness_autopromoted"
             ]
             assert detection_records, (
                 f"Target alone in project MUST trigger detection "
-                f"(warned_only path). Got detection_records="
+                f"(autopromoted path; default-ON posture). "
+                f"Got detection_records="
                 f"{[d for d in (stats.get('details') or []) if d.get('task_id') == task_id]}"
             )
 
-            # OFF=no-writes contract pinned.
+            # ON-with-writes default: ``is_deferred`` flipped to False
+            # (the bounded unstick).
             assert _get_task_is_deferred(
                 defer_watchdog_engine, task_id,
-            ) is True
+            ) is False
         finally:
             _jrs._reset_defer_autopromote_for_tests()
 
@@ -947,8 +956,12 @@ class TestDeferSelfWitnessDefensiveSkips:
                 f"{[d for d in (stats.get('details') or []) if d.get('task_id') == task_id]}"
             )
 
-            # OFF=no-writes contract — the task's ``is_deferred`` is
-            # untouched.
+            # Defensive skip — the resolver cannot compute the WS1
+            # predicate without project_id, so no flip is attempted.
+            # Under the default-ON posture, the absence of a project
+            # gate evaluation means the bounded unstick is NOT
+            # triggered for this row (defensive skip wins over the
+            # default-on flip).
             assert _get_task_is_deferred(
                 defer_watchdog_engine, task_id,
             ) is True
@@ -1031,12 +1044,13 @@ class TestDeferAutopromoteBootLog:
                 f"Got {len(first_calls)} records: "
                 f"{[r.getMessage()[:120] for r in first_calls]}"
             )
-            # The default-OFF message MUST be present.
+            # The default-ON message MUST be present (operator decision
+            # 2026-09-06 — the bounded unstick runs by default).
             assert any(
-                "DISABLED" in r.getMessage()
+                "ENABLED" in r.getMessage()
                 for r in first_calls
             ), (
-                f"Default-OFF boot log MUST include the DISABLED "
+                f"Default-ON boot log MUST include the ENABLED "
                 f"marker. Got messages="
                 f"{[r.getMessage()[:120] for r in first_calls]}"
             )
@@ -1073,6 +1087,38 @@ class TestDeferAutopromoteBootLog:
             assert "ENABLED" in records[0].getMessage(), (
                 f"ON-state boot log MUST include the ENABLED marker. "
                 f"Got message={records[0].getMessage()!r}"
+            )
+        _jrs._reset_defer_autopromote_for_tests()
+
+    def test_boot_log_emits_disabled_message_when_off(
+        self, monkeypatch, caplog,
+    ):
+        """When the flag is explicit OFF (operator escape hatch), the
+        boot log emits the DISABLED message.
+
+        Proves the explicit-OFF escape hatch survives the default flip
+        byte-identically — operator who sets ``=0`` and restarts sees
+        the same DISABLED boot line they relied on under the previous
+        default posture.
+        """
+        monkeypatch.setenv(
+            "ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED", "0",
+        )
+        _jrs._reset_defer_autopromote_for_tests()
+        with caplog.at_level(logging.INFO, logger="daemon.services.job_recovery_service"):
+            _jrs.emit_defer_autopromote_boot_log()
+            records = [
+                r for r in caplog.records
+                if "defer-self-witness autopromote" in r.getMessage()
+            ]
+            assert len(records) == 1, (
+                f"Expected exactly one boot-log record. Got "
+                f"{len(records)}: "
+                f"{[r.getMessage()[:120] for r in records]}"
+            )
+            assert "DISABLED" in records[0].getMessage(), (
+                f"OFF-state boot log MUST include the DISABLED "
+                f"marker. Got message={records[0].getMessage()!r}"
             )
         _jrs._reset_defer_autopromote_for_tests()
 

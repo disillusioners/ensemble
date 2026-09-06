@@ -174,10 +174,14 @@ a Pattern-(g) job; a stuck Task with a settled JobItem is a
 Pattern-(a) task. Pattern-(g) does NOT inspect Task state;
 Pattern-(a) does NOT inspect JobItem state.
 
-The `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED` env var (default OFF,
+The `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED` env var (default ON,
 env-only, restart-read) gates Pattern-(g)'s auto-promotion path.
-Default OFF is conservative — operators flip ON after a ≤2-week
-soak or on incident; OFF = instant revert path.
+Default ON is the new posture (operator decision 2026-09-06 after
+soak): the bounded unstick runs by default on every drift sweep.
+Operators who need to revert (or are mid-incident on this path) set
+`ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts `false` / `off`)
++ restart; the explicit-OFF escape hatch is byte-identical to the
+previous default behaviour (WARN only, no `task.is_deferred` writes).
 
 ---
 
@@ -209,6 +213,7 @@ The final phase of the decouple architecture migration. The system now has a sin
 - **TOCTOU race in `job_create` watch registration**: When `watch=True`, the watcher is now registered BEFORE the job is enqueued, closing a race window where fast jobs could complete before the watcher was registered (causing missed `[JOB_EVENT]` notifications).
 - **`job_continue` crash with `USE_WORKER_POOL=false`**: Direct `manager._task_repo` attribute access replaced with defensive `getattr` pattern.
 - **`watch_job`/`watch_jobs` missing error/result context**: Terminal job notifications now pass `result_summary` explicitly so the downstream resolver can fill gaps.
+- **`ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED` default flipped OFF → ON** (operator decision 2026-09-06 after soak). The Pattern-(g) defer-self-witness watchdog's bounded unstick (`_resolve_defer_autopromote_enabled` in `daemon/services/job_recovery_service.py`) now runs by default — an unset env var, a blank value, and unparseable non-blank values all resolve to ON. The explicit-OFF escape hatch is byte-identical to the previous default: set `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts `false` / `off` / `no`) and restart. The default-OFF path still emits only the WARN and writes nothing — the `OFF=no-writes` contract is unchanged. Census unchanged (23/1/0): the unstick writes `task.is_deferred` only, which is out of the admission-state writer scope. Boot-log copy (`emit_defer_autopromote_boot_log`) updated to state the new default and the explicit-OFF escape hatch.
 
 ### Added
 

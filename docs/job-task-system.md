@@ -1338,6 +1338,40 @@ three-SELECT page bound. Route-count floor bumped 33 → 35 in
 > throughout: zero DML on the path, no JobItem creation, no admission-state writes —
 > the census stays **frozen at 23**.
 
+#### Pattern-(g) bounded unstick — `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`
+
+The defer-gate carve-out (WS1) drops a target instance's own settled mirrors from the
+busy-set, which introduces a self-witness blind-spot class: a deferred PENDING task
+(`is_deferred=True`) whose target instance is the ONLY active non-deferred work in
+the project — no live ACTIVE job elsewhere, no settled mirror elsewhere. Pattern-(g)
+(detector: `_pattern_g_defer_self_witness_watchdog` in
+`daemon/services/job_recovery_service.py`) detects this class every drift sweep and,
+when the kill-switch is ON, unstucks the row by flipping `task.is_deferred=false` so
+the next `claim_pending_task` cycle picks it up.
+
+**Kill-switch** (env-only, restart-read, default ON — operator decision 2026-09-06
+after soak):
+
+- **Default ON** — an unset / blank / unparseable `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`
+  resolves to ON. The bounded unstick runs by default on every drift sweep.
+- **Explicit OFF** — set `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0` (also accepts
+  `false` / `off` / `no`) and restart. Detection WARN still fires; the
+  `task.is_deferred` flip does NOT execute (`OFF=no-writes` contract).
+- **Truthy spellings** (`1` / `true` / `yes` / `on`) are explicit ON — semantically
+  identical to the unset default.
+- **Unknown non-blank values** fall back to ON with a one-shot WARN
+  (`daemon.services.job_recovery_service`) — the consistent direction under the new
+  default; explicit OFF always wins.
+- **Restart required** to re-evaluate (cached resolver, mirrors the
+  `ENSEMBLE_ORPHAN_F1_ENABLED` discipline).
+
+The unstick writes `task.is_deferred` only — `job_queue_items.admission_state` is
+untouched, so the constitution census stays **23/1/0**. The boot-log helper
+(`emit_defer_autopromote_boot_log`, wired in `daemon/api.py` lifespan next to the
+f1 boot log) emits exactly one INFO line per process naming the resolved state.
+9-cell env matrix + the explicit-OFF zero-writes pin live in
+`tests/job_queue/test_defer_self_witness_watchdog.py`.
+
 #### The route + wiring
 
 `GET /api/queues/defer-blocked` lives in `daemon/routers/queues.py` on a system-scoped
