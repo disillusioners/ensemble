@@ -1448,13 +1448,13 @@ carries only the two facts + witnesses.
 
 > **WS4 NOTE (LANDED 2026-09-06, `fix/defer-self-witness-and-cleanup`): cleanup
 > blindness is BY-DESIGN — the unstick lives in the holder actions.** The
-> nuclear cleanup (`POST /api/jobs/cleanup`) deliberately does NOT cancel the
+> System Cleanup (`POST /api/jobs/cleanup`) deliberately does NOT cancel the
 > queued defer-lane mirrors: `batch_cancel_queued` excludes
 > `job_type='message'` (constitution-era mirror protection — cancelling a
 > mirror would desync the JobItem receipt from its authoritative Task), and
 > the deferred Task row behind the mirror is not a bad-state row. The live
 > unstick incident (2026-09-06, instance `6bc61f42` / job `47161b1e`) showed
-> the consequence: a cleanup press could not relieve a stalled holder because
+> the consequence: a System Cleanup press could not relieve a stalled holder because
 > Bucket 1 skipped its queued defer mirrors AND the old Bucket 5 zombie scan
 > let those same mirrors shield the holder from reaping. WS4 resolves the
 > reaping half via the **mission lens**: the zombie predicate no longer lets
@@ -1462,7 +1462,17 @@ carries only the two facts + witnesses.
 > exemption — fail-closed on unknown lanes), so idle/stalled holders are
 > reap-eligible while LIVE missions (running/paused Task, ACTIVE JobItem on
 > any lane, queued non-defer job, non-terminal children) are never
-> bulk-terminated — the cleanup preflight lists them as "will remain". The
+> bulk-terminated — the cleanup preflight lists them as "will remain".
+> The "will remain" listing is the **truth-survivor** set (unblock-round
+> ITEM 11): non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+> JobItem. Bucket 2's per-row `cancel_job` cascade (cancel +
+> `terminate_instance`) terminates every holder of a non-mirror ACTIVE
+> mission JobItem, so the round-2 listing (which listed such holders as
+> "will remain") over-promised survival; the unblock-round post-filter
+> (`SQLModelInstanceRepository.has_real_active_or_queued_work`) excludes
+> them. Instances with only live Tasks (no JobItem), or non-terminal
+> children, or settled-message-mirrors (active mirror protection
+> intact) survive cleanup and stay on the truth-survivor list. The
 > mirror-cancel protection itself STAYS. The defer-specific unstick is the
 > two holder-targeted actions on `POST /api/jobs/defer-holders/{instance_id}/
 > force-complete` (terminates a stalled holder after re-deriving

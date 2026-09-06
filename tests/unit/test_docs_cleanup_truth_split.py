@@ -95,3 +95,26 @@ def test_docs_changelog_records_round2_truth_split_intent() -> None:
         "CHANGELOG.md Round-2 ITEM 3 / T-H1 entry must document the "
         "canonical truth-split sentence VERBATIM."
     )
+
+
+def test_docs_truth_survivor_pin() -> None:
+    """Unblock-round ITEM 11 (2026-09-06) — the docs §8.5 cross-surface
+    pin must also record the truth-survivor semantic (the
+    ``live_instance_ids`` filter narrows to ``non-terminal ∧
+    not-zombie ∧ no non-mirror ACTIVE/queued JobItem``). Drift
+    between the docs and the BE preflight would re-open the
+    over-promise gap at the docs level.
+    """
+    text = DOCS_FILE.read_text(encoding="utf-8")
+    assert "truth-survivor" in text, (
+        f"{DOCS_FILE.relative_to(Path.cwd())} must mention 'truth-"
+        f"survivor' in §8.5 (the truth-survivor set docstring "
+        f"narrative — unblock-round ITEM 11)."
+    )
+    # Round-2 over-promise language must NOT survive in the live-
+    # and-reap paragraph — the truth-survivor superset replaces it.
+    assert "non-terminal instances cleanup will NOT touch" not in text, (
+        "Round-2 over-promise wording must NOT survive in §8.5 — "
+        "the truth-survivor shape replaces it. A drift here is the "
+        "re-introduction of the over-promise."
+    )

@@ -6,6 +6,18 @@ import { DeferHolderKind } from './defer-blocked.model';
  * The first two counts are always present on the wire. The remaining
  * fields are optional so the UI remains compatible with older daemons
  * while the richer cleanup split rolls out.
+ *
+ * **NOTE (unblock-round ITEM 12, 2026-09-06):** ``defer_holder_kind``
+ * is documented here ONLY for type-completeness — it is NOT on the
+ * preflight wire (``GET /api/jobs/cleanup/preflight`` does NOT emit
+ * it). The field is sourced from the SEPARATE
+ * ``GET /api/queues/defer-blocked`` endpoint and POPULATED BY THE
+ * CALLER (see ``frontend/src/app/pages/jobs/jobs.component.ts``
+ * around line 558 where the preflight is composed with the
+ * ``/api/queues/defer-blocked`` snapshot). The preflight payload
+ * carries the count; the holder kind is FE-composed from a sibling
+ * endpoint. Do NOT consume ``defer_holder_kind`` as a wire-payload
+ * field — it is a TS-side annotation only.
  */
 export interface CleanupPreflight {
   bad_state_count: number;
@@ -13,7 +25,8 @@ export interface CleanupPreflight {
   live_instance_count?: number;
   live_instance_ids?: string[];
   defer_blocked_count?: number;
-  /** The holder kind that explains the current defer block, when known. */
+  /** NOT on the preflight wire — populated by the caller. See the
+   *  interface docstring (unblock-round ITEM 12, 2026-09-06). */
   defer_holder_kind?: DeferHolderKind | null;
 }
 
@@ -34,6 +47,29 @@ export const CLEANUP_TRUTH_SPLIT_COPY = [
   'Only missions holding nothing but settled mirrors — no live work',
   '— are kept.',
 ].join(' ');
+
+/**
+ * Unblock-round ITEM 11 (2026-09-06, `fix/defer-self-witness-and-cleanup`)
+ * — the `live_instance_ids` list is the truth-survivor set:
+ * non-terminal ∧ not-zombie ∧ no non-mirror `active`/`queued`
+ * JobItem. Every ID in the dialog represents an instance cleanup
+ * will NOT terminate (a holder of a non-mirror ACTIVE mission
+ * JobItem is NOT a truth-survivor despite being a non-zombie —
+ * Bucket 2 cancels + cascades). When the list is non-empty, the
+ * dialog surfaces this explanatory fragment alongside the IDs so
+ * the operator knows the list is filtered to the post-Bucket-2
+ * survival subset, not the round-2 over-promise shape.
+ *
+ * Pinned shape — the FE spec in `cleanup-preflight.model.spec.ts`
+ * asserts this const is exported as ``CLEANUP_TRUTH_SURVIVOR_NOTE``
+ * verbatim, so any drift between the const and a render-side
+ * re-quote breaks the suite.
+ */
+export const CLEANUP_TRUTH_SURVIVOR_NOTE =
+  'Truth-survivor listing: every ID below is a non-terminal ' +
+  'instance cleanup will NOT terminate (no Bucket-2-cancellable ' +
+  'mission JobItems; live Tasks or non-terminal children may ' +
+  'still anchor them).';
 
 /**
  * Return the operator action for the holder kind reported by preflight.

@@ -1771,6 +1771,155 @@ class TestWS4MissionLens:
             queues_module._defer_block_resolver = None
             assert _defer_block_resolver is None  # global reset
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Unblock-round ITEM 11 (2026-09-06): truth-survivor pin against
+    # the REAL ``SQLModelInstanceRepository.has_live_work`` (the
+    # WS4 R2 W2 single-instance companion). Seeds one instance with
+    # a non-mirror ACTIVE JobItem (NOT a zombie per the WS4 lens,
+    # but Bucket 2 cancels + cascades it) and one instance with only
+    # settled mirrors (a TRULY retained instance). Asserts that
+    # ``live_instance_ids`` contains ONLY the truly-retained
+    # instance — the active-jobitem holder is excluded by the
+    # post-filter that closes the over-promise gap.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_28_preflight_truth_survivor_excludes_active_holder(
+        self,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+        tmp_path,
+    ):
+        """ITEM 11 (real-wiring integration pin): the preflight's
+        ``live_instance_ids`` MUST NOT include holders of non-mirror
+        ACTIVE mission JobItems. Seeded with:
+          * ``inst-task-only``: a non-terminal instance with a live
+            Task (PENDING) but NO JobItems at all — a TRULY-
+            retained instance per the ITEM 11 spec (live Task
+            witnesses as non-zombie; no non-mirror ACTIVE/queued
+            JobItem ⇒ passes the truth-survivor filter).
+          * ``inst-active-holder``: a non-terminal instance with a
+            NON-MIRROR ACTIVE JobItem on a non-defer lane — NOT a
+            zombie per WS4 lens, but Bucket 2 cancels + cascades
+            to terminate_instance, so this holder does NOT survive
+            cleanup despite being a non-zombie.
+          * ``inst-reaped``: a zombie (no live work, no Task) —
+            SHOULD be in the reap split, not the live split.
+
+        Then: assert that ``live_instance_ids`` is exactly
+        ``[inst_task_only.instance_id]`` (truth-survivor filter) —
+        the round-2 shape (``non-terminal ∖ zombie``) would have
+        included BOTH ``inst-task-only`` and ``inst-active-holder``
+        AND failed the canonical sentence (``Every ACTIVE job is
+        cancelled, ...``).
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import _defer_block_resolver
+
+        # Seed: non-defer (parallel) lane for the active-holder's
+        # genuine ACTIVE mission job (no defer lane needed — the
+        # truth-survivor shape uses a Task, not a JobItem, for the
+        # kept instance).
+        non_defer_qid = make_queue(
+            engine,
+            project_id=project_id,
+            queue_type="parallel",
+            queue_name="system_parallel_queue",
+        )
+
+        # TRULY-retained instance: a live Task (PENDING) but no
+        # JobItems at all. Live Task witnesses as non-zombie, and
+        # no non-mirror ACTIVE/queued JobItem → passes the
+        # truth-survivor filter.
+        inst_task_only = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        make_task(
+            engine,
+            instance_id=inst_task_only.instance_id,
+            status="pending",  # lives in _LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN
+        )
+
+        # Active-jobitem holder: ACTIVE job on a NON-DEFER lane.
+        # Not a zombie (the ACTIVE row witnesses), but Bucket 2
+        # cancels + cascade-terminates → excluded by the new filter.
+        inst_active = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        make_job_item(
+            engine,
+            instance_id=inst_active.instance_id,
+            admission_state="active",
+            job_type="task",  # non-mirror
+            project_id=project_id,
+            queue_id=non_defer_qid,
+        )
+
+        # Zombie: no live work, no Task — SHOULD be in reap split.
+        inst_reaped = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        # (no JobItems, no Task — fully zombie)
+
+        # Build the FastAPI app with the management router and a real
+        # manager wired with the REAL instance_repo (so the new
+        # ``has_real_active_or_queued_work`` filter does the right
+        # thing against real SQLite).
+        manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+        manager._task_repo = MagicMock()
+        manager._task_repo.count_bad_state_tasks = MagicMock(return_value=0)
+        manager._instance_repository = instance_repo
+
+        app = FastAPI()
+        app.include_router(management_router)
+        app.state.manager = manager
+        try:
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # Sanity: the reap split knows about inst_reaped.
+            assert inst_reaped.instance_id in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Sanity: inst_active is NOT a zombie (its ACTIVE row
+            # witnesses) — round-2 over-promise shape would have
+            # listed it in live_ids.
+            assert inst_active.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Sanity: inst_task_only is NOT a zombie (its live Task
+            # witnesses).
+            assert inst_task_only.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Truth-survivor filter: only inst_task_only passes (no
+            # non-mirror ACTIVE/queued JobItem). inst_active is
+            # EXCLUDED because Bucket 2 cancels + cascades.
+            assert body["live_instance_count"] == 1, (
+                f"only TRULY-retained instances should appear; got "
+                f"live_instance_ids={body['live_instance_ids']!r}"
+            )
+            assert body["live_instance_ids"] == [inst_task_only.instance_id]
+            # Round-2 over-promise: BOTH task-only and active would
+            # appear. The new filter knocks active out.
+            assert inst_active.instance_id not in body["live_instance_ids"]
+            # Zombie predicate counts correctly.
+            assert body["zombie_instance_count"] >= 1
+        finally:
+            # Reset the queues.py module-global (the sibling
+            # defer-resolver tests use the same pattern; production
+            # lifespan startup is idempotent — tests need explicit
+            # teardown).
+            import daemon.routers.queues as queues_module
+            queues_module._defer_block_resolver = None
+            assert _defer_block_resolver is None  # global reset
+
 
 def _only_job_id(engine: Engine) -> str:
     """Return the single job_queue_items row's job_id (test helper)."""

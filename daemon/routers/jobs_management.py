@@ -625,8 +625,12 @@ async def cleanup_preflight(request: Request):
     stalled-holder self-shield exemption), so idle/stalled holders are
     reap-eligible. The response now carries the full live-vs-reap
     split: ``zombie_instance_count`` (WILL be reaped),
-    ``live_instance_count`` / ``live_instance_ids`` (non-terminal
-    instances cleanup will NOT touch), and ``defer_blocked_count``
+    ``live_instance_count`` / ``live_instance_ids`` (truth-survivors
+    — non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+    work: cleanup's other buckets cancel their ACTIVE jobs and the
+    terminate cascade takes the instance, even though they are NOT
+    zombies; the unblock-round ITEM 11 post-filter excludes them so
+    the dialog does not over-promise survival), and ``defer_blocked_count``
     (pending defer-lane jobs). The defer count is deliberately
     SEPARATE from ``bad_state_count`` and is NOT a cleanup input:
     deferred messages are not cancelled by cleanup (constitution-era
@@ -650,6 +654,23 @@ async def cleanup_preflight(request: Request):
     System Cleanup button (the operator-facing button label is
     "System Cleanup", NOT "nuclear press" — see ITEM 8 vocabulary
     fix).
+
+    **Unblock-round ITEM 11 (2026-09-06, truth-survivor filter).**
+    ``live_instance_count`` / ``live_instance_ids`` are post-filtered
+    by ``SQLModelInstanceRepository.has_live_work(instance_id)`` —
+    the WS4 Round-2 W2 single-instance companion. Without this
+    filter, the list over-promises survival: a holder of a non-mirror
+    ACTIVE mission JobItem is NOT a zombie (the zombie predicate
+    counts ``admission_state='active'`` as live work and
+    excludes), BUT Bucket 2 cancels that JobItem and the
+    terminate-cascade in Bucket 5 takes the instance — so
+    appearing in the "will remain" list contradicts the canonical
+    sentence (`Every ACTIVE job is cancelled, ...`). The
+    post-filter narrows the list to TRULY-retained instances:
+    non-terminal ∧ not-zombie ∧ no live work AT ALL (jobitems,
+    tasks, children). Bounded by ``[:20]`` for dialog display.
+    Cost is ≤20 single-instance probes per preflight call;
+    acceptable for a preflight surface.
     """
     manager = _get_manager(request)
     task_repo = getattr(manager, "_task_repo", None)
@@ -665,19 +686,79 @@ async def cleanup_preflight(request: Request):
     live_instance_count = 0
     live_instance_ids: list[str] = []
     if instance_repo is not None:
+        # WS4 live-vs-reap split: list non-terminal instances that cleanup
+        # will NOT terminate (the truth-survivor set — non-terminal ∧
+        # not-zombie ∧ no non-mirror ACTIVE/queued JobItem). The
+        # bounded ``[:20]`` slice is enough to render in the dialog;
+        # the dialog shows up to 20 IDs as a comma-separated list.
+        #
+        # Unblock-round ITEM 11 (2026-09-06, ``fix/defer-self-witness-and-cleanup``):
+        # the round-2 truth-survivor shape was over-promising — it
+        # excluded only zombies, but the zombie predicate counts an
+        # ACTIVE JobItem (any lane) as live work, so holders of
+        # non-mirror ACTIVE mission jobs landed in ``live_ids`` even
+        # though Bucket 2 cancels + terminate-cascades exactly those
+        # jobs (cf. ``JobQueueService.cleanup_non_terminal_jobs``
+        # bucket 2 at ``job_queue_service.py:1337-1344``). To
+        # narrow the list to TRULY-retained instances, the preflight
+        # now post-filters the non-terminal ∖ zombie set through
+        # ``SQLModelInstanceRepository.has_real_active_or_queued_work(instance_id)`` —
+        # the dedicated probe for non-mirror ``active``/``queued``
+        # JobItem (the Bucket-1 + Bucket-2 cancellable work; mirror
+        # rows are constitution-era protected). Live Tasks and
+        # non-terminal children do NOT make an instance a
+        # truth-survivor (Bucket 5 will reap on second pass if no
+        # other live work remains); what DOES make it a survivor is
+        # "live work that cleanup won't touch" — instances with only
+        # an OWN queued defer-lane mirror set, OR live Tasks without
+        # JobItems, OR active mirrors (protected) — all of which
+        # both the zombie predicate AND the new probe consider
+        # non-zombie / non-cancellable. Cost: ≤20 probes (the dialog
+        # bound). Cheap and reuses existing machinery; no schema
+        # change, no census-write impact.
         zombie_instance_count = await asyncio.to_thread(
             instance_repo.count_zombie_instances
         )
-        # WS4 live-vs-reap split: non-terminal instances that are NOT
-        # reap-eligible will remain after cleanup — list them (bounded)
-        # so the dialog can state the split explicitly.
         non_terminal_ids = await asyncio.to_thread(
             instance_repo.find_non_terminal_instance_ids
         )
         reap_ids = set(await asyncio.to_thread(
             instance_repo.find_zombie_instances
         ))
-        live_ids = [iid for iid in non_terminal_ids if iid not in reap_ids]
+        # Round-2 "non-terminal ∖ zombie" set — over-promises; held
+        # here so the dialog comment can still reference the source.
+        pre_filter = [iid for iid in non_terminal_ids if iid not in reap_ids]
+
+        # ITEM 11 truth-survivor post-filter: exclude instances that
+        # have a non-mirror ACTIVE / queued JobItem (Bucket 2 cancels
+        # active + cascades terminate; Bucket 1 cancels queued). One
+        # ``SELECT EXISTS`` per candidate instance; bounded by the
+        # dialog slice below.
+        def _truth_survivor_set() -> list[str]:
+            survivors: list[str] = []
+            for iid in pre_filter:
+                try:
+                    # Truth-survivor = NOT has_real_active_or_queued_work.
+                    # An instance survives cleanup IFF it has some live
+                    # work (NOT a zombie) AND no Bucket-1/2-cancellable
+                    # JobItem.
+                    if not instance_repo.has_real_active_or_queued_work(iid):
+                        survivors.append(iid)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    # Fail-CLOSED on probe error: a probe that cannot
+                    # complete ⇒ treat the instance as NOT a survivor
+                    # (be safe — the dialog does not over-promise).
+                    # Mirrors the gate's own posture (see
+                    # ``has_live_work`` docstring).
+                    logger.warning(
+                        "cleanup_preflight: has_real_active_or_queued_work "
+                        "probe failed for %s: %s",
+                        iid,
+                        exc,
+                    )
+            return survivors
+
+        live_ids = await asyncio.to_thread(_truth_survivor_set)
         live_instance_count = len(live_ids)
         live_instance_ids = live_ids[:20]
 

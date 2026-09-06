@@ -141,13 +141,38 @@ export class JobsComponent implements OnInit, OnDestroy {
     () => this.zombieInstanceCount() > 0
   );
 
-  // WS4 — live-vs-reap split from the same preflight: non-terminal
-  // instances cleanup will NOT terminate ("will remain"), and the
-  // pending defer-lane count surfaced SEPARATELY from bad_state
-  // (cleanup does not cancel deferred messages — the dialog says so).
+  // WS4 — live-vs-reap split from the same preflight. The
+  // ``live_instance_count`` / ``live_instance_ids`` are the
+  // UNBLOCK-ROUND ITEM 11 (2026-09-06) TRUTH-SURVIVOR set:
+  // non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+  // JobItem. The round-2 shape (just ``non-terminal ∖ zombie``)
+  // over-promised survival — a holder of a non-mirror ACTIVE
+  // mission JobItem is a non-zombie per the WS4 mission lens,
+  // but Bucket 2 cancels + cascades to terminate_instance, so
+  // such a holder does NOT actually survive cleanup despite
+  // appearing in the round-2 list. The BE preflight now narrows
+  // the list via the post-filter
+  // ``SQLModelInstanceRepository.has_real_active_or_queued_work``;
+  // the dialog renders the bounded list of TRULY-retained
+  // instances. The canonical cleanup-truth-split sentence
+  // (``CLEANUP_TRUTH_SPLIT_COPY`` in
+  // cleanup-preflight.model.ts) is rendered verbatim on the
+  // dialog. ``defer_blocked_count`` is surfaced SEPARATELY
+  // because cleanup does NOT cancel deferred messages (the
+  // dialog says so via the defer note).
   readonly liveInstanceCount = signal<number>(0);
   readonly liveInstanceIds = signal<string[]>([]);
   readonly deferBlockedCount = signal<number>(0);
+  // Unblock-round ITEM 12 (2026-09-06): ``defer_holder_kind`` is
+  // NOT on the preflight wire — the preflight endpoint
+  // ``GET /api/jobs/cleanup/preflight`` does NOT emit it. The
+  // field is sourced from the SEPARATE
+  // ``GET /api/queues/defer-blocked`` endpoint and populated by
+  // this component when the JS snapshot is wired (see the
+  // setter below — populated via ``deferBlockAction(deferStatus)``
+  // composition). The TS interface in
+  // ``cleanup-preflight.model.ts`` annotates the field as a
+  // type-completeness convenience only.
   readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
 
   // Deleted jobs filter

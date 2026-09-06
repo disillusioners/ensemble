@@ -560,11 +560,23 @@ class CleanupPreflightResponse(BaseModel):
     WS4 mission lens (2026-09-06): ``zombie_instance_count`` counts the
     reap-eligible instances under the widened mission-lens predicate
     (own queued defer-lane rows no longer shield — the stalled-holder
-    self-shield exemption). ``live_instance_count`` /
-    ``live_instance_ids`` enumerate the non-terminal instances cleanup
-    will NOT touch ("will remain") so the dialog can state the split
-    explicitly. ``defer_blocked_count`` surfaces the defer lane
-    SEPARATELY (pending defer-lane jobs) — deliberately NOT folded into
+    self-shield exemption).
+
+    Unblock-round ITEM 11 (2026-09-06, ``fix/defer-self-witness-and-cleanup``):
+    ``live_instance_count`` / ``live_instance_ids`` are the
+    TRUTH-survivor set: non-terminal ∧ not-zombie ∧ no non-mirror
+    ``active``/``queued`` JobItem. They enumerate the instances
+    cleanup will NOT terminate. The round-2 shape (``non-terminal ∖
+    zombie``) over-promised survival — a holder of a non-mirror ACTIVE
+    mission JobItem is a non-zombie per the WS4 mission lens, so
+    round-2 listed it as "will remain". But Bucket 2's per-row
+    ``cancel_job`` cascade (cancel + ``terminate_instance``) takes
+    exactly those holders. The unblock-round post-filter
+    (``SQLModelInstanceRepository.has_real_active_or_queued_work``)
+    narrows the list to instances Bucket 1 / Bucket 2 will NOT touch.
+
+    ``defer_blocked_count`` surfaces the defer lane SEPARATELY
+    (pending defer-lane jobs) — deliberately NOT folded into
     ``bad_state_count``: bad-state Tasks are reconciled by cleanup,
     deferred messages are NOT (the constitution-era mirror protection),
     so conflating the two would promise an action cleanup does not
@@ -592,15 +604,21 @@ class CleanupPreflightResponse(BaseModel):
         default=0,
         ge=0,
         description=(
-            "System-wide count of non-terminal instances that cleanup "
-            "will NOT terminate (live missions — will remain)"
+            "System-wide count of TRULY-retained (truth-survivor) "
+            "instances: non-terminal ∧ not-zombie ∧ no non-mirror "
+            "ACTIVE/queued JobItem (cleanup will NOT terminate these "
+            "— live Tasks or non-terminal children only, no Bucket-1/2 "
+            "cancellable work)"
         ),
     )
     live_instance_ids: list[str] = Field(
         default_factory=list,
         description=(
-            "Bounded (first 20) instance_ids of the live missions that "
-            "will remain, for operator-facing listing"
+            "Bounded (first 20) instance_ids of the truth-survivor "
+            "instances that cleanup will NOT terminate, for the "
+            "operator-facing listing. Round-2 erroneously listed "
+            "non-mirror ACTIVE-jobitem holders here; the unblock-round "
+            "post-filter excludes them."
         ),
     )
     defer_blocked_count: int = Field(
