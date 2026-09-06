@@ -1174,15 +1174,28 @@ class TestCleanupPreflightEndpoint:
         ``JobQueueService.cleanup_non_terminal_jobs`` bucket 2 at
         ``job_queue_service.py:1337-1344`` — so listing it as
         "will remain" contradicts the canonical sentence
-        (`Every ACTIVE job is cancelled, ...`).
+        (``Every ACTIVE job is cancelled, ...``).
 
         The unblock-round post-filter through
-        ``SQLModelInstanceRepository.has_live_work(instance_id)``
-        narrows the list to TRULY-retained instances. This test
-        mocks the probe to confirm the filter shape:
-        ``has_live_work('inst-active-holder') == True`` is
-        excluded; ``has_live_work('inst-settled-mirror-only') ==
-        False`` is included.
+        ``SQLModelInstanceRepository.has_real_active_or_queued_work(instance_id)``
+        — a JobItem-only EXISTS-shape probe targeting non-mirror
+        ``active``/``queued`` JobItems (cancellable by Bucket 1's
+        batch UPDATE OR Bucket 2's per-row cancel cascade,
+        mirror rows excluded by both buckets). The
+        ``has_real_active_or_queued_work`` probe differs from the
+        Round-2 ``has_live_work`` (which also covers Tasks +
+        children) — the truth-survivor filter uses the dedicated
+        JobItem-only probe so live-Task-only instances stay in
+        the dialog list (they have NO non-mirror ACTIVE/queued
+        JobItem, so the probe returns False and they survive
+        Bucket 5 reaping).
+
+        This test mocks the probe to confirm the filter shape:
+        ``has_real_active_or_queued_work('inst-active-holder') ==
+        True`` is excluded;
+        ``has_real_active_or_queued_work('inst-settled-mirror-only')
+        == False`` is included (TRULY-retained — no Bucket-1/2-
+        cancellable JobItems on the instance).
         """
         instance_repo = MagicMock()
         instance_repo.count_zombie_instances = MagicMock(return_value=0)
@@ -1196,8 +1209,9 @@ class TestCleanupPreflightEndpoint:
         instance_repo.find_zombie_instances = MagicMock(return_value=[])
 
         def _has_real_active_or_queued_work(iid):
-            # Active-jobitem holder: True (has Bucket-2-cancellable
-            # work).
+            # Active-jobitem holder: True (has cancellable active or
+            # queued (non-mirror) work — Bucket 1 batch + Bucket 2
+            # per-row cancel both target this set).
             # Settled-mirror-only holder: False (TRULY-retained).
             return {
                 "inst-active-holder": True,

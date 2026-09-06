@@ -1646,6 +1646,17 @@ class SQLModelInstanceRepository:
         terminal CSV constant (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``)
         so the two scans cannot disagree on what "terminal" means.
 
+        Cap-exception micro-round (2026-09-06, ``fix/defer-self-
+        witness-and-cleanup``): the preflight post-filters this set
+        through :meth:`has_real_active_or_queued_work` to surface the
+        truth-survivor list (``non-terminal ∧ not-zombie ∧ no
+        cancellable active or queued (non-mirror) jobs``). Both
+        probes compose from the SAME class-level literal sets —
+        :data:`_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`,
+        :data:`_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN` — so the
+        per-instance truth-survivor predicate cannot drift from the
+        bulk scan.
+
         Self-contained SYNC method using raw-SQL ``text()`` — the
         preflight wraps it in ``asyncio.to_thread``.
 
@@ -1765,7 +1776,7 @@ class SQLModelInstanceRepository:
 
     def has_real_active_or_queued_work(self, instance_id: str) -> bool:
         """Return True iff ``instance_id`` has a NON-MIRROR ``active``
-        / ``queued`` JobItem (Bucket-2-cancellable work).
+        / ``queued`` JobItem (cancellable work — Bucket 1 + Bucket 2).
 
         Unblock-round ITEM 11 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
         — the truth-survivor filter for the cleanup preflight. The

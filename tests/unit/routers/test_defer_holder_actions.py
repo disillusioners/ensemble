@@ -281,8 +281,17 @@ class TestCleanupPreflightSurface:
         docstring = preflight.__doc__ or ""
         # ITEM 3 / T-H1: canonical split sentence (both clauses
         # present, verbatim in meaning).
+        # Cap-exception micro-round ITEM 2 (2026-09-06) broadened
+        # the wording to "settled mirrors, or running Tasks
+        # without JobItems" so the truth-survivor filter's TRUE
+        # semantics match the sentence (a live-Task-only
+        # instance is a real survivor, NOT a contradiction).
         assert "Every ACTIVE job is cancelled" in docstring
-        assert "Only missions holding nothing but settled mirrors" in docstring
+        assert (
+            "Only missions holding settled mirrors, or running Tasks"
+            in docstring
+        )
+        assert "JobItems — are kept." in docstring
         # ITEM 8: System Cleanup vocabulary as the positive label.
         assert "System Cleanup" in docstring
         # Single-owner operator term: "stalled mission".

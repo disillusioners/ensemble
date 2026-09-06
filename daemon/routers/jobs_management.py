@@ -637,10 +637,11 @@ async def cleanup_preflight(request: Request):
     mirror protection) — the operator should use the defer
     warning's holder actions.
 
-    Canonical operator copy (WS4 Round-2 ITEM 3 / T-H1, 2026-09-06):
+    Canonical operator copy (WS4 Round-2 ITEM 3 / T-H1, 2026-09-06;
+    cap-exception micro-round ITEM 2, 2026-09-06):
     Every ACTIVE job is cancelled, together with its whole subtree.
-    Only missions holding nothing but settled mirrors — no live work
-    — are kept. (Term single-owner: "stalled mission"; the
+    Only missions holding settled mirrors, or running Tasks without
+    JobItems — are kept. (Term single-owner: "stalled mission"; the
     ``zombie_instance_count`` field NAME stays technical.)
 
     All counts come from pure COUNT/SELECT queries with no writes, so
@@ -657,20 +658,24 @@ async def cleanup_preflight(request: Request):
 
     **Unblock-round ITEM 11 (2026-09-06, truth-survivor filter).**
     ``live_instance_count`` / ``live_instance_ids`` are post-filtered
-    by ``SQLModelInstanceRepository.has_live_work(instance_id)`` —
-    the WS4 Round-2 W2 single-instance companion. Without this
-    filter, the list over-promises survival: a holder of a non-mirror
-    ACTIVE mission JobItem is NOT a zombie (the zombie predicate
-    counts ``admission_state='active'`` as live work and
-    excludes), BUT Bucket 2 cancels that JobItem and the
-    terminate-cascade in Bucket 5 takes the instance — so
-    appearing in the "will remain" list contradicts the canonical
-    sentence (`Every ACTIVE job is cancelled, ...`). The
-    post-filter narrows the list to TRULY-retained instances:
-    non-terminal ∧ not-zombie ∧ no live work AT ALL (jobitems,
-    tasks, children). Bounded by ``[:20]`` for dialog display.
-    Cost is ≤20 single-instance probes per preflight call;
-    acceptable for a preflight surface.
+    by ``SQLModelInstanceRepository.has_real_active_or_queued_work(instance_id)``
+    — a JobItem-only EXISTS-shape probe (the WS4 Round-2
+    ``has_live_work`` is a different, broader probe — kept for the
+    holder-action guard; this one is dedicated to the preflight's
+    cancellable-work predicate). Without this filter, the list
+    over-promises survival: a holder of a non-mirror ACTIVE mission
+    JobItem is NOT a zombie (the zombie predicate counts
+    ``admission_state='active'`` as live work and excludes), BUT
+    Bucket 2's per-row cancel + terminate-cascade take those holders
+    — so appearing in the "will remain" list contradicts the
+    canonical sentence (``Every ACTIVE job is cancelled, ...``).
+    The post-filter narrows the list to TRULY-retained instances:
+    non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+    JobItem (cancellable work — Bucket 1 batch + Bucket 2 per-row
+    cancel both target this set, mirror rows excluded by Bucket
+    1/2). Bounded by ``[:20]`` for dialog display. Cost is
+    ≤20 single-instance probes per preflight call; acceptable for
+    a preflight surface.
     """
     manager = _get_manager(request)
     task_repo = getattr(manager, "_task_repo", None)
