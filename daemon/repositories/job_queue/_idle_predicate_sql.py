@@ -610,6 +610,14 @@ JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM: Final[str] = _unwrap_exists_body(
 #: carve-out) — :data:`JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT` with
 #: ``EXISTS`` unwrapped. Same binds as the gate body. Enumerates
 #: witnesses EXCLUDING the candidate's own settled mirrors.
+#:
+#: RESERVED for future per-candidate witness enumeration (WS4
+#: mission-aware cleanup); currently reached only via
+#: :func:`defer_busy_witness_statement` when called with a non-None
+#: ``requester_instance_id`` (no production caller does today —
+#: ``defer_block_resolver`` always passes ``None``). MUST keep
+#: deriving via :func:`_unwrap_exists_body` so the bind contract
+#: cannot drift from the gate body it mirrors.
 JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT: Final[str] = _unwrap_exists_body(
     JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
 )
@@ -617,6 +625,14 @@ JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT: Final[str] = _unwrap_exists_b
 #: Defer busy-set WITNESS body (system-wide, WS1 requester-instance
 #: carve-out) — :data:`JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT` with
 #: ``EXISTS`` unwrapped. Same binds as the gate body.
+#:
+#: RESERVED for future per-candidate witness enumeration (WS4
+#: mission-aware cleanup); currently reached only via
+#: :func:`defer_busy_witness_statement` when called with a non-None
+#: ``requester_instance_id`` (no production caller does today —
+#: ``defer_block_resolver`` always passes ``None``). MUST keep
+#: deriving via :func:`_unwrap_exists_body` so the bind contract
+#: cannot drift from the gate body it mirrors.
 JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT: Final[str] = _unwrap_exists_body(
     JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
 )
@@ -644,7 +660,12 @@ def defer_busy_witness_statement(
     scope, the witness surface shows ALL busy witnesses including any
     self-witnessed mirror (semantics identical to pre-WS1). The
     carve-out witness body is exposed for future per-candidate witness
-    enumeration (e.g. WS4 mission-aware cleanup).
+    enumeration (e.g. WS4 mission-aware cleanup) — those two RESERVED
+    constants (:data:`JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT`
+    and :data:`JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT`) MUST
+    keep deriving from their gate-body counterparts via
+    :func:`_unwrap_exists_body` so their bind contract cannot drift
+    from the gate they mirror.
 
     READ-ONLY consumers only — the statement is a bare SELECT; the
     transparency surface must never gain a write on this path (census

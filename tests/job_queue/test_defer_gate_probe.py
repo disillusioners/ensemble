@@ -298,9 +298,6 @@ def test_gate_b_select_next_eligible_with_settled_mirror(tmp_path):
         # Sanity: the no-carve-out predicate (requesting the gate with
         # ``requester_instance_id=None``) still sees the mirror as busy
         # — the carve-out is per-candidate, not global.
-        gate_no_carveout = asyncio.run(
-            asyncio.coroutine(lambda: asyncio.sleep(0))()  # noqa: E731
-        ) if False else None
         non_defer_active_no_carveout = asyncio.run(
             _gate_no_carveout(svc, pending, "proj-gate-b")
         )
