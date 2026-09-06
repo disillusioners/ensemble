@@ -222,8 +222,17 @@ class TestProactiveCompactionPreservesInjection:
             )
 
     @pytest.mark.asyncio
-    async def test_all_injected_messages_skips_compaction(self):
-        """When every message is injected, compaction is skipped entirely."""
+    async def test_all_unanswered_injections_skip_with_anti_refire_stamp(self):
+        """When every message is an UNANSWERED bare injection,
+        compaction is skipped — and per the anti-refire contract the
+        engine returns a STAMPED no-op result (NOT ``None``) so the
+        60s dedup engages on the next dispatch.
+
+        Migrated from the pre-anti-refire pin (``result is None``);
+        the hoisting fix keeps this skip firing for
+        permanent/unanswered injections only — answered notes would
+        make the pool non-empty (see the hoisting test module).
+        """
         compactor = _make_compactor()
         msgs = [
             HumanMessage(
@@ -237,8 +246,12 @@ class TestProactiveCompactionPreservesInjection:
 
         result = await compactor.compact_state(ctx)
 
-        # No compaction should occur — there's nothing to summarize
-        assert result is None
+        # No compaction should occur — there's nothing selectable —
+        # but the anti-refire stamp must still land.
+        assert result is not None
+        assert result.replacement_messages == []
+        assert result.compaction_type == "skipped_injections_dominate"
+        assert result.compacted_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -248,43 +261,96 @@ class TestProactiveCompactionPreservesInjection:
 
 
 class TestInjectionPartitioningHelper:
-    """Verify the _partition_injected_messages helper directly."""
+    """Verify the three-way injected partition helper directly.
 
-    def test_partitions_by_injected_flag(self):
-        from daemon.compaction import _partition_injected_messages
+    Injected-notes hoisting contract: ``context_kind`` messages and
+    UNANSWERED bare notes are preserved (hoisted); ANSWERED bare notes
+    (an AIMessage exists at a later index) join the selectable pool.
+    """
+
+    def test_partitions_bare_unanswered_notes_as_preserved(self):
+        from daemon.compaction import _partition_injected_for_compaction
 
         regular = [HumanMessage(content="r1"), HumanMessage(content="r2")]
         injected = [
-            HumanMessage(content="i1", additional_kwargs={"injected_message": True}),
-            HumanMessage(content="i2", additional_kwargs={"injected_message": True}),
+            HumanMessage(
+                content="i1",
+                id="i1",
+                additional_kwargs={"injected_message": True},
+            ),
+            HumanMessage(
+                content="i2",
+                id="i2",
+                additional_kwargs={"injected_message": True},
+            ),
         ]
         msgs = regular + injected
 
-        non_inj, inj = _partition_injected_messages(msgs)
-        assert len(non_inj) == 2
-        assert len(inj) == 2
+        selectable, preserved, absorbed = _partition_injected_for_compaction(msgs)
+        # No AIMessages anywhere → both bare notes are UNANSWERED →
+        # preserved; nothing absorbed.
+        assert len(selectable) == 2
+        assert len(preserved) == 2
+        assert len(absorbed) == 0
         # Order preserved within each bucket
-        assert [m.content for m in non_inj] == ["r1", "r2"]
-        assert [m.content for m in inj] == ["i1", "i2"]
+        assert [m.content for m in selectable] == ["r1", "r2"]
+        assert [m.content for m in preserved] == ["i1", "i2"]
+
+    def test_partitions_answered_bare_note_as_selectable(self):
+        from daemon.compaction import _partition_injected_for_compaction
+
+        note = HumanMessage(
+            content="note-1",
+            id="note-1",
+            additional_kwargs={"injected_message": True},
+        )
+        reply = AIMessage(content="ok", id="a-1")
+        msgs = [note, reply, HumanMessage(content="r1", id="r-1")]
+
+        selectable, preserved, absorbed = _partition_injected_for_compaction(msgs)
+        # The answered note joins the selectable pool in channel order.
+        assert [m.id for m in selectable] == ["note-1", "a-1", "r-1"]
+        assert preserved == []
+        assert [m.id for m in absorbed] == ["note-1"]
+
+    def test_context_kind_note_is_permanent_even_when_answered(self):
+        from daemon.compaction import _partition_injected_for_compaction
+
+        ctx_note = HumanMessage(
+            content="[SYSTEM CONTEXT: T]",
+            id="ctx-1",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "task_context",
+            },
+        )
+        msgs = [ctx_note, AIMessage(content="ok", id="a-1")]
+
+        selectable, preserved, absorbed = _partition_injected_for_compaction(msgs)
+        assert [m.id for m in selectable] == ["a-1"]
+        assert [m.id for m in preserved] == ["ctx-1"]
+        assert absorbed == []
 
     def test_handles_missing_additional_kwargs(self):
-        from daemon.compaction import _partition_injected_messages
+        from daemon.compaction import _partition_injected_for_compaction
 
         # Old/edge-case messages without additional_kwargs at all
         msg_no_kwargs = HumanMessage(content="legacy")
         # LangChain usually defaults additional_kwargs to {}
         msgs = [msg_no_kwargs]
 
-        non_inj, inj = _partition_injected_messages(msgs)
-        assert len(non_inj) == 1
-        assert len(inj) == 0
+        selectable, preserved, absorbed = _partition_injected_for_compaction(msgs)
+        assert len(selectable) == 1
+        assert len(preserved) == 0
+        assert len(absorbed) == 0
 
     def test_handles_empty_list(self):
-        from daemon.compaction import _partition_injected_messages
+        from daemon.compaction import _partition_injected_for_compaction
 
-        non_inj, inj = _partition_injected_messages([])
-        assert non_inj == []
-        assert inj == []
+        selectable, preserved, absorbed = _partition_injected_for_compaction([])
+        assert selectable == []
+        assert preserved == []
+        assert absorbed == []
 
     def test_is_injected_message_helper(self):
         from daemon.compaction import _is_injected_message

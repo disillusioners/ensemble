@@ -1444,6 +1444,16 @@ def _map_engine_result_to_wire(result: CompactionResult) -> WireOutcome:
     if result.sections_total is not None:
         detail["sections_total"] = int(result.sections_total)
 
+    # Injected-notes hoisting fix — additive envelope counts, stamped
+    # by :func:`compact_state` on every engine exit. ``None`` (legacy
+    # synthetic results) → key omitted, FE falls back defensively.
+    # Preserved = context_kind + unanswered bare notes (hoisted);
+    # absorbed = answered bare notes consumed by the compacted span.
+    if result.injected_preserved is not None:
+        detail["injected_preserved"] = int(result.injected_preserved)
+    if result.injected_absorbed is not None:
+        detail["injected_absorbed"] = int(result.injected_absorbed)
+
     is_success_type = ctype in _ENGINE_SUCCESS_COMPACTION_TYPES
     is_fallback_type = ctype in _ENGINE_FALLBACK_COMPACTION_TYPES
     is_known_type = ctype in _ENGINE_TYPE_TO_WIRE_COMPACTED_TYPE

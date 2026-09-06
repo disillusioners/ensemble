@@ -92,6 +92,118 @@ def _is_injected_message(msg: BaseMessage) -> bool:
     return bool(additional_kwargs.get("injected_message"))
 
 
+def _has_context_kind(msg: BaseMessage) -> bool:
+    """True when the injected message is a REAL ``[SYSTEM CONTEXT]`` block.
+
+    Context messages are stamped by ``_make_context_message``
+    (``daemon/services/context_messages.py``) with BOTH
+    ``injected_message=True`` AND a ``context_kind`` enum value. They are
+    permanently non-selectable: preserved verbatim and hoisted above the
+    compaction doc at every pass (unchanged behavior).
+
+    Bare-flag injected messages (operator notes via the FIFO injection
+    drain — ``daemon/services/instance_messaging.py``) carry
+    ``injected_message=True`` with NO ``context_kind``; only those are
+    eligible for the answered-note lifecycle.
+    """
+    additional_kwargs = getattr(msg, "additional_kwargs", None)
+    if not additional_kwargs:
+        return False
+    return bool(additional_kwargs.get("context_kind"))
+
+
+def _injected_note_absorbed_ids(messages: list[BaseMessage]) -> frozenset[str]:
+    """Ids of BARE-flag injected notes that are ANSWERED (selectable).
+
+    The conservative "protect until answered" contract (injected-notes
+    hoisting fix): a bare injected note is ANSWERED when an ``AIMessage``
+    exists at a LATER index in the channel order. Unanswered notes —
+    the newest message, or notes followed only by ToolMessages — stay
+    permanently preserved. ``context_kind`` messages never qualify
+    (they are permanent regardless of position), and id-less bare
+    notes are conservatively treated as UNANSWERED (never absorbed).
+
+    Args:
+        messages: The FULL pre-compaction channel (conversation order).
+
+    Returns:
+        Frozenset of message ids that may be absorbed into the
+        compacted span. Empty when there are no answered bare notes.
+    """
+    absorbed: set[str] = set()
+    for idx, msg in enumerate(messages):
+        if not _is_injected_message(msg) or _has_context_kind(msg):
+            continue
+        msg_id = getattr(msg, "id", None)
+        if not msg_id:
+            continue  # id-less → conservative: preserved, never absorbed
+        if any(isinstance(m, AIMessage) for m in messages[idx + 1:]):
+            absorbed.add(msg_id)
+    return absorbed
+
+
+def _is_hoisted_injected(
+    msg: BaseMessage, absorbed_note_ids: frozenset[str]
+) -> bool:
+    """The hoist/preserve predicate for injected messages.
+
+    Hoisted (preserved verbatim above the compaction doc) when:
+
+    * the message carries ``context_kind`` (real system context —
+      permanent), OR
+    * it is a bare-flag note that is NOT answered (no later AIMessage
+      in the pre-compaction channel — or an unresolvable id, treated
+      conservatively as unanswered).
+
+    Answered bare notes are NOT hoisted: they join the selectable pool
+    and are absorbed into the compacted span like regular history.
+    """
+    if not _is_injected_message(msg):
+        return False
+    if _has_context_kind(msg):
+        return True
+    msg_id = getattr(msg, "id", None)
+    if not msg_id:
+        return True  # id-less bare note → conservative preserve
+    return msg_id not in absorbed_note_ids
+
+
+def _partition_injected_for_compaction(
+    messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], list[BaseMessage], list[BaseMessage]]:
+    """Three-bucket partition of the pre-compaction channel.
+
+    Replaces the former unconditional two-way injected split: bare-flag
+    operator notes now join the selectable pool once ANSWERED (an
+    ``AIMessage`` exists at a later index — see
+    :func:`_injected_note_absorbed_ids`), instead of being hoisted
+    forever.
+
+    Returns:
+        Tuple ``(selectable, preserved_injected, absorbed_notes)`` where:
+
+        * ``selectable`` — regular history PLUS answered bare notes, in
+          original channel order (order matters: boundary grouping and
+          tail preservation are order-sensitive).
+        * ``preserved_injected`` — ``context_kind`` messages plus
+          UNANSWERED bare notes (hoisted verbatim above the doc).
+        * ``absorbed_notes`` — the answered bare-note subset of
+          ``selectable`` (same objects), for envelope accounting.
+    """
+    absorbed_note_ids = _injected_note_absorbed_ids(messages)
+    selectable: list[BaseMessage] = []
+    preserved_injected: list[BaseMessage] = []
+    absorbed_notes: list[BaseMessage] = []
+    for msg in messages:
+        if _is_hoisted_injected(msg, absorbed_note_ids):
+            preserved_injected.append(msg)
+        else:
+            selectable.append(msg)
+            if _is_injected_message(msg):
+                absorbed_notes.append(msg)
+    return selectable, preserved_injected, absorbed_notes
+
+
 # Architecture §5 / §6 — the per-compaction output is a single
 # `compaction-global-{iid}-{seq}` SystemMessage; the truncation marker is
 # now the boundary line INSIDE the doc, not a separate message. The
@@ -285,7 +397,11 @@ def build_sentinel_replacement(
        untouched. (W1 fix per architect §3.)
     2. **Desired final order** (tail keeps ORIGINAL ids, full message
        objects):
-       ``[injected…][compaction doc][tail…]``
+       ``[permanent/unanswered injected…][compaction doc][tail…]``
+       — the hoisted head is ``context_kind`` messages plus UNANSWERED
+       bare-flag notes. ANSWERED bare notes are NOT hoisted: they stay
+       in the doc/tail flow (absorbed into the compacted span like
+       regular history).
     3. **Return**
        ``[RemoveMessage(id=REMOVE_ALL_MESSAGES), *injected, *doc, *tail]``
        — sentinel MUST be element 0 (anything before it is discarded).
@@ -368,22 +484,29 @@ def build_sentinel_replacement(
     #     these, but be defensive — if any leak through, fold them
     #     into the sentinel)
     #   - new_keepables: every non-RemoveMessage message (doc + tail)
-    #   - injected: subset of new_keepables carrying the
-    #     injected_message flag (C3 — these keep their head position)
+    #   - injected: the hoisted subset of new_keepables — messages
+    #     carrying the injected_message flag that must keep their head
+    #     position (C3). Injected-notes hoisting fix: ``context_kind``
+    #     messages and UNANSWERED bare-flag notes hoist; ANSWERED bare
+    #     notes stay in doc_and_tail (absorbed into the compacted span).
+    #     Answeredness is derived from ``current_messages`` — the same
+    #     pre-compaction channel the engine partitioned — so the seam's
+    #     hoist decision matches the engine's selection decision.
     #
     # Note: the new design emits a SINGLE SystemMessage (the doc) plus
     # the preserved tail (HumanMessage/AIMessage/etc., unchanged) and
-    # the injected messages. Removals are NOT emitted as
+    # the hoisted injected messages. Removals are NOT emitted as
     # RemoveMessage items — the sentinel replaces them.
+    answered_note_ids = _injected_note_absorbed_ids(current_messages)
     keepables: list[BaseMessage] = [
         m for m in result.replacement_messages
         if not isinstance(m, RemoveMessage)
     ]
     injected: list[BaseMessage] = [
-        m for m in keepables if _is_injected_message(m)
+        m for m in keepables if _is_hoisted_injected(m, answered_note_ids)
     ]
     doc_and_tail: list[BaseMessage] = [
-        m for m in keepables if not _is_injected_message(m)
+        m for m in keepables if not _is_hoisted_injected(m, answered_note_ids)
     ]
 
     # Step 2: PRE-WRITE GUARD — the sentinel recipe is
@@ -1029,32 +1152,11 @@ def _summarization_timeout_s(prompt: str, config: CompactionConfig) -> float:
     )
 
 
-def _partition_injected_messages(
-    messages: list[BaseMessage],
-) -> tuple[list[BaseMessage], list[BaseMessage]]:
-    """Split a message list into ``(non_injected, injected)`` order.
-
-    The returned ``non_injected`` list preserves the relative order of
-    the non-injected messages from the input. The ``injected`` list
-    preserves the original order of injected messages so they can be
-    re-inserted at the end of the replacement list in their original
-    sequence. Order of injected messages relative to each other matters
-    less than their overall chronological position (preserved here).
-
-    Args:
-        messages: Source message list (in conversation order).
-
-    Returns:
-        Tuple ``(non_injected, injected)``.
-    """
-    non_injected: list[BaseMessage] = []
-    injected: list[BaseMessage] = []
-    for msg in messages:
-        if _is_injected_message(msg):
-            injected.append(msg)
-        else:
-            non_injected.append(msg)
-    return non_injected, injected
+# (The former ``_partition_injected_messages`` two-way split was
+# replaced by :func:`_partition_injected_for_compaction` — the
+# injected-notes hoisting contract change: bare-flag operator notes
+# become selectable once answered, so the engine needs the three-bucket
+# partition above.)
 
 
 # Context window sizes for known models (in tokens)
@@ -1293,6 +1395,18 @@ class CompactionResult:
     # if a ``RemoveMessage`` carries it; otherwise every dropped
     # id is silently lost under the sentinel).
     compacted_ids: frozenset[str] | None = None
+    # Injected-notes hoisting fix — additive envelope counts the FE /
+    # executor read DEFENSIVELY (mirrors the ``sections_kept`` /
+    # ``sections_total`` pattern). ``injected_preserved`` = the
+    # permanently-preserved injections (``context_kind`` blocks plus
+    # UNANSWERED bare-flag notes) hoisted verbatim above the doc.
+    # ``injected_absorbed`` = the ANSWERED bare notes that joined the
+    # selectable pool and were consumed by the compacted span this
+    # pass (summarized / truncated). An answered note left verbatim in
+    # the preserved tail is in NEITHER count. ``None`` on legacy
+    # construction sites that pre-date the fields.
+    injected_preserved: int | None = None
+    injected_absorbed: int | None = None
 
 
 @dataclass
@@ -1939,26 +2053,34 @@ class ContextCompactor:
             logger.debug("Skipping compaction: recently compacted")
             return None
 
-        # C3 / Phase 1: Partition injected messages out of the candidate
-        # list. These messages are user-injected HumanMessages that MUST
-        # survive compaction — they are deliberate user intent, not
-        # summarizable history. We filter once up-front and re-attach
-        # them to the result below.
-        regular_messages, injected_messages = _partition_injected_messages(
-            context.messages
+        # C3 / Phase 1 + injected-notes hoisting fix: Partition the
+        # channel into the selectable pool and the preserved injected
+        # set. ``context_kind`` messages (real [SYSTEM CONTEXT] blocks)
+        # and UNANSWERED bare-flag operator notes MUST survive
+        # compaction verbatim — deliberate user intent, not
+        # summarizable history. ANSWERED bare notes (an AIMessage
+        # exists at a later index) join the selectable pool and are
+        # absorbed into the compacted span like regular history; they
+        # are NOT hoisted. We filter once up-front and re-attach the
+        # preserved set to the result below.
+        selectable_messages, hoisted_injected, absorbed_notes = (
+            _partition_injected_for_compaction(context.messages)
         )
 
-        # Pre-compute injected tokens — included in the GATE NUMERATOR
-        # and the SELECTION BUDGET (honest trigger; matches what the
-        # LLM sees) but NOT selectable for compaction (they must
-        # survive; re-attach paths unchanged). This is L3 of the
-        # proactive-compaction-fix root-cause stack: the prior gate
+        # Pre-compute the PRESERVED injected tokens — included in the
+        # GATE NUMERATOR and the SELECTION BUDGET (honest trigger;
+        # matches what the LLM sees) but NOT selectable for compaction
+        # (they must survive; re-attach paths unchanged). This is L3 of
+        # the proactive-compaction-fix root-cause stack: the prior gate
         # excluded injections from the numerator, so a long-
         # orchestrating instance accumulating injected child reports
         # NEVER crossed the threshold even at 800+ messages.
+        # Answered notes moved OUT of this figure and INTO the
+        # selectable pool — they now count as available relief instead
+        # of permanent surviving occupancy.
         injected_tokens = (
-            estimate_messages_tokens(injected_messages)
-            if injected_messages else 0
+            estimate_messages_tokens(hoisted_injected)
+            if hoisted_injected else 0
         )
 
         # Helper: build the anti-refire stamp-only result so every
@@ -1972,12 +2094,12 @@ class ContextCompactor:
             lambda *, skip_reason: CompactionResult(
                 replacement_messages=[],
                 tokens_before=int(
-                    estimate_messages_tokens(regular_messages)
+                    estimate_messages_tokens(selectable_messages)
                     + injected_tokens
                     + context.system_prompt_tokens
                 ),
                 tokens_after=int(
-                    estimate_messages_tokens(regular_messages)
+                    estimate_messages_tokens(selectable_messages)
                     + injected_tokens
                     + context.system_prompt_tokens
                 ),
@@ -1986,15 +2108,19 @@ class ContextCompactor:
                 messages_after=len(context.messages),
                 compaction_type=skip_reason,
                 compacted_at=datetime.now(timezone.utc).isoformat(),
+                injected_preserved=len(hoisted_injected),
+                injected_absorbed=0,
             )
         )
 
-        # If every message is an injection, there is nothing to
-        # compact (the injected messages will be left in place by
-        # the unchanged conversation state). ANTI-REFIRE stamp
-        # engages the dedup so the gate does not re-fire every
-        # dispatch — the warning is rate-limited at the call site.
-        if not regular_messages:
+        # If every message is a PERMANENT or UNANSWERED injection, there
+        # is nothing to compact (the preserved injections will be left
+        # in place by the unchanged conversation state). Answered bare
+        # notes and regular history are selectable, so their presence
+        # alone does NOT fire this skip. ANTI-REFIRE stamp engages the
+        # dedup so the gate does not re-fire every dispatch — the
+        # warning is rate-limited at the call site.
+        if not selectable_messages:
             # Cycle 2 (review suggestion 4) — the
             # injection-dominated skip log is now WARN, matching
             # the 95% pre-call hook's skip-without-relief WARN
@@ -2007,9 +2133,10 @@ class ContextCompactor:
             # fires for all call sites (proactive + 95% +
             # /compact) so the WARN-level signal is uniform.
             logger.warning(
-                "[Compaction] skipping: every message carries "
-                "injected_message flag (n=%d, injected_tokens=%d); "
-                "anti-refire stamp engaged",
+                "[Compaction] skipping: every message carries the "
+                "injected_message flag and none are answered "
+                "(context_kind or unanswered bare notes; n=%d, "
+                "injected_tokens=%d); anti-refire stamp engaged",
                 len(context.messages),
                 injected_tokens,
             )
@@ -2017,27 +2144,30 @@ class ContextCompactor:
                 skip_reason="skipped_injections_dominate"
             )
 
-        # 2. Eligibility: minimum messages check (against the non-injected
-        # subset so an injection-heavy conversation doesn't get spuriously
+        # 2. Eligibility: minimum messages check (against the SELECTABLE
+        # subset — regular history plus answered notes — so a
+        # preserved-injection-heavy conversation doesn't get spuriously
         # compacted away). ANTI-REFIRE stamp engages the dedup so the
         # gate does not re-fire every dispatch.
-        if len(regular_messages) < context.config.min_messages_before_compaction:
+        if len(selectable_messages) < context.config.min_messages_before_compaction:
             logger.warning(
-                "[Compaction] skipping: %d non-injected messages "
-                "(minimum: %d, injected=%d); anti-refire stamp engaged",
-                len(regular_messages),
+                "[Compaction] skipping: %d selectable messages "
+                "(minimum: %d, preserved_injected=%d); anti-refire stamp engaged",
+                len(selectable_messages),
                 context.config.min_messages_before_compaction,
-                len(injected_messages),
+                len(hoisted_injected),
             )
             return anti_refire_skip(
                 skip_reason="skipped_below_min_messages"
             )
 
-        # 3. Token calculation — NUMERATOR includes injected tokens
-        # (L3 fix; matches what the LLM sees — the FE badge at
-        # ``_compute_context_usage`` already counts all messages).
+        # 3. Token calculation — NUMERATOR includes the preserved
+        # injected tokens (L3 fix; matches what the LLM sees — the FE
+        # badge at ``_compute_context_usage`` already counts all
+        # messages). Answered notes are inside the selectable estimate,
+        # so the unified numerator is unchanged in total.
         history_tokens = (
-            estimate_messages_tokens(regular_messages)
+            estimate_messages_tokens(selectable_messages)
             + injected_tokens
         )
         total_tokens = history_tokens + context.system_prompt_tokens
@@ -2070,13 +2200,15 @@ class ContextCompactor:
         logger.info(
             f"Compaction triggered: {total_tokens} tokens "
             f"(threshold: {threshold_tokens}, "
-            f"force={force}, regular={len(regular_messages)}, "
-            f"injected={len(injected_messages)}, "
+            f"force={force}, selectable={len(selectable_messages)}, "
+            f"injected_preserved={len(hoisted_injected)}, "
+            f"injected_absorbed={len(absorbed_notes)}, "
             f"injected_tokens={injected_tokens})"
         )
 
-        # 5. Boundary groups (regular messages only)
-        groups = identify_boundary_groups(regular_messages)
+        # 5. Boundary groups (selectable messages only — regular history
+        # plus answered bare notes)
+        groups = identify_boundary_groups(selectable_messages)
 
         # 6. Select compactable vs preserved. Pass injected tokens so
         # the budget math (`preserved_tokens <= threshold`) reflects
@@ -2138,6 +2270,8 @@ class ContextCompactor:
                     messages_after=len(context.messages),
                     compaction_type="skipped_preserved_within_threshold",
                     compacted_at=datetime.now(timezone.utc).isoformat(),
+                    injected_preserved=len(hoisted_injected),
+                    injected_absorbed=0,
                 )
 
             logger.warning(
@@ -2162,10 +2296,13 @@ class ContextCompactor:
                     if msg.id:
                         replacement.append(RemoveMessage(id=msg.id))
             replacement.extend(truncated_msgs)
-            # C3: re-attach injected messages verbatim at the end so
-            # they survive emergency truncation. They were never in
-            # ``regular_messages`` so no RemoveMessage applies.
-            replacement.extend(injected_messages)
+            # C3: re-attach preserved injected messages verbatim at the
+            # end so they survive emergency truncation. They were never
+            # in the selectable pool so no RemoveMessage applies.
+            # Answered notes ARE in the groups — they are absorbed by
+            # the truncation (re-id'd truncated-*), which is the
+            # contract for answered notes.
+            replacement.extend(hoisted_injected)
 
             non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
             tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
@@ -2194,6 +2331,11 @@ class ContextCompactor:
                 compaction_type="emergency_truncation",
                 compacted_at=timestamp,
                 compacted_ids=emergency_compacted_ids,
+                # Answered notes are all inside the groups here (the
+                # emergency path truncates the ENTIRE selectable pool),
+                # so every one of them is absorbed.
+                injected_preserved=len(hoisted_injected),
+                injected_absorbed=len(absorbed_notes),
             )
 
         # 7. Summarization path.
@@ -2272,9 +2414,9 @@ class ContextCompactor:
                         msg_timestamps=msg_timestamps,
                     )
                 )
-                # C3: re-attach injected messages verbatim at the end
-                # so they survive truncation.
-                replacement.extend(injected_messages)
+                # C3: re-attach the preserved injected messages verbatim
+                # at the end so they survive truncation.
+                replacement.extend(hoisted_injected)
                 if outcome.stop_reason in ("timeout", "budget"):
                     failure_kind = "timeout"
                 else:
@@ -2345,10 +2487,11 @@ class ContextCompactor:
                         previous_overview=previous_overview,
                         msg_timestamps=msg_timestamps,
                     )
-                # C3: re-attach injected messages at the end of the
-                # replacement list. The doc is the FIRST element so
-                # it lands in its proper position once the sentinel
-                # recipe (build_sentinel_replacement) re-orders.
+                # C3: re-attach the preserved injected messages at the
+                # end of the replacement list. The doc is the FIRST
+                # element so it lands in its proper position once the
+                # sentinel recipe (build_sentinel_replacement)
+                # re-orders.
                 replacement = [doc]
                 # Flatten preserved tail into the replacement list
                 # (multimodal content → text; original ids preserved).
@@ -2357,8 +2500,8 @@ class ContextCompactor:
                         if isinstance(msg.content, list):
                             msg.content = _extract_text_from_content(msg.content)
                         replacement.append(msg)
-                # C3: re-attach injected messages at the end.
-                replacement.extend(injected_messages)
+                # C3: re-attach the preserved injected messages at the end.
+                replacement.extend(hoisted_injected)
                 compaction_type = "summarization"
                 failure_kind = None
             else:
@@ -2413,14 +2556,14 @@ class ContextCompactor:
                     previous_overview=previous_overview,
                     msg_timestamps=msg_timestamps,
                 )
-                # C3: re-attach injected messages at the end.
+                # C3: re-attach the preserved injected messages at the end.
                 replacement = [doc]
                 for group in preserved:
                     for msg in group.messages:
                         if isinstance(msg.content, list):
                             msg.content = _extract_text_from_content(msg.content)
                         replacement.append(msg)
-                replacement.extend(injected_messages)
+                replacement.extend(hoisted_injected)
                 compaction_type = "partial_summary"
                 failure_kind = "timeout"
 
@@ -2449,7 +2592,7 @@ class ContextCompactor:
                 )
             )
             # C3: same re-attach on the truncation fallback path.
-            replacement.extend(injected_messages)
+            replacement.extend(hoisted_injected)
             failure_kind = "timeout"
             summarization_error = f"{type(e).__name__}: {e}"
         except Exception as e:
@@ -2465,7 +2608,7 @@ class ContextCompactor:
                 )
             )
             # C3: same re-attach on the truncation fallback path.
-            replacement.extend(injected_messages)
+            replacement.extend(hoisted_injected)
             failure_kind = "error"
             summarization_error = str(e)
 
@@ -2476,20 +2619,14 @@ class ContextCompactor:
         non_removal = [m for m in replacement if not isinstance(m, RemoveMessage)]
         tokens_after = estimate_messages_tokens(non_removal) + context.system_prompt_tokens
 
-        logger.info(
-            f"Compaction complete: {total_tokens} -> {tokens_after} tokens "
-            f"(saved {total_tokens - tokens_after}), type={compaction_type}, "
-            f"forced={force}, failure_kind={failure_kind}, "
-            f"injected_preserved={len(injected_messages)}, "
-            f"total_summary_status={total_summary_status}"
-        )
-
         # B1 fix (2026-09-01) — engine-populated compacted_ids.
         # The compactable span (every group message id that the
         # engine intends to drop / replace with the doc) is the
         # authoritative "removed" set for the persist-seam sites.
-        # Injected messages and the preserved tail are KEPT, NOT
-        # removed, so they are NOT in this set. The doc itself is
+        # Preserved injected messages and the preserved tail are KEPT,
+        # NOT removed, so they are NOT in this set. Answered notes that
+        # joined the selectable pool ARE absorbed via this set when
+        # their group was summarized. The doc itself is
         # a NEW id (allowed to be absent from the snapshot).
         compacted_span_ids = frozenset({
             getattr(msg, "id", None)
@@ -2497,6 +2634,28 @@ class ContextCompactor:
             for msg in group.messages
             if getattr(msg, "id", None)
         })
+
+        # Injected-notes hoisting observability — the completion line and
+        # the card envelope distinguish the preserved injections
+        # (``context_kind`` blocks + UNANSWERED bare notes — hoisted
+        # verbatim) from the absorbed ones (ANSWERED bare notes that
+        # joined the selectable pool and were consumed by the compacted
+        # span this pass). A preserved-tail-resident answered note is in
+        # NEITHER count (it stayed verbatim inline; it was not hoisted
+        # and not summarized).
+        absorbed_in_span = sum(
+            1
+            for note in absorbed_notes
+            if getattr(note, "id", None) in compacted_span_ids
+        )
+        logger.info(
+            f"Compaction complete: {total_tokens} -> {tokens_after} tokens "
+            f"(saved {total_tokens - tokens_after}), type={compaction_type}, "
+            f"forced={force}, failure_kind={failure_kind}, "
+            f"injected_preserved={len(hoisted_injected)}, "
+            f"injected_absorbed={absorbed_in_span}, "
+            f"total_summary_status={total_summary_status}"
+        )
 
         result_kwargs: dict = dict(
             replacement_messages=replacement,
@@ -2512,6 +2671,8 @@ class ContextCompactor:
             total_summary_status=total_summary_status,
             global_overview=global_overview,
             compacted_ids=compacted_span_ids,
+            injected_preserved=len(hoisted_injected),
+            injected_absorbed=absorbed_in_span,
         )
         if summarization_error:
             result_kwargs["summarization_error"] = summarization_error
@@ -3258,8 +3419,8 @@ class ContextCompactor:
         ``context.messages``.
         """
         # Span boundaries in 1-based terms (relative to the
-        # compactable_groups list, which is a slice of
-        # ``regular_messages``; the doc spec uses 1-based over the
+        # compactable_groups list, which is a slice of the
+        # selectable pool; the doc spec uses 1-based over the
         # original conversation — we emit indices relative to the
         # compactable subset since the engine does not know the
         # absolute conversation position. Persist-seam callers may
