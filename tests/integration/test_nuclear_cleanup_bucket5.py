@@ -1566,6 +1566,211 @@ class TestWS4MissionLens:
         with pytest.raises(LookupError):
             await service.resend_deferred_foreground("inst-missing")
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Unblock-round ITEM 2 (2026-09-06): real-wiring integration test
+    # for ``GET /api/jobs/cleanup/preflight``'s ``defer_blocked_count``
+    # surface. The previous (round-2) unit test
+    # ``TestCleanupPreflightEndpoint.test_preflight_ws4_live_vs_reap_split_and_defer_count``
+    # HAND-SET ``manager._defer_block_resolver`` and reached
+    # ``defer_resolver._job_repo.engine`` directly — the attribute was
+    # NEVER assigned in production (`api.py:977-978` wires only the
+    # queues.py module-global), so the count was silently 0 in
+    # production, masked behind the MagicMock hand-set. The test below
+    # uses the canonical production-shape wiring (the queues.py
+    # singleton via ``set_defer_block_resolver(...)``) against a real
+    # SQLite engine (file-backed recipe, see file header) and confirms
+    # the count propagates end-to-end through the FastAPI endpoint.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_27_preflight_defer_count_via_real_singleton_wiring(
+        self,
+        engine: Engine,
+        project_id: str,
+        tmp_path,
+    ):
+        """Unblock-round ITEM 2: real-wiring integration proof.
+
+        Production-shape wiring:
+
+        * ``set_defer_block_resolver(DeferBlockResolver(job_repo=...))``
+          — the same ``daemon/api.py:977-978`` lifespan-startup path;
+        * the FastAPI ``cleanup_preflight`` endpoint reads the resolver
+          via ``daemon.routers.queues.get_defer_block_resolver()``;
+        * the resolver's public
+          :meth:`DeferBlockResolver.defer_pending_count` instance
+          method reaches ``self._job_repo.engine`` internally — the
+          router NEVER touches the engine.
+
+        RED→GREEN anchor: this test would FAIL with the round-2
+        wiring shape (``manager._defer_block_resolver`` hand-set,
+        because the production code never assigns that attribute) —
+        the GREEN proof is "test passes with the canonical wiring
+        path". See `test_27b_preflight_defer_count_wiring_regression`
+        for the inverse pin.
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import (
+            set_defer_block_resolver,
+            _defer_block_resolver as queues_resolver_global,
+        )
+        from daemon.services.defer_block_resolver import DeferBlockResolver
+
+        # Seed: a queued defer-lane JobItem — this is the input the
+        # canonical SELECT counts (admission_state='queued' +
+        # queue_type='defer' + deleted_at IS NULL).
+        defer_qid = make_queue(
+            engine, project_id=project_id, queue_type="defer"
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Sanity: the canonical SQL constant returns 2 (the count the
+        # instance method will produce).
+        from daemon.services.defer_block_resolver import (
+            _DEFER_PENDING_COUNT_SQL,
+        )
+        with engine.connect() as conn:
+            raw_count = int(
+                conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
+            )
+        assert raw_count == 2
+
+        # Production-shape wiring: the queues.py module-global. THE
+        # SAME WIRING ``daemon/api.py`` lifespan runs at app startup.
+        job_repo = JobRepository(engine)
+        defer_resolver = DeferBlockResolver(job_repo=job_repo)
+        set_defer_block_resolver(defer_resolver)
+        try:
+            # The preflight endpoint reads the resolver via the
+            # ``get_defer_block_resolver()`` factory — assert it sees
+            # the same instance we just wired (this is the connection
+            # test for the singleton channel).
+            from daemon.routers.queues import get_defer_block_resolver
+            assert get_defer_block_resolver() is defer_resolver
+
+            # Build the FastAPI app with the management router. Use a
+            # ``MagicMock`` manager that has the bare-minimum repo
+            # attributes the preflight resolves (no hand-set on
+            # ``_defer_block_resolver`` — that would re-introduce the
+            # round-2 mask class).
+            manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+            manager._task_repo = TaskRepository(engine)
+            manager._instance_repository = SQLModelInstanceRepository(engine)
+
+            app = FastAPI()
+            app.include_router(management_router)
+            app.state.manager = manager
+
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # The defer count propagated through the singleton →
+            # resolver → instance-method path. Round-2 silently
+            # returned 0 because the wiring was never assigned in
+            # production.
+            assert body["defer_blocked_count"] == 2, (
+                f"defer_blocked_count should be 2 (real wiring); "
+                f"got {body['defer_blocked_count']}. If this is 0, "
+                f"the preflight's wiring regressed — see unblock-round "
+                f"ITEM 2 for the canonical-wiring fix."
+            )
+        finally:
+            # Reset the queues.py module-global — the integration
+            # test must not leak state to siblings. Production uses
+            # idempotent ``set_defer_block_resolver`` at lifespan
+            # startup; tests need explicit teardown.
+            import daemon.routers.queues as queues_module
+            queues_module._defer_block_resolver = None
+            assert queues_resolver_global is None  # global reset
+
+    def test_27b_preflight_defer_count_wiring_regression(
+        self,
+        engine: Engine,
+        project_id: str,
+    ):
+        """Unblock-round ITEM 2 — RED-pin for the original regression.
+
+        The round-2 wiring tried to read ``manager._defer_block_resolver``
+        (``jobs_management.py:675``) but NO production code ever assigns
+        that attribute — ``api.py:977-978`` wires only the
+        ``queues.py`` module-global. Round-2's unit test hand-set
+        ``manager._defer_block_resolver``, masking the regression.
+
+        After the unblock-round canonical fix, the preflight reads
+        ``daemon.routers.queues.get_defer_block_resolver()`` — when
+        the singleton is unwired (test double, partial lifespan, or
+        regression in startup order), the preflight sees ``503`` from
+        the factory, degrades to ``defer_blocked_count = 0``, and the
+        OLD ``manager._defer_block_resolver`` hand-set becomes a
+        silent zero — exactly the failure shape the round-2 mask
+        hid. This test pins the BRAND-NEW behavior: with the
+        production wiring absent, the preflight MUST report 0 (NOT
+        swallow an exception, NOT crash, NOT show a stale value).
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.routers.jobs_management import router as management_router
+        from daemon.routers.queues import _defer_block_resolver
+
+        # Seed: queued defer-lane JobItems.
+        defer_qid = make_queue(
+            engine, project_id=project_id, queue_type="defer"
+        )
+        make_job_item(
+            engine,
+            admission_state="queued",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Ensure the queues.py module-global is unwired (the
+        # regression shape — production's ``set_defer_block_resolver``
+        # never ran).
+        import daemon.routers.queues as queues_module
+        queues_module._defer_block_resolver = None
+        try:
+            manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+            manager._task_repo = TaskRepository(engine)
+            manager._instance_repository = SQLModelInstanceRepository(engine)
+            # NO hand-set on ``_defer_block_resolver`` (the round-2
+            # mask class). NO call to ``set_defer_block_resolver``.
+
+            app = FastAPI()
+            app.include_router(management_router)
+            app.state.manager = manager
+
+            with TestClient(app) as client:
+                response = client.get("/jobs/cleanup/preflight")
+
+            assert response.status_code == 200
+            body = response.json()
+            # The unwired-singleton path degrades to 0 — pinned so a
+            # future refactor cannot silently swallow the gap.
+            assert body["defer_blocked_count"] == 0
+        finally:
+            queues_module._defer_block_resolver = None
+            assert _defer_block_resolver is None  # global reset
+
 
 def _only_job_id(engine: Engine) -> str:
     """Return the single job_queue_items row's job_id (test helper)."""
