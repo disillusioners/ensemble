@@ -248,7 +248,7 @@ with Session(ENGINE) as s:
     report_task_id = int(report_task[0])
 
 # Real repository call — the SQL under test.
-claimed = repo.claim_pending_task()
+claimed = repo.claim_pending_task(worker_id="pg-smoke-test")
 if claimed is None:
     print("[FAIL] claim_pending_task returned None — no candidate visible", file=sys.stderr)
     sys.exit(1)
@@ -270,7 +270,7 @@ print(
 )
 
 # ── 4. Second claim — FIFO must hold within the non-report tier ─────
-claimed2 = repo.claim_pending_task()
+claimed2 = repo.claim_pending_task(worker_id="pg-smoke-test")
 if claimed2 is None:
     print("[FAIL] Second claim returned None — FIFO backlog was supposed to remain", file=sys.stderr)
     sys.exit(1)
