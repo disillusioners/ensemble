@@ -232,10 +232,16 @@ class TestWakeVsClaimExactlyOnce:
     def test_wake_lane_claim_vs_natural_claim_single_winner(
         self, engine: Engine, task_repo: TaskRepository
     ):
-        """Race 1 — the wake path and a natural FIFO competitor both
-        attempt to claim the SAME report task: exactly one worker wins;
-        the other gets nothing. Never zero (one always wins), never two
-        workers holding one task."""
+        """Regression pin — exactly-once under the wake-vs-claim race.
+
+        The wake path and a natural FIFO competitor both attempt to
+        claim the SAME report task: exactly one worker wins; the other
+        gets nothing. Never zero (one always wins), never two workers
+        holding one task. This pins a property of the wake lane
+        (terminal-report wake, ee66f0eb) — it is a regression pin, not
+        a bug-exercising proof of the original 7807e521 starvation
+        (that proof lives in
+        tests/integration/test_report_wake_priority_claim.py)."""
         _seed_instances(engine)
         report_task_id = _seed_report_triple(engine)
 

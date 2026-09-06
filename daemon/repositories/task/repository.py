@@ -1250,6 +1250,13 @@ class TaskRepository:
         Uses UPDATE-RETURNING pattern for SQLite compatibility.
         Only one worker can claim a task at a time.
 
+        Claim order (terminal-report wake, 2026-09-07): FIFO within
+        tier — PROCESS_REPORT candidates rank FIRST (the wake lane,
+        incident 7807e521), every other task type ranks second;
+        ``created_at ASC`` decides within each tier. See the ORDER BY
+        comment at the bottom of the gate cascade for the full
+        rationale and the starvation bound.
+
         Per-instance guard: a pending task is only claimable if no other task
         for the same ``instance_id`` is currently ``RUNNING`` AND no MESSAGE
         job for the same instance is *actively* ``PROCESSING`` (i.e. the
@@ -1475,9 +1482,14 @@ class TaskRepository:
                         -- ``_has_live_work`` zombie reaper. The
                         -- claim path itself remains
                         -- ``status='running'`` to preserve the
-                        -- FIFO ordering (oldest PENDING always
-                        -- claims, even when other PENDING tasks
-                        -- exist for the same instance) and the S3
+                        -- FIFO ordering within tier (the
+                        -- PROCESS_REPORT wake lane claims first
+                        -- among pending candidates — see the
+                        -- ORDER BY comment at the bottom of the
+                        -- gate cascade; oldest PENDING claims
+                        -- within its own tier, even when other
+                        -- PENDING tasks exist for the same
+                        -- instance) and the S3
                         -- operational-deadlock-prevention
                         -- invariant.
                         --
@@ -1599,6 +1611,18 @@ class TaskRepository:
                     --  * report Tasks are finite (one per child
                     --    completion), so the lane drains and plain
                     --    FIFO resumes; no indefinite starvation;
+                    --  * starvation bound (dynamic invariant,
+                    --    review cycle-1 W2): reports are DOWNSTREAM
+                    --    of tier-1 execution — a report Task row is
+                    --    only created when a child's task actually
+                    --    runs. A sustained wake lane starves those
+                    --    children → no new completions → no new
+                    --    report rows → the lane drains by itself
+                    --    (self-limiting, not self-sustaining).
+                    --    Retries are bounded (``schedule_retry``
+                    --    caps at 3), so even a repeatedly-failing
+                    --    report cannot hold the lane open
+                    --    indefinitely;
                     --  * the atomic UPDATE...RETURNING still hands
                     --    each Task to exactly one worker, and the
                     --    report_injections PENDING→TASK_DELIVERED /

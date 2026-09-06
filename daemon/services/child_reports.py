@@ -3411,8 +3411,9 @@ Provide a concise summary:"""
                     logger.info(
                         f"Bus-active: skipping inline cascade for parent "
                         f"{parent.instance_id[:8]}... — no inline status "
-                        f"write; parent terminal transition rides the "
-                        f"PROCESS_REPORT task delivery (bus is "
+                        f"write; parent terminal transition completes "
+                        f"when the PROCESS_REPORT task delivery "
+                        f"completes (bus is "
                         f"state-machine only — it does not own "
                         f"completion and does not wake the parent)"
                     )

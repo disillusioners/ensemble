@@ -5263,6 +5263,24 @@ class InstanceManager:
                 "resume_target_turn_id = work_id WHERE status = 'paused' "
                 "AND suspension_reason IS NULL"
             ),
+            # ── Composite claim-path index (terminal-report wake, ──────
+            # 2026-09-07, review cycle-1 W1). The wake lane's two-tier
+            # ORDER BY leads with a CASE on ``task_type``, which defeats
+            # ``idx_task_status_created`` (expression key ≠ index
+            # column) → full-backlog filter + top-N sort per claim
+            # cycle. ``(status, task_type, created_at)`` serves the
+            # ``status='pending'`` equality prefix and hands the ranker
+            # task_type-grouped, created_at-ordered input. The older
+            # ``idx_task_status_created`` is intentionally KEPT (the
+            # status-only created_at-ordered sweeps cannot use the new
+            # composite). Triple registration: the index name MUST be
+            # byte-identical to the SQLModel ``__table_args__`` entry
+            # and the SQLite migration
+            # ``20260906_192100_add_task_claim_wake_lane_index.sql``.
+            (
+                "CREATE INDEX IF NOT EXISTS idx_task_status_type_created "
+                "ON task (status, task_type, created_at)"
+            ),
             # ── Phase 2 admission_state column (Job-as-Queue-Proxy) ──
             # Adds the ``admission_state`` column to ``job_queue_items``
             # alongside the existing ``status`` column. Dual-write in

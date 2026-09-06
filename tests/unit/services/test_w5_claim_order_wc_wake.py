@@ -1,25 +1,46 @@
 """W5 two-turn claim-order semantics + S9 terminal-after-turn-1 edge (T9).
 
-wc-wake-report-integrity (phase1-plan §6-T9; decisions.md W5 ACCEPTED,
-C1-Q2 flag). With WC→enqueue, a user message and a child-completion
-report targeting the same parked parent BOTH become claimable Task
-rows. ``claim_pending_task`` picks strictly by ``ORDER BY created_at
-ASC LIMIT 1`` (``daemon/repositories/task/repository.py:1486``) and the
-per-instance single-RUNNING guard serializes execution: whichever row
-was created first claims first, the other runs as a SECOND turn. That
+wc-wake-report-integrity (phase1-plan §6-T9; decisions.md W5 —
+originally ACCEPTED, SUPERSEDED 2026-09-07 per leader adjudication,
+review cycle-1 verdict C1; C1-Q2 flag). With WC→enqueue, a user
+message and a child-completion report targeting the same parked parent
+BOTH become claimable Task rows. ``claim_pending_task`` ranks
+claimable candidates in TWO TIERS — PROCESS_REPORT first (the wake
+lane, Debug Phase 4 fix #1 for incident 7807e521), then every other
+task type — with ``created_at ASC`` deciding within each tier
+(``daemon/repositories/task/repository.py:1632-1635``, see the ORDER
+BY comment there). The per-instance single-RUNNING guard serializes
+execution: the winner claims, the other runs as a SECOND turn. That
 replaces the pre-wc-wake single-turn behavior (the user message was
 absorbed INTO the report turn via FIFO injection).
 
-Three pins live in this file:
+**W5 supersede (2026-09-07).** The original W5 recorded a SYMMETRIC
+claim-order race ("whichever row was created first claims first,
+strict ``ORDER BY created_at ASC``"). That symmetric-order clause is
+SUPERSEDED: same-instance REPORT-FIRST is the accepted semantics —
+when a report Task and a user-msg Task are both claimable on the same
+parent, the report claims first even if the user-msg row is older,
+completing the suspended WAITING_CHILDREN arc before new input.
+Exactly-once is unaffected (the loser still runs as a second turn,
+never absorbed, never dropped). decisions.md carries the superseding
+entry; the original ACCEPTED row is retained for audit.
 
-1. **Two-turn claim order (W5)** — under ``ENSEMBLE_WC_WAKE_ENQUEUE=1``
-   semantics, a report Task and a user-msg Task on a WAITING_CHILDREN
-   parent are both claimable and ``created_at ASC`` decides the order;
-   the loser is claimed on the NEXT pass (second turn after the first
-   completes). Also pins the reverse order (user first → report
-   second).
+Four pins live in this file:
 
-2. **FIFO-leftover single-turn invariant (the W5 deliberately-does-NOT-
+1. **Two-turn claim order (W5, superseded semantics)** — under
+   ``ENSEMBLE_WC_WAKE_ENQUEUE=1`` semantics, a report Task and a
+   user-msg Task on a WAITING_CHILDREN parent are both claimable; the
+   REPORT claims first (wake lane) in BOTH creation orders —
+   report-older and user-msg-older — and the loser (the user message)
+   runs as the SECOND turn after the report completes.
+
+2. **Wake-lane tier residency (S4 fold-in, review cycle-1)** — the
+   lane promotes ONLY ``PROCESS_REPORT``: ``SEND_REPORT`` and
+   ``CLEANUP`` are tier-1 residents that must NOT enter the wake
+   lane — they queue in plain ``created_at`` order behind older
+   ``PROCESS_MESSAGE`` work.
+
+3. **FIFO-leftover single-turn invariant (the W5 deliberately-does-NOT-
    extend case, phase1-plan §6-T9 last paragraph)** — PRE-EXISTING
    parked-FIFO leftovers still drain INTO the wake turn's graph input
    (T5/D2 seam drain: leftovers + new user message = ONE astream call,
@@ -27,10 +48,10 @@ Three pins live in this file:
    This is the S4 input-order positional pin as well — the prior T5
    pass landed the drain code without its mandated tests.
 
-3. **S9 — terminal-after-turn-1** (reconciliation-pass addition): the
+4. **S9 — terminal-after-turn-1** (reconciliation-pass addition): the
    claim pause gate excludes ONLY PAUSED/TERMINATED instances
-   (``task/repository.py:1414-1428``) — a queued user-msg Task still
-   CLAIMS on a parent that went COMPLETED after turn 1. The
+   (``task/repository.py`` claim pause gate) — a queued user-msg Task
+   still CLAIMS on a parent that went COMPLETED after turn 1. The
    enqueue-side twin (terminal-revive in ``_prepare_enqueued_message``,
    ``instance_messaging.py:1527-1545``) reactivates the COMPLETED
    parent at send time. Together: terminal-after-enqueue never
@@ -163,20 +184,25 @@ def _set_instance_status(engine: Engine, instance_id: str, status: str) -> None:
 
 
 class TestW5TwoTurnClaimOrder:
-    """User-msg and child-report rows on a WC parent: created_at ASC decides.
+    """User-msg and child-report rows on a WC parent: the wake lane decides.
 
     Both rows are claimable — WAITING_CHILDREN is not in the claim pause
     gate (only PAUSED/TERMINATED are). The per-instance single-RUNNING
     guard serializes the two turns: the first claim flips its row to
     RUNNING, the second row becomes claimable only after the first
     completes — i.e. the second claim pass represents the SECOND turn.
+
+    Order authority (W5 superseded semantics, 2026-09-07): the
+    PROCESS_REPORT wake lane claims FIRST regardless of which row is
+    older; within a tier, ``created_at ASC`` decides. The loser (the
+    user message) always runs as the second turn.
     """
 
     def test_report_first_created_claimed_first_user_msg_second_turn(
         self, engine: Engine
     ):
         """Report row created before the user-msg row → report turn 1,
-        user-message turn 2 (both claimable, ASC order)."""
+        user-message turn 2."""
         iid = _seed_instance(engine, status=InstanceStatus.WAITING_CHILDREN.value)
         base = datetime.now(timezone.utc)
         report_task_id = _seed_task(
@@ -194,12 +220,12 @@ class TestW5TwoTurnClaimOrder:
 
         repo = TaskRepository(engine)
 
-        # Turn 1: the OLDER row (the report) claims first.
+        # Turn 1: the report claims first — it is both OLDER and in the
+        # tier-0 wake lane.
         first = repo.claim_pending_task(worker_id="worker-1")
         assert first is not None
         assert first.id == report_task_id, (
-            "W5: the row created FIRST must claim first — "
-            "created_at ASC is the sole ordering authority"
+            "W5: the report claims first (wake lane AND older row)"
         )
         assert first.status == TaskStatus.RUNNING.value
 
@@ -221,10 +247,16 @@ class TestW5TwoTurnClaimOrder:
             "turn completes — not absorbed into the report turn"
         )
 
-    def test_user_msg_first_created_claimed_first_report_second_turn(
+    def test_report_claims_first_even_when_user_msg_created_first(
         self, engine: Engine
     ):
-        """Inverse order: user-msg created first, report second — amended by ee66f0eb: report claims first (two-tier CASE outranks FIFO)."""
+        """W5 SUPERSEDED semantics (leader adjudication 2026-09-07,
+        cycle-1 verdict C1; ratifies the 9b0dab41 stopgap): same-instance
+        REPORT-FIRST. The user-msg row is created FIRST (older), the
+        report SECOND (younger) — the report still claims first,
+        completing the suspended WAITING_CHILDREN arc before new input.
+        The user message then runs as the SECOND turn (not absorbed,
+        not stranded)."""
         iid = _seed_instance(engine, status=InstanceStatus.WAITING_CHILDREN.value)
         base = datetime.now(timezone.utc)
         user_msg_task_id = _seed_task(
@@ -242,21 +274,138 @@ class TestW5TwoTurnClaimOrder:
 
         repo = TaskRepository(engine)
 
-        # Contract amended by ee66f0eb: two-tier CASE ranking in
-        # TaskRepository.claim_pending_task supersedes the symmetric-order W5
-        # pin; canonical tests: tests/integration/test_report_wake_priority_claim.py — flagged for leader ratification.
+        # Turn 1: the report claims FIRST despite being the YOUNGER row —
+        # the tier-0 wake lane outranks created_at across tiers
+        # (canonical pin: tests/integration/test_report_wake_priority_claim.py).
         first = repo.claim_pending_task(worker_id="worker-1")
         assert first is not None and first.id == report_task_id, (
-            "W5 (amended by ee66f0eb): the PROCESS_REPORT task claims first "
-            "across tiers — wake-lane priority outranks created-at FIFO"
+            "W5 superseded semantics: same-instance report-first — the "
+            "PROCESS_REPORT wake lane claims before an older user-msg "
+            "row, completing the suspended WAITING_CHILDREN arc before "
+            "new input"
         )
 
-        repo.complete_task(report_task_id, result={})
+        # The user message is NOT absorbed into the report turn: it
+        # runs as the SECOND turn after the report completes
+        # (exactly-once and no-strand are unaffected by the supersede).
+        repo.complete_task(report_task_id, result={"summary": "report delivered"})
         second = repo.claim_pending_task(worker_id="worker-1")
         assert second is not None and second.id == user_msg_task_id, (
-            "W5 (amended by ee66f0eb): after the wake-lane row drains, the "
-            "user-msg task claims second — identities kept, order flipped"
+            "W5: the user message runs as a SECOND turn — identities "
+            "kept, order flipped by the wake lane"
         )
+
+
+# ---------------------------------------------------------------------------
+# 1b. S4 fold-in (review cycle-1) — wake-lane tier residency
+# ---------------------------------------------------------------------------
+
+
+class TestWakeLaneTierResidency:
+    """The wake lane promotes ONLY ``PROCESS_REPORT``.
+
+    ``SEND_REPORT`` and ``CLEANUP`` are tier-1 residents: they must NOT
+    enter the wake lane, i.e. they queue in plain ``created_at`` order
+    behind older ``PROCESS_MESSAGE`` work and never jump an older
+    message task. Pins the CASE key's exact type-residency
+    (``task_type = 'process_report'``) so a future widening of the
+    lane to other "report-ish" types is a deliberate, review-visible
+    decision — not an accident of substring or suffix matching.
+    """
+
+    def test_send_report_and_cleanup_stay_in_plain_fifo_tier(
+        self, engine: Engine
+    ):
+        """msg(oldest) + SEND_REPORT + CLEANUP (younger) on one instance:
+        claims come back in strict created_at order — neither
+        SEND_REPORT nor CLEANUP jumps the older PROCESS_MESSAGE."""
+        iid = _seed_instance(engine, status=InstanceStatus.WAITING_CHILDREN.value)
+        base = datetime.now(timezone.utc)
+        msg_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            created_at=base,
+        )
+        send_report_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.SEND_REPORT.value,
+            created_at=base + timedelta(seconds=1),
+        )
+        cleanup_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.CLEANUP.value,
+            created_at=base + timedelta(seconds=2),
+        )
+
+        repo = TaskRepository(engine)
+
+        first = repo.claim_pending_task(worker_id="worker-1")
+        assert first is not None and first.id == msg_id, (
+            "S4 tier residency: SEND_REPORT and CLEANUP must NOT enter "
+            "the wake lane — the older PROCESS_MESSAGE claims first"
+        )
+        repo.complete_task(msg_id, result={})
+
+        second = repo.claim_pending_task(worker_id="worker-1")
+        assert second is not None and second.id == send_report_id, (
+            "S4 tier residency: within tier-1, SEND_REPORT keeps "
+            "created_at FIFO"
+        )
+        repo.complete_task(send_report_id, result={})
+
+        third = repo.claim_pending_task(worker_id="worker-1")
+        assert third is not None and third.id == cleanup_id, (
+            "S4 tier residency: within tier-1, CLEANUP keeps "
+            "created_at FIFO"
+        )
+
+    def test_wake_lane_promotes_only_process_report(self, engine: Engine):
+        """msg(oldest) + SEND_REPORT + PROCESS_REPORT (youngest): the
+        PROCESS_REPORT claims first (lane key is exactly PROCESS_REPORT),
+        then tier-1 drains in created_at order (msg, then SEND_REPORT)."""
+        iid = _seed_instance(engine, status=InstanceStatus.WAITING_CHILDREN.value)
+        base = datetime.now(timezone.utc)
+        msg_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            created_at=base,
+        )
+        send_report_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.SEND_REPORT.value,
+            created_at=base + timedelta(seconds=1),
+        )
+        report_id = _seed_task(
+            engine,
+            instance_id=iid,
+            task_type=TaskType.PROCESS_REPORT.value,
+            created_at=base + timedelta(seconds=2),
+        )
+
+        repo = TaskRepository(engine)
+
+        first = repo.claim_pending_task(worker_id="worker-1")
+        assert first is not None and first.id == report_id, (
+            "the wake lane promotes ONLY PROCESS_REPORT — the youngest "
+            "row wins because it is the sole tier-0 resident, proving "
+            "SEND_REPORT was not promoted with it"
+        )
+        repo.complete_task(report_id, result={})
+
+        second = repo.claim_pending_task(worker_id="worker-1")
+        assert second is not None and second.id == msg_id, (
+            "after the wake lane drains, tier-1 resumes strict "
+            "created_at FIFO (msg before the younger SEND_REPORT)"
+        )
+        repo.complete_task(msg_id, result={})
+
+        third = repo.claim_pending_task(worker_id="worker-1")
+        assert third is not None and third.id == send_report_id
 
 
 # ---------------------------------------------------------------------------
