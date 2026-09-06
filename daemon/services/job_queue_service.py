@@ -1557,8 +1557,12 @@ class JobQueueService:
         WS4 holder action (2026-09-06) — recovers deferred messages a
         stalled/paused holder is pinning: each queued defer-lane
         JobItem on the holder's own books is cancelled through the
-        existing single-job :meth:`cancel_job` path, and its
-        ``message`` content is re-enqueued via the public
+        existing single-job :meth:`cancel_job` path, its authoritative
+        Task (``Task.work_id == JobItem.job_id`` on the job-driven
+        path) is cancelled through the existing virtual-job cancel
+        (:meth:`cancel_task_by_work_id` — atomic for PENDING, so the
+        union stays consistent and no bad-state shape is minted), and
+        its ``message`` content is re-enqueued via the public
         ``enqueue_message_job`` front primitive (the same call
         ``POST /api/instances/{id}/messages`` makes). The re-enqueue is
         a NEW foreground message job (``is_deferred=False`` — the
@@ -1654,16 +1658,34 @@ class JobQueueService:
                 })
                 continue
             cancelled += 1
+            # WS4: also cancel the mirror's authoritative Task (the
+            # shared linkage makes ``Task.work_id == JobItem.job_id``
+            # on the job-driven path) so the union stays consistent —
+            # a cancelled mirror over a live PENDING defer Task is
+            # exactly the bad-state shape. Best-effort: a missing
+            # task repo / already-terminal task yields False and is
+            # reported, not raised. Task-level writes are NOT census
+            # writers; this reuses the existing virtual-job cancel.
+            task_cancelled = False
+            try:
+                task_cancelled = await self.cancel_task_by_work_id(job.job_id)
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                logger.warning(
+                    "resend_deferred_foreground: task cancel failed for "
+                    "%s: %s", job.job_id[:8], exc,
+                )
             if not content:
                 skipped_empty += 1
                 resend_results.append({
                     "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
                     "skipped": "empty message content — nothing to re-send",
                 })
                 continue
             if self._instance_manager is None:
                 resend_results.append({
                     "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
                     "error": "instance manager unavailable — cannot re-enqueue",
                 })
                 continue
@@ -1675,12 +1697,14 @@ class JobQueueService:
                 )
                 resend_results.append({
                     "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
                     "job_id": getattr(result, "job_id", None),
                     "message_id": getattr(result, "message_id", None),
                 })
             except Exception as exc:  # noqa: BLE001 — per-row best-effort
                 resend_results.append({
                     "cancelled_job_id": job.job_id,
+                    "task_cancelled": task_cancelled,
                     "error": f"re-enqueue failed: {exc}",
                 })
 

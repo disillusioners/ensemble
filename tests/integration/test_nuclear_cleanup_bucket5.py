@@ -343,19 +343,22 @@ def make_task(
     *,
     instance_id: str,
     status: str = TaskStatus.PENDING.value,
+    work_id: str | None = None,
 ) -> int:
     """Insert a Task row with the given status. Returns the task id.
 
     Like :func:`make_job_item`, this uses a raw UPDATE after the
     initial insert so we can pin ``status`` to anything
     (running, paused, etc.) without going through the TaskRepository
-    state machine.
+    state machine. ``work_id`` lets a test pin the Task↔JobItem
+    linkage (``Task.work_id == JobItem.job_id`` on the job-driven
+    path).
     """
-    work_id = f"work-{uuid.uuid4().hex[:12]}"
+    wid = work_id or f"work-{uuid.uuid4().hex[:12]}"
     now_dt = _now_dt()
     with Session(engine) as s:
         task = Task(
-            work_id=work_id,
+            work_id=wid,
             task_type="process_message",
             instance_id=instance_id,
             message_id=None,
@@ -1235,6 +1238,9 @@ class TestWS4MissionLens:
             queue_id=defer_qid,
             message="please run the deferred work",
         )
+        # The mirror's authoritative Task — the job-driven path mints
+        # ``Task.work_id == JobItem.job_id``, so seed the linkage.
+        make_task(engine, instance_id=inst.instance_id, work_id=jid)
 
         from types import SimpleNamespace
 
@@ -1249,12 +1255,22 @@ class TestWS4MissionLens:
         assert result["skipped_empty_content"] == 0
         assert result["resend_results"][0]["cancelled_job_id"] == jid
         assert result["resend_results"][0]["job_id"] == "new-job-1"
+        # The authoritative Task was cancelled too (union consistency).
+        assert result["resend_results"][0]["task_cancelled"] is True
 
         # The cancelled row is terminal (done/cancelled) — the OLD
         # mirror, mutated through the registered cancel writer.
         job_after = get_job(engine, jid)
         assert job_after["admission_state"] == "done"
         assert job_after["terminal_reason"] == "cancelled"
+
+        # The linked Task is CANCELLED — no bad-state shape minted.
+        with engine.begin() as conn:
+            task_status = conn.execute(
+                text("SELECT status FROM task WHERE work_id = :w"),
+                {"w": jid},
+            ).scalar_one()
+        assert task_status == TaskStatus.CANCELLED.value
 
         # The NEW foreground job went through the public front
         # primitive with the original content (is_deferred defaults
