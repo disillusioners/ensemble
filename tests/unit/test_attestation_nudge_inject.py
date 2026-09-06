@@ -56,7 +56,11 @@ def test_deny_injects_checkpoint_plain_dict_and_routes_to_agent():
         "— and only when — the work is truly complete, you MUST "
         "call the attest_completion tool before finishing; "
         "completions without that call are premature and will be "
-        "blocked again."
+        "blocked again. Attestation is a SEPARATE step: FIRST "
+        "deliver your full detailed final report as its own "
+        "message, THEN call attest_completion alone as a "
+        "subsequent step — never bundle the report into the "
+        "attestation tool-call message."
     )
     assert nudge.additional_kwargs["attestation_nudge"] is True
     assert nudge.additional_kwargs["attestation_nudge_denied_count"] == 1
