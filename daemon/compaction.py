@@ -38,7 +38,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from .config import CompactionConfig
+# resolve_injected_notes_absorb — ENSEMBLE_INJECTED_NOTES_ABSORB
+# kill-switch resolver (env-only; injected-notes hoisting fix
+# follow-up), consulted at the ONE boundary site below.
+from .config import CompactionConfig, resolve_injected_notes_absorb
 from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -128,8 +131,20 @@ def _injected_note_absorbed_ids(messages: list[BaseMessage]) -> frozenset[str]:
 
     Returns:
         Frozenset of message ids that may be absorbed into the
-        compacted span. Empty when there are no answered bare notes.
+        compacted span. Empty when there are no answered bare notes —
+        or when the ``ENSEMBLE_INJECTED_NOTES_ABSORB`` kill-switch
+        resolves OFF, in which case the absorb contract is disabled
+        entirely and the three-bucket partition degenerates to the
+        legacy two-bucket behavior (ALL injected preserved + hoisted;
+        ``context_kind`` handling unchanged in both states). This is
+        the SINGLE check site for the flag — the gate, numerator,
+        envelope, and seam all consume this set downstream.
     """
+    if not resolve_injected_notes_absorb():
+        # Kill-switch OFF → empty absorbed set: every bare-flag note
+        # fails the ``msg_id not in absorbed_note_ids`` hoist check and
+        # returns to preserve-forever hoisting (old behavior).
+        return frozenset()
     absorbed: set[str] = set()
     for idx, msg in enumerate(messages):
         if not _is_injected_message(msg) or _has_context_kind(msg):

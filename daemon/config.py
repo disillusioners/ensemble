@@ -2215,6 +2215,51 @@ def _resolve_proactive_enabled(
     return bool(yaml_value)
 
 
+def resolve_injected_notes_absorb() -> bool:
+    """Resolve the ``ENSEMBLE_INJECTED_NOTES_ABSORB`` kill-switch.
+
+    Injected-notes hoisting fix follow-up. Governs the answered-note
+    absorb contract in ``daemon/compaction.py`` — when ON (default), a
+    bare-flag injected note with a later ``AIMessage`` joins the
+    selectable pool and is absorbed into the compacted span; when OFF,
+    the absorbed-id set is empty and EVERY bare-flag note returns to
+    the legacy preserve-forever hoisting (the pre-fix two-bucket
+    behavior). ``context_kind`` messages are permanent in BOTH states
+    (different contract, not governed by this flag).
+
+    Env-only resolver — deliberately NOT a ``CompactionConfig`` field:
+    the flag is consulted at the single boundary site
+    (``_injected_note_absorbed_ids``) at compaction time, and adding a
+    pydantic-settings bool field without an explicit ``_resolve_*`` in
+    ``load_config`` would reintroduce the init-kwarg-beats-env
+    inversion trap (a YAML/init value silently defeating the operator
+    kill-switch). Mirrors the ``ENSEMBLE_PROACTIVE_COMPACTION``
+    falsy-parsing convention: empty/whitespace (bare ``KEY=`` in
+    ``.env``) is treated as UNSET → documented ON default;
+    ``0``/``false``/``no``/``off`` (any case) → OFF;
+    ``1``/``true``/``yes``/``on`` (any case) → ON; any other
+    non-empty string raises :class:`ValueError` naming the flag (the
+    compaction path fails open and the typo is loud, never silently
+    defaulted).
+
+    Not coupled to ``ENSEMBLE_PROACTIVE_COMPACTION`` — that flag arms
+    the auto-trigger ladder (P1/P1b); this one flips the absorb
+    contract itself.
+    """
+    raw = _clean_env_value(os.environ.get("ENSEMBLE_INJECTED_NOTES_ABSORB"))
+    if raw is None:
+        return True  # documented default ON
+    s = raw.strip().lower()
+    if s in _PROACTIVE_FALSE_BOOLS:
+        return False
+    if s in _PROACTIVE_TRUE_BOOLS:
+        return True
+    raise ValueError(
+        f"Invalid ENSEMBLE_INJECTED_NOTES_ABSORB value {raw!r} — expected "
+        f"one of 0/false/no/off (disable) or 1/true/yes/on (enable)"
+    )
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.

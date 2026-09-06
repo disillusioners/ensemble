@@ -472,3 +472,369 @@ class TestEnvelopeHonesty:
             )
         assert result.injected_preserved == 0
         assert result.injected_absorbed == 0
+
+
+# ---------------------------------------------------------------------------
+# 7. Kill-switch ENSEMBLE_INJECTED_NOTES_ABSORB (follow-up item 1)
+# ---------------------------------------------------------------------------
+
+_FLAG = "ENSEMBLE_INJECTED_NOTES_ABSORB"
+
+
+def _unset_flag(monkeypatch) -> None:
+    monkeypatch.delenv(_FLAG, raising=False)
+
+
+class TestAbsorbKillSwitchResolver:
+    """Resolver-level pins for ``resolve_injected_notes_absorb`` —
+    mirrors the ``ENSEMBLE_PROACTIVE_COMPACTION`` falsy convention:
+    unset/empty → documented ON default; 0/false/no/off (any case) →
+    OFF; 1/true/yes/on → ON; anything else raises (loud typo, never a
+    silent default).
+    """
+
+    def test_flag_unset_resolves_on(self, monkeypatch):
+        _unset_flag(monkeypatch)
+        from daemon.config import resolve_injected_notes_absorb
+
+        assert resolve_injected_notes_absorb() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "False", "OFF"])
+    def test_flag_falsy_spellings_disable(self, monkeypatch, value):
+        monkeypatch.setenv(_FLAG, value)
+        from daemon.config import resolve_injected_notes_absorb
+
+        assert resolve_injected_notes_absorb() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE"])
+    def test_flag_truthy_spellings_enable(self, monkeypatch, value):
+        monkeypatch.setenv(_FLAG, value)
+        from daemon.config import resolve_injected_notes_absorb
+
+        assert resolve_injected_notes_absorb() is True
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_flag_empty_string_safe_on(self, monkeypatch, value):
+        """Bare ``KEY=`` in .env reaches os.environ as "" — treated as
+        UNSET per ``_clean_env_value`` → documented ON default (safe).
+        """
+        monkeypatch.setenv(_FLAG, value)
+        from daemon.config import resolve_injected_notes_absorb
+
+        assert resolve_injected_notes_absorb() is True
+
+    def test_flag_invalid_value_raises_loud(self, monkeypatch):
+        monkeypatch.setenv(_FLAG, "maybe")
+        from daemon.config import resolve_injected_notes_absorb
+
+        with pytest.raises(ValueError, match="ENSEMBLE_INJECTED_NOTES_ABSORB"):
+            resolve_injected_notes_absorb()
+
+
+class TestAbsorbKillSwitchOffDegeneration:
+    """Behavioral kill-switch pins. Contract: flag OFF ⇒ the absorbed-id
+    set is empty ⇒ the three-bucket partition degenerates EXACTLY to the
+    legacy two-bucket behavior — ALL bare-flag notes preserved verbatim
+    and hoisted, answered or not; ``context_kind`` unchanged in BOTH
+    states; the injections-dominate gate skips again under OFF.
+    """
+
+    @pytest.mark.asyncio
+    async def test_flag_off_answered_note_returns_to_legacy_hoist_shape(
+        self, monkeypatch
+    ):
+        """(ii) `=0` → the answered note from
+        ``TestAnsweredNoteAbsorbed`` is preserved VERBATIM and hoisted
+        at the head — the replacement-messages shape equals the legacy
+        hoist shape: [note][doc][tail].
+        """
+        monkeypatch.setenv(_FLAG, "0")
+        from daemon.compaction import build_sentinel_replacement
+
+        compactor = _make_compactor()
+        seen = _spy_prompts(compactor)
+        note = _bare_note("OPS-NOTE-OFF-STATE", "note-1")
+        msgs = (
+            _padded_regulars("early", ["e-0", "e-1", "e-2"])
+            + [note, AIMessage(content="noted, thanks", id="ai-ack")]
+            + _padded_regulars("late", ["l-0", "l-1", "l-2", "l-3"])
+        )
+        ctx = _build_context(msgs)
+
+        result = await compactor.compact_state(ctx)
+
+        assert result is not None
+        assert result.compaction_type == "summarization", (
+            "regular history still compacts under flag OFF"
+        )
+        # Envelope flips to the legacy accounting: preserved, not absorbed.
+        assert result.injected_preserved == 1
+        assert result.injected_absorbed == 0
+
+        replacement = build_sentinel_replacement(
+            result, list(ctx.messages), compacted_ids=result.compacted_ids
+        )
+        keepables = [
+            m for m in replacement if not isinstance(m, RemoveMessage)
+        ]
+        keep_ids = [m.id for m in keepables]
+        # Legacy hoist shape: [hoisted note][compaction doc][tail…].
+        assert keep_ids[0] == "note-1"
+        assert isinstance(keepables[1], SystemMessage)
+        assert (keepables[1].id or "").startswith("compaction-global-")
+        # Verbatim: exactly one copy, unmodified content.
+        assert keep_ids.count("note-1") == 1
+        assert keepables[0].content == "OPS-NOTE-OFF-STATE"
+        # Never summarized even though an AIMessage answered it.
+        for prompt in seen:
+            assert "OPS-NOTE-OFF-STATE" not in prompt, (
+                "flag OFF must restore preserve-forever: the answered "
+                "note leaked into the summarization prompt"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag_value", [None, "0"])
+    async def test_context_kind_preserved_in_both_flag_states(
+        self, monkeypatch, flag_value
+    ):
+        """(iv) context_kind handling is flag-INDEPENDENT: preserved
+        verbatim and hoisted under ON (unset) and OFF alike.
+        """
+        if flag_value is None:
+            _unset_flag(monkeypatch)
+        else:
+            monkeypatch.setenv(_FLAG, flag_value)
+
+        compactor = _make_compactor()
+        seen = _spy_prompts(compactor)
+        ctx_note = _ctx_note("[SYSTEM CONTEXT: T]\nCTX-BODY-XYZ", "ctx-1")
+        msgs = [ctx_note]
+        for i in range(6):
+            msgs.append(HumanMessage(content=f"h-{i} {PAD}", id=f"h-{i}"))
+            msgs.append(AIMessage(content=f"a-{i}", id=f"a-{i}"))
+        ctx = _build_context(msgs)
+
+        result = await compactor.compact_state(ctx)
+
+        assert result is not None
+        assert result.compaction_type == "summarization"
+        kept = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        ctx_kept = next(m for m in kept if m.id == "ctx-1")
+        assert ctx_kept.content == "[SYSTEM CONTEXT: T]\nCTX-BODY-XYZ"
+        assert (ctx_kept.additional_kwargs or {}).get("context_kind") == "task_context"
+        for prompt in seen:
+            assert "CTX-BODY-XYZ" not in prompt
+        assert result.injected_preserved == 1
+        assert result.injected_absorbed == 0
+
+    @pytest.mark.asyncio
+    async def test_flag_off_all_bare_unanswered_channel_skips(self, monkeypatch):
+        """(v, parity) An all-bare-injected channel (no AIMessage → all
+        unanswered) skips under OFF exactly as legacy semantics did.
+        """
+        monkeypatch.setenv(_FLAG, "0")
+        compactor = _make_compactor()
+        msgs = [_bare_note(f"NOTE-{i} {PAD}", f"note-{i}") for i in range(5)]
+        ctx = _build_context(msgs)
+
+        result = await compactor.compact_state(ctx)
+
+        assert result is not None
+        assert result.compaction_type == "skipped_injections_dominate"
+        assert result.replacement_messages == []
+        assert result.injected_preserved == 5
+        assert result.injected_absorbed == 0
+
+    @pytest.mark.asyncio
+    async def test_flag_off_gate_flips_back_to_injections_dominate(
+        self, monkeypatch
+    ):
+        """(v, distinguishing) Injected-ack channel: under ON the
+        answered notes make the pool selectable → engine compacts; the
+        SAME channel under OFF hoists everything → the
+        injections-dominate skip fires again (old semantics restored).
+        """
+        from daemon.compaction import CompactionContext  # noqa: F401 (parity with helpers)
+
+        def _injected_ack(i: int) -> AIMessage:
+            return AIMessage(
+                content=f"ack-{i}",
+                id=f"ai-{i}",
+                additional_kwargs={"injected_message": True},
+            )
+
+        # ON (unset): notes answered by the later injected AIMessage →
+        # selectable pool non-empty → compaction proceeds.
+        compactor_on = _make_compactor()
+        msgs = [_bare_note(f"NOTE-{i} {PAD}", f"note-{i}") for i in range(4)]
+        msgs.append(_injected_ack(0))
+        ctx_on = _build_context(msgs)
+        result_on = await compactor_on.compact_state(ctx_on)
+        assert result_on is not None
+        # The point of the flip: the gate does NOT fire under ON — the
+        # answered notes make the pool selectable and compaction runs.
+        assert result_on.compaction_type == "summarization"
+        assert result_on.injected_preserved == 1  # trailing injected ack (unanswered)
+        # At least one answered note absorbed into the doc (exact split
+        # is window-dependent: tail-resident answered notes count in
+        # neither envelope figure — see TestEnvelopeHonesty).
+        assert result_on.injected_absorbed >= 1
+
+        # OFF ("0"): identical channel → nothing selectable → skip.
+        monkeypatch.setenv(_FLAG, "0")
+        compactor_off = _make_compactor()
+        ctx_off = _build_context(list(msgs))
+        result_off = await compactor_off.compact_state(ctx_off)
+        assert result_off is not None
+        assert result_off.compaction_type == "skipped_injections_dominate"
+        assert result_off.injected_preserved == 5
+        assert result_off.injected_absorbed == 0
+
+
+# ---------------------------------------------------------------------------
+# 8. id-less bare note → conservative UNANSWERED fallback (item 2a)
+# ---------------------------------------------------------------------------
+
+
+class TestIdLessBareNoteFallback:
+    """An id-less bare note is conservatively treated as UNANSWERED —
+    never absorbed in EITHER flag state: preserved verbatim and hoisted
+    even when an AIMessage answers it positionally.
+    """
+
+    @staticmethod
+    def _id_less_note() -> HumanMessage:
+        return HumanMessage(
+            content="ID-LESS-OPERATOR-NOTE",
+            additional_kwargs={"injected_message": True},
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("flag_value", [None, "0"])
+    async def test_id_less_note_never_absorbed_both_flag_states(
+        self, monkeypatch, flag_value
+    ):
+        if flag_value is None:
+            _unset_flag(monkeypatch)
+        else:
+            monkeypatch.setenv(_FLAG, flag_value)
+        from daemon.compaction import build_sentinel_replacement
+
+        compactor = _make_compactor()
+        seen = _spy_prompts(compactor)
+        note = self._id_less_note()
+        msgs = (
+            _padded_regulars("h", ["h-0", "h-1", "h-2", "h-3", "h-4", "h-5"])
+            + [note, AIMessage(content="ack", id="ai-ack")]
+        )
+        ctx = _build_context(msgs)
+
+        result = await compactor.compact_state(ctx)
+
+        assert result is not None
+        assert result.compaction_type == "summarization"
+        # Envelope: conservative preserve in BOTH states.
+        assert result.injected_preserved == 1
+        assert result.injected_absorbed == 0
+        for prompt in seen:
+            assert "ID-LESS-OPERATOR-NOTE" not in prompt, (
+                "id-less bare note leaked into the summarization prompt"
+            )
+        # Hoisted verbatim at the head via the seam.
+        replacement = build_sentinel_replacement(
+            result, list(ctx.messages), compacted_ids=result.compacted_ids
+        )
+        keepables = [
+            m for m in replacement if not isinstance(m, RemoveMessage)
+        ]
+        assert keepables[0].content == "ID-LESS-OPERATOR-NOTE", (
+            "id-less bare note must hoist verbatim at the head"
+        )
+        assert isinstance(keepables[1], SystemMessage)
+
+
+# ---------------------------------------------------------------------------
+# 9. Emergency-path envelope math with answered notes (item 2b)
+# ---------------------------------------------------------------------------
+
+
+def _build_emergency_context(messages: list):
+    """CompactionContext shaped to force the emergency-truncation exit:
+    recent window ≥ group count (compactable == []) and a tiny window ×
+    threshold so preserved tokens blow past the threshold (mirrors the
+    ``test_emergency_truncation_when_preserved_exceeds_threshold``
+    fixture in tests/unit/test_compaction.py).
+    """
+    from daemon.compaction import CompactionContext
+
+    config = MagicMock()
+    config.threshold = 0.01
+    config.min_messages_before_compaction = 3
+    config.recent_message_window = 200
+    config.min_recent_window = 200
+    config.target_ratio = 0.5
+    config.summarization_chunk_threshold = 1.0
+    config.context_window_overrides = {"test-model": 100}
+    config.context_window_default = 0
+
+    return CompactionContext(
+        messages=messages,
+        system_prompt_tokens=0,
+        model_name="test-model",
+        config=config,
+        llm_config={
+            "model": "test-model",
+            "base_url": "http://test",
+            "api_key": "sk-test",
+            "temperature": 0.0,
+        },
+        last_compacted_at=None,
+    )
+
+
+class TestEmergencyPathEnvelope:
+    @pytest.mark.asyncio
+    async def test_emergency_envelope_counts_answered_notes(self, monkeypatch):
+        """Emergency exit with answered notes present: ``compactable
+        == []`` means groups cover the ENTIRE selectable pool, so every
+        group message (every answered note among them) is RemoveMessage'd
+        and its truncated successor is re-id'd ``truncated-*`` — the
+        ``injected_absorbed=len(absorbed_notes)`` claim at the emergency
+        return is exact. Pinned with a real assertion.
+        """
+        _unset_flag(monkeypatch)
+        compactor = _make_compactor()
+        note = _bare_note("EMERGENCY-ANSWERED-NOTE", "note-em")
+        msgs = (
+            _padded_regulars("h", [f"h-{i}" for i in range(8)])
+            + [note, AIMessage(content="ack", id="ai-ack")]
+        )
+        ctx = _build_emergency_context(msgs)
+
+        result = await compactor.compact_state(ctx)
+
+        assert result is not None
+        assert result.compaction_type == "emergency_truncation"
+        # Envelope math: the answered note is absorbed (its original id
+        # is a RemoveMessage target), nothing is hoisted.
+        assert result.injected_absorbed == 1
+        assert result.injected_preserved == 0
+        remove_ids = {
+            m.id for m in result.replacement_messages
+            if isinstance(m, RemoveMessage)
+        }
+        assert "note-em" in remove_ids, (
+            "answered note's original id must be a RemoveMessage target "
+            "on the emergency path — that IS the absorb contract there"
+        )
+        # Surviving non-removal messages carry only re-id'd truncated
+        # ids (hoisted_injected is empty in this scenario).
+        survivor_ids = [
+            m.id for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage) and m.id
+        ]
+        assert all(sid.startswith("truncated-") for sid in survivor_ids)
+
