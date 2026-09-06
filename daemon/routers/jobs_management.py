@@ -8,6 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
+# `defer_pending_count` lives in `daemon.services.defer_block_resolver`
+# but importing it at module level causes a circular import:
+#   defer_block_resolver -> daemon.routers.schemas -> daemon.routers -> jobs_management
+# Imported lazily inside :func:`cleanup_preflight` (WS4 Round-2 ITEM 7).
 from daemon.services.work_status import (
     _derive_legacy_status,
     is_terminal as _is_terminal_canonical,
@@ -605,12 +609,18 @@ async def cleanup_preflight(request: Request):
     reap-eligible. The response now carries the full live-vs-reap
     split: ``zombie_instance_count`` (WILL be reaped),
     ``live_instance_count`` / ``live_instance_ids`` (non-terminal
-    instances cleanup will NOT touch — listed as "will remain"),
-    and ``defer_blocked_count`` (pending defer-lane jobs). The defer
-    count is deliberately SEPARATE from ``bad_state_count`` and is
-    NOT a cleanup input: deferred messages are not cancelled by
-    cleanup (constitution-era mirror protection) — the operator
-    should use the defer warning's holder actions.
+    instances cleanup will NOT touch), and ``defer_blocked_count``
+    (pending defer-lane jobs). The defer count is deliberately
+    SEPARATE from ``bad_state_count`` and is NOT a cleanup input:
+    deferred messages are not cancelled by cleanup (constitution-era
+    mirror protection) — the operator should use the defer
+    warning's holder actions.
+
+    Canonical operator copy (WS4 Round-2 ITEM 3 / T-H1, 2026-09-06):
+    Every ACTIVE job is cancelled, together with its whole subtree.
+    Only missions holding nothing but settled mirrors — no live work
+    — are kept. (Term single-owner: "stalled mission"; the
+    ``zombie_instance_count`` field NAME stays technical.)
 
     All counts come from pure COUNT/SELECT queries with no writes, so
     the preflight is intentionally NOT guarded by ``is_write_paused``
@@ -619,8 +629,10 @@ async def cleanup_preflight(request: Request):
     bad-state / zombie items accumulate most because the cleanup
     endpoint itself cannot run.
 
-    Used by the frontend to render the red-glow + tooltip on the System
-    Cleanup button.
+    Used by the frontend to render the red-glow + tooltip on the
+    System Cleanup button (the operator-facing button label is
+    "System Cleanup", NOT "nuclear press" — see ITEM 8 vocabulary
+    fix).
     """
     manager = _get_manager(request)
     task_repo = getattr(manager, "_task_repo", None)
@@ -652,22 +664,27 @@ async def cleanup_preflight(request: Request):
         live_instance_count = len(live_ids)
         live_instance_ids = live_ids[:20]
 
-    # WS4: pending defer-lane jobs, surfaced SEPARATELY from bad_state
-    # (do not conflate — cleanup does not cancel them; the mirror
-    # protection stays). Read-only import of the resolver's canonical
-    # count SQL so the two surfaces cannot drift.
+    # WS4 Round-2 ITEM 7 (2026-09-06): defer-lane pending count
+    # surfaces through the resolver's PUBLIC helper
+    # (:func:`daemon.services.defer_block_resolver.defer_pending_count`),
+    # NOT a direct engine reach-through. The preflight reaches into
+    # the resolver for the count; the router no longer imports the
+    # module-private SQL constant. Schema or shape changes to the
+    # defer-pending-count SELECT now have ONE place to update.
     defer_blocked_count = 0
-    job_service = getattr(manager, "_job_queue_service", None)
-    job_repo = getattr(job_service, "_repository", None)
-    if job_repo is not None and getattr(job_repo, "engine", None) is not None:
-        from daemon.services.defer_block_resolver import _DEFER_PENDING_COUNT_SQL
-
-        def _count_defer_pending() -> int:
-            with job_repo.engine.connect() as conn:
-                return int(conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one())
+    defer_resolver = getattr(manager, "_defer_block_resolver", None)
+    if defer_resolver is not None:
+        # Deferred import to break the circular dependency
+        # ``daemon.routers.schemas`` ← ``daemon.routers.jobs``
+        # ← ``daemon.routers.jobs_management`` ← ``defer_block_resolver``
+        # at module-load time. The helper is stable and the lookup is
+        # cheap; the lazy import is the canonical fix.
+        from daemon.services.defer_block_resolver import defer_pending_count
 
         try:
-            defer_blocked_count = await asyncio.to_thread(_count_defer_pending)
+            defer_blocked_count = await asyncio.to_thread(
+                defer_pending_count, defer_resolver._job_repo.engine
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort read
             logger.warning(
                 "cleanup_preflight: defer pending count failed: %s", exc
@@ -752,7 +769,14 @@ async def cleanup_jobs(
     actions (``POST /api/jobs/defer-holders/{id}/force-complete`` and
     ``.../resend-foreground``) and the WS3 defer watchdog. The
     preflight/dialog copy says this explicitly so an operator never
-    expects the nuclear press to clear the defer lane.
+    expects the System Cleanup button to clear the defer lane.
+
+    Vocabulary (WS4 Round-2 ITEM 8, 2026-09-06): the operator-facing
+    button label is "System Cleanup" (NOT "nuclear press" — that
+    term was a developer-internal nickname that leaked into docs).
+    The operator-facing holder-action term is "stalled mission"
+    (the technical field name ``zombie_instance_count`` STAYS — wire
+    stability).
 
     Already-terminal jobs (``admission_state IN ('done', 'dead')``) and
     already-terminal instances (``status IN ('completed', 'error',
@@ -816,9 +840,14 @@ async def force_complete_defer_holder(
     terminating the holder releases the defer gate.
 
     SAFETY: the mirrors-only state is RE-DERIVED at execution time via
-    the canonical probe (``has_active_non_deferred_work(None,
-    requester_instance_id=<holder>)``) — the FE-reported kind is never
-    trusted. The probe is fail-CLOSED; a refusal surfaces as
+    ``SQLModelInstanceRepository.has_live_work(instance_id)`` — the
+    per-instance companion to the bulk zombie scan (see the W2
+    fixup in :meth:`JobQueueService.force_complete_defer_holder`).
+    The probe is fail-CLOSED on DB error; the FE-reported kind is
+    NEVER trusted. Round-2 W1 (2026-09-06) adds a TOCTOU re-check
+    immediately before the terminate call: a small probe→terminate
+    window remains, covered by ``terminate_instance``'s own
+    idempotency-on-terminal cascade. Refusal surfaces as
     ``terminated=false, probe_busy=true`` (200, not an error — the
     action was evaluated and declined by the guard).
 

@@ -1666,6 +1666,103 @@ class SQLModelInstanceRepository:
             rows = conn.execute(stmt).fetchall()
         return [row[0] for row in rows if row and row[0] is not None]
 
+    def has_live_work(self, instance_id: str) -> bool:
+        """Return True iff ``instance_id`` has ANY live work driving it.
+
+        WS4 Round-2 W2 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        — the single-instance companion to the zombie-scan family. The
+        WS4 holder-action guard (:meth:`JobQueueService.force_complete_defer_holder`)
+        previously probed ONLY the job side via
+        ``JobRepository.has_active_non_deferred_work`` — that misses two
+        live-work shapes the zombie scan already detects:
+
+        * a Task in ``pending``/``running``/``paused`` (no JobItem at
+          all — direct Task, common for forked helpers / reaper sweep);
+        * a non-terminal child instance (a ``waiting_children`` parent
+          whose subtree is still executing).
+
+        Without those arms the holder-probe returned False (probe clean)
+        for any non-trivial instance, and a force-complete would orphan
+        live tasks / live children.
+
+        **Reuse the existing scan arms (derive-don't-reimplement).** The
+        predicate composes from the SAME three literal-lists the zombie
+        scan bakes into :meth:`_build_zombie_scan_sql`
+        (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``,
+        ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``,
+        ``_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN``) so the per-instance
+        check CANNOT drift from the bulk-scan definition of "live".
+        The JobItem anti-join keeps the WS4 mission-lens self-shield:
+        the holder's OWN queued defer-lane rows do NOT witness against
+        it (``admission_state='active'`` OR queue is non-defer / unknown).
+        The child arm matches the third ``NOT EXISTS`` of the zombie
+        scan, same terminal CSV.
+
+        Returns:
+            True iff ANY of:
+
+            * EXISTS a JobItem on the instance in ``queued``/``active``,
+              AND not a settled-mirror exception
+              (WS4 mission lens: ``admission_state='active'`` OR
+              ``queue_type`` non-defer / unknown);
+            * EXISTS a Task on the instance with status in
+              ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``;
+            * EXISTS a child instance with ``parent_id`` set to this
+              instance whose status is not in the terminal CSV.
+
+            False iff none of the above holds — i.e. the instance has
+            no live work and is the safe-to-terminate set the bulk
+            zombie scan would also match.
+
+        Raises:
+            SQLAlchemyError: propagated — caller fails-closed by
+                treating any error as ``True`` (busy / refuse). Mirrors
+                the gate's own fail-CLOSED posture.
+        """
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_task_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_jobitem_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN
+        )
+        # Parameterized EXISTS over the three anti-join arms; ``iid``
+        # is bound so SQLAlchemy handles driver-quote differences
+        # (SQLite vs PG). The arms are byte-shared with
+        # :meth:`_build_zombie_scan_sql` apart from the outer WHERE
+        # binding to a single instance.
+        stmt = text(
+            f"""
+            SELECT EXISTS (
+                SELECT 1 FROM job_queue_items jqi
+                LEFT JOIN job_queues jq ON jq.queue_id = jqi.queue_id
+                WHERE jqi.instance_id = :instance_id
+                  AND jqi.admission_state IN ({live_jobitem_csv})
+                  AND jqi.deleted_at IS NULL
+                  AND (
+                    jqi.admission_state = 'active'
+                    OR jq.queue_type IS NULL
+                    OR jq.queue_type != 'defer'
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM task t
+                WHERE t.instance_id = :instance_id
+                  AND t.status IN ({live_task_csv})
+            )
+            OR EXISTS (
+                SELECT 1 FROM instances child
+                WHERE child.parent_id = :instance_id
+                  AND child.status NOT IN ({terminal_csv})
+            )
+            """
+        )
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt, {"instance_id": instance_id}).fetchone()
+        return bool(row[0]) if row else False
+
     def get_metadata_value(self, instance_id: str, key: str) -> Any | None:
         """Read ONE top-level metadata key without hydrating the row.
 

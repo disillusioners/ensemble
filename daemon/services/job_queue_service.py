@@ -1471,17 +1471,29 @@ class JobQueueService:
         ``terminate_instance`` cascade flips exactly that).
 
         SAFETY GUARD (never trust the caller-reported kind): the
-        mirrors-only state is re-derived at execution time via the
-        canonical probe ``JobRepository.has_active_non_deferred_work(
-        None, requester_instance_id=<holder>)`` — the SAME WS1
-        carve-out gate body WS2's stall classification uses, system
-        scope. The action proceeds ONLY when the probe returns
-        ``False`` (the holder's own mirrors were the ONLY busy rows
-        system-wide). WS2's ratified STRICT semantics make mixed
-        stalled+live holders structurally impossible, so probe=False
-        is exactly the safe-to-terminate set. The probe is
-        fail-CLOSED (returns True on DB error) so a degraded probe
-        refuses the action.
+        mirrors-only state is re-derived at execution time via
+        ``SQLModelInstanceRepository.has_live_work(instance_id)`` —
+        the per-instance companion to the bulk zombie scan, which
+        REUSES the same three predicate arms (terminal CSV, live-task
+        CSV, live-JobItem CSV — see
+        :meth:`daemon.repositories.instance.repository.SQLModelInstanceRepository._build_zombie_scan_sql`).
+        The probe covers ALL live-work shapes the bulk scan would
+        match (active JobItem on any lane, queued JobItem on a
+        non-defer lane, a Task in ``pending``/``running``/``paused``,
+        a non-terminal child instance) — NOT just the job side. The
+        probe is fail-CLOSED (any DB error raises, the caller-side
+        wrapper refuses); a busy probe returns ``probe_busy=True``.
+
+        WS4 Round-2 W1 (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``): the guard is NOT race-proof end-to-end. A small
+        probe→terminate window remains (the probe evaluates a point-
+        in-time predicate; between it and the ``terminate_instance``
+        call, a delegating-repo write or an injected state could
+        land). The guard now re-derives immediately before the
+        terminate call; if the re-check is busy, the action returns
+        ``terminated=False, probe_busy=True`` (200, not an error).
+        Any remaining window is covered by ``terminate_instance``'s
+        own idempotency-on-terminal cascade.
 
         Census discipline: this method performs NO ``admission_state``
         write of its own — the termination flows through the existing
@@ -1494,7 +1506,8 @@ class JobQueueService:
 
         Returns:
             ``{"instance_id": str, "terminated": bool, "probe_busy": bool}``
-            where ``terminated=False`` means the guard refused (the
+            where ``terminated=False`` means the guard refused (either
+            the initial probe OR the W1 TOCTOU re-check was busy — the
             caller should surface a conflict).
 
         Raises:
@@ -1513,20 +1526,73 @@ class JobQueueService:
         if instance is None:
             raise LookupError(f"Instance {instance_id} does not exist")
 
-        # Guard: re-derive mirrors-only at execution time (system
-        # scope + the holder as requester — the WS2 stalled probe).
-        # fail-CLOSED: a probe error returns True (busy) and refuses.
-        probe_busy = await asyncio.to_thread(
-            self._repository.has_active_non_deferred_work,
-            None,
-            instance_id,
-        )
+        # WS4 Round-2 W2 (2026-09-06) — fold in the bulk-scan's task +
+        # child-instance arms so the probe is FULL against any live-work
+        # shape, not just the job side. The single-instance companion
+        # ``SQLModelInstanceRepository.has_live_work`` reuses the same
+        # three CSV constants the bulk :meth:`_build_zombie_scan_sql`
+        # bakes into the zombie predicate (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``,
+        # ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``,
+        # ``_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN``) so the per-instance
+        # check CANNOT drift from the bulk scan's "zombie" definition.
+        # Derive-don't-reimplement: the predicate arms live at the
+        # home repo; this method re-evaluates them via the new public
+        # accessor — no hand-duplicated SQL.
+        #
+        # The pre-W2 probe (``has_active_non_deferred_work`` only) was
+        # structurally blind to (a) a Task in pending/running/paused
+        # without a backing JobItem, and (b) a non-terminal child
+        # instance — a ``waiting_children`` parent whose subtree is
+        # still executing. Those were the W2 SCOPE gaps.
+        #
+        # The job-side carve-out for the holder's OWN settled mirrors
+        # (WS4 mission lens: ``admission_state='active'`` OR queue
+        # non-defer / unknown) is preserved INSIDE
+        # ``has_live_work`` so the stalled-only classification still
+        # works.
+        #
+        # WS2 strict semantics make mixed stalled+live holders
+        # structurally impossible; ``has_live_work`` returning True ⇒
+        # NOT stalled ⇒ refuse.
+        #
+        # Fail-CLOSED: a probe error is treated as busy. The
+        # ``instance_repo.has_live_work`` call can raise SQLAlchemyError;
+        # the helper itself does not swallow.
+        def _live_work_probe() -> bool:
+            return bool(instance_repo.has_live_work(instance_id))
+
+        probe_busy = await asyncio.to_thread(_live_work_probe)
         if probe_busy:
             logger.warning(
                 "force_complete_defer_holder: REFUSED for %s — "
-                "guard probe reports live non-defer work (mixed or "
-                "live holder); force-complete is only safe when the "
-                "holder's own mirrors are the ONLY busy rows",
+                "guard probe reports live work (active JobItem, "
+                "live Task, or non-terminal children); "
+                "force-complete is only safe when the holder has "
+                "no live work (mirrors-only / stalled)",
+                instance_id[:8],
+            )
+            return {
+                "instance_id": instance_id,
+                "terminated": False,
+                "probe_busy": True,
+            }
+
+        # WS4 Round-2 W1 (2026-09-06) — TOCTOU re-check. A small
+        # probe→terminate window remains (the gate's own WS2 strict
+        # semantics hold for state at probe time; between the probe
+        # above and the terminate below, a delegating-repo write or
+        # an injected state could land). Re-derive immediately before
+        # the destructive call; refuse on a busy re-check (NOT an
+        # exception — the action was evaluated and declined by the
+        # guard). The terminate cascade's own idempotency-on-terminal
+        # covers the small remaining window.
+        rechecks_busy = await asyncio.to_thread(_live_work_probe)
+        if rechecks_busy:
+            logger.warning(
+                "force_complete_defer_holder: REFUSED for %s — "
+                "TOCTOU re-check caught live work between the probe "
+                "and the terminate; force-complete aborted to avoid "
+                "destroying live work",
                 instance_id[:8],
             )
             return {
@@ -1541,7 +1607,8 @@ class JobQueueService:
         await self._instance_manager.terminate_instance(instance_id)
         logger.info(
             "force_complete_defer_holder: terminated stalled holder "
-            "%s (guard probe reported mirrors-only)",
+            "%s (guard probe + TOCTOU re-check both reported no live "
+            "work)",
             instance_id[:8],
         )
         return {

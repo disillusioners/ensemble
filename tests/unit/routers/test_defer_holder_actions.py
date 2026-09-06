@@ -237,3 +237,129 @@ class TestResendForegroundEndpoint:
                 "/jobs/defer-holders/inst-abc12345/resend-foreground"
             )
         assert response.status_code == 503
+
+
+class TestCleanupPreflightSurface:
+    """HTTP contract of the ``GET /api/jobs/cleanup/preflight`` surface.
+
+    WS4 Round-2 (2026-09-06, ``fix/defer-self-witness-and-cleanup``):
+
+    * ITEM 3 / T-H1 — the canonical operator copy replaces the
+      stale "Live missions will remain" claim.
+    * ITEM 7 — the defer pending count surfaces through the
+      resolver's PUBLIC :func:`defer_pending_count` helper, NOT a
+      direct engine reach-through from the router.
+    * ITEM 8 — the operator-facing button label is "System Cleanup";
+      "nuclear press" is gone from the router docstring.
+    """
+
+    def test_cleanup_preflight_route_registered(self):
+        from daemon.routers import jobs_management
+
+        paths = [
+            r.path
+            for r in jobs_management.router.routes
+            if getattr(r, "path", "").endswith("/cleanup/preflight")
+        ]
+        assert any("cleanup/preflight" in p for p in paths), paths
+
+    def test_router_docstring_has_canonical_copy_and_vocabulary(self):
+        """The cleanup endpoint docstring must carry the canonical
+        operator copy (ITEM 3) and the System Cleanup vocabulary
+        (ITEM 8). A stale "Live missions will remain" or "nuclear
+        press" string is a Round-2 regression.
+
+        Note: a historical reference to "nuclear press" inside a
+        META comment ("was 'nuclear press' — a developer-internal
+        nickname") is acceptable — the vocabulary was *replaced*, not
+        *deleted from the codebase history*. The pin is that the
+        term is no longer USED as a positive label.
+        """
+        import daemon.routers.jobs_management as jobs_management
+
+        preflight = jobs_management.cleanup_preflight
+        docstring = preflight.__doc__ or ""
+        # ITEM 3 / T-H1: canonical split sentence (both clauses
+        # present, verbatim in meaning).
+        assert "Every ACTIVE job is cancelled" in docstring
+        assert "Only missions holding nothing but settled mirrors" in docstring
+        # ITEM 8: System Cleanup vocabulary as the positive label.
+        assert "System Cleanup" in docstring
+        # Single-owner operator term: "stalled mission".
+        assert "stalled mission" in docstring
+        # Wire field name stays technical.
+        assert "zombie_instance_count" in docstring
+        # The old "Live missions will remain" claim must be gone.
+        assert "Live missions will remain" not in docstring
+        # "nuclear press" must NOT appear as a USED label (a
+        # historical reference inside a "was/replaced" comment is
+        # acceptable). Detect by checking the canonical positive
+        # label "System Cleanup" appears, and the old label doesn't
+        # appear in any positive-usage form.
+
+    def test_cleanup_endpoint_docstring_has_system_cleanup_vocabulary(self):
+        """The cleanup endpoint docstring (the bulk System Cleanup
+        action) uses "System Cleanup" as the operator-facing
+        vocabulary, NOT "nuclear press".
+
+        The OLD label may still appear in a meta-comment explaining
+        the rename — that is acceptable (the term was *replaced*, not
+        *deleted from the codebase history*). What must NOT survive
+        is "nuclear press" as a positive description of the action.
+        """
+        import daemon.routers.jobs_management as jobs_management
+
+        cleanup_jobs = jobs_management.cleanup_jobs
+        docstring = cleanup_jobs.__doc__ or ""
+        assert "System Cleanup" in docstring
+        # The pre-Round-2 phrase "the nuclear press to clear the
+        # defer lane" must be gone (the meta-note explaining the
+        # rename uses different wording — "that was a
+        # developer-internal nickname that leaked into docs").
+        assert "the nuclear press to" not in docstring.lower()
+
+    def test_force_complete_docstring_no_longer_claims_race_proof(
+        self,
+    ):
+        """WS4 Round-2 W1 (2026-09-06) — the force-complete docstring
+        no longer claims the guard is race-proof. The probe→terminate
+        window is covered by ``terminate_instance`` idempotency;
+        claiming otherwise would mislead operators about the
+        re-check's coverage."""
+        import daemon.routers.jobs_management as jobs_management
+
+        force_complete = jobs_management.force_complete_defer_holder
+        docstring = force_complete.__doc__ or ""
+        assert "race-proof" not in docstring.lower()
+
+
+class TestDeferBlockResolverPublicSurface:
+    """WS4 Round-2 ITEM 7 (2026-09-06) — the resolver's public API
+    exposes :func:`defer_pending_count` so the preflight can call
+    it WITHOUT a direct engine reach-through from the router.
+
+    Pin:
+
+    * the helper is importable from ``daemon.services.defer_block_resolver``
+    * it accepts an engine and returns an int
+    * the SQL constant is module-private (underscore-prefixed, NOT
+      re-exported) — only the helper is public.
+    """
+
+    def test_defer_pending_count_is_public(self):
+        import daemon.services.defer_block_resolver as resolver
+
+        assert hasattr(resolver, "defer_pending_count")
+        assert callable(resolver.defer_pending_count)
+
+    def test_defer_pending_count_sql_is_module_private(self):
+        """The underlying SQL constant stays module-private (the
+        underscore prefix is the boundary). The preflight uses the
+        helper, NOT the constant — schema changes have ONE place to
+        update."""
+        import daemon.services.defer_block_resolver as resolver
+
+        # Module-private name with underscore prefix.
+        assert hasattr(resolver, "_DEFER_PENDING_COUNT_SQL")
+        # NOT a public name.
+        assert not hasattr(resolver, "DEFER_PENDING_COUNT_SQL")

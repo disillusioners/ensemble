@@ -987,6 +987,12 @@ class TestCleanupPreflightEndpoint:
         available on the manager, the preflight invokes
         ``count_bad_state_tasks`` and ``count_zombie_instances``
         and surfaces both counts in the response.
+
+        WS4 Round-2 ITEM 7 (2026-09-06) — defer-blocked count is
+        NOT wired in this test (``_defer_block_resolver = None``)
+        because we want to pin the repo-driven counts in
+        isolation. The defer-blocked count surface is pinned by
+        :func:`TestCleanupPreflightEndpoint.test_preflight_ws4_live_vs_reap_split_and_defer_count`.
         """
         task_repo = MagicMock()
         task_repo.count_bad_state_tasks = MagicMock(return_value=7)
@@ -1002,7 +1008,7 @@ class TestCleanupPreflightEndpoint:
         manager = MagicMock()
         manager._task_repo = task_repo
         manager._instance_repository = instance_repo
-        manager._job_queue_service = None  # no defer-count source wired
+        manager._defer_block_resolver = None  # no defer-count source wired
         preflight_app.state.manager = manager
 
         with TestClient(preflight_app) as client:
@@ -1028,7 +1034,14 @@ class TestCleanupPreflightEndpoint:
         """WS4: non-terminal instances NOT in the reap set surface as
         the live ("will remain") split; pending defer-lane jobs are
         counted SEPARATELY from bad_state via the canonical resolver
-        SQL."""
+        SQL.
+
+        WS4 Round-2 ITEM 7 (2026-09-06, ``fix/defer-self-witness-and-cleanup``):
+        the defer-lane pending count surfaces through the resolver's
+        PUBLIC ``defer_pending_count`` helper — the preflight reaches
+        into ``manager._defer_block_resolver._job_repo.engine``, NOT
+        ``manager._job_queue_service._repository.engine`` anymore.
+        """
         task_repo = MagicMock()
         task_repo.count_bad_state_tasks = MagicMock(return_value=0)
         instance_repo = MagicMock()
@@ -1044,13 +1057,16 @@ class TestCleanupPreflightEndpoint:
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         conn.execute.return_value.scalar_one.return_value = 4
         job_repo.engine = engine
-        job_service = MagicMock()
-        job_service._repository = job_repo
+        # WS4 Round-2 ITEM 7: defer count source is the resolver's
+        # public surface (DeferBlockResolver._job_repo.engine), NOT
+        # the job_queue_service's repository.
+        defer_resolver = MagicMock()
+        defer_resolver._job_repo = job_repo
 
         manager = MagicMock()
         manager._task_repo = task_repo
         manager._instance_repository = instance_repo
-        manager._job_queue_service = job_service
+        manager._defer_block_resolver = defer_resolver
         preflight_app.state.manager = manager
 
         with TestClient(preflight_app) as client:

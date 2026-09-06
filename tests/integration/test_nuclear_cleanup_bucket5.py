@@ -1139,7 +1139,14 @@ class TestWS4MissionLens:
         project_id: str,
     ):
         """Guard: a holder with LIVE non-defer work is refused (probe
-        busy → terminated=False; cascade never runs)."""
+        busy → terminated=False; cascade never runs).
+
+        WS4 Round-2 W2 (2026-09-06) — the probe is now
+        ``has_live_work`` (per-instance companion to the bulk zombie
+        scan). A live mirror on a non-defer lane for a DIFFERENT
+        instance must still trigger refusal on the requester
+        (``WS1 carve-out only excludes the REQUESTER's own mirrors``).
+        """
         inst = make_instance(engine, status="running", project_id=project_id)
         fifo_qid = make_queue(
             engine, project_id=project_id, queue_type="fifo",
@@ -1161,6 +1168,13 @@ class TestWS4MissionLens:
             queue_id=fifo_qid,
         )
 
+        # ``has_live_work`` is the new probe — mock it True so the
+        # initial probe refuses. (Real DB would also return True
+        # because the other-instance's settled mirror IS a live
+        # witness on the busy-set, but the mock keeps the assertion
+        # shape crisp.)
+        instance_repo.has_live_work = MagicMock(return_value=True)
+
         result = await service.force_complete_defer_holder(inst.instance_id)
 
         assert result == {
@@ -1179,8 +1193,9 @@ class TestWS4MissionLens:
         project_id: str,
     ):
         """Guard success: mirrors-only holder → terminated; the probe
-        ran with the canonical binds (system scope + requester
-        carve-out), NOT the FE-reported kind."""
+        ran with the canonical arms (system scope + WS1 carve-out + the
+        Round-2 W2 task/child-instance arms folded into
+        ``has_live_work``), NOT the FE-reported kind."""
         inst = make_instance(engine, status="running", project_id=project_id)
         defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
         # Settled mirror on the DEFER lane: the carve-out excludes the
@@ -1194,17 +1209,222 @@ class TestWS4MissionLens:
             queue_id=defer_qid,
         )
 
-        probe = MagicMock(return_value=False)
-        service._repository.has_active_non_deferred_work = probe
+        # WS4 Round-2 (2026-09-06) — the guard now calls
+        # ``instance_repo.has_live_work`` (per-instance companion to
+        # the bulk zombie scan) for BOTH the initial probe AND the
+        # W1 TOCTOU re-check immediately before terminate. The old
+        # WS1 carve-out probe (job-side only) is no longer used.
+        live_work_probe = MagicMock(return_value=False)
+        instance_repo.has_live_work = live_work_probe
 
         result = await service.force_complete_defer_holder(inst.instance_id)
 
         assert result["terminated"] is True
         assert result["probe_busy"] is False
-        probe.assert_called_once_with(None, inst.instance_id)
+        # Initial probe + W1 re-check: TWO calls to the same
+        # single-instance companion. The re-check uses the same
+        # bind so a probe→terminate window that lands new live work
+        # is caught (W1 RED→GREEN).
+        assert live_work_probe.call_count == 2
+        assert live_work_probe.call_args_list[0].args == (inst.instance_id,)
+        assert live_work_probe.call_args_list[1].args == (inst.instance_id,)
         service._instance_manager.terminate_instance.assert_awaited_once_with(
             inst.instance_id
         )
+
+    @pytest.mark.asyncio
+    async def test_21a_w1_toctou_recheck_refuses_when_work_appears(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W1 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        RED→GREEN pin: TOCTOU re-check immediately before the
+        terminate. The first probe returns False (clean), but live
+        work appears between the probe and the re-check (e.g. a
+        delegating-repo write that landed). The re-check returns
+        True (busy) → the action is REFUSED, terminate NEVER runs.
+
+        Pin the corner: ``terminated=False, probe_busy=True`` and
+        ``terminate_instance`` is NOT awaited.
+        """
+        inst = make_instance(engine, status="running", project_id=project_id)
+
+        # Probe side-effect sequence: first call False (clean),
+        # second call (the W1 re-check immediately before terminate)
+        # True (busy — work appeared between probe and re-check).
+        live_work_probe = MagicMock(side_effect=[False, True])
+        instance_repo.has_live_work = live_work_probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        # The destructive call was NEVER made — the re-check caught
+        # the racing live work.
+        service._instance_manager.terminate_instance.assert_not_awaited()
+        # Exactly two probe calls: the initial + the W1 re-check.
+        assert live_work_probe.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_21b_w1_recheck_succeeds_when_no_work_appears(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W1 companion pin: when no work appears between
+        the initial probe and the re-check, BOTH probes return False,
+        the terminate runs, ``terminated=True, probe_busy=False``."""
+        inst = make_instance(engine, status="running", project_id=project_id)
+
+        live_work_probe = MagicMock(return_value=False)
+        instance_repo.has_live_work = live_work_probe
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": True,
+            "probe_busy": False,
+        }
+        # Initial probe + W1 re-check, both False, terminate runs.
+        assert live_work_probe.call_count == 2
+        service._instance_manager.terminate_instance.assert_awaited_once_with(
+            inst.instance_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_21c_w2_holder_with_live_task_no_jobitem_refused(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 (2026-09-06) RED→GREEN pin: holder with a
+        live Task but NO JobItem at all is REFUSED. Pre-W2 the
+        job-side-only probe (``has_active_non_deferred_work``) saw
+        nothing busy and would have terminated the instance,
+        orphaning the live Task. Post-W2 the
+        ``has_live_work(instance_id)`` companion folds in the
+        ``task.status IN (pending, running, paused)`` arm and refuses.
+
+        No mocks — the real ``has_live_work`` runs against the real
+        SQLite engine (file-backed recipe — see the file header).
+        """
+        inst = make_instance(engine, status="running", project_id=project_id)
+        # Live Task with no JobItem at all (the W2 gap shape).
+        make_task(engine, instance_id=inst.instance_id, status="running")
+
+        result = await service.force_complete_defer_holder(inst.instance_id)
+
+        assert result == {
+            "instance_id": inst.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21d_w2_holder_with_live_child_refused(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 RED→GREEN pin: a parent instance with a
+        NON-TERMINAL CHILD running a Task (child has a Task row, NO
+        JobItems) is REFUSED by force-complete. The third arm of
+        ``has_live_work`` (``instances.child WHERE child.parent_id = i
+        AND child.status NOT IN terminal``) catches it.
+
+        The original dispatcher spec:
+          "holder with a LIVE CHILD running a Task (child has a Task
+          row, NO JobItems) → force-complete REFUSED".
+        """
+        parent = make_instance(
+            engine, status="waiting_children", project_id=project_id
+        )
+        child = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        # Wire the child's parent_id to the holder.
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE instances SET parent_id = :p WHERE instance_id = :c"),
+                {"p": parent.instance_id, "c": child.instance_id},
+            )
+        # Child runs a Task — the W2 "live child running a Task" shape.
+        make_task(engine, instance_id=child.instance_id, status="running")
+
+        result = await service.force_complete_defer_holder(parent.instance_id)
+
+        assert result == {
+            "instance_id": parent.instance_id,
+            "terminated": False,
+            "probe_busy": True,
+        }
+        service._instance_manager.terminate_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_21e_w2_probe_arms_match_bulk_zombie_scan(
+        self,
+        service: JobQueueService,
+        instance_repo: SQLModelInstanceRepository,
+        engine: Engine,
+        project_id: str,
+    ):
+        """WS4 Round-2 W2 structural pin: ``has_live_work`` is the
+        single-instance companion to the bulk ``find_zombie_instances``
+        scan — they MUST classify the same instance identically.
+
+        For each instance in the test fixture, ``has_live_work`` is
+        the exact INVERSE of "would this instance appear in
+        ``find_zombie_instances``?". An instance with the SAME live
+        shape (live Task only, live child only, etc.) must return
+        True from ``has_live_work`` AND must NOT appear in the
+        zombie scan.
+        """
+        # Holder with a live Task — ``has_live_work`` True, zombie scan misses.
+        holder = make_instance(engine, status="running", project_id=project_id)
+        make_task(engine, instance_id=holder.instance_id, status="running")
+
+        # Mirror-only holder (defer-lane settled mirror) — ``has_live_work``
+        # False (WS4 mission lens: own defer mirrors don't witness),
+        # zombie scan catches it.
+        mirror_only = make_instance(engine, status="running", project_id=project_id)
+        defer_qid = make_queue(engine, project_id=project_id, queue_type="defer")
+        make_job_item(
+            engine,
+            instance_id=mirror_only.instance_id,
+            admission_state="done",
+            job_type="message",
+            project_id=project_id,
+            queue_id=defer_qid,
+        )
+
+        # Verify the inverse: every instance flagged live by
+        # ``has_live_work`` is NOT in the zombie scan; every instance
+        # NOT live is in the scan.
+        live_ids = {
+            iid for iid in (
+                holder.instance_id, mirror_only.instance_id,
+            )
+            if instance_repo.has_live_work(iid)
+        }
+        zombie_ids = set(instance_repo.find_zombie_instances())
+
+        assert live_ids == {holder.instance_id}
+        assert mirror_only.instance_id in zombie_ids
+        assert holder.instance_id not in zombie_ids
 
     @pytest.mark.asyncio
     async def test_22_force_complete_missing_instance_404(

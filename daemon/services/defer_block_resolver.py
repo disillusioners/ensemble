@@ -177,6 +177,38 @@ _DEFER_PENDING_COUNT_SQL: Final[TextClause] = text(
 )
 
 
+def defer_pending_count(engine: Any) -> int:
+    """Public surface (WS4 Round-2 ITEM 7, 2026-09-06) — return the
+    system-wide pending-defer JobItem count for the preflight.
+
+    The preflight endpoint (``GET /api/jobs/cleanup/preflight``) and
+    any other BE consumer that needs the system-wide defer-lane
+    pending count MUST go through this helper — NOT a direct
+    ``engine.connect().execute(_DEFER_PENDING_COUNT_SQL)`` reach-through
+    from the router (the router doesn't own the engine; the resolver
+    does, and a future schema change has ONE place to update).
+
+    Args:
+        engine: A SQLAlchemy ``Engine`` (any dialect the canonical SQL
+            accepts — the statement uses ``text()`` with no
+            dialect-fragile operators; PG and SQLite both pass).
+
+    Returns:
+        The integer count of PENDING non-deleted defer-lane JobItems
+        system-wide. ``0`` when the busy set is empty (and the queue
+        table is empty).
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: propagated — callers fail
+            closed on the count surface (the preflight wraps the call
+            in ``except Exception`` and logs a warning; the gate's own
+            fail-CLOSED posture is preserved).
+    """
+    with engine.connect() as conn:
+        result = conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
+    return int(result)
+
+
 # ── Projection records ─────────────────────────────────────────────────────
 
 
@@ -349,6 +381,11 @@ class DeferBlockResolver:
                 .mappings()
                 .all()
             )
+            # Use the module-private SQL constant directly: the resolve
+            # path owns the connection already and the count is one of
+            # the 2+N budget SELECTs. Consumers outside this module
+            # MUST go through :func:`defer_pending_count` (WS4 Round-2
+            # ITEM 7, 2026-09-06).
             pending_count = conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
 
             # WS2 stall classification: collect the dedup'd instance_ids

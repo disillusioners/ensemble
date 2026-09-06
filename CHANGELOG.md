@@ -5,6 +5,101 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2026-09-06
+
+### Fixed — WS4 Round-2 (`fix/defer-self-witness-and-cleanup`)
+
+#### Force-complete TOCTOU re-check (Round-2 W1)
+
+`JobQueueService.force_complete_defer_holder` now re-derives the
+`has_live_work(instance_id)` predicate IMMEDIATELY before
+`terminate_instance`, in addition to the original probe at the top
+of the method. A small probe→terminate window remains; the second
+call catches state that lands between the probe and the destructive
+call (delegating-repo write, injected state). A busy re-check
+returns `terminated=False, probe_busy=True` (200, NOT an exception).
+The docstring no longer claims the guard is "race-proof" — the
+remaining window is covered by `terminate_instance`'s own
+idempotency-on-terminal cascade.
+
+#### Holder-probe scope gap — task + child-instance arms folded in (Round-2 W2)
+
+The original holder probe
+(`JobRepository.has_active_non_deferred_work(None, requester_instance_id=<holder>)`)
+was job-side only. It missed two live-work shapes the bulk zombie
+scan already detected:
+
+* a Task in `pending`/`running`/`paused` (no JobItem at all —
+  direct Task, common for forked helpers / reaper sweep);
+* a non-terminal child instance (a `waiting_children` parent whose
+  subtree is still executing).
+
+A new `SQLModelInstanceRepository.has_live_work(instance_id)`
+single-instance companion reuses the same three CSV constants the
+bulk `_build_zombie_scan_sql` bakes into the zombie predicate
+(`_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`,
+`_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN`,
+`_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN`) — derive-don't-reimplement.
+`force_complete_defer_holder` now uses this companion for both the
+initial probe and the W1 re-check; the predicate arms cannot drift
+from the bulk scan. A holder with a live Task (no JobItem) OR with
+a non-terminal child is now refused with
+`terminated=False, probe_busy=True`.
+
+### Changed
+
+#### Preflight copy truth (Round-2 ITEM 3 / T-H1)
+
+The cleanup preflight docstring replaces "Live missions will remain"
+with the canonical split sentence (FE + docs use the same):
+
+> Every ACTIVE job is cancelled, together with its whole subtree.
+> Only missions holding nothing but settled mirrors — no live work
+> — are kept.
+
+Term single-owner: "stalled mission" (operator-facing). The
+`zombie_instance_count` wire field NAME stays technical (wire
+stability).
+
+#### Operator vocabulary (Round-2 ITEM 8)
+
+The cleanup endpoint's router docstring replaces "nuclear press"
+with "System Cleanup" (the operator-facing button label). The
+holder-action term is "stalled mission". The technical wire fields
+(`zombie_instance_count`, `live_instance_count`, etc.) STAY
+unchanged.
+
+### Added
+
+#### Public `defer_pending_count` surface (Round-2 ITEM 7)
+
+`daemon.services.defer_block_resolver.defer_pending_count(engine)`
+is the single public surface for the system-wide defer-lane pending
+count. The preflight endpoint (`GET /api/jobs/cleanup/preflight`)
+calls this helper — NO direct engine reach-through from the router.
+Schema or shape changes to the defer-pending-count SELECT have ONE
+place to update.
+
+#### Pattern-(g) defer-job watchdog + `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`
+
+`Pattern-(g)` is the JOB-SIDE watchdog complement to the
+task-side `Pattern-(a)` recovery
+(`daemon/services/job_recovery_service.py`). Pattern-(g) covers
+stuck JobItems (stuck-active jobs with dead instances,
+stuck-queued jobs behind dead instances) — the job-queue
+lifecycle. Pattern-(a) covers stuck Tasks — the task lifecycle.
+The two are complementary: a stuck JobItem with a healthy Task is
+a Pattern-(g) job; a stuck Task with a settled JobItem is a
+Pattern-(a) task. Pattern-(g) does NOT inspect Task state;
+Pattern-(a) does NOT inspect JobItem state.
+
+The `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED` env var (default OFF,
+env-only, restart-read) gates Pattern-(g)'s auto-promotion path.
+Default OFF is conservative — operators flip ON after a ≤2-week
+soak or on incident; OFF = instant revert path.
+
+---
+
 ## [Phase 8] — Cleanup old architecture (FINAL)
 
 The final cleanup phase. The `use_dependency_bus` feature flag and the `ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS` env var have been removed; the DependencyBus is now the SOLE completion authority with no flag, no kill-switch, and no fallback path.
