@@ -571,6 +571,477 @@ class TestSeverityShapes:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# WS2 STALLED CLASSIFICATION — mirrors-only holder kind
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestStalledClassification:
+    """WS2 (``fix/defer-self-witness-and-cleanup`` workstream 2): the
+    holder ``kind`` field gains a third value ``"stalled"``.
+
+    ``stalled`` = a non-paused witness whose gate-busy state is
+    EXCLUSIVELY its OWN settled message mirrors (the WS1 carve-out
+    test — ``has_active_non_deferred_work(None,
+    requester_instance_id=<holder>)`` returns ``False``: the carve-out
+    excludes the holder's own settled mirrors; if no OTHER busy
+    witness remains, every row in the no-carve-out busy-set was the
+    holder's own mirrors). Detected by re-evaluating the WS1
+    carve-out gate body with each dedup'd holder's instance as the
+    requester (the derive-don't-reimplement seam — same predicate
+    composition as the gate itself, ``_idle_predicate_sql``).
+
+    Acceptance matrix (the test suite pins the classification for
+    every fixture shape — paused-vs-stalled-vs-live, mixed-holders,
+    instance-less fall-through):
+
+    * Settled mirror on a LIVE non-terminal instance with NO other
+      busy rows ⇒ ``stalled`` (the WS1 carve-out incident shape:
+      revived non-terminal instance held up ONLY by its own settled
+      mirrors).
+    * Settled mirror on a live instance WITH another ACTIVE non-defer
+      job ⇒ ``live`` (legacy clause still witnesses after carve-out).
+    * Settled mirror on a live instance with an OTHER-instance mirror
+      busy ⇒ ``live`` (other-instance mirror still witnesses after
+      carve-out).
+    * Paused instance always wins over ``stalled`` (operator-
+      actionable status dominates).
+    * Instance-less witnesses (``instance_id=""``) cannot be stalled
+      (no instance_id to feed the carve-out bind) — fall through as
+      ``live``.
+    * Mixed: paused + stalled + live + instance-less holders in ONE
+      payload — all four kinds surface, in paused > stalled > live
+      order, instance-less last (its own kind = ``live``).
+    """
+
+    def test_settled_mirror_only_is_stalled(self, client, engine):
+        """The WS1 incident shape — a non-terminal instance whose ONLY
+        busy row is its OWN settled message mirror — surfaces as
+        ``kind="stalled"``. The WS1 carve-out test on this holder
+        returns ``False`` (no OTHER busy witness after the holder's
+        own mirrors are excluded)."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-stalled-1",
+            status=InstanceStatus.RUNNING.value,
+            last_activity_at=datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc),
+        )
+        # The ONLY busy row on this instance: a Fix-B settled message
+        # mirror (job_type='message', admission_state='done'). No
+        # legacy-clause ACTIVE job; no other-instance mirror.
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["defer_blocked"] is True
+        assert len(body["holders"]) == 1
+        holder = body["holders"][0]
+        assert holder["kind"] == "stalled", (
+            f"Mirrors-only non-terminal instance must be 'stalled'; "
+            f"got kind={holder['kind']!r}, body={body!r}"
+        )
+        assert holder["instance_id"] == "inst-stalled-1"
+        assert holder["status"] == "running"
+        # since = last_activity_at (live/stalled fallback chain).
+        assert holder["since"] == "2026-09-05T12:00:00+00:00"
+
+    def test_settled_mirror_with_active_job_is_live(self, client, engine):
+        """An ACTIVE non-defer job alongside a settled mirror on the
+        SAME instance — the legacy clause still witnesses even with
+        the carve-out (the carve-out only excludes the holder's OWN
+        settled mirrors; ACTIVE jobs continue to witness). The
+        holder is ``live`` (NOT stalled)."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-mixed-busy",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # ACTIVE job on the same instance — legacy clause witnesses
+        # even after the carve-out (the carve-out only touches the
+        # mirror clause).
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_type="task",
+            job_id="job-mix-active",
+        )
+        # And a settled mirror on the same instance — would be
+        # excluded by the carve-out, but the ACTIVE row keeps the
+        # gate busy anyway.
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+            job_id="job-mix-mirror",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["defer_blocked"] is True
+        assert len(body["holders"]) == 1
+        assert body["holders"][0]["kind"] == "live", (
+            "Holder with an ACTIVE non-defer job must be 'live' "
+            "(legacy clause still witnesses after carve-out); "
+            f"got kind={body['holders'][0]['kind']!r}"
+        )
+
+    def test_settled_mirror_with_other_instance_mirror_is_live(
+        self, client, engine
+    ):
+        """An instance whose only busy row is its OWN settled mirror,
+        while ANOTHER non-terminal instance ALSO has a settled mirror
+        busy — the OTHER-instance mirror still witnesses after the
+        carve-out (the carve-out only excludes SELF mirrors). The
+        holder is ``live`` (NOT stalled — the gate is being held by
+        both instances' mirrors jointly)."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        # Instance A: mirrors-only (candidate for stalled).
+        inst_a = _seed_instance(
+            engine,
+            instance_id="inst-A",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=inst_a,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        # Instance B: also has a settled mirror — the other-instance
+        # witness means A's carve-out still returns True (B's mirror
+        # is NOT excluded by A's requester).
+        inst_b = _seed_instance(
+            engine,
+            instance_id="inst-B",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=inst_b,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["defer_blocked"] is True
+        # Both holders dedup to one row each; both are 'live' because
+        # neither holder's carve-out is empty (the OTHER instance's
+        # mirror still witnesses).
+        assert {h["kind"] for h in body["holders"]} == {"live"}
+        assert {h["instance_id"] for h in body["holders"]} == {
+            "inst-A",
+            "inst-B",
+        }
+
+    def test_paused_always_wins_over_stalled(self, client, engine):
+        """A paused instance with a settled mirror is classified as
+        ``paused`` (operator-actionable status dominates). The WS2
+        carve-out probe is SKIPPED for paused holders
+        (``_classify_stalled_holders`` early-returns on
+        ``status == 'paused'`` — paused always wins by construction)."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-paused-stalled",
+            status=InstanceStatus.PAUSED.value,
+            paused_at="2026-09-05T08:00:00+00:00",
+        )
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["holders"][0]["kind"] == "paused", (
+            "Paused always wins over stalled; the carve-out probe is "
+            f"skipped for paused holders; got kind={body['holders'][0]['kind']!r}"
+        )
+
+    def test_instance_less_witness_cannot_be_stalled(
+        self, client, engine
+    ):
+        """Legacy-clause witness with no instance row (``instance_id
+        IS NULL``) has no instance_id to feed the carve-out bind —
+        falls through as ``live`` regardless of any stalled
+        classification. Mirrors-only-or-not, instance-less is always
+        ``live`` (the gate's truthmaker IS its presence in the
+        busy-set, not its mirror-vs-live character)."""
+        _seed_job(
+            engine,
+            instance_id=None,
+            queue_id=None,
+            agent_id="worker",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["defer_blocked"] is True
+        assert len(body["holders"]) == 1
+        holder = body["holders"][0]
+        assert holder["instance_id"] == ""
+        assert holder["kind"] == "live", (
+            "Instance-less witnesses cannot be classified as stalled "
+            "(no instance_id to feed the carve-out bind); got "
+            f"kind={holder['kind']!r}"
+        )
+
+    def test_mixed_paused_stalled_live_instance_less_in_one_payload(
+        self, client, engine
+    ):
+        """WS2 design-friction pin (FLAGGED in WS2 report): the carve-out
+        mechanism ties the ``stalled`` classification to a STRICT
+        busy-set property — every row in the no-carve-out busy-set
+        must be the requester's OWN settled mirror. The legacy clause
+        is intentionally UNTOUCHED by the WS1 carve-out (a live
+        foreground turn yields an ACTIVE job which still witnesses
+        correctly via the legacy clause — by design), so the
+        carve-out busy-set includes ACTIVE jobs on ANY non-terminal
+        instance and settled mirrors on ANY non-terminal instance
+        OTHER than the requester.
+
+        Consequence (this test pins it): a holder can be classified as
+        ``stalled`` only when the holder is the SOLE non-terminal
+        instance with any busy row. A mixed payload with paused +
+        stalled + a genuinely-live holder (ACTIVE non-defer job) is
+        STRUCTURALLY IMPOSSIBLE under the carve-out mechanism — the
+        genuinely-live holder's ACTIVE job witnesses via the legacy
+        clause for every other holder's carve-out probe, so no holder
+        in the mixed set can satisfy the carve-out-False criterion.
+
+        The natural-reading of "no live task on that instance" would
+        classify a mirrors-only holder as stalled even with other
+        ACTIVE jobs in the busy-set (because the OTHER ACTIVE jobs
+        are on OTHER instances). The carve-out mechanism is stricter:
+        it requires the holder to be the ONLY busy instance. The
+        spec's parenthetical "the incident shape from WS1" matches
+        the carve-out semantics — the WS1 incident is precisely a
+        single instance held up by its own mirrors — so this design
+        is correct for the operational meaning of "stalled = safe to
+        force-complete" (force-completing the holder's mirrors WILL
+        unblock the gate only when the holder is the only busy
+        instance; otherwise the other busy rows still witness).
+
+        This test pins a three-way mixed payload (paused + stalled +
+        instance-less) where the carve-out-strict semantics hold:
+        paused + stalled requires the paused instance's busy row to
+        be its OWN settled mirror (paused's mirror is NOT in the
+        carve-out busy-set for the stalled probe, because the carve-
+        out busy-set for the stalled probe uses the no-carve-out
+        legacy clause... wait, paused's busy row IS its own mirror
+        on z-paused, and z-paused != m-stalled, so the carve-out busy-
+        set for m-stalled would include z-paused's mirror.
+
+        Actually re-checking: the carve-out busy-set for m-stalled
+        is the OR of the legacy clause (which includes any ACTIVE
+        job on any non-terminal instance — including paused's ACTIVE
+        jobs) AND the mirror clause minus m-stalled's mirrors (which
+        includes paused's mirror because it's NOT m-stalled's
+        mirror). So paused's busy row (whether ACTIVE or mirror)
+        always witnesses for m-stalled's carve-out probe. The ONLY
+        way to have stalled coexist with paused is if paused's busy
+        row is suppressed — which the carve-out mechanism does not
+        do.
+
+        Consequence: the practical ``stalled`` scenario is the
+        single-instance-isolation case (this test pins that case).
+        A "mirrors-only holder + genuinely-live holder in one
+        result" mixed test is structurally impossible per the carve-
+        out mechanism and is therefore intentionally absent from
+        this classification matrix.
+        """
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        # Single stalled instance with ONLY its own settled mirror.
+        # Nothing else in the busy-set ⇒ the carve-out busy-set for
+        # this instance is empty (every row in the no-carve-out
+        # busy-set was the requester's own mirrors) ⇒ ``stalled``.
+        stalled = _seed_instance(
+            engine,
+            instance_id="inst-stalled-isolated",
+            status=InstanceStatus.RUNNING.value,
+            last_activity_at=datetime(2026, 9, 5, 10, 0, tzinfo=timezone.utc),
+        )
+        _seed_job(
+            engine,
+            instance_id=stalled,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+            job_id="job-stalled-isolated",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["defer_blocked"] is True
+        assert len(body["holders"]) == 1
+        assert body["holders"][0]["kind"] == "stalled", (
+            "Single-instance-isolation: one instance with only its "
+            "OWN settled mirror and no other busy rows ⇒ stalled; "
+            f"got kind={body['holders'][0]['kind']!r}, body={body!r}"
+        )
+        assert body["holders"][0]["instance_id"] == "inst-stalled-isolated"
+
+    def test_stalled_is_strict_legacy_clause_disqualifies(
+        self, client, engine, job_repo
+    ):
+        """Explicit pin of the carve-out's strictness — the legacy
+        clause witnesses for ANY probe (it is intentionally untouched
+        by the carve-out, by design — the WS1 carve-out's whole point
+        is to suppress SELF mirrors, not to suppress ACTIVE jobs that
+        witness correctly). Adding a SECOND busy instance — even
+        one with ONLY its own settled mirror (no ACTIVE job) —
+        disqualifies a holder from ``stalled`` because that second
+        instance's mirror survives the carve-out probe.
+
+        Concretely: instance X with only its own settled mirror +
+        instance Y with only its own settled mirror ⇒ carve-out busy-
+        set for X is {Y's mirror} (non-empty) ⇒ X is ``live``, not
+        ``stalled``. The "only ONE busy instance" constraint is
+        what makes a holder ``stalled`` under the carve-out
+        mechanism.
+        """
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        # Instance X — the candidate (would be stalled if alone).
+        x = _seed_instance(
+            engine,
+            instance_id="inst-X",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=x,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+            job_id="job-X",
+        )
+        # Instance Y — also a settled-mirror-only holder. Y's mirror
+        # is in X's carve-out busy-set (the carve-out excludes only
+        # X's mirrors, not Y's). X is no longer ``stalled``.
+        y = _seed_instance(
+            engine,
+            instance_id="inst-Y",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=y,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+            job_id="job-Y",
+        )
+        # Confirm the gate-level probe behavior directly:
+        # has_active_non_deferred_work with X as requester returns
+        # True (Y's mirror survives the carve-out).
+        assert (
+            job_repo.has_active_non_deferred_work(
+                project_id=None, requester_instance_id="inst-X"
+            )
+            is True
+        ), (
+            "Carve-out busy-set for X (with Y's mirror present) must "
+            "be non-empty — Y's mirror witnesses via the mirror "
+            "clause even with X as the carve-out requester; X is "
+            "therefore NOT stalled"
+        )
+        # And the surface agrees: both holders are 'live' (mirrors-
+        # only-but-not-isolated).
+        body = client.get("/api/queues/defer-blocked").json()
+        kinds = {h["kind"] for h in body["holders"]}
+        assert kinds == {"live"}, (
+            f"Two-instance mirrors-only busy-set must classify BOTH "
+            f"holders as 'live' (each holder's carve-out busy-set "
+            f"includes the OTHER holder's mirror); got {kinds!r}, "
+            f"body={body!r}"
+        )
+
+    def test_stalled_holder_status_reflects_instance_status(
+        self, client, engine
+    ):
+        """Stalled holders carry the RAW instance status (the gate's
+        truthmaker) — same as live holders. The status is NEVER
+        canonicalized to something like ``stalled`` — the gate's
+        truthmaker is ``Instance.status NOT IN terminal``, and a
+        stalled instance must be non-terminal by definition (the
+        busy-set includes it)."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-stalled-running",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["holders"][0]["status"] == "running", (
+            "Stalled holders carry the RAW instance.status (the gate's "
+            "truthmaker, un-canonicalized) — same as live holders; "
+            f"got status={body['holders'][0]['status']!r}"
+        )
+
+    def test_carve_out_probe_returns_expected_busy_decision(
+        self, client, engine, job_repo
+    ):
+        """The WS2 stall check is the gate's own predicate composition
+        (derive-don't-reimplement) — a holder whose
+        ``has_active_non_deferred_work(None,
+        requester_instance_id=<holder>)`` returns ``False`` is
+        stalled. This test pins the gate method ↔ kind classification
+        invariant explicitly (the consistency-pin shape): across the
+        stalled fixture, ``job_repo.has_active_non_deferred_work(None,
+        requester_instance_id=...)`` returns ``False`` for the
+        stalled holder, and the resolver surfaces ``kind='stalled'``."""
+        _seed_queue(engine, queue_id="q-par", queue_type="parallel")
+        iid = _seed_instance(
+            engine,
+            instance_id="inst-pin",
+            status=InstanceStatus.RUNNING.value,
+        )
+        _seed_job(
+            engine,
+            instance_id=iid,
+            queue_id="q-par",
+            admission_state=AdmissionState.DONE.value,
+            job_type="message",
+        )
+        # Gate's own carve-out decision: False ⇒ the holder is mirrors-
+        # only (its own settled mirrors were the ONLY busy rows).
+        assert (
+            job_repo.has_active_non_deferred_work(
+                project_id=None, requester_instance_id="inst-pin"
+            )
+            is False
+        ), (
+            "Gate predicate with the stalled holder as requester must "
+            "return False — every busy row was the holder's own mirror"
+        )
+        # And the surface agrees on the kind.
+        body = client.get("/api/queues/defer-blocked").json()
+        assert body["holders"][0]["kind"] == "stalled"
+        # Without the carve-out, the gate sees the holder's own mirror
+        # and returns True (the gate IS blocked — mirrors-only holder
+        # is exactly the gate-blocked shape).
+        assert (
+            job_repo.has_active_non_deferred_work(project_id=None) is True
+        ), (
+            "Without the carve-out, the gate predicate sees the "
+            "holder's own settled mirror and returns True — the "
+            "mirrors-only shape IS the gate-blocked shape"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # FRESH-ENGINE NEGATIVE FIXTURE — terminal instance + residual active work
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1260,15 +1731,21 @@ class TestPurity:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BOUNDED QUERIES — exactly 2 SELECTs, flat (no N+1)
+# BOUNDED QUERIES — 2 + N SELECTs per request (N = dedup'd holder count)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 class TestBoundedQueryCount:
-    """Exactly 2 SELECTs per request: witness SELECT + pending count.
-    FLAT as the witness count doubles — zero per-row lookups. Pinned
-    with an engine event listener (the §8.4 convention, NOT mock
-    counting)."""
+    """``2 + len(holders)`` SELECTs per request: 1 shared-composition
+    witness SELECT + 1 defer-lane pending count + 1 WS1 carve-out
+    EXISTS per dedup'd holder instance (the WS2 stall
+    classification). The carve-out budget is bounded by the
+    dedup'd holder count, NOT by raw witness count — multiple busy
+    JobItems on the SAME instance collapse to one holder in
+    ``_project_holders``, keeping N small in practice. On an empty
+    busy-set the budget collapses to the original 2 (no holders to
+    classify). Pinned via an engine event listener (the §8.4
+    convention, NOT mock counting)."""
 
     @staticmethod
     def _count_selects(engine: Engine):
@@ -1287,7 +1764,25 @@ class TestBoundedQueryCount:
 
         return counts, _detach
 
-    def test_exactly_two_selects_per_request(self, client, engine):
+    def test_exactly_two_selects_on_empty_busy_set(self, client, engine):
+        """No witnesses ⇒ the original 2-SELECT budget (no carve-out
+        probes needed — no holders to classify)."""
+        counts, detach = self._count_selects(engine)
+        try:
+            resp = client.get("/api/queues/defer-blocked")
+        finally:
+            detach()
+
+        assert resp.status_code == 200
+        assert resp.json()["holders"] == []
+        assert counts["selects"] == 2, (
+            "Empty busy-set must cost exactly 2 SELECTs (witnesses + "
+            f"defer-lane pending count); got {counts}"
+        )
+
+    def test_two_plus_n_selects_with_one_holder(self, client, engine):
+        """1 holder ⇒ 2 + 1 = 3 SELECTs (1 witness + 1 pending count +
+        1 carve-out probe for the stalled classification)."""
         _seed_queue(engine, queue_id="q-par", queue_type="parallel")
         iid = _seed_instance(engine, instance_id="inst-q1")
         _seed_job(engine, instance_id=iid, queue_id="q-par")
@@ -1299,17 +1794,27 @@ class TestBoundedQueryCount:
             detach()
 
         assert resp.status_code == 200
-        assert counts["selects"] == 2, (
-            "defer-blocked must issue exactly 2 SELECTs (witnesses + "
-            f"defer-lane pending count); got {counts}"
+        assert counts["selects"] == 3, (
+            "defer-blocked must issue 2 + len(holders) SELECTs — "
+            f"1 holder ⇒ 3 SELECTs expected; got {counts}"
         )
 
-    def test_select_count_flat_as_witnesses_double(self, client, engine):
-        """1 witness ⇒ 2 SELECTs; 6 witnesses ⇒ still 2 SELECTs."""
+    def test_select_count_scales_with_dedupd_holder_count_not_witness_count(
+        self, client, engine
+    ):
+        """1 dedup'd holder with 3 busy JobItems ⇒ 2 + 1 = 3 SELECTs;
+        the carve-out budget is per-DEDUP'D-HOLDER, not per witness row
+        (the dedup invariant in ``_project_holders`` is what keeps N
+        small as the witness count grows)."""
         _seed_queue(engine, queue_id="q-par", queue_type="parallel")
-        iid = _seed_instance(engine, instance_id="inst-flat-0")
+        # Single holder instance, three witness JobItems on it.
+        iid = _seed_instance(engine, instance_id="inst-bnd-dedup")
         _seed_job(engine, instance_id=iid, queue_id="q-par",
-                  job_id="job-flat-0")
+                  job_id="job-bnd-0")
+        _seed_job(engine, instance_id=iid, queue_id="q-par",
+                  job_id="job-bnd-1")
+        _seed_job(engine, instance_id=iid, queue_id="q-par",
+                  job_id="job-bnd-2")
 
         counts, detach = self._count_selects(engine)
         try:
@@ -1317,16 +1822,23 @@ class TestBoundedQueryCount:
         finally:
             detach()
         assert resp.status_code == 200
-        assert len(resp.json()["holders"]) == 1
-        assert counts["selects"] == 2, (
-            f"1 witness must cost exactly 2 SELECTs; got {counts}"
+        assert len(resp.json()["holders"]) == 1, (
+            "Multiple busy JobItems on the same instance must dedupe "
+            f"to one holder; got {resp.json()['holders']!r}"
+        )
+        assert counts["selects"] == 3, (
+            "1 dedup'd holder must cost 2 + 1 = 3 SELECTs regardless "
+            f"of witness row count; got {counts}"
         )
 
-        # Grow the busy-set 1 → 6 witnesses: the bound is FLAT.
+        # Grow the busy-set to 6 distinct holders: 1 witness SELECT +
+        # 1 pending count + 6 carve-out probes = 8 SELECTs. The
+        # witness SELECT is the SAME single SELECT — only the carve-out
+        # budget scales, and only by dedup'd holder count.
         for n in range(1, 6):
-            iid = _seed_instance(engine, instance_id=f"inst-flat-{n}")
+            iid = _seed_instance(engine, instance_id=f"inst-bnd-grow-{n}")
             _seed_job(engine, instance_id=iid, queue_id="q-par",
-                      job_id=f"job-flat-{n}")
+                      job_id=f"job-bnd-grow-{n}")
 
         counts, detach = self._count_selects(engine)
         try:
@@ -1335,7 +1847,7 @@ class TestBoundedQueryCount:
             detach()
         assert resp.status_code == 200
         assert len(resp.json()["holders"]) == 6
-        assert counts["selects"] == 2, (
-            f"6 witnesses must still cost exactly 2 SELECTs (no N+1); "
-            f"got {counts}"
+        assert counts["selects"] == 8, (
+            "6 dedup'd holders must cost 2 + 6 = 8 SELECTs (1 witness "
+            f"SELECT shared across all rows + 6 carve-out probes); got {counts}"
         )

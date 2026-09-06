@@ -1374,24 +1374,49 @@ read service in the `MissionResolver` pattern.
   instance; a legacy-clause witness whose JobItem has NO instance row
   (`j.instance_id IS NULL`) surfaces as its OWN holder with `instance_id=""`,
   `status=""` and `agent` from the JobItem row (dropping it would break the
-  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive — it is
-  `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
-  suspended-but-occupying), `"live"` otherwise. The wire payload does NOT carry
-  severity — the AMBER / INFO / RED severity conjunction is a client-side read of
-  the `(kind, holders.len(), pending_count)` triple, NOT a server-derived property.
-  `status` is the RAW instance status (the gate's truthmaker, not canonicalized).
-  `since` is normalized ISO-8601 (naive → UTC — the `_parse_job_created_at`
-  TEXT-timestamp pattern): `paused_at` for paused holders, falling back through
-  `updated_at` then `created_at`; `last_activity_at` for live holders, falling back
-  through `updated_at` then `created_at`; `JobItem.created_at` for instance-less
-  witnesses (NO instance-side fallback chain — the JobItem's own `created_at` is
-  the sole source; null-or-empty is possible if even that column is NULL).
-  Ordering: paused holders first (AMBER operator-priority), then live, each
-  ascending by `instance_id` — the `_project_holders` sort key is
-  `(kind != "paused", instance_id, agent)`. Holders rows are NOT bounded by a
-  list `LIMIT` — the projection enumerates every witness (`len(witnesses)` is
-  unbounded); the FE renders every row but the render-gate below ensures the
-  affordance is invisible when there is nothing to warn about.
+  holders-non-empty == gate-blocked invariant). `kind` is purely descriptive and
+  takes one of three values (WS2 — `fix/defer-self-witness-and-cleanup` workstream 2):
+
+  - `"paused"` when the witness instance's `Instance.status` is `paused` (W2:
+    suspended-but-occupying). Paused takes precedence over stalled by construction
+    — a paused instance's actionable unblock is always the operator action
+    (resume / terminate), never the mirrors-only `stalled` action (force-complete),
+    so the operator-actionable status wins.
+
+  - `"stalled"` for a non-paused witness whose gate-busy state is EXCLUSIVELY
+    its OWN settled message mirrors. Detected by re-evaluating the WS1
+    requester-instance carve-out gate body with the holder's instance as the
+    requester: `JobRepository.has_active_non_deferred_work(None,
+    requester_instance_id=<holder>)` returns `False` (the carve-out excludes the
+    holder's own settled mirrors; if no OTHER busy witness remains, every row in
+    the no-carve-out busy-set was the holder's own mirrors — the gate is held by
+    mirrors pinning it against an instance with no live work). Stalled is
+    actionable via force-complete of the holder's settled mirrors (the WS4 cleanup
+    mechanic). Instance-less witnesses (`instance_id=""`) cannot be classified as
+    stalled (no instance_id to feed the carve-out bind) and fall through as `"live"`
+    by construction.
+
+  - `"live"` for every other witness (a non-paused instance with genuine non-mirror
+    busy work, OR a legacy-clause witness with no instance row).
+
+  The wire payload does NOT carry severity — the AMBER / INFO / RED severity
+  conjunction is a client-side read of the `(kind, holders.len(), pending_count)`
+  triple, NOT a server-derived property. `status` is the RAW instance status (the
+  gate's truthmaker, not canonicalized). `since` is normalized ISO-8601 (naive → UTC
+  — the `_parse_job_created_at` TEXT-timestamp pattern): `paused_at` for paused
+  holders, falling back through `updated_at` then `created_at`;
+  `last_activity_at` for live AND stalled holders, falling back through
+  `updated_at` then `created_at` (stalled holders have no live task to bump
+  `last_activity_at` recently, so the value is the most-recent prior activity
+  stamp); `JobItem.created_at` for instance-less witnesses (NO instance-side
+  fallback chain — the JobItem's own `created_at` is the sole source; null-or-empty
+  is possible if even that column is NULL). Ordering: paused holders first
+  (operator-priority AMBER witnesses), then stalled (operator-actionable mirrors-only
+  witnesses), then live — each ascending by `instance_id` — the `_project_holders`
+  sort key is `(kind != "paused", kind != "stalled", instance_id, agent)`. Holders
+  rows are NOT bounded by a list `LIMIT` — the projection enumerates every witness
+  (`len(witnesses)` is unbounded); the FE renders every row but the render-gate
+  below ensures the affordance is invisible when there is nothing to warn about.
 
 #### THE invariant — gate-truth == display-truth, by construction
 
@@ -1414,12 +1439,17 @@ fixtures) plus the shared-tail text pin are locked in
 
 | Shape | Condition | Meaning |
 |---|---|---|
-| AMBER | some holder has `kind == "paused"` | a paused instance occupies the gate's busy-set — operator-actionable (resume or terminate it) |
+| AMBER | some holder has `kind == "paused"` OR `kind == "stalled"` | a paused instance occupies the gate's busy-set (`paused` ⇒ operator-actionable via resume/terminate) — OR a non-paused witness is held up by EXCLUSIVELY its own settled message mirrors (`stalled` ⇒ actionable via force-complete of the holder's mirrors). Both are operator-actionable; the FE tooltip wording distinguishes the two kinds. |
 | INFO | holders non-empty, all `kind == "live"` | the gate is honoring ordinary live work |
 | RED anomaly | `pending_count > 0` AND `holders == []` | defer work is queued while the gate reports no witness — investigate |
 
 The severity conjunction is a client-side read of the payload; the surface itself
 carries only the two facts + witnesses.
+
+> **WS4 NOTE (deferred):** a separate by-design note about cleanup blindness
+> (the fact that `stalled` surfaces the remediation shape WITHOUT taking the
+> action — the WS4 cleanup mechanic must remain a deliberate operator step) will
+> be appended to this section in workstream 4.
 
 **FE render-gate** — the `deferBlockIndicator` helper
 (`frontend/src/app/models/defer-blocked.model.ts`) returns `null` (no render, no
@@ -1434,13 +1464,19 @@ the FE iterates the array to find the first paused holder; with `pending_count
 
 #### Purity, bound, degradation
 
-- **Purity:** zero DML on the path (two SELECTs per call through
+- **Purity:** zero DML on the path (`2 + len(holders)` SELECTs per call through
   `engine.connect()`); census unchanged — the constitution scanner finds no writer
   idiom in the surface (its only `admission_state` occurrences are column references
   inside the imported gate SQL).
-- **Bound:** exactly 2 SELECTs per request — the shared-composition witness SELECT +
-  the defer-lane pending count — flat regardless of witness count (no N+1; pinned via
-  an engine event listener, NOT mock counting).
+- **Bound:** the WS2 stall classification adds one WS1 carve-out EXISTS per
+  dedup'd holder instance (the witness SELECT + the defer-lane pending count + N
+  carve-out probes = `2 + N` SELECTs per request, where `N = len(holders)`
+  post-dedup). Bounded by the number of distinct non-terminal instances with
+  non-defer busy rows (NOT a witness-row N+1 — multiple busy JobItems on the SAME
+  instance collapse to one holder in `_project_holders`, keeping `N` small in
+  practice). On an empty busy-set the budget collapses to the original 2 (no
+  holders to classify). Pinned via an engine event listener in
+  `TestBoundedQueryCount`, NOT mock counting.
 - **Degradation:** none — DB errors propagate (⇒ 500). Queues-family posture (no
   §8.2-style degrade shape on this router family), and the honest choice: the gate
   itself fails CLOSED on DB error, and a surface that serves no body can never

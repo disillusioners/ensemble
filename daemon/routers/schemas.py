@@ -1356,10 +1356,19 @@ class DeferBlockHolderResponse(BaseModel):
     )
     kind: str = Field(
         description=(
-            "Holder kind — 'paused' iff the witness instance's "
-            "Instance.status is 'paused' (the W2 suspended-but-"
-            "occupying case, AMBER severity in the FE render), 'live' "
-            "for every other witness (live instance OR a legacy-clause "
+            "Holder kind — one of three values (docs §8.5, WS2): "
+            "'paused' when the witness instance's Instance.status is "
+            "'paused' (the W2 suspended-but-occupying case — AMBER "
+            "severity in the FE render; paused always wins over "
+            "stalled); 'stalled' for a non-paused witness whose "
+            "gate-busy state is EXCLUSIVELY its OWN settled message "
+            "mirrors (the WS1 requester-instance carve-out returns "
+            "False when the holder's instance is the requester — the "
+            "gate is held by mirrors pinning it against an instance "
+            "with no live work; AMBER severity, actionable via "
+            "force-complete, WS4 will ship the cleanup mechanic); "
+            "'live' for every other witness (a non-paused instance "
+            "with genuine non-mirror busy work, OR a legacy-clause "
             "witness with no instance row at all). Kind is purely "
             "descriptive — it is NOT a wire-property severity: the "
             "AMBER / INFO / RED severity conjunction is a client-side "
