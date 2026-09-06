@@ -708,17 +708,21 @@ async def cleanup_preflight(request: Request):
         # narrow the list to TRULY-retained instances, the preflight
         # now post-filters the non-terminal ∖ zombie set through
         # ``SQLModelInstanceRepository.has_real_active_or_queued_work(instance_id)`` —
-        # the dedicated probe for non-mirror ``active``/``queued``
-        # JobItem (the Bucket-1 + Bucket-2 cancellable work; mirror
-        # rows are constitution-era protected). Live Tasks and
-        # non-terminal children do NOT make an instance a
-        # truth-survivor (Bucket 5 will reap on second pass if no
-        # other live work remains); what DOES make it a survivor is
-        # "live work that cleanup won't touch" — instances with only
-        # an OWN queued defer-lane mirror set, OR live Tasks without
-        # JobItems, OR active mirrors (protected) — all of which
-        # both the zombie predicate AND the new probe consider
-        # non-zombie / non-cancellable. Cost: ≤20 probes (the dialog
+        # a JobItem-only EXISTS-shape probe (NOT the broader
+        # ``has_live_work``): the predicate checks ONLY the JobItem
+        # arm (non-mirror ``active``/``queued`` rows). Tasks and
+        # non-terminal children are deliberately OUT OF SCOPE — a
+        # live-Task-only instance HAS no JobItems at all (the
+        # probe returns False, instance passes the filter), and a
+        # child-bearing instance MAY lack an own non-mirror
+        # ACTIVE/queued JobItem too (the probe returns False,
+        # instance passes). Both shapes are genuine truth-survivors:
+        # Bucket 5 reap targets instances with no live work; live
+        # Tasks + non-terminal children ARE live work per the
+        # shared zombie predicate (``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``
+        # + child arm), so the post-filter lets them through while
+        # excluding the Bucket-1/2-cancellable holders (non-mirror
+        # ACTIVE/queued JobItems). Cost: ≤20 probes (the dialog
         # bound). Cheap and reuses existing machinery; no schema
         # change, no census-write impact.
         zombie_instance_count = await asyncio.to_thread(
