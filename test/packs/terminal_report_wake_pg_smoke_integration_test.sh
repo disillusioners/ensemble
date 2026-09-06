@@ -209,6 +209,21 @@ with Session(ENGINE) as s:
                 status=InstanceStatus.RUNNING.value,
             )
         )
+    # Separate instance for the report task — the per-instance concurrency
+    # gate filters out candidates whose instance has a RUNNING task. If we
+    # shared inst-busy-0 with the 30-min-old process_message, that
+    # message would be filtered out after the report claims, and the
+    # second-claim FIFO assertion would target the 25-min survivor
+    # instead of the 30-min-old one.
+    s.add(
+        Instance(
+            instance_id="inst-report",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
+            agent_name="developer",
+            status=InstanceStatus.RUNNING.value,
+        )
+    )
     s.commit()
 
 # 4 process_message tasks: 30, 25, 20, 15 minutes old — strict FIFO backlog.
@@ -227,7 +242,7 @@ with Session(ENGINE) as s:
     s.add(
         Task(
             task_type=TaskType.PROCESS_REPORT.value,
-            instance_id="inst-busy-0",  # a real child would be inst-busy-0; same row OK for lane proof
+            instance_id="inst-report",
             status=TaskStatus.PENDING.value,
             created_at=NOW - timedelta(minutes=1.0),
         )
