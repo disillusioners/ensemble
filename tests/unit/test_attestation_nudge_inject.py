@@ -19,6 +19,9 @@ def test_deny_injects_checkpoint_plain_dict_and_routes_to_agent():
     manager = MagicMock()
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
+    # Third R2 input (2026-09-06) — 0 by default keeps the test in the
+    # "no live descendants" branch of the R2 deny predicate.
+    manager.count_live_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()

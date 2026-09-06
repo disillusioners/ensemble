@@ -61,10 +61,14 @@ def plain_messages():
     ]
 
 
-def make_manager(pending_children=0, wakeups=0):
+def make_manager(pending_children=0, wakeups=0, live_descendants=0):
     manager = MagicMock()
     manager.count_pending_children = MagicMock(return_value=pending_children)
     manager.get_queued_or_expected_wakeups = MagicMock(return_value=wakeups)
+    # Third R2 input (2026-09-06) — defaulted to 0 for the unit suite.
+    # Tests that need a non-zero live-descendant count override via
+    # this kwarg (or use MagicMock side_effect on a per-test basis).
+    manager.count_live_descendants = MagicMock(return_value=live_descendants)
     return manager
 
 
@@ -76,7 +80,7 @@ def make_manager(pending_children=0, wakeups=0):
 class TestDecideMetaConditions:
     def test_disabled_gate_allows_regardless(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=2, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=False,
         )
@@ -87,7 +91,7 @@ class TestDecideMetaConditions:
 
     def test_scope_inapplicable_allows(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=1, bound=3, scope_applicable=False, mode="enforce",
             attestation_enabled=True,
         )
@@ -96,7 +100,7 @@ class TestDecideMetaConditions:
 
     def test_mode_off_allows_regardless(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=3, bound=3, scope_applicable=True, mode="off",
             attestation_enabled=True,
         )
@@ -109,7 +113,7 @@ class TestDecideDryMode:
         # Dry + missing attestation + R2-deny-predicate satisfied:
         # evaluation recorded (dry_log) but allow + no counter change.
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=1, bound=3, scope_applicable=True, mode="dry",
             attestation_enabled=True,
         )
@@ -121,7 +125,7 @@ class TestDecideDryMode:
         # Plan logic-tree order: dry short-circuits BEFORE the attested
         # check — so no reset fires in dry (zero side effects, always).
         result = decide(
-            attested=True, pending_children=0, queued_or_expected_wakeups=0,
+            attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=2, bound=3, scope_applicable=True, mode="dry",
             attestation_enabled=True,
         )
@@ -133,7 +137,7 @@ class TestDecideEnforce:
     def test_attested_allow_resets_counter(self):
         # Architect addition — attested allow is reset trigger (1).
         result = decide(
-            attested=True, pending_children=0, queued_or_expected_wakeups=0,
+            attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=3, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -143,7 +147,7 @@ class TestDecideEnforce:
 
     def test_r2_allow_pending_children(self):
         result = decide(
-            attested=False, pending_children=2, queued_or_expected_wakeups=0,
+            attested=False, pending_children=2, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=0, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -154,7 +158,7 @@ class TestDecideEnforce:
 
     def test_r2_allow_queued_wakeups(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=1,
+            attested=False, pending_children=0, queued_or_expected_wakeups=1, live_descendants=0,
             denied_count=2, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -164,7 +168,7 @@ class TestDecideEnforce:
 
     def test_first_deny(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=0, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -174,7 +178,7 @@ class TestDecideEnforce:
 
     def test_last_deny_before_bound(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=2, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -184,7 +188,7 @@ class TestDecideEnforce:
 
     def test_denied_count_at_bound_is_terminal_after_bound(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=3, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -197,7 +201,7 @@ class TestDecideEnforce:
 
     def test_boundary_bound_minus_one_denies(self):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=2, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
         )
@@ -214,7 +218,7 @@ class TestDecideEnforce:
     ])
     def test_bound_boundary_matrix(self, denied_count, bound, expected):
         result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0,
+            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=denied_count, bound=bound, scope_applicable=True,
             mode="enforce", attestation_enabled=True,
         )

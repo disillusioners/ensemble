@@ -98,6 +98,9 @@ def _build_node(repo: SQLModelInstanceRepository):
     manager = MagicMock()
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
+    # Third R2 input (2026-09-06) — defaulted to 0; the unit tests for
+    # the gate node exercise the "no live descendants" R2 branch.
+    manager.count_live_descendants.return_value = 0
     settings = GateSettings("enforce", 3, 3)
     config = build_gate_config(LEADER_ID, settings)
     return create_attestation_gate_node(
@@ -289,6 +292,8 @@ class TestRuntimeIdGetterFallback:
         manager = MagicMock()
         manager.count_pending_children.return_value = 0
         manager.get_queued_or_expected_wakeups.return_value = 0
+        # Third R2 input (2026-09-06) — 0 default for the unit tests.
+        manager.count_live_descendants.return_value = 0
         settings = GateSettings("enforce", 3, 3)
         config = build_gate_config(None, settings)  # build-time id ABSENT
         node = create_attestation_gate_node(

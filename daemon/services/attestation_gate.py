@@ -21,9 +21,13 @@ R2 (deny-input) semantics
 -------------------------
 
 Deny fires ONLY when ALL of: not attested AND ``pending_children == 0``
-AND ``queued_or_expected_wakeups == 0``. Any non-zero pending input
-means a legitimate wakeup is en route and the turn-end is allowed
-without attestation (the nudge-flood kill).
+AND ``queued_or_expected_wakeups == 0`` AND ``live_descendants == 0``.
+Any non-zero pending input means a legitimate wakeup is en route and
+the turn-end is allowed without attestation (the nudge-flood kill).
+The three-input R2 predicate (``live_descendants`` added 2026-09-06)
+closes the 809e2a59 waiting_children false-deny incident class — see
+``decide()`` arg ``live_descendants`` and the manager facade
+``InstanceManager.count_live_descendants``.
 
 Counter-reset semantics (leader ruling 1, SUPERSEDES plan prose)
 ----------------------------------------------------------------
@@ -272,6 +276,12 @@ class GateDecision:
     # ——— R2 inputs (canonical schema fields) ———
     pending_children: int = 0
     queued_or_expected_wakeups: int = 0
+    # Live descendants — the third R2 input (2026-09-06, option-a
+    # additive fix for the 809e2a59 waiting_children false-deny
+    # incident class). Live = NOT IN {COMPLETED, TERMINATED, ERROR,
+    # FAILED}. Always surfaces the count in the schema; 0 means
+    # either no descendants or every descendant terminal.
+    live_descendants: int = 0
     denied_count: int = 0
 
 
@@ -284,6 +294,7 @@ def decide(
     attested: bool,
     pending_children: int,
     queued_or_expected_wakeups: int,
+    live_descendants: int,
     denied_count: int,
     bound: int,
     scope_applicable: bool,
@@ -302,10 +313,18 @@ def decide(
        ZERO side effects, counter unchanged.
     3. enforce + attested → :attr:`Decision.ALLOWED` with
        ``next_denied_count = 0`` (reset trigger 1).
-    4. enforce + not attested + any pending wakeup input > 0 →
+    4. enforce + not attested + any pending wakeup input > 0
+       (THREE-input R2 — ``pending_children``,
+       ``queued_or_expected_wakeups``, OR ``live_descendants``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
-       protection).
+       protection). The ``live_descendants`` arm closes the 809e2a59
+       waiting_children false-deny incident class: deferral fires the
+       parent's watcher (so ``pending_children`` drops to 0) while a
+       deeper grandchild still runs, AND deferral emits no report/task
+       row (so ``queued_or_expected_wakeups`` stays 0). Without the
+       third input the gate sees 0/0 as TRUE facts and escalates to
+       ``terminal_after_bound`` while the descendant is alive.
     5. enforce + not attested + no pending wakeups +
        ``denied_count + 1 > bound`` → :attr:`Decision.TERMINAL_AFTER_BOUND`
        with ``next_denied_count = 0`` (reset trigger 2; the same reset
@@ -323,6 +342,10 @@ def decide(
         pending_children: R2 input from ``manager.count_pending_children``.
         queued_or_expected_wakeups: R2 input from
             ``manager.get_queued_or_expected_wakeups``.
+        live_descendants: R2 third input from
+            ``manager.count_live_descendants`` — count of descendants
+            whose status is NOT IN {COMPLETED, TERMINATED, ERROR,
+            FAILED}. Closes the watcher-fire-on-defer gap.
         denied_count: Current ``attestation_denied_count`` (Phase 2
             stand-in: the caller passes 0; Phase 3 threads the ledger).
         bound: Deny bound (D5, default 3).
@@ -367,8 +390,15 @@ def decide(
             should_inject_nudge=False,
         )
 
-    # (4) R2 allow — legitimate pending wakeup; counter unchanged.
-    if pending_children > 0 or queued_or_expected_wakeups > 0:
+    # (4) R2 allow — legitimate pending wakeup (THREE-input predicate:
+    # pending_children OR queued_or_expected_wakeups OR live_descendants);
+    # counter unchanged (ruling 1: the R2 non-reset IS the loop
+    # protection).
+    if (
+        pending_children > 0
+        or queued_or_expected_wakeups > 0
+        or live_descendants > 0
+    ):
         return GateDecision(
             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             next_denied_count=denied_count,
@@ -434,6 +464,7 @@ CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
     "leader_prompt_version",
     "pending_children",
     "queued_or_expected_wakeups",
+    "live_descendants",  # 2026-09-06 third R2 input (option-a fix)
     "attest_seen_outside_window",
     "messages_scanned",
     "scanned_window_size",
@@ -493,9 +524,10 @@ def evaluate(
     """Glue: scanner → R2 facade reads → decide → canonical log entry.
 
     Read sequence (CR-2 TOCTOU contract, mandatory ordering):
-    ``messages → pending_children → queued_or_expected_wakeups``. The
-    in-node ``messages`` list is the caller's LangGraph state argument —
-    evaluated first, synchronously, before any manager facade call.
+    ``messages → pending_children → queued_or_expected_wakeups →
+    live_descendants``. The in-node ``messages`` list is the caller's
+    LangGraph state argument — evaluated first, synchronously, before
+    any manager facade call.
 
     **TOCTOU race contract (task 2.3.1, CR-2):** a leader that dispatches
     a child and ENDs in the same cycle is protected because watcher
@@ -519,10 +551,11 @@ def evaluate(
         messages: In-node ``state["messages"]`` — NEVER an
             ``aget_state`` result (see module docstring).
         mode_resolver: :class:`GateSettings` (window/bound/mode).
-        manager: Handle exposing the two NEW facades
+        manager: Handle exposing the THREE NEW facades
             (``count_pending_children`` / ``get_queued_or_expected_
-            wakeups``). May be ``None`` ONLY in degenerate embeddings —
-            the response is fail-open allow (R2 inputs unreadable).
+            wakeups`` / ``count_live_descendants``). May be ``None``
+            ONLY in degenerate embeddings — the response is fail-open
+            allow (R2 inputs unreadable).
         attestation_enabled: C2 flag (False bypasses everything).
         scope_applicable: D3 flag (False bypasses everything).
         tool_name: Attestation tool name.
@@ -586,7 +619,7 @@ def evaluate(
             messages, mode_resolver.window, tool_name
         )
 
-        # (ii) R2 inputs — the two NEW manager facades (SYNC reads; the
+        # (ii) R2 inputs — the THREE NEW manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
         # DB seam: `except Exception` (KeyboardInterrupt stays fail-closed).
         try:
@@ -594,6 +627,7 @@ def evaluate(
             queued_or_expected_wakeups = manager.get_queued_or_expected_wakeups(
                 instance_id
             )
+            live_descendants = manager.count_live_descendants(instance_id)
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam
             error_class = type(db_exc).__name__
             logger.error(
@@ -607,6 +641,7 @@ def evaluate(
                 "denied_count=%s "
                 "pending_children=-1 "
                 "queued_or_expected_wakeups=-1 "
+                "live_descendants=-1 "
                 "attest_seen_outside_window=%s "
                 "messages_scanned=%s "
                 "scanned_window_size=%s "
@@ -641,6 +676,7 @@ def evaluate(
                 scanned_window_size=mode_resolver.window,
                 pending_children=-1,
                 queued_or_expected_wakeups=-1,
+                live_descendants=-1,
                 denied_count=denied_count,
                 gate_exception_seen=True,
             )
@@ -650,6 +686,7 @@ def evaluate(
             attested=scan.attested,
             pending_children=pending_children,
             queued_or_expected_wakeups=queued_or_expected_wakeups,
+            live_descendants=live_descendants,
             denied_count=denied_count,
             bound=mode_resolver.deny_bound,
             scope_applicable=scope_applicable,
@@ -668,6 +705,7 @@ def evaluate(
             scanned_window_size=mode_resolver.window,
             pending_children=pending_children,
             queued_or_expected_wakeups=queued_or_expected_wakeups,
+            live_descendants=live_descendants,
             denied_count=denied_count,
         )
 
@@ -678,6 +716,7 @@ def evaluate(
             "gate_location=%s leader_prompt_version=%s mode=%s "
             "attestation_present=%s denied_count=%s next_denied_count=%s "
             "pending_children=%s queued_or_expected_wakeups=%s "
+            "live_descendants=%s "
             "attest_seen_outside_window=%s messages_scanned=%s "
             "scanned_window_size=%s scanner_window_truncated=%s "
             "scanner_summary_seen=%s should_inject_nudge=%s",
@@ -691,6 +730,7 @@ def evaluate(
             result.next_denied_count,
             result.pending_children,
             result.queued_or_expected_wakeups,
+            result.live_descendants,
             result.attest_seen_outside_window,
             result.messages_scanned,
             result.scanned_window_size,
@@ -707,7 +747,8 @@ def evaluate(
         # ``dry_log_deny_predicate_total`` ticks on the SUBSET whose R2
         # deny predicate would have fired under ``enforce``
         # (``not attested AND pending_children == 0 AND
-        # queued_or_expected_wakeups == 0``). Enforce-mode denied:
+        # queued_or_expected_wakeups == 0 AND live_descendants == 0``
+        # — the THREE-input R2 predicate). Enforce-mode denied:
         # ``enforce_denied_total`` ticks on ``Decision.DENIED`` only —
         # ``terminal_after_bound`` is the escalation path, NOT a "denied
         # under enforce" event.
@@ -718,6 +759,7 @@ def evaluate(
                     not result.attestation_present
                     and result.pending_children == 0
                     and result.queued_or_expected_wakeups == 0
+                    and result.live_descendants == 0
                 ):
                     record_promotion_metric(METRIC_DRY_LOG_DENY_PREDICATE_TOTAL)
             elif (
@@ -757,5 +799,6 @@ def evaluate(
             scanned_window_size=mode_resolver.window,
             pending_children=-1,
             queued_or_expected_wakeups=-1,
+            live_descendants=-1,
             gate_exception_seen=True,
         )

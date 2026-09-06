@@ -117,10 +117,14 @@ def attestation_repository(file_sqlite_engine):
 def attestation_manager_factory():
     """Build a lightweight manager exposing the production gate surfaces.
 
-    The optional ``pending_children`` and ``queued_wakeups`` values are
-    deliberate overrides.  With ``pending_children=None`` (the default),
-    the facade reads the real ``dependency_watchers`` table, allowing a test
-    to assert the PENDING row before asking the gate to evaluate.
+    The optional ``pending_children``, ``queued_wakeups``, and
+    ``live_descendants`` values are deliberate overrides.  With
+    ``pending_children=None`` (the default), the facade reads the real
+    ``dependency_watchers`` table, allowing a test to assert the PENDING
+    row before asking the gate to evaluate. ``live_descendants`` defaults
+    to None which triggers a real BFS over the instance tree (mirroring
+    the production facade) — tests that want to assert a specific
+    descendant count can set it explicitly.
     """
 
     def factory(
@@ -130,6 +134,7 @@ def attestation_manager_factory():
         instance_id: str = "attestation-leader-e2e",
         pending_children: int | None = None,
         queued_wakeups: int = 0,
+        live_descendants: int | None = None,
     ):
         class GraphTestManager:
             _instance_repository = repo
@@ -154,6 +159,37 @@ def attestation_manager_factory():
             def get_queued_or_expected_wakeups(self, target_instance_id: str) -> int:
                 return int(queued_wakeups)
 
+            # Third R2 input (2026-09-06) — count of descendants whose
+            # status is NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}.
+            # Mirrors ``InstanceManager.count_live_descendants`` (BFS over
+            # the permanent ``instances.parent_id`` lineage, root excluded,
+            # terminal-set excluded). ``live_descendants=None`` (default)
+            # means "use the real facade"; tests that want a specific
+            # count override via the kwarg.
+            def count_live_descendants(self, target_instance_id: str) -> int:
+                if live_descendants is not None:
+                    return live_descendants
+                from daemon.repositories.instance.models import InstanceStatus
+
+                terminal_statuses = {
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.TERMINATED.value,
+                    InstanceStatus.ERROR.value,
+                    InstanceStatus.FAILED.value,
+                }
+                # BFS over the permanent lineage via get_tree_ids_permanent.
+                tree_ids = repo.get_tree_ids_permanent(target_instance_id)
+                count = 0
+                for iid in tree_ids:
+                    if iid == target_instance_id:
+                        continue
+                    row = repo.get(iid)
+                    if row is None:
+                        continue
+                    if row.status not in terminal_statuses:
+                        count += 1
+                return count
+
             @staticmethod
             def is_watchover_enabled(_target_instance_id: str) -> bool:
                 return False
@@ -174,6 +210,9 @@ def attestation_manager_factory():
         )
         manager.get_queued_or_expected_wakeups = MagicMock(
             side_effect=manager.get_queued_or_expected_wakeups
+        )
+        manager.count_live_descendants = MagicMock(
+            side_effect=manager.count_live_descendants
         )
         return manager
 

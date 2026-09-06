@@ -542,10 +542,10 @@ N_le_min_recent_window=WARN: WINDOW=<N> > min_recent_window=<floor>;
 **Dry→enforce promotion SOP (the "instrumented dry-run")**
 
 1. **Ship at `dry`.** Operators do NOT need to flip anything — `dry` is the ship default.
-2. **Observe.** Grep the log for `event=leader_completion_gate decision=dry_log`. Every entry carries the full canonical schema (`event`, `decision`, `instance_id`, `attestation_present`, `denied_count`, `gate_location`, `leader_prompt_version`, `pending_children`, `queued_or_expected_wakeups`, `attest_seen_outside_window`, `messages_scanned`, `scanned_window_size`, `mode`, `scanner_window_truncated`, `scanner_summary_seen` — the field set is exported as `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS` for drift tests).
+2. **Observe.** Grep the log for `event=leader_completion_gate decision=dry_log`. Every entry carries the full canonical schema (`event`, `decision`, `instance_id`, `attestation_present`, `denied_count`, `gate_location`, `leader_prompt_version`, `pending_children`, `queued_or_expected_wakeups`, `live_descendants`, `attest_seen_outside_window`, `messages_scanned`, `scanned_window_size`, `mode`, `scanner_window_truncated`, `scanner_summary_seen` — 16 fields, exported as `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS` for drift tests; `live_descendants` added 2026-09-06 as the third R2 input closing the 809e2a59 waiting_children false-deny incident class — count of descendants whose status is NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}, bounded BFS at `LIVE_DESCENDANTS_BFS_CAP = 500`).
 3. **Adjudicate false positives** using the canonical counters (task 4.6, `daemon/services/attestation_resolver.py`):
    - `dry_log_total` — every dry-mode evaluation that ran.
-   - `dry_log_deny_predicate_total` — subdivision of `dry_log_total` whose R2-deny predicate would have fired under `enforce` (the "would-have-denied" subset — `not attested AND pending_children == 0 AND queued_or_expected_wakeups == 0`).
+   - `dry_log_deny_predicate_total` — subdivision of `dry_log_total` whose R2-deny predicate would have fired under `enforce` (the "would-have-denied" subset — `not attested AND pending_children == 0 AND queued_or_expected_wakeups == 0 AND live_descendants == 0` — the THREE-input R2 predicate; `live_descendants` arm added 2026-09-06).
    - `enforce_denied_total` — every enforce-mode `Decision.DENIED` evaluation (escalation path is **not** counted here).
 
    False-positive rate = `dry_log_deny_predicate_total / dry_log_total`. If the rate is acceptable for the operator's tolerance, flip to `enforce`.
@@ -573,7 +573,7 @@ Invalid env values (typo'd mode, non-integer window/bound) **fail OPEN to `enfor
 **Stuck-leader postmortem checklist**
 
 1. Check the boot log line — confirm `mode` is what you expected (operator error class).
-2. Grep `event=leader_completion_gate decision=denied` — every deny prints the full R2 input fields (`pending_children`, `queued_or_expected_wakeups`, `attestation_present`) so you can see which predicate fired.
+2. Grep `event=leader_completion_gate decision=denied` — every deny prints the full R2 input fields (`pending_children`, `queued_or_expected_wakeups`, `live_descendants`, `attestation_present`) so you can see which predicate fired.
 3. Grep `event=leader_completion_gate decision=terminal_after_bound` — these are the escalation-path log entries (the bound was reached).
 4. Check the instance row for `completion_gate_escalated=true` — find the escalation boundary.
 5. If the gate is firing on legitimate completions (false positive), flip to `dry` or `off` for instant revert + restart.

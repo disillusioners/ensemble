@@ -631,3 +631,119 @@ RESOLVED upstream (post-reconciliation):
 - `daemon/graph.py:1836-1847` (loop-breaker cap); `_loop_breaker_state.pop` reset hooks at `daemon/manager.py:3734, :3798, :8548` (in-memory precedent only — does NOT apply to row-scoped DB columns; per D5 reset-on-allow)
 - `daemon/graph.py:216-224` (`[SYSTEM NOTE: ...]` data-frame convention — MUST NOT be used for recovery)
 - `daemon/compaction.py` (compaction folding behavior — to verify pre-implementation)
+
+---
+
+## 2026-09-06 — Waiting-children false-deny incident fix (option-a, additive third R2 input)
+
+**Status:** APPLIED 2026-09-06 on `feature/leader-completion-attestation`.
+
+### Context
+
+Incident 809e2a59 (2026-09-02 self-diagnosis): a leader escalated to
+`terminal_after_bound` while a transitive grandchild was still alive.
+Root cause: the watcher lifecycle is per-TURN
+(`child_still_running_defer` at `daemon/services/child_reports.py:3646-3695`,
+the 02fb2e01 un-wedging fix) DELIBERATELY fires the parent's watcher
+when the child defers to `waiting_children` — so the parent's
+`pending_children` drops to 0 while the deeper child mission continues.
+`count_pending_for_target` only counts direct PENDING watchers
+(`daemon/repositories/dependency_bus/repository.py:429-482`), so the
+gate saw `pending_children=0`. Deferral emits no report / no task row,
+so `get_queued_or_expected_wakeups` also returned 0 (deferral excludes
+claimable rows). The gate correctly per-spec decided DENY → escalate
+to `terminal_after_bound` (instance `809e2a59` escalated at 09:30:19
+while the child `a135fb55` lived until ≥09:59). TOCTOU excluded; zero
+gate-error rows.
+
+### Decision (option-a)
+
+**Add an additive THIRD R2 input — `live_descendants`** — counted by a
+new manager facade `InstanceManager.count_live_descendants(instance_id)`
+that BFS-walks the permanent `instances.parent_id` lineage (root
+EXCLUDED) and counts descendants whose status is NOT IN {COMPLETED,
+TERMINATED, ERROR, FAILED}. The R2 deny predicate becomes a three-input
+conjunction: `not attested AND pending_children == 0 AND
+queued_or_expected_wakeups == 0 AND live_descendants == 0`. Same
+decision value — `ALLOWED_LEGITIMATE_PENDING_WAKEUP` — NO new enum
+member (decision enum stays 5-valued).
+
+### Why option-a (and not option-b / option-c)
+
+- **Option-b** (touch the watcher lifecycle) was REJECTED — the
+  per-turn semantics are DELIBERATE (the 02fb2e01 un-wedging fix). A
+  change there re-introduces the un-wedging class of bug.
+- **Option-c** (gate-internal sweep over instances) is structurally
+  identical to option-a but lacks the canonical facade shape; option-a
+  is the additive, minimum-surface-area fix that mirrors the existing
+  two R2 facades (decision tree stays a pure function over inputs).
+- **Option-a reads INSTANCE tree, NOT dependency_bus.** This is the
+  key design choice: the watcher lifecycle emits PENDING rows for
+  direct children only and DELETES them on deferral fire — the bus
+  is structurally silent about transitive live descendants. Only the
+  permanent `instances.parent_id` lineage carries the durable signal
+  (and it survives completion / error / terminate / revive).
+
+### Performance
+
+- BFS bounded at `InstanceManager.LIVE_DESCENDANTS_BFS_CAP = 500`
+  (the gate sits on the routing hot path with a 20ms P95 budget; the
+  current gate P95 is ~0.016ms — keep that order of magnitude). The
+  cap is well above any realistic leader subtree; admin-tool-only
+  territory past it. The unit-test pins both the cap value and the
+  cap behavior.
+- The BFS uses `SQLModelInstanceRepository.get_tree_ids_permanent`
+  precedent (which already caps at `_MAX_TRAVERSAL_DEPTH = 256` and
+  WARN-logs on cap-hit); we apply our own additional slice cap on the
+  descendant set (the visited set minus the root).
+
+### Schema change
+
+`CANONICAL_LOG_SCHEMA_FIELDS` grows from 15 → 16 fields — `live_descendants`
+appended (positioned after `queued_or_expected_wakeups` in the field
+order). The canonical log format string emits the new field, and the
+DB-seam fail-open path reports `live_descendants=-1` alongside the
+existing two `-1` sentinels. The scanner-fail-open path also reports
+`live_descendants=-1` (UNKNOWN on that path; never the meaningful 0).
+
+### DO NOT TOUCH
+
+- Watcher lifecycle (`child_still_running_defer` per-turn semantics).
+- `dependency_bus` / `count_pending_for_target`.
+- The existing two R2 inputs.
+- Nudge text, deny/bound/escalation semantics, mode handling.
+- The 5-value canonical decision enum (no new member).
+
+### Tests (acceptance suite — all required, all green at ship)
+
+(a) repro of exact 809e2a59 incident class — child defers to
+`waiting_children` (watcher FIRED), grandchild RUNNING → gate returns
+`allowed_legitimate_pending_wakeup`, NO nudge, NO counter write;
+(b) transitive descendant at depth 2+ counts;
+(c) all descendants terminal, no watchers / wakeups → DENY still fires
+(regression guard: the ORIGINAL protection must survive);
+(d) ERROR / FAILED descendants do NOT count as live (terminal set);
+(e) facade unit tests incl. the BFS cap (pin cap value + cap behavior);
+(f) log row carries `live_descendants` (drift pin);
+(g) P95 timing sanity (gate stays inside the 20ms NFR-1 budget).
+
+### Files
+
+- `daemon/manager.py:8594-8683` (new facade `count_live_descendants` +
+  `LIVE_DESCENDANTS_BFS_CAP = 500`).
+- `daemon/services/attestation_gate.py:24-30` (R2 docstring); `:284`
+  (GateDecision field); `:297, :345-346` (decide arg + docstring);
+  `:394-401` (R2 allow predicate); `:467` (CANONICAL_LOG_SCHEMA_FIELDS
+  entry); `:528, :556` (evaluate docstring); `:630, :679, :689,
+  :708, :719, :733, :750, :762` (evaluate implementation); `:802`
+  (scanner-fail-open path).
+- `docs/setup.md:545, :548, :576` (schema documentation — 16 fields,
+  third-input predicate, deny-log diagnostic surface).
+- `requirements.md` — append-only FR-3 / FR-10 third-input note.
+- `tests/support/conftest.py:117-180` (attestation_manager_factory
+  extended with `live_descendants` kwarg, mirroring pending_children /
+  queued_wakeups).
+- `tests/unit/test_attestation_gate.py` (decide() matrix gains
+  live_descendants arm; canonical schema field assertion grows to 16).
+- `tests/integration/test_attestation_live_descendants.py` (NEW —
+  acceptance suite (a)-(g)).
