@@ -303,8 +303,10 @@ async def test_dry_mode_metrics_emitted(caplog):
     # both dry counters must increment.
     assert snapshot["dry_log_total"] >= 1
     assert snapshot["dry_log_deny_predicate_total"] >= 1
-    # enforce_denied_total stays zero — dry mode is the default,
-    # never enforce.
+    # enforce_denied_total stays zero — this test runs under explicit
+    # mode="dry"; even with the operator-override ship default of
+    # "enforce" (2026-09-06), the canonical default for this scenario is
+    # still dry (the test sets it explicitly).
     assert snapshot["enforce_denied_total"] == 0
 
 
