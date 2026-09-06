@@ -15,6 +15,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule, MatMenuTrigger } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
@@ -75,6 +76,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private readonly tabStateService = inject(TabStateService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly snackBar = inject(MatSnackBar);
 
   /** Poll interval, in milliseconds. */
   private readonly POLL_INTERVAL_MS = 8000;
@@ -384,6 +386,10 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
             result.terminated ? 'terminated' : 'refused by server guard',
             result.message
           );
+          this.snackBar.open(result.message, 'Close', {
+            duration: 3000,
+            panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar',
+          });
           this.fetchBadgeSignals();
         },
         error: (err) => {
@@ -416,6 +422,10 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
             result.resend_results.filter((r) => r.job_id).length,
             're-sent'
           );
+          this.snackBar.open(result.message, 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
           this.fetchBadgeSignals();
         },
         error: (err) => {

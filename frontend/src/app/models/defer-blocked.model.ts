@@ -115,7 +115,7 @@ export function deferBlockIndicator(
     return {
       severity: 'amber',
       tooltip:
-        `held by stalled instance ${stalled.instance_id} ` +
+        `held by stalled mission ${stalled.instance_id} ` +
         `since ${formatDeferHoldSince(stalled.since)} — no live work; safe to force-complete`,
     };
   }

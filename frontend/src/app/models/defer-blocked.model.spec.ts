@@ -136,7 +136,7 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     expect(warn).not.toBeNull();
     expect(warn!.severity).toBe('amber');
     expect(warn!.tooltip).toBe(
-      'held by stalled instance stl-001 since 2026-09-05 11:00 UTC — no live work; safe to force-complete'
+      'held by stalled mission stl-001 since 2026-09-05 11:00 UTC — no live work; safe to force-complete'
     );
   });
 
@@ -168,7 +168,7 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
       })
     );
     expect(warn!.severity).toBe('amber');
-    expect(warn!.tooltip).toContain('stalled instance stl-2');
+    expect(warn!.tooltip).toContain('stalled mission stl-2');
     expect(warn!.tooltip).toContain('no live work; safe to force-complete');
   });
 
@@ -179,7 +179,7 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     expect(warn).not.toBeNull();
     expect(warn!.severity).toBe('amber');
     expect(warn!.tooltip).toBe(
-      'held by stalled instance inst-123 since unknown time — no live work; safe to force-complete'
+      'held by stalled mission inst-123 since unknown time — no live work; safe to force-complete'
     );
   });
 
@@ -192,7 +192,7 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     expect(warn).not.toBeNull();
     expect(warn!.severity).toBe('amber');
     expect(warn!.tooltip).toBe(
-      'held by stalled instance inst-123 since unknown time — no live work; safe to force-complete'
+      'held by stalled mission inst-123 since unknown time — no live work; safe to force-complete'
     );
   });
 

@@ -77,7 +77,7 @@
         [class.has-bad-state]="hasBadState()"
         [matTooltip]="hasBadState()
           ? '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.'
-          : 'Cancel ALL jobs (every lane) + reap idle/stalled missions across ALL projects'">
+          : 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects'">
         <mat-icon [class.spinning]="cleanupInProgress()">cleaning_services</mat-icon>
         System Cleanup
       </button>

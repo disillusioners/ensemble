@@ -33,6 +33,8 @@ import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 import { Work } from '../../models/work.model';
+import { CleanupPreflight } from '../../models/cleanup-preflight.model';
+import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -146,6 +148,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly liveInstanceCount = signal<number>(0);
   readonly liveInstanceIds = signal<string[]>([]);
   readonly deferBlockedCount = signal<number>(0);
+  readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
 
   // Deleted jobs filter
   readonly showDeleted = signal(false);
@@ -530,16 +533,18 @@ export class JobsComponent implements OnInit, OnDestroy {
    * a snackbar to the operator.
    */
   private refreshBadStateCount(): void {
-    firstValueFrom(
-      this.http.get<{
-        bad_state_count: number;
-        zombie_instance_count: number;
-        live_instance_count?: number;
-        live_instance_ids?: string[];
-        defer_blocked_count?: number;
-      }>('/api/jobs/cleanup/preflight')
-    )
-      .then((result) => {
+    const preflight = firstValueFrom(
+      this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight')
+    );
+    // The preflight intentionally exposes only the defer count. Read the
+    // existing defer-blocked surface as well so the dialog can preserve the
+    // holder-specific remediation without adding a daemon-only field.
+    const deferBlocked = firstValueFrom(
+      this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked')
+    ).catch(() => null);
+
+    Promise.all([preflight, deferBlocked])
+      .then(([result, deferStatus]) => {
         this.badStateCount.set(result.bad_state_count);
         this.zombieInstanceCount.set(
           result.zombie_instance_count ?? 0
@@ -550,6 +555,9 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.liveInstanceCount.set(result.live_instance_count ?? 0);
         this.liveInstanceIds.set(result.live_instance_ids ?? []);
         this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
+        this.deferHolderKind.set(
+          deferBlockAction(deferStatus)?.holder.kind ?? null
+        );
       })
       .catch(() => {
         // Fail silently — badge is UX-only.
@@ -1096,6 +1104,7 @@ export class JobsComponent implements OnInit, OnDestroy {
         live_instance_count: this.liveInstanceCount(),
         live_instance_ids: this.liveInstanceIds(),
         defer_blocked_count: this.deferBlockedCount(),
+        defer_holder_kind: this.deferHolderKind(),
       },
     });
 
