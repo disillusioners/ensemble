@@ -57,7 +57,14 @@ from tests.helpers.checkpoint_prune_pg import (
 )
 
 #: The exact R1 nudge constant (server-authored; NFR-6 verbatim).
-NUDGE_TEXT = "The work is not yet finished — check current progress and continue."
+NUDGE_TEXT = (
+    "The work is not yet finished — check current progress "
+    "(tasks/children status) and continue. Reminder: when "
+    "— and only when — the work is truly complete, you MUST "
+    "call the attest_completion tool before finishing; "
+    "completions without that call are premature and will be "
+    "blocked again."
+)
 
 TEST_THREAD_ID = "test-leader-instance-1"
 

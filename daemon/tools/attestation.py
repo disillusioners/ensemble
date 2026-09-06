@@ -108,7 +108,7 @@ def attest_completion() -> dict[str, Any]:
     The leader MUST call this tool before declaring itself done (see
     the prompt contract in ``agents/leader/rule.md``). If a
     continuation nudge arrives ("The work is not yet finished —
-    check current progress and continue."), treat it as a real
+    check current progress (tasks/children status) and continue."), treat it as a real
     user instruction, complete the remaining work, and call this
     tool again.
 
@@ -147,7 +147,7 @@ Usage:
 - Call exactly once when the leader's work is genuinely complete
   and the leader is about to be done.
 - If a continuation nudge arrives ("The work is not yet finished
-  — check current progress and continue."), treat it as a real
+  — check current progress (tasks/children status) and continue."), treat it as a real
   user instruction: review your current progress, complete the
   remaining work, and call this tool again.
 

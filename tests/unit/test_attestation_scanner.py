@@ -225,7 +225,14 @@ class TestD10EdgeCases:
             additional_kwargs={"language_check_reminder": True},
         )
         attestation_nudge = HumanMessage(
-            content="The work is not yet finished — check current progress and continue.",
+            content=(
+                "The work is not yet finished — check current progress "
+                "(tasks/children status) and continue. Reminder: when "
+                "— and only when — the work is truly complete, you MUST "
+                "call the attest_completion tool before finishing; "
+                "completions without that call are premature and will be "
+                "blocked again."
+            ),
             additional_kwargs={"attestation_nudge": True},
         )
         messages = [

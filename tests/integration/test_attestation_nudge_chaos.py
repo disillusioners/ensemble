@@ -20,7 +20,14 @@ from langchain_core.tools import tool
 from tests.support.scripted_chat_model import ScriptedChatModel
 
 INSTANCE_ID = "attestation-leader-e2e"
-NUDGE_TEXT = "The work is not yet finished — check current progress and continue."
+NUDGE_TEXT = (
+    "The work is not yet finished — check current progress "
+    "(tasks/children status) and continue. Reminder: when "
+    "— and only when — the work is truly complete, you MUST "
+    "call the attest_completion tool before finishing; "
+    "completions without that call are premature and will be "
+    "blocked again."
+)
 
 
 @pytest.fixture(autouse=True)
