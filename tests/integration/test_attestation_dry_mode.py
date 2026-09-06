@@ -94,11 +94,18 @@ def plain_ai(text="Working on the mission."):
     return AIMessage(content=text)
 
 
-def make_manager(pending_children=0, wakeups=0):
-    """Mock manager with the two NEW R2 facades + inert watchover surface."""
+def make_manager(pending_children=0, wakeups=0, live_descendants=0):
+    """Mock manager with the THREE R2 facades + inert watchover surface."""
     manager = MagicMock()
     manager.count_pending_children = MagicMock(return_value=pending_children)
     manager.get_queued_or_expected_wakeups = MagicMock(return_value=wakeups)
+    # Third R2 input (2026-09-06) — defaulted to 0 for the dry-mode
+    # suite. The dry-deny-predicate metric relies on the THREE-input
+    # predicate (`pending_children == 0 AND queued_or_expected_wakeups
+    # == 0 AND live_descendants == 0`) — leaving it as a MagicMock
+    # would silently inflate the predicate (MagicMock > 0 is True),
+    # which is why this default matters.
+    manager.count_live_descendants = MagicMock(return_value=live_descendants)
     manager.is_question_pause_requested = MagicMock(return_value=False)
     manager.is_watchover_enabled = MagicMock(return_value=False)
     # Forbidden dual-delivery surface — asserted NOT called on dry.

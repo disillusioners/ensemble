@@ -117,11 +117,14 @@ def attest_ai():
     )
 
 
-def make_manager(pending_children=0, wakeups=0):
-    """Mock manager with the two NEW R2 facades + inert watchover surface."""
+def make_manager(pending_children=0, wakeups=0, live_descendants=0):
+    """Mock manager with the THREE R2 facades + inert watchover surface."""
     manager = MagicMock()
     manager.count_pending_children = MagicMock(return_value=pending_children)
     manager.get_queued_or_expected_wakeups = MagicMock(return_value=wakeups)
+    # Third R2 input (2026-09-06) — defaulted to 0 so the C2-both-branches
+    # matrix exercises the "no live descendants" R2 deny predicate.
+    manager.count_live_descendants = MagicMock(return_value=live_descendants)
     # keep the question-pause router inert
     manager.is_question_pause_requested = MagicMock(return_value=False)
     # keep watchover passthrough inert (slot reads this via getattr)

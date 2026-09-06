@@ -27,6 +27,9 @@ def _manager():
     manager = MagicMock()
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
+    # Third R2 input (2026-09-06) — defaulted to 0; the observability
+    # matrix exercises the "no live descendants" R2 deny predicate.
+    manager.count_live_descendants.return_value = 0
     return manager
 
 

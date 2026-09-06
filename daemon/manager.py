@@ -8592,6 +8592,97 @@ class InstanceManager:
             instance_id
         )
 
+    # Live-descendants count cap (R2 third-input, 2026-09-06). The cap
+    # bounds the BFS tree walk on the gate hot path; production trees are
+    # well under 500 (the cap is admin-tool-only escalation territory,
+    # mirroring ``_MAX_TRAVERSAL_DEPTH = 256`` precedent).
+    LIVE_DESCENDANTS_BFS_CAP = 500
+
+    def count_live_descendants(self, instance_id: str) -> int:
+        """Count non-terminal descendants of this instance (R2 third input).
+
+        Attestation-gate R2 input (``live_descendants``). Mirrors
+        :meth:`count_pending_children` / :meth:`get_queued_or_expected_wakeups`
+        as the third pre-attestation allow predicate. BFS over the
+        PERMANENT ``instances.parent_id`` lineage (same source as
+        :meth:`get_tree_ids_permanent` — ``instance_hierarchy`` rows are
+        deleted on churn and would silently miss live descendants
+        revived after a terminal event). The root itself is EXCLUDED
+        from the count: only true descendants count toward the allow
+        signal.
+
+        Live definition (terminal set is the complement of this list):
+
+        * ``COMPLETED``, ``TERMINATED``, ``ERROR``, ``FAILED`` are
+          terminal (excluded).
+        * ``IDLE``, ``QUEUED``, ``RUNNING``, ``WAITING``,
+          ``WAITING_CHILDREN``, ``PAUSED`` are live (counted).
+
+        The watcher lifecycle emits PENDING dependency rows for direct
+        children but DELIBERATELY fires the watcher on
+        ``child_still_running_defer`` so the parent's
+        ``pending_children`` drops to 0 while a deeper grandchild still
+        runs (incident 809e2a59 — gate saw 0/0 as TRUE facts and
+        escalated to ``terminal_after_bound`` while the descendant was
+        alive). This facade is the third input that closes the gap:
+        even with zero pending watchers / zero held wakeups, a live
+        descendant means a real wakeup is en route.
+
+        Performance: bounded BFS at :data:`LIVE_DESCENDANTS_BFS_CAP`
+        ids — the gate sits on the routing hot path with a 20ms P95
+        budget (current gate P95 ~0.016ms — keep this order of
+        magnitude). The cap is well above any realistic leader subtree
+        size; if you legitimately exceed it, raise the constant AND
+        the unit-test pin. Deferral emits no report/task row, so the
+        existing two inputs cannot see this state — only the INSTANCE
+        tree can.
+
+        Args:
+            instance_id: The leader instance whose subtree to scan
+                (root is excluded from the count).
+
+        Returns:
+            Non-negative int count of live descendants. 0 when the
+            root is not found OR no descendants exist OR every
+            descendant is terminal. Bounded by
+            :data:`LIVE_DESCENDANTS_BFS_CAP` (the tree walk stops at
+            the cap — admin-tool territory past that).
+        """
+        repo = getattr(self, "_instance_repository", None)
+        if repo is None:
+            # No repo wired ⇒ no descendants known. Mirrors the
+            # ``count_pending_children`` fail-closed-allow semantics:
+            # unreadable ⇒ 0 (genuinely zero, not fail-open dodge).
+            return 0
+        # Permanent lineage — same source as ``get_tree_ids_permanent``;
+        # the repository already caps the BFS at _MAX_TRAVERSAL_DEPTH=256
+        # and WARN-logs if the cap is hit. We apply our own additional
+        # cap of LIVE_DESCENDANTS_BFS_CAP on the descendant slice to
+        # bound the hot-path cost.
+        tree_ids = repo.get_tree_ids_permanent(instance_id)
+        # Exclude the root itself.
+        descendant_ids = [iid for iid in tree_ids if iid != instance_id]
+        if not descendant_ids:
+            return 0
+        # Apply our hot-path cap.
+        cap = self.LIVE_DESCENDANTS_BFS_CAP
+        scanned = descendant_ids[:cap]
+        terminal_statuses = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        }
+        live_count = 0
+        for iid in scanned:
+            row = repo.get(iid)
+            if row is None:
+                # Row missing (likely purged) — skip; not live.
+                continue
+            if row.status not in terminal_statuses:
+                live_count += 1
+        return live_count
+
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
 

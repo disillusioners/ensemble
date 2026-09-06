@@ -676,3 +676,22 @@ These were OPEN at the planner stage and are resolved by the architect's review 
 | Inter-report gap bug class — separate | C-9, OS-2 |
 | Phase6 backstop (durable-enqueue recovery; out of MVP) | C-3, AC-E2E-8, OS-1, OS-2 |
 | Test strategy (unit for scanner/decision/fail-open; integration for full E2E + dry-adjudication) | AC-2.1..AC-2.5, AC-3.1..AC-3.4, AC-4.1..AC-4.5, AC-6.1..AC-6.6, AC-7.1..AC-7.9, AC-9.1..AC-9.3, AC-10.1..AC-10.4, AC-11.1, AC-13.1, AC-13.2, AC-E2E-1..AC-E2E-8 |
+
+---
+
+## 2026-09-06 Amendments (append-only — historical rows above are NOT rewritten)
+
+### FR-3 third-input amendment (additive — original deny semantics preserved)
+
+The FR-3 deny predicate as ratified above (two-input: `pending_children == 0 AND queued_or_expected_wakeups == 0`) is EXTENDED by a THIRD, additive input `live_descendants` (counted by `InstanceManager.count_live_descendants(instance_id)` — BFS over permanent `instances.parent_id`, root excluded, status NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}, capped at `LIVE_DESCENDANTS_BFS_CAP = 500`). The new FR-3 deny predicate (read in full) is:
+
+- NOT attested, AND
+- `pending_children == 0`, AND
+- `queued_or_expected_wakeups == 0`, AND
+- `live_descendants == 0` ← **third input, 2026-09-06**
+
+Closes the 809e2a59 waiting_children false-deny incident class (transitive grandchild alive but `pending_children` and `queued_or_expected_wakeups` both 0 because the watcher lifecycle is per-turn — see `decisions.md` "2026-09-06" entry for full root-cause narrative). DO NOT TOUCH the watcher lifecycle; the third input reads the permanent INSTANCE tree, NOT `dependency_bus`. Decision enum is NOT changed (no new member) — `ALLOWED_LEGITIMATE_PENDING_WAKEUP` already covers the allow predicate; a non-zero `live_descendants` is the same allow predicate semantically.
+
+### FR-10 schema amendment (additive — original 15 fields preserved, one appended)
+
+The FR-10 canonical log schema as ratified above is EXTENDED by ONE additive field — `live_descendants: int` — appended to `CANONICAL_LOG_SCHEMA_FIELDS` (now 16 fields, exported at `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS`). The DB-seam fail-open path (`event=leader_completion_gate_db_error`) emits `live_descendants=-1` alongside the existing two `-1` sentinels (`pending_children=-1`, `queued_or_expected_wakeups=-1`). The scanner-fail-open path (`event=leader_completion_gate_error`) emits `live_descendants=-1` alongside the existing UNKNOWN sentinels. `docs/setup.md:545, :548, :576` updated to document the 16-field schema and the three-input deny predicate.
