@@ -240,7 +240,7 @@ repo = TaskRepository(engine=ENGINE)
 with Session(ENGINE) as s:
     report_task = s.exec(
         text("SELECT id FROM task WHERE task_type = :tt AND status = :st ORDER BY id ASC LIMIT 1"),
-        {"tt": TaskType.PROCESS_REPORT.value, "st": TaskStatus.PENDING.value},
+        params={"tt": TaskType.PROCESS_REPORT.value, "st": TaskStatus.PENDING.value},
     ).first()
     if report_task is None:
         print("[FAIL] No process_report task found in DB", file=sys.stderr)
