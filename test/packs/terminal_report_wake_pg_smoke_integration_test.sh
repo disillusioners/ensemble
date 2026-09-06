@@ -182,7 +182,12 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 
 ENGINE_URL = sys.argv[1]
-ENGINE = create_engine(ENGINE_URL, future=True)
+# Force UTC on every connection — PG server is in Asia/Ho_Chi_Minh
+# (UTC+7), and the Task.created_at column is TIMESTAMP WITHOUT TIME
+# ZONE, so naive datetimes round-trip as local time. Without forcing
+# UTC, a seeded (NOW - 30min) round-trips as +7 hours ahead, making
+# the second-claim age check return a negative value.
+ENGINE = create_engine(ENGINE_URL, future=True, connect_args={"options": "-c TimeZone=UTC"})
 
 # ── 1. Schema ──────────────────────────────────────────────────────────
 SQLModel.metadata.create_all(ENGINE)
