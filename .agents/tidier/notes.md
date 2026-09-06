@@ -1,5 +1,13 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-09-06 — ask-questions doc-only polish pass (feature/ask-questions-format-validation @ 07290356 → 5e4e33b9), Iteration 001
+- Dispatch: 1 worker readable-code (review, read-only) → SAME worker revived for sequential apply pass (house apply-chain shape from 08-25). COMPLETED-revive reuse worked clean; worker self-caught 3-vs-2-space `_full_doc_` indent mismatch pre-land.
+- Verdict: Pass. 0 High / 1 Medium / 1 Low — both applied, commit 5e4e33b9 (docs(question-tools), 2 files +32/−3, explicit-path staging, no `git add -A`). Tests: 48 collected / 48 passed post-apply.
+- Applied: M1 None-handling asymmetry documented at all 3 surfaces (helper docstring :139, tool body :345, `_full_doc_` :502 — mirrored per parity convention; no ask_questions parity test exists, only send_message's TestDocstringParity at tests/unit/tools/test_instance_tools.py:2387). L1 defense-in-depth banners on question_manager.py `_normalize_option` :45 / `_normalize_options` :87.
+- Verified no-change: S3 duplicate-label docs already verbatim at question_tools.py:488-491 (caller's :216-218 refs were actually the empty-label gate); no dead code/unused imports; test file top docstring satisfies plan-referencing convention.
+- Exclusions honored: :190 whitespace gate (4 occurrences preserved), tests:700 xdist comment (test file untouched).
+- Deferred to Reviewer: set-iteration non-determinism question_manager.py:104 (`[_normalize_option(item) for item in values]` on a set) — unreachable via tool path today, flag if the boundary contract ever weakens.
+
 ## 2026-08-20 — pause-report-recovery (6bb99d5f..HEAD), Iteration 001
 - Verdict: Needs Work — 1 High (vacuous `assert True` test, test_explicit_handle_resume_report_guard.py:483), 15 Medium, 7 Low. 0 findings on the 8 adjudicated do-not-flag items.
 - Pattern: review-fix rounds leave `assert True` placeholders even when devs report band-aids removed — always grep `assert True` on branches with 3+ fix rounds.
