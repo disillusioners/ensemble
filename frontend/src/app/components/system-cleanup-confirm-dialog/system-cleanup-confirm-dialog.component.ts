@@ -5,6 +5,7 @@ import {
   CleanupPreflight,
   cleanupDeferNote,
   CLEANUP_TRUTH_SPLIT_COPY,
+  CLEANUP_TRUTH_SURVIVOR_NOTE,
 } from '../../models/cleanup-preflight.model';
 
 /**
@@ -99,6 +100,11 @@ export type SystemCleanupConfirmData = Partial<CleanupPreflight>;
           <span class="live-id-list">{{ liveIds().join(', ') }}</span>
         }
       </p>
+      @if (liveIds().length > 0) {
+        <p class="survivor-note">
+          {{ survivorNote }}
+        </p>
+      }
       @if (deferCount() > 0) {
         <p class="defer-note">
           {{ deferCount() }} deferred
@@ -150,4 +156,11 @@ export class SystemCleanupConfirmDialogComponent {
   /** Truth-split copy VERBATIM match against
    *  ``CLEANUP_TRUTH_SPLIT_COPY`` — unblock-round ITEM 5 pin. */
   readonly truthSplitCopy = CLEANUP_TRUTH_SPLIT_COPY;
+  /** Truth-survivor caption VERBATIM match against
+   *  ``CLEANUP_TRUTH_SURVIVOR_NOTE`` — rendered in the template
+   *  (gated on ``liveIds().length > 0``). Cap-exception micro-round
+   *  ITEM 1, 2026-09-06 — keeps the caption's render path pinned via
+   *  ``tests/unit/test_fe_dialog_survivor_render_path.py`` (import
+   *  line + readonly exposure + template interpolation). */
+  readonly survivorNote = CLEANUP_TRUTH_SURVIVOR_NOTE;
 }
