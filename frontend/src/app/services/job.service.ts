@@ -10,6 +10,33 @@ interface JobListResponse {
   total: number;
 }
 
+/** Result of ``POST /api/jobs/defer-holders/{id}/force-complete`` (WS4). */
+export interface DeferHolderForceCompleteResult {
+  instance_id: string;
+  terminated: boolean;
+  probe_busy: boolean;
+  message: string;
+}
+
+/** One per-row outcome inside ``DeferHolderResendResult``. */
+export interface DeferHolderResendRow {
+  cancelled_job_id: string;
+  job_id?: string;
+  message_id?: string;
+  error?: string;
+  skipped?: string;
+}
+
+/** Result of ``POST /api/jobs/defer-holders/{id}/resend-foreground`` (WS4). */
+export interface DeferHolderResendResult {
+  instance_id: string;
+  found_defer_jobs: number;
+  cancelled_defer_jobs: number;
+  resend_results: DeferHolderResendRow[];
+  skipped_empty_content: number;
+  message: string;
+}
+
 /**
  * Result payload returned by ``POST /api/jobs/cleanup``.
  *
@@ -154,6 +181,48 @@ export class JobService {
    */
   listDeferBlocked(): Observable<DeferBlockedStatus> {
     return this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked');
+  }
+
+  /**
+   * POST /api/jobs/defer-holders/{id}/force-complete (WS4).
+   *
+   * Terminate a STALLED (mirrors-only) defer-gate holder. The server
+   * re-derives mirrors-only at execution time; a guard refusal comes
+   * back as 200 with ``terminated=false`` — the caller inspects the
+   * flag rather than the error channel.
+   */
+  forceCompleteDeferHolder(instanceId: string): Observable<DeferHolderForceCompleteResult> {
+    return this.http
+      .post<DeferHolderForceCompleteResult>(
+        `${this.API_BASE}/defer-holders/${encodeURIComponent(instanceId)}/force-complete`,
+        {}
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to force-complete holder');
+          throw err;
+        })
+      );
+  }
+
+  /**
+   * POST /api/jobs/defer-holders/{id}/resend-foreground (WS4).
+   *
+   * Cancel the holder's queued defer-lane jobs and re-send their
+   * message content as NEW foreground message jobs.
+   */
+  resendDeferredForeground(instanceId: string): Observable<DeferHolderResendResult> {
+    return this.http
+      .post<DeferHolderResendResult>(
+        `${this.API_BASE}/defer-holders/${encodeURIComponent(instanceId)}/resend-foreground`,
+        {}
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err?.message || 'Failed to re-send deferred messages');
+          throw err;
+        })
+      );
   }
 
   /**

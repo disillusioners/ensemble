@@ -139,6 +139,14 @@ export class JobsComponent implements OnInit, OnDestroy {
     () => this.zombieInstanceCount() > 0
   );
 
+  // WS4 — live-vs-reap split from the same preflight: non-terminal
+  // instances cleanup will NOT terminate ("will remain"), and the
+  // pending defer-lane count surfaced SEPARATELY from bad_state
+  // (cleanup does not cancel deferred messages — the dialog says so).
+  readonly liveInstanceCount = signal<number>(0);
+  readonly liveInstanceIds = signal<string[]>([]);
+  readonly deferBlockedCount = signal<number>(0);
+
   // Deleted jobs filter
   readonly showDeleted = signal(false);
 
@@ -526,6 +534,9 @@ export class JobsComponent implements OnInit, OnDestroy {
       this.http.get<{
         bad_state_count: number;
         zombie_instance_count: number;
+        live_instance_count?: number;
+        live_instance_ids?: string[];
+        defer_blocked_count?: number;
       }>('/api/jobs/cleanup/preflight')
     )
       .then((result) => {
@@ -533,6 +544,12 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.zombieInstanceCount.set(
           result.zombie_instance_count ?? 0
         );
+        // WS4 — the live-vs-reap split + the separate defer count
+        // feed the confirm dialog ("will remain" listing + the
+        // by-design "deferred messages are not cancelled here" note).
+        this.liveInstanceCount.set(result.live_instance_count ?? 0);
+        this.liveInstanceIds.set(result.live_instance_ids ?? []);
+        this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
       })
       .catch(() => {
         // Fail silently — badge is UX-only.
@@ -1075,6 +1092,10 @@ export class JobsComponent implements OnInit, OnDestroy {
       data: {
         bad_state_count: this.badStateCount(),
         zombie_instance_count: this.zombieInstanceCount(),
+        // WS4 — the full live-vs-reap split + separate defer count.
+        live_instance_count: this.liveInstanceCount(),
+        live_instance_ids: this.liveInstanceIds(),
+        defer_blocked_count: this.deferBlockedCount(),
       },
     });
 

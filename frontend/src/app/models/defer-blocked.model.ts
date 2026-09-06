@@ -126,3 +126,52 @@ export function deferBlockIndicator(
     tooltip: `held by ${n} live mission${n === 1 ? '' : 's'}`,
   };
 }
+
+/** One operator action the defer warning can offer for a holder. */
+export interface DeferBlockAction {
+  /** The holder the actions target (paused > stalled precedence — same
+   * ordering the indicator tooltip uses). */
+  holder: DeferBlockHolder;
+  /**
+   * Force-complete is OFFERED only for the mirrors-only ``stalled``
+   * kind (the SERVER re-verifies mirrors-only at execution time via
+   * the canonical probe — the FE gate is a UX gate, not the safety
+   * gate). Paused holders are unblocked by resume/terminate from the
+   * instance surface, so the button is disabled for them.
+   */
+  forceCompleteAllowed: boolean;
+}
+
+/**
+ * Derive the holder-targeted unstick actions from the payload
+ * (WS4). Returns ``null`` when no action is offered: no payload, zero
+ * pending defer jobs (same render gate as ``deferBlockIndicator``),
+ * or no instance-backed actionable holder.
+ *
+ * Precedence matches the indicator: the first ``paused`` holder wins
+ * (its remediation is resume/terminate, so force-complete is NOT
+ * allowed), then the first ``stalled`` holder (force-complete IS
+ * allowed). Live-only payloads offer no action — the deferral is
+ * working as designed.
+ */
+export function deferBlockAction(
+  status: DeferBlockedStatus | null | undefined
+): DeferBlockAction | null {
+  if (!status || !(status.pending_count > 0)) {
+    return null;
+  }
+
+  const holders = status.holders ?? [];
+
+  const paused = holders.find((h) => h.kind === 'paused');
+  if (paused) {
+    return { holder: paused, forceCompleteAllowed: false };
+  }
+
+  const stalled = holders.find((h) => h.kind === 'stalled');
+  if (stalled) {
+    return { holder: stalled, forceCompleteAllowed: true };
+  }
+
+  return null;
+}

@@ -2,6 +2,8 @@ import {
   DeferBlockedStatus,
   DeferBlockHolder,
   deferBlockIndicator,
+  deferBlockAction,
+  DeferBlockAction,
   formatDeferHoldSince,
 } from './defer-blocked.model';
 
@@ -229,5 +231,92 @@ describe('defer-blocked.model — deferBlockIndicator', () => {
     it('truncates non-ISO strings instead of throwing (degraded path keeps the zone suffix)', () => {
       expect(formatDeferHoldSince('not-a-date-but-long-enough')).toBe('not-a-date-but-l UTC');
     });
+  });
+});
+
+// ── WS4 holder actions — deferBlockAction ───────────────────────────────
+
+describe('defer-blocked.model — deferBlockAction (WS4)', () => {
+  const holder = (overrides?: Partial<DeferBlockHolder>): DeferBlockHolder => ({
+    instance_id: 'inst-123',
+    agent: 'leader',
+    status: 'processing',
+    since: '2026-09-04T15:33:24+00:00',
+    kind: 'live',
+    ...(overrides ?? {}),
+  });
+
+  const payload = (overrides?: Partial<DeferBlockedStatus>): DeferBlockedStatus => ({
+    defer_blocked: true,
+    pending_count: 2,
+    holders: [],
+    ...(overrides ?? {}),
+  });
+
+  it('returns null for a null/undefined payload (defensive)', () => {
+    expect(deferBlockAction(null)).toBeNull();
+    expect(deferBlockAction(undefined)).toBeNull();
+  });
+
+  it('returns null when pending_count is 0 — same render gate as the indicator', () => {
+    expect(
+      deferBlockAction(
+        payload({ pending_count: 0, holders: [holder({ kind: 'stalled' })] })
+      )
+    ).toBeNull();
+  });
+
+  it('returns null when holders are live-only — deferral working as designed', () => {
+    expect(
+      deferBlockAction(payload({ holders: [holder({ kind: 'live' })] }))
+    ).toBeNull();
+  });
+
+  it('returns null when holders list is empty (RED anomaly has no target)', () => {
+    expect(deferBlockAction(payload({ holders: [] }))).toBeNull();
+  });
+
+  it('stalled holder → action with forceCompleteAllowed=true', () => {
+    const action: DeferBlockAction | null = deferBlockAction(
+      payload({ holders: [holder({ instance_id: 'inst-stall', kind: 'stalled' })] })
+    );
+    expect(action).not.toBeNull();
+    expect(action!.holder.instance_id).toBe('inst-stall');
+    expect(action!.holder.kind).toBe('stalled');
+    expect(action!.forceCompleteAllowed).toBe(true);
+  });
+
+  it('paused holder → action with forceCompleteAllowed=false (resume/terminate is the remediation)', () => {
+    const action = deferBlockAction(
+      payload({ holders: [holder({ instance_id: 'inst-pause', kind: 'paused' })] })
+    );
+    expect(action).not.toBeNull();
+    expect(action!.holder.instance_id).toBe('inst-pause');
+    expect(action!.forceCompleteAllowed).toBe(false);
+  });
+
+  it('paused wins over stalled — same precedence as the indicator', () => {
+    const action = deferBlockAction(
+      payload({
+        holders: [
+          holder({ instance_id: 'inst-stall', kind: 'stalled' }),
+          holder({ instance_id: 'inst-pause', kind: 'paused' }),
+        ],
+      })
+    );
+    expect(action!.holder.instance_id).toBe('inst-pause');
+    expect(action!.forceCompleteAllowed).toBe(false);
+  });
+
+  it('names the FIRST stalled holder when several exist', () => {
+    const action = deferBlockAction(
+      payload({
+        holders: [
+          holder({ instance_id: 'inst-a', kind: 'stalled' }),
+          holder({ instance_id: 'inst-b', kind: 'stalled' }),
+        ],
+      })
+    );
+    expect(action!.holder.instance_id).toBe('inst-a');
   });
 });

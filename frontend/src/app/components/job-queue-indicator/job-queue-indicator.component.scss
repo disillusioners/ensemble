@@ -66,6 +66,40 @@
   &.red {
     color: #ef4444; /* red-500 — pending defer jobs with no holder */
   }
+
+  /* WS4: the icon doubles as the holder-actions menu trigger — give
+     it affordance (pointer + hover glow) only when actionable. */
+  &.actionable {
+    cursor: pointer;
+  }
+
+  .defer-warning-trigger {
+    display: inline-flex;
+    align-items: center;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    line-height: 1;
+
+    &:hover:not(:disabled) {
+      filter: drop-shadow(0 0 4px currentColor);
+    }
+
+    &:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+  }
+}
+
+/* WS4 menu item note — explains why force-complete is disabled for a
+   paused holder (resume/terminate is the remediation). */
+.defer-action-note {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
 }
 
 @keyframes mission-pulse {
