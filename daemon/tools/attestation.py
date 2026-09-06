@@ -80,9 +80,10 @@ interception) scans the most recent ``N`` AIMessages for an
 ``attest_completion`` tool_call to decide whether to allow or deny
 the END transition. Per ``architecture-recommendation.md``, the
 tri-state env ``ENSEMBLE_LEADER_ATTESTATION_MODE`` defaults to
-``dry`` at ship (telemetry before commitment); promote to
-``enforce`` after a ≤2-week soak with adjudicated dry-log
-false-positive rate.
+``enforce`` at ship (operator override 2026-09-06 — flipped from
+``dry``; dry-at-ship D2 rationale superseded). ``off`` is the
+instant-revert / kill-switch (restart-read Pattern C — no live flip);
+``dry`` remains available for observation-only operation.
 
 Scope: leader-scoped via explicit ``agents/leader/meta.json``
 ``tools.allow`` opt-in; NOT privileged per D7 (CLOSED-by-leader).

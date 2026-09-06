@@ -63,9 +63,13 @@ def clean_env(monkeypatch):
 
 
 class TestTriStateMode:
-    def test_unset_returns_default_dry(self, clean_env):
+    def test_unset_returns_default_enforce(self, clean_env):
+        """Canonical pin (operator override 2026-09-06): env unset →
+        resolved mode MUST be ``DEFAULT_MODE`` which is now ``"enforce"``
+        (was ``"dry"`` at ship per the D2 RESOLVED rationale, superseded
+        by the operator override)."""
         config = get_config()
-        assert config.mode == DEFAULT_MODE == "dry"
+        assert config.mode == DEFAULT_MODE == "enforce"
         assert config.window == DEFAULT_WINDOW == 3
         assert config.deny_bound == DEFAULT_DENY_BOUND == 3
         assert config.attestation_enabled is True  # mode != "off"
@@ -89,20 +93,23 @@ class TestTriStateMode:
         assert config.mode == "enforce"
         assert config.attestation_enabled is True
 
-    def test_blank_value_falls_back_to_default_dry(self, monkeypatch, clean_env):
+    def test_blank_value_falls_back_to_default_enforce(
+        self, monkeypatch, clean_env
+    ):
         """Blank value resolves to default — NOT to ``off`` (the WC-wake
         resolver precedent resolves blank to its default; ruling 4 keeps
-        the contract for attestation)."""
+        the contract for attestation). Default is now ``"enforce"``
+        (operator override 2026-09-06)."""
         monkeypatch.setenv(ENSEMBLE_ATTESTATION_MODE_ENV, "")
         config = get_config()
-        assert config.mode == "dry"
+        assert config.mode == "enforce"
 
-    def test_whitespace_only_falls_back_to_default_dry(
+    def test_whitespace_only_falls_back_to_default_enforce(
         self, monkeypatch, clean_env
     ):
         monkeypatch.setenv(ENSEMBLE_ATTESTATION_MODE_ENV, "   ")
         config = get_config()
-        assert config.mode == "dry"
+        assert config.mode == "enforce"
 
     def test_uppercase_normalized_to_lowercase(
         self, monkeypatch, clean_env
@@ -115,15 +122,17 @@ class TestTriStateMode:
 class TestInvalidModeFailsOpen:
     """Ruling 4 — Pattern C fail-OPEN with one-shot WARN."""
 
-    def test_typo_falls_back_to_dry_with_warn(
+    def test_typo_falls_back_to_enforce_with_warn(
         self, monkeypatch, clean_env, caplog
     ):
+        """Invalid/typo'd mode fails OPEN to ``DEFAULT_MODE`` (``enforce``
+        after the operator override 2026-09-06) with a one-shot WARN."""
         monkeypatch.setenv(ENSEMBLE_ATTESTATION_MODE_ENV, "enforse")
         with caplog.at_level(
             logging.WARNING, logger="daemon.services.attestation_resolver"
         ):
             config = get_config()
-        assert config.mode == "dry"
+        assert config.mode == "enforce"
         assert "is not a recognized mode" in caplog.text
         assert "off|dry|enforce" in caplog.text
 
@@ -137,7 +146,7 @@ class TestInvalidModeFailsOpen:
             logging.WARNING, logger="daemon.services.attestation_resolver"
         ):
             config = get_config()
-        assert config.mode == "dry"
+        assert config.mode == "enforce"
         assert "is not a recognized mode" in caplog.text
 
     def test_warn_is_one_shot_per_process(
@@ -328,7 +337,7 @@ class TestBootLog:
         assert any(
             "Leader completion attestation resolved" in msg for msg in info_lines
         )
-        assert any("mode=dry" in msg for msg in info_lines)
+        assert any("mode=enforce" in msg for msg in info_lines)
         assert any("window=3" in msg for msg in info_lines)
         assert any("deny_bound=3" in msg for msg in info_lines)
         assert any("N_le_min_recent_window=PASS" in msg for msg in info_lines)
@@ -482,14 +491,16 @@ class TestBootLog:
     def test_invalid_mode_emits_warn_in_boot_log(
         self, monkeypatch, clean_env, caplog
     ):
-        """Invalid mode → boot log carries mode=dry + the resolver WARN."""
+        """Invalid mode → boot log carries mode=enforce + the resolver WARN.
+        After the operator override 2026-09-06 the fail-OPEN fallback is
+        ``DEFAULT_MODE`` (currently ``"enforce"``)."""
         monkeypatch.setenv(ENSEMBLE_ATTESTATION_MODE_ENV, "enforse")
         with caplog.at_level(
             logging.INFO, logger="daemon.services.attestation_resolver"
         ):
             emit_attestation_boot_log()
-        # Main INFO line — fail-OPEN to dry (gate still works).
-        assert any("mode=dry" in r.message for r in caplog.records)
+        # Main INFO line — fail-OPEN to enforce (gate still works).
+        assert any("mode=enforce" in r.message for r in caplog.records)
         # Separate WARN line — operator-visible typo signal.
         warn_lines = [
             r.message for r in caplog.records if r.levelno == logging.WARNING

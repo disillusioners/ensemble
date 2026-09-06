@@ -311,11 +311,15 @@ class TestEvaluateComposition:
             result = evaluate(
                 "inst-1", 0, plain_messages(), DEFAULT_GATE_SETTINGS, manager,
             )
-        # default settings are mode=dry → dry_log (passive observer)
-        assert result.decision is Decision.DRY_LOG
+        # DEFAULT_GATE_SETTINGS.mode is now "enforce" (operator override
+        # 2026-09-06; ship default flipped from "dry") → R2-deny predicate
+        # satisfied (pending_children=0, wakeups=0, no attestation) →
+        # DENIED + nudge injected (passive observer is no longer the default).
+        assert result.decision is Decision.DENIED
         assert result.messages_scanned > 0
+        assert result.should_inject_nudge is True
         assert "event=leader_completion_gate" in caplog.text
-        assert "decision=dry_log" in caplog.text
+        assert "decision=denied" in caplog.text
         assert "pending_children=0" in caplog.text
         assert "queued_or_expected_wakeups=0" in caplog.text
         assert "messages_scanned=" in caplog.text
@@ -328,7 +332,7 @@ class TestEvaluateComposition:
         )
         assert result.pending_children == 3
         assert result.queued_or_expected_wakeups == 1
-        assert result.decision is Decision.DRY_LOG  # dry default
+        assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP  # R2-allow (DEFAULT=enforce; pending=3, wakeups=1)
 
     def test_attest_seen_outside_window_populated(self):
         messages = [
@@ -343,8 +347,9 @@ class TestEvaluateComposition:
         )
         assert result.attest_seen_outside_window is True
         assert result.attestation_present is False
-        # dry default: diagnostic fires while the decision stays dry_log
-        assert result.decision is Decision.DRY_LOG
+        # DEFAULT=enforce (operator override 2026-09-06); no in-window
+        # attestation + R2-deny predicate satisfied (0/0) → DENIED + nudge.
+        assert result.decision is Decision.DENIED
 
     def test_enforce_deny_full_flow(self):
         manager = make_manager(0, 0)
@@ -416,8 +421,10 @@ class TestResolverFailOpen:
         gate_module._reset_gate_settings_for_tests()
 
     def test_defaults_when_unset(self):
+        """env unset → resolved mode is ``DEFAULT_MODE`` (currently
+        ``"enforce"`` per operator override 2026-09-06)."""
         settings = resolve_gate_settings()
-        assert settings == GateSettings(mode="dry", window=3, deny_bound=3)
+        assert settings == GateSettings(mode="enforce", window=3, deny_bound=3)
 
     def test_valid_env_parsed(self, monkeypatch):
         monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_MODE", "enforce")
@@ -428,11 +435,13 @@ class TestResolverFailOpen:
         assert settings.window == 2
         assert settings.deny_bound == 5
 
-    def test_invalid_mode_fails_open_to_dry_with_warn(self, caplog, monkeypatch):
+    def test_invalid_mode_fails_open_to_enforce_with_warn(self, caplog, monkeypatch):
+        """Invalid/typo'd mode fails OPEN to ``DEFAULT_MODE``
+        (currently ``"enforce"`` per operator override 2026-09-06)."""
         monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_MODE", "enforse")
         with caplog.at_level(logging.WARNING, logger="daemon.services.attestation_gate"):
             settings = resolve_gate_settings()
-        assert settings.mode == "dry"
+        assert settings.mode == "enforce"
         assert "not a recognized mode" in caplog.text
 
     def test_invalid_window_fails_open_to_default(self, caplog, monkeypatch):

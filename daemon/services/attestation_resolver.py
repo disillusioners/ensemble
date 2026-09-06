@@ -33,13 +33,21 @@ Ruling 4 (FAIL-OPEN posture, SUPERSEDES plan prose)
 
 An invalid env value MUST NOT disable the gate nor crash the boot — the
 resolver logs a one-shot WARN and falls back to the default
-(``mode=dry``, ``window=3``, ``deny_bound=3``). The ``fail-closed``
+(``mode=enforce``, ``window=3``, ``deny_bound=3``). The ``fail-closed``
 branch the plan task 4.1 test-notes mention as Pattern-A-only is **dead
 code** for this feature — Pattern C is chosen, fail-OPEN is mandated.
 This mirrors the WC-wake resolver's behavior (which fails OPEN with a
 WARN for typo'd values per its resolver shape — the explicit precedent
 the requirements.md AC-7.9 false fail-closed claim was CORRECTED to
 mirror).
+
+Note: the ship-default changed from ``dry`` to ``enforce`` on
+2026-09-06 (operator override — user decision; the dry-at-ship D2
+rationale was superseded). Fail-open + off-kill-switch remain the
+safety valves: an invalid/typo'd mode now falls back to ``enforce``
+(accepted consequence of using ``DEFAULT_MODE`` as the fail-open
+fallback), and ``ENSEMBLE_LEADER_ATTESTATION_MODE=off`` is the
+instant-revert / kill-switch (restart-read Pattern C — no live flip).
 
 O1 boot assert (``WINDOW <= min_recent_window``)
 ------------------------------------------------
@@ -91,7 +99,7 @@ ENSEMBLE_ATTESTATION_DENY_BOUND_ENV = "ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND"
 # Defaults — referenced VERBATIM by the runbook drift test
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODE: Literal["dry"] = "dry"
+DEFAULT_MODE: Literal["enforce"] = "enforce"
 DEFAULT_WINDOW: int = 3
 DEFAULT_DENY_BOUND: int = 3
 
@@ -124,7 +132,9 @@ class AttestationConfig:
 
     Attributes:
         mode: Tri-state mode (``"off"`` / ``"dry"`` / ``"enforce"``).
-            Default ``"dry"`` per D2 RESOLVED.
+            Default ``"enforce"`` (operator override 2026-09-06 — the
+            ship default flipped from ``"dry"`` to ``"enforce"``;
+            dry-at-ship D2 rationale superseded).
         window: Attestation lookback window N (default 3 per D4).
         deny_bound: Per-instance denied-completion bound (default 3 per D5).
         attestation_enabled: Convenience flag — ``mode != "off"``. The
@@ -199,15 +209,18 @@ def reset_attestation_resolver_for_tests() -> None:
 
 
 def _parse_mode(source: dict[str, str]) -> Literal["off", "dry", "enforce"]:
-    """Parse the tri-state mode env, failing OPEN to ``"dry"``.
+    """Parse the tri-state mode env, failing OPEN to ``DEFAULT_MODE``.
 
-    Per ruling 4: invalid values resolve to ``"dry"`` (the default) and
+    Per ruling 4: invalid values resolve to ``DEFAULT_MODE`` (the
+    canonical default — currently ``"enforce"`` after the operator
+    override of 2026-09-06; flipped from ``"dry"`` per D2 RESOLVED) and
     emit a one-shot WARN via the caller. Blank / unset also resolves to
-    ``"dry"`` (mirroring the WC-wake resolver shape — blank is NOT
-    treated as ``"off"``; the plan task 4.1 prose originally offered
-    "blank → off" but the actual resolved value is ``"dry"`` per D2
-    RESOLVED default and the requirements.md mode-glossary entry that
-    specifies ``default dry at ship``).
+    ``DEFAULT_MODE`` (mirroring the WC-wake resolver shape — blank is
+    NOT treated as ``"off"``; the plan task 4.1 prose originally
+    offered "blank → off" but the actual resolved value tracks
+    ``DEFAULT_MODE``, which itself tracks the operator-set ship default;
+    see ``.agents/shared/planning/leader-completion-attestation/
+    decisions.md`` D2 entry for the supersession note).
     """
     raw = source.get(ENSEMBLE_ATTESTATION_MODE_ENV, "")
     if raw is None:
@@ -257,7 +270,8 @@ def _resolve_config_from_env(source: dict[str, str]) -> AttestationConfig:
     """Pure env → config resolver. No logging. No I/O.
 
     Returns an :class:`AttestationConfig` with ``mode`` defaulted to
-    ``"dry"`` on any failure (ruling 4 — fail-OPEN).
+    ``DEFAULT_MODE`` (currently ``"enforce"`` — operator override
+    2026-09-06) on any failure (ruling 4 — fail-OPEN).
     """
     mode = _parse_mode(source)
     window = _parse_positive_int(
@@ -341,9 +355,9 @@ def _collect_invalid_warnings(source: dict[str, str]) -> list[str]:
     if mode_raw and mode_raw not in _VALID_MODES:
         warnings.append(
             "%s=%r is not a recognized mode (off|dry|enforce); "
-            "failing OPEN to the default 'dry'. Restart required after "
+            "failing OPEN to the default %r. Restart required after "
             "fixing the env value."
-            % (ENSEMBLE_ATTESTATION_MODE_ENV, mode_raw)
+            % (ENSEMBLE_ATTESTATION_MODE_ENV, mode_raw, DEFAULT_MODE)
         )
     for key, default in (
         (ENSEMBLE_ATTESTATION_WINDOW_ENV, DEFAULT_WINDOW),

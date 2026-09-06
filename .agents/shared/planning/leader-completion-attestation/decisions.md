@@ -208,6 +208,8 @@ What is the default ship value of the gate's mode env? What is the flip/soak pla
 
 The single-state-mode env shape (under any prior canonical name) is **NOT a supported surface** post-reconciliation (C-5 in `requirements.md`, AC-7.9 — resolver raises `ResolverError` if set).
 
+**2026-09-06: operator override — default mode enforce (user decision); dry-at-ship rationale superseded; fail-open + off-kill-switch remain the safety valves.**
+
 #### Impacted Components
 
 - Config resolver: `daemon/services/attestation_resolver.py` (Pattern C, module env resolver + cached global + one-time boot log).

@@ -90,11 +90,14 @@ class TestDefaultValueDrift:
         self.text = SETUP_MD.read_text(encoding="utf-8")
         return self.text
 
-    def test_default_mode_dry_documented(self):
+    def test_default_mode_enforce_documented(self):
         # The runbook env-table cell + the boot-log section both name
-        # the default. We assert the env-table cell pinned to ``dry``
-        # (the env table format: a row containing the env name + the
-        # default value in the third column).
+        # the default. We assert the env-table cell pinned to
+        # ``DEFAULT_MODE`` (the env table format: a row containing the
+        # env name + the default value in the third column). The
+        # canonical default flipped from ``dry`` to ``enforce`` on
+        # 2026-09-06 via operator override (dry-at-ship D2 rationale
+        # superseded).
         # Look for the row that names the env var; the default lives
         # in the same row.
         pattern = re.compile(
