@@ -160,6 +160,7 @@ later by a separate tester agent. Time budget per pack: 2 min (unit),
 - **Use parallel execution with low confidence** — only parallel when HIGH confidence
 - **Assume tasks are independent without verification** — hidden dependencies break parallel execution
 - **Spawn next batch before current batch completes** — wait for all parallel tasks to finish
+- Assigned wt_path? cd into the worktree before any git op; never commit on the main checkout.
 
 ## Core Principles
 
