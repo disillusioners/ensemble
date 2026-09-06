@@ -88,8 +88,8 @@ if [[ "$TARGET_DB" == *"ensemble_prod"* ]]; then
   exit 5
 fi
 
-ADMIN_URL="postgresql://${PG_TEST_USER}:${PG_TEST_PASSWORD}@${PG_TEST_HOST}:${PG_TEST_PORT}/${PG_TEST_ADMIN_DB}"
-TARGET_URL="postgresql://${PG_TEST_USER}:${PG_TEST_PASSWORD}@${PG_TEST_HOST}:${PG_TEST_PORT}/${TARGET_DB}"
+ADMIN_URL="postgresql+psycopg://${PG_TEST_USER}:${PG_TEST_PASSWORD}@${PG_TEST_HOST}:${PG_TEST_PORT}/${PG_TEST_ADMIN_DB}"
+TARGET_URL="postgresql+psycopg://${PG_TEST_USER}:${PG_TEST_PASSWORD}@${PG_TEST_HOST}:${PG_TEST_PORT}/${TARGET_DB}"
 
 # ── HARD GUARD #2: every resolved URL must not be production ────────
 for url in "$ADMIN_URL" "$TARGET_URL"; do
