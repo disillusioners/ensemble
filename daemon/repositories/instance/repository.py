@@ -1763,6 +1763,67 @@ class SQLModelInstanceRepository:
             row = conn.execute(stmt, {"instance_id": instance_id}).fetchone()
         return bool(row[0]) if row else False
 
+    def has_real_active_or_queued_work(self, instance_id: str) -> bool:
+        """Return True iff ``instance_id`` has a NON-MIRROR ``active``
+        / ``queued`` JobItem (Bucket-2-cancellable work).
+
+        Unblock-round ITEM 11 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        — the truth-survivor filter for the cleanup preflight. The
+        round-2 ``live_ids`` shape (``non-terminal ∖ zombie``) listed
+        an instance that has a non-mirror ``active`` / ``queued``
+        JobItem (NOT a zombie per the WS4 mission lens — ``active``
+        rows of any lane witness, ``queued`` rows on non-defer /
+        unknown lanes witness) as a "will remain" candidate. But
+        Bucket 2's per-row ``cancel_job`` cascade terminates the
+        instance for every active JobItem (excluding mirrors), and
+        Bucket 1's queued batch UPDATE cancels every queued JobItem
+        (excluding mirrors). So the preflight over-promised survival.
+
+        This helper is the truth-survivor guard: the preflight's
+        ``live_instance_ids`` MUST exclude instances for which this
+        probe returns True. The probe SQL is the minimum required to
+        detect Bucket-2 / Bucket-1 cancellable work:
+
+        * ``admission_state IN ('queued','active')`` — the live
+          JobItem predicate (the SAME constant the zombie scan uses).
+        * ``job_type != 'message'`` — mirror protection: cleanup does
+          NOT cancel ``job_type='message'`` rows in buckets 1/2, so
+          they are NOT Bucket-1/2-cancellable.
+        * ``deleted_at IS NULL`` — soft-deleted rows are terminal on
+          paper and excluded everywhere.
+
+        Returns:
+            ``True`` iff at least one qualifying row exists. SQL is
+            a single ``SELECT EXISTS`` so the wire cost is one
+            round-trip per probed instance.
+
+        Raises:
+            SQLAlchemyError: propagated — the preflight wraps the
+                probe in ``except Exception`` and treats an error as
+                ``has_real_active_or_queued_work == False`` (NOT a
+                survivor — conservative, fail-CLOSED).
+        """
+        live_jobitem_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN
+        )
+        # Mirror exclusion is hard-coded: ``cleanup_helper`` only
+        # flags ``job_type='message'`` rows (the canonical
+        # constitution-era mirror protection).
+        stmt = text(
+            f"""
+            SELECT EXISTS (
+                SELECT 1 FROM job_queue_items jqi
+                WHERE jqi.instance_id = :instance_id
+                  AND jqi.admission_state IN ({live_jobitem_csv})
+                  AND jqi.job_type != 'message'
+                  AND jqi.deleted_at IS NULL
+            )
+            """
+        )
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt, {"instance_id": instance_id}).fetchone()
+        return bool(row[0]) if row else False
+
     def get_metadata_value(self, instance_id: str, key: str) -> Any | None:
         """Read ONE top-level metadata key without hydrating the row.
 

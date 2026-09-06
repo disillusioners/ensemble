@@ -1056,6 +1056,18 @@ class TestCleanupPreflightEndpoint:
         ``manager._defer_block_resolver`` (the previous mask class:
         round-2 hand-set the attribute, masking the
         never-assigned-in-production wiring gap).
+
+        Unblock-round ITEM 11 (2026-09-06, truth-survivor filter):
+        ``live_instance_count`` post-filters the non-terminal ∖
+        zombie set through
+        ``SQLModelInstanceRepository.has_real_active_or_queued_work(instance_id)``
+        so a holder of a non-mirror ACTIVE mission JobItem does
+        NOT appear in the dialog "will remain" list (Bucket 2
+        cancels + terminate-cascades such holders). This test
+        mocks the probe to return False for ``inst-live`` (no
+        Bucket-1/2-cancellable JobItem ⇒ truth-survivor) and True
+        for ``inst-stalled`` (BUT ``inst-stalled`` is in reap_ids
+        so the filter never even probes it).
         """
         task_repo = MagicMock()
         task_repo.count_bad_state_tasks = MagicMock(return_value=0)
@@ -1064,6 +1076,16 @@ class TestCleanupPreflightEndpoint:
         instance_repo.find_zombie_instances = MagicMock(return_value=["inst-stalled"])
         instance_repo.find_non_terminal_instance_ids = MagicMock(
             return_value=["inst-live", "inst-stalled"]
+        )
+        # Unblock-round ITEM 11: the post-filter probe. ``inst-live``
+        # has no non-mirror ACTIVE/queued JobItem (returns False ⇒
+        # truth-survivor); the default MagicMock for the unused path
+        # is harmless. ``inst-stalled`` is in reap_ids, so the probe
+        # is NEVER reached for it (the FILTER branch runs ONLY for
+        # non-zombies). The default MagicMock for ``has_live_work``
+        # would be truthy without explicit mock.
+        instance_repo.has_real_active_or_queued_work = MagicMock(
+            side_effect=lambda iid: iid != "inst-live"
         )
         manager = MagicMock()
         manager._task_repo = task_repo
@@ -1136,6 +1158,82 @@ class TestCleanupPreflightEndpoint:
         # Task count falls back to 0; zombie count is real.
         assert body["bad_state_count"] == 0
         assert body["zombie_instance_count"] == 4
+
+    def test_preflight_truth_survivor_filter_excludes_active_jobitem_holder(
+        self, preflight_app
+    ):
+        """Unblock-round ITEM 11 (2026-09-06,
+        ``fix/defer-self-witness-and-cleanup``) — the round-2 shape
+        (``live_ids = non-terminal ∖ zombie``) over-promised survival.
+
+        A holder of a NON-MIRROR ACTIVE JobItem is NOT a zombie
+        (the zombie predicate counts ``admission_state='active'`` as
+        live work and excludes it from the reap set — so the
+        round-2 listing showed it in ``live_ids``). But Bucket 2
+        cancels + terminate-cascades exactly those holders per
+        ``JobQueueService.cleanup_non_terminal_jobs`` bucket 2 at
+        ``job_queue_service.py:1337-1344`` — so listing it as
+        "will remain" contradicts the canonical sentence
+        (`Every ACTIVE job is cancelled, ...`).
+
+        The unblock-round post-filter through
+        ``SQLModelInstanceRepository.has_live_work(instance_id)``
+        narrows the list to TRULY-retained instances. This test
+        mocks the probe to confirm the filter shape:
+        ``has_live_work('inst-active-holder') == True`` is
+        excluded; ``has_live_work('inst-settled-mirror-only') ==
+        False`` is included.
+        """
+        instance_repo = MagicMock()
+        instance_repo.count_zombie_instances = MagicMock(return_value=0)
+        # Round-2 shape would list BOTH; the truth-survivor filter
+        # excludes only the ACTIVE-jobitem holder (the WS4 lens is
+        # ``non-terminal ∖ zombie``; both instances are non-terminal
+        # and not zombies here).
+        instance_repo.find_non_terminal_instance_ids = MagicMock(
+            return_value=["inst-active-holder", "inst-settled-mirror-only"]
+        )
+        instance_repo.find_zombie_instances = MagicMock(return_value=[])
+
+        def _has_real_active_or_queued_work(iid):
+            # Active-jobitem holder: True (has Bucket-2-cancellable
+            # work).
+            # Settled-mirror-only holder: False (TRULY-retained).
+            return {
+                "inst-active-holder": True,
+                "inst-settled-mirror-only": False,
+            }.get(iid, False)
+
+        instance_repo.has_real_active_or_queued_work = MagicMock(
+            side_effect=_has_real_active_or_queued_work
+        )
+
+        manager = MagicMock(spec=["_task_repo", "_instance_repository"])
+        manager._task_repo = MagicMock()
+        manager._task_repo.count_bad_state_tasks = MagicMock(return_value=0)
+        manager._instance_repository = instance_repo
+        preflight_app.state.manager = manager
+
+        with TestClient(preflight_app) as client:
+            response = client.get("/jobs/cleanup/preflight")
+
+        assert response.status_code == 200
+        body = response.json()
+        # Truth-survivor filter: only ``inst-settled-mirror-only``
+        # passes (no non-mirror ACTIVE/queued JobItem). The active-
+        # jobitem holder is EXCLUDED (Bucket 2 cancels it).
+        assert body["live_instance_count"] == 1
+        assert body["live_instance_ids"] == ["inst-settled-mirror-only"]
+        # Both probes ran (one per non-zombie candidate).
+        assert instance_repo.has_real_active_or_queued_work.call_count == 2
+        # Order is by the listing input (round-2 set order); the
+        # filter preserves order.
+        instance_repo.has_real_active_or_queued_work.assert_any_call(
+            "inst-active-holder"
+        )
+        instance_repo.has_real_active_or_queued_work.assert_any_call(
+            "inst-settled-mirror-only"
+        )
 
 
 # ---------------------------------------------------------------------------
