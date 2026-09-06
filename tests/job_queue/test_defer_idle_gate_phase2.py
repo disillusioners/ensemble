@@ -899,6 +899,12 @@ class TestGateCompositionBeltAndSuspenders:
         matches the mocked ``queue_repo.get`` so the branch picks it
         up as a defer candidate. Note the project_id must match
         ``defer_job.project_id`` (we use ``"proj-composition"``).
+
+        WS1 (2026-09-06): the defer job's ``instance_id`` is set
+        explicitly so the per-candidate requester-instance carve-out is
+        observable in the call signatures (``has_active_non_deferred_
+        work`` is now called with two positional args: project_id and
+        the candidate's ``instance_id``).
         """
         defer_job = MagicMock()
         defer_job.job_id = "job-composition-defer"
@@ -906,6 +912,7 @@ class TestGateCompositionBeltAndSuspenders:
         defer_job.project_id = "proj-composition"
         defer_job.priority = 5
         defer_job.created_at = "2025-01-01T00:00:00"
+        defer_job.instance_id = "inst-composition-defer"
 
         defer_queue = MagicMock()
         defer_queue.queue_id = defer_queue_id
@@ -997,7 +1004,11 @@ class TestGateCompositionBeltAndSuspenders:
         )
         # The job predicate was consulted FIRST; the task predicate was
         # NOT consulted because the job predicate short-circuited True.
-        job_pred.assert_called_once_with("proj-composition")
+        # WS1 (2026-09-06): the per-candidate requester-instance
+        # carve-out is the second positional arg.
+        job_pred.assert_called_once_with(
+            "proj-composition", "inst-composition-defer"
+        )
         non_deferred_pred.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1017,7 +1028,11 @@ class TestGateCompositionBeltAndSuspenders:
         assert result is None, (
             "Defer job must be blocked when both predicates are True."
         )
-        job_pred.assert_called_once_with("proj-composition")
+        # WS1 (2026-09-06): the per-candidate requester-instance
+        # carve-out is the second positional arg.
+        job_pred.assert_called_once_with(
+            "proj-composition", "inst-composition-defer"
+        )
         # Job predicate short-circuits the OR; task predicate is not
         # consulted.
         non_deferred_pred.assert_not_called()
