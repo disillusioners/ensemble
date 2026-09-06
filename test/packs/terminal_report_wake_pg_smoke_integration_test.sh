@@ -114,14 +114,19 @@ if ! PGPASSWORD="$PG_TEST_PASSWORD" psql -h "$PG_TEST_HOST" -p "$PG_TEST_PORT" -
 fi
 
 # ── Cleanup trap — always drop the disposable DB on exit ────────────
+# Note: cleanup must NOT 'exit' — it runs from the EXIT trap AFTER the
+# script has already set its exit code via the RESULT block below.
+# Calling 'exit' here would clobber the script's RESULT signal with the
+# in-function local rc (which is the previous command's exit code, not
+# the verifier's). The trap fires on every exit path (success, failure,
+# timeout, error) so the DB is always dropped.
 cleanup() {
-  local rc=$?
-  echo "[cleanup] Dropping disposable database '$TARGET_DB' (rc=$rc)..."
+  echo "[cleanup] Dropping disposable database '$TARGET_DB' (rc=$?)..."
   PGPASSWORD="$PG_TEST_PASSWORD" psql -h "$PG_TEST_HOST" -p "$PG_TEST_PORT" -U "$PG_TEST_USER" -d "$PG_TEST_ADMIN_DB" \
     -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS \"$TARGET_DB\" WITH (FORCE)" >/dev/null 2>&1 || \
   PGPASSWORD="$PG_TEST_PASSWORD" psql -h "$PG_TEST_HOST" -p "$PG_TEST_PORT" -U "$PG_TEST_USER" -d "$PG_TEST_ADMIN_DB" \
     -v ON_ERROR_STOP=0 -c "DROP DATABASE IF EXISTS \"$TARGET_DB\"" >/dev/null 2>&1 || true
-  exit "$rc"
+  return 0
 }
 trap cleanup EXIT INT TERM
 
@@ -332,10 +337,8 @@ echo "[run] Executing verifier against $TARGET_URL"
 timeout 280s .venv/bin/python "$VERIFIER" "$TARGET_URL" 2>&1
 EXIT_CODE=$?
 
-# Tidy the tmp verifier before the cleanup trap fires.
+# Tidy the tmp verifier; the cleanup trap will drop the DB on exit.
 rm -f "$VERIFIER"
-trap - EXIT INT TERM
-cleanup
 
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"
