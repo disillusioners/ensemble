@@ -284,7 +284,12 @@ if claimed2.task_type != TaskType.PROCESS_MESSAGE.value:
 
 # Verify it's the OLDEST remaining process_message (created 30 minutes ago).
 expected_minutes_old = 30.0
-delta = (NOW - claimed2.created_at).total_seconds() / 60.0
+created_at = claimed2.created_at
+if created_at.tzinfo is None:
+    # PostgreSQL TIMESTAMP WITHOUT TIME ZONE round-trips as naive; treat as UTC
+    # to subtract from NOW (offset-aware).
+    created_at = created_at.replace(tzinfo=timezone.utc)
+delta = (NOW - created_at).total_seconds() / 60.0
 if abs(delta - expected_minutes_old) > 0.5:
     print(
         f"[FAIL] Second claim returned process_message with age {delta:.1f} min "
