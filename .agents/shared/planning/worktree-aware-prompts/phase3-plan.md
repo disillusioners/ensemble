@@ -144,7 +144,7 @@ Status: PASS / FAIL
 
 | Pointer site | Target label | Resolves? |
 |--------------|--------------|-----------|
-| `agents/leader/workflow.md` | Worktree Mode | Y/N |
+| `agents/leader/workflow.md` | n/a — no pointer by design (phase2 File-1 note: leader's single pointer lives in tools_note.md) | n/a |
 | `agents/leader/tools_note.md` | Worktree Mode | Y/N |
 | `agents/developer/workflow.md` | Worktree Mode | Y/N |
 | `agents/tester/workflow.md` | Worktree Mode | Y/N |
