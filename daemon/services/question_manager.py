@@ -134,6 +134,12 @@ class Question:
             Phase 2 answer API stores the answer as a generic dict in
             :attr:`QuestionPack.answers` keyed by id (so multiple-shape
             JSON is accepted), so this field stays ``None`` for now.
+        option_descriptions: Optional display metadata mapping option
+            string → description, carried through from label-object
+            options (``{"label": ..., "description": ...}``) accepted by
+            the ``ask_questions`` tool boundary. Purely additive
+            metadata — the frontend-facing ``options`` contract stays
+            ``list[str]``; consumers that don't know this key ignore it.
     """
 
     id: str
@@ -142,6 +148,7 @@ class Question:
     allow_custom: bool = True
     required: bool = True
     answer: str | None = None
+    option_descriptions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -240,6 +247,18 @@ class QuestionManager:
                 qid = q.get("id") or str(uuid.uuid4())
                 if not isinstance(qid, str) or not qid:
                     qid = str(uuid.uuid4())
+                # Optional label-object description metadata (carried
+                # through from the ask_questions tool's normalization).
+                # Defensively sanitized: keep only non-empty str→str
+                # entries; anything else collapses to {}.
+                raw_descriptions = q.get("option_descriptions")
+                descriptions: dict[str, str] = {}
+                if isinstance(raw_descriptions, dict):
+                    descriptions = {
+                        k: v
+                        for k, v in raw_descriptions.items()
+                        if isinstance(k, str) and k and isinstance(v, str) and v
+                    }
                 parsed.append(
                     Question(
                         id=qid,
@@ -247,6 +266,7 @@ class QuestionManager:
                         options=_normalize_options(q.get("options")),
                         allow_custom=bool(q.get("allow_custom", True)),
                         required=bool(q.get("required", True)),
+                        option_descriptions=descriptions,
                     )
                 )
 
@@ -341,6 +361,11 @@ def pack_to_dict(pack: QuestionPack) -> dict[str, Any]:
                     "allow_custom": bool,
                     "required": bool,
                     "answer": str | None,
+                    "option_descriptions": dict[str, str],
+                    # display metadata from label-object options; always
+                    # emitted (empty dict when no descriptions were
+                    # supplied). Additive key — the frontend-facing
+                    # options contract stays list[str].
                 },
                 ...
             ],
@@ -365,6 +390,7 @@ def pack_to_dict(pack: QuestionPack) -> dict[str, Any]:
                 "allow_custom": q.allow_custom,
                 "required": q.required,
                 "answer": q.answer,
+                "option_descriptions": dict(q.option_descriptions),
             }
             for q in pack.questions
         ],
