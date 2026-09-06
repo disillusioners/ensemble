@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-09-06
 
+### Fixed — Unblock round (`fix/defer-self-witness-and-cleanup`)
+
+#### Preflight defer-count wiring (ITEM 1)
+
+The preflight endpoint (`GET /api/jobs/cleanup/preflight`) previously
+read `manager._defer_block_resolver`, but `daemon/api.py:977-978`
+wires **only** the `daemon.routers.queues` module-global singleton
+(`set_defer_block_resolver(DeferBlockResolver(...))` is the
+production-shape wiring). `manager._defer_block_resolver` was NEVER
+assigned in production, so `defer_blocked_count` silently stayed `0`.
+The preflight now consumes the already-wired singleton via
+`daemon.routers.queues.get_defer_block_resolver()` — the same
+factory the `GET /api/queues/defer-blocked` endpoint uses — so the
+defer count surface and the resolver singleton can no longer drift.
+
+The unit test that hand-set `manager._defer_block_resolver` (the
+round-2 mask class that hid the gap) was updated to use
+`set_defer_block_resolver(resolver)` and now exercises the
+real-wiring path end-to-end.
+
+#### `defer_pending_count` is an instance method (ITEM 4)
+
+`daemon.services.defer_block_resolver.DeferBlockResolver.defer_pending_count()`
+is now a public INSTANCE method (round-2's free function
+`defer_pending_count(engine)` is gone). The engine is reached via
+`self._job_repo.engine` internally — no direct
+`_job_repo.engine` reach-through from the router anywhere. The SQL
+constant `_DEFER_PENDING_COUNT_SQL` stays module-private (underscore
+prefix).
+
+#### Cycle docstring rewritten to truth (ITEM 3)
+
+The `jobs_management.py` docstring claimed a `schemas → daemon.routers`
+edge that does not exist. The real traced cycle goes through the
+routers package boundary:
+
+```
+jobs_management → defer_block_resolver → routers.schemas →
+  routers/__init__ → queues.py:32 → recursion
+```
+
+The deferred-import pattern stays (the cycle is real); the docstring
+now describes the actual edges.
+
+#### Canonical copy cross-surface pin (ITEM 5)
+
+The cleanup-truth-split sentence (Round-2 ITEM 3 / T-H1) now lives
+on three surfaces, each pinned by a plain-TS or Python spec:
+
+* **BE**: `daemon/routers/jobs_management.py:cleanup_preflight`
+  docstring;
+* **FE**: `frontend/src/app/models/cleanup-preflight.model.ts` —
+  exported constant `CLEANUP_TRUTH_SPLIT_COPY` referenced by
+  `system-cleanup-confirm-dialog.component.ts`;
+* **docs**: `docs/job-task-system.md` §8.5.
+
+A drift between any two surfaces breaks `cleanup-preflight.model.spec.ts`
+(plain-TS, no Angular TestBed) or `tests/unit/test_docs_cleanup_truth_split.py`.
+
+### Known follow-ups (ledgered for visibility)
+
+* **`TestIdlePredicatePgSqliteParity` boolean-bind helpers** —
+  `tests/job_queue/test_defer_gate_post_settle_window.py` methods
+  `_insert_queue` / `_insert_job` bind integer literals `1,0` for
+  the boolean-typed columns (`is_system`, `is_paused`,
+  `concurrency_limit`-as-flag). SQLite accepts the bind; PostgreSQL
+  rejects it (`InvalidTextRepresentation` on the boolean type). The
+  parity test currently runs red-on-PG until the helpers are made
+  dialect-aware (e.g. use `True/False` and let SQLAlchemy coerce, or
+  branch on `engine.dialect.name`). Tracked for the next round —
+  not blocking the unblock.
+
+---
+
 ### Fixed — WS4 Round-2 (`fix/defer-self-witness-and-cleanup`)
 
 #### Force-complete TOCTOU re-check (Round-2 W1)
@@ -71,14 +145,18 @@ unchanged.
 
 ### Added
 
-#### Public `defer_pending_count` surface (Round-2 ITEM 7)
+#### Public `defer_pending_count` surface (Round-2 ITEM 7 → unblock-round ITEM 4)
 
-`daemon.services.defer_block_resolver.defer_pending_count(engine)`
-is the single public surface for the system-wide defer-lane pending
-count. The preflight endpoint (`GET /api/jobs/cleanup/preflight`)
-calls this helper — NO direct engine reach-through from the router.
+Originally a public free function
+`daemon.services.defer_block_resolver.defer_pending_count(engine)`;
+replaced in the unblock round by the public instance method
+`daemon.services.defer_block_resolver.DeferBlockResolver.defer_pending_count()`.
+The preflight endpoint (`GET /api/jobs/cleanup/preflight`) calls
+the instance method via the resolver singleton — NO direct
+`_job_repo.engine` reach-through from the router anywhere.
 Schema or shape changes to the defer-pending-count SELECT have ONE
-place to update.
+place to update (the SQL constant `_DEFER_PENDING_COUNT_SQL`,
+which stays module-private — underscore-prefixed, not re-exported).
 
 #### Pattern-(g) defer-job watchdog + `ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED`
 
