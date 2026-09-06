@@ -229,6 +229,13 @@ def log_blob_prune(
       anything for that thread;
     * cap skip: ``skipped_reason=MAX_REFS_EXCEEDED``.
 
+    Emitted at DEBUG (formerly INFO) — one line fires per
+    (thread, checkpoint_ns) candidate the prune walks, which is many
+    per maintenance sweep and pure noise at INFO. Operators wanting a
+    single per-sweep summary line should grep
+    ``op=blob_prune_summary`` instead; the maintenance module emits
+    exactly one summary line per sweep.
+
     Suppressed when ``CHECKPOINT_PERF_LOGS`` is falsy, matching the other
     C4 emitters.
     """
@@ -243,4 +250,4 @@ def log_blob_prune(
     )
     if skipped_reason:
         line += f" skipped_reason={skipped_reason}"
-    logger.info(line)
+    logger.debug(line)

@@ -35,6 +35,7 @@ Error Handling:
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Coroutine
@@ -555,6 +556,12 @@ class CheckpointCleanupJob:
 
             logger.info(f"Found {len(orphaned)} orphaned checkpoint threads")
 
+            # Sweep-level accounting for the one-shot INFO summary emit
+            # at the end of the loop. Per-thread observation is demoted
+            # to DEBUG (was conditional INFO inside the loop).
+            sweep_t0 = time.perf_counter()
+            pruned_rows_total = 0
+
             # Delete each orphaned thread using adelete_thread, then
             # prune the ``message_metadata`` side-table rows for the
             # same thread. The prune is best-effort and never-raises
@@ -571,13 +578,18 @@ class CheckpointCleanupJob:
                             self._message_metadata_repo.delete_for_thread,
                             thread_id,
                         )
-                        if deleted_rows:
-                            logger.info(
-                                f"_cleanup_orphaned_threads: "
-                                f"message_metadata prune deleted "
-                                f"{deleted_rows} row(s) for thread "
-                                f"{thread_id[:8]}..."
-                            )
+                        # Per-thread DEBUG emit (formerly conditional
+                        # INFO inside the loop — one line per orphan,
+                        # mostly with ``deleted=0`` during steady state,
+                        # pure noise at INFO). Aggregate into the
+                        # sweep-level INFO summary below.
+                        logger.debug(
+                            f"_cleanup_orphaned_threads: "
+                            f"message_metadata prune deleted "
+                            f"{deleted_rows} row(s) for thread "
+                            f"{thread_id[:8]}..."
+                        )
+                        pruned_rows_total += deleted_rows
                     except Exception:
                         # Never-raise guard (W3): orphan side-table
                         # rows are over-record-only and never join the
@@ -592,6 +604,14 @@ class CheckpointCleanupJob:
                         )
 
             logger.info(f"Deleted {len(orphaned)} orphaned checkpoint threads")
+
+            # ONE summary line for the sweep (replaces per-thread INFO).
+            elapsed_ms = int((time.perf_counter() - sweep_t0) * 1000)
+            logger.info(
+                f"message_metadata prune: summary threads={len(orphaned)} "
+                f"deleted={pruned_rows_total} row(s) elapsed_ms={elapsed_ms} "
+                f"(op=_cleanup_orphaned_threads)"
+            )
 
         except Exception as e:
             logger.error(f"Orphaned threads cleanup failed: {e}")
@@ -649,16 +669,33 @@ class CheckpointCleanupJob:
             # Full cleanup for each expired instance (checkpoint + record + in-memory)
             # Per-instance try/except ensures one failure doesn't abort the batch
             deleted = 0
+            # Sweep-level accounting for the one-shot INFO summary line.
+            # ``_cleanup_instance`` returns the per-thread message_metadata
+            # prune count (``None`` when no prune was attempted); sum the
+            # int returns and skip Nones.
+            sweep_t0 = time.perf_counter()
+            pruned_rows_total = 0
             for instance_id in candidates:
                 try:
-                    await self._cleanup_instance(instance_id)
+                    pruned_rows = await self._cleanup_instance(instance_id)
                     deleted += 1
+                    if isinstance(pruned_rows, int):
+                        pruned_rows_total += pruned_rows
                 except Exception as e:
                     logger.error(
                         f"Failed to clean up instance {instance_id[:8]}...: {e}"
                     )
 
             logger.info(f"Cleaned up {deleted} expired terminal instances (checkpoints + records)")
+
+            # ONE summary line for the sweep (replaces per-instance INFO
+            # from ``_cleanup_instance`` — which now logs at DEBUG).
+            elapsed_ms = int((time.perf_counter() - sweep_t0) * 1000)
+            logger.info(
+                f"message_metadata prune: summary threads={deleted} "
+                f"deleted={pruned_rows_total} row(s) elapsed_ms={elapsed_ms} "
+                f"(op=_cleanup_expired_terminal)"
+            )
 
         except Exception as e:
             logger.error(f"Expired terminal cleanup failed: {e}")
@@ -726,16 +763,30 @@ class CheckpointCleanupJob:
             # Per-instance try/except ensures one failure doesn't abort the batch
             to_delete = candidates[:excess]
             deleted = 0
+            # Sweep-level accounting for the one-shot INFO summary line.
+            sweep_t0 = time.perf_counter()
+            pruned_rows_total = 0
             for instance_id in to_delete:
                 try:
-                    await self._cleanup_instance(instance_id)
+                    pruned_rows = await self._cleanup_instance(instance_id)
                     deleted += 1
+                    if isinstance(pruned_rows, int):
+                        pruned_rows_total += pruned_rows
                 except Exception as e:
                     logger.error(
                         f"Failed to clean up instance {instance_id[:8]}...: {e}"
                     )
 
             logger.info(f"Pruned {deleted} terminal instances from history cap (checkpoints + records)")
+
+            # ONE summary line for the sweep (replaces per-instance INFO
+            # from ``_cleanup_instance`` — which now logs at DEBUG).
+            elapsed_ms = int((time.perf_counter() - sweep_t0) * 1000)
+            logger.info(
+                f"message_metadata prune: summary threads={deleted} "
+                f"deleted={pruned_rows_total} row(s) elapsed_ms={elapsed_ms} "
+                f"(op=_enforce_history_cap)"
+            )
 
         except Exception as e:
             logger.error(f"History cap enforcement failed: {e}")
@@ -865,7 +916,7 @@ class CheckpointCleanupJob:
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
 
-    async def _cleanup_instance(self, instance_id: str) -> None:
+    async def _cleanup_instance(self, instance_id: str) -> int | None:
         """Delete instance record, checkpoint data, and in-memory state for an instance.
 
         Performs the full cleanup sequence in order:
@@ -924,7 +975,7 @@ class CheckpointCleanupJob:
                 f"Instance record not found during cleanup: {instance_id[:8]}... "
                 f"(skipping checkpoint and in-memory cleanup)"
             )
-            return
+            return None
 
         # 2. Delete checkpoint data from checkpoints.db
         await self._checkpointer.adelete_thread(instance_id)
@@ -942,12 +993,27 @@ class CheckpointCleanupJob:
         # never join the read path), a broken instance teardown is not.
         # The repo is SYNC (decisions.md D14) — bridged via
         # asyncio.to_thread like every other consumer of this repo.
+        #
+        # Returned to the caller so loop callers can aggregate a single
+        # per-sweep INFO summary line (per-thread DEBUG; summary at INFO).
+        pruned_rows: int | None = None
         if self._message_metadata_repo is not None:
+            pruned_rows = 0
             try:
                 deleted_rows = await asyncio.to_thread(
                     self._message_metadata_repo.delete_for_thread, instance_id
                 )
-                logger.info(
+                pruned_rows = deleted_rows
+                # Per-thread emit demoted to DEBUG (formerly INFO). The
+                # per-call INFO line fired on every maintenance tick,
+                # typically with ``deleted=0`` (rows already gone), and
+                # produced multi-thread/second noise during orphan /
+                # TTL sweeps. Loop callers aggregate into ONE INFO
+                # summary at the end of the sweep (search
+                # ``message_metadata prune: summary``). One-shot
+                # callers (e.g. ``hard_delete_instance``) keep exactly
+                # one INFO line per invocation.
+                logger.debug(
                     f"message_metadata prune: deleted {deleted_rows} row(s) "
                     f"for thread {instance_id[:8]}..."
                 )
@@ -969,6 +1035,8 @@ class CheckpointCleanupJob:
                 logger.warning(
                     f"In-memory cleanup callback failed for {instance_id[:8]}...: {e}"
                 )
+
+        return pruned_rows
 
     def _get_all_instance_ids(self) -> set[str]:
         """Get all instance IDs from the instance repository.

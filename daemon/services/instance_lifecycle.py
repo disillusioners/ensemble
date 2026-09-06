@@ -2734,29 +2734,50 @@ class InstanceLifecycleService:
         # with the checkpoint sweep — its own per-tree_id try/except
         # keeps the prune decoupled from checkpoint-sweep success/failure.
         meta_repo = getattr(self._manager, "message_metadata_repo", None)
+        # Sweep-level accounting — exactly ONE INFO line per invocation
+        # (task: hard_delete is a one-shot event; per-tree logs were
+        # already conditional on truthy ``deleted_rows`` but were still
+        # potentially many per invocation. Now ONE summary line.)
+        pruned_rows_total = 0
+        pruned_failed_count = 0
+        sweep_t0 = time.perf_counter()
         if meta_repo is not None:
             for tree_id in tree_ids:
                 try:
                     deleted_rows = await asyncio.to_thread(
                         meta_repo.delete_for_thread, tree_id
                     )
-                    if deleted_rows:
-                        logger.info(
-                            f"hard_delete_instance: message_metadata prune "
-                            f"deleted {deleted_rows} row(s) for thread "
-                            f"{tree_id[:8]}..."
-                        )
+                    # Per-tree DEBUG emit (formerly conditional INFO
+                    # inside the loop). Aggregated into the ONE INFO
+                    # summary line emitted at the end of this function.
+                    logger.debug(
+                        f"hard_delete_instance: message_metadata prune "
+                        f"deleted {deleted_rows} row(s) for thread "
+                        f"{tree_id[:8]}..."
+                    )
+                    pruned_rows_total += deleted_rows
                 except Exception:
                     # Never-raise guard (W3 / D14): side-table prune
                     # failure MUST NOT abort the hard-delete — orphan
                     # rows are over-record-only and never join the read
                     # path; a broken instance teardown is not.
+                    pruned_failed_count += 1
                     logger.warning(
                         f"hard_delete_instance: message_metadata prune "
                         f"failed for {tree_id[:8]}... — orphans tolerated "
                         f"(never-raise guard)",
                         exc_info=True,
                     )
+
+        # ONE INFO summary line per invocation (task: one-shot caller
+        # keeps exactly one INFO line; per-tree detail at DEBUG).
+        elapsed_ms = int((time.perf_counter() - sweep_t0) * 1000)
+        logger.info(
+            f"message_metadata prune: summary threads={len(tree_ids)} "
+            f"deleted={pruned_rows_total} row(s) elapsed_ms={elapsed_ms} "
+            f"failed={pruned_failed_count} "
+            f"(op=hard_delete_instance instance={instance_id[:8]}...)"
+        )
 
         logger.info(
             f"[TRACE] hard_delete_instance: {instance_id[:8]}... complete "

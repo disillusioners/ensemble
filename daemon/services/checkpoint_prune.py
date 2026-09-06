@@ -142,9 +142,18 @@ async def prune_unreferenced_blobs(
 
         summary.scanned_pairs = len(candidate_pairs)
 
+        # Sweep-level accounting for the one-shot INFO summary line emitted
+        # at the end of the loop. Per-(thread, ns) observations go through
+        # ``log_blob_prune`` at DEBUG — the per-pair INFO line that used to
+        # fire (one per pair, often with ``deleted=0``) was pure noise.
+        sweep_t0 = time.perf_counter()
+        unique_threads: set[str] = set()
+
         for thread_id, checkpoint_ns, _ckpt_count in candidate_pairs:
             try:
                 t0 = time.perf_counter()
+                # Sweep-level accounting (summary emit below).
+                unique_threads.add(thread_id)
 
                 # ── Fail-safe pre-check (detection AND prevention) ──────
                 # 0 refs on a pair that HAS remaining checkpoints (every
@@ -248,15 +257,25 @@ async def prune_unreferenced_blobs(
                 )
                 continue
 
+        # ONE INFO summary line per sweep — replaces the per-pair INFO
+        # line that used to fire (one per (thread, ns) candidate, often
+        # with ``deleted=0``, pure noise at INFO). Per-pair detail is
+        # still available at DEBUG via ``log_blob_prune`` (emits
+        # ``op=blob_prune thread=…``); operators wanting per-pair
+        # diagnostics enable ``CHECKPOINT_PERF_LOGS=1`` and tail DEBUG.
+        duration_ms = int((time.perf_counter() - sweep_t0) * 1000)
         logger.info(
-            "[CheckpointPerf] blob_prune scanned=%d pairs backend=%s "
-            "dry_run=%s total_deleted=%d total_bytes_freed=%d skipped=%d",
-            summary.scanned_pairs,
-            summary.backend,
-            summary.dry_run,
+            "[CheckpointPerf] op=blob_prune_summary threads=%d deleted=%d "
+            "bytes=%d dry_run=%d duration_ms=%d scanned_pairs=%d "
+            "skipped=%d backend=%s",
+            len(unique_threads),
             summary.total_deleted,
             summary.total_bytes_freed,
+            1 if summary.dry_run else 0,
+            duration_ms,
+            summary.scanned_pairs,
             len(summary.skipped),
+            summary.backend,
         )
         return summary
     except Exception as e:  # noqa: BLE001

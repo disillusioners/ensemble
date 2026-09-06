@@ -307,12 +307,18 @@ class TestRealSaverWritePruneResume:
         assert summary.dry_run is True
         assert summary.total_deleted == 0
         assert summary.scanned_pairs >= 1
-        dry_run_lines = [
+        # Per-(thread, ns) pair detail now logs at DEBUG (formerly INFO;
+        # one line per pair was pure noise during sweeps). The single
+        # INFO summary line ``op=blob_prune_summary`` is emitted at the
+        # end of the sweep — assert THAT line carries the dry_run flag.
+        summary_lines = [
             r.getMessage() for r in caplog.records
-            if "op=blob_prune" in r.getMessage() and "dry_run=1" in r.getMessage()
-            and T[:8] in r.getMessage()
+            if "op=blob_prune_summary" in r.getMessage()
         ]
-        assert dry_run_lines, "dry-run must emit a per-pair report line"
+        assert summary_lines, "dry-run must emit the per-sweep summary line"
+        assert any("dry_run=1" in m for m in summary_lines), (
+            f"summary line must carry dry_run=1; got: {summary_lines}"
+        )
         assert fp_before == await blob_fingerprint(adapter, T), (
             "dry-run must not change a single byte of checkpoint_blobs"
         )
@@ -934,11 +940,15 @@ class TestRealSaverDryRunReport:
             summary = await prune_unreferenced_blobs(adapter)
         assert summary.dry_run is True and summary.total_deleted == 0
         assert await blob_fingerprint(adapter, T) == fp_before
-        line = next(
+        # Per-pair line is now DEBUG; assert the per-sweep INFO summary
+        # line that replaced it (``op=blob_prune_summary``).
+        summary_lines = [
             r.getMessage() for r in caplog.records
-            if "op=blob_prune" in r.getMessage() and T[:8] in r.getMessage()
-        )
-        assert "dry_run=1" in line and "bytes=" in line and "refs_seen=" in line
+            if "op=blob_prune_summary" in r.getMessage()
+        ]
+        assert summary_lines, "dry-run sweep must emit the summary line"
+        line = summary_lines[0]
+        assert "dry_run=1" in line and "threads=" in line and "deleted=" in line
 
 
 class TestRealSaverSqliteNoOp:
