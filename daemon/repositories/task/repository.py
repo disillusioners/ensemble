@@ -3101,11 +3101,16 @@ class TaskRepository:
             """), params)
             count = result.rowcount
         if count > 0:
+            # NB: structlog-style kwargs (`count=`, `queue_id=`, `project_id=`)
+            # would crash stdlib ``Logger._log`` with
+            # ``TypeError: Logger._log() got an unexpected keyword argument
+            # 'count'``. stdlib only accepts ``exc_info``/``stack_info``/
+            # ``stacklevel``/``extra`` as kwargs — positional %-args are the
+            # local convention here (cf. lines 1193, 1664, 2164).
             logger.info(
-                "task.reconciled_bad_state_batch",
-                count=count,
-                queue_id=queue_id,
-                project_id=project_id,
+                "task.reconciled_bad_state_batch count=%d "
+                "queue_id=%s project_id=%s",
+                count, queue_id, project_id,
             )
         return count
 
