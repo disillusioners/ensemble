@@ -1,7 +1,11 @@
 import { Component, inject, signal } from '@angular/core';
 import { MatDialogModule, MatDialogRef, MAT_DIALOG_DATA } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
-import { CleanupPreflight, cleanupDeferNote } from '../../models/cleanup-preflight.model';
+import {
+  CleanupPreflight,
+  cleanupDeferNote,
+  CLEANUP_TRUTH_SPLIT_COPY,
+} from '../../models/cleanup-preflight.model';
 
 /**
  * Dialog data payload for the System Cleanup confirmation.
@@ -90,7 +94,7 @@ export type SystemCleanupConfirmData = Partial<CleanupPreflight>;
         </p>
       }
       <p class="will-remain">
-        Every ACTIVE job is cancelled, together with its whole subtree. Only missions holding nothing but settled mirrors — no live work — are kept.
+        {{ truthSplitCopy }}
         @if (liveIds().length > 0) {
           <span class="live-id-list">{{ liveIds().join(', ') }}</span>
         }
@@ -143,4 +147,7 @@ export class SystemCleanupConfirmDialogComponent {
   readonly liveIds = () => this.data.live_instance_ids ?? [];
   readonly deferCount = () => this.data.defer_blocked_count ?? 0;
   readonly deferNote = () => cleanupDeferNote(this.data.defer_holder_kind);
+  /** Truth-split copy VERBATIM match against
+   *  ``CLEANUP_TRUTH_SPLIT_COPY`` — unblock-round ITEM 5 pin. */
+  readonly truthSplitCopy = CLEANUP_TRUTH_SPLIT_COPY;
 }

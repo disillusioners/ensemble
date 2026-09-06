@@ -18,6 +18,24 @@ export interface CleanupPreflight {
 }
 
 /**
+ * Canonical cleanup preflight operator copy (WS4 Round-2 ITEM 3 / T-H1,
+ * 2026-09-06 — unblock-round ITEM 5, 2026-09-06 reframe).
+ *
+ * Single source of truth for the truth-split sentence rendered on the
+ * System Cleanup dialog. The same sentence lives in BE
+ * (`daemon/routers/jobs_management.py:cleanup_preflight` docstring),
+ * the FE dialog template, and `docs/job-task-system.md` §8.5. Editing
+ * this constant alone leaves BE/docs out of sync; the plain-TS spec
+ * asserts the dialog template renders this const VERBATIM so any
+ * template drift fails the suite.
+ */
+export const CLEANUP_TRUTH_SPLIT_COPY = [
+  'Every ACTIVE job is cancelled, together with its whole subtree.',
+  'Only missions holding nothing but settled mirrors — no live work',
+  '— are kept.',
+].join(' ');
+
+/**
  * Return the operator action for the holder kind reported by preflight.
  * Live/unknown holders have no dead-control recommendation: their defer
  * is working as designed, or the daemon is too old to classify it.
