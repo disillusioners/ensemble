@@ -106,7 +106,11 @@ def attest_completion() -> dict[str, Any]:
     effect as calling it once.
 
     The leader MUST call this tool before declaring itself done (see
-    the prompt contract in ``agents/leader/rule.md``). If a
+    the prompt contract in ``agents/leader/rule.md``). Two-step
+    contract: FIRST deliver the full detailed final report as its own
+    message, THEN call this tool ALONE in a subsequent step — the
+    attestation tool-call message must NOT contain the report (at
+    most a one-line ack). If a
     continuation nudge arrives ("The work is not yet finished —
     check current progress (tasks/children status) and continue."), treat it as a real
     user instruction, complete the remaining work, and call this
@@ -146,6 +150,11 @@ does NOT mutate state, enqueue work, or write to the journal.
 Usage:
 - Call exactly once when the leader's work is genuinely complete
   and the leader is about to be done.
+- Two-step contract: the full detailed final report is delivered as
+  its own message FIRST (normal completion-report discipline); this
+  tool is then called ALONE as a separate subsequent step — never
+  bundled into the report message (the attestation tool-call message
+  carries at most a one-line ack).
 - If a continuation nudge arrives ("The work is not yet finished
   — check current progress (tasks/children status) and continue."), treat it as a real
   user instruction: review your current progress, complete the

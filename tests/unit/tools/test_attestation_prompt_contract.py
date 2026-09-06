@@ -48,6 +48,12 @@ CONTRACT_FRAGMENTS = (
     # Core action — call the tool before declaring done.
     "you MUST call the `attest_completion` tool",
     "Do not declare done in plain text",
+    # Two-step contract (2026-09-06) — detailed report first, tool
+    # call alone; the report is never compressed into the
+    # attestation step.
+    "as its own message FIRST",
+    "call `attest_completion` ALONE",
+    "Compress the report into the `attest_completion` call",
     # Continuation nudge verbatim — Phase 2 gate writes this text;
     # the leader is expected to recognize and act on it.
     "The work is not yet finished — check current progress (tasks/children status) and continue",
