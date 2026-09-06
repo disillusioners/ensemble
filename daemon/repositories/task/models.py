@@ -122,6 +122,23 @@ class Task(SQLModel, table=True):
     __tablename__ = "task"
     __table_args__ = (
         Index("idx_task_status_created", "status", "created_at"),
+        # Composite claim-path index (terminal-report wake, 2026-09-07):
+        # the wake lane's ORDER BY leads with a CASE on ``task_type``,
+        # which defeats ``idx_task_status_created`` (the CASE key is not
+        # an index column) → full-backlog filter + top-N sort per claim
+        # cycle, worst under saturation. ``(status, task_type,
+        # created_at)`` serves the ``status='pending'`` equality prefix
+        # AND hands the ranker task_type-grouped, created_at-ordered
+        # input. Kept alongside (not instead of)
+        # ``idx_task_status_created``, which still serves the
+        # status-only created_at-ordered sweeps
+        # (``list_running_tasks`` / ``list_pending_tasks_older_than``).
+        # Triple registration: SQLite migration
+        # ``daemon/migrations/versions/20260906_192100_add_task_claim_wake_lane_index.sql``
+        # + ``EnsembleManager._ensure_postgres_columns`` (the .sql
+        # runner is a NO-OP on PG). Index name MUST be byte-identical
+        # across all three sites.
+        Index("idx_task_status_type_created", "status", "task_type", "created_at"),
         Index("idx_task_resume_target", "resume_target_turn_id", "suspension_reason"),
     )
 
