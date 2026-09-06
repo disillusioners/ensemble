@@ -224,8 +224,7 @@ class TestW5TwoTurnClaimOrder:
     def test_user_msg_first_created_claimed_first_report_second_turn(
         self, engine: Engine
     ):
-        """Inverse order: the user-msg row created first claims first —
-        the race is symmetric, purely created_at-driven."""
+        """Inverse order: user-msg created first, report second — amended by ee66f0eb: report claims first (two-tier CASE outranks FIFO)."""
         iid = _seed_instance(engine, status=InstanceStatus.WAITING_CHILDREN.value)
         base = datetime.now(timezone.utc)
         user_msg_task_id = _seed_task(
@@ -243,14 +242,20 @@ class TestW5TwoTurnClaimOrder:
 
         repo = TaskRepository(engine)
 
+        # Contract amended by ee66f0eb: two-tier CASE ranking in
+        # TaskRepository.claim_pending_task supersedes the symmetric-order W5
+        # pin; canonical tests: tests/integration/test_report_wake_priority_claim.py — flagged for leader ratification.
         first = repo.claim_pending_task(worker_id="worker-1")
-        assert first is not None and first.id == user_msg_task_id
+        assert first is not None and first.id == report_task_id, (
+            "W5 (amended by ee66f0eb): the PROCESS_REPORT task claims first "
+            "across tiers — wake-lane priority outranks created-at FIFO"
+        )
 
-        repo.complete_task(user_msg_task_id, result={})
+        repo.complete_task(report_task_id, result={})
         second = repo.claim_pending_task(worker_id="worker-1")
-        assert second is not None and second.id == report_task_id, (
-            "W5: whichever row was created first claims first — the race "
-            "is symmetric and order is not type-biased"
+        assert second is not None and second.id == user_msg_task_id, (
+            "W5 (amended by ee66f0eb): after the wake-lane row drains, the "
+            "user-msg task claims second — identities kept, order flipped"
         )
 
 
