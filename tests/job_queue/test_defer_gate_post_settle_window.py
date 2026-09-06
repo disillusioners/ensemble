@@ -69,6 +69,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlmodel import SQLModel
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
@@ -1877,6 +1878,200 @@ class TestPostSettlePhase2Fix:
             "background gate (system-wide) wrongly counted a dangling "
             "done mirror as busy — same NULL ``i.status`` drop, same "
             "docstring pin"
+        )
+
+    def test_gateb_jobleg_error_does_not_skip_task_leg(
+        self, fb_engine, job_repo
+    ):
+        """Gate B fail-CLOSED corner (Phase-4 review Issue #1): a prior
+        candidate's job-leg error must NOT suppress the task-side leg
+        for a later clean candidate.
+
+        The corner (pre-fix): ``_select_next_eligible_job``'s defer arm
+        cached a module-scope ``defer_job_error`` flag and gated the
+        Phase-2 task-side predicate on ``not defer_job_error``. A
+        transient DB error on candidate A's job-leg probe (instance X)
+        set the flag; candidate B (instance Y) with a CLEAN job-leg
+        ``False`` then SKIPPED the task-side leg entirely and was
+        admitted without the Phase-2 second leg — the exact
+        "defer queue silently released by a transient failure" shape
+        the W3 fail-CLOSED rule bans.
+
+        Scenario (file-backed SQLite, real repository stack):
+
+          * Two queued defer candidates A (``inst-cand-a``) and B
+            (``inst-cand-b``), no job-side busy rows (so both job
+            legs evaluate clean-False absent the injected error).
+          * Task-side busy work: a RUNNING non-deferred task on a
+            third instance in the same project → the task-side
+            predicate returns True (Phase-2 second leg).
+          * A delegating repository wrapper raises a real
+            ``OperationalError`` on the FIRST job-leg probe (A) and
+            delegates every later call to the real ``JobRepository``.
+
+        Expected (post-fix): BOTH candidates are held — A on its own
+        error (fail-CLOSED), B because the task-side leg RUNS for its
+        clean job-leg ``False`` and reports busy. The method returns
+        ``None`` and B's ``admission_state`` stays ``queued``.
+
+        Pre-fix this test fails with candidate B ADMITTED — the
+        bug-exercising proof (temporarily revert the one-line guard
+        fix to reproduce).
+        """
+        project = "proj-gateb-failclosed"
+
+        # Candidate instances (non-terminal — the WS1 revive shape).
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-cand-a",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-cand-b",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # Task-side busy witness instance + RUNNING non-deferred task.
+        _insert_instance(
+            fb_engine,
+            instance_id="inst-taskside-busy",
+            project_id=project,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _insert_task(
+            fb_engine,
+            work_id="work-taskside-busy",
+            instance_id="inst-taskside-busy",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+        )
+
+        # The defer lane + two queued task-type defer candidates.
+        # Insertion order fixes created_at ordering: A before B.
+        _insert_queue(
+            fb_engine,
+            queue_id="queue-defer-failclosed",
+            project_id=project,
+            queue_type="defer",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-fc-a",
+            instance_id="inst-cand-a",
+            project_id=project,
+            queue_id="queue-defer-failclosed",
+            admission_state=AdmissionState.QUEUED.value,
+            job_type="task",
+        )
+        _insert_job_item(
+            fb_engine,
+            job_id="job-defer-fc-b",
+            instance_id="inst-cand-b",
+            project_id=project,
+            queue_id="queue-defer-failclosed",
+            admission_state=AdmissionState.QUEUED.value,
+            job_type="task",
+        )
+
+        # Sanity: no job-side busy rows — both job legs would be clean
+        # False without the injected error (the queued defer jobs are
+        # excluded by the queue-type arm of the busy-set).
+        assert (
+            job_repo.has_active_non_deferred_work(
+                project, requester_instance_id="inst-cand-b"
+            )
+            is False
+        ), (
+            "job-side busy-set unexpectedly non-empty for candidate B "
+            "— the scenario does not isolate the task-side leg; fix "
+            "the fixture before trusting this pin"
+        )
+        # The task-side leg IS busy (the Phase-2 second leg).
+        task_repo_busy = TaskRepository(fb_engine)
+        assert (
+            task_repo_busy.has_active_non_deferred_work(project) is True
+        ), (
+            "task-side predicate returned False with a RUNNING "
+            "non-deferred task in scope — the scenario lost its "
+            "second-leg busy witness"
+        )
+
+        # Delegating wrapper: OperationalError on the FIRST job-leg
+        # probe (candidate A), clean delegation afterwards (candidate
+        # B's probe sees the real repository).
+        real_repo = job_repo
+        probes: list[str | None] = []
+
+        class _RaisingOnceJobRepo:
+            """Raise once on ``has_active_non_deferred_work``, then
+            delegate everything to the real repository."""
+
+            def has_active_non_deferred_work(
+                self, project_id: str | None,
+                requester_instance_id: str | None = None,
+            ) -> bool:
+                probes.append(requester_instance_id)
+                if len(probes) == 1:
+                    raise OperationalError(
+                        "SELECT EXISTS (…defer busy-body…)",
+                        {},
+                        Exception("simulated transient DB failure"),
+                    )
+                return real_repo.has_active_non_deferred_work(
+                    project_id, requester_instance_id
+                )
+
+            def __getattr__(self, name: str):
+                return getattr(real_repo, name)
+
+        svc = _make_gate_b_service(fb_engine)
+        svc._repository = _RaisingOnceJobRepo()
+
+        pending = job_repo.list_all_pending()
+        assert [j.job_id for j in pending] == [
+            "job-defer-fc-a",
+            "job-defer-fc-b",
+        ], (
+            f"pending order is not [A, B]: {[j.job_id for j in pending]} "
+            "— the per-candidate probe order would not exercise the "
+            "error-then-clean sequence"
+        )
+
+        result = asyncio.run(
+            svc._select_next_eligible_job(pending, project)
+        )
+
+        # Both probes ran, in candidate order: A raised, B delegated.
+        assert probes == ["inst-cand-a", "inst-cand-b"], (
+            f"job-leg probe sequence was {probes!r} — the corner "
+            "scenario did not exercise A-error-then-B-clean"
+        )
+
+        # THE PIN: candidate B must be HELD (task-side leg ran and
+        # reported busy), not admitted on the suppressed second leg.
+        assert result is None, (
+            f"candidate B was ADMITTED ({getattr(result, 'job_id', None)!r}) "
+            "on a clean job-leg False while the task-side predicate was "
+            "suppressed by candidate A's job-leg error — the fail-CLOSED "
+            "corner (Phase-4 review Issue #1) is LIVE: a transient "
+            "job-predicate failure silently releases the defer queue "
+            "from the Phase-2 second leg"
+        )
+
+        # Admission-state read-back: B stays queued (nothing admitted,
+        # nothing mutated).
+        with fb_engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = 'job-defer-fc-b'"
+                )
+            ).one()
+        assert row[0] == AdmissionState.QUEUED.value, (
+            f"candidate B admission_state drifted to {row[0]!r} — the "
+            "held candidate must stay queued"
         )
 
 

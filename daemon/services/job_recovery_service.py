@@ -293,9 +293,11 @@ def emit_defer_autopromote_boot_log() -> None:
 
     Wired by ``daemon/api.py`` lifespan next to the
     :func:`emit_orphan_f1_boot_log` call so an operator grepping boot
-    logs sees the resolved state at startup. The wiring is NOT shipped
-    in this WS (it belongs to a separate lifespan-touching change);
-    tests call this function directly to assert emission.
+    logs sees the resolved state at startup. The wiring IS shipped on
+    this branch (``fix/defer-self-witness-and-cleanup`` — WS4's
+    lifespan follow-up; api.py calls this right after the f1 boot
+    log). Tests additionally call this function directly to assert
+    emission.
     """
     global _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED
     if _DEFER_AUTOPROMOTE_BOOT_LOG_EMITTED:

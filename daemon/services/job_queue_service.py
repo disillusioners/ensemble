@@ -3119,11 +3119,6 @@ class JobQueueService:
         # PER-PROJECT (it is project-scoped, not per-candidate).
         defer_job_results: dict[str | None, bool] = {}
         defer_task_result: bool | None = None
-        defer_task_error: bool = False
-        defer_job_error: bool = False
-        has_defer_candidate = any(
-            queue_type_map.get(job.queue_id) == "defer" for job in pending
-        )
 
         async def _resolve_defer_gate(
             candidate_requester: str | None,
@@ -3136,7 +3131,7 @@ class JobQueueService:
             result per-candidate and the task-side result per-project.
             Fail-CLOSED on DB error.
             """
-            nonlocal defer_job_results, defer_task_result, defer_task_error, defer_job_error
+            nonlocal defer_job_results, defer_task_result
 
             non_defer_active = False
             job_result: bool | None = None
@@ -3164,7 +3159,6 @@ class JobQueueService:
                             f"requester_instance_id={candidate_requester!r} — "
                             f"failing CLOSED (non_defer_active=True)"
                         )
-                        defer_job_error = True
                         non_defer_active = True
                         defer_job_results[cache_key] = True
                     else:
@@ -3173,7 +3167,17 @@ class JobQueueService:
                             non_defer_active = result
                             defer_job_results[cache_key] = result
 
-            if not non_defer_active and not defer_job_error:
+            # W3 (fail-CLOSED, Phase-4 review Issue #1 fix): the task-
+            # side leg runs for EVERY clean job-leg False. A PRIOR
+            # candidate's job-leg error must NOT suppress this leg —
+            # a skipped second leg would admit the candidate while
+            # task-only non-defer work is active (the exact silent
+            # release the W3 rule bans; pinned by
+            # ``test_gateb_jobleg_error_does_not_skip_task_leg``).
+            # The candidate whose OWN job-leg raised is already held
+            # above (``non_defer_active=True`` short-circuits this
+            # guard).
+            if not non_defer_active:
                 if task_repo is None:
                     if job_result is None:
                         non_defer_active = True
@@ -3192,7 +3196,6 @@ class JobQueueService:
                             f"raised {e!r} for project_id={project_id!r} — "
                             f"failing CLOSED (non_defer_active=True)"
                         )
-                        defer_task_error = True
                         defer_task_result = True
                         non_defer_active = True
                 else:
@@ -3291,10 +3294,14 @@ class JobQueueService:
                     getattr(job, "instance_id", None)
                     or requester_instance_id
                 )
-                if has_defer_candidate:
-                    if await _resolve_defer_gate(candidate_requester):
-                        continue
-                else:
+                # NB: the gate resolves ONLY inside this arm, so with
+                # no defer candidates in ``pending`` the SQL round trip
+                # is short-circuited structurally (the former explicit
+                # ``has_defer_candidate`` wrapper here was provably
+                # always-True — it is ``any(...)`` over the same
+                # pending list with the same map — and its dead
+                # else-arm was removed; Phase-4 review Issue #3).
+                if await _resolve_defer_gate(candidate_requester):
                     continue
                 return job
             if queue_type == "background":
