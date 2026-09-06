@@ -48,6 +48,25 @@ form with NO project parameter at all — and the helper layer selects
 between them on ``project_id``. With no NULL-typed parameter binding on
 either dialect, the ambiguity class is impossible by construction.
 
+**WS1 — requester-instance carve-out (defer self-witness gate carve-out,
+2026-09-06):** a deferred message sent to a COMPLETED instance REVIVES
+it (F7 revive). The revived instance's non-terminal status + its OWN
+settled message mirrors would hold the defer busy-gate against ITSELF
+(the ``instance_id IS NOT NULL`` mirror clause matches the candidate's
+own mirrors) — the held defer task becomes the instance's only work,
+no turn ever runs, no exit; every reaper is shielded. The carve-out
+adds ``AND j.instance_id != :requester_instance_id`` to the MIRROR
+clause ONLY (legacy clause stays UNTOUCHED — a live foreground turn
+yields an ACTIVE job which still witnesses correctly). The
+``:requester_instance_id`` bind is a STRING (never NULL); the bind is
+only added when the caller passes a requester instance (system-scope
+and legacy callers see the no-carve-out body, semantics identical to
+the pre-WS1 shape). Two-body split preserved: four defer bodies total
+(no-carve-out project + system; carve-out project + system) sharing the
+disjunction structure and the ``_unwrap_exists_body`` derivation. The
+defer-blocked witness surface is system-wide and continues to use the
+no-carve-out variant — the carve-out is per-candidate.
+
 Both bodies are plain ``text()``-compatible strings, fully
 parameter-bound: the status / queue-type sets ride ``expanding``
 bindparams declared by the statement helpers below (never f-string
@@ -152,15 +171,57 @@ _MIRROR_CLAUSE: Final[str] = (
     " AND i.status NOT IN :terminal_statuses)"
 )
 
+#: Post-Fix-B mirror clause WITH the WS1 requester-instance carve-out.
+#: Used when the caller passes a non-None ``requester_instance_id`` —
+#: the candidate's own settled mirrors do NOT witness against the
+#: candidate (the defer self-witness incident: a deferred message sent
+#: to a COMPLETED instance REVIVES it, the revived instance's non-
+#: terminal status + its own settled mirrors would otherwise hold the
+#: gate against itself forever — no turn ever runs, no exit; every
+#: reaper is shielded).
+#:
+#: The legacy clause is UNTOUCHED — a live foreground turn yields an
+#: ACTIVE job which still witnesses correctly via the legacy clause
+#: (``admission_state='active'`` + non-terminal instance). The carve-out
+#: only suppresses the SELF-witness via the post-Fix-B settled-mirror
+#: clause; other-instance mirrors continue to witness.
+#:
+#: The ``requester_instance_id`` bindparam is a STRING when used
+#: (never NULL — the bind is added by the statement helper ONLY when
+#: the caller passes a requester instance; when it is None the
+#: caller falls back to the no-carve-out body, semantics identical to
+#: pre-WS1). This avoids the NULL-typed ``!=`` bind trap that would
+#: otherwise drop every mirror row (NULL-comparison evaluates to NULL).
+_MIRROR_CLAUSE_WITH_CARVEOUT: Final[str] = (
+    "(j.job_type = 'message'"
+    " AND j.admission_state = 'done'"
+    " AND j.instance_id IS NOT NULL"
+    " AND j.instance_id != :requester_instance_id"
+    " AND i.status NOT IN :terminal_statuses)"
+)
+
 #: The defer busy-set disjunction (defer legacy OR mirror). Shared by
-#: both defer bodies (project-scoped + system-wide) — splicing this
-#: (rather than re-stating the two clauses inline) makes it impossible
-#: for the defer bodies' semantics to drift apart.
+#: both no-carve-out defer bodies (project-scoped + system-wide) —
+#: splicing this (rather than re-stating the two clauses inline) makes
+#: it impossible for the no-carve-out bodies' semantics to drift apart.
 _DEFER_BUSY_DISJUNCTION: Final[str] = (
     "(\n"
     "      " + _LEGACY_CLAUSE + "\n"
     "      OR\n"
     "      " + _MIRROR_CLAUSE + "\n"
+    " )"
+)
+
+#: The defer busy-set disjunction WITH the WS1 requester-instance
+#: carve-out (defer legacy OR carve-out mirror). Shared by both
+#: carve-out defer bodies (project-scoped + system-wide). The legacy
+#: clause is identical to the no-carve-out disjunction; only the
+#: mirror clause adds ``j.instance_id != :requester_instance_id``.
+_DEFER_BUSY_DISJUNCTION_WITH_CARVEOUT: Final[str] = (
+    "(\n"
+    "      " + _LEGACY_CLAUSE + "\n"
+    "      OR\n"
+    "      " + _MIRROR_CLAUSE_WITH_CARVEOUT + "\n"
     " )"
 )
 
@@ -224,6 +285,48 @@ JOB_DEFER_BUSY_BODY_SYSTEM: Final[str] = (
     + ")"
 ).replace("\n", " ")
 
+#: Defer busy-set body (project-scoped, WS1 requester-instance carve-out).
+#:
+#: Same structure as :data:`JOB_DEFER_BUSY_BODY_PROJECT` but uses the
+#: WS1 carve-out disjunction (mirror clause adds
+#: ``j.instance_id != :requester_instance_id``). The ``:requester_instance_id``
+#: bindparam is a STRING when bound (never NULL — the caller only adds
+#: the bind when a requester instance is in scope, otherwise the
+#: no-carve-out body is selected). Used by Gate A defer
+#: (``_defer_idle_check``) and Gate B defer
+#: (``_select_next_eligible_job``) when the candidate's instance_id is
+#: in scope.
+JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT: Final[str] = (
+    "SELECT EXISTS ("
+    " SELECT 1 FROM job_queue_items j"
+    " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+    " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+    " WHERE j.project_id = :project_id"
+    " AND j.deleted_at IS NULL"
+    " AND (q.queue_type IS NULL"
+    "      OR q.queue_type NOT IN :excluded_queue_types)"
+    " AND " + _DEFER_BUSY_DISJUNCTION_WITH_CARVEOUT
+    + ")"
+).replace("\n", " ")
+
+#: Defer busy-set body (system-wide, WS1 requester-instance carve-out).
+#:
+#: Same structure as :data:`JOB_DEFER_BUSY_BODY_SYSTEM` but uses the
+#: WS1 carve-out disjunction (mirror clause adds
+#: ``j.instance_id != :requester_instance_id``). Used by system-wide
+#: defer consumers that pass a requester instance.
+JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT: Final[str] = (
+    "SELECT EXISTS ("
+    " SELECT 1 FROM job_queue_items j"
+    " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
+    " LEFT JOIN instances i ON j.instance_id = i.instance_id"
+    " WHERE j.deleted_at IS NULL"
+    " AND (q.queue_type IS NULL"
+    "      OR q.queue_type NOT IN :excluded_queue_types)"
+    " AND " + _DEFER_BUSY_DISJUNCTION_WITH_CARVEOUT
+    + ")"
+).replace("\n", " ")
+
 #: Background busy-set body (system-wide — NO project clause).
 #:
 #: Same two busy clauses as the defer body with two differences per the
@@ -277,7 +380,35 @@ def _declare_expanding_binds_project(body: str) -> TextClause:
     )
 
 
-def defer_busy_statement(project_id: str | None) -> TextClause:
+def _declare_expanding_binds_with_carveout(body: str) -> TextClause:
+    """Like :func:`_declare_expanding_binds` but for the WS1
+    requester-instance carve-out system-wide body (whose bindparams
+    include ``:requester_instance_id``).
+    """
+    return text(body).bindparams(
+        bindparam("requester_instance_id"),
+        bindparam("terminal_statuses", expanding=True),
+        bindparam("excluded_queue_types", expanding=True),
+    )
+
+
+def _declare_expanding_binds_project_with_carveout(body: str) -> TextClause:
+    """Like :func:`_declare_expanding_binds_project` but for the WS1
+    requester-instance carve-out project-scoped body (whose bindparams
+    include ``:project_id`` AND ``:requester_instance_id``).
+    """
+    return text(body).bindparams(
+        bindparam("project_id"),
+        bindparam("requester_instance_id"),
+        bindparam("terminal_statuses", expanding=True),
+        bindparam("excluded_queue_types", expanding=True),
+    )
+
+
+def defer_busy_statement(
+    project_id: str | None,
+    requester_instance_id: str | None = None,
+) -> TextClause:
     """Return the defer busy-set body as an executable TextClause.
 
     Selects the project-scoped body when ``project_id`` is not None
@@ -285,7 +416,27 @@ def defer_busy_statement(project_id: str | None) -> TextClause:
     keeps a bare ``IS NULL`` parameter comparison off every code path
     on both dialects — the PG ``AmbiguousParameter`` incident is
     impossible by construction.
+
+    Selects the WS1 requester-instance carve-out body variant when
+    ``requester_instance_id`` is not None (the candidate's own settled
+    mirrors are excluded from the busy-set), and the no-carve-out body
+    when it is ``None``. System-scope and legacy callers see the
+    no-carve-out shape (semantics identical to pre-WS1). The carve-out
+    variant adds ``:requester_instance_id`` to the bindparam contract;
+    the bind is a STRING (never NULL) — the NULL-typed ``!=`` bind
+    trap is impossible by construction because the bind is only
+    declared when the caller passes a requester instance.
     """
+    has_carveout = requester_instance_id is not None
+    if has_carveout:
+        body = (
+            JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
+            if project_id is not None
+            else JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
+        )
+        if project_id is not None:
+            return _declare_expanding_binds_project_with_carveout(body)
+        return _declare_expanding_binds_with_carveout(body)
     body = (
         JOB_DEFER_BUSY_BODY_PROJECT
         if project_id is not None
@@ -296,12 +447,22 @@ def defer_busy_statement(project_id: str | None) -> TextClause:
     return _declare_expanding_binds(body)
 
 
-def defer_busy_binds(project_id: str | None) -> dict[str, object]:
+def defer_busy_binds(
+    project_id: str | None,
+    requester_instance_id: str | None = None,
+) -> dict[str, object]:
     """Bind values for :func:`defer_busy_statement`.
 
     ``project_id=None`` selects the system-wide scope (maintenance
     ``_is_idle``); a set project selects the project scope (Gate A/B
     defer lanes).
+
+    ``requester_instance_id`` adds the WS1 requester-instance carve-out
+    bind when set (selects the carve-out body variant in
+    :func:`defer_busy_statement`). The value is bound as a STRING (never
+    NULL) — when omitted, no carve-out bind is added and the no-carve-
+    out body is used. System-scope and legacy callers see the pre-WS1
+    bind contract.
     """
     binds: dict[str, object] = {
         "terminal_statuses": list(JOB_TERMINAL_STATUSES),
@@ -309,6 +470,8 @@ def defer_busy_binds(project_id: str | None) -> dict[str, object]:
     }
     if project_id is not None:
         binds["project_id"] = project_id
+    if requester_instance_id is not None:
+        binds["requester_instance_id"] = requester_instance_id
     return binds
 
 
@@ -443,8 +606,26 @@ JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM: Final[str] = _unwrap_exists_body(
     JOB_DEFER_BUSY_BODY_SYSTEM
 )
 
+#: Defer busy-set WITNESS body (project-scoped, WS1 requester-instance
+#: carve-out) — :data:`JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT` with
+#: ``EXISTS`` unwrapped. Same binds as the gate body. Enumerates
+#: witnesses EXCLUDING the candidate's own settled mirrors.
+JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT: Final[str] = _unwrap_exists_body(
+    JOB_DEFER_BUSY_BODY_PROJECT_WITH_CARVEOUT
+)
 
-def defer_busy_witness_statement(project_id: str | None) -> TextClause:
+#: Defer busy-set WITNESS body (system-wide, WS1 requester-instance
+#: carve-out) — :data:`JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT` with
+#: ``EXISTS`` unwrapped. Same binds as the gate body.
+JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT: Final[str] = _unwrap_exists_body(
+    JOB_DEFER_BUSY_BODY_SYSTEM_WITH_CARVEOUT
+)
+
+
+def defer_busy_witness_statement(
+    project_id: str | None,
+    requester_instance_id: str | None = None,
+) -> TextClause:
     """Return the defer busy-set WITNESS body as an executable TextClause.
 
     The enumeration counterpart of :func:`defer_busy_statement`: instead
@@ -454,10 +635,31 @@ def defer_busy_witness_statement(project_id: str | None) -> TextClause:
     (project-scoped vs system-wide on ``project_id``; no bare-NULL
     parameter comparison on either dialect).
 
+    Selects the WS1 requester-instance carve-out witness body variant
+    when ``requester_instance_id`` is not None (the candidate's own
+    settled mirrors are excluded from the enumeration), and the
+    no-carve-out witness body when it is ``None``. The system-wide
+    defer-blocked transparency surface (``GET /api/queues/defer-blocked``)
+    continues to pass ``None`` — system-wide enumeration, no candidate
+    scope, the witness surface shows ALL busy witnesses including any
+    self-witnessed mirror (semantics identical to pre-WS1). The
+    carve-out witness body is exposed for future per-candidate witness
+    enumeration (e.g. WS4 mission-aware cleanup).
+
     READ-ONLY consumers only — the statement is a bare SELECT; the
     transparency surface must never gain a write on this path (census
     contract, docs §8.5).
     """
+    has_carveout = requester_instance_id is not None
+    if has_carveout:
+        body = (
+            JOB_DEFER_BUSY_WITNESS_BODY_PROJECT_WITH_CARVEOUT
+            if project_id is not None
+            else JOB_DEFER_BUSY_WITNESS_BODY_SYSTEM_WITH_CARVEOUT
+        )
+        if project_id is not None:
+            return _declare_expanding_binds_project_with_carveout(body)
+        return _declare_expanding_binds_with_carveout(body)
     body = (
         JOB_DEFER_BUSY_WITNESS_BODY_PROJECT
         if project_id is not None
@@ -468,11 +670,14 @@ def defer_busy_witness_statement(project_id: str | None) -> TextClause:
     return _declare_expanding_binds(body)
 
 
-def defer_busy_witness_binds(project_id: str | None) -> dict[str, object]:
+def defer_busy_witness_binds(
+    project_id: str | None,
+    requester_instance_id: str | None = None,
+) -> dict[str, object]:
     """Bind values for :func:`defer_busy_witness_statement`.
 
     Delegates to :func:`defer_busy_binds` — the witness body is derived
     from the gate body, so the parameter contract is shared BY
     CONSTRUCTION and cannot drift.
     """
-    return defer_busy_binds(project_id)
+    return defer_busy_binds(project_id, requester_instance_id)

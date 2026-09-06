@@ -2697,6 +2697,7 @@ class JobQueueService:
         self,
         pending: list[JobItem],
         project_id: str,
+        requester_instance_id: str | None = None,
     ) -> JobItem | None:
         """Select the next eligible job from pending list, respecting defer + background semantics.
 
@@ -2709,12 +2710,31 @@ class JobQueueService:
         This ensures defer queues and background queues don't start processing
         while their respective gate lanes are still active.
 
+        **WS1 requester-instance carve-out (2026-09-06):** when the
+        caller passes ``requester_instance_id`` (the candidate instance
+        being admitted), the per-defer-candidate gate check excludes
+        the candidate's OWN settled mirrors from the busy-set. The
+        legacy clause stays UNTOUCHED — a live foreground turn yields
+        an ACTIVE job which still witnesses correctly. When
+        ``requester_instance_id`` is ``None`` (system-scope and legacy
+        callers), the pre-WS1 shape is preserved and the gate is
+        project-scoped only.
+
         Args:
             pending: List of pending jobs (ordered by priority desc, created_at asc).
             project_id: Project ID for the DEFER idle check (project-scoped).
                 The BACKGROUND idle check is system-wide and ignores this
                 argument — the background predicate is always system-wide
                 (Phase 3 background seam, 2026-07-14).
+            requester_instance_id: Optional candidate instance for the
+                WS1 requester-instance carve-out. When ``None`` (the
+                default — system-scope and legacy callers), the
+                no-carve-out body is used and semantics are identical
+                to pre-WS1. When set, each defer candidate is
+                evaluated with its OWN ``instance_id`` (the carve-out
+                is per-candidate) so a self-witnessing candidate is
+                admitted while OTHER candidates with other witnesses
+                remain blocked.
 
         Returns:
             Next eligible JobItem, or None if no eligible jobs.
@@ -2775,70 +2795,98 @@ class JobQueueService:
         )
 
         # DEFER gate: project-scoped check, "is non-deferred work
-        # active in THIS project?". Only computed when at least one
-        # pending job is a defer job — short-circuits the SQL round
-        # trip when the pending list has no defer candidates.
-        non_defer_active = False
+        # active in THIS project (excluding the candidate's own
+        # settled mirrors when the WS1 requester-instance carve-out
+        # is in effect)?". Only computed when at least one pending job
+        # is a defer job — short-circuits the SQL round trip when the
+        # pending list has no defer candidates.
+        #
+        # The job-side result is cached PER-CANDIDATE so each defer
+        # candidate is evaluated against the gate using its OWN
+        # ``requester_instance_id`` (the WS1 carve-out is per-
+        # candidate, not per-call). The task-side result is cached
+        # PER-PROJECT (it is project-scoped, not per-candidate).
+        defer_job_results: dict[str | None, bool] = {}
+        defer_task_result: bool | None = None
+        defer_task_error: bool = False
+        defer_job_error: bool = False
         has_defer_candidate = any(
             queue_type_map.get(job.queue_id) == "defer" for job in pending
         )
-        if has_defer_candidate:
-            # Phase 2 (defer-queue idle gate, 2026-07-23): check both
-            # work-tracking tables. The job predicate catches active jobs
-            # between graph turns; the task predicate catches tasks that have
-            # no backing JobItem. A non-bool job result means the repository is
-            # probably a loose Mock, so ignore it and use the task predicate.
-            #
-            # W3 (fail-CLOSED, 2026-07-23): each predicate call is wrapped
-            # in try/except so a transient DB error during the call is
-            # treated as "active" (non_defer_active=True) — the defer
-            # queue MUST NOT be silently released by a transient
-            # failure. Mirrors the JobProcessor._defer_idle_check
-            # posture.
-            repo = getattr(self, "_repository", None)
+
+        async def _resolve_defer_gate(
+            candidate_requester: str | None,
+        ) -> bool:
+            """Resolve the WS1 carve-out gate for ONE defer candidate.
+
+            Returns True iff the gate is BUSY (non-deferred work is
+            active EXCLUDING the candidate's own settled mirrors when
+            ``candidate_requester`` is set). Caches the job-side
+            result per-candidate and the task-side result per-project.
+            Fail-CLOSED on DB error.
+            """
+            nonlocal defer_job_results, defer_task_result, defer_task_error, defer_job_error
+
+            non_defer_active = False
             job_result: bool | None = None
+            repo = getattr(self, "_repository", None)
             if (
                 repo is not None
                 and hasattr(repo, "has_active_non_deferred_work")
             ):
-                try:
-                    result = await asyncio.to_thread(
-                        repo.has_active_non_deferred_work, project_id
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"_select_next_eligible_job: defer job predicate "
-                        f"raised {e!r} for project_id={project_id!r} — "
-                        f"failing CLOSED (non_defer_active=True)"
-                    )
-                    non_defer_active = True
-                else:
-                    if isinstance(result, bool):
-                        job_result = result
-                        non_defer_active = result
-
-            if not non_defer_active:
-                if task_repo is None:
-                    # If neither predicate can be evaluated, conservatively
-                    # hold defer work back. A valid False from the job
-                    # predicate remains authoritative when task tracking is
-                    # unavailable during partial initialization.
-                    if job_result is None:
-                        non_defer_active = True
+                # Per-candidate cache key (the carve-out is per-candidate).
+                cache_key = candidate_requester
+                if cache_key in defer_job_results:
+                    job_result = defer_job_results[cache_key]
+                    non_defer_active = job_result
                 else:
                     try:
-                        non_defer_active = bool(
+                        result = await asyncio.to_thread(
+                            repo.has_active_non_deferred_work,
+                            project_id,
+                            candidate_requester,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"_select_next_eligible_job: defer job predicate "
+                            f"raised {e!r} for project_id={project_id!r}, "
+                            f"requester_instance_id={candidate_requester!r} — "
+                            f"failing CLOSED (non_defer_active=True)"
+                        )
+                        defer_job_error = True
+                        non_defer_active = True
+                        defer_job_results[cache_key] = True
+                    else:
+                        if isinstance(result, bool):
+                            job_result = result
+                            non_defer_active = result
+                            defer_job_results[cache_key] = result
+
+            if not non_defer_active and not defer_job_error:
+                if task_repo is None:
+                    if job_result is None:
+                        non_defer_active = True
+                elif defer_task_result is None:
+                    try:
+                        defer_task_result = bool(
                             await asyncio.to_thread(
-                                task_repo.has_active_non_deferred_work, project_id
+                                task_repo.has_active_non_deferred_work,
+                                project_id,
                             )
                         )
+                        non_defer_active = defer_task_result
                     except Exception as e:
                         logger.warning(
                             f"_select_next_eligible_job: defer task predicate "
                             f"raised {e!r} for project_id={project_id!r} — "
                             f"failing CLOSED (non_defer_active=True)"
                         )
+                        defer_task_error = True
+                        defer_task_result = True
                         non_defer_active = True
+                else:
+                    non_defer_active = defer_task_result
+            return non_defer_active
 
         # BACKGROUND gate: system-wide check, "is non-deferred,
         # non-background work active ANYWHERE?". Only computed when
@@ -2905,17 +2953,39 @@ class JobQueueService:
         # Three-way admission decision:
         #   * FIFO / PARALLEL (and any unknown queue_type — see the
         #     default-fallback comment above): always eligible.
-        #   * DEFER: eligible iff ``non_defer_active`` is False.
+        #   * DEFER: eligible iff the per-candidate gate returns
+        #     False (with the WS1 requester-instance carve-out
+        #     excluding the candidate's own settled mirrors). The
+        #     requester instance is the candidate JobItem's OWN
+        #     ``instance_id`` when present (the per-candidate
+        #     carve-out); otherwise the caller-supplied
+        #     ``requester_instance_id`` (the legacy single-request
+        #     path) or ``None`` (system-scope and legacy callers
+        #     see the pre-WS1 shape).
         #   * BACKGROUND: eligible iff ``non_background_active`` is
         #     False. Background is held back by EITHER non-deferred
         #     work OR other background work anywhere in the system.
         for job in pending:
             queue_type = queue_type_map.get(job.queue_id, "fifo")
             if queue_type == "defer":
-                if not non_defer_active:
-                    return job
-                # Otherwise skip this defer job and continue checking
-                continue
+                # WS1 per-candidate carve-out: prefer the candidate's
+                # own instance_id (when present) so the candidate's
+                # OWN settled mirrors do NOT witness against the
+                # candidate. Fall back to the caller-supplied
+                # requester_instance_id (legacy single-request path)
+                # for the rare case where the candidate has no
+                # instance_id; fall back to ``None`` (system-scope
+                # callers see the pre-WS1 shape).
+                candidate_requester = (
+                    getattr(job, "instance_id", None)
+                    or requester_instance_id
+                )
+                if has_defer_candidate:
+                    if await _resolve_defer_gate(candidate_requester):
+                        continue
+                else:
+                    continue
+                return job
             if queue_type == "background":
                 if not non_background_active:
                     return job
