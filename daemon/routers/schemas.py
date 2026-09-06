@@ -556,6 +556,19 @@ class CleanupPreflightResponse(BaseModel):
     intentionally NOT guarded by ``is_write_paused`` (W1): it is a pure
     COUNT query and must surface stale rows even during a write pause,
     which is precisely when bad-state / zombie items accumulate most.
+
+    WS4 mission lens (2026-09-06): ``zombie_instance_count`` counts the
+    reap-eligible instances under the widened mission-lens predicate
+    (own queued defer-lane rows no longer shield — the stalled-holder
+    self-shield exemption). ``live_instance_count`` /
+    ``live_instance_ids`` enumerate the non-terminal instances cleanup
+    will NOT touch ("will remain") so the dialog can state the split
+    explicitly. ``defer_blocked_count`` surfaces the defer lane
+    SEPARATELY (pending defer-lane jobs) — deliberately NOT folded into
+    ``bad_state_count``: bad-state Tasks are reconciled by cleanup,
+    deferred messages are NOT (the constitution-era mirror protection),
+    so conflating the two would promise an action cleanup does not
+    take.
     """
 
     bad_state_count: int = Field(
@@ -570,8 +583,34 @@ class CleanupPreflightResponse(BaseModel):
         default=0,
         ge=0,
         description=(
-            "System-wide count of zombie instances (non-terminal with "
-            "no live work)"
+            "System-wide count of reap-eligible (zombie) instances under "
+            "the WS4 mission-lens predicate (own queued defer-lane rows "
+            "no longer shield)"
+        ),
+    )
+    live_instance_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "System-wide count of non-terminal instances that cleanup "
+            "will NOT terminate (live missions — will remain)"
+        ),
+    )
+    live_instance_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Bounded (first 20) instance_ids of the live missions that "
+            "will remain, for operator-facing listing"
+        ),
+    )
+    defer_blocked_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "System-wide count of pending (queued) defer-lane jobs — "
+            "surfaced separately from bad_state_count because cleanup "
+            "does NOT cancel them (mirror protection); use the defer "
+            "warning's holder actions instead"
         ),
     )
 
@@ -580,9 +619,63 @@ class CleanupPreflightResponse(BaseModel):
             "example": {
                 "bad_state_count": 2,
                 "zombie_instance_count": 1,
+                "live_instance_count": 3,
+                "live_instance_ids": ["inst-a", "inst-b", "inst-c"],
+                "defer_blocked_count": 1,
             }
         }
     }
+
+
+class DeferHolderForceCompleteResponse(BaseModel):
+    """Response for ``POST /api/jobs/defer-holders/{instance_id}/force-complete``.
+
+    WS4 holder action — terminates a stalled (mirrors-only) defer-gate
+    holder after re-deriving the mirrors-only state server-side.
+    """
+
+    instance_id: str = Field(..., description="The targeted holder instance")
+    terminated: bool = Field(
+        ...,
+        description=(
+            "True when the termination cascade ran; False when the "
+            "safety guard refused (probe reports live non-defer work)"
+        ),
+    )
+    probe_busy: bool = Field(
+        ...,
+        description=(
+            "Result of the execution-time mirrors-only re-derivation "
+            "(has_active_non_deferred_work with the holder as "
+            "requester). False = mirrors-only confirmed."
+        ),
+    )
+    message: str = Field(
+        default="", description="Human-readable outcome for the FE snackbar"
+    )
+
+
+class DeferHolderResendResponse(BaseModel):
+    """Response for ``POST /api/jobs/defer-holders/{instance_id}/resend-foreground``.
+
+    WS4 holder action — cancels the holder's queued defer-lane jobs
+    and re-enqueues their message content as NEW foreground message
+    jobs (not mirror mutations).
+    """
+
+    instance_id: str = Field(..., description="The targeted holder instance")
+    found_defer_jobs: int = Field(..., ge=0, description="Queued defer-lane jobs found on the holder's books")
+    cancelled_defer_jobs: int = Field(..., ge=0, description="Jobs successfully cancelled")
+    resend_results: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-row outcomes: cancelled_job_id plus the new foreground job_id/message_id, or an error/skipped note",
+    )
+    skipped_empty_content: int = Field(
+        default=0, ge=0, description="Cancelled jobs with empty content (nothing to re-send)"
+    )
+    message: str = Field(
+        default="", description="Human-readable outcome for the FE snackbar"
+    )
 
 
 class JobQueueListResponse(BaseModel):

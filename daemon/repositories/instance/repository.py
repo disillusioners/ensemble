@@ -1470,6 +1470,27 @@ class SQLModelInstanceRepository:
         the terminal set AND has no live JobItem AND no live Task AND
         has no non-terminal child instance.
 
+        **WS4 mission lens (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``):** the JobItem anti-join no longer lets an instance's
+        OWN queued defer-lane rows shield it (the "self-shield"). The
+        live ops unstick (incident 2026-09-06, instance 6bc61f42 / job
+        47161b1e) proved the gap: a stalled holder's only remaining
+        busy rows were its own queued defer-lane message mirrors, so
+        the pre-WS4 scan shielded the holder from the reaper forever —
+        the mirrors hold the defer gate, the gate holds the mirrors,
+        nothing ever runs. The witness clause now counts a JobItem row
+        against the instance ONLY when it is ``active`` (any lane) or
+        ``queued`` on a NON-defer lane (or on an unknown/missing queue
+        — a ``LEFT JOIN`` miss yields ``queue_type IS NULL`` and the
+        row still shields: fail-CLOSED, matching the gate's error
+        posture). Rationale for exempting queued defer TASK rows too:
+        the reaper runs AFTER cleanup bucket 1
+        (``batch_cancel_queued``), which has already drained every
+        queued non-mirror job, so at reaper time the surviving queued
+        defer-lane rows are necessarily ``job_type='message'`` mirrors
+        — and for the standalone preflight the exemption predicts the
+        post-bucket-1 state, which is what a preflight must predict.
+
         Each anti-join is expressed as a ``NOT EXISTS (SELECT 1 ... WHERE
         jqi.instance_id = i.instance_id ...)`` correlated subquery — NOT
         as ``NOT IN (SELECT DISTINCT jqi.instance_id ...)``. C1 (2026-08-12):
@@ -1528,9 +1549,21 @@ class SQLModelInstanceRepository:
             WHERE i.status NOT IN ({terminal_csv})
               AND NOT EXISTS (
                 SELECT 1 FROM job_queue_items jqi
+                LEFT JOIN job_queues jq ON jq.queue_id = jqi.queue_id
                 WHERE jqi.instance_id = i.instance_id
                   AND jqi.admission_state IN ({live_jobitem_csv})
                   AND jqi.deleted_at IS NULL
+                  -- WS4 mission lens: the instance's OWN queued
+                  -- defer-lane rows do NOT witness against it (the
+                  -- self-shield exemption). ``active`` rows of any
+                  -- lane and queued rows on non-defer / unknown
+                  -- lanes still witness (fail-CLOSED on the LEFT
+                  -- JOIN miss via the explicit ``IS NULL`` arm).
+                  AND (
+                    jqi.admission_state = 'active'
+                    OR jq.queue_type IS NULL
+                    OR jq.queue_type != 'defer'
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM task t
@@ -1551,9 +1584,11 @@ class SQLModelInstanceRepository:
         the terminal set (``completed``, ``error``, ``terminated``,
         ``failed``) AND has:
 
-        * no active/queued ``job_queue_items`` rows
-          (``admission_state IN ('queued','active')``,
-          ``deleted_at IS NULL``), and
+        * no *witnessing* ``job_queue_items`` rows — WS4 mission lens:
+          an ``active`` row on ANY lane, or a ``queued`` row on a
+          non-defer (or unknown) lane, witnesses; the instance's OWN
+          ``queued`` defer-lane rows do NOT (the self-shield
+          exemption — see :meth:`_build_zombie_scan_sql`), and
         * no pending/running/paused ``task`` rows.
 
         Used by the System Cleanup endpoint's Bucket 5 (instance-level
@@ -1600,6 +1635,36 @@ class SQLModelInstanceRepository:
         with self.engine.begin() as conn:
             row = conn.execute(stmt).fetchone()
         return int(row[0]) if row else 0
+
+    def find_non_terminal_instance_ids(self) -> list[str]:
+        """Return ids of ALL non-terminal instances (read-only scan).
+
+        WS4 (2026-09-06) companion to :meth:`find_zombie_instances`
+        for the cleanup preflight's live-vs-reap split: the preflight
+        derives ``live_instance_ids`` ("will remain") as the
+        non-terminal set minus the reap-eligible set, using the SAME
+        terminal CSV constant (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``)
+        so the two scans cannot disagree on what "terminal" means.
+
+        Self-contained SYNC method using raw-SQL ``text()`` — the
+        preflight wraps it in ``asyncio.to_thread``.
+
+        Returns:
+            List of ``instance_id`` strings whose status is NOT in the
+            terminal set. Unbounded (the operator preflight owns
+            bounding).
+        """
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        stmt = text(
+            f"SELECT i.instance_id FROM instances i "
+            f"WHERE i.status NOT IN ({terminal_csv}) "
+            f"ORDER BY i.instance_id"
+        )
+        with self.engine.begin() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [row[0] for row in rows if row and row[0] is not None]
 
     def get_metadata_value(self, instance_id: str, key: str) -> Any | None:
         """Read ONE top-level metadata key without hydrating the row.

@@ -1446,10 +1446,36 @@ fixtures) plus the shared-tail text pin are locked in
 The severity conjunction is a client-side read of the payload; the surface itself
 carries only the two facts + witnesses.
 
-> **WS4 NOTE (deferred):** a separate by-design note about cleanup blindness
-> (the fact that `stalled` surfaces the remediation shape WITHOUT taking the
-> action — the WS4 cleanup mechanic must remain a deliberate operator step) will
-> be appended to this section in workstream 4.
+> **WS4 NOTE (LANDED 2026-09-06, `fix/defer-self-witness-and-cleanup`): cleanup
+> blindness is BY-DESIGN — the unstick lives in the holder actions.** The
+> nuclear cleanup (`POST /api/jobs/cleanup`) deliberately does NOT cancel the
+> queued defer-lane mirrors: `batch_cancel_queued` excludes
+> `job_type='message'` (constitution-era mirror protection — cancelling a
+> mirror would desync the JobItem receipt from its authoritative Task), and
+> the deferred Task row behind the mirror is not a bad-state row. The live
+> unstick incident (2026-09-06, instance `6bc61f42` / job `47161b1e`) showed
+> the consequence: a cleanup press could not relieve a stalled holder because
+> Bucket 1 skipped its queued defer mirrors AND the old Bucket 5 zombie scan
+> let those same mirrors shield the holder from reaping. WS4 resolves the
+> reaping half via the **mission lens**: the zombie predicate no longer lets
+> an instance's OWN queued defer-lane rows shield it (the self-shield
+> exemption — fail-closed on unknown lanes), so idle/stalled holders are
+> reap-eligible while LIVE missions (running/paused Task, ACTIVE JobItem on
+> any lane, queued non-defer job, non-terminal children) are never
+> bulk-terminated — the cleanup preflight lists them as "will remain". The
+> mirror-cancel protection itself STAYS. The defer-specific unstick is the
+> two holder-targeted actions on `POST /api/jobs/defer-holders/{instance_id}/
+> force-complete` (terminates a stalled holder after re-deriving
+> mirrors-only server-side via the canonical WS1 carve-out probe — the FE
+> kind is never trusted) and `POST /api/jobs/defer-holders/{instance_id}/
+> resend-foreground` (cancels the holder's queued defer jobs and re-enqueues
+> their message content through the public `enqueue_message_job` front
+> primitive as NEW foreground message jobs — not mirror mutations). Both
+> reuse registered admission-state writers only; the census stays at 23. The
+> cleanup preflight/dialog copy states the blindness explicitly: "deferred
+> messages are not cancelled here — use the defer warning's actions", and
+> keeps `defer_blocked_count` a SEPARATE number from `bad_state_count`
+> (cleanup reconciles bad-state Tasks; it does not touch the defer lane).
 
 **FE render-gate** — the `deferBlockIndicator` helper
 (`frontend/src/app/models/defer-blocked.model.ts`) returns `null` (no render, no

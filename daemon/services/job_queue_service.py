@@ -1339,6 +1339,28 @@ class JobQueueService:
         # ``idle``/``queued``/``waiting``/``waiting_children`` even though
         # all of its JobItems and Tasks are gone).
         #
+        # WS4 MISSION LENS (2026-09-06, ``fix/defer-self-witness-and-
+        # cleanup``): an instance's OWN queued defer-lane rows no longer
+        # shield it from this reaper (the self-shield exemption). The
+        # live ops unstick (incident 6bc61f42 / job 47161b1e) proved a
+        # stalled holder — mirrors-only witness, the WS2 ``stalled``
+        # class — survived every cleanup press forever because its own
+        # queued defer mirrors satisfied the old live-JobItem clause.
+        # The exemption lives in the shared scan
+        # (``SQLModelInstanceRepository._build_zombie_scan_sql``) and is
+        # mirrored by the C3 TOCTOU re-check (``_has_live_work``) so the
+        # re-check cannot re-shield what the scan exempted. LIVE
+        # missions are NEVER bulk-terminated here: a running/paused
+        # Task, an ACTIVE JobItem on any lane, a queued job on a
+        # non-defer lane, or non-terminal children all still protect
+        # the instance. The ``terminate_instance`` cascade deletes the
+        # holder's Task rows; its queued defer mirrors stay AS-IS (the
+        # constitution-era mirror protection — cleanup does NOT cancel
+        # mirrors) and are subsequently aborted by the dispatch loop's
+        # queued-message-on-terminal-instance path
+        # (``atomic_transition`` → ``terminal_reason='aborted'``), so
+        # no revive wedge is created.
+        #
         # C2 (2026-08-12): terminate each zombie through the full
         # ``InstanceManager.terminate_instance()`` cascade instead of a
         # raw ``transition_status_if`` UPDATE. The raw UPDATE skipped
@@ -1436,6 +1458,246 @@ class JobQueueService:
             "total_processed": total,
         }
     
+    async def force_complete_defer_holder(self, instance_id: str) -> dict[str, Any]:
+        """Terminate a stalled defer-gate holder instance ("force-complete").
+
+        WS4 holder action (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``) — the PRIMARY unstick path for the WS2 ``stalled``
+        class: a holder whose gate-busy state is EXCLUSIVELY its own
+        settled message mirrors has no live work, so terminating the
+        instance IS the force-complete (the mirrors are already
+        ``admission_state='done'``; the busy-set witness is the
+        instance's non-terminal status, and the
+        ``terminate_instance`` cascade flips exactly that).
+
+        SAFETY GUARD (never trust the caller-reported kind): the
+        mirrors-only state is re-derived at execution time via the
+        canonical probe ``JobRepository.has_active_non_deferred_work(
+        None, requester_instance_id=<holder>)`` — the SAME WS1
+        carve-out gate body WS2's stall classification uses, system
+        scope. The action proceeds ONLY when the probe returns
+        ``False`` (the holder's own mirrors were the ONLY busy rows
+        system-wide). WS2's ratified STRICT semantics make mixed
+        stalled+live holders structurally impossible, so probe=False
+        is exactly the safe-to-terminate set. The probe is
+        fail-CLOSED (returns True on DB error) so a degraded probe
+        refuses the action.
+
+        Census discipline: this method performs NO ``admission_state``
+        write of its own — the termination flows through the existing
+        :meth:`InstanceManager.terminate_instance` cascade (an
+        instances-table writer), so the constitution's writer census
+        stays at 23.
+
+        Args:
+            instance_id: The holder instance to force-complete.
+
+        Returns:
+            ``{"instance_id": str, "terminated": bool, "probe_busy": bool}``
+            where ``terminated=False`` means the guard refused (the
+            caller should surface a conflict).
+
+        Raises:
+            LookupError: The instance does not exist.
+        """
+        instance_repo = (
+            getattr(self._instance_manager, "_instance_repository", None)
+            if self._instance_manager
+            else None
+        )
+        if instance_repo is None:
+            raise LookupError(
+                "force_complete_defer_holder: instance repository unavailable"
+            )
+        instance = await asyncio.to_thread(instance_repo.get, instance_id)
+        if instance is None:
+            raise LookupError(f"Instance {instance_id} does not exist")
+
+        # Guard: re-derive mirrors-only at execution time (system
+        # scope + the holder as requester — the WS2 stalled probe).
+        # fail-CLOSED: a probe error returns True (busy) and refuses.
+        probe_busy = await asyncio.to_thread(
+            self._repository.has_active_non_deferred_work,
+            None,
+            instance_id,
+        )
+        if probe_busy:
+            logger.warning(
+                "force_complete_defer_holder: REFUSED for %s — "
+                "guard probe reports live non-defer work (mixed or "
+                "live holder); force-complete is only safe when the "
+                "holder's own mirrors are the ONLY busy rows",
+                instance_id[:8],
+            )
+            return {
+                "instance_id": instance_id,
+                "terminated": False,
+                "probe_busy": True,
+            }
+
+        # Reuse the full termination cascade (C2 lineage) — idempotent
+        # on already-terminal instances, so a TOCTOU loss vs. another
+        # cleanup path is safe.
+        await self._instance_manager.terminate_instance(instance_id)
+        logger.info(
+            "force_complete_defer_holder: terminated stalled holder "
+            "%s (guard probe reported mirrors-only)",
+            instance_id[:8],
+        )
+        return {
+            "instance_id": instance_id,
+            "terminated": True,
+            "probe_busy": False,
+        }
+
+    async def resend_deferred_foreground(self, instance_id: str) -> dict[str, Any]:
+        """Cancel the holder's queued defer-lane jobs and re-send their
+        message content as FOREGROUND messages.
+
+        WS4 holder action (2026-09-06) — recovers deferred messages a
+        stalled/paused holder is pinning: each queued defer-lane
+        JobItem on the holder's own books is cancelled through the
+        existing single-job :meth:`cancel_job` path, and its
+        ``message`` content is re-enqueued via the public
+        ``enqueue_message_job`` front primitive (the same call
+        ``POST /api/instances/{id}/messages`` makes). The re-enqueue is
+        a NEW foreground message job (``is_deferred=False`` — the
+        default), NOT a mirror mutation: the JobItem side goes through
+        the registered ``create`` writer and the cancelled side through
+        the registered ``cancel_job`` writer, so the census stays at
+        23.
+
+        Live unstick reference (2026-09-06 incident 47161b1e /
+        6bc61f42, ``data/logs/ensemble.log`` 16:22–16:24 UTC): the
+        manual sequence was ``POST /api/jobs/{id}/cancel`` →
+        ``POST /api/jobs/cleanup`` (reaped the idle holder) →
+        ``POST /api/instances/{id}/messages`` (revived + new message
+        job). This method compresses the cancel + re-enqueue legs into
+        one holder-targeted action; the reaper leg stays a cleanup
+        press (or the force-complete action).
+
+        Args:
+            instance_id: The holder instance whose queued defer jobs
+                should be re-sent foreground.
+
+        Returns:
+            ``{"instance_id": str, "found_defer_jobs": int,
+            "cancelled_defer_jobs": int, "resend_results": list[dict],
+            "skipped_empty_content": int}`` — ``resend_results`` rows
+            carry ``cancelled_job_id`` and (on success) the new
+            foreground ``job_id`` / ``message_id``; failures are
+            recorded per-row under ``error`` and do not abort the
+            loop.
+
+        Raises:
+            LookupError: The instance does not exist.
+        """
+        instance_repo = (
+            getattr(self._instance_manager, "_instance_repository", None)
+            if self._instance_manager
+            else None
+        )
+        if instance_repo is None:
+            raise LookupError(
+                "resend_deferred_foreground: instance repository unavailable"
+            )
+        instance = await asyncio.to_thread(instance_repo.get, instance_id)
+        if instance is None:
+            raise LookupError(f"Instance {instance_id} does not exist")
+
+        # The holder's OWN live jobs (queued + active), ordered by
+        # created_at — the defer-lane QUEUED subset is the re-send
+        # scope. ``active`` defer rows are NOT touched (they are
+        # already executing); non-defer lanes are not the defer
+        # unstick's business.
+        live_jobs = await asyncio.to_thread(
+            self._repository.find_jobs_by_instance, instance_id
+        )
+        queue_repo = getattr(self, "_queue_repo", None)
+        defer_jobs: list[Any] = []
+        for job in live_jobs:
+            if job.admission_state != AdmissionState.QUEUED.value:
+                continue
+            queue_type: str | None = None
+            if queue_repo is not None and job.queue_id:
+                try:
+                    queue = await asyncio.to_thread(queue_repo.get, job.queue_id)
+                    queue_type = getattr(queue, "queue_type", None) if queue else None
+                except Exception as exc:  # noqa: BLE001 — classify best-effort
+                    logger.warning(
+                        "resend_deferred_foreground: queue lookup failed "
+                        "for %s (queue %s): %s",
+                        job.job_id[:8], job.queue_id, exc,
+                    )
+            # Fail-CLOSED on unknown lanes: a job whose lane cannot be
+            # proven defer is left alone.
+            if queue_type == "defer":
+                defer_jobs.append(job)
+
+        cancelled = 0
+        skipped_empty = 0
+        resend_results: list[dict[str, Any]] = []
+        for job in defer_jobs:
+            content = (job.message or "").strip()
+            try:
+                cancel_ok = await self.cancel_job(job.job_id)
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": f"cancel failed: {exc}",
+                })
+                continue
+            if not cancel_ok:
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": "cancel returned False (already terminal?)",
+                })
+                continue
+            cancelled += 1
+            if not content:
+                skipped_empty += 1
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "skipped": "empty message content — nothing to re-send",
+                })
+                continue
+            if self._instance_manager is None:
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": "instance manager unavailable — cannot re-enqueue",
+                })
+                continue
+            try:
+                result = await self._instance_manager.enqueue_message_job(
+                    instance_id=instance_id,
+                    message=content,
+                    source="api",
+                )
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "job_id": getattr(result, "job_id", None),
+                    "message_id": getattr(result, "message_id", None),
+                })
+            except Exception as exc:  # noqa: BLE001 — per-row best-effort
+                resend_results.append({
+                    "cancelled_job_id": job.job_id,
+                    "error": f"re-enqueue failed: {exc}",
+                })
+
+        logger.info(
+            "resend_deferred_foreground: holder=%s found=%d cancelled=%d "
+            "resent=%d skipped_empty=%d",
+            instance_id[:8], len(defer_jobs), cancelled,
+            sum(1 for r in resend_results if r.get("job_id")), skipped_empty,
+        )
+        return {
+            "instance_id": instance_id,
+            "found_defer_jobs": len(defer_jobs),
+            "cancelled_defer_jobs": cancelled,
+            "resend_results": resend_results,
+            "skipped_empty_content": skipped_empty,
+        }
+
     def _is_instance_alive(self, instance_id: str) -> bool:
         """Check if an instance exists and is not in a terminal state.
         
@@ -1523,10 +1785,35 @@ class JobQueueService:
         # the cancel path uses, scoped to one instance_id. The
         # method filters on ``ACTIVE_ADMISSION_STATES`` so we
         # automatically get the live-only predicate.
+        #
+        # WS4 mission lens: the re-check MUST match the scan
+        # predicate (the C3 invariant — "re-check of the SAME
+        # predicates used by the scan"), and the scan now exempts
+        # the instance's OWN queued defer-lane rows (the self-shield
+        # exemption). Without the matching exemption here, every
+        # newly-eligible stalled holder would be re-shielded at this
+        # line by its own mirrors and the lens would never fire.
+        # ``active`` rows of any lane and queued rows on non-defer /
+        # unknown lanes still count as live (fail-CLOSED on unknown
+        # queue ids — same posture as the SQL arm).
         try:
             live_jobs = self._repository.find_jobs_by_instance(instance_id)
             if live_jobs:
-                return True
+                queue_repo = getattr(self, "_queue_repo", None)
+                for job in live_jobs:
+                    if job.admission_state == AdmissionState.ACTIVE.value:
+                        return True
+                    if queue_repo is None:
+                        # Cannot classify the lane — fail CLOSED
+                        # (treat as live; the reaper skips).
+                        return True
+                    queue = queue_repo.get(job.queue_id) if job.queue_id else None
+                    queue_type = (
+                        getattr(queue, "queue_type", None) if queue else None
+                    )
+                    if queue_type is None or queue_type != "defer":
+                        return True
+                    # Queued on a defer lane — does not witness.
         except Exception as exc:  # noqa: BLE001 — best-effort probe
             logger.debug(
                 "cleanup_non_terminal_jobs: "
