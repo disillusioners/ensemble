@@ -2805,7 +2805,12 @@ def create_should_continue(language_check_enabled: bool):
 #: Server-authored nudge text (R1 / NFR-6 — EXACT constant; Phase 6's
 #: recovery injector reuses the same text).
 ATTESTATION_NUDGE_TEXT = (
-    "The work is not yet finished — check current progress and continue."
+    "The work is not yet finished — check current progress "
+    "(tasks/children status) and continue. Reminder: when "
+    "— and only when — the work is truly complete, you MUST "
+    "call the attest_completion tool before finishing; "
+    "completions without that call are premature and will be "
+    "blocked again."
 )
 
 #: Graph node name + conditional-route name for the attestation gate.

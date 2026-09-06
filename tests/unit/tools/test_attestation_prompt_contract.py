@@ -6,8 +6,8 @@ The LCA contract instructs the leader LLM to:
 1. Call ``attest_completion`` BEFORE declaring itself done (not in
    plain text).
 2. Treat the in-graph continuation nudge ("The work is not yet
-   finished — check current progress and continue.") as a real user
-   instruction.
+   finished — check current progress (tasks/children status) and
+   continue.") as a real user instruction.
 
 The contract has ONE canonical home:
 
@@ -50,7 +50,7 @@ CONTRACT_FRAGMENTS = (
     "Do not declare done in plain text",
     # Continuation nudge verbatim — Phase 2 gate writes this text;
     # the leader is expected to recognize and act on it.
-    "The work is not yet finished — check current progress and continue",
+    "The work is not yet finished — check current progress (tasks/children status) and continue",
     "treat it as a real user instruction",
 )
 

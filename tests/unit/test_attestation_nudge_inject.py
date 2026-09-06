@@ -50,7 +50,14 @@ def test_deny_injects_checkpoint_plain_dict_and_routes_to_agent():
 
     nudge = result["messages"][0]
     assert isinstance(nudge, HumanMessage)
-    assert nudge.content == "The work is not yet finished — check current progress and continue."
+    assert nudge.content == (
+        "The work is not yet finished — check current progress "
+        "(tasks/children status) and continue. Reminder: when "
+        "— and only when — the work is truly complete, you MUST "
+        "call the attest_completion tool before finishing; "
+        "completions without that call are premature and will be "
+        "blocked again."
+    )
     assert nudge.additional_kwargs["attestation_nudge"] is True
     assert nudge.additional_kwargs["attestation_nudge_denied_count"] == 1
     assert result["attestation_route"] == "agent"

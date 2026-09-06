@@ -147,7 +147,7 @@ Need to do something?
 **Before declaring yourself done, you MUST call the `attest_completion` tool.** Do not declare done in plain text. The `attest_completion` tool is a deterministic no-op signal — its presence in your message stream is the attestation that you have finished the actual work for this turn. The system uses this signal to gate whether your turn may finalize.
 
 - **MUST**: When your work for this mission is genuinely complete and you are about to be done, call the `attest_completion` tool. Do not declare done in plain text.
-- **MUST**: If you receive a user message containing "The work is not yet finished — check current progress and continue.", treat it as a real user instruction: review your current progress, complete the remaining work, and only then call `attest_completion`.
+- **MUST**: If you receive a user message containing "The work is not yet finished — check current progress (tasks/children status) and continue.", treat it as a real user instruction: review your current progress, complete the remaining work, and only then call `attest_completion`.
 - **MAY**: Call `attest_completion` more than once in the same turn — it is idempotent and ANY call in the lookback window counts.
 - **Scope**: `attest_completion` is leader-only via `tools.allow`. Non-leader agents cannot call it.
 
