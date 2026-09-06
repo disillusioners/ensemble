@@ -17,8 +17,10 @@ Coverage
 * Failure path non-fatal — any exception in the repo (or in
   ``asyncio.to_thread``) is swallowed + WARNING-logged + returns 0.
 * Empty / id-less persisted lists — no-op (returns 0, no SQL).
-* Source-label round-trip — the slot's ``source`` is preserved
-  through to ``log_message_tap``.
+* No-log guard — a successful tap emits NO ``[MessageTap]`` line
+  on the ``daemon.checkpoint_perf`` logger (the per-tap INFO line
+  was removed; the source label survives only in the failure
+  WARNING).
 
 Mock repo (no SQLAlchemy, no engine) — these tests run without the
 ``daemon.persistence`` / ``daemon.graph`` machinery.
@@ -253,31 +255,31 @@ class TestTapNodeReturnFailurePath:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# log_message_tap — observability
+# Observability — the happy path is SILENT on daemon.checkpoint_perf
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestTapNodeReturnObservability:
-    """The slot emits ``[MessageTap]`` lines via ``log_message_tap``."""
+    """A successful tap emits NO ``[MessageTap]`` log line.
+
+    The per-tap INFO line (``log_message_tap``) was removed — it was
+    noise at per-turn volume. This class guards against its return;
+    the source label survives only in the failure-path WARNING.
+    """
 
     @pytest.mark.asyncio
-    async def test_log_line_emitted_on_happy_path(self, caplog):
-        """[MessageTap] source=<label> thread=<8-char-prefix> count=<N>."""
+    async def test_no_log_on_happy_path(self, caplog):
+        """A successful upsert emits NOTHING on the checkpoint_perf logger."""
         repo, _captured = _repo_double(rowcount=2, capture_items=True)
         slot = MessageTapSlot(repo, SOURCE_COMPACTION_REACTIVE)
         persisted = [_msg("h-1"), _msg("ai-1")]
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
             count = await slot.tap_node_return(persisted, "thread-abcdef1234567890")
         assert count == 2
-        # The plan mandates the thread_id be sliced to 8 chars.
-        # "thread-abcdef1234567890" -> first 8 chars -> "thread-a".
-        assert any(
-            "[MessageTap]" in rec.message
-            and "source=compaction_aupdate_reactive" in rec.message
-            and "thread=thread-a" in rec.message
-            and "count=2" in rec.message
-            for rec in caplog.records
-        ), f"Missing [MessageTap] line: {[r.message for r in caplog.records]}"
+        # The per-tap [MessageTap] INFO line was removed — the
+        # checkpoint_perf logger must stay silent on the happy path.
+        perf_logs = [r for r in caplog.records if r.name == "daemon.checkpoint_perf"]
+        assert perf_logs == []
 
     @pytest.mark.asyncio
     async def test_no_log_on_empty_persisted(self, caplog):

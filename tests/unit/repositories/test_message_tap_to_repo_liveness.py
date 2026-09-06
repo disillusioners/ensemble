@@ -192,9 +192,8 @@ async def test_tap_to_thread_bridge_returns_real_repo_rowcount(repo):
     This is the binding assertion: a broken
     ``asyncio.to_thread`` bridge would lose the return value
     (the coroutine wrapper default-returns ``None`` and we coerce
-    to ``int``). The repo's rowcount feeds ``log_message_tap``;
-    a drift between tap-return and repo-rowcount would silently
-    misreport the upsert count in the structured log line.
+    to ``int``); a drift between tap-return and repo-rowcount
+    would silently misreport the upsert count to callers.
     """
     slot = MessageTapSlot(repo, SOURCE_AGENT_NODE_RETURN)
 

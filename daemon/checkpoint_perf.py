@@ -190,42 +190,6 @@ def log_prune(
     logger.info(line)
 
 
-def log_message_tap(
-    thread_id: str,
-    count: int,
-    source: str,
-) -> None:
-    """Gated emit for the C2 message-tap observation lines (PR2).
-
-    Phase 1 C2 (``message_metadata`` side table + ``MessageTapSlot``).
-    The 4 approved tap sites (decisions.md D1) each emit one line per
-    call:
-
-    * ``source="user_message_entry"`` — at ``_build_graph_input``
-      (instance_messaging.py; F1 fix).
-    * ``source="agent_node_return"`` — post-F2 single-return site in
-      ``daemon/graph.py`` (covers both the injected-branch AND the
-      plain-turn branch in one call).
-    * ``source="compaction_aupdate_reactive"`` — after the reactive
-      compaction ``aupdate_state`` at ``daemon/graph.py:3248-3250``.
-    * ``source="compaction_aupdate_messaging"`` — after the
-      messaging-side ``aupdate_state`` at
-      ``daemon/services/instance_messaging.py:810-822``.
-
-    Every emit is suppressed when ``CHECKPOINT_PERF_LOGS`` is set to a
-    falsy value, matching the C4 instrumentation. ``count`` is the
-    rows-affected returned by ``MessageMetadataRepository.upsert_batch``
-    — the rowcount is 0 on a no-op re-tap under
-    ``ON CONFLICT DO NOTHING`` (D3).
-    """
-    if not _logs_enabled():
-        return
-    logger.info(
-        f"[MessageTap] source={source} thread={thread_id[:8] if thread_id else '?'} "
-        f"count={count}"
-    )
-
-
 def invariant_check_no_alist() -> None:
     """ERROR log if invoked at all post-C1."""
     # Invariant violation is never suppressed by CHECKPOINT_PERF_LOGS — the

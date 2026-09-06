@@ -101,8 +101,6 @@ import datetime as dt
 import logging
 from typing import TYPE_CHECKING, Any
 
-from daemon.checkpoint_perf import log_message_tap
-
 if TYPE_CHECKING:
     from daemon.repositories.message_metadata.repository import (
         MessageMetadataRepository,
@@ -138,10 +136,9 @@ class MessageTapSlot:
         repo: A :class:`MessageMetadataRepository` (or any object
             exposing ``upsert_batch(thread_id: str,
             items: list[tuple[str, str, int|None]]) -> int``).
-        source: One of the four source-label constants above
-            (``SOURCE_*``). The slot logs the source on every emit so
-            per-site observability is preserved (PR1's
-            ``log_message_tap`` consumer).
+        source: One of the source-label constants above
+            (``SOURCE_*``). The label appears in the failure-path
+            WARNING so per-site observability is preserved.
     """
 
     def __init__(self, repo: "MessageMetadataRepository", source: str) -> None:
@@ -245,7 +242,6 @@ class MessageTapSlot:
                 thread_id,
                 [(mid, now_iso, None) for mid in ids],
             )
-            log_message_tap(thread_id, count, self._source)
             return count
         except Exception as exc:
             logger.warning(
