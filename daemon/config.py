@@ -2406,6 +2406,21 @@ def load_config(config_path: str | None = None) -> Config:
         ens_value=os.environ.get("ENSEMBLE_PROACTIVE_COMPACTION"),
         cpe_value=os.environ.get("COMPACTION_PROACTIVE_ENABLED"),
     )
+    # Boot-time validation for the injected-notes absorb kill-switch
+    # (``ENSEMBLE_INJECTED_NOTES_ABSORB``). The resolver is read-at-call by
+    # ``daemon/compaction.py::_injected_note_absorbed_ids``; invoking it
+    # here on every ``load_config`` makes any unrecognized value (e.g.
+    # ``purple``) raise during daemon startup with the flag-naming
+    # ValueError, so the mid-flight CLE recovery turn can never inherit a
+    # garbage env. Mirrors the ``_resolve_proactive_enabled`` /
+    # ``_resolve_compaction_model`` precedent above — env-only, deliberately
+    # NOT a ``CompactionConfig`` field (re-adding it as a pydantic bool
+    # would reintroduce the init-kwarg-beats-env inversion trap this call
+    # site was carved out to avoid; see ``resolve_injected_notes_absorb``
+    # docstring). The resolver's return is discarded — the side effect
+    # (raising on bad input) is the contract; read-at-call in
+    # ``daemon/compaction.py`` is the live source.
+    resolve_injected_notes_absorb()
     config_dict["compaction"] = compaction_config
     if "slash_commands" in processed_config:
         # Phase 1 / WS-7: operators may set SLASH_COMMANDS_* via YAML; let
