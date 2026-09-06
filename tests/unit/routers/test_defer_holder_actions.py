@@ -334,29 +334,55 @@ class TestCleanupPreflightSurface:
 
 
 class TestDeferBlockResolverPublicSurface:
-    """WS4 Round-2 ITEM 7 (2026-09-06) — the resolver's public API
-    exposes :func:`defer_pending_count` so the preflight can call
-    it WITHOUT a direct engine reach-through from the router.
+    """WS4 Round-2 ITEM 7 → unblock-round ITEM 4 (2026-09-06) — the
+    resolver's public API exposes
+    :meth:`daemon.services.defer_block_resolver.DeferBlockResolver.defer_pending_count`
+    so the preflight can call it WITHOUT a direct engine reach-through
+    from the router.
 
-    Pin:
+    Pin (instance-method shape, replacing the round-2 free function):
 
-    * the helper is importable from ``daemon.services.defer_block_resolver``
-    * it accepts an engine and returns an int
+    * the helper is reachable from
+      ``daemon.services.defer_block_resolver.DeferBlockResolver`` and
+      is a callable instance method (NOT a module-level free function);
     * the SQL constant is module-private (underscore-prefixed, NOT
-      re-exported) — only the helper is public.
+      re-exported) — only the instance method is public, and it
+      reaches ``self._job_repo.engine`` internally.
     """
 
     def test_defer_pending_count_is_public(self):
+        """The defer-pending count surface is a PUBLIC INSTANCE METHOD
+        on :class:`DeferBlockResolver` (unblock-round ITEM 4, 2026-09-06).
+
+        Round-2 pinned the round-2 free function ``defer_pending_count(engine)``
+        on the module — that pin is now obsolete: there is NO module-level
+        ``defer_pending_count`` anymore. The pin migrated to the class
+        shape so the router reaches the count through the wired
+        singleton (``manager._defer_block_resolver.defer_pending_count()``
+        via ``get_defer_block_resolver``) and NEVER imports the
+        module-private SQL constant directly.
+        """
         import daemon.services.defer_block_resolver as resolver
 
-        assert hasattr(resolver, "defer_pending_count")
-        assert callable(resolver.defer_pending_count)
+        # No module-level public surface for the free function.
+        assert not hasattr(resolver, "defer_pending_count")
+        # The method lives on the class — bound method of an instance
+        # reaches ``self._job_repo.engine`` internally.
+        assert hasattr(resolver.DeferBlockResolver, "defer_pending_count")
+        assert callable(resolver.DeferBlockResolver.defer_pending_count)
 
     def test_defer_pending_count_sql_is_module_private(self):
         """The underlying SQL constant stays module-private (the
         underscore prefix is the boundary). The preflight uses the
-        helper, NOT the constant — schema changes have ONE place to
-        update."""
+        instance method on the resolver class, NOT the constant —
+        schema changes have ONE place to update.
+
+        Additional pin (unblock-round ITEM 4): the SQL constant has
+        ZERO external references — the only readers are inside
+        ``daemon.services.defer_block_resolver`` itself (the
+        ``resolve()`` method's shared-connection optimization + the
+        new public ``defer_pending_count()`` instance method).
+        """
         import daemon.services.defer_block_resolver as resolver
 
         # Module-private name with underscore prefix.
