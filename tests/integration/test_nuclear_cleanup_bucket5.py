@@ -1773,14 +1773,23 @@ class TestWS4MissionLens:
 
     # ──────────────────────────────────────────────────────────────────────
     # Unblock-round ITEM 11 (2026-09-06): truth-survivor pin against
-    # the REAL ``SQLModelInstanceRepository.has_live_work`` (the
-    # WS4 R2 W2 single-instance companion). Seeds one instance with
-    # a non-mirror ACTIVE JobItem (NOT a zombie per the WS4 lens,
-    # but Bucket 2 cancels + cascades it) and one instance with only
-    # settled mirrors (a TRULY retained instance). Asserts that
-    # ``live_instance_ids`` contains ONLY the truly-retained
-    # instance — the active-jobitem holder is excluded by the
-    # post-filter that closes the over-promise gap.
+    # the REAL ``SQLModelInstanceRepository.has_real_active_or_queued_work`` —
+    # the JobItem-only EXISTS-shape probe introduced by the unblock
+    # round (it is NOT the WS4 R2 W2 ``has_live_work`` companion used
+    # by the holder-action guard; the two probes share class-level
+    # literal sets but cover different predicate surfaces). The
+    # truth-survivor filter targets a SUBSET — non-mirror ``active``
+    # / ``queued`` JobItems (the Bucket-1 batch + Bucket-2 per-row
+    # cancellable subset; mirror rows excluded by both buckets) —
+    # so a live-Task-only instance IS a truth-survivor (Tasks do
+    # not exclude an instance from the list). Seeds one instance
+    # with a non-mirror ACTIVE JobItem (NOT a zombie per the WS4
+    # lens, but Bucket 2 cancels + cascades it) and one instance
+    # with only a live Task (a TRULY retained instance per the
+    # ITEM 11 spec). Asserts that ``live_instance_ids`` contains
+    # ONLY the truly-retained instance — the active-jobitem holder
+    # is excluded by the post-filter that closes the over-promise
+    # gap.
     # ──────────────────────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
@@ -1807,12 +1816,28 @@ class TestWS4MissionLens:
           * ``inst-reaped``: a zombie (no live work, no Task) —
             SHOULD be in the reap split, not the live split.
 
+        Reviewer fold-in (ITEMS 7 + 8b, 2026-09-06): the topology
+        is extended with ``inst-child-only`` — a non-terminal
+        PARENT instance that has ONLY a non-terminal child
+        instance (no JobItems, no Tasks). The third arm of the
+        zombie predicate (`NOT EXISTS non-terminal child`)
+        EXCLUDES this instance from the reap set; the truth-
+        survivor filter (no non-mirror ACTIVE/queued JobItem)
+        ALSO passes (no JobItems at all). The instance is a
+        genuine truth-survivor — Bucket 5 reap skips it (the
+        child witnesses) and Bucket 1/2 cancel nothing (no
+        JobItems).
+
         Then: assert that ``live_instance_ids`` is exactly
-        ``[inst_task_only.instance_id]`` (truth-survivor filter) —
-        the round-2 shape (``non-terminal ∖ zombie``) would have
-        included BOTH ``inst-task-only`` and ``inst-active-holder``
-        AND failed the canonical sentence (``Every ACTIVE job is
-        cancelled, ...``).
+        ``{inst_task_only, inst_child_only}`` (truth-survivor
+        filter) — the round-2 shape (``non-terminal ∖ zombie``)
+        would have included BOTH ``inst-task-only`` AND
+        ``inst-active-holder`` AND failed the canonical
+        sentence (``Every ACTIVE job is cancelled, ...``).
+        The new filter additionally proves ``inst-child-only``
+        is a survivor (proves the JobItem-only probe does
+        NOT over-filter an instance that survives purely on
+        a non-terminal child).
         """
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -1865,6 +1890,33 @@ class TestWS4MissionLens:
         )
         # (no JobItems, no Task — fully zombie)
 
+        # Reviewer fold-in (ITEM 8b, 2026-09-06): a parent
+        # instance with ONLY a non-terminal child — proves the
+        # truth-survivor filter does NOT over-filter an
+        # instance that has child-shape live work but no
+        # JobItems/Task.
+        # The parent's live work comes through the child's
+        # ``status NOT IN terminal`` arm (3rd arm of the zombie
+        # predicate). The truth-survivor filter passes because
+        # the parent has ZERO non-mirror ACTIVE/queued JobItems.
+        inst_child_only_parent = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        inst_child_only_child = make_instance(
+            engine, status="running", project_id=project_id
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET parent_id = :p "
+                    "WHERE instance_id = :c"
+                ),
+                {
+                    "p": inst_child_only_parent.instance_id,
+                    "c": inst_child_only_child.instance_id,
+                },
+            )
+
         # Build the FastAPI app with the management router and a real
         # manager wired with the REAL instance_repo (so the new
         # ``has_real_active_or_queued_work`` filter does the right
@@ -1898,14 +1950,25 @@ class TestWS4MissionLens:
             assert inst_task_only.instance_id not in set(
                 instance_repo.find_zombie_instances()
             )
-            # Truth-survivor filter: only inst_task_only passes (no
-            # non-mirror ACTIVE/queued JobItem). inst_active is
-            # EXCLUDED because Bucket 2 cancels + cascades.
-            assert body["live_instance_count"] == 1, (
+            # Sanity: inst_child_only_parent is NOT a zombie (its
+            # non-terminal child witnesses — 3rd arm of the
+            # predicate).
+            assert inst_child_only_parent.instance_id not in set(
+                instance_repo.find_zombie_instances()
+            )
+            # Truth-survivor filter: inst_task_only + inst_child_only_parent
+            # both pass (no non-mirror ACTIVE/queued JobItem on
+            # either). inst_active is EXCLUDED because Bucket 2
+            # cancels + cascades.
+            assert body["live_instance_count"] == 2, (
                 f"only TRULY-retained instances should appear; got "
                 f"live_instance_ids={body['live_instance_ids']!r}"
             )
-            assert body["live_instance_ids"] == [inst_task_only.instance_id]
+            live_ids_set = set(body["live_instance_ids"])
+            assert live_ids_set == {
+                inst_task_only.instance_id,
+                inst_child_only_parent.instance_id,
+            }
             # Round-2 over-promise: BOTH task-only and active would
             # appear. The new filter knocks active out.
             assert inst_active.instance_id not in body["live_instance_ids"]
