@@ -8,10 +8,27 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
-# `defer_pending_count` lives in `daemon.services.defer_block_resolver`
-# but importing it at module level causes a circular import:
-#   defer_block_resolver -> daemon.routers.schemas -> daemon.routers -> jobs_management
-# Imported lazily inside :func:`cleanup_preflight` (WS4 Round-2 ITEM 7).
+# Defer-pending count and resolver access (``defer_pending_count`` /
+# ``get_defer_block_resolver``) live in
+# ``daemon.services.defer_block_resolver`` /
+# ``daemon.routers.queues`` respectively. Importing them at module
+# load time would trigger a circular import:
+#
+#   jobs_management -> services.defer_block_resolver (TYPE_CHECKING
+#     ``JobRepository`` + runtime ``DeferBlockHolderResponse``
+#     schema) -> daemon.routers.schemas (line 123 of
+#     defer_block_resolver.py) -> daemon.routers.__init__ (line 14
+#     imports queues) -> daemon.routers.queues (line 32 imports
+#     ``_holder_to_response`` from defer_block_resolver) -> recursion
+#     back to jobs_management (still being loaded).
+#
+# The real cycle goes through the routers package boundary (schemas /
+# __init__ / queues), NOT through ``daemon.routers`` directly. The
+# deferred import (at function-body time, inside :func:`cleanup_preflight`)
+# is the canonical fix because by the time the endpoint is invoked,
+# FastAPI has fully loaded every router module — the partial-module
+# recursion is gone. Imported lazily inside :func:`cleanup_preflight`
+# (WS4 Round-2 ITEM 7 + unblock-round ITEM 1, 2026-09-06).
 from daemon.services.work_status import (
     _derive_legacy_status,
     is_terminal as _is_terminal_canonical,
@@ -664,26 +681,49 @@ async def cleanup_preflight(request: Request):
         live_instance_count = len(live_ids)
         live_instance_ids = live_ids[:20]
 
-    # WS4 Round-2 ITEM 7 (2026-09-06): defer-lane pending count
-    # surfaces through the resolver's PUBLIC helper
-    # (:func:`daemon.services.defer_block_resolver.defer_pending_count`),
-    # NOT a direct engine reach-through. The preflight reaches into
-    # the resolver for the count; the router no longer imports the
-    # module-private SQL constant. Schema or shape changes to the
-    # defer-pending-count SELECT now have ONE place to update.
+    # WS4 Round-2 ITEM 7 (2026-09-06) → unblock-round ITEM 1 + ITEM 4
+    # (2026-09-06): defer-lane pending count surfaces through the
+    # resolver's PUBLIC INSTANCE METHOD
+    # :meth:`daemon.services.defer_block_resolver.DeferBlockResolver.defer_pending_count`,
+    # NOT a direct engine reach-through. The router consumes the
+    # already-wired singleton (``get_defer_block_resolver()`` from
+    # ``daemon.routers.queues``, the same shape the
+    # ``GET /api/queues/defer-blocked`` endpoint uses) — the
+    # ``manager._defer_block_resolver`` attribute the round-2 read is
+    # NEVER assigned in production (`api.py` wires only the
+    # ``queues.py`` module-global); the canonical wiring is the
+    # singleton, the singleton is the source of truth. The engine
+    # stays behind ``self._job_repo`` inside the resolver — the router
+    # does NOT reach into ``manager._job_repo.engine`` or similar.
+    # Schema or shape changes to the defer-pending-count SELECT now
+    # have ONE place to update (the instance method).
     defer_blocked_count = 0
-    defer_resolver = getattr(manager, "_defer_block_resolver", None)
+    defer_resolver = None
+    # Deferred import to break the circular dependency
+    # ``jobs_management`` → ``daemon.services.defer_block_resolver``
+    # → ``daemon.routers.schemas`` → ``daemon.routers.__init__``
+    # → ``daemon.routers.queues`` (line 32 imports
+    # ``_holder_to_response`` from defer_block_resolver) →
+    # recursion. The helper ``get_defer_block_resolver`` is a
+    # factory: it 503s when the singleton is unwired, which the
+    # preflight catches and treats as ``defer_blocked_count = 0``
+    # (older reads). The lazy import stays because the cycle is
+    # REAL — it goes through the routers package boundary, not the
+    # direct ``daemon.routers`` edge that round-2 incorrectly named.
+    try:
+        from daemon.routers.queues import (
+            get_defer_block_resolver as _get_defer_resolver,
+        )
+        defer_resolver = _get_defer_resolver()
+    except HTTPException:
+        # Unwired (test doubles, partial lifespan); the preflight
+        # degrades to ``defer_blocked_count = 0`` like the
+        # round-2 fallback did.
+        defer_resolver = None
     if defer_resolver is not None:
-        # Deferred import to break the circular dependency
-        # ``daemon.routers.schemas`` ← ``daemon.routers.jobs``
-        # ← ``daemon.routers.jobs_management`` ← ``defer_block_resolver``
-        # at module-load time. The helper is stable and the lookup is
-        # cheap; the lazy import is the canonical fix.
-        from daemon.services.defer_block_resolver import defer_pending_count
-
         try:
             defer_blocked_count = await asyncio.to_thread(
-                defer_pending_count, defer_resolver._job_repo.engine
+                defer_resolver.defer_pending_count
             )
         except Exception as exc:  # noqa: BLE001 — best-effort read
             logger.warning(

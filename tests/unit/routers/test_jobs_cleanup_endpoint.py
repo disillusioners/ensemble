@@ -988,11 +988,16 @@ class TestCleanupPreflightEndpoint:
         ``count_bad_state_tasks`` and ``count_zombie_instances``
         and surfaces both counts in the response.
 
-        WS4 Round-2 ITEM 7 (2026-09-06) — defer-blocked count is
-        NOT wired in this test (``_defer_block_resolver = None``)
-        because we want to pin the repo-driven counts in
-        isolation. The defer-blocked count surface is pinned by
-        :func:`TestCleanupPreflightEndpoint.test_preflight_ws4_live_vs_reap_split_and_defer_count`.
+        Unblock-round ITEM 1 (2026-09-06) — defer-blocked count is
+        NOT wired in this test (the queues.py module singleton stays
+        ``None``); the preflight degrades gracefully to
+        ``defer_blocked_count = 0``. The defer-blocked count surface
+        is pinned by:
+          * :func:`TestCleanupPreflightEndpoint.test_preflight_ws4_live_vs_reap_split_and_defer_count`
+            (this file — wired via ``set_defer_block_resolver``);
+          * integration test in
+            ``tests/integration/test_nuclear_cleanup_bucket5.py``
+            (the real-startup wiring path).
         """
         task_repo = MagicMock()
         task_repo.count_bad_state_tasks = MagicMock(return_value=7)
@@ -1008,7 +1013,9 @@ class TestCleanupPreflightEndpoint:
         manager = MagicMock()
         manager._task_repo = task_repo
         manager._instance_repository = instance_repo
-        manager._defer_block_resolver = None  # no defer-count source wired
+        # No hand-set on ``manager._defer_block_resolver`` — that
+        # attribute is historical and NEVER read by the canonical
+        # wiring path.
         preflight_app.state.manager = manager
 
         with TestClient(preflight_app) as client:
@@ -1036,11 +1043,19 @@ class TestCleanupPreflightEndpoint:
         counted SEPARATELY from bad_state via the canonical resolver
         SQL.
 
-        WS4 Round-2 ITEM 7 (2026-09-06, ``fix/defer-self-witness-and-cleanup``):
-        the defer-lane pending count surfaces through the resolver's
-        PUBLIC ``defer_pending_count`` helper — the preflight reaches
-        into ``manager._defer_block_resolver._job_repo.engine``, NOT
-        ``manager._job_queue_service._repository.engine`` anymore.
+        Unblock-round ITEM 1 + ITEM 4 (2026-09-06,
+        ``fix/defer-self-witness-and-cleanup``): the defer-lane
+        pending count surfaces through the WIRING SIDE-EFFECT — the
+        preflight consumes the ``daemon.routers.queues`` module
+        singleton set via ``set_defer_block_resolver(...)`` (the
+        production-shape wiring that ``daemon/api.py:977-978``
+        lifespan startup uses), then calls the resolver's PUBLIC
+        instance method
+        ``DaemonBlockResolver.defer_pending_count()``. NO direct
+        engine reach-through from the router, NO hand-set on
+        ``manager._defer_block_resolver`` (the previous mask class:
+        round-2 hand-set the attribute, masking the
+        never-assigned-in-production wiring gap).
         """
         task_repo = MagicMock()
         task_repo.count_bad_state_tasks = MagicMock(return_value=0)
@@ -1050,35 +1065,51 @@ class TestCleanupPreflightEndpoint:
         instance_repo.find_non_terminal_instance_ids = MagicMock(
             return_value=["inst-live", "inst-stalled"]
         )
-        job_repo = MagicMock()
+        manager = MagicMock()
+        manager._task_repo = task_repo
+        manager._instance_repository = instance_repo
+        # The preflight NO LONGER reads
+        # ``manager._defer_block_resolver`` — this attribute is
+        # historical and unused by the canonical wiring path.
+        # Leaving it unset is the regression-detector for the
+        # round-2 mask class.
+        preflight_app.state.manager = manager
+
+        # Production-shape wiring: set the singleton via the
+        # queues.py module-global (the same setter ``daemon/api.py``
+        # lifespan calls at startup). The router reaches the
+        # resolver through ``get_defer_block_resolver()``, NEVER
+        # via ``manager._defer_block_resolver``.
+        from daemon.routers.queues import set_defer_block_resolver
+        from daemon.services.defer_block_resolver import DeferBlockResolver
+
         engine = MagicMock()
         conn = MagicMock()
         engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         conn.execute.return_value.scalar_one.return_value = 4
-        job_repo.engine = engine
-        # WS4 Round-2 ITEM 7: defer count source is the resolver's
-        # public surface (DeferBlockResolver._job_repo.engine), NOT
-        # the job_queue_service's repository.
-        defer_resolver = MagicMock()
-        defer_resolver._job_repo = job_repo
+        defer_resolver = DeferBlockResolver(job_repo=MagicMock(engine=engine))
 
-        manager = MagicMock()
-        manager._task_repo = task_repo
-        manager._instance_repository = instance_repo
-        manager._defer_block_resolver = defer_resolver
-        preflight_app.state.manager = manager
+        set_defer_block_resolver(defer_resolver)
+        try:
+            with TestClient(preflight_app) as client:
+                response = client.get("/jobs/cleanup/preflight")
 
-        with TestClient(preflight_app) as client:
-            response = client.get("/jobs/cleanup/preflight")
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["zombie_instance_count"] == 1
-        assert body["live_instance_count"] == 1
-        assert body["live_instance_ids"] == ["inst-live"]
-        assert body["defer_blocked_count"] == 4
-        assert body["bad_state_count"] == 0
+            assert response.status_code == 200
+            body = response.json()
+            assert body["zombie_instance_count"] == 1
+            assert body["live_instance_count"] == 1
+            assert body["live_instance_ids"] == ["inst-live"]
+            assert body["defer_blocked_count"] == 4
+            assert body["bad_state_count"] == 0
+            # Pin that the engine's ``connect()`` was called by the
+            # instance method (NOT by the router directly).
+            engine.connect.assert_called()
+            conn.execute.assert_called()
+        finally:
+            from daemon.routers.queues import _defer_block_resolver
+            import daemon.routers.queues as queues_module
+            queues_module._defer_block_resolver = None
 
     def test_preflight_zombie_count_independent_of_task_repo(
         self, preflight_app
