@@ -1,5 +1,15 @@
 import { signal, computed } from '@angular/core';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
+import {
+  getStatusColor as modelGetStatusColor,
+  Job,
+  JobStatus,
+  MissionSummary,
+  MissionLiveness,
+  missionLivenessChip,
+  buildQueueTree,
+  shouldAutoExpand,
+  missionDisplayTitle,
+} from '../../models/job.model';
 import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-test-helpers';
 
 /**
@@ -25,6 +35,7 @@ class MockJobQueuePanelComponent {
   private readonly _recentJobs = signal<Job[]>([]);
   private readonly _projectNameMap = signal<Map<string | null, string>>(new Map());
   private readonly _liveMissionCount = signal<number>(0);
+  private readonly _missions = signal<MissionSummary[]>([]);
 
   readonly MAX_RECENT = 10;
 
@@ -32,13 +43,27 @@ class MockJobQueuePanelComponent {
   recentJobs = this._recentJobs.asReadonly();
   projectNameMap = this._projectNameMap.asReadonly();
   liveMissionCount = this._liveMissionCount.asReadonly();
+  missions = this._missions.asReadonly();
 
   /** Mock output — mirrors the real component's `output<Job>()`. */
   readonly jobClick = { emit: jest.fn() };
 
+  /** Tree derivation — mirrors the real component's ``tree`` computed. */
+  readonly tree = computed(() =>
+    buildQueueTree(this._runningJobs(), this._recentJobs(), this._missions())
+  );
+
+  /** Auto-expand decision — mirrors the real component. */
+  readonly shouldAutoExpandLive = computed(() =>
+    shouldAutoExpand(this.tree().liveMissions)
+  );
+
   recentCapped = computed(() => this._recentJobs().slice(0, this.MAX_RECENT));
   isEmpty = computed(
-    () => this._runningJobs().length === 0 && this.recentCapped().length === 0,
+    () =>
+      this._runningJobs().length === 0 &&
+      this.recentCapped().length === 0 &&
+      this._liveMissionCount() === 0,
   );
   runningCount = computed(() => this._runningJobs().length);
 
@@ -53,6 +78,10 @@ class MockJobQueuePanelComponent {
 
   setLiveMissionCount(n: number): void {
     this._liveMissionCount.set(n);
+  }
+
+  setMissions(m: MissionSummary[]): void {
+    this._missions.set(m);
   }
 
   /**
@@ -100,6 +129,13 @@ class MockJobQueuePanelComponent {
     if (diffHour < 24) return `${diffHour}h ago`;
     if (diffDay < 7) return `${diffDay}d ago`;
     return date.toLocaleDateString();
+  }
+
+  /**
+   * Mission title — mirrors the real component's ``missionTitle`` helper.
+   */
+  missionTitle(m: MissionSummary): string {
+    return missionDisplayTitle(m, (d) => this.timeAgo(d));
   }
 
   getStatusIcon(status: JobStatus): string {
@@ -536,6 +572,185 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(component.missionChip(createMockJob({ job_type: 'task', mission_liveness: null }))).toBeNull();
       expect(component.missionChip(createMockJob({ job_type: 'message', mission_liveness: null }))).toBeNull();
       expect(component.missionChip(createMockJob())).toBeNull();
+    });
+  });
+
+  // ── Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``) ─
+
+  describe('missionTitle', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('prefers server-authoritative title', () => {
+      expect(component.missionTitle(mkMission({ title: 'Refactor auth' }))).toBe('Refactor auth');
+    });
+
+    it('falls back to "agent · timeAgo" when no title', () => {
+      const t = component.missionTitle(mkMission());
+      expect(t).toMatch(/leader · /);
+    });
+  });
+
+  describe('tree derivation — liveMissions / queued / recent / recentFlat', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('groups active jobs under their live mission', () => {
+      component.setRunningJobs([
+        createMockJob({ job_id: 'a', mission_id: 'm-1', status: 'processing' }),
+        createMockJob({ job_id: 'b', mission_id: 'm-1', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-1', liveness: 'processing' })]);
+      const t = component.tree();
+      expect(t.liveMissions).toHaveLength(1);
+      expect(t.liveMissions[0].jobs.map((j) => j.job_id).sort()).toEqual(['a', 'b']);
+      expect(t.queued).toEqual([]);
+    });
+
+    it('routes unattached non-terminal jobs to queued (NEVER hide)', () => {
+      component.setRunningJobs([
+        createMockJob({ job_id: 'attached', mission_id: 'm-1', status: 'processing' }),
+        createMockJob({ job_id: 'orphan', mission_id: null, status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-1' })]);
+      const t = component.tree();
+      expect(t.liveMissions[0].jobs).toHaveLength(1);
+      expect(t.queued).toHaveLength(1);
+      expect(t.queued[0].job_id).toBe('orphan');
+    });
+
+    it('routes terminal jobs to recentFlat when no mission matches', () => {
+      component.setRecentJobs([
+        createMockJob({ job_id: 'matched', mission_id: 'm-done', status: 'completed' }),
+        createMockJob({ job_id: 'loose', mission_id: null, status: 'failed' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-done', liveness: 'completed' })]);
+      const t = component.tree();
+      expect(t.recent).toHaveLength(1);
+      expect(t.recent[0].jobs[0].job_id).toBe('matched');
+      expect(t.recentFlat.map((j) => j.job_id)).toEqual(['loose']);
+    });
+
+    it('NEVER hides a job — every input row ends up in exactly one bucket', () => {
+      component.setRunningJobs([
+        createMockJob({ job_id: 'live-matched', mission_id: 'm-live', status: 'processing' }),
+        createMockJob({ job_id: 'live-unattached', mission_id: null, status: 'processing' }),
+      ]);
+      component.setRecentJobs([
+        createMockJob({ job_id: 'recent-matched', mission_id: 'm-done', status: 'completed' }),
+        createMockJob({ job_id: 'recent-unattached', mission_id: null, status: 'failed' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'm-live', liveness: 'processing' }),
+        mkMission({ mission_id: 'm-done', liveness: 'completed' }),
+      ]);
+      const t = component.tree();
+      const all = [
+        ...t.liveMissions.flatMap((n) => n.jobs),
+        ...t.queued,
+        ...t.recent.flatMap((n) => n.jobs),
+        ...t.recentFlat,
+      ].map((j) => j.job_id).sort();
+      expect(all).toEqual(['live-matched', 'live-unattached', 'recent-matched', 'recent-unattached']);
+    });
+
+    it('handles empty missions input without throwing — falls back to legacy flat layout', () => {
+      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setRecentJobs([createMockJob({ status: 'completed' })]);
+      // missions = [] (default), tree still produces queued + recentFlat
+      const t = component.tree();
+      expect(t.liveMissions).toEqual([]);
+      expect(t.queued).toHaveLength(1);
+      expect(t.recent).toEqual([]);
+      expect(t.recentFlat).toHaveLength(1);
+    });
+  });
+
+  describe('shouldAutoExpandLive', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: null,
+        last_activity_at: null,
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('returns true iff exactly one live mission exists', () => {
+      component.setMissions([mkMission({ mission_id: 'm-1' })]);
+      expect(component.shouldAutoExpandLive()).toBe(true);
+    });
+
+    it('returns false for zero or 2+ live missions', () => {
+      component.setMissions([]);
+      expect(component.shouldAutoExpandLive()).toBe(false);
+      component.setMissions([
+        mkMission({ mission_id: 'm-1' }),
+        mkMission({ mission_id: 'm-2' }),
+      ]);
+      expect(component.shouldAutoExpandLive()).toBe(false);
+    });
+  });
+
+  describe('missions input drives panel rendering', () => {
+    it('default empty missions yields no liveMissions tree', () => {
+      expect(component.missions()).toEqual([]);
+      expect(component.tree().liveMissions).toEqual([]);
+    });
+
+    it('setMissions replaces the live list verbatim', () => {
+      component.setMissions([
+        {
+          mission_id: 'm-1',
+          agent_id: 'leader',
+          parent_mission_id: null,
+          liveness: 'processing',
+          terminal_reason: null,
+          epoch: 1,
+          linked_jobs: [],
+          started_at: null,
+          last_activity_at: null,
+          title: null,
+          initiative_preview: null,
+        },
+      ]);
+      expect(component.missions().length).toBe(1);
     });
   });
 });

@@ -19,15 +19,18 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
+import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
+import { MissionListResponse, MissionSummary } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, DeferBlockAction, deferBlockIndicator, deferBlockAction } from '../../models/defer-blocked.model';
 import { forkJoin, catchError, of } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
 /**
- * Header status indicator that surfaces the live job queue as
- * ``X/Y`` (running / total non-terminal) and exposes a Material
- * dropdown with the full ``JobQueuePanelComponent`` embedded.
+ * Header status indicator that surfaces the live job queue as a
+ * SEGMENTED status pill: jobs (running/non-terminal) on the left,
+ * live missions (count + pulse dot) on the right, defer-gate warning
+ * ⚠ adjacent (unchanged). The whole pill is ONE click target that
+ * opens the mat-menu — affordances are NOT split.
  *
  * The button is ``mat-button`` (not icon-button) so the count can
  * render as plain monospace text in the header bar. Clicking opens
@@ -35,18 +38,29 @@ import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.compo
  * to the underlying instance via ``onJobClick``.
  *
  * Data sources (all on ONE 8s tick — no separate pollers):
- *   - ``JobService.listActiveJobs()``        — running + pending jobs
- *   - ``JobService.listRecentJobs(10)``      — terminal jobs for the
+ *   - ``JobService.listActiveJobs()``             — running + pending jobs
+ *   - ``JobService.listRecentJobs(10)``           — terminal jobs for the
  *     ``Recent`` section of the embedded panel
- *   - ``JobService.listLiveMissionCount()``  — authoritative
- *     ``GET /api/missions`` live count (the badge's N)
- *   - ``JobService.listDeferBlocked()``      — defer-gate warning
+ *   - ``JobService.listMissions({ limit: 20 })``  — missions list (BE
+ *     orders by last_activity desc; the badge derives the count + the
+ *     liveness breakdown for the tooltip from this list)
+ *   - ``JobService.listDeferBlocked()``           — defer-gate warning
  *     payload for the severity icon beside the badge
+ *
+ * The former ``JobService.listLiveMissionCount(limit=1)`` round-trip
+ * is REPLACED — the segmented pill needs the per-liveness breakdown
+ * for its tooltip, so a single ``listMissions({ limit: 20 })`` call
+ * serves both the count and the breakdown.
  *
  * All four fire together via ``forkJoin`` on the same 8s tick so the
  * snapshot stays internally consistent. The two additive participants
- * isolate their own errors (degrade to ``null``) so a rollout-skew
- * 404 on ``/api/queues/defer-blocked`` can never kill the jobs intake.
+ * (missions + deferBlocked) carry their own ``catchError`` so a
+ * failure (404/503 during BE rollout skew, 500, network) degrades
+ * THAT participant to ``null`` without failing the whole ``forkJoin``
+ * — the jobs intake keeps flowing. ``null`` missions ⇒ the last known
+ * data is RETAINED (never a bare 0/0). ``null`` deferBlocked ⇒ the
+ * warning icon hides.
+ *
  * Project names are resolved once on init via
  * ``ProjectService.listProjects()`` and cached in ``projectNameMap``
  * for the lifetime of the component.
@@ -143,14 +157,18 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   // ── Mission awareness — sourced from the authoritative projection ───
 
   /**
-   * Live-mission count as reported by ``GET /api/missions``
-   * (``liveness=processing,pending,paused``) — the authoritative
-   * missions projection. ``null`` = count unavailable (degraded count
-   * leg or fetch failure) and is deliberately NOT rendered as 0: the
-   * last known count is RETAINED so a transient missions failure can
-   * never flip a working system's badge back to a false "bare 0/0".
+   * Last successful missions-list response payload — ``null`` when no
+   * fetch has landed yet OR the latest poll's missions leg degraded
+   * (the badge then retains the previous good payload so the count
+   * never flips back to a false bare 0/0).
+   *
+   * REPLACES the former ``missionCountRaw: number | null`` — the
+   * segmented pill needs the per-liveness breakdown (processing /
+   * pending / paused counts) for the tooltip, so we keep the FULL
+   * ``MissionSummary[]`` plus the envelope ``total`` here. The
+   * former single-number signal did not carry enough detail.
    */
-  private readonly missionCountRaw = signal<number | null>(null);
+  private readonly missionsPayload = signal<MissionListResponse | null>(null);
 
   /**
    * Distinct live missions, from the missions projection this
@@ -163,11 +181,48 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * mission was visibly working. ``/api/missions`` is correct and
    * authoritative — one mission per instance, liveness-filtered
    * server-side.
+   *
+   * Count leg degraded: when ``total`` is ``null`` on the latest
+   * payload (BE degradation contract — §8.2 honesty: "count
+   * unavailable" must NOT read as 0), fall back to
+   * ``missions.length`` as a defensive filter-aware count.
    */
-  readonly liveMissionCount = computed(() => this.missionCountRaw() ?? 0);
+  readonly liveMissionCount = computed(() => {
+    const p = this.missionsPayload();
+    if (!p) return 0;
+    return p.total ?? p.missions.length;
+  });
 
   /** True when the missions projection reports at least one live mission. */
   readonly hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+
+  /**
+   * Raw missions list (latest good payload) — feeds the panel via
+   * ``getMissions()`` / signals so the panel can group jobs by
+   * mission_id without a second round-trip. Retained across a
+   * degraded poll so the panel never flashes empty.
+   */
+  readonly missionsList = computed<MissionSummary[]>(() => {
+    return this.missionsPayload()?.missions ?? [];
+  });
+
+  /**
+   * Per-liveness breakdown of the current missions list — drives
+   * the segmented pill's tooltip ``Live missions: N (processing a,
+   * pending b, paused c)`` line.
+   */
+  readonly liveMissionBreakdown = computed(() => {
+    const list = this.missionsList();
+    let processing = 0;
+    let pending = 0;
+    let paused = 0;
+    for (const m of list) {
+      if (m.liveness === 'processing') processing += 1;
+      else if (m.liveness === 'pending') pending += 1;
+      else if (m.liveness === 'paused') paused += 1;
+    }
+    return { processing, pending, paused } as Record<MissionLiveness, number>;
+  });
 
   /**
    * Defer-gate warning affordance, derived via the pure
@@ -213,33 +268,71 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * The badge shows system activity even when the intake queue is
-   * empty: jobs present → the classic ``X/Y``; queue empty but live
-   * missions exist → ``missions: N`` so a working leader never reads
-   * as a bare "0/0 = system idle"; both empty → ``0/0`` idle.
+   * Pill STATE — drives which template branch renders (segmented /
+   * missions-only / idle). Three discrete branches keep the styling
+   * clean and the spec straightforward; the underlying numbers flow
+   * through ``runningCount`` / ``pendingCount`` / ``liveMissionCount``
+   * computeds.
+   *
+   *   * ``'segmented'`` — jobs present AND live missions present.
+   *     Left segment = running/non-terminal count, right = mission
+   *     count + pulse dot. Both numbers stay explained.
+   *   * ``'missions-only'`` — queue idle (no non-terminal jobs) BUT
+   *     live missions exist. Pill shows the right segment only
+   *     (pulse + count) — a working leader never reads as system idle.
+   *   * ``'idle'`` — both empty. Muted grey.
    */
-  readonly displayText = computed(() => {
-    if (this.totalNonTerminal() === 0 && this.hasLiveMissions()) {
-      return `missions: ${this.liveMissionCount()}`;
+  readonly pillState = computed<'segmented' | 'missions-only' | 'idle'>(() => {
+    if (this.totalNonTerminal() > 0) {
+      return this.hasLiveMissions() ? 'segmented' : 'segmented';
     }
-    return `${this.runningCount()}/${this.totalNonTerminal()}`;
+    if (this.hasLiveMissions()) return 'missions-only';
+    return 'idle';
   });
 
   /**
-   * Tooltip text shown on hover — exposes the raw counts so the
-   * user can distinguish "all running" from "all pending" without
-   * opening the dropdown. Format: ``Running: X / Pending: Y``, plus
-   * a live-missions line whenever the missions projection reports
-   * live work. Both numbers are always explained: jobs
-   * (Running/Pending) and missions (Live missions).
+   * Jobs segment text — left side of the segmented pill. Format is
+   * ``X/Y`` where X = running, Y = total non-terminal (running +
+   * pending). Matches the legacy ``displayText`` when jobs are
+   * present.
+   */
+  readonly jobsSegmentText = computed(
+    () => `${this.runningCount()}/${this.totalNonTerminal()}`
+  );
+
+  /**
+   * Missions segment text — right side of the segmented pill. Just
+   * the integer N (no ``missions: `` prefix anymore — the pill's
+   * segmented layout already conveys "this is the missions count").
+   */
+  readonly missionsSegmentText = computed(
+    () => `${this.liveMissionCount()}`
+  );
+
+  /**
+   * Tooltip text shown on hover — multi-line breakdown per the brief:
+   * ``Running X · Queued Y · Live missions: N (processing a,
+   * pending b, paused c) · refreshed Ns ago``. Always present, even
+   * when idle, so the user can distinguish a real idle from a
+   * transient refresh gap.
    */
   readonly tooltipText = computed(() => {
-    const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
-    if (!this.hasLiveMissions()) {
-      return base;
-    }
-    return `${base} · Live missions: ${this.liveMissionCount()} (from missions projection)`;
+    const breakdown = this.liveMissionBreakdown();
+    return [
+      `Running ${this.runningCount()} · Queued ${this.pendingCount()}`,
+      `Live missions: ${this.liveMissionCount()} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`,
+      `refreshed ${this.refreshAgeSeconds()}s ago`,
+    ].join('\n');
   });
+
+  /** Seconds since the last successful poll — drives ``refreshed Ns ago``. */
+  readonly refreshAgeSeconds = computed(() => {
+    if (!this.lastFetchAt()) return 0;
+    return Math.max(0, Math.floor((Date.now() - this.lastFetchAt()!) / 1000));
+  });
+
+  /** Wall-clock time of the last successful forkJoin — used by ``refreshAgeSeconds``. */
+  private readonly lastFetchAt = signal<number | null>(null);
 
   /** Running-only subset — passed to the embedded panel. */
   readonly runningJobs = computed(() =>
@@ -288,8 +381,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * name understated it):
    *
    * - jobs intake — active + recent (``X/Y`` + the Recent section);
-   * - ``missions`` — authoritative live-mission count
-   *   (``GET /api/missions?liveness=processing,pending,paused``);
+   * - ``missions`` — authoritative missions projection
+   *   (``GET /api/missions?limit=20`` — REPLACES the former
+   *   ``listLiveMissionCount(limit=1)`` call; the segmented pill's
+   *   tooltip needs the per-liveness breakdown, which means we have
+   *   to fetch the actual rows, not just a count);
    * - ``deferBlocked`` — defer-gate warning payload
    *   (``GET /api/queues/defer-blocked``).
    *
@@ -297,8 +393,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * failure (404/503 during BE rollout skew, 500, network) degrades
    * THAT participant to ``null`` without failing the whole
    * ``forkJoin`` — the jobs intake keeps flowing. ``null`` missions ⇒
-   * the last known count is retained (never falsely idle); ``null``
-   * deferBlocked ⇒ the warning icon hides.
+   * the last known payload is retained (never falsely idle);
+   * ``null`` deferBlocked ⇒ the warning icon hides.
    *
    * The raw recent payload is stored in ``allRecentJobs`` and a
    * derived ``recentJobs`` computed filters/sorts/slices it for
@@ -314,7 +410,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       active: this.jobService.listActiveJobs(),
       recent: this.jobService.listRecentJobs(10),
       missions: this.jobService
-        .listLiveMissionCount()
+        .listMissions({ limit: 20 })
         .pipe(catchError(() => of(null))),
       deferBlocked: this.jobService
         .listDeferBlocked()
@@ -338,22 +434,23 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * with mocked service payloads.
    *
    * - jobs (active + recent) are stored verbatim;
-   * - ``missions === null`` (degraded count leg / fetch failure)
-   *   RETAINS the previous count — "count unavailable" must not read
-   *   as 0, so the badge never falsely reports an idle system;
+   * - ``missions === null`` (degraded list / fetch failure) RETAINS
+   *   the previous payload — "data unavailable" must not collapse to
+   *   a bare 0/0, so the badge never falsely reports an idle system.
    * - ``deferBlocked === null`` hides the warning affordance.
    */
   private applyFetchResults(
     active: Job[],
     recent: Job[],
-    missions: number | null,
+    missions: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     this.activeJobs.set(active);
     this.allRecentJobs.set(recent);
     if (missions !== null) {
-      this.missionCountRaw.set(missions);
+      this.missionsPayload.set(missions);
     }
+    this.lastFetchAt.set(Date.now());
     this.deferBlockedPayload.set(deferBlocked);
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)

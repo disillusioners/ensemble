@@ -89,6 +89,15 @@ export interface Job {
   // row / degraded lookup / no linked instance — by design; render
   // nothing extra rather than inventing a state.
   mission_liveness?: MissionLiveness | null;
+  // Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``):
+  // BE ships ``mission_id`` (== the instance the job is grouped under;
+  // equals ``instance_id`` for mirror rows and the task row's own
+  // instance for task rows) and ``mission_ref`` (the cross-reference
+  // payload the BE added in M2) on EVERY job payload — FE consumes
+  // them verbatim and uses ``mission_id`` as the grouping key for
+  // the new tree panel. Both optional for backward compatibility.
+  mission_id?: string | null;
+  mission_ref?: { mission_id: string; agent_id: string; liveness: string } | null;
 }
 
 export interface JobCreate {
@@ -390,4 +399,256 @@ export interface DLQReplayResponse {
 export interface DLQListResponse {
   items: DeadLetterItem[];
   total: number;
+}
+
+// ── Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``) ───
+
+/**
+ * Full mission row consumed by the new tree panel — mirrors the BE
+ * ``MissionResponse`` wire shape exactly (see ``daemon/routers/schemas.py``
+ * class ``MissionResponse``, see also ``MissionSummary`` in
+ * ``models/mission.model.ts`` which is the badge's minimal subset).
+ *
+ * All fields nullable to mirror the BE degraded-lookup contract (§8.2:
+ * 200 with None-fields, never 500). The FE never invents a value for
+ * a null field — the tree builder routes null-bearing missions into the
+ * fallback path ("NEVER hide a job").
+ */
+export interface MissionSummary {
+  mission_id: string | null;
+  agent_id: string | null;
+  parent_mission_id: string | null;
+  liveness: MissionLiveness | null;
+  terminal_reason: string | null;
+  epoch: number | null;
+  linked_jobs: string[];
+  started_at: string | null;
+  last_activity_at: string | null;
+  title: string | null;
+  initiative_preview: string | null;
+}
+
+/**
+ * Display title for a mission node — honest fallback chain:
+ *
+ *   1. ``title`` (server-authoritative ``instance_metadata['title']``).
+ *   2. ``${agent_id} · ${timeAgo(last_activity_at)}`` (mirrors the
+ *      existing ``resolveTitle`` fallback philosophy — agent_id is
+ *      the human-meaningful label and timeAgo tells the operator when
+ *      the mission last did anything).
+ *
+ * Empty / null guards: a null ``agent_id`` AND null ``last_activity_at``
+ * returns an empty string so the caller can decide whether to render
+ * the placeholder; a non-null ``agent_id`` ALWAYS wins even with a null
+ * timestamp (the agent_id alone is more useful than "unknown time").
+ *
+ * ``timeAgoFn`` is an OPTIONAL injection point — defaults to an
+ * internal ISO-string formatter so the helper is usable end-to-end
+ * without depending on any component class. The component's own
+ * ``timeAgo`` (with "just now" / "Xm ago" / "Xh ago" wording) is the
+ * production wiring; passing ``undefined`` lets tests pin deterministic
+ * output.
+ *
+ * Pure helper, no Angular deps — exercised by ``job.model.spec.ts``.
+ */
+export function missionDisplayTitle(
+  m: MissionSummary,
+  timeAgoFn?: (d: string | null | undefined) => string
+): string {
+  if (m.title) return m.title;
+  const agent = m.agent_id ?? '';
+  const formatter = timeAgoFn ?? defaultMissionTimeAgo;
+  const ts = formatter(m.last_activity_at);
+  if (agent && ts) return `${agent} · ${ts}`;
+  if (agent) return agent;
+  if (ts) return ts;
+  return '';
+}
+
+/** Default ISO-string formatter used when no custom ``timeAgoFn`` is passed. */
+function defaultMissionTimeAgo(dateString: string | null | undefined): string {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return '';
+  const diffMs = Date.now() - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}h ago`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString();
+}
+
+/** A mission node in the tree — its mission row plus the jobs attached. */
+export interface MissionNode {
+  mission: MissionSummary;
+  jobs: Job[];
+}
+
+/** Output of ``buildQueueTree`` — three buckets the panel renders. */
+export interface QueueTree {
+  /** Live missions (processing/pending/paused) with their attached jobs. */
+  liveMissions: MissionNode[];
+  /** Non-terminal jobs whose mission is NOT in the listed missions set. */
+  queued: Job[];
+  /** Terminal mission nodes + terminal jobs that map to no listed mission. */
+  recent: MissionNode[];
+  recentFlat: Job[];
+}
+
+/** Defensive cap for the Recent section — matches the legacy ``MAX_RECENT_JOBS``. */
+export const MAX_RECENT_JOBS = 10;
+
+/**
+ * Pure tree builder for the job-queue panel.
+ *
+ * Inputs:
+ * - ``activeJobs`` — non-terminal jobs (running/pending/paused), typically
+ *   the indicator's ``runningJobs`` + queued-list output.
+ * - ``recentJobs`` — terminal jobs (completed/settled/failed/cancelled/
+ *   dead_letter), typically the indicator's ``recentJobs`` output.
+ * - ``missions`` — the missions list from ``GET /api/missions`` (BE
+ *   orders by ``last_activity_at DESC NULLS LAST`` with mission_id
+ *   tiebreak — §8.4). The grouping key is
+ *   ``job.mission_id === mission.mission_id`` (the BE's
+ *   ``linked_jobs`` is the reverse index; we use mission_id matching
+ *   against the job lists so the FE never has to look up an instance
+ *   just to group a row).
+ *
+ * Rules:
+ * - Live missions = liveness in {processing, pending, paused}, sorted
+ *   ``last_activity_at`` desc (nulls last), then ``mission_id`` asc
+ *   tiebreak (deterministic).
+ * - Task jobs whose mission isn't in the missions list STILL render —
+ *   they fall into ``queued`` (non-terminal, unattached) so the panel
+ *   never silently hides a row.
+ * - ``queued`` = non-terminal jobs with no mission linkage (mission_id
+ *   null AND not represented by any listed mission node).
+ * - ``recent`` = terminal mission nodes (liveness in completed/failed/
+ *   cancelled) with their attached terminal jobs.
+ * - ``recentFlat`` = terminal jobs that map to no listed mission —
+ *   render as today's flat rows. Cap total Recent rows (mission
+ *   children + flat) at ``MAX_RECENT_JOBS`` so the panel stays bounded.
+ * - NEVER hide a job: every input job ends up in exactly one output
+ *   bucket. Unattached → fallback (queued for non-terminal, recentFlat
+ *   for terminal).
+ *
+ * Pure, no Angular deps, plain TS — exercised by ``job.model.spec.ts``.
+ */
+export function buildQueueTree(
+  activeJobs: ReadonlyArray<Job>,
+  recentJobs: ReadonlyArray<Job>,
+  missions: ReadonlyArray<MissionSummary>
+): QueueTree {
+  // 1) Filter missions into live vs terminal buckets, sorted deterministically.
+  const liveMissionsList = missions
+    .filter((m) => m.liveness === 'processing' || m.liveness === 'pending' || m.liveness === 'paused')
+    .slice()
+    .sort((a, b) => {
+      const at = a.last_activity_at ?? '';
+      const bt = b.last_activity_at ?? '';
+      if (at !== bt) return bt.localeCompare(at); // desc, nulls last (empty < non-empty in string order)
+      const aid = a.mission_id ?? '';
+      const bid = b.mission_id ?? '';
+      return aid.localeCompare(bid);
+    });
+  const terminalMissionsList = missions
+    .filter((m) => m.liveness === 'completed' || m.liveness === 'failed' || m.liveness === 'cancelled')
+    .slice()
+    .sort((a, b) => {
+      const at = a.last_activity_at ?? '';
+      const bt = b.last_activity_at ?? '';
+      if (at !== bt) return bt.localeCompare(at);
+      const aid = a.mission_id ?? '';
+      const bid = b.mission_id ?? '';
+      return aid.localeCompare(bid);
+    });
+
+  // 2) Index missions by id for O(1) attachment lookups.
+  const liveById = new Map<string, MissionSummary>();
+  for (const m of liveMissionsList) {
+    if (m.mission_id) liveById.set(m.mission_id, m);
+  }
+  const terminalById = new Map<string, MissionSummary>();
+  for (const m of terminalMissionsList) {
+    if (m.mission_id) terminalById.set(m.mission_id, m);
+  }
+
+  // 3) Attach jobs to their live mission OR queue as unattached.
+  const liveNodes = new Map<string, MissionNode>();
+  for (const m of liveMissionsList) {
+    if (m.mission_id) liveNodes.set(m.mission_id, { mission: m, jobs: [] });
+  }
+  const queued: Job[] = [];
+  for (const job of activeJobs) {
+    const mid = job.mission_id ?? null;
+    const node = mid ? liveNodes.get(mid) : undefined;
+    if (node) {
+      node.jobs.push(job);
+    } else {
+      // Unattached non-terminal job (no mission_id OR mission_id not
+      // represented in the missions list) → queued bucket. NEVER hide.
+      queued.push(job);
+    }
+  }
+
+  // 4) Attach terminal jobs to terminal mission nodes OR fall back to flat.
+  const terminalNodes = new Map<string, MissionNode>();
+  for (const m of terminalMissionsList) {
+    if (m.mission_id) terminalNodes.set(m.mission_id, { mission: m, jobs: [] });
+  }
+  const recentFlat: Job[] = [];
+  for (const job of recentJobs) {
+    const mid = job.mission_id ?? null;
+    const node = mid ? terminalNodes.get(mid) : undefined;
+    if (node) {
+      node.jobs.push(job);
+    } else {
+      recentFlat.push(job);
+    }
+  }
+
+  // 5) Cap Recent: mission nodes (each counts as 1 row + its child jobs)
+  //    PLUS recentFlat rows = MAX_RECENT_JOBS total rows.
+  const liveMissionRows = liveMissionsList.map((m) => ({ mission: m, jobs: [] as Job[] }));
+  const finalRecentNodes: MissionNode[] = [];
+  const finalRecentFlat: Job[] = [];
+  let rowCount = 0;
+  for (const node of terminalNodes.values()) {
+    if (rowCount >= MAX_RECENT_JOBS) break;
+    // Each mission node reserves 1 row (the header) + its child jobs as rows.
+    const children = node.jobs;
+    if (rowCount + 1 + children.length > MAX_RECENT_JOBS) {
+      // If we can't fit the whole node, drop it entirely (the strict
+      // MAX cap mirrors the legacy "cap at 10 rows" — better to drop
+      // a node than to render a partial node).
+      continue;
+    }
+    finalRecentNodes.push(node);
+    rowCount += 1 + children.length;
+  }
+  for (const job of recentFlat) {
+    if (rowCount >= MAX_RECENT_JOBS) break;
+    finalRecentFlat.push(job);
+    rowCount += 1;
+  }
+
+  return {
+    liveMissions: Array.from(liveNodes.values()),
+    queued,
+    recent: finalRecentNodes,
+    recentFlat: finalRecentFlat,
+  };
+}
+
+/**
+ * Auto-expand decision for the LIVE MISSIONS section: true iff exactly
+ * ONE live mission is present (single-live focus). Zero missions → no
+ * expand; 2+ → leave all collapsed so the user picks. Pure, no Angular deps.
+ */
+export function shouldAutoExpand(liveMissions: ReadonlyArray<MissionNode>): boolean {
+  return liveMissions.length === 1;
 }

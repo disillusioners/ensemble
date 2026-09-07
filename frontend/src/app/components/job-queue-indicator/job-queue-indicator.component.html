@@ -2,14 +2,33 @@
   <button
     mat-button
     class="queue-button"
-    [class.idle]="isIdle() && !hasLiveMissions()"
-    [class.missions-live]="isIdle() && hasLiveMissions()"
+    [class.idle]="pillState() === 'idle'"
+    [class.missions-live]="pillState() === 'missions-only'"
+    [class.segmented]="pillState() === 'segmented'"
     [matMenuTriggerFor]="jobQueueMenu"
     [matTooltip]="tooltipText()"
     aria-label="View job queue">
-    <span class="queue-count">{{ displayText() }}</span>
-    @if (isIdle() && hasLiveMissions()) {
-      <span class="mission-pulse-dot" aria-hidden="true"></span>
+    @switch (pillState()) {
+      @case ('segmented') {
+        <span class="segment-jobs" aria-label="Running and queued jobs">
+          <mat-icon class="segment-jobs-icon" aria-hidden="true">hourglass_top</mat-icon>
+          <span class="segment-jobs-count">{{ jobsSegmentText() }}</span>
+        </span>
+        <span class="segment-divider" aria-hidden="true">│</span>
+        <span class="segment-missions" aria-label="Live missions">
+          <span class="mission-pulse-dot" aria-hidden="true"></span>
+          <span class="segment-missions-count">{{ missionsSegmentText() }}</span>
+        </span>
+      }
+      @case ('missions-only') {
+        <span class="segment-missions" aria-label="Live missions">
+          <span class="mission-pulse-dot" aria-hidden="true"></span>
+          <span class="segment-missions-count">{{ missionsSegmentText() }}</span>
+        </span>
+      }
+      @default {
+        <span class="queue-count" aria-label="No jobs">idle</span>
+      }
     }
   </button>
 
@@ -74,6 +93,7 @@
         [recentJobs]="recentJobs()"
         [projectNameMap]="projectNameMap()"
         [liveMissionCount]="liveMissionCount()"
+        [missions]="missionsList()"
         (jobClick)="onJobClick($event)">
       </app-job-queue-panel>
     </ng-template>

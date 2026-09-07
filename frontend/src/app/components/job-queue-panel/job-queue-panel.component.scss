@@ -1,11 +1,12 @@
 // Job Queue Panel — presentational dropdown content.
 // Matches the notification-bell dropdown styling: dark slate panel,
-// 440px max width, monospace badges, status-coloured left border, and
-// a slim scrollable list capped at 400px tall.
+// 560px max width per the mission-tree brief (2026-09-07, feature/
+// job-queue-mission-tree), monospace badges, status-coloured left
+// border, and a slim scrollable list capped at 600px tall (was 400).
 
 .job-queue-panel {
-  width: min(440px, calc(100vw - 32px));
-  max-height: min(520px, calc(100vh - 32px));
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(600px, calc(100vh - 32px));
   display: flex;
   flex-direction: column;
   background-color: #1e293b;  /* dark slate, fully opaque */
@@ -34,6 +35,30 @@
     white-space: nowrap;
   }
 
+  .header-stats {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+  }
+
+  .header-stat {
+    color: #3b82f6;
+    background: rgba(59, 130, 246, 0.12);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: monospace;
+  }
+
+  .header-stat-divider {
+    color: #475569;
+    user-select: none;
+  }
+
+  /* Legacy header count badge — kept for the spec mirror's
+     expectations; superseded by ``.header-stats`` above. */
   .header-count {
     font-size: 11px;
     font-weight: 500;
@@ -48,7 +73,7 @@
 .panel-list {
   flex: 1 1 auto;
   min-height: 0;
-  max-height: 400px;
+  max-height: 540px;
   overflow-y: auto;
 
   &::-webkit-scrollbar {
@@ -114,12 +139,117 @@
   }
 }
 
+// ── Tree (mission nodes + child jobs) ────────────────────────────────────
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-node {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-job-row {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mission-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 12px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-left: 3px solid transparent;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  &:focus-visible {
+    outline: none;
+    background: rgba(255, 255, 255, 0.06);
+    border-left-color: #3b82f6;
+  }
+
+  &.mission-recent {
+    border-left-color: #475569;
+  }
+
+  .mission-chevron {
+    flex-shrink: 0;
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: #94a3b8;
+  }
+
+  .mission-liveness-badge {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: lowercase;
+    letter-spacing: 0.3px;
+
+    .mission-liveness-icon {
+      font-size: 12px;
+      width: 12px;
+      height: 12px;
+    }
+  }
+
+  .mission-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .mission-title {
+    font-weight: 500;
+    font-size: 13px;
+    color: #f1f5f9;
+    line-height: 1.3;
+    /* 2-line clamp per the brief. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mission-meta {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 3px;
+  }
+}
+
+.job-children {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 4px 36px; /* indent child rows under the chevron */
+  background: rgba(15, 23, 42, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
 .job-row {
   position: relative;
   display: flex;
   align-items: flex-start;
-  padding: 14px 18px;
-  gap: 12px;
+  padding: 10px 18px 10px 14px;
+  gap: 10px;
   cursor: pointer;
   transition: background 0.15s ease;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -157,6 +287,12 @@
 
   &.status-dead_letter {
     border-left-color: #7c3aed;
+  }
+
+  &.queued-row {
+    /* Same left-border palette as the LIVE MISSIONS child rows so
+       the queued rows don't read as a different surface. */
+    border-left-color: #475569;
   }
 
   .job-spinner {
@@ -236,7 +372,7 @@
       }
 
       // Mission-liveness chips on receipt rows are rendered via
-// ``app-mission-liveness-chip``; the panel just hosts the element.
+      // ``app-mission-liveness-chip``; the panel just hosts the element.
       // No local chip styles are needed here.
 
       .time-text {

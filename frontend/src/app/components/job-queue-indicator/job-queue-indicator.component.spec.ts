@@ -1,5 +1,6 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
+import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
+import { MissionListResponse, MissionSummary } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
 import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
@@ -36,15 +37,21 @@ class MockJobQueueIndicatorComponent {
   private readonly allRecentJobs = signal<Job[]>([]);
 
   /**
-   * Raw live-mission count from the authoritative missions projection —
-   * mirrors the private ``missionCountRaw`` signal. ``null`` = count
-   * unavailable (degraded leg / fetch failure); the last known count is
-   * RETAINED so the badge never falsely reads idle.
+   * Raw missions-list payload — mirrors the private ``missionsPayload``
+   * signal. ``null`` = count unavailable (degraded leg / fetch failure);
+   * the last known payload is RETAINED so the badge never falsely reads idle.
+   *
+   * REPLACES the former ``missionCountRaw: number | null`` signal — the
+   * segmented pill needs the per-liveness breakdown so we carry the full
+   * page here, not just a count.
    */
-  private readonly missionCountRaw = signal<number | null>(null);
+  private readonly missionsPayload = signal<MissionListResponse | null>(null);
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
+
+  /** Wall-clock time of the last successful forkJoin — used by ``refreshAgeSeconds``. */
+  private readonly lastFetchAt = signal<number | null>(null);
 
   // ---------------------------------------------------------------------------
   // Helpers exposed as methods so tests can call them directly.
@@ -90,8 +97,18 @@ class MockJobQueueIndicatorComponent {
    * ``applyFetchResult`` with mocked service payloads. ``null`` count
    * is NOT rendered as 0: the last known value is retained so the
    * badge never shows a false bare 0/0 while live missions exist.
+   *
+   * REPLACES the former ``missionCountRaw ?? 0`` fallback — now reads
+   * the count leg out of the cached ``MissionListResponse``: prefer
+   * ``payload.total`` (authoritative filter-aware COUNT) and fall
+   * back to ``payload.missions.length`` only when the count leg
+   * degraded (``total === null``).
    */
-  liveMissionCount = computed(() => this.missionCountRaw() ?? 0);
+  liveMissionCount = computed(() => {
+    const p = this.missionsPayload();
+    if (!p) return 0;
+    return p.total ?? p.missions.length;
+  });
 
   hasLiveMissions = computed(() => this.liveMissionCount() > 0);
 
@@ -106,16 +123,60 @@ class MockJobQueueIndicatorComponent {
   });
 
   /**
-   * Mirror of the real component's tooltip text computed.
-   * Format: ``Running: X / Pending: Y`` plus a live-missions line
-   * whenever the missions projection reports live work.
+   * Pill STATE — mirrors the real component. Three branches:
+   *   * 'segmented' — jobs present (running OR pending)
+   *   * 'missions-only' — queue idle, live missions exist
+   *   * 'idle' — both empty
+   */
+  pillState = computed<'segmented' | 'missions-only' | 'idle'>(() => {
+    if (this.totalNonTerminal() > 0) return 'segmented';
+    if (this.hasLiveMissions()) return 'missions-only';
+    return 'idle';
+  });
+
+  jobsSegmentText = computed(
+    () => `${this.runningCount()}/${this.totalNonTerminal()}`
+  );
+
+  missionsSegmentText = computed(
+    () => `${this.liveMissionCount()}`
+  );
+
+  liveMissionBreakdown = computed(() => {
+    const list = this.missionsPayload()?.missions ?? [];
+    let processing = 0;
+    let pending = 0;
+    let paused = 0;
+    for (const m of list) {
+      if (m.liveness === 'processing') processing += 1;
+      else if (m.liveness === 'pending') pending += 1;
+      else if (m.liveness === 'paused') paused += 1;
+    }
+    return { processing, pending, paused } as Record<string, number>;
+  });
+
+  missionsList = computed<MissionSummary[]>(() => {
+    return this.missionsPayload()?.missions ?? [];
+  });
+
+  refreshAgeSeconds = computed(() => {
+    if (!this.lastFetchAt()) return 0;
+    return Math.max(0, Math.floor((Date.now() - this.lastFetchAt()!) / 1000));
+  });
+
+  /**
+   * Tooltip text mirror. New multi-line breakdown:
+   *   Running X · Queued Y
+   *   Live missions: N (processing a, pending b, paused c)
+   *   refreshed Ns ago
    */
   tooltipText = computed(() => {
-    const base = `Running: ${this.runningCount()} / Pending: ${this.pendingCount()}`;
-    if (!this.hasLiveMissions()) {
-      return base;
-    }
-    return `${base} · Live missions: ${this.liveMissionCount()} (from missions projection)`;
+    const breakdown = this.liveMissionBreakdown();
+    return [
+      `Running ${this.runningCount()} · Queued ${this.pendingCount()}`,
+      `Live missions: ${this.liveMissionCount()} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`,
+      `refreshed ${this.refreshAgeSeconds()}s ago`,
+    ].join('\n');
   });
 
   runningJobs = computed(() =>
@@ -196,6 +257,41 @@ class MockJobQueueIndicatorComponent {
   }
 
   /**
+   * Build a ``MissionListResponse`` payload from a total + an array of
+   * per-mission overrides. The fake mirrors the BE wire shape so the
+   * forkJoin leg can be exercised end-to-end without HTTP. ``total``
+   * defaults to ``missions.length`` so the badge's
+   * ``total ?? missions.length`` fallback stays consistent.
+   */
+  static buildMissionsPayload(
+    overrides: Array<Partial<MissionSummary>>,
+    total?: number
+  ): MissionListResponse {
+    const missions: MissionSummary[] = overrides.map((o, i) => ({
+      mission_id: `m-${i}`,
+      agent_id: 'leader',
+      parent_mission_id: null,
+      liveness: 'processing' as MissionLiveness,
+      terminal_reason: null,
+      epoch: 1,
+      linked_jobs: [],
+      started_at: '2026-09-07T10:00:00Z',
+      last_activity_at: '2026-09-07T10:30:00Z',
+      title: null,
+      initiative_preview: null,
+      ...o,
+    }));
+    return {
+      missions,
+      total: total ?? missions.length,
+      limit: 20,
+      offset: 0,
+      has_more: false,
+      degraded: false,
+    };
+  }
+
+  /**
    * Mirror of the real component's ``applyFetchResults`` — the
    * ``forkJoin`` next-handler body — driven with MOCKED service
    * payloads so tests prove the intake wiring without HTTP.
@@ -203,21 +299,26 @@ class MockJobQueueIndicatorComponent {
    * Parity contract with the component:
    * - jobs (active + recent) stored verbatim;
    * - ``missions === null`` (degraded count leg / 404-skew failure)
-   *   RETAINS the previous count — never falsely idle;
+   *   RETAINS the previous payload — never falsely idle;
    * - ``deferBlocked === null`` hides the warning; a payload is run
    *   through the canonical ``deferBlockIndicator`` helper.
+   *
+   * ``missions`` now carries the FULL ``MissionListResponse``
+   * envelope (REPLACES the prior ``number | null`` signature) — the
+   * segmented pill needs the per-liveness breakdown, not just a count.
    */
   applyFetchResult(
     active: Job[],
     recent: Job[],
-    missions: number | null,
+    missions: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     this.activeJobs.set(active);
     this.allRecentJobs.set(recent);
     if (missions !== null) {
-      this.missionCountRaw.set(missions);
+      this.missionsPayload.set(missions);
     }
+    this.lastFetchAt.set(Date.now());
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
     );
@@ -441,7 +542,13 @@ describe('JobQueueIndicatorComponent Logic', () => {
             instance_id: 'leader-b', job_type: 'message', mission_liveness: 'completed',
           }),
         ],
-        2, // mocked GET /api/missions?liveness=processing,pending,paused → total: 2
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [
+            { mission_id: 'leader-a', liveness: 'processing' },
+            { mission_id: 'leader-b', liveness: 'processing' },
+          ],
+          2
+        ),
         null
       );
       expect(component.liveMissionCount()).toBe(2);
@@ -459,12 +566,14 @@ describe('JobQueueIndicatorComponent Logic', () => {
             instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
           }),
         ],
-        0,
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
         null
       );
       expect(component.liveMissionCount()).toBe(0);
       expect(component.displayText()).toBe('0/0');
-      expect(component.tooltipText()).toBe('Running: 0 / Pending: 0');
+      // Tooltip's first line explains the breakdown.
+      expect(component.tooltipText()).toContain('Running 0 · Queued 0');
+      expect(component.tooltipText()).toContain('Live missions: 0');
     });
 
     it('CASE C — jobs present + missions projection reports 1: X/Y display unchanged, tooltip explains both numbers', () => {
@@ -476,27 +585,44 @@ describe('JobQueueIndicatorComponent Logic', () => {
             instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
           }),
         ],
-        1,
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'leader-a', liveness: 'processing' }],
+          1
+        ),
         null
       );
       expect(component.displayText()).toBe('1/1'); // intake count keeps primary billing
       expect(component.liveMissionCount()).toBe(1);
-      expect(component.tooltipText()).toContain('Running: 1 / Pending: 0');
+      expect(component.tooltipText()).toContain('Running 1 · Queued 0');
       expect(component.tooltipText()).toContain('Live missions: 1');
     });
 
-    it('retains the last known count when the missions leg degrades to null — never a false bare 0/0', () => {
-      component.applyFetchResult([], [], 2, null);
+    it('retains the last known payload when the missions leg degrades to null — never a false bare 0/0', () => {
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'leader-a', liveness: 'processing' }],
+          2
+        ),
+        null
+      );
       expect(component.displayText()).toBe('missions: 2');
 
-      // Degraded count leg (missionCountFromListResponse → null) or a
-      // failed fetch: "count unavailable" must NOT collapse to 0.
+      // Degraded count leg (total=null) or a failed fetch: "data
+      // unavailable" must NOT collapse to 0 — the badge retains the
+      // last good payload.
       component.applyFetchResult([], [], null, null);
       expect(component.liveMissionCount()).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
 
       // ...and the next healthy tick corrects downward.
-      component.applyFetchResult([], [], 0, null);
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        null
+      );
       expect(component.displayText()).toBe('0/0');
     });
 
@@ -584,7 +710,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
   });
 
   describe('tooltipText', () => {
-    it('should produce "Running: X / Pending: Y" formatted tooltip', () => {
+    it('should produce multi-line breakdown with "Running X · Queued Y" plus missions + refreshed lines', () => {
       component.setActiveJobs([
         createMockJob({ status: 'processing' }),
         createMockJob({ status: 'processing' }),
@@ -593,13 +719,18 @@ describe('JobQueueIndicatorComponent Logic', () => {
         createMockJob({ status: 'pending' }),
         createMockJob({ status: 'pending' }),
       ]);
-      // 3 running (2 processing + 1 paused) and 3 pending → "Running: 3 / Pending: 3".
-      expect(component.tooltipText()).toBe('Running: 3 / Pending: 3');
+      // 3 running (2 processing + 1 paused) and 3 pending → "Running 3 · Queued 3".
+      const tt = component.tooltipText();
+      expect(tt).toContain('Running 3 · Queued 3');
+      expect(tt).toContain('Live missions:');
+      expect(tt).toContain('refreshed');
     });
 
-    it('should produce "Running: 0 / Pending: 0" when idle', () => {
+    it('should produce "Running 0 · Queued 0" when idle', () => {
       component.setActiveJobs([]);
-      expect(component.tooltipText()).toBe('Running: 0 / Pending: 0');
+      const tt = component.tooltipText();
+      expect(tt).toContain('Running 0 · Queued 0');
+      expect(tt).toContain('Live missions: 0');
     });
   });
 
@@ -961,7 +1092,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // A live leader mission is proven by the missions projection; the
       // jobs intake then errors (forkJoin-level failure). The badge may
       // show stale "missions: N" — NEVER a false bare 0/0 idle.
-      component.applyFetchResult([], [], 2, null);
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'leader-a', liveness: 'processing' }],
+          2
+        ),
+        null
+      );
       expect(component.displayText()).toBe('missions: 2');
 
       component.onFetchError(new Error('backend down'));
@@ -985,6 +1124,110 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(result.active.length).toBe(1); // jobs intake survived both failures
       expect(result.missions).toBeNull();
       expect(result.deferBlocked).toBeNull();
+    });
+  });
+
+  // ── Segmented status pill (2026-09-07, mission-tree panel) ──────────
+
+  describe('segmented status pill — pillState branch', () => {
+    it('returns "segmented" when jobs are present (regardless of missions)', () => {
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+      expect(component.pillState()).toBe('segmented');
+    });
+
+    it('returns "missions-only" when no jobs but live missions exist', () => {
+      component.setActiveJobs([]);
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'm-1', liveness: 'processing' }],
+          1
+        ),
+        null
+      );
+      expect(component.pillState()).toBe('missions-only');
+    });
+
+    it('returns "idle" when both jobs and missions are empty', () => {
+      component.setActiveJobs([]);
+      expect(component.pillState()).toBe('idle');
+    });
+  });
+
+  describe('segmented pill — jobsSegmentText / missionsSegmentText', () => {
+    it('jobsSegmentText: "X/Y" with running + total non-terminal', () => {
+      component.setActiveJobs([
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'pending' }),
+      ]);
+      expect(component.jobsSegmentText()).toBe('2/3');
+    });
+
+    it('missionsSegmentText: just the integer N', () => {
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [
+            { mission_id: 'm-1', liveness: 'processing' },
+            { mission_id: 'm-2', liveness: 'paused' },
+          ],
+          2
+        ),
+        null
+      );
+      expect(component.missionsSegmentText()).toBe('2');
+    });
+  });
+
+  describe('segmented pill — liveMissionBreakdown (per-liveness counts)', () => {
+    it('tallies processing / pending / paused from the missions list', () => {
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([
+          { mission_id: 'm-1', liveness: 'processing' },
+          { mission_id: 'm-2', liveness: 'processing' },
+          { mission_id: 'm-3', liveness: 'paused' },
+          { mission_id: 'm-4', liveness: 'pending' },
+        ]),
+        null
+      );
+      const bd = component.liveMissionBreakdown();
+      expect(bd.processing).toBe(2);
+      expect(bd.paused).toBe(1);
+      expect(bd.pending).toBe(1);
+    });
+
+    it('zeros when no missions payload is present', () => {
+      const bd = component.liveMissionBreakdown();
+      expect(bd.processing).toBe(0);
+      expect(bd.paused).toBe(0);
+      expect(bd.pending).toBe(0);
+    });
+  });
+
+  describe('missionsList signal — feeds the panel', () => {
+    it('exposes the latest successful missions payload', () => {
+      const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
+        { mission_id: 'm-1', liveness: 'processing' },
+        { mission_id: 'm-2', liveness: 'paused' },
+      ]);
+      component.applyFetchResult([], [], payload, null);
+      expect(component.missionsList().length).toBe(2);
+      expect(component.missionsList().map((m) => m.mission_id).sort()).toEqual(['m-1', 'm-2']);
+    });
+
+    it('retains the last known missions across a degraded poll', () => {
+      const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
+        { mission_id: 'm-1', liveness: 'processing' },
+      ]);
+      component.applyFetchResult([], [], payload, null);
+      component.applyFetchResult([], [], null, null);
+      expect(component.missionsList().length).toBe(1);
+      expect(component.missionsList()[0].mission_id).toBe('m-1');
     });
   });
 });

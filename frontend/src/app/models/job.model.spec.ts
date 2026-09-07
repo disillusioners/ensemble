@@ -10,6 +10,7 @@ import {
   DLQReplayResponse,
   DLQListResponse,
   MissionLiveness,
+  MissionSummary,
   isTerminalStatus,
   isJobDeleted,
   getStatusColor,
@@ -19,6 +20,10 @@ import {
   getMissionLivenessColor,
   missionLivenessChip,
   liveMissionIds,
+  missionDisplayTitle,
+  buildQueueTree,
+  shouldAutoExpand,
+  MAX_RECENT_JOBS,
 } from './job.model';
 
 describe('Job Model', () => {
@@ -758,6 +763,261 @@ describe('Job Model', () => {
       ]);
       expect(ids.size).toBe(1);
       expect(ids.has('orphan-receipt')).toBe(true);
+    });
+  });
+
+  // ── Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``) ─
+
+  describe('missionDisplayTitle', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: null,
+        last_activity_at: '2026-09-07T10:00:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('prefers the server-authoritative title when present', () => {
+      const m = mkMission({ title: 'Refactor auth module' });
+      expect(missionDisplayTitle(m)).toBe('Refactor auth module');
+    });
+
+    it('falls back to "${agent_id} · ${timeAgo}" when title is null', () => {
+      const m = mkMission({ title: null, agent_id: 'leader', last_activity_at: '2026-09-07T10:00:00Z' });
+      expect(missionDisplayTitle(m)).toMatch(/^leader · /);
+    });
+
+    it('uses just agent_id when timestamp is null', () => {
+      const m = mkMission({ title: null, agent_id: 'leader', last_activity_at: null });
+      expect(missionDisplayTitle(m)).toBe('leader');
+    });
+
+    it('returns empty string when both title and agent_id are null', () => {
+      const m = mkMission({ title: null, agent_id: null, last_activity_at: null });
+      expect(missionDisplayTitle(m)).toBe('');
+    });
+
+    it('accepts a custom timeAgoFn for deterministic tests', () => {
+      const m = mkMission({ title: null, agent_id: 'leader', last_activity_at: '2026-09-07T10:00:00Z' });
+      expect(missionDisplayTitle(m, () => '5m ago')).toBe('leader · 5m ago');
+    });
+  });
+
+  describe('buildQueueTree', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:00:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    function mkJob(over: Partial<Job> = {}): Job {
+      return {
+        job_id: 'j-1',
+        agent_id: 'developer',
+        project_id: 'p-1',
+        priority: 5,
+        status: 'processing',
+        created_at: '2026-09-07T10:00:00Z',
+        started_at: '2026-09-07T10:01:00Z',
+        completed_at: null,
+        instance_id: 'm-1',
+        error_message: null,
+        result_summary: null,
+        job_metadata: null,
+        cancelled_at: null,
+        ...over,
+      };
+    }
+
+    it('groups active jobs under their live mission via mission_id', () => {
+      const tree = buildQueueTree(
+        [
+          mkJob({ job_id: 'a', mission_id: 'm-1', status: 'processing' }),
+          mkJob({ job_id: 'b', mission_id: 'm-1', status: 'pending' }),
+        ],
+        [],
+        [mkMission({ mission_id: 'm-1', liveness: 'processing' })],
+      );
+      expect(tree.liveMissions).toHaveLength(1);
+      expect(tree.liveMissions[0].mission.mission_id).toBe('m-1');
+      expect(tree.liveMissions[0].jobs.map((j) => j.job_id).sort()).toEqual(['a', 'b']);
+      expect(tree.queued).toEqual([]);
+    });
+
+    it('routes unattached non-terminal jobs to queued (NEVER hide)', () => {
+      const tree = buildQueueTree(
+        [
+          mkJob({ job_id: 'attached', mission_id: 'm-1', status: 'processing' }),
+          mkJob({ job_id: 'unattached-1', mission_id: null, status: 'pending' }),
+          mkJob({ job_id: 'orphan-mission', mission_id: 'm-missing', status: 'processing' }),
+        ],
+        [],
+        [mkMission({ mission_id: 'm-1', liveness: 'processing' })],
+      );
+      expect(tree.liveMissions).toHaveLength(1);
+      expect(tree.liveMissions[0].jobs.map((j) => j.job_id)).toEqual(['attached']);
+      // Both null mission_id AND missing-mission-id → queued fallback.
+      const queuedIds = tree.queued.map((j) => j.job_id).sort();
+      expect(queuedIds).toEqual(['orphan-mission', 'unattached-1']);
+    });
+
+    it('groups terminal jobs under terminal mission nodes', () => {
+      const tree = buildQueueTree(
+        [],
+        [
+          mkJob({ job_id: 'r1', mission_id: 'm-done', status: 'completed' }),
+          mkJob({ job_id: 'r2', mission_id: 'm-done', status: 'settled', job_type: 'message' }),
+        ],
+        [mkMission({ mission_id: 'm-done', liveness: 'completed', last_activity_at: '2026-09-07T09:00:00Z' })],
+      );
+      expect(tree.recent).toHaveLength(1);
+      expect(tree.recent[0].mission.mission_id).toBe('m-done');
+      expect(tree.recent[0].jobs.map((j) => j.job_id).sort()).toEqual(['r1', 'r2']);
+      expect(tree.recentFlat).toEqual([]);
+    });
+
+    it('routes terminal jobs that map to no listed mission into recentFlat', () => {
+      const tree = buildQueueTree(
+        [],
+        [
+          mkJob({ job_id: 'matched', mission_id: 'm-done', status: 'completed' }),
+          mkJob({ job_id: 'loose-1', mission_id: null, status: 'completed' }),
+          mkJob({ job_id: 'loose-2', mission_id: 'm-missing', status: 'failed' }),
+        ],
+        [mkMission({ mission_id: 'm-done', liveness: 'completed' })],
+      );
+      expect(tree.recent).toHaveLength(1);
+      expect(tree.recent[0].jobs.map((j) => j.job_id)).toEqual(['matched']);
+      const flatIds = tree.recentFlat.map((j) => j.job_id).sort();
+      expect(flatIds).toEqual(['loose-1', 'loose-2']);
+    });
+
+    it('sorts live missions by last_activity_at desc with mission_id tiebreak', () => {
+      const tree = buildQueueTree(
+        [],
+        [],
+        [
+          mkMission({ mission_id: 'm-a', liveness: 'processing', last_activity_at: '2026-09-07T10:00:00Z' }),
+          mkMission({ mission_id: 'm-b', liveness: 'paused', last_activity_at: '2026-09-07T11:00:00Z' }),
+          mkMission({ mission_id: 'm-c', liveness: 'pending', last_activity_at: null }),
+        ],
+      );
+      expect(tree.liveMissions.map((n) => n.mission.mission_id)).toEqual(['m-b', 'm-a', 'm-c']);
+    });
+
+    it('splits missions into live (processing/pending/paused) vs terminal (completed/failed/cancelled)', () => {
+      const tree = buildQueueTree(
+        [],
+        [mkJob({ job_id: 'r1', mission_id: 'm-done', status: 'completed' })],
+        [
+          mkMission({ mission_id: 'm-live', liveness: 'processing' }),
+          mkMission({ mission_id: 'm-done', liveness: 'completed', last_activity_at: '2026-09-07T09:00:00Z' }),
+          mkMission({ mission_id: 'm-failed', liveness: 'failed' }),
+          mkMission({ mission_id: 'm-cancelled', liveness: 'cancelled' }),
+        ],
+      );
+      expect(tree.liveMissions.map((n) => n.mission.mission_id).sort()).toEqual(['m-live']);
+      expect(tree.recent.map((n) => n.mission.mission_id).sort()).toEqual(['m-cancelled', 'm-done', 'm-failed']);
+    });
+
+    it('caps total Recent rows (mission nodes + flat rows) at MAX_RECENT_JOBS', () => {
+      const manyFlat: Job[] = Array.from({ length: MAX_RECENT_JOBS + 5 }, (_, i) =>
+        mkJob({ job_id: `flat-${i}`, mission_id: null, status: 'completed' }),
+      );
+      const tree = buildQueueTree([], manyFlat, []);
+      const totalRows = tree.recent.reduce((sum, n) => sum + 1 + n.jobs.length, 0) + tree.recentFlat.length;
+      expect(totalRows).toBeLessThanOrEqual(MAX_RECENT_JOBS);
+      expect(tree.recentFlat.length).toBeLessThanOrEqual(MAX_RECENT_JOBS);
+    });
+
+    it('NEVER hides a job — every input job ends up in exactly one bucket', () => {
+      const tree = buildQueueTree(
+        [
+          mkJob({ job_id: 'live-matched', mission_id: 'm-live', status: 'processing' }),
+          mkJob({ job_id: 'live-unattached', mission_id: null, status: 'pending' }),
+        ],
+        [
+          mkJob({ job_id: 'recent-matched', mission_id: 'm-done', status: 'completed' }),
+          mkJob({ job_id: 'recent-unattached', mission_id: null, status: 'failed' }),
+        ],
+        [
+          mkMission({ mission_id: 'm-live', liveness: 'processing' }),
+          mkMission({ mission_id: 'm-done', liveness: 'completed', last_activity_at: '2026-09-07T09:00:00Z' }),
+        ],
+      );
+      const allOut = [
+        ...tree.liveMissions.flatMap((n) => n.jobs),
+        ...tree.queued,
+        ...tree.recent.flatMap((n) => n.jobs),
+        ...tree.recentFlat,
+      ].map((j) => j.job_id).sort();
+      expect(allOut).toEqual(['live-matched', 'live-unattached', 'recent-matched', 'recent-unattached']);
+    });
+
+    it('handles empty inputs without throwing', () => {
+      const tree = buildQueueTree([], [], []);
+      expect(tree).toEqual({ liveMissions: [], queued: [], recent: [], recentFlat: [] });
+    });
+
+    it('ignores missions whose liveness is null (degraded) — null liveness never invents a bucket', () => {
+      const tree = buildQueueTree(
+        [],
+        [],
+        [
+          mkMission({ mission_id: 'm-null', liveness: null, last_activity_at: null }),
+          mkMission({ mission_id: 'm-live', liveness: 'processing' }),
+        ],
+      );
+      expect(tree.liveMissions.map((n) => n.mission.mission_id)).toEqual(['m-live']);
+      expect(tree.recent).toEqual([]);
+    });
+  });
+
+  describe('shouldAutoExpand', () => {
+    function mkNode(mid: string): { mission: MissionSummary; jobs: Job[] } {
+      return {
+        mission: {
+          mission_id: mid,
+          agent_id: 'leader',
+          parent_mission_id: null,
+          liveness: 'processing',
+          terminal_reason: null,
+          epoch: 1,
+          linked_jobs: [],
+          started_at: null,
+          last_activity_at: null,
+          title: null,
+          initiative_preview: null,
+        },
+        jobs: [],
+      };
+    }
+
+    it('returns true iff exactly one live mission', () => {
+      expect(shouldAutoExpand([mkNode('m-1')])).toBe(true);
+      expect(shouldAutoExpand([])).toBe(false);
+      expect(shouldAutoExpand([mkNode('m-1'), mkNode('m-2')])).toBe(false);
+      expect(shouldAutoExpand([mkNode('m-1'), mkNode('m-2'), mkNode('m-3')])).toBe(false);
     });
   });
 });

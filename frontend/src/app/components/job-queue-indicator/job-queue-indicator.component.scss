@@ -30,17 +30,78 @@
     color: #3b82f6; /* blue-500 — same live colour as processing jobs */
   }
 
+  /* Segmented state: both jobs AND missions present. The two
+     segments share a flex row, divided by a thin glyph. Colors lean
+     blue (jobs) and blue (missions) but the divider keeps them
+     visually distinct so a glance can parse the count split. */
+  &.segmented {
+    color: #3b82f6; /* blue-500 — matches the missions-live hue */
+  }
+
   .queue-count {
     line-height: 1;
+  }
+
+  // ── Segmented pill internals ────────────────────────────────────────
+
+  .segment-jobs,
+  .segment-missions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    line-height: 1;
+  }
+
+  .segment-jobs {
+    color: #f1f5f9; /* text-white-ish for legibility */
+  }
+
+  .segment-jobs-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+    color: #3b82f6; /* blue-500 — animates when jobs are running */
+    animation: jobs-segment-pulse 1.5s ease-in-out infinite;
+  }
+
+  /* Suppress the jobs pulse when no jobs are running (e.g. only
+     pending — still segment-present, but no work in flight). The
+     ``runningCount() === 0`` guard is in the template via the icon
+     class flip below if needed; here we keep it always-on for
+     simplicity and let the muted count speak for itself. */
+
+  .segment-divider {
+    color: #475569; /* slate-600 — subtle vertical glyph between
+                       segments; matches the dark theme palette. */
+    font-weight: 400;
+    margin: 0 4px;
+    user-select: none;
+  }
+
+  .segment-jobs-count,
+  .segment-missions-count {
+    font-family: monospace;
+    font-weight: 600;
   }
 
   .mission-pulse-dot {
     width: 6px;
     height: 6px;
-    margin-left: 6px;
     border-radius: 50%;
     background-color: #3b82f6; /* blue-500 */
     animation: mission-pulse 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes jobs-segment-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: rotate(0deg);
+  }
+  50% {
+    opacity: 0.45;
   }
 }
 

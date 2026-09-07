@@ -1,25 +1,34 @@
-import { Component, input, output, computed } from '@angular/core';
+import { Component, input, output, computed, signal, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
+import { getStatusColor as modelGetStatusColor, Job, JobStatus, MissionSummary, MissionLiveness, missionLivenessChip, buildQueueTree, shouldAutoExpand, missionDisplayTitle } from '../../models/job.model';
 import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
-const MAX_RECENT_JOBS = 10;
-
 /**
- * Presentational panel that surfaces the current job queue state in
- * two sections: jobs currently running and recently completed/failed/
- * cancelled jobs. This is a DUMB component — all data is pushed in
- * via inputs and click events flow out via the ``jobClick`` output.
+ * Presentational panel that surfaces the current job queue state as
+ * a MISSION TREE (2026-09-07, ``feature/job-queue-mission-tree``):
  *
- * The parent component is responsible for fetching jobs, slicing
- * recent activity, and resolving any project/instance name maps. We
- * additionally cap the recent list to a small number for safety.
+ *   * LIVE MISSIONS section — mission nodes (liveness in
+ *     processing/pending/paused) with their attached jobs as
+ *     expandable children. Collapsed by default; auto-expands when
+ *     exactly one live mission exists.
+ *   * QUEUED section — non-terminal unattached jobs (mission_id
+ *     null OR mission not in the missions list). Always falls back
+ *     so a job never silently vanishes.
+ *   * RECENT section — terminal mission nodes + terminal jobs that
+ *     map to no listed mission (recentFlat).
+ *
+ * This is a DUMB component — all data is pushed in via inputs and
+ * click events flow out via the ``jobClick`` output. The parent
+ * (job-queue-indicator) is responsible for fetching jobs + missions,
+ * resolving any project/instance name maps, and re-fetching on
+ * every 8s tick.
  *
  * Styling mirrors the notification-bell dropdown (dark slate panel,
- * 440px max width, monospace badges, status-coloured left border).
+ * 560px max width per the mission-tree brief, monospace badges,
+ * status-coloured left border).
  */
 @Component({
   selector: 'app-job-queue-panel',
@@ -52,19 +61,169 @@ export class JobQueuePanelComponent {
    */
   liveMissionCount = input<number>(0);
 
+  /**
+   * Mission-tree panel (2026-09-07) — the full missions list from
+   * the latest successful poll. The panel feeds it through the
+   * pure ``buildQueueTree`` helper to derive the live + terminal
+   * mission nodes plus the unattached-fallback buckets.
+   *
+   * Default ``[]`` so the panel degrades to its legacy flat layout
+   * (running + recent) when no missions have arrived yet (or the
+   * missions leg is degraded — the parent retains the last good
+   * payload so the tree never flashes empty).
+   */
+  missions = input<MissionSummary[]>([]);
+
   /** Emitted when the user clicks any job row. */
   jobClick = output<Job>();
 
-  /** Capped list of recent jobs (defence-in-depth slice). */
-  recentCapped = computed(() => this.recentJobs().slice(0, MAX_RECENT_JOBS));
+  /**
+   * Per-mission-id expansion state for LIVE MISSIONS. Survives data
+   * refreshes by being keyed on mission_id (not array index) — a
+   * poll refresh that re-orders the live missions does NOT collapse
+   * the user's expanded state. ``Set<string>`` keeps it cheap.
+   */
+  private readonly expandedLiveMissions = signal<Set<string>>(new Set());
 
-  /** True when both running and recent lists are empty. */
-  isEmpty = computed(
-    () => this.runningJobs().length === 0 && this.recentCapped().length === 0,
+  /**
+   * Per-mission-id expansion state for RECENT mission nodes. Same
+   * survival guarantee as ``expandedLiveMissions``.
+   */
+  private readonly expandedRecentMissions = signal<Set<string>>(new Set());
+
+  /**
+   * Tree derivation — wraps the pure ``buildQueueTree`` model
+   * helper with the panel's input signals so the template binds to
+   * the structured tree rather than two flat lists.
+   *
+   * Passes the running jobs as the "active" input. The non-running
+   * queued/pending jobs are absorbed into the tree via
+   * ``buildQueueTree``'s ``attached → live mission node`` /
+   * ``unattached → queued bucket`` logic — the brief's NEVER-hide
+   * contract keeps every job visible exactly once.
+   */
+  readonly tree = computed(() => {
+    return buildQueueTree(this.runningJobs(), this.recentJobs(), this.missions());
+  });
+
+  /**
+   * Capped list of terminal jobs (defence-in-depth slice). Replaces
+   * the legacy ``recentCapped`` — kept for backwards compatibility
+   * with the existing spec mirror; the tree handles the actual cap.
+   */
+  readonly recentCapped = computed(() => this.recentJobs().slice(0, 10));
+
+  /**
+   * Total Recent rows shown to the user (mission node headers + their
+   * child jobs + flat rows) — mirrors ``buildQueueTree``'s internal
+   * cap so the header stats strip ties to the visible content.
+   */
+  readonly recentRowCount = computed(() => {
+    const t = this.tree();
+    return (
+      t.recent.reduce((sum, n) => sum + 1 + n.jobs.length, 0) +
+      t.recentFlat.length
+    );
+  });
+
+  /**
+   * True when the panel has nothing to show — live missions empty,
+   * queued empty, recent empty, AND the parent's liveMissionCount
+   * (legacy receipt-derived count) is zero. This is the "everything
+   * is idle" branch — the empty-state renders "Queue is currently
+   * idle".
+   */
+  readonly isEmpty = computed(() => {
+    const t = this.tree();
+    return (
+      t.liveMissions.length === 0 &&
+      t.queued.length === 0 &&
+      t.recent.length === 0 &&
+      t.recentFlat.length === 0 &&
+      this.liveMissionCount() === 0
+    );
+  });
+
+  /** Convenience running count used in the header (matches the legacy surface). */
+  readonly runningCount = computed(() => this.runningJobs().length);
+
+  /**
+   * Auto-expand the LIVE MISSIONS section when exactly one live
+   * mission exists. Pure derivation from the tree; the auto-seed
+   * effect (in the constructor) syncs this into the expansion set.
+   */
+  readonly shouldAutoExpandLive = computed(() =>
+    shouldAutoExpand(this.tree().liveMissions)
   );
 
-  /** Convenience running count used in the header. */
-  runningCount = computed(() => this.runningJobs().length);
+  constructor() {
+    // Auto-seed the LIVE MISSIONS expansion set when the set of live
+    // mission ids changes AND the auto-expand rule says we should.
+    // Tracked by a join-key so unrelated input changes don't fight
+    // the user's manual toggles.
+    let seededForKey = '';
+    let lastSeenSet: Set<string> = new Set();
+    const liveIds = computed(() =>
+      this.tree()
+        .liveMissions.map((n) => n.mission.mission_id ?? '')
+        .filter((id) => id.length > 0)
+    );
+    const liveKey = computed(() => liveIds().slice().sort().join('|'));
+
+    // Sync effect: runs whenever the live-mission SET changes (not
+    // whenever the auto-expand decision flips on/off). When a new
+    // single-mission state is observed AND the rule says yes, seed
+    // the set to {that-mission-id}; otherwise leave user state alone.
+    effect(() => {
+      const key = liveKey();
+      if (key === seededForKey) return;
+      seededForKey = key;
+      const ids = liveIds();
+      const current = lastSeenSet;
+      // Detect a TRUE set change (size or membership differs from
+      // last seen). If just the auto-expand boolean flipped without
+      // a set change, don't clobber user toggles.
+      const sameSet =
+        current.size === ids.length && ids.every((id) => current.has(id));
+      if (sameSet) return;
+      lastSeenSet = new Set(ids);
+      if (shouldAutoExpand(this.tree().liveMissions) && ids.length === 1) {
+        this.expandedLiveMissions.set(new Set(ids));
+      }
+    });
+  }
+
+  /** Toggle a live mission's expansion state. */
+  toggleLiveMission(missionId: string): void {
+    this.expandedLiveMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+
+  /** Toggle a recent mission's expansion state. */
+  toggleRecentMission(missionId: string): void {
+    this.expandedRecentMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+
+  /** True iff a live mission node is expanded. */
+  isLiveExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this.expandedLiveMissions().has(missionId);
+  }
+
+  /** True iff a recent mission node is expanded. */
+  isRecentExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this.expandedRecentMissions().has(missionId);
+  }
 
   /**
    * Fix C (§8.2) — mission-liveness chip for a row, or null when the
@@ -159,5 +318,107 @@ export class JobQueuePanelComponent {
   /** Emits the clicked job up to the parent for navigation. */
   onRowClick(job: Job): void {
     this.jobClick.emit(job);
+  }
+
+  /**
+   * Mission title — delegates to the model helper with this
+   * component's own ``timeAgo`` so the rendered "X ago" wording is
+   * identical across the panel surface (no half-built strings from
+   * two different formatters).
+   */
+  missionTitle(m: MissionSummary): string {
+    return missionDisplayTitle(m, (d) => this.timeAgo(d));
+  }
+
+  /**
+   * Mission meta line for collapsed node — ``agent_id · N jobs ·
+   * timeAgo(last_activity_at)``. Single-line, 2-line clamped in CSS.
+   */
+  missionMeta(m: MissionSummary, jobCount: number): string {
+    const agent = m.agent_id ?? '—';
+    const ago = this.timeAgo(m.last_activity_at) || 'idle';
+    return `${agent} · ${jobCount} job${jobCount === 1 ? '' : 's'} · ${ago}`;
+  }
+
+  /**
+   * Mission node click — toggles expansion. ``stopPropagation`` is
+   * NOT needed here because the mission chip's own (click) handler
+   * also calls ``$event.stopPropagation()`` in the template, and the
+   * row click only fires once per event target.
+   */
+  onLiveMissionClick(missionId: string | null | undefined): void {
+    if (!missionId) return;
+    this.toggleLiveMission(missionId);
+  }
+
+  onRecentMissionClick(missionId: string | null | undefined): void {
+    if (!missionId) return;
+    this.toggleRecentMission(missionId);
+  }
+
+  /** Convenience: chevron glyph based on expansion state. */
+  liveChevron(missionId: string | null | undefined): string {
+    return this.isLiveExpanded(missionId) ? 'expand_more' : 'chevron_right';
+  }
+
+  recentChevron(missionId: string | null | undefined): string {
+    return this.isRecentExpanded(missionId) ? 'expand_more' : 'chevron_right';
+  }
+
+  /**
+   * Mission liveness → material icon for the header badge.
+   * Keeps the brief's "reuse mission-liveness-chip where its input
+   * shape fits" rule — for the tree nodes we have ``MissionSummary``
+   * directly (not a Job), so we build a tiny ``MissionLivenessChip``
+   * inline rather than force-fitting.
+   */
+  livenessIcon(liveness: MissionLiveness | null): string {
+    switch (liveness) {
+      case 'processing':
+        return 'sync';
+      case 'pending':
+        return 'schedule';
+      case 'paused':
+        return 'pause_circle';
+      case 'completed':
+        return 'check_circle';
+      case 'failed':
+        return 'error';
+      case 'cancelled':
+        return 'cancel';
+      default:
+        return 'help_outline';
+    }
+  }
+
+  /** Human-readable liveness label for the mission node badge. */
+  livenessLabel(liveness: MissionLiveness | null): string {
+    return liveness ?? 'unknown';
+  }
+
+  /**
+   * Color for the mission node badge — delegates to the canonical
+   * ``getMissionLivenessColor`` so the colour palette matches the
+   * existing mission-liveness-chip component (no new colour table).
+   */
+  livenessColor(liveness: MissionLiveness | null): string {
+    // getMissionLivenessColor covers the canonical space; fall back
+    // to a neutral grey for the degraded null branch.
+    switch (liveness) {
+      case 'pending':
+        return '#9CA3AF';
+      case 'processing':
+        return '#3B82F6';
+      case 'paused':
+        return '#F59E0B';
+      case 'completed':
+        return '#22C55E';
+      case 'failed':
+        return '#EF4444';
+      case 'cancelled':
+        return '#F59E0B';
+      default:
+        return '#9CA3AF';
+    }
   }
 }

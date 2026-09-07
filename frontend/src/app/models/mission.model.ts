@@ -1,24 +1,26 @@
-// Missions read-model types (Fix C §8.4 / M4-i pull-forward).
+// Missions read-model types (Fix C §8.4 / M4-i pull-forward / 2026-09-07 mission-tree panel).
 //
 // FE-side counterpart of ``GET /api/missions`` (daemon/routers/missions.py,
 // contract documented in docs/job-task-system.md §8.4). The badge consumes
 // ONLY the live-mission count — the authoritative missions projection —
 // instead of deriving it from recent job receipts.
 
-import type { MissionLiveness } from './job.model';
+import type { MissionLiveness, MissionSummary } from './job.model';
 
 /**
- * Minimal mission row — only the fields the FE reads today. The wire
- * carries more (parent_mission_id, terminal_reason, epoch, …); add
- * fields here when a consumer actually needs them, never speculatively.
- * All fields mirror the backend's nullable degraded-lookup contract
- * (§8.2: 200 with None-fields, never 500).
+ * Canonical mission row — mirrors the BE ``MissionResponse`` wire
+ * shape exactly (see ``daemon/routers/schemas.py`` class
+ * ``MissionResponse``). The full type lives in ``models/job.model.ts``
+ * (per the mission-tree panel brief, 2026-09-07) and is re-exported
+ * here as ``MissionSummary`` for convenience so the badge / panel
+ * specs share one identifier.
+ *
+ * Every nullable field mirrors the BE degraded-lookup contract
+ * (§8.2: 200 with None-fields, never 500). The FE never invents a
+ * value for a null field — the tree builder routes null-bearing
+ * missions into the fallback path ("NEVER hide a job").
  */
-export interface MissionSummary {
-  mission_id: string | null;
-  agent_id: string | null;
-  liveness: MissionLiveness | null;
-}
+export type { MissionSummary };
 
 /**
  * Envelope for ``GET /api/missions``. ``total``/``has_more`` are

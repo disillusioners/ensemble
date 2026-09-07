@@ -171,6 +171,58 @@ export class JobService {
   }
 
   /**
+   * Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+   * — fetch the missions projection used by both the badge's segmented
+   * pill and the panel's tree.
+   *
+   * ``GET /api/missions`` with optional ``liveness`` filter and
+   * ``limit`` (BE clamps to ``[1, MAX_PAGE_LIMIT]``, default
+   * ``DEFAULT_PAGE_LIMIT`` = 10; the badge calls with limit=20 to
+   * show a richer breakdown). The badge still uses
+   * ``listLiveMissionCount`` for the count leg, but the segmented
+   * pill's tooltip needs the per-liveness breakdown so it must pull
+   * the full page here.
+   *
+   * Returns the full ``MissionSummary[]`` + ``total`` from the
+   * envelope. ``null`` total ⇒ count leg degraded (NOT 0); the badge
+   * falls back to ``missions.length`` defensively.
+   *
+   * Errors propagate so the badge's per-participant ``catchError``
+   * in the forkJoin degrades to ``null`` without killing the jobs
+   * intake on the same tick.
+   */
+  listMissions(params?: { liveness?: string; limit?: number }): Observable<MissionListResponse> {
+    let httpParams = new HttpParams();
+    if (params?.liveness) httpParams = httpParams.set('liveness', params.liveness);
+    if (params?.limit !== undefined) httpParams = httpParams.set('limit', params.limit.toString());
+    return this.http.get<MissionListResponse>('/api/missions', { params: httpParams });
+  }
+
+  /**
+   * Mission-tree panel — fetch the jobs attached to a given mission.
+   *
+   * ``GET /api/jobs?mission_id=<id>&include_deleted=false`` (BE
+   * landed this filter in 327fdc1a). Returns the raw ``Job[]`` array
+   * (mapped from the response envelope so callers get rows, not the
+   * wrapper). ``include_deleted=false`` keeps the panel view clean —
+   * soft-deleted jobs are filtered out, matching the rest of the
+   * panel's surface.
+   *
+   * Errors propagate so the badge's per-participant ``catchError``
+   * degrades to an empty array (mirrors ``listRecentJobs`` /
+   * ``listDeferBlocked`` — additive participants must not fail the
+   * jobs intake riding the same tick).
+   */
+  listJobsByMission(missionId: string): Observable<Job[]> {
+    const params = new HttpParams()
+      .set('mission_id', missionId)
+      .set('include_deleted', 'false');
+    return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
+      map((response) => response.jobs),
+    );
+  }
+
+  /**
    * Defer-gate block status — ``GET /api/queues/defer-blocked``.
    *
    * Consumed by the header JobQueueIndicator's warning affordance.
