@@ -138,6 +138,7 @@ _PENDING_STATE: str = ReportInjectionState.PENDING.value
 _DEFERRED_STATE: str = ReportInjectionState.DEFERRED.value
 _INJECTED_STATE: str = ReportInjectionState.INJECTED.value
 _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
+_FAILED_STATE: str = ReportInjectionState.FAILED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
 
 # Phase 2 (pause-report-recovery) sweep: the parent terminal set is
@@ -291,9 +292,9 @@ class ReportInjectionRepository:
         :meth:`transition_deferred_to_pending` and then complete the
         delivery.
 
-        The partial unique index ``uq_report_injections_oblig_triple``
-        (``WHERE state IN ('PENDING','DEFERRED')``) is the write-once
-        gate. Two outcomes:
+        Three call shapes, gated by the partial unique index
+        ``uq_report_injections_oblig_triple`` (``WHERE state IN
+        ('PENDING','DEFERRED')`` — the write-once gate):
 
         * **No existing non-terminal row**: insert a fresh DEFERRED
           row with ``report_message_id=None``, ``content=None``.
@@ -302,11 +303,40 @@ class ReportInjectionRepository:
           the second INSERT with ``sqlalchemy.exc.IntegrityError``;
           this method absorbs the error (W6 — the child-keyed bus
           lock does NOT serialize the three actors, so the index is
-          the only cross-actor gate) and returns ``None`` (no-op).
+          the only cross-actor gate). Post-rollback the triple is
+          re-read: a non-terminal row → in-place reason update (or
+          benign no-op); a terminal row → positive delivery
+          evidence → legitimate no-op.
         * **Existing DEFERRED/PENDING row for the same triple**:
           re-fetch and (only if the ``deferred_reason`` differs) UPDATE
           the reason in-place. Never duplicates; never escalates the
           state.
+
+        Debug Phase 4 (2026-09-07) — INSERT-ON-MISSING: the
+        post-rollback re-read covers ALL states, and absence of rows
+        is NEVER interpreted as "already delivered". An
+        ``IntegrityError`` with ZERO rows for the obligation triple
+        (a phantom conflict — e.g. the row was deleted by the drift
+        sweep's dead-parent Pattern (e) DELETE, or escalated to
+        terminal and removed between INSERT and SELECT) previously
+        produced a FALSE-POSITIVE "racing delivery won" no-op that
+        stranded the parent's completion gate permanently and made
+        the recovery sweep self-heal impossible (production incident
+        leader b7ead8a4 / child d90b18f9, 2026-09-07). The corrected
+        semantics:
+
+        * terminal row present BEFORE the insert (pre-check) →
+          POSITIVE evidence of delivery → legitimate no-op (the
+          partial unique index does NOT cover terminal rows, so the
+          insert alone could not detect this);
+        * non-terminal row present → duplicate absorbed (W6, above);
+        * ZERO rows present → INSERT a fresh DEFERRED marker
+          (insert-on-missing). If that retry also raises
+          ``IntegrityError`` and the re-read STILL finds no row, the
+          error is re-raised — a persistent conflict with zero rows
+          is a real DB failure, and silently claiming "already
+          delivered" is the bug class this method must never
+          exhibit. Callers already wrap this method best-effort.
 
         Args:
             parent_instance_id: The parent that should eventually
@@ -321,45 +351,28 @@ class ReportInjectionRepository:
         Returns:
             The persisted :class:`ReportInjection` row when this call
             inserted or updated; ``None`` when the call was a
-            no-op (concurrent duplicate absorbed by W6).
+            no-op — which now REQUIRES positive evidence: either a
+            concurrent duplicate was absorbed (non-terminal row
+            present) or a terminal row proves delivery. ``None`` is
+            NEVER returned for a zero-row triple.
 
         Raises:
             Any non-integrity DB error propagates. ``IntegrityError``
-            on the obligation-triple index is the ONLY error caught
-            here.
+            on the obligation-triple index is absorbed EXCEPT in the
+            persistent-conflict-with-zero-rows case (insert-on-
+            missing retry also rejected with still no row visible),
+            where it re-raises.
         """
-        with Session(self.engine) as session:
-            try:
-                row = ReportInjection(
-                    parent_instance_id=parent_instance_id,
-                    child_instance_id=child_instance_id,
-                    child_message_id=child_message_id,
-                    report_message_id=None,
-                    content=None,
-                    state=_DEFERRED_STATE,
-                    deferred_reason=deferred_reason,
-                    delivered_at=None,
-                    recovery_attempted_at=None,
-                )
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                logger.info(
-                    f"[ReportInjection] DEFERRED marker written: "
-                    f"parent={parent_instance_id[:8]}..., "
-                    f"child={child_instance_id[:8]}..., "
-                    f"msg={child_message_id[:8]}..., "
-                    f"reason={deferred_reason}"
-                )
-                return row
-            except IntegrityError:
-                # W6: concurrent duplicate (router/sweep/Site 1 races
-                # the same triple). The child-keyed bus lock does
-                # NOT serialize the three actors — this is the only
-                # cross-actor gate. Roll back, then update the
-                # existing non-terminal row's reason if it differs.
-                session.rollback()
-                existing = session.exec(
+        try:
+            # Positive-evidence pre-check (Debug Phase 4): the partial
+            # unique index only gates (parent, child, msg) among
+            # NON-TERMINAL rows — a fresh DEFERRED insert alongside an
+            # existing TERMINAL row is index-LEGAL (re-spawn
+            # allowance). Since "already delivered" must rest on
+            # positive evidence, the terminal check happens BEFORE the
+            # insert: a delivered obligation has nothing to preserve.
+            with Session(self.engine) as session:
+                delivered = session.exec(
                     select(ReportInjection)
                     .where(
                         ReportInjection.parent_instance_id
@@ -375,30 +388,113 @@ class ReportInjectionRepository:
                     )
                     .where(
                         ReportInjection.state.in_([
-                            _PENDING_STATE,
-                            _DEFERRED_STATE,
+                            _INJECTED_STATE,
+                            _TASK_DELIVERED_STATE,
+                            _FAILED_STATE,
                         ])
                     )
                 ).first()
+            if delivered is not None:
+                logger.info(
+                    f"[ReportInjection] ensure_deferred no-op: terminal "
+                    f"row present (state={delivered.state}, "
+                    f"delivered_at={delivered.delivered_at}) — positive "
+                    f"delivery evidence for "
+                    f"parent={parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..., "
+                    f"msg={child_message_id[:8]}... "
+                    f"(original reason={deferred_reason}) "
+                    f"— no action needed"
+                )
+                return None
+            return self._insert_deferred_marker(
+                parent_instance_id=parent_instance_id,
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                deferred_reason=deferred_reason,
+            )
+        except IntegrityError:
+            with Session(self.engine) as session:
+                # W6: concurrent duplicate (router/sweep/Site 1 races
+                # the same triple). The child-keyed bus lock does
+                # NOT serialize the three actors — this is the only
+                # cross-actor gate. Roll back, then read the triple
+                # across ALL states: the routing decision needs
+                # POSITIVE evidence, not absence.
+                session.rollback()
+                existing = self._fetch_obligation_row(
+                    session,
+                    parent_instance_id=parent_instance_id,
+                    child_instance_id=child_instance_id,
+                    child_message_id=child_message_id,
+                )
                 if existing is None:
-                    # Benign race, expected occasionally: the
-                    # IntegrityError fired but the SELECT
-                    # (post-rollback) finds no non-terminal row. The
-                    # terminal rows exist (the index predicate
-                    # excludes them), so a race escalated to terminal
-                    # between the rolled-back INSERT and this SELECT.
-                    # No-op — delivery has happened.
-                    logger.info(
-                        f"[ReportInjection] ensure_deferred no-op: "
-                        f"report was already delivered "
-                        f"(racing delivery won) for "
+                    # INSERT-ON-MISSING (Debug Phase 4): the
+                    # IntegrityError fired but NO row exists for the
+                    # triple in ANY state. Absence of rows is not
+                    # delivery — it is an obligation with no marker
+                    # (phantom conflict: delete / terminal-
+                    # escalation race). Insert the marker now; the
+                    # sweep/router recover it as usual.
+                    logger.warning(
+                        f"[ReportInjection] ensure_deferred: "
+                        f"IntegrityError with ZERO rows for "
                         f"parent={parent_instance_id[:8]}..., "
                         f"child={child_instance_id[:8]}..., "
-                        f"msg={child_message_id[:8]}... "
-                        f"(original reason={deferred_reason}) "
-                        f"— no action needed"
+                        f"msg={child_message_id[:8]}... — phantom "
+                        f"conflict (row deleted or escalated between "
+                        f"INSERT and re-read); inserting DEFERRED "
+                        f"marker (insert-on-missing, "
+                        f"reason={deferred_reason})"
                     )
-                    return None
+                    try:
+                        return self._insert_deferred_marker(
+                            parent_instance_id=parent_instance_id,
+                            child_instance_id=child_instance_id,
+                            child_message_id=child_message_id,
+                            deferred_reason=deferred_reason,
+                        )
+                    except IntegrityError:
+                        # Convergence: a legitimate concurrent insert
+                        # raced ours — its row MUST now be visible.
+                        with Session(self.engine) as session2:
+                            session2.rollback()
+                            existing = self._fetch_obligation_row(
+                                session2,
+                                parent_instance_id=parent_instance_id,
+                                child_instance_id=child_instance_id,
+                                child_message_id=child_message_id,
+                            )
+                        if existing is None:
+                            # Persistent conflict with zero rows is a
+                            # REAL DB failure (constraint unrelated to
+                            # the triple, or storage-level fault).
+                            # Re-raise — silently concluding "already
+                            # delivered" here is exactly the
+                            # false-positive bug class (b7ead8a4).
+                            logger.error(
+                                f"[ReportInjection] ensure_deferred: "
+                                f"repeated IntegrityError with still "
+                                f"ZERO rows for "
+                                f"parent={parent_instance_id[:8]}..., "
+                                f"child={child_instance_id[:8]}..., "
+                                f"msg={child_message_id[:8]}... — "
+                                f"persistent conflict, NOT a delivery "
+                                f"race; re-raising (no silent no-op)"
+                            )
+                            raise
+                        logger.info(
+                            f"[ReportInjection] ensure_deferred: "
+                            f"insert-on-missing lost a legitimate "
+                            f"insert race for "
+                            f"parent={parent_instance_id[:8]}..., "
+                            f"child={child_instance_id[:8]}..., "
+                            f"msg={child_message_id[:8]}... — winner "
+                            f"row now visible; falling through to "
+                            f"duplicate routing"
+                        )
+                        # Fall through to state routing below.
+            if existing.state in (_PENDING_STATE, _DEFERRED_STATE):
                 if existing.deferred_reason != deferred_reason:
                     logger.info(
                         f"[ReportInjection] ensure_deferred updating "
@@ -406,10 +502,28 @@ class ReportInjectionRepository:
                         f"injection_id={existing.injection_id[:8]}... "
                         f"{existing.deferred_reason} -> {deferred_reason}"
                     )
+                    # Guarded Core UPDATE (transition_deferred_to_pending
+                    # style) — ``existing`` is detached (loaded in a now-
+                    # closed session), so never re-attach ORM objects;
+                    # state-guarded so a concurrent terminal escalation
+                    # is not overwritten.
+                    with Session(self.engine) as session:
+                        session.execute(
+                            sa_update(ReportInjection)
+                            .where(
+                                ReportInjection.injection_id
+                                == existing.injection_id
+                            )
+                            .where(
+                                ReportInjection.state.in_([
+                                    _PENDING_STATE,
+                                    _DEFERRED_STATE,
+                                ])
+                            )
+                            .values(deferred_reason=deferred_reason)
+                        )
+                        session.commit()
                     existing.deferred_reason = deferred_reason
-                    session.add(existing)
-                    session.commit()
-                    session.refresh(existing)
                     return existing
                 logger.debug(
                     f"[ReportInjection] ensure_deferred: duplicate "
@@ -421,6 +535,132 @@ class ReportInjectionRepository:
                     f"(reason={deferred_reason})"
                 )
                 return None
+            # Terminal row present — POSITIVE evidence that delivery
+            # happened (INJECTED by the live drain / TASK_DELIVERED by
+            # the fallback task / FAILED dead-letter). This is the
+            # ONLY legitimate "already delivered" conclusion.
+            logger.info(
+                f"[ReportInjection] ensure_deferred no-op: terminal "
+                f"row present (state={existing.state}, "
+                f"delivered_at={existing.delivered_at}) — positive "
+                f"delivery evidence for "
+                f"parent={parent_instance_id[:8]}..., "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}... "
+                f"(original reason={deferred_reason}) "
+                f"— no action needed"
+            )
+            return None
+
+    def _insert_deferred_marker(
+        self,
+        *,
+        parent_instance_id: str,
+        child_instance_id: str,
+        child_message_id: str,
+        deferred_reason: str,
+    ) -> ReportInjection:
+        """Insert a fresh DEFERRED marker row and commit it.
+
+        Single-row-creation seam used by both the fast path and the
+        insert-on-missing retry in :meth:`ensure_deferred`. Kept as a
+        separate method so tests can inject a phantom
+        ``IntegrityError`` on the first attempt without mocking the
+        engine.
+
+        Returns:
+            The persisted :class:`ReportInjection` row.
+
+        Raises:
+            ``IntegrityError`` when the obligation-triple partial
+            unique index rejects the insert.
+        """
+        with Session(self.engine) as session:
+            row = ReportInjection(
+                parent_instance_id=parent_instance_id,
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                report_message_id=None,
+                content=None,
+                state=_DEFERRED_STATE,
+                deferred_reason=deferred_reason,
+                delivered_at=None,
+                recovery_attempted_at=None,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            logger.info(
+                f"[ReportInjection] DEFERRED marker written: "
+                f"parent={parent_instance_id[:8]}..., "
+                f"child={child_instance_id[:8]}..., "
+                f"msg={child_message_id[:8]}..., "
+                f"reason={deferred_reason}"
+            )
+            return row
+
+    @staticmethod
+    def _fetch_obligation_row(
+        session: Session,
+        *,
+        parent_instance_id: str,
+        child_instance_id: str,
+        child_message_id: str,
+    ) -> ReportInjection | None:
+        """Read the obligation triple across ALL states.
+
+        Routing priority in :meth:`ensure_deferred`:
+
+        * A NON-TERMINAL row (PENDING/DEFERRED) wins — it is the live
+          obligation another actor already wrote (duplicate path).
+        * Else a TERMINAL row (INJECTED/TASK_DELIVERED/FAILED) — the
+          POSITIVE delivery-evidence shape.
+        * Else ``None`` — genuinely zero rows (insert-on-missing
+          territory).
+
+        The previous read filtered to non-terminal states only, which
+        is what conflated "no row" with "delivered" (repository.py
+        read-path warning mirrored at the write path).
+        """
+        non_terminal = session.exec(
+            select(ReportInjection)
+            .where(
+                ReportInjection.parent_instance_id == parent_instance_id
+            )
+            .where(
+                ReportInjection.child_instance_id == child_instance_id
+            )
+            .where(
+                ReportInjection.child_message_id == child_message_id
+            )
+            .where(
+                ReportInjection.state.in_([
+                    _PENDING_STATE,
+                    _DEFERRED_STATE,
+                ])
+            )
+        ).first()
+        if non_terminal is not None:
+            return non_terminal
+        return session.exec(
+            select(ReportInjection)
+            .where(
+                ReportInjection.parent_instance_id == parent_instance_id
+            )
+            .where(
+                ReportInjection.child_instance_id == child_instance_id
+            )
+            .where(
+                ReportInjection.child_message_id == child_message_id
+            )
+            .where(
+                ReportInjection.state.in_([
+                    _INJECTED_STATE,
+                    _TASK_DELIVERED_STATE,
+                    _FAILED_STATE,
+                ])
+            )
+        ).first()
 
     def find_row_by_report_message_id(
         self, report_message_id: str | None

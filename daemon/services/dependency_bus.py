@@ -970,6 +970,43 @@ class DependencyBus:
         )
         return [FollowUp.from_payload(r.follow_up_payload) for r in rows]
 
+    async def rearm_watch_cache(
+        self, source_task_id: str, follow_up: FollowUp
+    ) -> None:
+        """Mirror a DB-side watcher re-arm into the in-memory cache.
+
+        Pause/resume watcher durability (Debug Phase 4, 2026-09-07):
+        when the resume cascade re-arms a CANCELLED watcher row back
+        to PENDING via the repository (``rearm_cancelled``), the DB is
+        authoritative and all bus gates (``emit_terminal``,
+        ``emit_terminal_for_child_instance``, ``count_pending_for_target``)
+        read it correctly. This method restores the ``watch()``
+        cache-parity invariant for THIS process: the re-armed row is
+        appended to the per-task cache entry exactly as a fresh
+        ``watch()`` would, so ``pending_watchers(task_id)`` on a warm
+        cache cannot report a stale empty view.
+
+        Best-effort by contract: callers wrap it in ``try/except`` —
+        a cache hiccup must never fail the resume cascade (the DB
+        row is already PENDING and drives every gate).
+
+        Args:
+            source_task_id: The re-armed watcher's source task id.
+            follow_up: The FollowUp deserialized from the watcher
+                row's payload.
+        """
+        lock = await self._get_lock(source_task_id)
+        async with lock:
+            if source_task_id not in self._pending:
+                self._pending[source_task_id] = []
+            self._pending[source_task_id].append(follow_up)
+            logger.debug(
+                f"bus rearm_watch_cache: source_task_id="
+                f"{source_task_id[:8]}, "
+                f"target={follow_up.target_instance_id[:8]}",
+                extra={"completion_delivery_path": "bus"},
+            )
+
     async def count_pending_for_target(
         self, target_instance_id: str
     ) -> int:

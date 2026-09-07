@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -45,6 +46,82 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Pause/resume watcher-durability kill-switch (Debug Phase 4, 2026-09-07)
+#
+# The resume cascade re-arms CANCELLED, never-delivered child-completion
+# watchers (``dependency_watchers``) whose source child is still
+# non-terminal — closing the b7ead8a4/d90b18f9 incident class
+# (pause cascade left the watcher CANCELLED; resume created NO
+# replacement; the child's later completion emitted into zero PENDING
+# watchers and the parent stuck in ``waiting_children`` forever).
+#
+# Default ON (mirrors the ``ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED``
+# default-ON kill-switch posture: the fix ships active; explicit falsy
+# spellings disable; blank/unknown resolve ON with a one-shot WARN).
+# OFF = byte-identical legacy resume behavior (no re-arm, no re-arm
+# logging) — the instant-revert path.
+# ─────────────────────────────────────────────────────────────────
+_WATCHER_REARM_ON_RESUME_ENV = "ENSEMBLE_WATCHER_REARM_ON_RESUME"
+_WATCHER_REARM_ON_RESUME_ENABLED: bool | None = None
+
+# Falsy spellings cover both textual (false/no/off) AND zero-style
+# (0/00/-0/0./0x0) forms — same MATRIX_A set as the autopromote
+# resolver (tests/job_queue/test_defer_self_witness_watchdog.py).
+_FALSY_SPELLINGS = ("0", "00", "-0", "0.", "0x0", "false", "no", "off")
+_TRUTHY_SPELLINGS = ("1", "true", "yes", "on", "")
+
+
+def _resolve_watcher_rearm_on_resume() -> bool:
+    """Resolve and cache the resume watcher-re-arm kill-switch.
+
+    Returns:
+        ``True`` (the default) when ``ENSEMBLE_WATCHER_REARM_ON_RESUME``
+        is unset / blank — the resume cascade re-arms CANCELLED,
+        never-delivered watchers whose source child is non-terminal.
+        ``False`` when the env is explicitly falsy (``0`` / ``00`` /
+        ``-0`` / ``0.`` / ``0x0`` / ``false`` / ``no`` / ``off``) —
+        legacy behavior, no watcher writes on resume.
+
+    Unknown non-blank values fall back to ON with a one-shot WARN —
+    consistent with the default-ON direction (a typo that does not
+    parse as falsy is still ON; explicit OFF always wins). The
+    boolean is cached for the daemon's lifetime (restart-read; env
+    flips mid-flight are inert).
+    """
+    global _WATCHER_REARM_ON_RESUME_ENABLED
+    if _WATCHER_REARM_ON_RESUME_ENABLED is not None:
+        return _WATCHER_REARM_ON_RESUME_ENABLED
+    raw = os.environ.get(_WATCHER_REARM_ON_RESUME_ENV, "1").strip().lower()
+    if raw in _FALSY_SPELLINGS:
+        _WATCHER_REARM_ON_RESUME_ENABLED = False
+    elif raw in _TRUTHY_SPELLINGS:
+        _WATCHER_REARM_ON_RESUME_ENABLED = True
+    else:
+        logger.warning(
+            "%s=%r is not a recognized truthy/falsy value; falling "
+            "back to ON (the default). Recognized falsy spellings: "
+            "0/00/-0/0./0x0/false/no/off — set one of those + restart "
+            "to disable resume watcher re-arm.",
+            _WATCHER_REARM_ON_RESUME_ENV,
+            raw,
+        )
+        _WATCHER_REARM_ON_RESUME_ENABLED = True
+    state = _WATCHER_REARM_ON_RESUME_ENABLED
+    logger.info(
+        "Watcher re-arm on resume is %s (env %s)",
+        "ENABLED" if state else "DISABLED",
+        _WATCHER_REARM_ON_RESUME_ENV,
+    )
+    return state
+
+
+def _reset_watcher_rearm_for_tests() -> None:
+    """Reset the cached kill-switch boolean (test isolation only)."""
+    global _WATCHER_REARM_ON_RESUME_ENABLED
+    _WATCHER_REARM_ON_RESUME_ENABLED = None
 
 
 def _resolve_guard_enabled() -> bool:
@@ -3082,6 +3159,193 @@ class InstanceLifecycleService:
         # desired behaviour — the instance is going away permanently).
         return result
 
+    async def _rearm_cancelled_watchers_for_resumed(
+        self, instance_id: str
+    ) -> int:
+        """Re-arm CANCELLED child-completion watchers after resume.
+
+        Pause/resume watcher durability (Debug Phase 4, 2026-09-07).
+        The pause cascade can leave a child-completion watcher in
+        CANCELLED state (graph-task cancellation routes the watcher
+        through a force-cancel cleanup path) and resume previously
+        created NO replacement — the child's post-resume completion
+        then emitted into ZERO PENDING watchers (both the task-keyed
+        and the corrective (parent, child)-keyed emit match PENDING
+        rows only), so the parent never woke and stuck in
+        ``waiting_children`` forever (production incident: leader
+        b7ead8a4 / child d90b18f9, 2026-09-07).
+
+        This hook runs per resumed node in the post-commit section of
+        :meth:`resume_instance_cascade`, next to the FIRED-watcher
+        compaction hook (``_compact_fired_watchers_for_paused``, which
+        handles FIRED rows — this method is its CANCELLED-state
+        sibling).
+
+        Per-row decision:
+
+        * Candidate: ``state = 'CANCELLED' AND enqueued_at IS NULL``
+        for the resumed parent (``find_cancelled_unenqueued_for_target``
+        — never-delivered only; a delivered watcher is FIRED + stamped
+        and is never resurrected: exactly-once preserved).
+        * Resolve the source child id from the payload's
+        ``metadata.child_id`` (stamped by ``send_message``); legacy
+        rows without it fall back to the ``source_task_id`` → task →
+        instance lookup.
+        * Re-arm ONLY when the child instance exists and is
+        NON-TERMINAL — the child will run again (its paused task
+        replays) and can fire the watcher. A watcher cancelled
+        because the child TERMINATED is permanent and stays
+        cancelled (terminate semantics preserved).
+        * ``rearm_cancelled`` is rowcount-guarded (CANCELLED →
+        PENDING): a concurrent transition between the candidate
+        SELECT and the UPDATE makes this call lose the race and skip.
+
+        The live bus's in-memory cache is mirrored best-effort via
+        ``DependencyBus.rearm_watch_cache`` (DB stays authoritative —
+        every gate reads it — the cache refresh only keeps warm-cache
+        ``pending_watchers`` views honest).
+
+        Never raises: per-row and top-level failures are logged and
+        swallowed — the sweep lanes
+        (``report_delivery_recovery``) remain the durable backstop;
+        this hook is the zero-latency restore.
+
+        Args:
+            instance_id: The resumed instance (the watchers' target
+                parent).
+
+        Returns:
+            Number of watchers re-armed to PENDING (diagnostics only).
+        """
+        if not _resolve_watcher_rearm_on_resume():
+            return 0
+
+        # Lazy imports — circular-import breaker (mirrors the
+        # _compact_fired_watchers_for_paused local-import style).
+        from ..repositories.dependency_bus.repository import (
+            DependencyWatcherRepository,
+        )
+        from .dependency_bus import FollowUp
+
+        repo = DependencyWatcherRepository(self._manager.engine)
+        try:
+            candidates = await asyncio.to_thread(
+                repo.find_cancelled_unenqueued_for_target, instance_id
+            )
+        except Exception as scan_err:
+            logger.warning(
+                f"resume_instance_cascade: watcher re-arm scan failed "
+                f"for {instance_id[:8]}... (non-fatal): "
+                f"{type(scan_err).__name__}: {scan_err}"
+            )
+            return 0
+        if not candidates:
+            return 0
+
+        instance_repo = self._manager._instance_repository
+        bus = get_dependency_bus()
+        rearmed = 0
+        for row in candidates:
+            try:
+                child_id = self._resolve_watcher_child_id(row)
+                if child_id is None:
+                    logger.debug(
+                        f"resume_instance_cascade: re-arm skipped — "
+                        f"cannot resolve child for watch_id="
+                        f"{row.watch_id[:8]}... (no payload child_id, "
+                        f"no task row)"
+                    )
+                    continue
+                child = await asyncio.to_thread(instance_repo.get, child_id)
+                if child is None:
+                    logger.debug(
+                        f"resume_instance_cascade: re-arm skipped — "
+                        f"child {child_id[:8]}... row missing for "
+                        f"watch_id={row.watch_id[:8]}..."
+                    )
+                    continue
+                if child.status in TERMINAL_STATUSES:
+                    # Terminate-class cancellation: the child is gone
+                    # permanently — the watcher must stay cancelled.
+                    logger.debug(
+                        f"resume_instance_cascade: re-arm skipped — "
+                        f"child {child_id[:8]}... terminal "
+                        f"({child.status}) for "
+                        f"watch_id={row.watch_id[:8]}..."
+                    )
+                    continue
+                if not await asyncio.to_thread(
+                    repo.rearm_cancelled, row.watch_id
+                ):
+                    # Lost the guarded race (another actor transitioned
+                    # the row) — skip, exactly-once preserved.
+                    continue
+                rearmed += 1
+                logger.info(
+                    f"resume_instance_cascade: re-armed cancelled "
+                    f"watcher after pause — watch_id="
+                    f"{row.watch_id[:8]}..., parent="
+                    f"{instance_id[:8]}..., child={child_id[:8]}..., "
+                    f"source_task={str(row.source_task_id)[:8]}... "
+                    f"(CANCELLED → PENDING)"
+                )
+                if bus is not None:
+                    payload = row.follow_up_payload
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    await bus.rearm_watch_cache(
+                        str(row.source_task_id),
+                        FollowUp.from_payload(payload),
+                    )
+            except Exception as row_err:
+                logger.warning(
+                    f"resume_instance_cascade: watcher re-arm failed "
+                    f"for watch_id={getattr(row, 'watch_id', '?')[:8]}..."
+                    f" (non-fatal, sweep remains the backstop): "
+                    f"{type(row_err).__name__}: {row_err}"
+                )
+        return rearmed
+
+    def _resolve_watcher_child_id(self, row: "DependencyWatcher") -> str | None:
+        """Resolve the source child instance id for a watcher row.
+
+        Primary: the payload's ``metadata.child_id`` — stamped by
+        ``send_message`` at registration (production rows always carry
+        it). Fallback for legacy / test rows: ``source_task_id`` →
+        ``task.instance_id`` (raw SQL, CAST-guarded like the
+        reconcile path in ``task/repository.py``). Returns ``None``
+        when neither resolves (caller skips the re-arm).
+        """
+        payload = row.follow_up_payload
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = None
+        if isinstance(payload, dict):
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                child_id = metadata.get("child_id")
+                if child_id:
+                    return str(child_id)
+        # Legacy fallback: source_task_id → task.instance_id.
+        raw = row.source_task_id
+        try:
+            task_id = int(str(raw))
+        except (TypeError, ValueError):
+            return None
+        try:
+            with Session(self._manager.engine) as session:
+                return session.exec(
+                    select(Task.instance_id).where(Task.id == task_id)
+                ).first()
+        except Exception as task_err:
+            logger.debug(
+                f"resume_instance_cascade: task fallback lookup failed "
+                f"for source_task_id={raw} (non-fatal): {task_err}"
+            )
+            return None
+
     async def resume_instance_cascade(self, instance_id: str) -> dict:
         """Resume an instance and cascade to all children.
 
@@ -3246,6 +3510,29 @@ class InstanceLifecycleService:
                         f"resume_instance_cascade: compaction hook raised "
                         f"unexpected error for {resumed_node_id[:8]}... "
                         f"({type(compact_err).__name__}: {compact_err})"
+                    )
+
+            # Debug Phase 4 (2026-09-07): re-arm CANCELLED, never-
+            # delivered child-completion watchers for each resumed
+            # node. The FIRED-watcher compaction above handles rows
+            # that fired BEFORE the pause; this hook is the CANCELLED
+            # sibling — the b7ead8a4/d90b18f9 incident class (watcher
+            # cancelled mid-pause, never recreated, parent stuck in
+            # waiting_children forever). Kill-switch:
+            # ENSEMBLE_WATCHER_REARM_ON_RESUME=0 disables (legacy
+            # byte-identical resume). The hook swallows its own
+            # errors — the sweep lanes remain the durable backstop.
+            for resumed_node_id in resumed_ids:
+                try:
+                    await self._rearm_cancelled_watchers_for_resumed(
+                        resumed_node_id
+                    )
+                except Exception as rearm_err:
+                    logger.warning(
+                        f"resume_instance_cascade: watcher re-arm hook "
+                        f"raised unexpected error for "
+                        f"{resumed_node_id[:8]}... "
+                        f"({type(rearm_err).__name__}: {rearm_err})"
                     )
 
             worker_pool = getattr(self._manager, "_worker_pool", None)
