@@ -38,7 +38,7 @@ from daemon.repositories.report_injection import (
     ReportInjectionRepository,
     ReportInjectionState,
 )
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 
 # =============================================================================
@@ -351,21 +351,33 @@ class TestEnsureDeferredWriteOnceGate:
     def test_ensure_deferred_after_terminal_allowed(
         self, repo, engine
     ) -> None:
-        """After the live drain delivers a PENDING row (terminal
-        INJECTED), a NEW ``ensure_deferred`` for the same triple is
-        allowed — terminal rows are out of the index predicate, so a
-        fresh non-terminal obligation (re-spawn scenario) can be
-        recorded."""
+        """Amended by e9aac370: SAME triple after terminal INJECTED =
+        positive delivery evidence → no-op (returns None, row count
+        unchanged); DIFFERENT triple still inserts (re-spawn)."""
+        # Canonical pins: tests/unit/test_ensure_deferred_insert_on_missing.py
+        # (terminal-positive-evidence contract) — flagged for leader
+        # ratification.
         _enqueue(repo, engine)  # PENDING row
         repo.claim_for_injection("parent-1")  # → INJECTED (terminal)
+        with Session(engine) as session:
+            before = len(session.exec(select(ReportInjection)).all())
         new_marker = repo.ensure_deferred(
             parent_instance_id="parent-1",
             child_instance_id="child-1",
             child_message_id="msg-1",
             deferred_reason=DEFERRED_REASON_PAUSE_TOCTOU,
         )
-        assert new_marker is not None
-        assert new_marker.state == ReportInjectionState.DEFERRED.value
+        assert new_marker is None  # (a) same triple: terminal = evidence
+        with Session(engine) as session:
+            assert len(session.exec(select(ReportInjection)).all()) == before
+        # (b) DIFFERENT triple (fresh child ids): re-spawn inserts.
+        respawn = repo.ensure_deferred(
+            parent_instance_id="parent-1", child_instance_id="child-2",
+            child_message_id="msg-2",
+            deferred_reason=DEFERRED_REASON_PAUSE_TOCTOU,
+        )
+        assert respawn is not None
+        assert respawn.state == ReportInjectionState.DEFERRED.value
 
     def test_duplicate_non_terminal_triple_raises_integrity_error(
         self, repo, engine
