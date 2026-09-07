@@ -74,6 +74,13 @@ This tells us:
    h. git commit → Complete merge
 ```
 
+### Worktree Mode
+>=2 fresh wt.active.<branch>.<task-id> rows -> ../<repo>-wt-<slug>/; else skip
+Reconcile: list --porcelain; orphan: dirty or HEAD <30 min -> adopt+heartbeat else remove; dirty-remove refusal -> STOP+report; phantom -> delete_keys.
+wt.claim.<slug>: set_kv AFTER add; heartbeat per action; stale 10 min / census 15 min.
+Cleanup: merge -> remove -> delete_keys claim+census (remove-first)
+never rely on ambient KV surfacing; dispatch context is primary; explicit KV read is the backstop.
+Traps: daemon in worktree hits prod defaults (export env explicitly)
 ### 3. Common Scenarios
 
 #### Scenario: "Commit my changes"

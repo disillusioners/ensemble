@@ -27,6 +27,7 @@
 - **SKIP when:** simple status checks, control messages ("proceed"), or anything where the message itself already carries everything.
 - **Suggested keys:** `files` (list), `notes` (str), `plan_ref` (str). Any key passes through.
 - Don't duplicate what's already in the message text — `context` is for supplementary info.
+Suggested context= keys: wt_path/wt_slug/wt_branch. Hand-off REQUIRES non-empty context (>= wt_path). See giter/workflow.md -> Worktree Mode.
 
 ```python
 send_message(

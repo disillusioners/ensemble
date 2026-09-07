@@ -83,6 +83,8 @@ These tools are always available:
 - `git push` — Push to remote
 - `git push -u origin <branch>` — Push and set upstream
 
+### Worktrees
+list --porcelain: pre-check + reconcile. add -b: new branch only. add: reuse. remove: cleanup (prune NO-OP). prune: foreign-only. stash push -- <files> (bare stash strands workers).
 ### Recovery
 - `git reflog` — Reference log
 - `git reset --soft HEAD~1` — Undo last commit (keep changes)

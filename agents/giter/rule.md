@@ -83,6 +83,7 @@
 3. Suggest branch naming convention
 4. Create or switch as appropriate
 5. Verify with `git branch` or `git checkout`
+- >=2 fresh wt.active rows -> sibling worktree; see workflow.md -> Worktree Mode.
 
 ### Conflict Workflow
 
