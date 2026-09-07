@@ -67,6 +67,12 @@ logger = logging.getLogger(__name__)
 # (``20260621_000001_create_dependency_watchers.sql``).
 _PENDING_STATE: str = DependencyWatcherState.PENDING.value
 
+# Module-level CANCELLED state literal — same capture rationale as
+# ``_PENDING_STATE``; used by the pause/resume watcher-durability
+# re-arm path (``find_cancelled_unenqueued_for_target`` /
+# ``rearm_cancelled``, Debug Phase 4 2026-09-07).
+_CANCELLED_STATE: str = DependencyWatcherState.CANCELLED.value
+
 
 class DependencyWatcherRepository:
     """SQLModel-based repository for the ``dependency_watchers`` table.
@@ -747,3 +753,101 @@ class DependencyWatcherRepository:
                     f"missing): watch_id={watch_id}, requested={new_state}"
                 )
             return transitioned
+
+    # --------------------------------------------------------
+    # Pause/resume watcher durability (Debug Phase 4, 2026-09-07)
+    # --------------------------------------------------------
+
+    def find_cancelled_unenqueued_for_target(
+        self, target_instance_id: str
+    ) -> list[DependencyWatcher]:
+        """List CANCELLED, never-delivered watchers for a target parent.
+
+        Pause/resume watcher-durability candidates (Debug Phase 4,
+        production incident leader b7ead8a4 / child d90b18f9): the
+        pause cascade can leave a child-completion watcher in
+        CANCELLED state (graph-task cancellation → force-cancel
+        watcher cleanup) and resume created NO replacement — the
+        child's later completion emitted into zero PENDING watchers
+        and the parent stayed ``waiting_children`` forever.
+
+        The predicate mirrors the resume Pass-1 delivery predicate
+        (``state = FIRED AND enqueued_at IS NULL``) with CANCELLED as
+        the source state: ``enqueued_at IS NULL`` means the FollowUp
+        was NEVER delivered (a delivered watcher would be FIRED +
+        stamped and must not be resurrected — exactly-once).
+
+        The caller (``InstanceLifecycleService.
+        _rearm_cancelled_watchers_for_resumed``) owns the CHILD
+        liveness guard — only watchers whose source child instance is
+        still non-terminal (it will run again and can fire) are
+        re-armed; watchers cancelled because the child TERMINATED are
+        permanent and stay cancelled.
+
+        Args:
+            target_instance_id: The parent instance id whose
+                cancelled watchers should be listed.
+
+        Returns:
+            List of :class:`DependencyWatcher` rows in CANCELLED
+            state with ``enqueued_at IS NULL``, oldest first. Empty
+            list when none.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(DependencyWatcher)
+                .where(
+                    DependencyWatcher.target_instance_id
+                    == target_instance_id
+                )
+                .where(DependencyWatcher.state == _CANCELLED_STATE)
+                .where(DependencyWatcher.enqueued_at.is_(None))
+                .order_by(DependencyWatcher.created_at.asc())
+            )
+            return list(session.exec(stmt).all())
+
+    def rearm_cancelled(self, watch_id: str) -> bool:
+        """Atomically re-arm one CANCELLED watcher back to PENDING.
+
+        The write-once inverse of :meth:`transition_state`: a guarded
+        Core UPDATE ``WHERE watch_id = :watch_id AND state =
+        'CANCELLED'``. Rowcount-gated so a concurrent actor that
+        already cancelled / fired the row between the candidate
+        SELECT and this UPDATE wins and this call returns ``False``
+        (the caller must skip — never resurrect a row another actor
+        just moved).
+
+        ``fired_at`` is already NULL on CANCELLED rows (both cancel
+        paths stamp ``None``) and is left untouched; ``enqueued_at``
+        is untouched (the candidate predicate guarantees NULL).
+
+        Args:
+            watch_id: The watcher to re-arm.
+
+        Returns:
+            ``True`` iff the row was CANCELLED and is now PENDING.
+            ``False`` when the row is missing or no longer CANCELLED
+            (concurrent transition — caller skips).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                sa_update(DependencyWatcher)
+                .where(DependencyWatcher.watch_id == watch_id)
+                .where(DependencyWatcher.state == _CANCELLED_STATE)
+                .values(state=_PENDING_STATE)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            rearmed = result.rowcount > 0
+            if rearmed:
+                logger.info(
+                    f"[DependencyWatcher] re-armed CANCELLED watcher "
+                    f"to PENDING (resume durability): "
+                    f"watch_id={watch_id}"
+                )
+            else:
+                logger.debug(
+                    f"rearm_cancelled no-op (missing or no longer "
+                    f"CANCELLED): watch_id={watch_id}"
+                )
+            return rearmed

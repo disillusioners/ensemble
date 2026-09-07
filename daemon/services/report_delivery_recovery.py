@@ -63,6 +63,11 @@ Per-row invariants (every lane):
   = another actor already recovered → skip).
 * ``ensure_deferred`` absorbs ``IntegrityError`` on the obligation-
   triple index (W6 — the router/sweep NEVER see raw IntegrityError).
+  Debug Phase 4 (2026-09-07): ``ensure_deferred`` is INSERT-ON-
+  MISSING — a post-rollback re-read finding ZERO rows inserts a
+  fresh DEFERRED marker (absence is never "already delivered");
+  ``None`` now requires positive evidence (a duplicate non-terminal
+  row or a terminal delivered row).
 * Re-enter ``_process_child_completion_and_notify_parent`` under
   per-instance S3 serialization.
 * Per-row errors leave rows DEFERRED (no rollback to terminal —
@@ -925,11 +930,19 @@ class ReportDeliveryRecoveryService:
             return
 
         # Step 2: ensure_deferred. W6: IntegrityError is absorbed by
-        # ``ensure_deferred`` itself — the call returns ``None`` for
-        # a concurrent duplicate (e.g. Site 1 already wrote a
-        # DEFERRED row for the same triple). We proceed regardless
-        # of the return value because the router/sweep NEVER see
-        # raw IntegrityError.
+        # ``ensure_deferred`` itself — the call returns ``None`` ONLY
+        # with positive evidence: a concurrent duplicate was absorbed
+        # (a non-terminal row for the triple already exists — e.g.
+        # Site 1 wrote it) or a TERMINAL row proves prior delivery.
+        # Since Debug Phase 4 (2026-09-07) a ZERO-row triple INSERTs
+        # a fresh marker (insert-on-missing) — the old "racing
+        # delivery won" no-op for zero rows was a false positive that
+        # made this lane flap every cycle without healing (incident
+        # b7ead8a4/d90b18f9). We proceed regardless of the return
+        # value because the router/sweep NEVER see raw IntegrityError
+        # (the persistent-conflict-with-zero-rows case re-raises and
+        # is caught by the per-row handler below → errors, retried
+        # next cycle).
         #
         # Propagation style (Rec-2, 2026-08-20): catch + LOG + RAISE
         # — the SAME style as every other per-row handler in this
@@ -958,11 +971,15 @@ class ReportDeliveryRecoveryService:
             )
             raise
 
-        # ``row is None`` means a concurrent duplicate was absorbed
-        # (W6) — the OTHER actor (Site 1 / another sweep cycle) has
-        # the obligation; we treat it as already_recovered and skip
-        # to avoid duplicate transitions. The other actor's
-        # reconcile+re-enter path will recover the row.
+        # ``row is None`` now REQUIRES positive evidence (Debug Phase
+        # 4, 2026-09-07): a concurrent duplicate was absorbed (a
+        # non-terminal row for the triple exists — the OTHER actor
+        # (Site 1 / another sweep cycle) has the obligation and its
+        # recovery path owns it) OR a terminal row proves the report
+        # was already delivered. Both dispositions are safe to skip —
+        # we treat either as already_recovered and avoid duplicate
+        # transitions. ``None`` is NEVER returned for a zero-row
+        # triple anymore (that shape inserts instead).
         if row is None:
             result.already_recovered += 1
             return
