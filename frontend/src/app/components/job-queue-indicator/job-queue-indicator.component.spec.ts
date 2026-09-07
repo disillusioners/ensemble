@@ -1,6 +1,6 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
-import { MissionListResponse, MissionSummary } from '../../models/mission.model';
+import { Job, JobStatus, MissionLiveness, isTerminalStatus, buildQueueTree } from '../../models/job.model';
+import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
 import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
@@ -26,8 +26,15 @@ import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
  * Angular.
  */
 class MockJobQueueIndicatorComponent {
-  /** Raw active jobs (running + paused + pending) — mirrors ``activeJobs``. */
-  private readonly activeJobs = signal<Job[]>([]);
+  /**
+   * Raw active jobs (running + paused + pending) — mirrors the
+   * component's ``activeJobs`` signal. The mirror exposes it as a
+   * readonly public signal so the panel-binding seam tests can assert
+   * that the FULL non-terminal set (not the prior running-only filter)
+   * reaches the embedded panel (C1 fix).
+   */
+  private readonly _activeJobs = signal<Job[]>([]);
+  readonly activeJobs = this._activeJobs.asReadonly();
 
   /**
    * Raw recent jobs — mirrors the private ``allRecentJobs`` signal.
@@ -44,14 +51,34 @@ class MockJobQueueIndicatorComponent {
    * REPLACES the former ``missionCountRaw: number | null`` signal — the
    * segmented pill needs the per-liveness breakdown so we carry the full
    * page here, not just a count.
+   *
+   * The mirror exposes this signal as ``lastMissionsPayload`` (read-only)
+   * so the C2 retention test can assert the raw payload wasn't
+   * overwritten by a degraded-200 envelope.
    */
-  private readonly missionsPayload = signal<MissionListResponse | null>(null);
+  private readonly _missionsPayload = signal<MissionListResponse | null>(null);
+  readonly lastMissionsPayload = this._missionsPayload.asReadonly();
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
 
   /** Wall-clock time of the last successful forkJoin — used by ``refreshAgeSeconds``. */
   private readonly lastFetchAt = signal<number | null>(null);
+
+  /**
+   * C3 mirror — the latest non-null count from the canonical helper.
+   * Initial ``null`` (pre-data); retained across degraded/null ticks
+   * so the badge never flips back to a false bare 0/0.
+   */
+  private readonly liveMissionCountRaw = signal<number | null>(null);
+
+  /**
+   * C2/C3/W-jobs-intake mirror — non-null when the latest poll tick
+   * had a per-leg failure; ``null`` on a clean tick. The UI surfaces
+   * this as a degraded modifier on the missions segment so screen
+   * readers don't read "0 live missions" during an outage.
+   */
+  readonly lastIntakeError = signal<string | null>(null);
 
   // ---------------------------------------------------------------------------
   // Helpers exposed as methods so tests can call them directly.
@@ -80,11 +107,11 @@ class MockJobQueueIndicatorComponent {
   // ---------------------------------------------------------------------------
 
   runningCount = computed(
-    () => this.activeJobs().filter((j) => this.isRunningStatus(j.status)).length
+    () => this._activeJobs().filter((j) => this.isRunningStatus(j.status)).length
   );
 
   pendingCount = computed(
-    () => this.activeJobs().filter((j) => this.isPendingStatus(j.status)).length
+    () => this._activeJobs().filter((j) => this.isPendingStatus(j.status)).length
   );
 
   totalNonTerminal = computed(() => this.runningCount() + this.pendingCount());
@@ -92,32 +119,26 @@ class MockJobQueueIndicatorComponent {
   isIdle = computed(() => this.totalNonTerminal() === 0);
 
   /**
-   * Mission-awareness mirror — the N comes from the authoritative
-   * missions projection (``GET /api/missions``), fed via
-   * ``applyFetchResult`` with mocked service payloads. ``null`` count
-   * is NOT rendered as 0: the last known value is retained so the
-   * badge never shows a false bare 0/0 while live missions exist.
-   *
-   * REPLACES the former ``missionCountRaw ?? 0`` fallback — now reads
-   * the count leg out of the cached ``MissionListResponse``: prefer
-   * ``payload.total`` (authoritative filter-aware COUNT) and fall
-   * back to ``payload.missions.length`` only when the count leg
-   * degraded (``total === null``).
+   * C3 mirror — widened to ``number | null`` and routed through the
+   * canonical ``missionCountFromListResponse`` helper. The mirror
+   * feeds ``liveMissionCountRaw`` directly from ``applyFetchResult``
+   * so the test pins below can drive the signal end-to-end without
+   * re-implementing the helper.
    */
-  liveMissionCount = computed(() => {
-    const p = this.missionsPayload();
-    if (!p) return 0;
-    return p.total ?? p.missions.length;
-  });
+  liveMissionCount = computed<number | null>(() => this.liveMissionCountRaw());
 
-  hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+  /** C3 mirror — handles null (pre-data state). */
+  hasLiveMissions = computed(() => {
+    const n = this.liveMissionCount();
+    return n !== null && n > 0;
+  });
 
   /** Defer-gate warning — mirrors the component's ``deferBlockWarning`` signal. */
   deferBlockWarning = signal<DeferBlockIndicator | null>(null);
 
   displayText = computed(() => {
     if (this.totalNonTerminal() === 0 && this.hasLiveMissions()) {
-      return `missions: ${this.liveMissionCount()}`;
+      return `missions: ${this.liveMissionCount() ?? 0}`;
     }
     return `${this.runningCount()}/${this.totalNonTerminal()}`;
   });
@@ -139,11 +160,11 @@ class MockJobQueueIndicatorComponent {
   );
 
   missionsSegmentText = computed(
-    () => `${this.liveMissionCount()}`
+    () => `${this.liveMissionCount() ?? 0}`
   );
 
   liveMissionBreakdown = computed(() => {
-    const list = this.missionsPayload()?.missions ?? [];
+    const list = this.lastMissionsPayload()?.missions ?? [];
     let processing = 0;
     let pending = 0;
     let paused = 0;
@@ -156,7 +177,7 @@ class MockJobQueueIndicatorComponent {
   });
 
   missionsList = computed<MissionSummary[]>(() => {
-    return this.missionsPayload()?.missions ?? [];
+    return this.lastMissionsPayload()?.missions ?? [];
   });
 
   refreshAgeSeconds = computed(() => {
@@ -172,15 +193,19 @@ class MockJobQueueIndicatorComponent {
    */
   tooltipText = computed(() => {
     const breakdown = this.liveMissionBreakdown();
+    const liveCount = this.liveMissionCount();
+    const liveLine = liveCount === null
+      ? 'Live missions: count unavailable'
+      : `Live missions: ${liveCount} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`;
     return [
       `Running ${this.runningCount()} · Queued ${this.pendingCount()}`,
-      `Live missions: ${this.liveMissionCount()} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`,
+      liveLine,
       `refreshed ${this.refreshAgeSeconds()}s ago`,
     ].join('\n');
   });
 
   runningJobs = computed(() =>
-    this.activeJobs().filter((j) => this.isRunningStatus(j.status))
+    this._activeJobs().filter((j) => this.isRunningStatus(j.status))
   );
 
   /**
@@ -245,7 +270,7 @@ class MockJobQueueIndicatorComponent {
   // ---------------------------------------------------------------------------
 
   setActiveJobs(j: Job[]): void {
-    this.activeJobs.set(j);
+    this._activeJobs.set(j);
   }
 
   setRecentJobs(j: Job[]): void {
@@ -262,10 +287,16 @@ class MockJobQueueIndicatorComponent {
    * forkJoin leg can be exercised end-to-end without HTTP. ``total``
    * defaults to ``missions.length`` so the badge's
    * ``total ?? missions.length`` fallback stays consistent.
+   *
+   * ``degraded`` defaults to ``false`` (the healthy tick shape). Tests
+   * exercising C2 retention (a 200-OK ``degraded:true`` envelope) pass
+   * ``{ degraded: true }`` to flip the flag — the prior hard-coded
+   * ``false`` made the degraded-200 path unreachable from specs.
    */
   static buildMissionsPayload(
     overrides: Array<Partial<MissionSummary>>,
-    total?: number
+    total?: number,
+    options?: { degraded?: boolean }
   ): MissionListResponse {
     const missions: MissionSummary[] = overrides.map((o, i) => ({
       mission_id: `m-${i}`,
@@ -283,11 +314,11 @@ class MockJobQueueIndicatorComponent {
     }));
     return {
       missions,
-      total: total ?? missions.length,
+      total: options?.degraded ? null : (total ?? missions.length),
       limit: 20,
       offset: 0,
       has_more: false,
-      degraded: false,
+      degraded: options?.degraded ?? false,
     };
   }
 
@@ -296,64 +327,89 @@ class MockJobQueueIndicatorComponent {
    * ``forkJoin`` next-handler body — driven with MOCKED service
    * payloads so tests prove the intake wiring without HTTP.
    *
-   * Parity contract with the component:
-   * - jobs (active + recent) stored verbatim;
+   * Parity contract with the component (C2/C3/W-jobs-intake
+   * honesty):
+   * - ``active`` / ``recent`` may be ``null`` (per-leg catchError
+   *   swallowed a failure); on ``null`` we RETAIN the previous list
+   *   rather than resetting to ``[]``;
    * - ``missions === null`` (degraded count leg / 404-skew failure)
    *   RETAINS the previous payload — never falsely idle;
+   * - C2 fix: a 200-OK ``degraded:true`` envelope ALSO retains the
+   *   previous payload and DOES NOT touch the count signal;
+   * - C3 fix: ``liveMissionCountRaw`` is updated only via the
+   *   canonical ``missionCountFromListResponse`` helper, on a
+   *   non-degraded tick;
    * - ``deferBlocked === null`` hides the warning; a payload is run
-   *   through the canonical ``deferBlockIndicator`` helper.
+   *   through the canonical ``deferBlockIndicator`` helper;
+   * - ``lastFetchAt`` advances only when at least one leg succeeded.
    *
    * ``missions`` now carries the FULL ``MissionListResponse``
    * envelope (REPLACES the prior ``number | null`` signature) — the
    * segmented pill needs the per-liveness breakdown, not just a count.
    */
   applyFetchResult(
-    active: Job[],
-    recent: Job[],
+    active: Job[] | null,
+    recent: Job[] | null,
     missions: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
-    this.activeJobs.set(active);
-    this.allRecentJobs.set(recent);
-    if (missions !== null) {
-      this.missionsPayload.set(missions);
+    if (active !== null) this._activeJobs.set(active);
+    if (recent !== null) this.allRecentJobs.set(recent);
+    if (missions !== null && !missions.degraded) {
+      this._missionsPayload.set(missions);
+      const count = missionCountFromListResponse(missions);
+      this.liveMissionCountRaw.set(count);
     }
-    this.lastFetchAt.set(Date.now());
+    const anyNull =
+      active === null || recent === null || missions === null || deferBlocked === null;
+    if (!anyNull) this.lastIntakeError.set(null);
+    if (active !== null || recent !== null || missions !== null || deferBlocked !== null) {
+      this.lastFetchAt.set(Date.now());
+    }
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
     );
   }
 
   // ---------------------------------------------------------------------------
-  // Error-path mirror — replicates ``fetchBadgeSignals()``'s forkJoin error
-  // handler.
-  //
-  // C3 fix: ``JobService.listActiveJobs()`` and ``listRecentJobs()`` no longer
-  // swallow failures, so errors propagate to a single ``forkJoin`` error
-  // callback here that resets both ``activeJobs`` and ``allRecentJobs`` to
-  // ``[]`` and logs via ``console.error``. The mirror records the last error
-  // so tests can assert it was received without a real ``console.error``.
+  // Error-path mirror — per-leg catchError now isolates failures
+  // (W-forkJoin legs); ``onLegError`` mirrors the component's
+  // ``recordLegError`` so tests can pin the per-leg error flow.
   // ---------------------------------------------------------------------------
 
-  /** Last error passed to ``onFetchError`` — mirrors the ``console.error`` side-effect. */
-  lastFetchError: unknown = null;
+  /** Last error passed to ``onLegError`` — mirrors the ``console.warn`` side-effect. */
+  lastLegError: { leg: string; err: unknown } | null = null;
 
-  /** Count of times ``onFetchError`` has been invoked — for idempotency assertions. */
-  fetchErrorCount = 0;
+  /** Count of per-leg errors recorded — for idempotency assertions. */
+  legErrorCount = 0;
 
   /**
-   * Mirror of the real component's ``fetchBadgeSignals()`` error handler:
-   * clears both JOB signals to ``[]`` so the indicator surfaces the
-   * intake truthfully (not a stale snapshot) until the next
-   * successful poll tick. The missions count is deliberately NOT
-   * cleared — "count unavailable" retains the last known value so a
-   * live leader mission never flips the badge to a false bare 0/0.
+   * Mirror of the real component's ``recordLegError`` — sets
+   * ``lastIntakeError`` so the UI can flip into a degraded visual.
+   * Mirrors the W-jobs-intake-honesty contract: do NOT reset the
+   * active/recent lists to ``[]`` (a bare 0/0 plus a stale
+   * "refreshed Ns ago" would impersonate a healthy poll).
+   */
+  onLegError(leg: string, err: unknown): void {
+    this.legErrorCount += 1;
+    this.lastLegError = { leg, err };
+    const reason =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : 'fetch failed';
+    this.lastIntakeError.set(`${leg}: ${reason}`);
+  }
+
+  /**
+   * Mirror of the real component's forkJoin safety-net error path —
+   * kept as a last-resort handler for synchronous operator throws
+   * that escape per-leg isolation. Per-leg catchError means this is
+   * normally unreachable for routine HTTP failures.
    */
   onFetchError(err: unknown): void {
-    this.fetchErrorCount += 1;
-    this.lastFetchError = err;
-    this.activeJobs.set([]);
-    this.allRecentJobs.set([]);
+    this.legErrorCount += 1;
+    this.lastLegError = { leg: 'forkjoin', err };
+    const reason =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : 'fetch failed';
+    this.lastIntakeError.set(`forkjoin: ${reason}`);
   }
 }
 
@@ -626,8 +682,103 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.displayText()).toBe('0/0');
     });
 
-    it('shows bare 0/0 before any missions payload arrives (pre-data state)', () => {
+    it('C2/C3: 200-OK degraded envelope (degraded:true, total:null, missions:[]) is NOT written — last good data retained', () => {
+      // Test pin 2 — the bug class the C2 fix closes: a degraded-200
+      // response has degraded:true and empty rows + null total.
+      // Before C2, the intake would write that envelope verbatim and
+      // collapse the badge to "0/0" during an outage. After C2, the
+      // canonical helper returns ``null`` and the indicator treats
+      // the tick as a no-op against the last good payload.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [
+            { mission_id: 'leader-a', liveness: 'processing' },
+            { mission_id: 'leader-b', liveness: 'paused' },
+          ],
+          2
+        ),
+        null
+      );
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.missionsList().length).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+
+      // Now the BE returns a degraded envelope — empty rows, null total,
+      // degraded:true. The intake MUST NOT write this payload.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
+        null
+      );
+      // Last good data retained across the degraded tick.
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.missionsList().length).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+      // The raw payload signal was NOT overwritten either — the
+      // canonical helper's null branch keeps the missions projection
+      // honest. A subsequent healthy tick re-syncs both.
+      const payload = component.lastMissionsPayload();
+      expect(payload).not.toBeNull();
+      expect(payload!.degraded).toBe(false);
+
+      // The next healthy tick DOES update both signals.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        null
+      );
       expect(component.liveMissionCount()).toBe(0);
+      expect(component.missionsList().length).toBe(0);
+      expect(component.displayText()).toBe('0/0');
+    });
+
+    it('C3: degraded-200 envelope does NOT zero the count — canonical helper returns null and the signal retains last', () => {
+      // Companion to the C2 test: pin the count leg independently.
+      // Even if a future bug re-introduced the degraded-200 write,
+      // the count helper routes through missionCountFromListResponse
+      // and would refuse to zero the signal.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'leader-a', liveness: 'processing' }],
+          1
+        ),
+        null
+      );
+      // Direct helper sanity: degraded envelope returns null.
+      const degradedEnvelope = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [],
+        undefined,
+        { degraded: true }
+      );
+      expect(missionCountFromListResponse(degradedEnvelope)).toBeNull();
+    });
+
+    it('shows pre-data state via null liveMissionCount + "0/0" displayText (no fake 0)', () => {
+      // C3 fix: before any payload arrives the signal is ``null``,
+      // not ``0`` — "count unavailable" must NOT be invented as 0.
+      // The displayText fallback uses ``?? 0`` so the badge still
+      // shows "0/0" without lying about whether a count has landed.
+      expect(component.liveMissionCount()).toBeNull();
+      expect(component.displayText()).toBe('0/0');
+    });
+
+    it('returns to "0/0" once a healthy tick reports zero live missions (legitimate update, not a degraded gap)', () => {
+      // After a healthy tick with total=0 the signal is ``0`` (a real
+      // value, not null). The display still reads "0/0" / "idle".
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        null
+      );
+      expect(component.liveMissionCount()).toBe(0);
+      expect(component.hasLiveMissions()).toBe(false);
       expect(component.displayText()).toBe('0/0');
     });
   });
@@ -685,8 +836,14 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  describe('runningJobs (computed subset for panel)', () => {
-    it('should include only processing/active jobs', () => {
+  describe('runningJobs (computed subset — NOT the panel binding)', () => {
+    // C1 fix: the panel input is now ``activeJobs()`` (full
+    // non-terminal set). The internal ``runningJobs`` computed is
+    // still useful for the badge's running count + tooltip, but it
+    // MUST NOT be what flows to the panel. The seam test (below)
+    // pins the binding change.
+
+    it('runningJobs includes only processing/active jobs (badge helper)', () => {
       component.setActiveJobs([
         createMockJob({ job_id: 'r1', status: 'processing' }),
         createMockJob({ job_id: 'p1', status: 'pending' }),
@@ -697,7 +854,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(ids).toEqual(['r1', 'r2']);
     });
 
-    it('should include paused jobs in the running subset', () => {
+    it('runningJobs includes paused jobs in the badge helper', () => {
       component.setActiveJobs([
         createMockJobWithStatus('paused', { job_id: 'pa' }),
         createMockJob({ job_id: 'pr', status: 'processing' }),
@@ -706,6 +863,58 @@ describe('JobQueueIndicatorComponent Logic', () => {
       ]);
       const ids = component.runningJobs().map((j) => j.job_id);
       expect(ids).toEqual(['pa', 'pr']);
+    });
+  });
+
+  describe('activeJobs signal — the panel binding seam (C1)', () => {
+    // C1 fix: the embedded panel's ``[activeJobs]`` binding reads the
+    // FULL non-terminal set, NOT the prior ``runningJobs`` filter.
+    // The old behaviour starved ``tree().queued`` of pending/queued
+    // jobs — the badge said "2 queued" while the panel showed
+    // nothing. This block pins the seam so the regression cannot
+    // recur.
+
+    it('activeJobs signal is public (read by the panel input)', () => {
+      // Compile-time guard: ``activeJobs`` is the binding surface,
+      // not the ``runningJobs`` helper. If someone renames the
+      // signal back to private, this test will not catch it — but
+      // the type system will (the template binding stops compiling).
+      expect(typeof component.activeJobs).toBe('function');
+    });
+
+    it('passes the FULL non-terminal set (running + pending/queued) to the panel', () => {
+      // The badge's runningCount is 2 (2 processing) and pendingCount
+      // is 2 (1 pending + 1 queued). The OLD runningJobs filter
+      // returned just the 2 running jobs; the panel's QUEUED section
+      // silently starved.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'r1', status: 'processing' }),
+        createMockJob({ job_id: 'r2', status: 'processing' }),
+        createMockJob({ job_id: 'p1', status: 'pending' }),
+        createMockJobWithStatus('queued', { job_id: 'q1' }),
+      ]);
+      // activeJobs is the FULL non-terminal set — what flows to the
+      // panel via [activeJobs]="activeJobs()".
+      const ids = component.activeJobs().map((j) => j.job_id).sort();
+      expect(ids).toEqual(['p1', 'q1', 'r1', 'r2']);
+      // The legacy runningJobs filter is still narrower (only
+      // processing/paused/active) — used for the badge helper.
+      const runningIds = component.runningJobs().map((j) => j.job_id).sort();
+      expect(runningIds).toEqual(['r1', 'r2']);
+    });
+
+    it('a pending/queued job in activeJobs reaches the panel’s QUEUED section via buildQueueTree', () => {
+      // End-to-end seam pin: the panel receives activeJobs() and
+      // routes unattached non-terminal jobs into ``tree().queued``.
+      // A pending/queued job with no mission_id MUST land in
+      // ``tree().queued`` — the prior running-only filter hid it.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'q-orphan', status: 'pending', mission_id: null }),
+      ]);
+      // Mirror the panel's buildQueueTree call so the seam is
+      // verifiable without an Angular TestBed harness.
+      const tree = buildQueueTree(component.activeJobs(), [], []);
+      expect(tree.queued.map((j) => j.job_id)).toEqual(['q-orphan']);
     });
   });
 
@@ -726,11 +935,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(tt).toContain('refreshed');
     });
 
-    it('should produce "Running 0 · Queued 0" when idle', () => {
+    it('should produce "Running 0 · Queued 0" plus "count unavailable" when idle (pre-data)', () => {
+      // C3 fix: in pre-data state liveMissionCount is ``null`` and
+      // the tooltip's ``Live missions`` line reads ``count
+      // unavailable`` so the operator can distinguish a real idle
+      // from a transient refresh gap.
       component.setActiveJobs([]);
       const tt = component.tooltipText();
       expect(tt).toContain('Running 0 · Queued 0');
-      expect(tt).toContain('Live missions: 0');
+      expect(tt).toContain('Live missions: count unavailable');
     });
   });
 
@@ -999,11 +1212,10 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  describe('error handling (C3 propagation)', () => {
-    it('should reset activeJobs and allRecentJobs to empty on fetch error', () => {
+  describe('error handling (W-forkJoin legs + W-jobs-intake honesty)', () => {
+    it('onLegError sets lastIntakeError and records the leg (no reset of activeJobs)', () => {
       // 1. Seed the mirror with non-empty data so the error path has
-      //    something to clear (otherwise an empty starting state makes
-      //    the assertion vacuous).
+      //    something to RETAIN (otherwise the assertion is vacuous).
       component.setActiveJobs([
         createMockJob({ job_id: 'a1', status: 'processing' }),
         createMockJob({ job_id: 'a2', status: 'pending' }),
@@ -1016,82 +1228,100 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.displayText()).toBe('1/2');
       expect(component.recentJobs().length).toBe(1);
 
-      // 3. Simulate the forkJoin error handler firing on the mirror.
-      component.onFetchError(new Error('backend down'));
+      // 3. Simulate the per-leg catchError firing on the ``active`` leg.
+      component.onLegError('active', new Error('backend down'));
 
-      // 4. Both raw signals must be reset so the next poll starts clean.
-      //    Display text must collapse to "0/0" and the panel subsets must
-      //    be empty — this is the user-visible contract of the C3 fix.
-      expect(component.displayText()).toBe('0/0');
-      expect(component.runningJobs().length).toBe(0);
-      expect(component.recentJobs().length).toBe(0);
-      expect(component.isIdle()).toBe(true);
+      // 4. The active/recent lists MUST be retained — a bare 0/0
+      //    plus a stale "refreshed Ns ago" would impersonate a
+      //    successful idle poll (W-jobs-intake honesty).
+      expect(component.displayText()).toBe('1/2');
+      expect(component.runningJobs().length).toBe(1);
+      expect(component.recentJobs().length).toBe(1);
+      expect(component.isIdle()).toBe(false);
 
-      // 5. The error is captured for logging parity with
-      //    ``console.error('[JobQueueIndicator] Failed to fetch badge signals:', err)``.
-      expect(component.fetchErrorCount).toBe(1);
-      expect(component.lastFetchError).toBeInstanceOf(Error);
-      expect((component.lastFetchError as Error).message).toBe('backend down');
+      // 5. The leg error is captured for UI degradation signals.
+      expect(component.legErrorCount).toBe(1);
+      expect(component.lastLegError?.leg).toBe('active');
+      expect(component.lastIntakeError()).toContain('active: backend down');
     });
 
-    it('should stay empty when onFetchError fires on an already-empty mirror', () => {
-      // Defensive: an empty starting state must remain empty — no throw,
-      // no spurious data, and displayText stays "0/0".
-      expect(component.displayText()).toBe('0/0');
-      expect(component.isIdle()).toBe(true);
+    it('onFetchError (safety net) sets lastIntakeError and does not reset', () => {
+      // The forkJoin safety-net path mirrors the per-leg error flow
+      // and uses the same W-jobs-intake honesty contract — do NOT
+      // reset the job lists on operator-thrown failures either.
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
 
       component.onFetchError(new Error('network reset'));
 
-      expect(component.displayText()).toBe('0/0');
-      expect(component.runningJobs().length).toBe(0);
-      expect(component.recentJobs().length).toBe(0);
-      expect(component.fetchErrorCount).toBe(1);
+      expect(component.displayText()).toBe('1/1');
+      expect(component.runningJobs().length).toBe(1);
+      expect(component.legErrorCount).toBe(1);
+      expect(component.lastLegError?.leg).toBe('forkjoin');
+      expect(component.lastIntakeError()).toContain('forkjoin: network reset');
     });
 
-    it('should record each error and stay reset across repeated fetch failures', () => {
-      // Repeated failures must not leave partial state behind and must
-      // overwrite the recorded error so the next log line reflects the
-      // current failure, not a stale one.
-      component.setActiveJobs([
-        createMockJob({ job_id: 'a1', status: 'processing' }),
-      ]);
-      component.setRecentJobs([createMockJob({ job_id: 'r1', status: 'failed' })]);
-
-      component.onFetchError(new Error('first failure'));
-      expect(component.displayText()).toBe('0/0');
-      expect(component.fetchErrorCount).toBe(1);
-      expect((component.lastFetchError as Error).message).toBe('first failure');
-
-      // Re-seed and fail again — error counter advances, recorded error updates.
-      component.setActiveJobs([
-        createMockJob({ job_id: 'a1', status: 'processing' }),
-      ]);
-      component.onFetchError(new Error('second failure'));
-
-      expect(component.displayText()).toBe('0/0');
-      expect(component.fetchErrorCount).toBe(2);
-      expect((component.lastFetchError as Error).message).toBe('second failure');
-    });
-
-    it('should accept non-Error throwables (strings, objects) the way console.error does', () => {
-      // ``forkJoin`` can deliver any thrown value; the error handler must
-      // not assume the error is an ``Error`` instance.
+    it('records each per-leg error across repeated failures (W-forkJoin legs)', () => {
+      // Each leg failure must advance the counter and update the
+      // recorded error so the next log line reflects the current
+      // failure, not a stale one.
       component.setActiveJobs([createMockJob({ status: 'processing' })]);
 
-      component.onFetchError('string error');
-      expect(component.displayText()).toBe('0/0');
-      expect(component.lastFetchError).toBe('string error');
+      component.onLegError('active', new Error('first failure'));
+      expect(component.legErrorCount).toBe(1);
+      expect((component.lastLegError?.err as Error).message).toBe('first failure');
 
-      component.setActiveJobs([createMockJob({ status: 'processing' })]);
-      component.onFetchError({ code: 500, reason: 'server' });
-      expect(component.displayText()).toBe('0/0');
-      expect(component.lastFetchError).toEqual({ code: 500, reason: 'server' });
+      component.onLegError('recent', new Error('second failure'));
+      expect(component.legErrorCount).toBe(2);
+      expect(component.lastLegError?.leg).toBe('recent');
+      expect((component.lastLegError?.err as Error).message).toBe('second failure');
     });
 
-    it('should RETAIN the missions count across a jobs-fetch error (no false bare 0/0)', () => {
-      // A live leader mission is proven by the missions projection; the
-      // jobs intake then errors (forkJoin-level failure). The badge may
-      // show stale "missions: N" — NEVER a false bare 0/0 idle.
+    it('accepts non-Error throwables (strings, objects) the way recordLegError does', () => {
+      // ``catchError`` can deliver any thrown value; the error
+      // handler must not assume the error is an ``Error`` instance.
+      component.onLegError('missions', 'string error');
+      expect(component.lastIntakeError()).toContain('missions: string error');
+
+      component.onLegError('deferBlocked', { code: 500, reason: 'server' });
+      // Non-Error, non-string values fall back to ``fetch failed``;
+      // the reason text is intentionally not the literal object toString
+      // (the UI gets a stable, short label).
+      expect(component.lastIntakeError()).toContain('deferBlocked: fetch failed');
+    });
+
+    it('clears lastIntakeError when a clean tick lands after failures', () => {
+      // Partial-failure ticks keep the flag set; a fully-clean
+      // tick clears it so the UI returns to the healthy visual.
+      component.onLegError('active', new Error('transient'));
+      expect(component.lastIntakeError()).not.toBeNull();
+
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        { defer_blocked: false, pending_count: 0, holders: [] }
+      );
+      expect(component.lastIntakeError()).toBeNull();
+    });
+
+    it('passes a null leg through applyFetchResult without resetting (W-jobs-intake honesty)', () => {
+      // The forkJoin per-leg catchError turns each failure into
+      // ``null``. The applyFetchResult handler MUST NOT reset the
+      // job list to ``[]`` on null — that's the impersonation gap.
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+      component.setRecentJobs([createMockJob({ status: 'completed' })]);
+
+      component.applyFetchResult(null, null, null, null);
+
+      expect(component.displayText()).toBe('1/1');
+      expect(component.runningJobs().length).toBe(1);
+      expect(component.recentJobs().length).toBe(1);
+    });
+
+    it('RETAINS the missions count across a jobs-fetch error (no false bare 0/0)', () => {
+      // A live leader mission is proven by the missions projection;
+      // the jobs intake then errors. The badge must show the last
+      // good "missions: N" — NEVER a false bare 0/0 idle.
       component.applyFetchResult(
         [],
         [],
@@ -1103,7 +1333,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       );
       expect(component.displayText()).toBe('missions: 2');
 
-      component.onFetchError(new Error('backend down'));
+      component.onLegError('active', new Error('backend down'));
 
       expect(component.liveMissionCount()).toBe(2);
       expect(component.displayText()).toBe('missions: 2');

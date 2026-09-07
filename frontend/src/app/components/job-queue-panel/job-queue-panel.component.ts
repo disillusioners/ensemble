@@ -44,8 +44,16 @@ import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-l
   styleUrl: './job-queue-panel.component.scss',
 })
 export class JobQueuePanelComponent {
-  /** Currently active/processing jobs. */
-  runningJobs = input<Job[]>([]);
+  /**
+   * All non-terminal jobs (running + pending + paused) — the panel's
+   * primary input. Replaces the prior ``runningJobs`` input which
+   * filtered out pending/queued statuses and silently starved the
+   * panel's QUEUED section (C1 fix). The downstream ``buildQueueTree``
+   * helper splits this into attached (live mission node) vs unattached
+   * (``tree().queued``) — the NEVER-hide invariant keeps every job
+   * visible exactly once.
+   */
+  activeJobs = input<Job[]>([]);
 
   /** Recently completed/failed/cancelled jobs (already trimmed by parent). */
   recentJobs = input<Job[]>([]);
@@ -54,12 +62,15 @@ export class JobQueuePanelComponent {
   projectNameMap = input<Map<string | null, string>>(new Map());
 
   /**
-   * Fix C (§8.2) — number of distinct live missions derived by the
-   * parent from the receipt window. Shown in the header and the
-   * empty state so an idle queue beside a working leader does not
-   * read as "system idle" inside the dropdown either.
+   * Fix C (§8.2) — last-known live-mission count from the parent
+   * (badge). Widened to ``number | null`` per the C3 fix: ``null``
+   * means the badge has never received a good count (pre-data
+   * state); once a good number arrives the parent retains it across
+   * degraded/null ticks, so the panel's empty-state subtitle never
+   * flips to "Queue is currently idle" during an outage. ``0`` is a
+   * legitimate healthy tick with no live missions.
    */
-  liveMissionCount = input<number>(0);
+  liveMissionCount = input<number | null>(null);
 
   /**
    * Mission-tree panel (2026-09-07) — the full missions list from
@@ -96,14 +107,13 @@ export class JobQueuePanelComponent {
    * helper with the panel's input signals so the template binds to
    * the structured tree rather than two flat lists.
    *
-   * Passes the running jobs as the "active" input. The non-running
-   * queued/pending jobs are absorbed into the tree via
-   * ``buildQueueTree``'s ``attached → live mission node`` /
-   * ``unattached → queued bucket`` logic — the brief's NEVER-hide
-   * contract keeps every job visible exactly once.
+   * Passes ALL non-terminal jobs (running + pending + paused) as the
+   * "active" input. ``buildQueueTree`` splits them into attached
+   * (live mission node) vs unattached (``queued`` bucket); the
+   * NEVER-hide contract keeps every job visible exactly once.
    */
   readonly tree = computed(() => {
-    return buildQueueTree(this.runningJobs(), this.recentJobs(), this.missions());
+    return buildQueueTree(this.activeJobs(), this.recentJobs(), this.missions());
   });
 
   /**
@@ -132,20 +142,29 @@ export class JobQueuePanelComponent {
    * (legacy receipt-derived count) is zero. This is the "everything
    * is idle" branch — the empty-state renders "Queue is currently
    * idle".
+   *
+   * C3 fix: ``liveMissionCount() === 0`` is a healthy tick with no
+   * live missions; ``liveMissionCount() === null`` means the badge
+   * has never received a good value (pre-data state). Both read as
+   * "no live missions" for the empty-state gate. A degraded tick
+   * that retains a positive last-known count does NOT trip the
+   * empty state — the subtitle reads "Queue is idle · N live
+   * missions still working" instead.
    */
   readonly isEmpty = computed(() => {
     const t = this.tree();
+    const liveCount = this.liveMissionCount();
     return (
       t.liveMissions.length === 0 &&
       t.queued.length === 0 &&
       t.recent.length === 0 &&
       t.recentFlat.length === 0 &&
-      this.liveMissionCount() === 0
+      (liveCount === null || liveCount === 0)
     );
   });
 
-  /** Convenience running count used in the header (matches the legacy surface). */
-  readonly runningCount = computed(() => this.runningJobs().length);
+  /** Convenience active count used in the header (matches the legacy surface). */
+  readonly activeCount = computed(() => this.activeJobs().length);
 
   /**
    * Auto-expand the LIVE MISSIONS section when exactly one live

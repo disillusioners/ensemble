@@ -940,14 +940,59 @@ describe('Job Model', () => {
       expect(tree.recent.map((n) => n.mission.mission_id).sort()).toEqual(['m-cancelled', 'm-done', 'm-failed']);
     });
 
-    it('caps total Recent rows (mission nodes + flat rows) at MAX_RECENT_JOBS', () => {
+    it('caps the *visible* recent band at MAX_RECENT_JOBS and overflows the rest to recentFlat (no jobs hidden)', () => {
+      // C4 fix: the cap is a soft "what renders in the visible band"
+      // hint, not a hard hid-everything-else gate. A big node that
+      // doesn't fully fit must NOT empty the Recent section — render
+      // what fits, overflow the remainder into recentFlat so every
+      // job still surfaces (NEVER-hide invariant).
       const manyFlat: Job[] = Array.from({ length: MAX_RECENT_JOBS + 5 }, (_, i) =>
         mkJob({ job_id: `flat-${i}`, mission_id: null, status: 'completed' }),
       );
       const tree = buildQueueTree([], manyFlat, []);
-      const totalRows = tree.recent.reduce((sum, n) => sum + 1 + n.jobs.length, 0) + tree.recentFlat.length;
-      expect(totalRows).toBeLessThanOrEqual(MAX_RECENT_JOBS);
-      expect(tree.recentFlat.length).toBeLessThanOrEqual(MAX_RECENT_JOBS);
+      // Visible band = recent mission node rows + the first MAX_RECENT_JOBS
+      // recentFlat rows. Anything beyond that overflows after the cap.
+      const visibleFlat = tree.recentFlat.slice(0, MAX_RECENT_JOBS);
+      const totalVisible =
+        tree.recent.reduce((sum, n) => sum + 1 + n.jobs.length, 0) + visibleFlat.length;
+      expect(totalVisible).toBeLessThanOrEqual(MAX_RECENT_JOBS);
+      // Every input row still appears somewhere — overflow is appended
+      // after the cap so nothing gets hidden.
+      const allOut = [
+        ...tree.recent.flatMap((n) => n.jobs),
+        ...tree.recentFlat,
+      ].map((j) => j.job_id).sort();
+      const expectedIds = manyFlat.map((_, i) => `flat-${i}`).sort();
+      expect(allOut).toEqual(expectedIds);
+    });
+
+    it('renders a partial mission node + overflow remainder to recentFlat when the node is bigger than the cap (C4)', () => {
+      // A single mission node with 12 children, with MAX_RECENT_JOBS=10,
+      // must render the header + as many children as fit and overflow
+      // the remainder into recentFlat. Total mission-node rows never
+      // empty the section.
+      const twelveChildren: Job[] = Array.from({ length: 12 }, (_, i) =>
+        mkJob({
+          job_id: `big-${i}`,
+          mission_id: 'big-m',
+          status: 'completed',
+        }),
+      );
+      const tree = buildQueueTree(
+        [],
+        twelveChildren,
+        [mkMission({ mission_id: 'big-m', liveness: 'completed', last_activity_at: '2026-09-07T09:00:00Z' })],
+      );
+      // Header + 9 fit children = 10 rows under the cap. Overflow = 3.
+      expect(tree.recent).toHaveLength(1);
+      expect(tree.recent[0].jobs).toHaveLength(9);
+      expect(tree.recentFlat).toHaveLength(3);
+      // NEVER-hide: every input job appears in exactly one bucket.
+      const allOut = [
+        ...tree.recent.flatMap((n) => n.jobs),
+        ...tree.recentFlat,
+      ].map((j) => j.job_id).sort();
+      expect(allOut).toEqual(twelveChildren.map((j) => j.job_id).sort());
     });
 
     it('NEVER hides a job — every input job ends up in exactly one bucket', () => {

@@ -172,7 +172,8 @@ export class JobService {
   }
 
   /**
-   * Mission-tree panel — fetch the jobs attached to a given mission.
+   * Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+   * — fetch the jobs attached to a given mission.
    *
    * ``GET /api/jobs?mission_id=<id>&include_deleted=false`` (BE
    * landed this filter in 327fdc1a). Returns the raw ``Job[]`` array
@@ -181,10 +182,26 @@ export class JobService {
    * soft-deleted jobs are filtered out, matching the rest of the
    * panel's surface.
    *
-   * Errors propagate so the badge's per-participant ``catchError``
-   * degrades to an empty array (mirrors ``listRecentJobs`` /
-   * ``listDeferBlocked`` — additive participants must not fail the
-   * jobs intake riding the same tick).
+   * Status: deliberately UNWIRED on the FE today (kept per the
+   * leader's review decision, 2026-09-07). The panel currently
+   * pulls its full mission-jobs picture from the existing
+   * ``listActiveJobs`` + ``listRecentJobs`` polling — the mission
+   * grouping key (``job.mission_id``) is already on every Job
+   * payload, so ``buildQueueTree`` does the matching client-side
+   * without a per-mission round-trip.
+   *
+   * Intended future use: LAZY FETCH for an expanded mission node —
+   * when a user expands a node with N+ jobs, the panel can call
+   * ``listJobsByMission(node.mission.mission_id)`` to stream the
+   * full row list rather than paginating the global active/recent
+   * windows. That work is NOT scheduled for this fix; the method is
+   * here so the future consumer doesn't have to re-add it (and so
+   * this comment stops people reading the unwired surface as
+   * accidental dead code). Its spec stays.
+   *
+   * Errors propagate so a future per-mission fetch can route through
+   * the same per-participant ``catchError`` isolation the badge
+   * already uses.
    */
   listJobsByMission(missionId: string): Observable<Job[]> {
     const params = new HttpParams()

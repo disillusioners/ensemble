@@ -2,9 +2,9 @@
   <div class="panel-header">
     <span class="header-title">Job Queue</span>
     <span class="header-stats">
-      <span class="header-stat">⧗ {{ runningCount() }}</span>
+      <span class="header-stat">⧗ {{ activeCount() }}</span>
       <span class="header-stat-divider">·</span>
-      <span class="header-stat">● {{ liveMissionCount() }}</span>
+      <span class="header-stat">● {{ liveMissionCount() ?? 0 }}</span>
     </span>
   </div>
 
@@ -13,7 +13,7 @@
       <div class="empty-state">
         <mat-icon>pending_actions</mat-icon>
         <span class="empty-title">No jobs</span>
-        @if (liveMissionCount() > 0) {
+        @if ((liveMissionCount() ?? 0) > 0) {
           <span class="empty-subtitle">
             Queue is idle · {{ liveMissionCount() }} live mission{{ liveMissionCount() === 1 ? '' : 's' }} still working
           </span>
@@ -74,8 +74,26 @@
                           role="button"
                           tabindex="0"
                           [matTooltip]="job.instance_id">
-                          <div class="job-icon" [style.color]="getStatusColor(job.status)">
-                            <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                          <!-- Running rows surface a spinner instead of
+                               the legacy info icon so an active job
+                               reads as actively working (W-spinner
+                               decision: RESTORE the running-row
+                               spinner affordance). The .job-spinner
+                               wrapper class scopes the SCSS so the
+                               legacy dimensions don't fight the
+                               mat-icon sizing. -->
+                          <div
+                            class="job-icon"
+                            [class.job-spinner]="job.status === 'processing'"
+                            [style.color]="getStatusColor(job.status)">
+                            @if (job.status === 'processing') {
+                              <mat-spinner
+                                diameter="18"
+                                strokeWidth="2"
+                                color="primary"></mat-spinner>
+                            } @else {
+                              <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                            }
                           </div>
                           <div class="job-content">
                             <div class="job-title">
@@ -118,8 +136,18 @@
               role="button"
               tabindex="0"
               [matTooltip]="job.instance_id">
-              <div class="job-icon" [style.color]="getStatusColor(job.status)">
-                <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+              <div
+                class="job-icon"
+                [class.job-spinner]="job.status === 'processing'"
+                [style.color]="getStatusColor(job.status)">
+                @if (job.status === 'processing') {
+                  <mat-spinner
+                    diameter="18"
+                    strokeWidth="2"
+                    color="primary"></mat-spinner>
+                } @else {
+                  <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                }
               </div>
               <div class="job-content">
                 <div class="job-title">
@@ -194,8 +222,18 @@
                           role="button"
                           tabindex="0"
                           [matTooltip]="job.instance_id">
-                          <div class="job-icon" [style.color]="getStatusColor(job.status)">
-                            <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                          <div
+                            class="job-icon"
+                            [class.job-spinner]="job.status === 'processing'"
+                            [style.color]="getStatusColor(job.status)">
+                            @if (job.status === 'processing') {
+                              <mat-spinner
+                                diameter="18"
+                                strokeWidth="2"
+                                color="primary"></mat-spinner>
+                            } @else {
+                              <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                            }
                           </div>
                           <div class="job-content">
                             <div class="job-title">
@@ -211,7 +249,8 @@
                                 <app-mission-liveness-chip
                                   [chip]="chip"
                                   (click)="$event.stopPropagation()"
-                                  (keydown.enter)="$event.stopPropagation()" />
+                                  (keydown.enter)="$event.stopPropagation()"
+                                  (keydown.space)="$event.stopPropagation()" />
                               }
                               <span class="time-text">
                                 {{ timeAgo(job.completed_at || job.created_at) }}
@@ -239,8 +278,18 @@
                   role="button"
                   tabindex="0"
                   [matTooltip]="job.instance_id">
-                  <div class="job-icon" [style.color]="getStatusColor(job.status)">
-                    <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                  <div
+                    class="job-icon"
+                    [class.job-spinner]="job.status === 'processing'"
+                    [style.color]="getStatusColor(job.status)">
+                    @if (job.status === 'processing') {
+                      <mat-spinner
+                        diameter="18"
+                        strokeWidth="2"
+                        color="primary"></mat-spinner>
+                    } @else {
+                      <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
+                    }
                   </div>
                   <div class="job-content">
                     <div class="job-title">
@@ -256,7 +305,8 @@
                         <app-mission-liveness-chip
                           [chip]="chip"
                           (click)="$event.stopPropagation()"
-                          (keydown.enter)="$event.stopPropagation()" />
+                          (keydown.enter)="$event.stopPropagation()"
+                          (keydown.space)="$event.stopPropagation()" />
                       }
                       <span class="time-text">
                         {{ timeAgo(job.completed_at || job.created_at) }}

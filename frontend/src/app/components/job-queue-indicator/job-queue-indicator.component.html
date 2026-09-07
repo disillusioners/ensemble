@@ -15,13 +15,25 @@
           <span class="segment-jobs-count">{{ jobsSegmentText() }}</span>
         </span>
         <span class="segment-divider" aria-hidden="true">│</span>
-        <span class="segment-missions" aria-label="Live missions">
+        <!-- W-degraded a11y: the missions segment flips into a
+             degraded modifier + aria-label when ``lastIntakeError``
+             is non-null (a leg failed) so screen readers don't read
+             "0 live missions" during an outage. The visible count is
+             RETAINED via ``missionsSegmentText`` so sighted users
+             also see the last good number, not a fake 0. -->
+        <span
+          class="segment-missions"
+          [class.degraded]="lastIntakeError() !== null"
+          [attr.aria-label]="lastIntakeError() ? 'Live missions count may be stale (' + lastIntakeError() + ')' : 'Live missions'">
           <span class="mission-pulse-dot" aria-hidden="true"></span>
           <span class="segment-missions-count">{{ missionsSegmentText() }}</span>
         </span>
       }
       @case ('missions-only') {
-        <span class="segment-missions" aria-label="Live missions">
+        <span
+          class="segment-missions"
+          [class.degraded]="lastIntakeError() !== null"
+          [attr.aria-label]="lastIntakeError() ? 'Live missions count may be stale (' + lastIntakeError() + ')' : 'Live missions'">
           <span class="mission-pulse-dot" aria-hidden="true"></span>
           <span class="segment-missions-count">{{ missionsSegmentText() }}</span>
         </span>
@@ -89,7 +101,7 @@
   <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
     <ng-template matMenuContent>
       <app-job-queue-panel
-        [runningJobs]="runningJobs()"
+        [activeJobs]="activeJobs()"
         [recentJobs]="recentJobs()"
         [projectNameMap]="projectNameMap()"
         [liveMissionCount]="liveMissionCount()"

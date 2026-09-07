@@ -92,6 +92,24 @@
     background-color: #3b82f6; /* blue-500 */
     animation: mission-pulse 1.5s ease-in-out infinite;
   }
+
+  /* W-degraded a11y — when a leg has failed, the missions segment
+     flips into a degraded visual modifier so sighted users (and
+     paired aria-label readers) can distinguish a stale count from a
+     healthy idle. Italic + amber underline + slower pulse keep the
+     affordance subtle but readable. */
+  .segment-missions.degraded {
+    color: #f59e0b; /* amber-500 — "data may be stale" without
+                      aliasing the idle grey */
+    font-style: italic;
+    text-decoration: underline dotted #f59e0b;
+    text-underline-offset: 2px;
+  }
+
+  .segment-missions.degraded .mission-pulse-dot {
+    background-color: #f59e0b;
+    animation-duration: 3s; /* slower pulse = "stalled, not healthy" */
+  }
 }
 
 @keyframes jobs-segment-pulse {

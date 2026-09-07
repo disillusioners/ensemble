@@ -31,15 +31,15 @@ import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-t
  * in lockstep.
  */
 class MockJobQueuePanelComponent {
-  private readonly _runningJobs = signal<Job[]>([]);
+  private readonly _activeJobs = signal<Job[]>([]);
   private readonly _recentJobs = signal<Job[]>([]);
   private readonly _projectNameMap = signal<Map<string | null, string>>(new Map());
-  private readonly _liveMissionCount = signal<number>(0);
+  private readonly _liveMissionCount = signal<number | null>(null);
   private readonly _missions = signal<MissionSummary[]>([]);
 
   readonly MAX_RECENT = 10;
 
-  runningJobs = this._runningJobs.asReadonly();
+  activeJobs = this._activeJobs.asReadonly();
   recentJobs = this._recentJobs.asReadonly();
   projectNameMap = this._projectNameMap.asReadonly();
   liveMissionCount = this._liveMissionCount.asReadonly();
@@ -50,7 +50,7 @@ class MockJobQueuePanelComponent {
 
   /** Tree derivation — mirrors the real component's ``tree`` computed. */
   readonly tree = computed(() =>
-    buildQueueTree(this._runningJobs(), this._recentJobs(), this._missions())
+    buildQueueTree(this._activeJobs(), this._recentJobs(), this._missions())
   );
 
   /** Auto-expand decision — mirrors the real component. */
@@ -61,11 +61,11 @@ class MockJobQueuePanelComponent {
   recentCapped = computed(() => this._recentJobs().slice(0, this.MAX_RECENT));
   isEmpty = computed(
     () =>
-      this._runningJobs().length === 0 &&
+      this._activeJobs().length === 0 &&
       this.recentCapped().length === 0 &&
-      this._liveMissionCount() === 0,
+      (this._liveMissionCount() ?? 0) === 0,
   );
-  runningCount = computed(() => this._runningJobs().length);
+  activeCount = computed(() => this._activeJobs().length);
 
   /**
    * Fix C (§8.2) mirror — mission-liveness chip for a row, or null
@@ -76,13 +76,41 @@ class MockJobQueuePanelComponent {
     return missionLivenessChip(job);
   }
 
-  setLiveMissionCount(n: number): void {
+  setLiveMissionCount(n: number | null): void {
     this._liveMissionCount.set(n);
   }
 
   setMissions(m: MissionSummary[]): void {
     this._missions.set(m);
   }
+
+  /**
+   * Expansion-state survival mirror — keys the expansion set on
+   * ``mission_id`` (NOT array index) so a poll refresh that
+   * re-orders the live missions does NOT collapse the user's
+   * expanded state. Mirrors the real component's
+   * ``expandedLiveMissions`` signal + ``toggleLiveMission`` /
+   * ``isLiveExpanded`` methods.
+   */
+  private readonly _expandedLiveMissions = signal<Set<string>>(new Set());
+
+  toggleLiveMission(missionId: string): void {
+    this._expandedLiveMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+
+  isLiveExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this._expandedLiveMissions().has(missionId);
+  }
+
+  /** Read-only view of the expansion set — used by the survival test
+   *  to assert the user's expanded state survived a poll refresh. */
+  readonly expandedLiveMissions = this._expandedLiveMissions.asReadonly();
 
   /**
    * Resolves the best available title for a job. Priority chain:
@@ -162,8 +190,8 @@ class MockJobQueuePanelComponent {
   }
 
   /** Test helpers — mirror the writable inputs of the real component. */
-  setRunningJobs(jobs: Job[]): void {
-    this._runningJobs.set(jobs);
+  setActiveJobs(jobs: Job[]): void {
+    this._activeJobs.set(jobs);
   }
 
   setRecentJobs(jobs: Job[]): void {
@@ -189,7 +217,7 @@ describe('JobQueuePanelComponent Logic', () => {
 
     it('should default to empty state and 0 running', () => {
       expect(component.isEmpty()).toBe(true);
-      expect(component.runningCount()).toBe(0);
+      expect(component.activeCount()).toBe(0);
       expect(component.recentCapped().length).toBe(0);
     });
   });
@@ -343,34 +371,34 @@ describe('JobQueuePanelComponent Logic', () => {
 
   describe('isEmpty', () => {
     it('should be true when both running and recent are empty', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([]);
       expect(component.isEmpty()).toBe(true);
     });
 
-    it('should be false when runningJobs has items', () => {
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+    it('should be false when activeJobs has items', () => {
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should be false when recentJobs has items', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should be false when both lists have items', () => {
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should react to signal updates', () => {
       expect(component.isEmpty()).toBe(true);
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       expect(component.isEmpty()).toBe(false);
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       expect(component.isEmpty()).toBe(true);
     });
   });
@@ -423,23 +451,23 @@ describe('JobQueuePanelComponent Logic', () => {
     });
   });
 
-  describe('runningCount', () => {
-    it('should reflect the number of running jobs', () => {
-      component.setRunningJobs([
+  describe('activeCount', () => {
+    it('should reflect the number of active jobs (running + pending + paused)', () => {
+      component.setActiveJobs([
         createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
       ]);
-      expect(component.runningCount()).toBe(3);
+      expect(component.activeCount()).toBe(3);
     });
 
     it('should not count recent jobs', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([
         createMockJob({ status: 'completed' }),
         createMockJob({ status: 'failed' }),
       ]);
-      expect(component.runningCount()).toBe(0);
+      expect(component.activeCount()).toBe(0);
     });
   });
 
@@ -484,7 +512,7 @@ describe('JobQueuePanelComponent Logic', () => {
 
   describe('integration — priority chain with mixed data', () => {
     it('should resolve different titles for a mixed list', () => {
-      component.setRunningJobs([
+      component.setActiveJobs([
         createMockJob({
           job_id: 'job-1',
           instance_id: 'inst-A',
@@ -507,7 +535,7 @@ describe('JobQueuePanelComponent Logic', () => {
           status: 'processing',
         }),
       ]);
-      const titles = component.runningJobs().map((j) => component.resolveTitle(j));
+      const titles = component.activeJobs().map((j) => component.resolveTitle(j));
       expect(titles).toEqual([
         'From Metadata A',
         'developer',
@@ -550,15 +578,19 @@ describe('JobQueuePanelComponent Logic', () => {
   // ── Fix C (§8.2) — panel mission awareness ───────────────────────────
 
   describe('Fix C liveMissionCount + missionChip', () => {
-    it('should default liveMissionCount to 0', () => {
-      expect(component.liveMissionCount()).toBe(0);
+    it('should default liveMissionCount to null (pre-data state)', () => {
+      // C3 fix: the panel input is now ``number | null``. Initial
+      // state is ``null`` — "count unavailable", NOT 0. A healthy
+      // tick with zero live missions is a separate signal (0).
+      expect(component.liveMissionCount()).toBeNull();
     });
 
     it('should accept a live-mission count from the parent (drives header pill + empty state)', () => {
       component.setLiveMissionCount(2);
       expect(component.liveMissionCount()).toBe(2);
       // The template branches on this: >0 → header pill + "Queue is
-      // idle · N live missions" empty-state subtitle; 0 → neither.
+      // idle · N live missions" empty-state subtitle; 0 or null →
+      // neither (the subtitle reads "Queue is currently idle").
     });
 
     it('missionChip: terminal receipt + live mission returns a live chip (core case)', () => {
@@ -624,7 +656,7 @@ describe('JobQueuePanelComponent Logic', () => {
     }
 
     it('groups active jobs under their live mission', () => {
-      component.setRunningJobs([
+      component.setActiveJobs([
         createMockJob({ job_id: 'a', mission_id: 'm-1', status: 'processing' }),
         createMockJob({ job_id: 'b', mission_id: 'm-1', status: 'processing' }),
       ]);
@@ -636,7 +668,7 @@ describe('JobQueuePanelComponent Logic', () => {
     });
 
     it('routes unattached non-terminal jobs to queued (NEVER hide)', () => {
-      component.setRunningJobs([
+      component.setActiveJobs([
         createMockJob({ job_id: 'attached', mission_id: 'm-1', status: 'processing' }),
         createMockJob({ job_id: 'orphan', mission_id: null, status: 'processing' }),
       ]);
@@ -660,7 +692,7 @@ describe('JobQueuePanelComponent Logic', () => {
     });
 
     it('NEVER hides a job — every input row ends up in exactly one bucket', () => {
-      component.setRunningJobs([
+      component.setActiveJobs([
         createMockJob({ job_id: 'live-matched', mission_id: 'm-live', status: 'processing' }),
         createMockJob({ job_id: 'live-unattached', mission_id: null, status: 'processing' }),
       ]);
@@ -683,7 +715,7 @@ describe('JobQueuePanelComponent Logic', () => {
     });
 
     it('handles empty missions input without throwing — falls back to legacy flat layout', () => {
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
       // missions = [] (default), tree still produces queued + recentFlat
       const t = component.tree();
@@ -725,6 +757,90 @@ describe('JobQueuePanelComponent Logic', () => {
         mkMission({ mission_id: 'm-2' }),
       ]);
       expect(component.shouldAutoExpandLive()).toBe(false);
+    });
+  });
+
+  describe('expansion-state survival across poll refresh (test pin 4)', () => {
+    // Headline guarantee — ZERO coverage before this fix: a user's
+    // manual expansion must SURVIVE a poll refresh that re-orders
+    // the live missions. The expansion set is keyed on ``mission_id``
+    // (NOT array index), so a refresh that re-sorts or inserts a new
+    // mission earlier in the list doesn't collapse the user's toggle.
+
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('a user-expanded mission stays expanded after a poll refresh that re-orders it', () => {
+      // Initial poll: two live missions in order [m-a, m-b].
+      component.setMissions([
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+        mkMission({ mission_id: 'm-b', last_activity_at: '2026-09-07T09:00:00Z' }),
+      ]);
+      // User expands m-a (index 0 in the tree).
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+
+      // Next poll: m-b has newer activity and is re-ordered to index 0.
+      component.setMissions([
+        mkMission({ mission_id: 'm-b', last_activity_at: '2026-09-07T11:00:00Z' }),
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+      ]);
+      // The tree now lists m-b first, but m-a is still expanded.
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+      expect(component.isLiveExpanded('m-b')).toBe(false);
+    });
+
+    it('a user-expanded mission stays expanded after a poll refresh that inserts a new live mission before it', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'm-a' }),
+      ]);
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+
+      // Next poll: a new mission m-c arrives at the head of the list.
+      component.setMissions([
+        mkMission({ mission_id: 'm-c', last_activity_at: '2026-09-07T11:00:00Z' }),
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+      ]);
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+      expect(component.isLiveExpanded('m-c')).toBe(false);
+    });
+
+    it('toggling a mission off collapses it; the rest of the set is preserved', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'm-a' }),
+        mkMission({ mission_id: 'm-b' }),
+      ]);
+      component.toggleLiveMission('m-a');
+      component.toggleLiveMission('m-b');
+      expect(component.expandedLiveMissions().size).toBe(2);
+
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(false);
+      expect(component.isLiveExpanded('m-b')).toBe(true);
+      expect(component.expandedLiveMissions().size).toBe(1);
+
+      // Poll refresh with changed ordering — only m-b is expanded.
+      component.setMissions([
+        mkMission({ mission_id: 'm-b' }),
+        mkMission({ mission_id: 'm-a' }),
+      ]);
+      expect(component.isLiveExpanded('m-a')).toBe(false);
+      expect(component.isLiveExpanded('m-b')).toBe(true);
     });
   });
 

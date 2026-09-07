@@ -20,7 +20,7 @@ import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
-import { MissionListResponse, MissionSummary } from '../../models/mission.model';
+import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, DeferBlockAction, deferBlockIndicator, deferBlockAction } from '../../models/defer-blocked.model';
 import { forkJoin, catchError, of } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
@@ -95,8 +95,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /** Poll interval, in milliseconds. */
   private readonly POLL_INTERVAL_MS = 8000;
 
-  /** Raw active jobs (running + paused + pending) returned by listActiveJobs. */
-  private readonly activeJobs = signal<Job[]>([]);
+  /** Raw active jobs (running + paused + pending) returned by listActiveJobs.
+   *  Public surface: the panel input (``[activeJobs]``) reads the full
+   *  non-terminal set so queued jobs reach ``tree().queued`` instead of
+   *  being silently dropped by the prior running-only filter (C1 fix). */
+  readonly activeJobs = signal<Job[]>([]);
 
   /**
    * Raw recent jobs returned by ``listRecentJobs(10)`` — defensive
@@ -167,6 +170,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * pending / paused counts) for the tooltip, so we keep the FULL
    * ``MissionSummary[]`` plus the envelope ``total`` here. The
    * former single-number signal did not carry enough detail.
+   *
+   * C2 fix: a 200-OK ``degraded:true`` envelope (empty rows + null
+   * total) is NO LONGER written here — it would clobber the last
+   * good payload and turn the badge into a false bare 0/0. Only
+   * non-degraded payloads overwrite.
    */
   private readonly missionsPayload = signal<MissionListResponse | null>(null);
 
@@ -182,19 +190,37 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * authoritative — one mission per instance, liveness-filtered
    * server-side.
    *
-   * Count leg degraded: when ``total`` is ``null`` on the latest
-   * payload (BE degradation contract — §8.2 honesty: "count
-   * unavailable" must NOT read as 0), fall back to
-   * ``missions.length`` as a defensive filter-aware count.
+   * C3 fix: widens to ``number | null`` and routes through the
+   * canonical ``missionCountFromListResponse`` helper (mission.model.ts).
+   * The helper returns ``null`` on a degraded envelope — we then
+   * LEAVE THIS SIGNAL UNTOUCHED on degraded ticks so the value
+   * retains the last good number. Initial state is ``null``
+   * (pre-data; the display layer treats ``null`` as 0 for badge
+   * formatting). On a healthy tick that legitimately reports zero
+   * missions, the value is 0 (a real update, not a degraded gap).
    */
-  readonly liveMissionCount = computed(() => {
-    const p = this.missionsPayload();
-    if (!p) return 0;
-    return p.total ?? p.missions.length;
-  });
+  private readonly liveMissionCountRaw = signal<number | null>(null);
 
-  /** True when the missions projection reports at least one live mission. */
-  readonly hasLiveMissions = computed(() => this.liveMissionCount() > 0);
+  /**
+   * Public live-mission count. Widened to ``number | null`` per C3
+   * — ``null`` means we have never received a good count (pre-data
+   * state). Once a good number arrives, this signal retains it
+   * across degraded/null ticks so the badge never flips back to a
+   * false bare 0/0.
+   */
+  readonly liveMissionCount = computed<number | null>(() => this.liveMissionCountRaw());
+
+  /**
+   * True when the missions projection reports at least one live
+   * mission — i.e. we have a positive last-known count. ``null``
+   * (pre-data) and 0 (healthy tick, no live missions) both read as
+   * false; the badge then branches to ``'idle'`` / ``'segmented'``
+   * based on the jobs side.
+   */
+  readonly hasLiveMissions = computed(() => {
+    const n = this.liveMissionCount();
+    return n !== null && n > 0;
+  });
 
   /**
    * Raw missions list (latest good payload) — feeds the panel via
@@ -304,9 +330,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * Missions segment text — right side of the segmented pill. Just
    * the integer N (no ``missions: `` prefix anymore — the pill's
    * segmented layout already conveys "this is the missions count").
+   * ``null`` (pre-data, never received a good value) renders as
+   * ``0`` so the pill doesn't ship a literal "null" string.
    */
   readonly missionsSegmentText = computed(
-    () => `${this.liveMissionCount()}`
+    () => `${this.liveMissionCount() ?? 0}`
   );
 
   /**
@@ -315,12 +343,22 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * pending b, paused c) · refreshed Ns ago``. Always present, even
    * when idle, so the user can distinguish a real idle from a
    * transient refresh gap.
+   *
+   * C3 fix: ``Live missions`` line is suffixed with ``(count
+   * unavailable)`` when ``liveMissionCount`` is ``null`` (pre-data
+   * state — never received a good value). Once we have a real
+   * count, the line reads as ``N (processing a, ...)`` even across
+   * degraded/null ticks (the signal retains the last good value).
    */
   readonly tooltipText = computed(() => {
     const breakdown = this.liveMissionBreakdown();
+    const liveCount = this.liveMissionCount();
+    const liveLine = liveCount === null
+      ? 'Live missions: count unavailable'
+      : `Live missions: ${liveCount} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`;
     return [
       `Running ${this.runningCount()} · Queued ${this.pendingCount()}`,
-      `Live missions: ${this.liveMissionCount()} (processing ${breakdown.processing}, pending ${breakdown.pending}, paused ${breakdown.paused})`,
+      liveLine,
       `refreshed ${this.refreshAgeSeconds()}s ago`,
     ].join('\n');
   });
@@ -334,7 +372,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /** Wall-clock time of the last successful forkJoin — used by ``refreshAgeSeconds``. */
   private readonly lastFetchAt = signal<number | null>(null);
 
-  /** Running-only subset — passed to the embedded panel. */
+  /** Running-only subset (processing/paused/active) — drives the
+   *  badge's runningCount + tooltip. NOT the panel input. */
   readonly runningJobs = computed(() =>
     this.activeJobs().filter((j) => isRunningStatus(j.status))
   );
@@ -375,6 +414,21 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Per-leg error state — drives W-jobs-intake honesty (the "0/0,
+   * refreshed Ns ago" impersonation gap). ``null`` when the latest
+   * poll tick completed without per-leg failures; a non-null value
+   * carries a short human-readable reason for the UI to surface (the
+   * template's ``segment-missions`` segment gets a ``degraded``
+   * modifier + an aria-label so screen readers don't read "0 live
+   * missions" when the projection degraded).
+   *
+   * Set ONLY when a leg's per-participant catchError swallowed a
+   * failure — the forkJoin outer error handler is a safety net for
+   * operator-thrown values that escaped the per-leg isolation.
+   */
+  readonly lastIntakeError = signal<string | null>(null);
+
+  /**
    * Fetch every header badge signal in ONE parallel ``forkJoin`` on
    * the same 8s tick — the name says "badge signals" because this is
    * THREE families, not just jobs (the pre-round-1 ``fetchJobs``
@@ -389,43 +443,72 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * - ``deferBlocked`` — defer-gate warning payload
    *   (``GET /api/queues/defer-blocked``).
    *
-   * The two additive participants carry their own ``catchError`` so a
+   * Every leg carries its own ``catchError`` (W-forkJoin legs) so a
    * failure (404/503 during BE rollout skew, 500, network) degrades
-   * THAT participant to ``null`` without failing the whole
-   * ``forkJoin`` — the jobs intake keeps flowing. ``null`` missions ⇒
-   * the last known payload is retained (never falsely idle);
-   * ``null`` deferBlocked ⇒ the warning icon hides.
+   * THAT leg to ``null`` without failing the whole ``forkJoin`` —
+   * the healthy legs keep flowing.
    *
-   * The raw recent payload is stored in ``allRecentJobs`` and a
-   * derived ``recentJobs`` computed filters/sorts/slices it for
-   * the panel — see the field docs for why the public surface is
-   * defensive.
-   *
-   * Active/recent errors still propagate to the single ``forkJoin``
-   * error handler here (those service methods no longer swallow
-   * failures) so we can log and reset both job signals to ``[]``.
+   * ``null`` missions ⇒ the last known payload is RETAINED (never
+   * falsely idle); ``null`` deferBlocked ⇒ the warning icon hides;
+   * ``null`` active/recent ⇒ the last known job list is RETAINED
+   * (W-jobs-intake honesty — a reset to ``[]`` plus a stale
+   * ``refreshed Ns ago`` would impersonate a successful "0/0"
+   * poll). ``lastIntakeError`` flips non-null on any per-leg error
+   * so the UI can flag the degradation honestly.
    */
   private fetchBadgeSignals(): void {
     forkJoin({
-      active: this.jobService.listActiveJobs(),
-      recent: this.jobService.listRecentJobs(10),
-      missions: this.jobService
-        .listMissions({ limit: 20 })
-        .pipe(catchError(() => of(null))),
-      deferBlocked: this.jobService
-        .listDeferBlocked()
-        .pipe(catchError(() => of(null))),
+      active: this.jobService.listActiveJobs().pipe(
+        catchError((err) => {
+          this.recordLegError('active', err);
+          return of(null);
+        })
+      ),
+      recent: this.jobService.listRecentJobs(10).pipe(
+        catchError((err) => {
+          this.recordLegError('recent', err);
+          return of(null);
+        })
+      ),
+      missions: this.jobService.listMissions({ limit: 20 }).pipe(
+        catchError((err) => {
+          this.recordLegError('missions', err);
+          return of(null);
+        })
+      ),
+      deferBlocked: this.jobService.listDeferBlocked().pipe(
+        catchError((err) => {
+          this.recordLegError('deferBlocked', err);
+          return of(null);
+        })
+      ),
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: ({ active, recent, missions, deferBlocked }) =>
           this.applyFetchResults(active, recent, missions, deferBlocked),
+        // Safety net only — per-leg catchError above means this
+        // path is unreachable for routine HTTP failures. It still
+        // exists for synchronous throws from operator pipes that
+        // escaped isolation.
         error: (err) => {
-          console.error('[JobQueueIndicator] Failed to fetch badge signals:', err);
-          this.activeJobs.set([]);
-          this.allRecentJobs.set([]);
+          console.error('[JobQueueIndicator] Forkjoin crashed:', err);
+          this.recordLegError('forkjoin', err);
         }
       });
+  }
+
+  /**
+   * Record a per-leg failure for W-jobs-intake honesty. Captures the
+   * leg name + a short human-readable reason; the UI uses this to
+   * flip the segment into a degraded visual + aria state instead of
+   * impersonating a healthy "0/0" poll.
+   */
+  private recordLegError(leg: string, err: unknown): void {
+    const reason =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : 'fetch failed';
+    this.lastIntakeError.set(`${leg}: ${reason}`);
+    console.warn(`[JobQueueIndicator] ${leg} leg degraded:`, err);
   }
 
   /**
@@ -433,24 +516,59 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * its own method so the logic-mirror spec can replicate it 1:1
    * with mocked service payloads.
    *
-   * - jobs (active + recent) are stored verbatim;
+   * - jobs (active + recent) — ``null`` means the per-leg
+   *   catchError swallowed a failure; we RETAIN the previous list
+   *   rather than resetting to ``[]`` (W-jobs-intake honesty — a
+   *   bare 0/0 plus a stale "refreshed Ns ago" would impersonate a
+   *   healthy poll). ``lastIntakeError`` already records the leg
+   *   failure for the UI to surface;
    * - ``missions === null`` (degraded list / fetch failure) RETAINS
    *   the previous payload — "data unavailable" must not collapse to
-   *   a bare 0/0, so the badge never falsely reports an idle system.
-   * - ``deferBlocked === null`` hides the warning affordance.
+   *   a bare 0/0, so the badge never falsely reports an idle system;
+   * - C2 fix: a 200-OK ``degraded:true`` envelope (empty rows + null
+   *   total) ALSO retains the previous payload — same logic. The
+   *   canonical ``missionCountFromListResponse`` helper returns
+   *   ``null`` for the degraded envelope so we don't update the
+   *   count signal either;
+   * - ``deferBlocked === null`` hides the warning affordance;
+   * - ``lastFetchAt`` only advances when AT LEAST ONE leg returned
+   *   a non-null payload — a tick where every leg failed leaves
+   *   the timestamp frozen so "refreshed Ns ago" doesn't lie about
+   *   the staleness.
    */
   private applyFetchResults(
-    active: Job[],
-    recent: Job[],
+    active: Job[] | null,
+    recent: Job[] | null,
     missions: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
-    this.activeJobs.set(active);
-    this.allRecentJobs.set(recent);
-    if (missions !== null) {
-      this.missionsPayload.set(missions);
+    if (active !== null) {
+      this.activeJobs.set(active);
     }
-    this.lastFetchAt.set(Date.now());
+    if (recent !== null) {
+      this.allRecentJobs.set(recent);
+    }
+    if (missions !== null && !missions.degraded) {
+      this.missionsPayload.set(missions);
+      // C3 fix: route through the canonical helper. The helper
+      // returns ``number | null`` — ``null`` only on degraded (already
+      // filtered above). A healthy tick with total=0 returns 0 and
+      // IS recorded (legitimate update, not a degraded gap).
+      const count = missionCountFromListResponse(missions);
+      this.liveMissionCountRaw.set(count);
+    }
+    // Clear the per-leg error flag only when ALL legs returned a
+    // non-null payload — a partial-failure tick keeps the flag set
+    // so the UI continues to surface the degradation.
+    const anyNull = active === null || recent === null || missions === null || deferBlocked === null;
+    if (!anyNull) {
+      this.lastIntakeError.set(null);
+    }
+    // Stamp "last successful poll" only when at least one leg
+    // returned data; an all-null tick leaves the timestamp frozen.
+    if (active !== null || recent !== null || missions !== null || deferBlocked !== null) {
+      this.lastFetchAt.set(Date.now());
+    }
     this.deferBlockedPayload.set(deferBlocked);
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)

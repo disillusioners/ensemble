@@ -506,8 +506,11 @@ export const MAX_RECENT_JOBS = 10;
  * Pure tree builder for the job-queue panel.
  *
  * Inputs:
- * - ``activeJobs`` — non-terminal jobs (running/pending/paused), typically
- *   the indicator's ``runningJobs`` + queued-list output.
+ * - ``activeJobs`` — non-terminal jobs (running/pending/paused).
+ *   The indicator passes the FULL non-terminal set here so queued
+ *   jobs reach ``tree().queued`` (C1 fix — the prior ``runningJobs``
+ *   filter silently starved the QUEUED section by excluding pending
+ *   + queued statuses).
  * - ``recentJobs`` — terminal jobs (completed/settled/failed/cancelled/
  *   dead_letter), typically the indicator's ``recentJobs`` output.
  * - ``missions`` — the missions list from ``GET /api/missions`` (BE
@@ -530,8 +533,11 @@ export const MAX_RECENT_JOBS = 10;
  * - ``recent`` = terminal mission nodes (liveness in completed/failed/
  *   cancelled) with their attached terminal jobs.
  * - ``recentFlat`` = terminal jobs that map to no listed mission —
- *   render as today's flat rows. Cap total Recent rows (mission
- *   children + flat) at ``MAX_RECENT_JOBS`` so the panel stays bounded.
+ *   render as today's flat rows. The visible band is capped at
+ *   ``MAX_RECENT_JOBS`` total rows (mission node headers + flat
+ *   rows); anything that doesn't fit OVERFLOWS into ``recentFlat``
+ *   after the cap so every job still surfaces (C4 fix — a big node
+ *   must never empty the Recent section nor hide jobs).
  * - NEVER hide a job: every input job ends up in exactly one output
  *   bucket. Unattached → fallback (queued for non-terminal, recentFlat
  *   for terminal).
@@ -602,29 +608,58 @@ export function buildQueueTree(
   }
 
   // 5) Cap Recent: mission nodes (each counts as 1 row + its child jobs)
-  //    PLUS recentFlat rows = MAX_RECENT_JOBS total rows.
-  const liveMissionRows = liveMissionsList.map((m) => ({ mission: m, jobs: [] as Job[] }));
+  //    PLUS recentFlat rows = MAX_RECENT_JOBS total rows. A large
+  //    mission node MUST NOT empty the Recent section nor hide jobs —
+  //    when the node's children + header would overflow the cap, we
+  //    render what fits and overflow the remainder to ``recentFlat``
+  //    so every job still surfaces (the NEVER-hide invariant holds).
   const finalRecentNodes: MissionNode[] = [];
-  const finalRecentFlat: Job[] = [];
+  const overflowRecentFlat: Job[] = [];
   let rowCount = 0;
   for (const node of terminalNodes.values()) {
-    if (rowCount >= MAX_RECENT_JOBS) break;
-    // Each mission node reserves 1 row (the header) + its child jobs as rows.
-    const children = node.jobs;
-    if (rowCount + 1 + children.length > MAX_RECENT_JOBS) {
-      // If we can't fit the whole node, drop it entirely (the strict
-      // MAX cap mirrors the legacy "cap at 10 rows" — better to drop
-      // a node than to render a partial node).
+    if (rowCount >= MAX_RECENT_JOBS) {
+      // Cap reached — spill every remaining job (including from this
+      // node's children) into the overflow bucket so the user still
+      // sees them after the visible band.
+      overflowRecentFlat.push(...node.jobs);
       continue;
     }
-    finalRecentNodes.push(node);
-    rowCount += 1 + children.length;
+    // Each mission node reserves 1 row (the header) + its child jobs
+    // as rows. A mission with zero children still costs 1 row — the
+    // header — and is included as long as that 1 row fits.
+    const children = node.jobs;
+    const headerCost = 1;
+    const capacityForChildren = Math.max(0, MAX_RECENT_JOBS - rowCount - headerCost);
+    const fitCount = Math.min(children.length, capacityForChildren);
+    const fitChildren = children.slice(0, fitCount);
+    const overflowChildren = children.slice(fitCount);
+    finalRecentNodes.push({ mission: node.mission, jobs: fitChildren });
+    rowCount += headerCost + fitCount;
+    // Spill the remainder into the flat bucket so the user still sees
+    // every job — they render as detached Recent rows in the panel
+    // rather than vanishing under a strict MAX cap.
+    overflowRecentFlat.push(...overflowChildren);
   }
+
+  // 6) Fill remaining capacity from the orphan recentFlat list, then
+  //    drain anything that didn't fit into the overflow bucket. The
+  //    cap is enforced row-by-row; anything that doesn't fit here
+  //    lives in ``overflowRecentFlat`` and is appended AFTER the
+  //    capped rows below.
+  const finalRecentFlat: Job[] = [];
   for (const job of recentFlat) {
-    if (rowCount >= MAX_RECENT_JOBS) break;
+    if (rowCount >= MAX_RECENT_JOBS) {
+      overflowRecentFlat.push(job);
+      continue;
+    }
     finalRecentFlat.push(job);
     rowCount += 1;
   }
+  // Anything that overflowed the cap (children + late flat) is
+  // appended after the capped rows so the user sees them all. The
+  // cap is now a "what renders in the visible band" hint, not a
+  // hard hid-everything-else gate.
+  finalRecentFlat.push(...overflowRecentFlat);
 
   return {
     liveMissions: Array.from(liveNodes.values()),
