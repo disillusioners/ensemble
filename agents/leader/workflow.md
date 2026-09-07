@@ -91,6 +91,7 @@ I support three workflows. The user may invoke them sequentially within a single
 - **ALWAYS merge to latest after feature is done** — this keeps latest as the current state
 - Push both `latest` and the feature branch to keep them in sync
 - `latest` should always contain the latest completed features
+Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> spawn giter FIRST -> on its report spawn each editor with non-empty context={"wt_path":...}.
 
 ### When Git Flow Applies
 | Scope | Git Flow |

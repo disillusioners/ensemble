@@ -33,6 +33,8 @@ import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 import { Work } from '../../models/work.model';
+import { CleanupPreflight } from '../../models/cleanup-preflight.model';
+import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -138,6 +140,40 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly hasZombieInstances = computed(
     () => this.zombieInstanceCount() > 0
   );
+
+  // WS4 — live-vs-reap split from the same preflight. The
+  // ``live_instance_count`` / ``live_instance_ids`` are the
+  // UNBLOCK-ROUND ITEM 11 (2026-09-06) TRUTH-SURVIVOR set:
+  // non-terminal ∧ not-zombie ∧ no non-mirror ACTIVE/queued
+  // JobItem. The round-2 shape (just ``non-terminal ∖ zombie``)
+  // over-promised survival — a holder of a non-mirror ACTIVE
+  // mission JobItem is a non-zombie per the WS4 mission lens,
+  // but Bucket 2 cancels + cascades to terminate_instance, so
+  // such a holder does NOT actually survive cleanup despite
+  // appearing in the round-2 list. The BE preflight now narrows
+  // the list via the post-filter
+  // ``SQLModelInstanceRepository.has_real_active_or_queued_work``;
+  // the dialog renders the bounded list of TRULY-retained
+  // instances. The canonical cleanup-truth-split sentence
+  // (``CLEANUP_TRUTH_SPLIT_COPY`` in
+  // cleanup-preflight.model.ts) is rendered verbatim on the
+  // dialog. ``defer_blocked_count`` is surfaced SEPARATELY
+  // because cleanup does NOT cancel deferred messages (the
+  // dialog says so via the defer note).
+  readonly liveInstanceCount = signal<number>(0);
+  readonly liveInstanceIds = signal<string[]>([]);
+  readonly deferBlockedCount = signal<number>(0);
+  // Unblock-round ITEM 12 (2026-09-06): ``defer_holder_kind`` is
+  // NOT on the preflight wire — the preflight endpoint
+  // ``GET /api/jobs/cleanup/preflight`` does NOT emit it. The
+  // field is sourced from the SEPARATE
+  // ``GET /api/queues/defer-blocked`` endpoint and populated by
+  // this component when the JS snapshot is wired (see the
+  // setter below — populated via ``deferBlockAction(deferStatus)``
+  // composition). The TS interface in
+  // ``cleanup-preflight.model.ts`` annotates the field as a
+  // type-completeness convenience only.
+  readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
 
   // Deleted jobs filter
   readonly showDeleted = signal(false);
@@ -522,16 +558,30 @@ export class JobsComponent implements OnInit, OnDestroy {
    * a snackbar to the operator.
    */
   private refreshBadStateCount(): void {
-    firstValueFrom(
-      this.http.get<{
-        bad_state_count: number;
-        zombie_instance_count: number;
-      }>('/api/jobs/cleanup/preflight')
-    )
-      .then((result) => {
+    const preflight = firstValueFrom(
+      this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight')
+    );
+    // The preflight intentionally exposes only the defer count. Read the
+    // existing defer-blocked surface as well so the dialog can preserve the
+    // holder-specific remediation without adding a daemon-only field.
+    const deferBlocked = firstValueFrom(
+      this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked')
+    ).catch(() => null);
+
+    Promise.all([preflight, deferBlocked])
+      .then(([result, deferStatus]) => {
         this.badStateCount.set(result.bad_state_count);
         this.zombieInstanceCount.set(
           result.zombie_instance_count ?? 0
+        );
+        // WS4 — the live-vs-reap split + the separate defer count
+        // feed the confirm dialog ("will remain" listing + the
+        // by-design "deferred messages are not cancelled here" note).
+        this.liveInstanceCount.set(result.live_instance_count ?? 0);
+        this.liveInstanceIds.set(result.live_instance_ids ?? []);
+        this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
+        this.deferHolderKind.set(
+          deferBlockAction(deferStatus)?.holder.kind ?? null
         );
       })
       .catch(() => {
@@ -1075,6 +1125,11 @@ export class JobsComponent implements OnInit, OnDestroy {
       data: {
         bad_state_count: this.badStateCount(),
         zombie_instance_count: this.zombieInstanceCount(),
+        // WS4 — the full live-vs-reap split + separate defer count.
+        live_instance_count: this.liveInstanceCount(),
+        live_instance_ids: this.liveInstanceIds(),
+        defer_blocked_count: this.deferBlockedCount(),
+        defer_holder_kind: this.deferHolderKind(),
       },
     });
 

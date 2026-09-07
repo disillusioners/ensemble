@@ -969,9 +969,11 @@ class TestCompactionReappendContextMessages:
     def test_context_msgs_carry_injected_flag_compaction_visible(self) -> None:
         """Surviving context msgs must carry ``injected_message=True``.
 
-        Compaction's :func:`_partition_injected_messages` keys on
+        Compaction's :func:`_partition_injected_for_compaction` keys on
         ``additional_kwargs["injected_message"]`` to preserve user
-        intent. Context messages share the flag (per ADR-5), so they
+        intent (the ``context_kind`` here makes this note PERMANENTLY
+        preserved under the injected-notes hoisting contract).
+        Context messages share the flag (per ADR-5), so they
         ride through compaction by the same partitioning path.
         Mirrors ``daemon.compaction._is_injected_message``.
         """

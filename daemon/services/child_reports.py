@@ -3387,11 +3387,35 @@ Provide a concise summary:"""
                 and parent.status != InstanceStatus.PAUSED.value
             ):
                 if bus is not None:
-                    # Bus is active — bus callback handles completion.
-                    # No count_pending query, no inline status transition.
+                    # Bus is active — no inline status transition here.
+                    #
+                    # TRUTH CORRECTION (Debug Phase 4 fix #1,
+                    # 2026-09-07): the previous text — "bus callback
+                    # owns completion" — was misleading. The bus is a
+                    # pure state machine: it flips this child's PENDING
+                    # watchers to FIRED (bookkeeping only) and NEVER
+                    # wakes the parent or finalizes its job directly
+                    # (the Phase 1 report-lane decoupling removed the
+                    # re-trigger shortcut). The parent's terminal
+                    # transition rides the natural PROCESS_REPORT task
+                    # delivery: a worker claims the report Task, the
+                    # report is delivered to the parent's turn
+                    # (claim_for_task_delivery / live drain), and
+                    # JobFeedbackObserver._process_event finalizes the
+                    # job when the bus pending count reaches 0. Claim
+                    # latency is governed by the worker pool's claim
+                    # path — see the PROCESS_REPORT wake lane in
+                    # ``TaskRepository.claim_pending_task`` (the
+                    # 7807e521 fix): under pool saturation the wake
+                    # rests on that claim, not on any bus callback.
                     logger.info(
                         f"Bus-active: skipping inline cascade for parent "
-                        f"{parent.instance_id[:8]}... — bus callback owns completion"
+                        f"{parent.instance_id[:8]}... — no inline status "
+                        f"write; parent terminal transition completes "
+                        f"when the PROCESS_REPORT task delivery "
+                        f"completes (bus is "
+                        f"state-machine only — it does not own "
+                        f"completion and does not wake the parent)"
                     )
                 else:
                     # (dead-code fallback — bus-active path bypasses)

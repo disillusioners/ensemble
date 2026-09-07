@@ -2823,20 +2823,35 @@ class TestSentinelRecipeRealGraph:
                 iid = "sentinel-order"
                 cfg = {"configurable": {"thread_id": iid}}
 
-                # Seed: 1 injected HumanMessage + A1..A20 (old arc)
-                # + T1..T5 (tail). 26 messages total.
+                # Seed: 1 permanent context_kind injection + 1 bare
+                # UNANSWERED note (last message — no later AIMessage)
+                # + A1..A20 (old arc) + T1..T5 (tail). 27 messages
+                # total. Under the injected-notes hoisting contract the
+                # hoisted head is context_kind + unanswered bare notes;
+                # a bare note followed by AIMessages would be ANSWERED
+                # and absorbed instead (covered by the hoisting tests).
                 seeded = []
                 seeded.append(
                     HumanMessage(
                         content="INJECTED",
                         id="INJ-1",
-                        additional_kwargs={"injected_message": True},
+                        additional_kwargs={
+                            "injected_message": True,
+                            "context_kind": "task_context",
+                        },
                     )
                 )
                 for i in range(1, 21):
                     seeded.append(AIMessage(content=f"arc-{i}", id=f"A{i}"))
                 for i in range(1, 6):
                     seeded.append(HumanMessage(content=f"tail-{i}", id=f"T{i}"))
+                seeded.append(
+                    HumanMessage(
+                        content="NOTE-TAIL",
+                        id="NOTE-TAIL",
+                        additional_kwargs={"injected_message": True},
+                    )
+                )
 
                 await compiled.aupdate_state(
                     cfg, {"messages": seeded}, as_node="agent"
@@ -2846,16 +2861,18 @@ class TestSentinelRecipeRealGraph:
                 await compiled.ainvoke({"messages": []}, cfg)
                 pre_state = await compiled.aget_state(cfg)
                 pre_messages = list(pre_state.values.get("messages", []))
-                assert len(pre_messages) == 26, (
-                    f"pre-compaction snapshot should have 26 messages; got {len(pre_messages)}"
+                assert len(pre_messages) == 27, (
+                    f"pre-compaction snapshot should have 27 messages; got {len(pre_messages)}"
                 )
 
-                # Build a synthetic engine result: ONE doc + the
-                # preserved tail (T1..T5) + the injected INJ-1.
+                # Build a synthetic engine result: the hoisted
+                # injections (INJ-1 + NOTE-TAIL) + ONE doc + the
+                # preserved tail (T1..T5).
                 result = CompactionResult(
                     replacement_messages=[
-                        # INJ-1 first (injected head).
+                        # Hoisted head (injected head).
                         seeded[0],
+                        seeded[26],
                         # Doc.
                         SystemMessage(
                             id=f"compaction-global-{iid}-1",
@@ -2870,8 +2887,8 @@ class TestSentinelRecipeRealGraph:
                     tokens_before=1000,
                     tokens_after=500,
                     tokens_saved=500,
-                    messages_before=26,
-                    messages_after=7,
+                    messages_before=27,
+                    messages_after=8,
                     compaction_type="summary",
                     compacted_at="2026-09-01T00:00:00+00:00",
                 )
@@ -2898,20 +2915,24 @@ class TestSentinelRecipeRealGraph:
                     seen.add(m.id)
                     deduped.append(m)
 
-                # 1. The injected message lands at index 0.
+                # 1. BOTH hoisted injections land at the head, in
+                # keepables order: the permanent context_kind note,
+                # then the bare unanswered tail note.
                 assert isinstance(deduped[0], HumanMessage)
                 assert deduped[0].id == "INJ-1"
+                assert isinstance(deduped[1], HumanMessage)
+                assert deduped[1].id == "NOTE-TAIL"
 
                 # 2. The doc carries the canonical id and sits
-                # right after the injected message.
+                # right after the hoisted head.
                 doc_idx = next(
                     i for i, m in enumerate(deduped)
                     if isinstance(m, SystemMessage)
                     and (m.id or "").startswith("compaction-global-")
                 )
-                assert doc_idx == 1, (
-                    f"doc must land at index 1 (right after the "
-                    f"injected head); got {doc_idx}"
+                assert doc_idx == 2, (
+                    f"doc must land at index 2 (right after the "
+                    f"hoisted injection head); got {doc_idx}"
                 )
                 assert deduped[doc_idx].id == f"compaction-global-{iid}-1"
 

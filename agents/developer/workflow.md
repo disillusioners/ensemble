@@ -505,6 +505,7 @@ Otherwise, always spawn new.
 ---
 
 ## Auto-Commit on Successful Review
+> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (giter/workflow.md -> Worktree Mode).
 
 When review session confirms code is good (no issues, no improvements needed):
 

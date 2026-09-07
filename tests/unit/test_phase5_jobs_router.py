@@ -128,9 +128,11 @@ class TestJobsRouteRegistration:
         # - GET /api/jobs/{job_id}/events
         # - POST /api/jobs/cleanup                           (System Jobs Cleanup)
         # - GET /api/jobs/cleanup/preflight                  (System Jobs Cleanup preflight)
-        # = 10 endpoints
-        assert len(jobs_routes) == 10, (
-            f"Expected 10 job endpoints, found {len(jobs_routes)}"
+        # - POST /api/jobs/defer-holders/{instance_id}/force-complete (WS4 — fix/defer-self-witness-and-cleanup)
+        # - POST /api/jobs/defer-holders/{instance_id}/resend-foreground (WS4 — fix/defer-self-witness-and-cleanup)
+        # = 12 endpoints
+        assert len(jobs_routes) == 12, (
+            f"Expected 12 job endpoints, found {len(jobs_routes)}"
         )
 
 

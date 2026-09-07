@@ -210,7 +210,11 @@ class JobProcessor:
         """
         return hasattr(obj, "_mock_name") and hasattr(obj, "_mock_methods")
 
-    async def _defer_idle_check(self, project_id: str) -> int:
+    async def _defer_idle_check(
+        self,
+        project_id: str,
+        requester_instance_id: str | None = None,
+    ) -> int:
         """Return the count of active non-defer jobs for a project.
 
         Gate A (Phase 1 of defer-seam bugfix, 2026-06-30): consults
@@ -228,6 +232,16 @@ class JobProcessor:
         predicate for admission-lifecycle rows. The task predicate remains a
         required second check when the job predicate returns False because a
         Task can exist without a backing JobItem.
+
+        **WS1 requester-instance carve-out (2026-09-06):** when the
+        caller passes ``requester_instance_id`` (the candidate
+        instance being admitted on this defer queue), the
+        job-granular predicate excludes the candidate's OWN settled
+        mirrors from the busy-set. The legacy clause stays UNTOUCHED —
+        a live foreground turn yields an ACTIVE job which still
+        witnesses correctly. System-scope and legacy callers see the
+        pre-WS1 shape (semantics identical to the previous
+        implementation).
 
         Fallback contract (test back-compat):
 
@@ -248,6 +262,14 @@ class JobProcessor:
                 allowed (system-wide) by the underlying predicate but
                 the defer-queue gate is always project-scoped — pass
                 ``queue.project_id``.
+            requester_instance_id: Optional candidate instance for
+                the WS1 requester-instance carve-out (the first
+                pending JobItem's instance on the defer queue being
+                processed). When ``None`` (the default — system-scope
+                and legacy callers), the no-carve-out body is used
+                and semantics are identical to pre-WS1. When set, the
+                candidate's own settled mirrors do NOT witness against
+                the candidate.
 
         Returns:
             Truthy ``int`` (1) when non-deferred work is active —
@@ -275,14 +297,17 @@ class JobProcessor:
         ):
             try:
                 active = await asyncio.to_thread(
-                    queue_repo.has_active_non_deferred_work, project_id
+                    queue_repo.has_active_non_deferred_work,
+                    project_id,
+                    requester_instance_id,
                 )
                 if isinstance(active, bool) and active:
                     return 1
             except Exception as e:
                 logger.warning(
                     f"JobProcessor._defer_idle_check: job predicate "
-                    f"raised {e!r} for project_id={project_id!r} — "
+                    f"raised {e!r} for project_id={project_id!r}, "
+                    f"requester_instance_id={requester_instance_id!r} — "
                     f"failing CLOSED (returning 1)"
                 )
                 return 1
@@ -783,8 +808,23 @@ class JobProcessor:
                 # is the shared predicate backing Gate A, Gate B
                 # (``_select_next_eligible_job``), and the maintenance
                 # ``_is_idle`` check.
+                #
+                # WS1 (2026-09-06): the candidate being admitted on
+                # this defer queue is the first pending JobItem; pass
+                # its ``instance_id`` as the requester-instance
+                # carve-out so the candidate's OWN settled mirrors do
+                # NOT witness against the candidate (the defer self-
+                # witness incident). When the first pending JobItem
+                # has no ``instance_id`` (a queued defer job with no
+                # instance yet), the carve-out degrades to the
+                # pre-WS1 shape (no carve-out, project-scoped gate).
+                first_pending = pending[0]
+                requester_instance_id = (
+                    getattr(first_pending, "instance_id", None)
+                )
                 non_defer_active = await self._defer_idle_check(
-                    queue.project_id
+                    queue.project_id,
+                    requester_instance_id,
                 )
                 if non_defer_active:
                     continue

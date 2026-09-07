@@ -1470,6 +1470,27 @@ class SQLModelInstanceRepository:
         the terminal set AND has no live JobItem AND no live Task AND
         has no non-terminal child instance.
 
+        **WS4 mission lens (2026-09-06, ``fix/defer-self-witness-and-
+        cleanup``):** the JobItem anti-join no longer lets an instance's
+        OWN queued defer-lane rows shield it (the "self-shield"). The
+        live ops unstick (incident 2026-09-06, instance 6bc61f42 / job
+        47161b1e) proved the gap: a stalled holder's only remaining
+        busy rows were its own queued defer-lane message mirrors, so
+        the pre-WS4 scan shielded the holder from the reaper forever —
+        the mirrors hold the defer gate, the gate holds the mirrors,
+        nothing ever runs. The witness clause now counts a JobItem row
+        against the instance ONLY when it is ``active`` (any lane) or
+        ``queued`` on a NON-defer lane (or on an unknown/missing queue
+        — a ``LEFT JOIN`` miss yields ``queue_type IS NULL`` and the
+        row still shields: fail-CLOSED, matching the gate's error
+        posture). Rationale for exempting queued defer TASK rows too:
+        the reaper runs AFTER cleanup bucket 1
+        (``batch_cancel_queued``), which has already drained every
+        queued non-mirror job, so at reaper time the surviving queued
+        defer-lane rows are necessarily ``job_type='message'`` mirrors
+        — and for the standalone preflight the exemption predicts the
+        post-bucket-1 state, which is what a preflight must predict.
+
         Each anti-join is expressed as a ``NOT EXISTS (SELECT 1 ... WHERE
         jqi.instance_id = i.instance_id ...)`` correlated subquery — NOT
         as ``NOT IN (SELECT DISTINCT jqi.instance_id ...)``. C1 (2026-08-12):
@@ -1528,9 +1549,21 @@ class SQLModelInstanceRepository:
             WHERE i.status NOT IN ({terminal_csv})
               AND NOT EXISTS (
                 SELECT 1 FROM job_queue_items jqi
+                LEFT JOIN job_queues jq ON jq.queue_id = jqi.queue_id
                 WHERE jqi.instance_id = i.instance_id
                   AND jqi.admission_state IN ({live_jobitem_csv})
                   AND jqi.deleted_at IS NULL
+                  -- WS4 mission lens: the instance's OWN queued
+                  -- defer-lane rows do NOT witness against it (the
+                  -- self-shield exemption). ``active`` rows of any
+                  -- lane and queued rows on non-defer / unknown
+                  -- lanes still witness (fail-CLOSED on the LEFT
+                  -- JOIN miss via the explicit ``IS NULL`` arm).
+                  AND (
+                    jqi.admission_state = 'active'
+                    OR jq.queue_type IS NULL
+                    OR jq.queue_type != 'defer'
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM task t
@@ -1551,9 +1584,11 @@ class SQLModelInstanceRepository:
         the terminal set (``completed``, ``error``, ``terminated``,
         ``failed``) AND has:
 
-        * no active/queued ``job_queue_items`` rows
-          (``admission_state IN ('queued','active')``,
-          ``deleted_at IS NULL``), and
+        * no *witnessing* ``job_queue_items`` rows — WS4 mission lens:
+          an ``active`` row on ANY lane, or a ``queued`` row on a
+          non-defer (or unknown) lane, witnesses; the instance's OWN
+          ``queued`` defer-lane rows do NOT (the self-shield
+          exemption — see :meth:`_build_zombie_scan_sql`), and
         * no pending/running/paused ``task`` rows.
 
         Used by the System Cleanup endpoint's Bucket 5 (instance-level
@@ -1600,6 +1635,205 @@ class SQLModelInstanceRepository:
         with self.engine.begin() as conn:
             row = conn.execute(stmt).fetchone()
         return int(row[0]) if row else 0
+
+    def find_non_terminal_instance_ids(self) -> list[str]:
+        """Return ids of ALL non-terminal instances (read-only scan).
+
+        WS4 (2026-09-06) companion to :meth:`find_zombie_instances`
+        for the cleanup preflight's live-vs-reap split: the preflight
+        derives ``live_instance_ids`` ("will remain") as the
+        non-terminal set minus the reap-eligible set, using the SAME
+        terminal CSV constant (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``)
+        so the two scans cannot disagree on what "terminal" means.
+
+        Cap-exception micro-round (2026-09-06, ``fix/defer-self-
+        witness-and-cleanup``): the preflight post-filters this set
+        through :meth:`has_real_active_or_queued_work` to surface the
+        truth-survivor list (``non-terminal ∧ not-zombie ∧ no
+        cancellable active or queued (non-mirror) jobs``). Both
+        probes compose from the SAME class-level literal sets —
+        :data:`_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`,
+        :data:`_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN` — so the
+        per-instance truth-survivor predicate cannot drift from the
+        bulk scan.
+
+        Self-contained SYNC method using raw-SQL ``text()`` — the
+        preflight wraps it in ``asyncio.to_thread``.
+
+        Returns:
+            List of ``instance_id`` strings whose status is NOT in the
+            terminal set. Unbounded (the operator preflight owns
+            bounding).
+        """
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        stmt = text(
+            f"SELECT i.instance_id FROM instances i "
+            f"WHERE i.status NOT IN ({terminal_csv}) "
+            f"ORDER BY i.instance_id"
+        )
+        with self.engine.begin() as conn:
+            rows = conn.execute(stmt).fetchall()
+        return [row[0] for row in rows if row and row[0] is not None]
+
+    def has_live_work(self, instance_id: str) -> bool:
+        """Return True iff ``instance_id`` has ANY live work driving it.
+
+        WS4 Round-2 W2 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        — the single-instance companion to the zombie-scan family. The
+        WS4 holder-action guard (:meth:`JobQueueService.force_complete_defer_holder`)
+        previously probed ONLY the job side via
+        ``JobRepository.has_active_non_deferred_work`` — that misses two
+        live-work shapes the zombie scan already detects:
+
+        * a Task in ``pending``/``running``/``paused`` (no JobItem at
+          all — direct Task, common for forked helpers / reaper sweep);
+        * a non-terminal child instance (a ``waiting_children`` parent
+          whose subtree is still executing).
+
+        Without those arms the holder-probe returned False (probe clean)
+        for any non-trivial instance, and a force-complete would orphan
+        live tasks / live children.
+
+        **Reuse the existing scan arms (derive-don't-reimplement).** The
+        predicate composes from the SAME three literal-lists the zombie
+        scan bakes into :meth:`_build_zombie_scan_sql`
+        (``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN``,
+        ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``,
+        ``_LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN``) so the per-instance
+        check CANNOT drift from the bulk-scan definition of "live".
+        The JobItem anti-join keeps the WS4 mission-lens self-shield:
+        the holder's OWN queued defer-lane rows do NOT witness against
+        it (``admission_state='active'`` OR queue is non-defer / unknown).
+        The child arm matches the third ``NOT EXISTS`` of the zombie
+        scan, same terminal CSV.
+
+        Returns:
+            True iff ANY of:
+
+            * EXISTS a JobItem on the instance in ``queued``/``active``,
+              AND not a settled-mirror exception
+              (WS4 mission lens: ``admission_state='active'`` OR
+              ``queue_type`` non-defer / unknown);
+            * EXISTS a Task on the instance with status in
+              ``_LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN``;
+            * EXISTS a child instance with ``parent_id`` set to this
+              instance whose status is not in the terminal CSV.
+
+            False iff none of the above holds — i.e. the instance has
+            no live work and is the safe-to-terminate set the bulk
+            zombie scan would also match.
+
+        Raises:
+            SQLAlchemyError: propagated — caller fails-closed by
+                treating any error as ``True`` (busy / refuse). Mirrors
+                the gate's own fail-CLOSED posture.
+        """
+        terminal_csv = ", ".join(
+            f"'{s}'" for s in self._TERMINAL_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_task_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_TASK_STATUSES_FOR_ZOMBIE_SCAN
+        )
+        live_jobitem_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN
+        )
+        # Parameterized EXISTS over the three anti-join arms; ``iid``
+        # is bound so SQLAlchemy handles driver-quote differences
+        # (SQLite vs PG). The arms are byte-shared with
+        # :meth:`_build_zombie_scan_sql` apart from the outer WHERE
+        # binding to a single instance.
+        stmt = text(
+            f"""
+            SELECT EXISTS (
+                SELECT 1 FROM job_queue_items jqi
+                LEFT JOIN job_queues jq ON jq.queue_id = jqi.queue_id
+                WHERE jqi.instance_id = :instance_id
+                  AND jqi.admission_state IN ({live_jobitem_csv})
+                  AND jqi.deleted_at IS NULL
+                  AND (
+                    jqi.admission_state = 'active'
+                    OR jq.queue_type IS NULL
+                    OR jq.queue_type != 'defer'
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM task t
+                WHERE t.instance_id = :instance_id
+                  AND t.status IN ({live_task_csv})
+            )
+            OR EXISTS (
+                SELECT 1 FROM instances child
+                WHERE child.parent_id = :instance_id
+                  AND child.status NOT IN ({terminal_csv})
+            )
+            """
+        )
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt, {"instance_id": instance_id}).fetchone()
+        return bool(row[0]) if row else False
+
+    def has_real_active_or_queued_work(self, instance_id: str) -> bool:
+        """Return True iff ``instance_id`` has a NON-MIRROR ``active``
+        / ``queued`` JobItem (cancellable work — Bucket 1 + Bucket 2).
+
+        Unblock-round ITEM 11 (2026-09-06, ``fix/defer-self-witness-and-cleanup``)
+        — the truth-survivor filter for the cleanup preflight. The
+        round-2 ``live_ids`` shape (``non-terminal ∖ zombie``) listed
+        an instance that has a non-mirror ``active`` / ``queued``
+        JobItem (NOT a zombie per the WS4 mission lens — ``active``
+        rows of any lane witness, ``queued`` rows on non-defer /
+        unknown lanes witness) as a "will remain" candidate. But
+        Bucket 2's per-row ``cancel_job`` cascade terminates the
+        instance for every active JobItem (excluding mirrors), and
+        Bucket 1's queued batch UPDATE cancels every queued JobItem
+        (excluding mirrors). So the preflight over-promised survival.
+
+        This helper is the truth-survivor guard: the preflight's
+        ``live_instance_ids`` MUST exclude instances for which this
+        probe returns True. The probe SQL is the minimum required to
+        detect Bucket-2 / Bucket-1 cancellable work:
+
+        * ``admission_state IN ('queued','active')`` — the live
+          JobItem predicate (the SAME constant the zombie scan uses).
+        * ``job_type != 'message'`` — mirror protection: cleanup does
+          NOT cancel ``job_type='message'`` rows in buckets 1/2, so
+          they are NOT Bucket-1/2-cancellable.
+        * ``deleted_at IS NULL`` — soft-deleted rows are terminal on
+          paper and excluded everywhere.
+
+        Returns:
+            ``True`` iff at least one qualifying row exists. SQL is
+            a single ``SELECT EXISTS`` so the wire cost is one
+            round-trip per probed instance.
+
+        Raises:
+            SQLAlchemyError: propagated — the preflight wraps the
+                probe in ``except Exception`` and treats an error as
+                ``has_real_active_or_queued_work == False`` (NOT a
+                survivor — conservative, fail-CLOSED).
+        """
+        live_jobitem_csv = ", ".join(
+            f"'{s}'" for s in self._LIVE_JOBITEM_STATES_FOR_ZOMBIE_SCAN
+        )
+        # Mirror exclusion is hard-coded: ``cleanup_helper`` only
+        # flags ``job_type='message'`` rows (the canonical
+        # constitution-era mirror protection).
+        stmt = text(
+            f"""
+            SELECT EXISTS (
+                SELECT 1 FROM job_queue_items jqi
+                WHERE jqi.instance_id = :instance_id
+                  AND jqi.admission_state IN ({live_jobitem_csv})
+                  AND jqi.job_type != 'message'
+                  AND jqi.deleted_at IS NULL
+            )
+            """
+        )
+        with self.engine.begin() as conn:
+            row = conn.execute(stmt, {"instance_id": instance_id}).fetchone()
+        return bool(row[0]) if row else False
 
     def get_metadata_value(self, instance_id: str, key: str) -> Any | None:
         """Read ONE top-level metadata key without hydrating the row.

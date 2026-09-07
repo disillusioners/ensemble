@@ -644,7 +644,9 @@ class JobRepository:
             return db_session.exec(stmt).one()
 
     def has_active_non_deferred_work(
-        self, project_id: str | None = None
+        self,
+        project_id: str | None = None,
+        requester_instance_id: str | None = None,
     ) -> bool:
         """Return True iff there is active non-defer work that should hold a
         defer queue back.
@@ -666,6 +668,22 @@ class JobRepository:
         failed) must not block the defer queue — the originating
         work is genuinely done; the residual job row is awaiting
         observer finalization but is no longer "actively working".
+
+        **WS1 requester-instance carve-out (2026-09-06):** when the
+        caller passes ``requester_instance_id`` (the candidate's
+        instance_id), the predicate excludes the candidate's OWN
+        settled mirrors from the busy-set. Without the carve-out, a
+        deferred message sent to a COMPLETED instance REVIVES it (F7
+        revive) and the revived instance's non-terminal status + its
+        own settled mirrors would hold the gate against ITSELF
+        forever — the held defer task becomes the instance's only
+        work, no turn ever runs, every reaper is shielded. The
+        carve-out ONLY applies to the post-Fix-B mirror clause (a live
+        foreground turn yields an ACTIVE job which still witnesses
+        correctly via the legacy clause — UNCHANGED). The carve-out
+        bind is a STRING (never NULL); when omitted the predicate
+        degrades to the pre-WS1 shape (system-scope and legacy
+        callers see identical semantics).
 
         **Paused behaviour (W2 invariant, 2026-07-23):** a paused
         ``Instance`` is NOT in the terminal set
@@ -699,11 +717,14 @@ class JobRepository:
 
         The SQL bodies live in
         ``daemon/repositories/job_queue/_idle_predicate_sql.py`` — TWO
-        scope-selected constants: ``JOB_DEFER_BUSY_BODY_PROJECT``
+        scope-selected constants per variant: ``JOB_DEFER_BUSY_BODY_PROJECT``
         (project-scoped) and ``JOB_DEFER_BUSY_BODY_SYSTEM``
         (system-wide), chosen by ``defer_busy_statement`` on
-        ``project_id``. Project and system bodies share structure and
-        signatures but are DISTINCT SQL bodies (the single collapsed
+        ``project_id``; with the WS1 requester-instance carve-out the
+        body selection branches again on ``requester_instance_id``
+        (``_WITH_CARVEOUT`` variant when set). Project and system
+        bodies share structure and signatures but are DISTINCT SQL
+        bodies (the single collapsed
         body's ``:project_id IS NULL OR`` scope switch was the PG
         ``AmbiguousParameter`` bug). Error posture is fail-CLOSED
         (hotfix 2026-09-04); bool contract: True = busy/hold.
@@ -720,13 +741,23 @@ class JobRepository:
                 caller is system-wide, e.g. the maintenance idle
                 probe), all projects are evaluated. When set, only
                 jobs in that project are counted.
+            requester_instance_id: Optional candidate instance for the
+                WS1 requester-instance carve-out. When ``None`` (the
+                default — system-scope and legacy callers), the
+                no-carve-out body is used and semantics are identical
+                to pre-WS1. When set, the candidate's own settled
+                mirrors do NOT witness against the candidate (the
+                legacy clause still witnesses normally for ACTIVE
+                jobs).
 
         Returns:
             True iff busy (active non-deferred work or a live settled
-            mirror); False only on empty result. On repository/database
-            errors returns True — fail-CLOSED (hotfix 2026-09-04): the
-            gate refuses the defer and the 30s reconciler tick retries;
-            fail-OPEN admitted wrongly (2026-09-04 PG AmbiguousParameter).
+            mirror — excluding the requester's own mirrors when the
+            carve-out is in effect); False only on empty result. On
+            repository/database errors returns True — fail-CLOSED
+            (hotfix 2026-09-04): the gate refuses the defer and the
+            30s reconciler tick retries; fail-OPEN admitted wrongly
+            (2026-09-04 PG AmbiguousParameter).
         """
         try:
             with self.engine.begin() as conn:
@@ -738,10 +769,12 @@ class JobRepository:
                 # the system-wide body (NO project parameter at all) on
                 # ``project_id`` — the bare ``:project_id IS NULL`` shape
                 # that produced the PG ``AmbiguousParameter`` incident is
-                # gone by construction.
+                # gone by construction. With WS1 the body selection
+                # branches again on ``requester_instance_id`` for the
+                # candidate-self-mirror carve-out.
                 row = conn.execute(
-                    defer_busy_statement(project_id),
-                    defer_busy_binds(project_id),
+                    defer_busy_statement(project_id, requester_instance_id),
+                    defer_busy_binds(project_id, requester_instance_id),
                 ).first()
         except Exception as e:
             # W3 (fail-CLOSED, hotfix 2026-09-04): the predicate's own
@@ -757,7 +790,8 @@ class JobRepository:
             # ``has_active_non_background_work`` below.
             logger.warning(
                 f"has_active_non_deferred_work failed "
-                f"(project_id={project_id!r}): {e} — "
+                f"(project_id={project_id!r}, "
+                f"requester_instance_id={requester_instance_id!r}): {e} — "
                 "treating as True (fail-CLOSED on DB error; defer queue "
                 "waits for the next tick instead of admitting)"
             )

@@ -1,0 +1,62 @@
+-- Migration: add composite claim-path index idx_task_status_type_created
+--
+-- Created: 2026-09-07
+-- Author: coder (terminal-report-wake round 2, review cycle-1 W1)
+-- Description: composite (status, task_type, created_at) index on the
+--   task table for the PROCESS_REPORT wake-lane claim query.
+--
+-- WHY: ``TaskRepository.claim_pending_task`` ranks claimable
+-- candidates with a two-tier ORDER BY (terminal-report wake,
+-- incident 7807e521):
+--
+--     ORDER BY
+--       CASE WHEN task_type = 'process_report' THEN 0 ELSE 1 END,
+--       created_at ASC
+--
+-- The leading CASE key is an EXPRESSION over ``task_type``, so the
+-- pre-existing ``idx_task_status_created (status, created_at)``
+-- cannot serve the sort: the planner falls back to filtering the
+-- whole PENDING backlog and top-N sorting it on EVERY claim cycle —
+-- degradation that is worst exactly when the wake lane matters most
+-- (pool saturation, large queued backlog). The composite
+-- ``(status, task_type, created_at)`` index serves the
+-- ``status = 'pending'`` equality prefix and hands the ranker rows
+-- that are already grouped by task_type and ordered by created_at
+-- within each group — the sort input collapses to the two CASE
+-- tiers.
+--
+-- ``idx_task_status_created`` is deliberately KEPT: the status-only
+-- sweeps (``list_running_tasks``, ``list_pending_tasks_older_than``)
+-- filter ``status = ?`` and ORDER BY ``created_at`` with no
+-- ``task_type`` constraint, which the new composite cannot order
+-- (``task_type`` sits between the equality prefix and the sort
+-- column).
+--
+-- DUAL-DRIVER NOTES (both dialects, no PG-only DDL):
+--   * Plain ``CREATE INDEX IF NOT EXISTS`` is valid on PostgreSQL
+--     AND SQLite — unlike migration 20260714_000001 (fresh-SQLite
+--     boot broken by PG-only ``DROP CONSTRAINT IF EXISTS``), this
+--     file applies cleanly on both backends.
+--   * Triple registration (the runner's ``run_pending_migrations``
+--     is a NO-OP on PostgreSQL — schema evolution for existing PG
+--     databases is handled by ``EnsembleManager
+--     ._ensure_postgres_columns``):
+--       1. this .sql file (SQLite path),
+--       2. ``daemon/repositories/task/models.py`` ``__table_args__``
+--          (fresh databases via ``SQLModel.metadata.create_all``),
+--       3. ``daemon/manager.py`` ``_ensure_postgres_columns``
+--          (existing PostgreSQL databases).
+--     The index name MUST be byte-identical across all three sites.
+--
+-- Plan-verification evidence (disposable prod-shaped PostgreSQL
+-- database ``ensemble_w1_plan_check``, created and dropped for the
+-- check — ensemble_prod never touched): EXPLAIN on the claim query
+-- switched from ``Sort + Filter`` over the backlog to an index scan
+-- on ``idx_task_status_type_created``. See the round-2 coder report.
+
+-- UP
+CREATE INDEX IF NOT EXISTS idx_task_status_type_created
+ON task (status, task_type, created_at);
+
+-- DOWN
+DROP INDEX IF EXISTS idx_task_status_type_created;

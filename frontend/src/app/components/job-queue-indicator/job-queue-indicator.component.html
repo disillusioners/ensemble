@@ -15,19 +15,57 @@
 
   <!-- Defer-gate warning — renders ONLY when pending defer jobs exist
        (deferBlockWarning() is null otherwise, so no reserved space).
-       Tooltip text comes from the pure deferBlockIndicator helper. -->
+       Tooltip text comes from the pure deferBlockIndicator helper.
+       WS4: when a holder-targeted action is available (paused or
+       stalled holder), the icon becomes the menu trigger for the
+       guarded unstick actions; the icon stays inert otherwise. -->
   @if (deferBlockWarning(); as warn) {
     <span
       class="defer-block-warning"
       [class.amber]="warn.severity === 'amber'"
       [class.info]="warn.severity === 'info'"
       [class.red]="warn.severity === 'red'"
-      [matTooltip]="warn.tooltip"
-      [attr.aria-label]="warn.tooltip"
-      role="img">
-      <mat-icon inline>{{ deferBlockIcon() }}</mat-icon>
+      [class.actionable]="deferBlockActionTarget() !== null"
+      role="img"
+      [attr.aria-label]="warn.tooltip">
+      @if (deferBlockActionTarget(); as action) {
+        <button
+          class="defer-warning-trigger"
+          [matMenuTriggerFor]="deferHolderMenu"
+          [matTooltip]="warn.tooltip"
+          [disabled]="holderActionInProgress()"
+          aria-label="Defer holder unstick actions">
+          <mat-icon inline>{{ deferBlockIcon() }}</mat-icon>
+        </button>
+      } @else {
+        <mat-icon inline [matTooltip]="warn.tooltip">{{ deferBlockIcon() }}</mat-icon>
+      }
     </span>
   }
+
+  <mat-menu #deferHolderMenu="matMenu">
+    <ng-template matMenuContent>
+      @if (deferBlockActionTarget(); as action) {
+        <button
+          mat-menu-item
+          [disabled]="!action.forceCompleteAllowed || holderActionInProgress()"
+          (click)="onForceCompleteHolder()">
+          <mat-icon>task_alt</mat-icon>
+          <span>Force-complete stalled holder</span>
+          @if (!action.forceCompleteAllowed) {
+            <span class="defer-action-note">paused — use resume/terminate</span>
+          }
+        </button>
+        <button
+          mat-menu-item
+          [disabled]="holderActionInProgress()"
+          (click)="onResendDeferredForeground()">
+          <mat-icon>send</mat-icon>
+          <span>Re-send as foreground</span>
+        </button>
+      }
+    </ng-template>
+  </mat-menu>
 
   <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
     <ng-template matMenuContent>

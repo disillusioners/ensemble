@@ -31,10 +31,13 @@ is pinned in ``tests/unit/routers/test_defer_blocked_api.py``.
 Purity (census contract)
 ------------------------
 
-Pure read-model: two SELECTs per resolve, zero DML, no JobItem
-creation, no admission-state writes — ``KNOWN_ADMISSION_STATE_WRITERS``
-stays frozen at 23 (``daemon/job_state/constitution.py``). The scanner
-in ``constitution.py`` keys on ``SET admission_state`` strings,
+Pure read-model: WS2 ``2 + len(dedup'd_holders)`` SELECTs per
+resolve (the no-carve-out witness SELECT + the defer-lane pending
+count + one WS1 carve-out EXISTS per dedup'd holder), zero DML, no
+JobItem creation, no admission-state writes —
+``KNOWN_ADMISSION_STATE_WRITERS`` stays frozen at 23
+(``daemon/job_state/constitution.py``). The scanner in
+``constitution.py`` keys on ``SET admission_state`` strings,
 ``admission_state=`` keyword writes and ``"admission_state"`` dict keys;
 none appear here (the module's only ``admission_state`` occurrences are
 column REFERENCES inside the shared gate SQL imported from
@@ -48,20 +51,56 @@ Holder semantics (docs §8.5)
   rows) each surface as their OWN holder with ``instance_id=""``,
   ``agent`` from the JobItem row, ``status=""`` and ``kind="live"`` —
   dropping them would break the holders-non-empty == gate-blocked pin.
-* ``kind``: ``"paused"`` when the witness instance's status is
-  ``paused`` (the W2 invariant: pause is suspended-but-occupying — the
-  AMBER severity), ``"live"`` otherwise.
+* ``kind`` (WS2, three values):
+  - ``"paused"`` when the witness instance's status is ``paused``
+    (the W2 invariant: pause is suspended-but-occupying — the AMBER
+    severity). Paused takes precedence over stalled by construction:
+    a paused instance's actionable unblock is always the operator
+    action (resume / terminate), never the mirrors-only ``stalled``
+    action (force-complete), so the operator-actionable status wins.
+  - ``"stalled"`` for a non-paused witness whose gate-busy state is
+    EXCLUSIVELY its OWN settled message mirrors (the WS1 carve-out
+    test — ``has_active_non_deferred_work(None,
+    requester_instance_id=<holder>)`` returns ``False``: the carve-out
+    excludes the holder's own settled mirrors; if no OTHER busy
+    witness remains, every row in the no-carve-out busy-set was the
+    holder's own mirrors — the gate is held by mirrors pinning the
+    gate against an instance with no live work running). Stalled is
+    actionable via force-complete of the holder's settled mirrors
+    (WS4 will ship the cleanup mechanic — the kind surfaces the
+    remediation shape WITHOUT taking the action; docs §8.5 by-design
+    note about cleanup blindness is appended by WS4).
+  - ``"live"`` for every other witness (a non-paused instance with
+    genuine non-mirror busy work, OR a legacy-clause witness with no
+    instance row at all — instance-less JobItems have no
+    ``instance_id`` to feed the carve-out bind, so they fall through
+    as ``live`` by construction).
 * ``since`` (normalized ISO-8601, naive → UTC — the
   ``_parse_job_created_at`` pattern in ``job_recovery_service.py``:
   ``instances.last_activity_at`` is TEXT on PG (tz-naive) vs SQLite
   (tz-aware)): paused holders report ``paused_at`` (falling back to
-  ``updated_at``/``created_at``); live holders report
-  ``last_activity_at`` (falling back to ``updated_at``/
-  ``created_at``); instance-less witnesses report the JobItem's own
-  ``created_at``.
+  ``updated_at``/``created_at``); live AND stalled holders report
+  ``last_activity_at`` (falling back through ``updated_at``/
+  ``created_at`` — stalled holders have no live task to bump
+  ``last_activity_at`` recently, so the timestamp is the most-recent
+  prior activity stamp); instance-less witnesses report the JobItem's
+  own ``created_at``.
 * Ordering: paused holders first (the operator-priority AMBER
-  witnesses), then live, each ascending by ``instance_id`` —
+  witnesses), then stalled (the operator-actionable mirrors-only
+  witnesses), then live — each ascending by ``instance_id`` —
   deterministic for tests and UI.
+
+WS2 query budget — the stall check adds ONE additional EXISTS query
+per dedup'd holder instance (``2 + len(holders)`` SELECTs total per
+``resolve()`` call). Bounded by dedup'd holder count, which is small
+in practice (every holder is per-DISTINCT-instance — multiple busy
+JobItems on the SAME instance dedupe to one holder in
+``_project_holders``); NOT a witness-row N+1. The bounded-query test
+pin in ``tests/unit/routers/test_defer_blocked_api.py::TestBoundedQueryCount``
+documents the new ``2 + N`` budget and the dedup invariant that keeps
+``N`` small. The carve-out bodies are byte-derived from the same
+``_idle_predicate_sql`` gate constants (the WS1 seam), so the stall
+classification cannot drift from the gate's own decision.
 
 Degradation posture: none. A DB error propagates (⇒ HTTP 500 on the
 route) — queues-family convention (no §8.2-style degrade shape on this
@@ -93,8 +132,29 @@ if TYPE_CHECKING:
 #: (the AMBER severity shape — the operator-actionable case).
 HOLDER_KIND_PAUSED: Final[str] = "paused"
 
-#: Holder kind for every non-paused witness (live instance, or a
-#: legacy-clause witness with no instance row at all).
+#: Holder kind for a non-paused witness whose gate-busy state is
+#: EXCLUSIVELY its own settled message mirrors — the WS2 mirrors-only
+#: shape (no live ACTIVE task on the instance, no OTHER-instance
+#: witnesses). Detected by re-evaluating the gate predicate with the
+#: WS1 requester-instance carve-out
+#: (``has_active_non_deferred_work(None, requester_instance_id=<holder>)``):
+#: carve-out ⇒ busy-set excludes the holder's own settled mirrors; if
+#: the result is empty, every remaining witness was the holder's OWN
+#: mirrors — the holder is "stalled" (AMBER severity, actionable via
+#: force-complete of the holder's mirrors; the
+#: ``defer_blocked`` ``True`` reading stays the gate's own decision
+#: and is unaffected by the kind). Distinguished from ``paused`` at
+#: the FE tooltip layer (paused = suspended-by-operator; stalled =
+#: nothing-running-but-mirrors-pinning-the-gate).
+HOLDER_KIND_STALLED: Final[str] = "stalled"
+
+#: Holder kind for a witness that is NEITHER ``paused`` NOR
+#: ``stalled`` — a live instance with a genuine non-mirror busy row
+#: (an ACTIVE foreground turn, or OTHER-instance mirrors still
+#: witnessing after the carve-out). Also the kind for a legacy-clause
+#: witness with no instance row at all (instance-less JobItems have no
+#: instance_id to feed the carve-out bind — they fall through as
+#: ``live`` by construction).
 HOLDER_KIND_LIVE: Final[str] = "live"
 
 #: ``instance_id`` value for a busy-set witness JobItem that has NO
@@ -108,6 +168,17 @@ NO_INSTANCE_ID: Final[str] = ""
 #: the ``system_defer_queue`` lane, one per project). System-wide: the
 #: endpoint is unscoped. Composed from literal status/type values with
 #: no parameters — nothing user-shaped reaches this string.
+#:
+#: Unblock-round ITEM 4 (``fix/defer-self-witness-and-cleanup``,
+#: 2026-09-06): ``_DEFER_PENDING_COUNT_SQL`` STAYS module-private
+#: (``daemon.services.defer_block_resolver._DEFER_PENDING_COUNT_SQL``,
+#: underscore-prefixed). External callers — including the preflight
+#: router — MUST consume the PUBLIC instance method
+#: :meth:`DeferBlockResolver.defer_pending_count`. The SQL moves from a
+#: free function with an explicit engine parameter to an instance
+#: method that reaches ``self._job_repo.engine`` internally. There is
+#: no longer a ``defer_pending_count(engine)`` free function in this
+#: module's public surface: only the class-bound instance method.
 _DEFER_PENDING_COUNT_SQL: Final[TextClause] = text(
     "SELECT count(*) FROM job_queue_items j"
     " LEFT JOIN job_queues q ON j.queue_id = q.queue_id"
@@ -115,6 +186,160 @@ _DEFER_PENDING_COUNT_SQL: Final[TextClause] = text(
     " AND j.admission_state = 'queued'"
     " AND q.queue_type = 'defer'"
 )
+
+
+# ── The resolver ───────────────────────────────────────────────────────────
+
+
+class DeferBlockResolver:
+    """Enumerate the defer gate's busy-set witnesses (READ-ONLY).
+
+    Mirrors the leaf-service pattern of
+    ``daemon/services/mission_resolver.py:MissionResolver``: the caller
+    wires the repository at construction time, the service holds no
+    state, and every public method reads through the underlying engine.
+
+    **WS2 query budget** — :meth:`resolve` issues exactly
+    ``2 + len(dedup'd_holders)`` SELECTs:
+
+    1. the shared-composition witness SELECT (system-wide no-carve-out
+       body — the same body the gate evaluates for ``project_id=None``);
+    2. the defer-lane pending count;
+    3. for each DEDUP'D holder instance, one EXISTS query evaluating
+       the WS1 carve-out gate body with the holder's instance as the
+       requester (the stall classification — see module docstring).
+
+    Dedup'd holders are per-DISTINCT-instance (multiple busy JobItems
+    on the SAME instance collapse to ONE holder in
+    :func:`_project_holders`); N stays small in practice — bounded by
+    the number of distinct non-terminal instances with non-defer
+    busy rows. NOT a witness-row N+1. The ``TestBoundedQueryCount``
+    pin in ``tests/unit/routers/test_defer_blocked_api.py`` documents
+    the ``2 + N`` budget and the dedup invariant that keeps ``N``
+    small. On an empty busy-set the budget collapses to the original
+    2 (no stall checks needed — no holders to classify).
+
+    **Unblock-round ITEM 4 (2026-09-06):** :meth:`defer_pending_count`
+    is the public instance method replacing the round-2 free function
+    ``defer_pending_count(engine)``. The router reaches the count
+    through ``self._job_repo.engine`` INTERNALLY — there is NO direct
+    engine reach-through from the preflight router anymore. The SQL
+    constant :data:`_DEFER_PENDING_COUNT_SQL` stays module-private.
+    """
+
+    def __init__(self, job_repo: "JobRepository") -> None:
+        """Initialize with the READ-only ``JobRepository``.
+
+        Args:
+            job_repo: ``JobRepository`` whose engine serves the
+                witness + count SELECTs. READ-ONLY access — no writes,
+                no JobItem creation (census stays frozen at 23).
+        """
+        self._job_repo = job_repo
+
+    def defer_pending_count(self) -> int:
+        """Return the system-wide pending-defer JobItem count.
+
+        Public instance method (unblock-round ITEM 4, 2026-09-06) —
+        the defer-pending count surface for BE callers (the preflight
+        endpoint at ``GET /api/jobs/cleanup/preflight`` consumes this
+        through the singleton wired at app startup). Replaces the
+        round-2 free function ``defer_pending_count(engine)`` so the
+        router no longer reaches into ``self._job_repo.engine`` from
+        outside the resolver.
+
+        Implementation note: opens a fresh connection (the count is a
+        one-shot statement, no transaction required) and executes the
+        module-private ``_DEFER_PENDING_COUNT_SQL`` constant. The
+        ``resolve()`` method composes its OWN count SELECT inside its
+        existing connection (the 2+N budget pattern) — :meth:`resolve`
+        and :meth:`defer_pending_count` are independent surfaces that
+        share the SAME underlying SQL constant (derive-don't-reimplement
+        contract, same shape as the witness body share).
+
+        Returns:
+            The integer count of PENDING non-deleted defer-lane
+            JobItems system-wide. ``0`` when the busy set is empty
+            (and the queue table is empty).
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: propagated — callers fail
+                closed on the count surface (the preflight wraps the
+                call in ``except Exception`` and logs a warning; the
+                gate's own fail-CLOSED posture is preserved).
+        """
+        with self._job_repo.engine.connect() as conn:
+            result = conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
+        return int(result)
+
+    def resolve(self) -> DeferBlockSnapshot:
+        """Enumerate the defer busy-set (system-wide scope).
+
+        The endpoint is unscoped (``GET /api/queues/defer-blocked``),
+        so the system-wide defer busy body is selected — the same body
+        selection rule the gate applies for ``project_id=None`` (the
+        maintenance ``_is_idle`` scope).
+
+        WS2: the stall classification is computed by re-evaluating the
+        WS1 carve-out gate body (``has_active_non_deferred_work``
+        semantics — byte-derived from the same
+        ``_idle_predicate_sql`` gate constants) with each DEDUP'D
+        holder's instance as the requester. A holder whose carve-out
+        busy-set is empty is EXCLUSIVELY holding the gate with its
+        OWN settled mirrors — ``stalled``. The carve-out bodies are
+        the same SELECTs the gate evaluates; the WS2 stall check is
+        a re-evaluation of the gate, not a re-implementation.
+
+        Returns:
+            :class:`DeferBlockSnapshot` — ``defer_blocked`` mirrored
+            from the witness rows, ``pending_count`` from the defer
+            lane, ``holders`` enumerated (paused > stalled > live,
+            each ascending by ``instance_id``).
+
+        Raises:
+            SQLAlchemyError: propagated — no degrade shape (module
+                docstring, "Degradation posture").
+        """
+        with self._job_repo.engine.connect() as conn:
+            witness_rows = (
+                conn.execute(
+                    _idle_predicate_sql.defer_busy_witness_statement(None),
+                    _idle_predicate_sql.defer_busy_witness_binds(None),
+                )
+                .mappings()
+                .all()
+            )
+            # Use the module-private SQL constant directly: the resolve
+            # path owns the connection already and the count is one of
+            # the 2+N budget SELECTs. Consumers outside this module
+            # MUST go through :meth:`DeferBlockResolver.defer_pending_count`
+            # (unblock-round ITEM 4, 2026-09-06) — the public instance
+            # method on this class, NOT a free function.
+            pending_count = conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
+
+            # WS2 stall classification: collect the dedup'd instance_ids
+            # of non-paused holders and probe each with the WS1
+            # carve-out gate body. A holder whose carve-out busy-set
+            # is empty is mirrors-only (its own settled mirrors were
+            # the ONLY busy rows; the carve-out excluded them). The
+            # probe uses the canonical gate entry point — same body
+            # the gate evaluates, fail-CLOSED on DB error (the
+            # gate's own posture is propagated: a probe that cannot
+            # complete ⇒ the holder is conservatively ``live``,
+            # because the alternative (``stalled``) implies a
+            # force-complete action whose safety we cannot prove
+            # without a clean probe result). Bounded by dedup'd
+            # holder count, NOT by raw witness-row count.
+            stalled_instance_ids = _classify_stalled_holders(
+                job_repo=self._job_repo,
+                witness_rows=witness_rows,
+            )
+
+        return DeferBlockSnapshot(
+            defer_blocked=len(witness_rows) > 0,
+            pending_count=int(pending_count),
+            holders=_project_holders(witness_rows, stalled_instance_ids),
+        )
 
 
 # ── Projection records ─────────────────────────────────────────────────────
@@ -135,7 +360,9 @@ class DeferBlockHolder:
         since: Normalized ISO-8601 timestamp (naive → UTC) per the
             holder-typed fallback chain in the module docstring;
             ``None`` only when the source columns are all NULL.
-        kind: :data:`HOLDER_KIND_PAUSED` or :data:`HOLDER_KIND_LIVE`.
+        kind: :data:`HOLDER_KIND_PAUSED`, :data:`HOLDER_KIND_STALLED`,
+            or :data:`HOLDER_KIND_LIVE` (see module docstring "Holder
+            semantics" for the WS2 three-way classification).
     """
 
     instance_id: str
@@ -208,84 +435,110 @@ def _normalize_since(value: Any) -> str | None:
     return str(value)
 
 
-# ── The resolver ───────────────────────────────────────────────────────────
-
-
-class DeferBlockResolver:
-    """Enumerate the defer gate's busy-set witnesses (READ-ONLY).
-
-    Mirrors the leaf-service pattern of
-    ``daemon/services/mission_resolver.py:MissionResolver``: the caller
-    wires the repository at construction time, the service holds no
-    state, and every public method reads through the underlying engine.
-    Two SELECTs per :meth:`resolve` — the shared-composition witness
-    SELECT + the pending-defer count — regardless of witness count (no
-    N+1; pinned by an engine event listener in the test file).
-    """
-
-    def __init__(self, job_repo: "JobRepository") -> None:
-        """Initialize with the READ-only ``JobRepository``.
-
-        Args:
-            job_repo: ``JobRepository`` whose engine serves the
-                witness + count SELECTs. READ-ONLY access — no writes,
-                no JobItem creation (census stays frozen at 23).
-        """
-        self._job_repo = job_repo
-
-    def resolve(self) -> DeferBlockSnapshot:
-        """Enumerate the defer busy-set (system-wide scope).
-
-        The endpoint is unscoped (``GET /api/queues/defer-blocked``),
-        so the system-wide defer busy body is selected — the same body
-        selection rule the gate applies for ``project_id=None`` (the
-        maintenance ``_is_idle`` scope).
-
-        Returns:
-            :class:`DeferBlockSnapshot` — ``defer_blocked`` mirrored
-            from the witness rows, ``pending_count`` from the defer
-            lane, ``holders`` enumerated (paused first).
-
-        Raises:
-            SQLAlchemyError: propagated — no degrade shape (module
-                docstring, "Degradation posture").
-        """
-        with self._job_repo.engine.connect() as conn:
-            witness_rows = (
-                conn.execute(
-                    _idle_predicate_sql.defer_busy_witness_statement(None),
-                    _idle_predicate_sql.defer_busy_witness_binds(None),
-                )
-                .mappings()
-                .all()
-            )
-            pending_count = conn.execute(_DEFER_PENDING_COUNT_SQL).scalar_one()
-
-        return DeferBlockSnapshot(
-            defer_blocked=len(witness_rows) > 0,
-            pending_count=int(pending_count),
-            holders=_project_holders(witness_rows),
-        )
-
-
 # ── Holder projection ──────────────────────────────────────────────────────
 
 
-def _holder_kind_for(status: str | None) -> str:
-    """Map a witness instance's raw status to the holder kind.
+def _classify_stalled_holders(
+    *,
+    job_repo: "JobRepository",
+    witness_rows: Any,
+) -> frozenset[str]:
+    """Return the dedup'd set of non-paused instance_ids whose gate-busy
+    state is EXCLUSIVELY their OWN settled message mirrors.
 
-    ``paused`` is the AMBER kind; every other status (and a missing
-    instance) is ``live``. The gate's own truthmaker is
-    ``Instance.status NOT IN terminal`` — ``paused`` is deliberately
-    non-terminal (W2 invariant), which is exactly why a paused
-    instance holds the gate and why it deserves its own kind here.
+    For each dedup'd non-paused instance-backed holder, evaluate the
+    WS1 carve-out gate body with the holder's instance as the
+    requester. The carve-out excludes the holder's OWN settled
+    mirrors from the busy-set; if the carve-out busy-set is empty,
+    every row in the no-carve-out busy-set was the holder's own
+    mirrors — the holder is ``stalled`` (WS2 AMBER severity, the
+    mirrors-only actionable shape).
+
+    Implementation notes:
+
+    * Re-uses :meth:`JobRepository.has_active_non_deferred_work` —
+      the canonical gate entry point — so the carve-out body cannot
+      drift from the gate's own evaluation (derive-don't-reimplement;
+      same pattern as :meth:`resolve`'s witness query, which itself
+      composes from the same ``_idle_predicate_sql`` constants).
+      Each probe opens its own ``engine.begin()`` round-trip; the
+      query budget is one probe per dedup'd holder, total
+      ``2 + len(dedup'd_holders)`` SELECTs for the resolve call.
+    * Bounded by DEDUP'D holder count (the dedup happens here, not
+      in the caller's witness-row iteration): ``set()`` over the
+      seen instance_ids, one ``has_active_non_deferred_work`` call
+      per UNIQUE non-paused instance.
+    * Fail-CLOSED on probe error: the gate's own posture propagates.
+      A probe that returns ``True`` (busy after carve-out) is a
+      non-stalled holder; a probe that returns ``False`` (empty after
+      carve-out) is stalled. The gate method itself returns ``True``
+      on its own DB error (the W3 hotfix fail-CLOSED posture), so a
+      transient probe error conservatively classifies the holder as
+      ``live`` — the alternative (classifying as ``stalled`` and
+      triggering force-complete) is unsafe to commit on a probe whose
+      result we cannot verify.
+    * Paused holders are excluded from the probe entirely: paused
+      always wins over stalled (see :func:`_holder_kind_for`), so
+      probing a paused instance's carve-out status is wasted work —
+      and a paused holder's busy state is irrelevant to the kind
+      (paused is its own kind regardless of mirrors-vs-live).
+    * Instance-less witnesses (``j.instance_id IS NULL``) cannot be
+      classified as stalled (no instance_id to feed the carve-out
+      bind). They fall through as ``live`` by construction; the
+      instance-less branch of :func:`_holder_from_row` ignores the
+      stalled flag.
+    """
+    stalled: set[str] = set()
+    seen: set[str] = set()
+    for row in witness_rows:
+        instance_id = row["instance_id"]
+        if not instance_id or instance_id in seen:
+            # Skip: instance-less (no probe possible) or already
+            # classified.
+            continue
+        status = row["instance_status"] or ""
+        if status == InstanceStatus.PAUSED.value:
+            # Paused always wins; no probe needed.
+            seen.add(instance_id)
+            continue
+        seen.add(instance_id)
+        # WS1 carve-out probe: gate predicate with this holder as the
+        # requester. ``project_id=None`` selects the system-wide body
+        # (same scope as :meth:`resolve`).
+        if not job_repo.has_active_non_deferred_work(
+            project_id=None,
+            requester_instance_id=instance_id,
+        ):
+            stalled.add(instance_id)
+    return frozenset(stalled)
+
+
+def _holder_kind_for(status: str | None, stalled: bool = False) -> str:
+    """Map a witness instance's raw status (and the WS2 stalled flag)
+    to the holder kind.
+
+    ``paused`` is the AMBER kind and ALWAYS wins over ``stalled``
+    (a paused instance is actionable by the operator regardless of
+    whether its busy rows are exclusively mirrors — the actionable
+    unblock is resume/terminate, never force-complete). ``stalled`` is
+    the AMBER kind for a non-paused witness whose gate-busy state is
+    EXCLUSIVELY its own settled message mirrors (the WS1 carve-out
+    test, computed upstream by :meth:`DeferBlockResolver.resolve`).
+    Every other status (and a missing instance) is ``live``. The
+    gate's own truthmaker is ``Instance.status NOT IN terminal`` —
+    ``paused`` is deliberately non-terminal (W2 invariant), which is
+    exactly why a paused instance holds the gate and why it deserves
+    its own kind here; ``stalled`` derives from the gate predicate
+    composition itself, not from ``Instance.status``.
     """
     if status == InstanceStatus.PAUSED.value:
         return HOLDER_KIND_PAUSED
+    if stalled:
+        return HOLDER_KIND_STALLED
     return HOLDER_KIND_LIVE
 
 
-def _holder_from_row(row: Any) -> DeferBlockHolder:
+def _holder_from_row(row: Any, stalled: bool = False) -> DeferBlockHolder:
     """Project one witness row (``sqlalchemy.RowMapping``) onto a holder.
 
     Field-sourcing rules per the module docstring ("Holder
@@ -294,11 +547,18 @@ def _holder_from_row(row: Any) -> DeferBlockHolder:
     legacy-clause witnesses fall back to the JobItem's own
     ``agent_id`` / ``created_at`` and surface with
     ``instance_id=""`` / ``status=""`` / ``kind="live"``.
+
+    The ``stalled`` flag is the WS2 carve-out result (see
+    :func:`_holder_kind_for`): ``True`` when the gate predicate with
+    the holder's instance as requester returns ``False`` (every row
+    in the no-carve-out busy-set was the holder's own mirrors). Only
+    non-paused instance-backed witnesses can be stalled — instance-
+    less holders fall through as ``live`` regardless of the flag.
     """
     instance_id = row["instance_id"] or NO_INSTANCE_ID
     if instance_id:
         status = row["instance_status"] or ""
-        kind = _holder_kind_for(row["instance_status"])
+        kind = _holder_kind_for(row["instance_status"], stalled=stalled)
         agent = row["instance_agent_id"] or ""
         if kind == HOLDER_KIND_PAUSED:
             # Status-change timestamp for the paused case: paused_at
@@ -312,7 +572,11 @@ def _holder_from_row(row: Any) -> DeferBlockHolder:
             )
         else:
             # Cheapest honest liveness timestamp: last_activity_at,
-            # falling back through the row's own update stamps.
+            # falling back through the row's own update stamps. Used
+            # for both live and stalled holders (stalled holders have
+            # no live task to bump last_activity_at recently, so the
+            # value is the most-recent prior activity stamp — still
+            # the cheapest honest timestamp).
             since_raw = (
                 row["instance_last_activity_at"]
                 or row["instance_updated_at"]
@@ -321,6 +585,10 @@ def _holder_from_row(row: Any) -> DeferBlockHolder:
     else:
         # No instance row (legacy clause: active JobItem with
         # instance_id IS NULL). The JobItem itself is the witness.
+        # Instance-less holders have no instance_id to feed the
+        # carve-out bind — they fall through as ``live`` regardless
+        # of any stalled flag (the stalled flag is irrelevant when
+        # there is no instance to test).
         status = ""
         kind = HOLDER_KIND_LIVE
         agent = row["job_agent_id"] or ""
@@ -334,20 +602,34 @@ def _holder_from_row(row: Any) -> DeferBlockHolder:
     )
 
 
-def _project_holders(witness_rows: Any) -> list[DeferBlockHolder]:
+def _project_holders(
+    witness_rows: Any,
+    stalled_instance_ids: frozenset[str] = frozenset(),
+) -> list[DeferBlockHolder]:
     """Deduplicate + order the witness rows into the holders list.
 
     One holder per DISTINCT witness instance (several busy JobItems on
     the same instance describe one holder); instance-less witnesses
     are keyed per-JobItem (``__job__:<job_id>``) so none is dropped —
     dropping any witness would break the holders-non-empty ==
-    gate-blocked invariant. Paused holders sort first (AMBER
-    operator-priority), then live, each ascending by
-    ``(instance_id, agent)`` — deterministic.
+    gate-blocked invariant.
+
+    WS2: the WS1 carve-out result (``stalled_instance_ids`` — the
+    dedup'd set of holder instances whose gate-busy state is
+    EXCLUSIVELY their own settled mirrors) reclassifies non-paused
+    instance-backed holders to ``"stalled"`` at projection time. The
+    flag is irrelevant for instance-less holders (no instance to
+    test) and for paused holders (paused always wins).
+
+    Ordering: paused holders first (AMBER operator-priority), then
+    stalled (AMBER mirrors-only actionable), then live — each
+    ascending by ``(instance_id, agent)`` — deterministic.
     """
     merged: dict[str, DeferBlockHolder] = {}
     for row in witness_rows:
-        holder = _holder_from_row(row)
+        instance_id = row["instance_id"] or NO_INSTANCE_ID
+        stalled = bool(instance_id) and instance_id in stalled_instance_ids
+        holder = _holder_from_row(row, stalled=stalled)
         key = (
             holder.instance_id
             if holder.instance_id
@@ -357,7 +639,13 @@ def _project_holders(witness_rows: Any) -> list[DeferBlockHolder]:
             merged[key] = holder
     return sorted(
         merged.values(),
-        key=lambda h: (h.kind != HOLDER_KIND_PAUSED, h.instance_id, h.agent),
+        # paused > stalled > live; within each kind: instance_id, agent.
+        key=lambda h: (
+            h.kind != HOLDER_KIND_PAUSED,
+            h.kind != HOLDER_KIND_STALLED,
+            h.instance_id,
+            h.agent,
+        ),
     )
 
 

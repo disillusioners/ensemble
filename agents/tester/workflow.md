@@ -79,6 +79,7 @@ Task: Inspect git diff to derive the change set
   )
 ```
 (No `load_skill` — the worker uses its default bash/filesystem tools for this generic task.)
+Worktree conventions: see giter/workflow.md -> Worktree Mode. Never launch dev.sh inside a worktree (hits prod defaults).
 
 **How to use:**
 1. `spawn_instance(agent="worker")` to create the worker

@@ -36,6 +36,7 @@
 - Spawn parallel `tidier-<area>` opencode sessions (max 3 concurrent)
 - Partition by module/directory
 - Use `wait_any` to collect results as they complete
+If a worktree was used, review inside ../<repo>-wt-<slug>/, not the main checkout. Never launch dev.sh inside a worktree.
 
 ### 4. Review Checklist
 

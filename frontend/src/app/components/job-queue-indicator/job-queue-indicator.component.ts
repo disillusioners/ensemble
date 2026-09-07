@@ -15,11 +15,12 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule, MatMenuTrigger } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { Job, JobStatus, isTerminalStatus } from '../../models/job.model';
-import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, deferBlockIndicator } from '../../models/defer-blocked.model';
+import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, DeferBlockAction, deferBlockIndicator, deferBlockAction } from '../../models/defer-blocked.model';
 import { forkJoin, catchError, of } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
@@ -75,6 +76,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private readonly tabStateService = inject(TabStateService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly snackBar = inject(MatSnackBar);
 
   /** Poll interval, in milliseconds. */
   private readonly POLL_INTERVAL_MS = 8000;
@@ -174,6 +176,28 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * skew — the icon hides silently).
    */
   readonly deferBlockWarning = signal<DeferBlockIndicator | null>(null);
+
+  /**
+   * Raw defer-blocked payload from the latest poll — the input the
+   * WS4 holder-action derivation (``deferBlockAction``) needs. The
+   * derived indicator carries only severity/tooltip; the actions
+   * need the actionable holder's identity.
+   */
+  private readonly deferBlockedPayload = signal<DeferBlockedStatus | null>(null);
+
+  /**
+   * WS4 holder actions for the warning affordance — ``null`` = no
+   * action offered (no payload, zero pending defer jobs, or no
+   * instance-backed actionable holder). Pure derivation via the
+   * model helper (house convention: components stay thin computeds
+   * over model helpers).
+   */
+  readonly deferBlockActionTarget = computed<DeferBlockAction | null>(() =>
+    deferBlockAction(this.deferBlockedPayload())
+  );
+
+  /** True while a holder action is in flight (buttons disabled). */
+  readonly holderActionInProgress = signal(false);
 
   /** Material icon name per severity — presentation-only mapping. */
   private static readonly DEFER_BLOCK_ICONS: Record<DeferBlockSeverity, string> = {
@@ -330,9 +354,85 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     if (missions !== null) {
       this.missionCountRaw.set(missions);
     }
+    this.deferBlockedPayload.set(deferBlocked);
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
     );
+  }
+
+  /**
+   * WS4: force-complete the actionable stalled holder.
+   *
+   * The button is disabled unless the derived action says the holder
+   * is ``stalled`` (mirrors-only) — the SERVER re-verifies via the
+   * canonical probe at execution time, so a stale-UI click on a
+   * since-gone-live holder is still refused safely (200 with
+   * ``terminated=false``).
+   */
+  onForceCompleteHolder(): void {
+    const target = this.deferBlockActionTarget();
+    if (!target || !target.forceCompleteAllowed || this.holderActionInProgress()) {
+      return;
+    }
+    this.holderActionInProgress.set(true);
+    this.jobService
+      .forceCompleteDeferHolder(target.holder.instance_id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (result) => {
+          this.holderActionInProgress.set(false);
+          console.log(
+            '[JobQueueIndicator] force-complete:',
+            result.terminated ? 'terminated' : 'refused by server guard',
+            result.message
+          );
+          this.snackBar.open(result.message, 'Close', {
+            duration: 3000,
+            panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar',
+          });
+          this.fetchBadgeSignals();
+        },
+        error: (err) => {
+          this.holderActionInProgress.set(false);
+          console.error('[JobQueueIndicator] force-complete failed:', err);
+        },
+      });
+  }
+
+  /**
+   * WS4: re-send the actionable holder's queued defer messages as
+   * foreground jobs (cancel + re-enqueue server-side).
+   */
+  onResendDeferredForeground(): void {
+    const target = this.deferBlockActionTarget();
+    if (!target || this.holderActionInProgress()) {
+      return;
+    }
+    this.holderActionInProgress.set(true);
+    this.jobService
+      .resendDeferredForeground(target.holder.instance_id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (result) => {
+          this.holderActionInProgress.set(false);
+          console.log(
+            '[JobQueueIndicator] resend-foreground:',
+            result.cancelled_defer_jobs,
+            'cancelled,',
+            result.resend_results.filter((r) => r.job_id).length,
+            're-sent'
+          );
+          this.snackBar.open(result.message, 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar',
+          });
+          this.fetchBadgeSignals();
+        },
+        error: (err) => {
+          this.holderActionInProgress.set(false);
+          console.error('[JobQueueIndicator] resend-foreground failed:', err);
+        },
+      });
   }
 
   /**
