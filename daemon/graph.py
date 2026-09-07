@@ -2837,6 +2837,21 @@ ATTESTATION_NUDGE_TEXT = (
     "picture), you MUST call the attest_completion tool before "
     "finishing; completions without that call are premature and "
     "will be blocked again."
+    "\nCompletion flow:\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    '    TurnEnd["Your turn is about to end"] --> UsedSend{"Did you use send_message since the last user message?"}\n'
+    '    UsedSend -- No --> FinishFree["Finish freely - no attestation needed"]\n'
+    '    UsedSend -- Yes --> AttestRecent{"Is attest_completion in your last 3 messages?"}\n'
+    '    AttestRecent -- Yes --> FinishGate["Finish - gate allows"]\n'
+    '    AttestRecent -- No --> Nudged["You are being nudged: work not finished"]\n'
+    '    Nudged --> CheckContinue["Check children and task status, continue working"]\n'
+    '    CheckContinue --> TrulyDone{"Work truly complete?"}\n'
+    '    TrulyDone -- "No, keep working" --> CheckContinue\n'
+    '    TrulyDone -- Yes --> Report["Deliver detailed report as its own message"]\n'
+    '    Report --> Attest["Then call attest_completion alone"]\n'
+    '    Attest --> FinishGate\n'
+    "```"
 )
 
 #: Graph node name + conditional-route name for the attestation gate.
