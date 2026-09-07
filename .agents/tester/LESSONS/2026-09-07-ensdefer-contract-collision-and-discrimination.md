@@ -1,0 +1,14 @@
+# Edge-Case Lessons — ensure_deferred/watcher-re-arm gate (2026-09-07)
+
+## 1. Contract-collision pattern is now 2-for-2 — pre-gate grep for OLD-semantics pins
+Second consecutive gate (after W5 claim-order pin, 2026-09-06) where an intentional semantic change collides deterministically with a pre-existing pin of the OLD contract:
+- Gate 1: `test_w5_claim_order_wc_wake.py` pinned "symmetric created_at order, not type-biased" vs the ratified type-priority lane.
+- Gate 2: `tests/repositories/test_report_injection.py::test_ensure_deferred_after_terminal_allowed` pinned "same-triple re-insert after terminal allowed" vs the ratified terminal-positive-evidence no-op — the old pin encoded the exact bug class the fix removes (insert-after-terminal fed the flap).
+**Rule to apply at PLANNING time**: when the fix's diff excerpt shows a semantic inversion (old no-op→insert, old insert→no-op, ordering flip), grep neighbor suites for pins of the OLD semantics BEFORE running (search the docstring vocabulary: "allowed", "symmetric", "not type-biased", "re-spawn"). Pre-stage the adjudication; amendment (never silent) + leader ratification.
+
+## 2. Pre-fix discrimination: pick the test that exercises the BUG CLASS, not the downstream consumer
+Round-1 pre-fix proof targeted the caller-suggested self-heal file → PASSED 4/4 at parent (sequential path; the bug is a concurrent IntegrityError→zero-rows false-positive). Round 2 targeted `tests/unit/test_ensure_deferred_insert_on_missing.py` → 4/10 real assertion failures at parent (terminal-evidence ×2 + phantom/persistent-IntegrityError ×2 via absent `_insert_deferred_marker`). Bonus structural proof: the integration file couldn't even COLLECT at parent (ImportError on fix-era `_reset_watcher_rearm_for_tests`).
+**Rule**: for a concurrency bug class, the discriminating pre-fix test is the one that forces the error path (monkeypatched IntegrityError, barrier races) — downstream consumers that only exercise happy paths pass at both commits and prove nothing. Also: task-stated test paths can be paraphrases — always derive ACTUAL paths from `git show <fix> --name-only`.
+
+## 3. FAILED-state verdict (edge finding, keep for future report-delivery work)
+FAILED = deliberate dead-letter sentinel (models.py:118-121), written ONLY at 3 dead-parent-gated seams in manager.py (:7648/:8025/:8302); no lane re-drives FAILED (Lane 1=DEFERRED, Lanes 3/4=PENDING, Lane 2 excludes FAILED pairs twice). Treating FAILED as terminal-delivered in ensure_deferred is CORRECT — recoverable obligations are exactly PENDING/DEFERRED. Post-revive delivery rides the persisted completion_report message row, not the injection row. Coverage gap (1-line fix, not applied): add FAILED to the `terminal_state` parametrization at tests/unit/test_ensure_deferred_insert_on_missing.py:285-290.
