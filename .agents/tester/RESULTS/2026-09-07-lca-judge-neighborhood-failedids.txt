@@ -1,0 +1,89 @@
+# LCA judge Neighborhood — FAILED/ERROR IDs + A/B Attribution
+# Generated: 2026-09-07 (Job 4 of 6 merge gate)
+# Delta under test: bb052fce..d6e30d9d (judge delta: daemon/graph.py + attestation judge files)
+# Files: 58 pinned from 2026-09-07-lca-cond-neighborhood-filelist.txt @ 8eace79e — all exist at BOTH commits
+# Flags IDENTICAL both sides: .venv/bin/python -m pytest <58 files> -o addopts="" --tb=short -q
+#   wrapped in `timeout 300` (cap did NOT fire; wall 221s BASE / 218s HEAD; per-test pytest-timeout=30s active)
+# HEAD-side pre-run relaxed drift check (coordination update): H=fdec1e9f;
+#   `git merge-base --is-ancestor d6e30d9d H` exit=0; `git diff --name-only d6e30d9d..H` =
+#   .agents/tester/RESULTS/ paths ONLY → code under test byte-identical to d6e30d9d. Working tree CLEAN.
+# BASE-side pre-run: detached @ bb052fce, clean, venv daemon.__file__ resolves inside ens-lca-judge-base-tmp.
+
+# ============================================================
+# BASE — bb052fce (Merge 'feature/leader-completion-attestation' into latest, detached worktree ens-lca-judge-base-tmp)
+# Counts: 6 failed, 875 passed, 5 skipped, 32 warnings, 16 errors in 216.86s (0:03:36)  [875P/6F/5S/16E]
+# ============================================================
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_composes_with_other_keys
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_overwrites_with_same_key
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_round_trips_unicode
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_round_trip_initiative_message
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_empty_string_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_none_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_backslash_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_percent_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_underscore_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_lowercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_uppercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_coexists_with_title_and_agent_fields
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_handles_non_string_initiative_message_value
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_matches_initiative_message_substring
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_no_match_returns_empty
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_skips_when_initiative_message_absent
+FAILED tests/integration/test_compaction_e2e.py::test_compaction_and_graph_continuation
+FAILED tests/integration/test_compaction_e2e.py::test_crash_recovery_after_compaction
+FAILED tests/integration/test_message_queue_e2e.py::test_debug_llm_invocation_count
+FAILED tests/integration/test_message_queue_e2e.py::test_single_message_no_duplicate_llm_calls
+FAILED tests/integration/test_message_queue_e2e.py::test_sse_events_count
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+
+# ============================================================
+# HEAD — feature/leader-completion-attestation @ d6e30d9d (run at H=fdec1e9f, RESULTS-only ahead)
+# Counts: 6 failed, 875 passed, 5 skipped, 36 warnings, 16 errors in 215.90s (0:03:35)  [875P/6F/5S/16E]
+# ============================================================
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_composes_with_other_keys
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_overwrites_with_same_key
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_round_trips_unicode
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_round_trip_initiative_message
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_empty_string_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_none_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_backslash_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_percent_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_underscore_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_lowercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_uppercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_coexists_with_title_and_agent_fields
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_handles_non_string_initiative_message_value
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_matches_initiative_message_substring
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_no_match_returns_empty
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_skips_when_initiative_message_absent
+FAILED tests/integration/test_compaction_e2e.py::test_compaction_and_graph_continuation
+FAILED tests/integration/test_compaction_e2e.py::test_crash_recovery_after_compaction
+FAILED tests/integration/test_message_queue_e2e.py::test_debug_llm_invocation_count
+FAILED tests/integration/test_message_queue_e2e.py::test_single_message_no_duplicate_llm_calls
+FAILED tests/integration/test_message_queue_e2e.py::test_sse_events_count
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+
+# ============================================================
+# Sorted-ID diff (sorted FAILED+ERROR sets; comm -13 / comm -23 / diff)
+# ============================================================
+# HEAD-only (introduced candidates): NONE
+# BASE-only (healed candidates): NONE
+# VERDICT: BYTE-IDENTICAL FAILURE SETS → PASS (0 introduced)
+#
+# ERROR class (16, identical sets both sides): ALL in tests/postgres/test_initiative_message_pg.py, ERROR at setup —
+#   "Migration 20260714_000001 failed: (sqlite3.OperationalError) near \"CONSTRAINT\": syntax error"
+#   = the documented fresh-SQLite migration trap (PG-only DROP CONSTRAINT IF EXISTS), environmental. Matches prior-gate class exactly.
+#
+# FAILED families (6, identical sets both sides, ALL present at BASE → pre-existing, not judge-introduced):
+#   tests/integration/test_compaction_e2e.py::test_compaction_and_graph_continuation
+#   tests/integration/test_compaction_e2e.py::test_crash_recovery_after_compaction
+#   tests/integration/test_message_queue_e2e.py::test_single_message_no_duplicate_llm_calls
+#   tests/integration/test_message_queue_e2e.py::test_sse_events_count
+#   tests/integration/test_message_queue_e2e.py::test_debug_llm_invocation_count
+#   tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+#
+# Solo re-run triage: NOT TRIGGERED — zero HEAD-only failures.
+# Context vs prior gate (neighboring delta 26f908a4..7be6b1d8: 872P/7F/5S/16E): same 16-error class + same 6 FAILED
+#   families; the 7th prior-gate family
+#   (tests/test_injection_compaction.py::TestProactiveCompactionPreservesInjection::test_all_injected_messages_skips_compaction)
+#   did NOT fail at either bb052fce or d6e30d9d (out of judge-delta scope; 902 vs 900 collected reflects later commits).

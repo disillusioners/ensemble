@@ -848,3 +848,164 @@ The conditional scanner walks the AIMessage tail at-or-after the last real user 
 - `tests/unit/test_attestation_conditional_gate_outcomes.py` (NEW — 15 tests, evaluate()/graph-node matrix for cases (a)/(b)/(c)/(d)/(e)/(g) + canonical schema 17-field pin + full-graph delegated-still-denies pin).
 - All integration tests that previously hardcoded `NUDGE_TEXT = (...)` rewritten to `from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT` — the single-source-of-truth fix eliminates per-file prose drift.
 - All integration tests that previously inferred a non-delegated baseline updated to anchor the mission as DELEGATED (a `send_message` AIMessage as the scripted model's first response) — the legacy deny / wakeup-allow / bound-escalation / counter-reset semantics continue to exercise against the conditional-gate-ON branch.
+
+---
+
+## Phase 6 fastfollow (2026-09-07) — Inline-LLM completion-report judge
+
+### Context (append-only)
+
+The Phase 6 fastfollow adds a per-deny-attempt inline-LLM judge that asks "are the leader's last messages a REAL completion report?" before injecting the in-graph nudge. The judge is a pure inline chat completion (no instance spawn, no message persistence). It is invoked ONLY on the would-be-deny path: after the gate has resolved to `Decision.DENIED` and BEFORE the counter increments / the nudge is injected. The judge-yes verdict flips the would-be-deny to `Decision.ALLOWED` (no nudge, no counter increment); the judge-no verdict (or any error / timeout / unparsable JSON path) falls through to the existing deny+nudge path unchanged.
+
+The motivation: a leader LLM can satisfy the conditional-attestation branch (delegated mission, no `attest_completion` in window) yet still have authored a genuine, detailed completion report — outcomes, evidence, follow-ups. The gate's windowed scanner only looks for the `attest_completion` tool call. A short prose recap delivered as the final AIMessage is the false-positive pattern (the leader DID finish, but the tool call never happened because the LLM didn't think it was required when the work was already complete). The judge disambiguates: a conservative LLM yes-or-no on "is this a real completion report?" before the nudge.
+
+### RESOLVED-2026-09-07 — Judge service (D13)
+
+**Resolution:** Ship an inline-LLM judge service at `daemon/services/attestation_report_judge.py` that:
+
+* Takes the SAME scanned message window the gate already uses (last `ENSEMBLE_LEADER_ATTESTATION_WINDOW` AIMessages, content truncated to a sane cap);
+* Calls the LLM with a STRICT system prompt that judges whether the final messages constitute a genuine, detailed completion report (outcomes, evidence, follow-ups — NOT a short summary, NOT mid-work status text; conservative);
+* Demands STRICT JSON output `{"is_complete_report": <bool>, "reason": "<one-sentence rationale>"}`;
+* Parses STRICTLY — unparsable = NOT a report (conservative fall-through);
+* Returns a `JudgeResult` dataclass carrying `is_complete_report`, `verdict` (`"yes" | "no" | "error" | "timeout" | "unparsable"`), `reason`, `model`, `latency_ms`, `error_class`;
+* NEVER raises — every error path (timeout, exception, unparsable JSON) resolves to `is_complete_report=False` so the deny+nudge fall-through is always available.
+
+**Async entry point:** `judge_completion_report_async(messages, *, config, window, timeout_s)` — used by the gate node (the gate's `attestation_gate_node` is async).
+
+**Sync entry point:** `judge_completion_report_sync(messages, *, config, window, timeout_s)` — used by sync callers (worker threads, scripts). Uses `asyncio.run`. Cannot be called from inside a running event loop — gate node uses the async entry point.
+
+**Bounds:**
+* `JUDGE_TIMEOUT_S = 10.0` (wall-clock cap; belt-and-braces `asyncio.wait_for` wraps the facade-wrapped call; the HA facade's `wall_clock_cap_s` is the primary defense);
+* `JUDGE_MAX_INPUT_CHARS = 12,000` (per-message budget = `MAX / count` so the total stays below cap);
+* `JUDGE_MAX_OUTPUT_CHARS = 400` (defensive ceiling on LLM reply size; oversized payloads are truncated then re-parsed conservatively).
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Kill-switch (D14)
+
+**Resolution:** Pattern C sibling resolver at `daemon/services/attestation_judge_resolver.py` mirroring the existing `attestation_resolver.py` shape:
+
+* `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables; restart-read);
+* `is_llm_judge_enabled()` cached-global resolver (one-shot boot log via the parent resolver's `emit_attestation_boot_log`);
+* `reset_llm_judge_resolver_for_tests()` test-only cache reset (also wired into `reset_attestation_resolver_for_tests` so a single call clears both caches).
+
+The gate config dict gains a `llm_judge_enabled: bool` field (default `True`) via `attestation_gate.build_gate_config(...)`. The gate node reads both sources: the env resolver AND the gate-config field. Either being `False` skips the judge.
+
+OFF = pre-feature byte-identical: judge never invoked, deny+nudge path runs as before. The gate emits NO judge log lines when OFF.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Model resolution (D15)
+
+**Resolution:** Honor the existing `daemon/services/keyword_extraction.py` resolution semantics — `config.llm.model_keywords` when non-empty, else `config.llm.model`. The judge module exposes `resolve_judge_model(config) -> str` which is a single-line mirror of the keyword-extraction pattern:
+
+```python
+model_keywords = (config.llm.model_keywords or "").strip()
+return model_keywords or config.llm.model
+```
+
+The `set_title_model_fallback` validator at `daemon/config.py:424-431` already collapses empty `model_keywords` to `model` at config-load time, so the runtime branch above is defense-in-depth. Both paths yield identical behavior. The boot log surfaces the resolved model name (`llm_judge_model=<name>` when ON; `<disabled>` when OFF). The judge logs `llm_judge_model=<name>` on every call so operators can grep the resolved model per instance.
+
+**Flag (per the dispatcher's instruction):** The dispatcher's pre-flight note ("how does `daemon/config.py` resolve `OPENAI_MODEL_KEYWORDS` today? It may be a keyword-based model SELECTOR, not a plain model name") was INVESTIGATED. The actual semantics are: **`OPENAI_MODEL_KEYWORDS` is a plain model name string**, NOT a keyword-based selector. The LLMConfig field at `daemon/config.py:130-137` declares `model_keywords: str | None` (default `None`); `OPENAI_MODEL_KEYWORDS` is consumed via the `config.yaml` interpolation at `config.yaml:22`. The `set_title_model_fallback` model_validator at `daemon/config.py:424-431` collapses empty `model_keywords` to `model`. There is no keyword-to-model mapping logic in `daemon/config.py`. The operator docs at `config.yaml:22` and `.env.example:42` describe the field as "Optional. Set to 'quick' to mirror the explorer agent's llm_model" — i.e., a literal model name, not a selector. The judge's implementation matches this straightforward reading.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Observability (D16)
+
+**Resolution:** Diagnostic extras OUTSIDE the canonical 17-field tuple (same pattern as the supplementary conditional-attestation fields `last_real_user_found`, `last_real_user_index`, `first_delegation_after_last_user_index`, `delegation_tool_call_total`, `delegation_since_last_user`). One-shot structured log line per judge call:
+
+```
+event=leader_completion_gate_judge instance_id=%s verdict=%s llm_judge_verdict=%s llm_judge_model=%s llm_judge_latency_ms=%s llm_judge_reason=%s llm_judge_error_class=%s
+```
+
+Fields:
+* `verdict` — `yes` / `no` / `error` / `timeout` / `unparsable`
+* `llm_judge_verdict` — duplicate of `verdict` for grep convenience
+* `llm_judge_model` — the resolved quick model (or main model fallback)
+* `llm_judge_latency_ms` — wall-clock latency of the judge call
+* `llm_judge_reason` — the LLM's one-sentence rationale (empty on error paths)
+* `llm_judge_error_class` — exception class name on the error path; `<none>` otherwise
+
+A separate `event=leader_completion_gate_judge_error` log line carries `error_class` for wrapper-layer bugs (e.g. config-load failure). The canonical 17-field tuple remains unchanged — existing test pins coherent.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Nudge mermaid (D17)
+
+**Resolution:** The mermaid embedded in `ATTESTATION_NUDGE_TEXT` gains ONE new decision node between `"AttestRecent -- No"` and `"Nudged"`:
+
+```
+AttestRecent -- No --> ReportJudge{"Did the gate's report judge confirm a real completion report?"}
+ReportJudge -- Yes --> FinishGate
+ReportJudge -- No --> Nudged["You are being nudged: work not finished"]
+```
+
+The canonical byte-pin test `test_attestation_nudge_text_canonical_byte_pin` (and the `EXPECTED_NUDGE_TEXT_CANONICAL` constant) is updated in the same commit. All other `ATTESTATION_NUDGE_TEXT` import sites (the lane artifact at `.agents/tester/RESULTS/2026-09-06-lca-independent-e2e-testfile.py`, the scenarios at `.agents/tester/RESULTS/2026-09-07-lca-cond-e2e-scenarios.py`, the integration tests under `tests/integration/test_attestation_*.py`) import the constant via `from daemon.graph import ATTESTATION_NUDGE_TEXT` — single source of truth, no per-file byte drift.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### Files (Phase 6 fastfollow judge)
+
+- `daemon/services/attestation_judge_resolver.py` (new) — Pattern C kill-switch resolver.
+- `daemon/services/attestation_report_judge.py` (new) — the judge service (`JudgeResult`, `resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`, `_invoke_judge_llm`, `judge_completion_report_async`, `judge_completion_report_sync`).
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_enabled` + `llm_judge_model` fields; `reset_attestation_resolver_for_tests` also clears the judge cache.
+- `daemon/services/attestation_gate.py` — `build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg; `GATE_CONFIG_KEYS` extended.
+- `daemon/graph.py` — `create_attestation_gate_node` runs the judge BEFORE the ledger write on the would-be-deny path (judge-yes → return END; judge-no / error / timeout / unparsable → fall through to existing deny+nudge). `ATTESTATION_NUDGE_TEXT` mermaid gains the `ReportJudge` decision node.
+- `tests/unit/test_attestation_report_judge.py` (new) — 34 tests: pure-function surface (`resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`) + async judge entry points (`_invoke_judge_llm` patched) + the W4 `JudgeResult` frozen/dataclass construction pin.
+- `tests/unit/test_attestation_judge_wiring.py` (new) — 21 tests: gate-level scenarios (a)–(i) per the spec + the W3 `llm_judge_verdict` duplicate-field drop (test assertion was tightened) + the W5/S6 monkeypatch-to-real-env conversion + the S5 judge-yes-at-bound-1 counter-no-escalation regression pin.
+- `tests/unit/test_attestation_judge_resolver.py` (new) — parametrize the W5 `_parse_llm_judge_enabled` truth table (falsy / truthy / unset / cached-global / reset helper); 17 tests.
+- `tests/unit/test_attestation_nudge_inject.py` — `EXPECTED_NUDGE_TEXT_CANONICAL` updated for the new mermaid; the byte-pin test continues to enforce the full literal.
+- `docs/setup.md` — new "Inline-LLM completion-report judge" section appended (judge behavior, env flag, model resolution, log fields).
+
+### DO NOT TOUCH (Phase 6 fastfollow)
+
+- The 5-value canonical decision enum (`ALLOWED` is reused with no new value added).
+- The counter-reset semantics (R1 — attested-allow only; the judge-yes path does NOT reset because it is distinct from attested-allow).
+- The marker kwargs on the deny-nudge injection (`attestation_nudge=True`, `attestation_nudge_denied_count=<n>`).
+- The canonical 17-field `leader_completion_gate` log schema tuple.
+- The conditional-attestation scanner / scanner's `delegation_since_last_user` flag.
+- The `_make_context_message` factory and the `[SYSTEM CONTEXT: ...]` prefix convention.
+
+### RESOLVED-2026-09-07 — Judge wall-clock cap env-tunable (D18)
+
+**Context (operator tuning decision, 2026-09-07):** the prior hardcoded `JUDGE_TIMEOUT_S = 10.0` (wall-clock cap on the inline-LLM judge) was timeslicing genuine-report quick-model calls. The tester live-LLM probe captured at `.agents/tester/RESULTS/2026-09-07-lca-judge-live-probe*` (evidence commits `b42f7237..2a43904c` on branch `feature/leader-completion-attestation`) showed real quick-model latencies of successes 2.6s–13.6s with **4/8 calls >15s** — the 10.0s cap was firing on a substantial fraction of genuine-report calls and silently flipping the gate to the conservative deny+nudge path, defeating the feature's purpose. The feature was working as designed (the judge timed out; the gate fell through to deny+nudge) — but the timeout was wrong.
+
+**Resolution:** Pattern C sibling resolver at `daemon/services/attestation_judge_timeout_resolver.py` mirroring the existing `attestation_judge_resolver.py` (boolean kill-switch) and `attestation_resolver.py` (main tri-state mode) shapes:
+
+* `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` (default `25.0` seconds; minimum clamp `5.0` seconds — values below clamp to `5.0` with a one-shot WARN; restart-read);
+* `get_judge_timeout_s()` cached-global resolver (one-shot boot log via the parent resolver's `emit_attestation_boot_log`, which now also carries the `llm_judge_timeout_s=<resolved>` field);
+* `reset_judge_timeout_resolver_for_tests()` test-only cache + one-shot WARN flag reset helper (sibling to `reset_llm_judge_resolver_for_tests`, both also called from the umbrella `reset_attestation_resolver_for_tests` in `daemon/services/attestation_resolver.py`);
+* the module constant `DEFAULT_JUDGE_TIMEOUT_S = 25.0` (was hardcoded `10.0`) and the documented bound `JUDGE_TIMEOUT_S = DEFAULT_JUDGE_TIMEOUT_S` in `daemon/services/attestation_report_judge.py` (kept as the canonical DOCUMENTED default reference; runtime value flows from the resolver).
+
+**Failure / clamp policy (fail-OPEN, one-shot WARN, restart-read):**
+
+| Env value | Resolved | One-shot WARN? |
+|-----------|----------|----------------|
+| unset / blank | `25.0` (default) | no |
+| `=30` / `=15.5` | parsed float | no |
+| `=abc` / `=1.5x` | `25.0` (default) | yes (invalid → default) |
+| `=0` / `=-1` | `25.0` (default) | yes (invalid → default) |
+| `=3` / `=4.9` | `5.0` (clamp) | yes (below clamp → floor) |
+
+**Trade-off:** a longer worst-case turn-end wait on the rare deny path (the judge runs only on the WOULD-BE-DENY branch, so the cost is bounded by the per-instance `deny_bound=3` escalation + the existing 3-deny escalation guard) vs fewer false nudges of genuine reports. The `25.0s` default keeps the wait bounded while letting the quick-model tail latency ride. Operators with a known-fast quick-model can tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` for a faster worst-case bound; operators with a slow quick-model can loosen to `=40`. Restart required to flip (Pattern C — no live flip).
+
+**Wiring (replaces the prior hardcoded references — all hardcoded `JUDGE_TIMEOUT_S=10.0` usage removed):**
+
+* The `asyncio.wait_for` cap in `_invoke_judge_llm` now reads the resolved value (`timeout_s` is resolved lazily inside `judge_completion_report_async` from the resolver; passed through to `_invoke_judge_llm`).
+* The W1 coupling (`request_timeout = min(resolved_timeout, config.llm.request_timeout or resolved_timeout)`) is computed inside `_invoke_judge_llm` from the resolver (was `min(JUDGE_TIMEOUT_S, config.llm.request_timeout or JUDGE_TIMEOUT_S)`).
+* The failover `wall_clock_cap_s=timeout_s` argument picks up the resolved value via the same `timeout_s` parameter (no separate reference).
+* The async + sync public entry points (`judge_completion_report_async`, `judge_completion_report_sync`) use `timeout_s: float | None = None` and resolve inside; explicit numeric `timeout_s` (test fixtures, hot-loop callers) passes through unchanged.
+
+**Files (this resolution):**
+
+- `daemon/services/attestation_judge_timeout_resolver.py` (new) — Pattern C timeout resolver (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`, `_parse_judge_timeout_s`, `get_judge_timeout_s`, `reset_judge_timeout_resolver_for_tests`; default `25.0`, min clamp `5.0`).
+- `daemon/services/attestation_report_judge.py` — `JUDGE_TIMEOUT_S` constant bumped to `DEFAULT_JUDGE_TIMEOUT_S` (25.0; documented default reference only); the `_invoke_judge_llm` W1 coupling + `asyncio.wait_for` cap + failover `wall_clock_cap_s` now all read from the resolver; the public async + sync entry points use `timeout_s: float | None = None` and resolve inside.
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_timeout_s=<resolved>` field + an additional env readout; `reset_attestation_resolver_for_tests` also clears the new timeout cache + one-shot WARN flags.
+- `docs/setup.md` — the inline-LLM completion-report judge section updated (bounds line shows `JUDGE_TIMEOUT_S=25.0s` env-tunable; boot-log example updated to include `llm_judge_timeout_s=25.0`; new "Judge wall-clock cap" subsection documents the env name, default, min clamp, fail-OPEN policy table, and the 2026-09-07 tuning rationale).
+- `tests/unit/test_attestation_judge_resolver.py` — extended with the timeout truth table: 29 new tests (valid parses / below-clamp clamp / invalid fail-OPEN / unset returns default / None defensive / one-shot WARN emission discipline for invalid + below-clamp + zero + valid + unset / cached-global restart-read / reset helper re-resolves / reset clears one-shot WARN flags / sibling-resolver-caches-are-independent). File total: 46 tests (was 17).
+- `tests/unit/test_attestation_judge_wiring.py` — 5 new wiring tests asserting the resolved timeout FLOWS to BOTH seams (`asyncio.wait_for` cap + W1 `request_timeout` coupling): the resolved-default case, the env=17 case, the below-clamp-clamp case, the explicit-kwarg-overrides-resolver case, and the W1-coupling-uses-min case (config-side request_timeout below resolved → request_timeout is the config value). File total: 26 tests (was 21).
+- `tests/unit/test_attestation_report_judge.py` — `test_constants_pinned` updated: `assert JUDGE_TIMEOUT_S == 25.0` (was `10.0`).
+
+**Test-count truth-table discipline (grep-verified 2026-09-07):** the three touched unit files ship **106 tests total** (`pytest --collect-only -q tests/unit/test_attestation_judge_resolver.py tests/unit/test_attestation_judge_wiring.py tests/unit/test_attestation_report_judge.py` → `106 tests collected`): `test_attestation_report_judge.py` 34, `test_attestation_judge_resolver.py` 46, `test_attestation_judge_wiring.py` 26. The full attestation matrix (40 files across `tests/unit/`, `tests/integration/`, `tests/migration/`, `tests/unit/tools/`) collects the baseline + these new tests; see the Coder final report for the exact run numbers (any drift here is a doc-truth violation — the matrix run is ground truth, not the numbers above).
+
+**Decision-owner:** architect (RESOLVED 2026-09-07) + operator tuning decision (RESOLVED 2026-09-07).

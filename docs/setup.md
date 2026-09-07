@@ -580,6 +580,49 @@ Invalid env values (typo'd mode, non-integer window/bound) **fail OPEN to `enfor
 4. Check the instance row for `completion_gate_escalated=true` — find the escalation boundary.
 5. If the gate is firing on legitimate completions (false positive), flip to `dry` or `off` for instant revert + restart.
 
+**Inline-LLM completion-report judge (Phase 6 fastfollow, 2026-09-07)**
+
+The leader completion gate sits on the would-be-deny path BEFORE the in-graph nudge is injected. When the gate reaches `decision=denied` (delegated mission, no `attest_completion` in window, nothing pending), an inline LLM judge asks: "are the leader's last messages a REAL completion report?" — outcomes, evidence, follow-ups (not a short summary, not mid-work status text). If the judge says yes, the gate flips to `allowed` without demanding the toolcall and WITHOUT a counter increment. If the judge says no (or the call errors / times out / returns unparsable JSON), the existing deny+nudge path runs unchanged.
+
+The judge is a pure inline chat completion — no instance spawn, no message persistence. Model resolution honors `OPENAI_MODEL_KEYWORDS` (= `config.llm.model_keywords`) with fallback to `OPENAI_MODEL` (= `config.llm.model`). This mirrors the existing `daemon/services/keyword_extraction.py` model-resolution semantics — set `OPENAI_MODEL_KEYWORDS=quick` (or similar) to pin the judge to a fast model; leave unset to inherit the main `OPENAI_MODEL`.
+
+Kill-switch via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C restart-read resolver; default ON; `=0` / `=false` / `=no` / `=off` disables). When OFF, the judge is never invoked and the gate's `deny+nudge` fall-through runs as before — but OFF is NOT pre-feature byte-identical: the `attest_completion` mermaid block at `daemon/graph.py:2862-2864` (the `ReportJudge` decision node + its two edges) is rendered unconditionally in the leader prompt, so the prompt text itself is a Phase 6 fastfollow change. OFF toggles ATTESTATION BEHAVIOR only (judge call suppressed → existing deny+nudge path); the prompt-text change is permanent. The boot log surfaces the resolved state plus the resolved quick model plus the resolved wall-clock cap:
+
+```
+Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=25.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED).
+```
+
+When the kill-switch is OFF, the line carries `llm_judge_model=<disabled>` so operators see at a glance that no judge call will fire. Bounds: `JUDGE_TIMEOUT_S=25.0s` wall-clock cap (env-tunable via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`; minimum clamp 5.0s — values below clamp with a one-shot WARN; restart-read Pattern C resolver at `daemon/services/attestation_judge_timeout_resolver.py`); `JUDGE_MAX_INPUT_CHARS=12,000` chars of user-role payload; `JUDGE_MAX_OUTPUT_CHARS=400` chars of LLM response (a defensive ceiling against a runaway LLM that returns prose instead of JSON).
+
+**Judge wall-clock cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`)** — Pattern C restart-read resolver (sibling to the kill-switch resolver); default `25.0` seconds; minimum clamp `5.0` seconds. Resolver home: `daemon/services/attestation_judge_timeout_resolver.py`. Failure / clamp policy (fail-OPEN):
+
+| Env value | Resolved | One-shot WARN? |
+|-----------|----------|----------------|
+| unset / blank | `25.0` (default) | no |
+| `=30` / `=15.5` | parsed float | no |
+| `=abc` / `=1.5x` | `25.0` (default) | yes (invalid → default) |
+| `=0` / `=-1` | `25.0` (default) | yes (invalid → default) |
+| `=3` / `=4.9` | `5.0` (clamp) | yes (below clamp → floor) |
+
+Rationale (operator tuning decision 2026-09-07 grounded in the tester live-LLM probe; evidence commits `b42f7237..2a43904c` on branch `feature/leader-completion-attestation`, captured at `.agents/tester/RESULTS/2026-09-07-lca-judge-live-probe*`): the hardcoded `JUDGE_TIMEOUT_S=10.0` was timeslicing genuine-report quick-model calls. Real quick-model latencies in the probe showed successes 2.6s–13.6s with **4/8 calls >15s** — the 10.0s cap was firing on a substantial fraction of genuine-report calls and silently flipping the gate to the conservative deny+nudge path, defeating the feature's purpose. The default was bumped from 10.0s → 25.0s and the env was exposed so operators can re-tune without a code change.
+
+Trade-off: a longer worst-case turn-end wait on the rare deny path (the judge runs only on the WOULD-BE-DENY branch, so the cost is bounded by the per-instance `deny_bound=3` escalation + the existing 3-deny escalation guard) vs fewer false nudges of genuine reports. The 25.0s default keeps the wait bounded while letting the quick-model tail latency ride. Operators with a known-fast quick-model can tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` (or similar) for a faster worst-case bound; operators with a slow quick-model can loosen to `=40`. Restart required to flip (Pattern C — no live flip).
+
+Observability fields (logged on every judge call):
+
+| Field | Source | Purpose |
+|-------|--------|---------|
+| `event=leader_completion_gate_judge` | gate node | One-shot structured log line on the would-be-deny path; emitted after the judge call |
+| `verdict` | JudgeResult | `yes` / `no` / `error` / `timeout` / `unparsable` |
+| `llm_judge_model` | JudgeResult | The resolved quick model (or main model fallback) |
+| `llm_judge_latency_ms` | JudgeResult | Wall-clock latency of the judge call |
+| `llm_judge_reason` | JudgeResult | The LLM's one-sentence rationale (empty on error paths) |
+| `llm_judge_error_class` | JudgeResult | Exception class name on the error path; `<none>` otherwise |
+
+These fields are diagnostic extras (NOT in the canonical 17-field `leader_completion_gate` tuple). They live alongside the supplementary conditional-attestation fields (`last_real_user_found`, `last_real_user_index`, `delegation_tool_call_total`, etc.) — same shape, same grep pattern.
+
+The judge is fail-safe: every failure path (timeout, exception, unparsable JSON) returns `is_complete_report=False` so the existing deny+nudge path runs unchanged. The 3-deny escalation bound caps worst-case misfires. A judge-error wrapper-layer bug emits a separate `event=leader_completion_gate_judge_error` log line with `error_class` and degrades to the existing deny+nudge path.
+
 ## Database
 
 ### Overview
