@@ -208,14 +208,27 @@ def _initiative_preview(raw: str | None) -> str | None:
     :data:`INITIATIVE_PREVIEW_MAX_CHARS` passes through unchanged;
     longer ones are hard-truncated by a plain slice.
 
+    W-2 (second-pass review fold, 2026-09-07): a NON-STRING input
+    (the metadata JSON column is untyped — int / dict / list values
+    are possible) also yields ``None`` — honest null, never a crash
+    and never a fabricated stringification.
+
     Args:
-        raw: The ``Instance.initiative_message`` value (may be ``None``).
+        raw: The ``Instance.initiative_message`` value (may be
+            ``None`` or any JSON-decoded value).
 
     Returns:
         The preview string (≤ :data:`INITIATIVE_PREVIEW_MAX_CHARS`
         chars), or ``None`` when there is nothing to preview.
     """
     if raw is None:
+        return None
+    if not isinstance(raw, str):
+        # W-2 (second-pass review fold, 2026-09-07): the metadata
+        # JSON column carries UNTYPED values — a legacy row may hold
+        # an int / dict / list under ``initiative_message``. Honest
+        # None, never a crash and never a fabricated stringification
+        # (no ``str(123) → "123"``).
         return None
     collapsed = " ".join(raw.split())
     if not collapsed:
@@ -854,7 +867,17 @@ class MissionResolver:
             # the JSON column rides the existing Instance SELECT, so
             # the 3-SELECT page bound (and the 2-SELECT detail bound)
             # is untouched.
-            title=instance.title,
+            #
+            # W-2 (second-pass review fold, 2026-09-07): ``title`` is
+            # COERCED, not forwarded raw — the metadata JSON column is
+            # untyped, so a stray non-string (or whitespace-only)
+            # value degrades to the honest ``None`` instead of leaking
+            # an int/dict onto the wire or stringifying it.
+            title=(
+                instance.title.strip()
+                if isinstance(instance.title, str) and instance.title.strip()
+                else None
+            ),
             initiative_preview=_initiative_preview(
                 instance.initiative_message
             ),

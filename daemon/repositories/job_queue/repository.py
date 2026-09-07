@@ -1101,10 +1101,17 @@ class JobRepository:
                 count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
             if job_types is not None:
                 count_stmt = count_stmt.where(JobItem.job_type.in_(job_types))
-            if instance_id:
+            if instance_id is not None:
                 # Mission tree panel — same predicate the page query
                 # applies below, so ``total`` stays consistent with
                 # the returned rows.
+                #
+                # W-1 (second-pass review fold, 2026-09-07): the gate
+                # is ``is not None`` so an EMPTY-STRING filter
+                # filters-by-empty (matches no rows ⇒ empty page /
+                # total 0) instead of being silently DROPPED —
+                # symmetry with the page query below and honest
+                # "you asked for an impossible value" semantics.
                 count_stmt = count_stmt.where(
                     JobItem.instance_id == instance_id
                 )
@@ -1153,10 +1160,14 @@ class JobRepository:
                 stmt = stmt.where(JobItem.queue_id == queue_id)
             if job_types is not None:
                 stmt = stmt.where(JobItem.job_type.in_(job_types))
-            if instance_id:
+            if instance_id is not None:
                 # Mission tree panel — mission identity is
                 # ``mission_id == instance_id``; narrow in SQL on the
                 # existing query (no extra round-trip).
+                #
+                # W-1 (second-pass review fold, 2026-09-07): mirrors
+                # the count-query gate above — empty string filters
+                # by empty (⇒ empty page), it is not dropped.
                 stmt = stmt.where(JobItem.instance_id == instance_id)
 
             stmt = stmt.order_by(

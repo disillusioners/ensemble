@@ -1626,3 +1626,101 @@ class TestTitleAndInitiativePreview:
         record = mr_mod._unknown_mission_record()
         assert record.title is None
         assert record.initiative_preview is None
+
+
+class TestW2NonStringCoercion:
+    """W-2 (second-pass review fold, 2026-09-07): untyped metadata
+    values degrade to honest ``None``.
+
+    The ``instance_metadata`` JSON column is UNTYPED — a legacy row
+    may hold an int / dict / list (or empty / whitespace-only
+    strings) under ``title`` / ``initiative_message``. The resolver
+    must degrade BOTH fields to ``None`` for every such value: no
+    500, no leak of a raw non-string onto the wire, and NO
+    stringification (``str(123) → "123"`` is a fabricated label).
+    """
+
+    @pytest.mark.parametrize("bad_title", ["", "   \n\t  ", 123, {"k": "v"}])
+    def test_bad_title_values_yield_none(
+        self,
+        engine: Engine,
+        resolver: MissionResolver,
+        bad_title,
+    ) -> None:
+        """Stored ``""`` / whitespace-only / int / dict under
+        ``title`` ⇒ ``record.title is None``."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id=f"title-bad-{uuid.uuid4().hex[:6]}",
+            metadata={"title": bad_title},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.title is None, f"bad title {bad_title!r} leaked"
+
+    @pytest.mark.parametrize(
+        "bad_msg", ["", "   \n\t  ", 123, {"k": "v"}]
+    )
+    def test_bad_initiative_values_yield_none(
+        self,
+        engine: Engine,
+        resolver: MissionResolver,
+        bad_msg,
+    ) -> None:
+        """Stored ``""`` / whitespace-only / int / dict under
+        ``initiative_message`` ⇒ ``record.initiative_preview is
+        None`` (``_initiative_preview`` non-string guard + honest
+        empty collapse)."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id=f"msg-bad-{uuid.uuid4().hex[:6]}",
+            metadata={"initiative_message": bad_msg},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.initiative_preview is None, (
+            f"bad initiative_message {bad_msg!r} leaked"
+        )
+
+    def test_bad_values_never_stringified(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """No ``"123"`` stringification: an int metadata value must
+        not reappear as the STRING ``"123"`` on either field."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="no-stringify",
+            metadata={"title": 123, "initiative_message": 456},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.title != "123"
+        assert record.title is None
+        assert record.initiative_preview != "456"
+        assert record.initiative_preview is None
+
+    def test_list_page_degrades_bad_values_to_none(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """The LIST path (``resolve_page``) applies the same coercion
+        per row — a page mixing good and bad metadata rows surfaces
+        honest nulls on the bad ones without affecting the good."""
+        bad = _seed_instance_with_metadata(
+            engine,
+            instance_id="list-bad",
+            metadata={"title": 7, "initiative_message": {"a": 1}},
+        )
+        good = _seed_instance_with_metadata(
+            engine,
+            instance_id="list-good",
+            metadata={
+                "title": "Good title",
+                "initiative_message": "Good initiative",
+            },
+        )
+        page = resolver.resolve_page(limit=10)
+        by_id = {m.mission_id: m for m in page.missions}
+        assert by_id[bad].title is None
+        assert by_id[bad].initiative_preview is None
+        assert by_id[good].title == "Good title"
+        assert by_id[good].initiative_preview == "Good initiative"

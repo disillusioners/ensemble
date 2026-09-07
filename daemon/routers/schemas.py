@@ -1373,15 +1373,19 @@ class MissionResponse(BaseModel):
         default=None,
         description=(
             "Mission display title (instance_metadata['title']); null "
-            "when unset — no server-side fallback label is fabricated"
+            "when unset, non-string, or whitespace-only — no "
+            "server-side fallback label is fabricated"
         ),
     )
     initiative_preview: str | None = Field(
         default=None,
         description=(
-            "First 140 chars of instance_metadata['initiative_message'], "
-            "whitespace-collapsed; null when unset — no server-side "
-            "fallback label is fabricated"
+            "First 140 chars of instance_metadata['initiative_message'] "
+            "(INITIATIVE_PREVIEW_MAX_CHARS=140): the raw message is "
+            "WHITESPACE-COLLAPSED first, THEN truncated to 140 chars "
+            "by a plain slice (no ellipsis); null when unset, "
+            "non-string, or whitespace-collapsed-to-empty — no "
+            "server-side fallback label is fabricated"
         ),
     )
 

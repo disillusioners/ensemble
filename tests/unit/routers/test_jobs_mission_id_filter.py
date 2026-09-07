@@ -229,6 +229,25 @@ class TestJobRepositoryInstanceIdFilter:
         assert jobs == []
         assert total == 0
 
+    def test_empty_string_filters_by_empty(
+        self, job_repo: JobRepository, engine: Engine
+    ) -> None:
+        """W-1 (second-pass review fold, 2026-09-07): ``instance_id=''``
+        is a REAL filter that matches nothing ⇒ empty page with
+        ``total == 0`` — it is NOT silently dropped (which would
+        return every row). Count and page queries agree."""
+        _seed_job(engine, instance_id="m-1")
+        _seed_job(engine, instance_id=None)
+        jobs, total = job_repo.list(instance_id="")
+        assert total == 0, (
+            "empty-string filter must filter-by-empty in the COUNT "
+            "query, not be dropped"
+        )
+        assert jobs == [], (
+            "empty-string filter must filter-by-empty in the PAGE "
+            "query, not be dropped"
+        )
+
     def test_composes_with_statuses(
         self, job_repo: JobRepository, engine: Engine
     ) -> None:
@@ -284,6 +303,18 @@ class TestJobQueueServiceInstanceIdFilter:
         _seed_job(engine, instance_id="m-2")
         jobs = await job_queue_service.list_jobs()
         assert {j.instance_id for j in jobs} == {"m-1", "m-2"}
+
+    @pytest.mark.asyncio
+    async def test_service_empty_string_filters_by_empty(
+        self, job_queue_service: JobQueueService, engine: Engine
+    ) -> None:
+        """W-1 (second-pass review fold, 2026-09-07): a direct
+        (non-HTTP) caller passing ``instance_id=""`` gets an EMPTY
+        result set — the empty string is a real filter, not dropped."""
+        _seed_job(engine, instance_id="m-1")
+        _seed_job(engine, instance_id=None)
+        jobs = await job_queue_service.list_jobs(instance_id="")
+        assert jobs == []
 
 
 # ─── Router layer: ``GET /api/jobs?mission_id=...`` wire contract ─────────
@@ -367,8 +398,9 @@ class TestJobsRouterMissionIdFilter:
     def test_mission_id_primary_over_alias(
         self, client: TestClient, engine: Engine
     ) -> None:
-        """When both ``mission_id`` and ``instance_id`` are supplied,
-        ``mission_id`` wins — the deprecated alias is ignored."""
+        """When both ``mission_id`` and ``instance_id`` are supplied
+        (valid values), ``mission_id`` wins — the deprecated alias is
+        ignored."""
         _seed_job(engine, instance_id="m-1")
         _seed_job(engine, instance_id="m-2")
 
@@ -380,6 +412,47 @@ class TestJobsRouterMissionIdFilter:
         body = resp.json()
         assert body["total"] == 1
         assert body["jobs"][0]["instance_id"] == "m-1"
+
+    def test_empty_mission_id_rejected_422(
+        self, client: TestClient, engine: Engine
+    ) -> None:
+        """②/S-1 param hardening (second-pass review fold,
+        2026-09-07): ``mission_id`` carries ``min_length=1``, so an
+        EMPTY primary value is rejected by FastAPI with 422 BEFORE
+        the handler runs — the empty value never reaches the
+        filter-resolution logic.
+
+        SPEC-CONFLICT RESOLUTION: the originally requested wire pin
+        for this case was "empty page", but that contract is
+        unreachable once ``min_length=1`` lands (the 422 happens
+        upstream). This test pins the ACTUAL contract: 422. The
+        filter-by-empty semantics for an empty value are pinned at
+        the wire only via the deprecated ``instance_id`` alias (see
+        ``test_empty_instance_id_alias_filters_by_empty``) and at the
+        repo/service layers for direct callers.
+        """
+        _seed_job(engine, instance_id="m-1")
+        resp = client.get("/api/jobs", params={"mission_id": ""})
+        assert resp.status_code == 422
+        # The seed row is untouched — read-only endpoint.
+        jobs, total = JobRepository(engine).list()
+        assert total == 1
+
+    def test_empty_instance_id_alias_filters_by_empty(
+        self, client: TestClient, engine: Engine
+    ) -> None:
+        """W-1 at the wire, via the deprecated alias: the
+        ``instance_id`` Query has NO ``min_length``, so an EMPTY
+        alias value reaches the handler and — per the ``is not
+        None`` resolution — filters-by-empty ⇒ 200 with an empty
+        page (NOT every row, NOT a 422)."""
+        _seed_job(engine, instance_id="m-1")
+        _seed_job(engine, instance_id=None)
+        resp = client.get("/api/jobs", params={"instance_id": ""})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 0
+        assert body["jobs"] == []
 
     def test_unknown_mission_id_empty_page(
         self, client: TestClient, engine: Engine
