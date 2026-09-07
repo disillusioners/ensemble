@@ -2859,7 +2859,9 @@ ATTESTATION_NUDGE_TEXT = (
     '    UsedSend -- No --> FinishFree["Finish freely - no attestation needed"]\n'
     '    UsedSend -- Yes --> AttestRecent{"Is attest_completion in your last 3 messages?"}\n'
     '    AttestRecent -- Yes --> FinishGate["Finish - gate allows"]\n'
-    '    AttestRecent -- No --> Nudged["You are being nudged: work not finished"]\n'
+    '    AttestRecent -- No --> ReportJudge{"Did the gate\'s report judge confirm a real completion report?"}\n'
+    '    ReportJudge -- Yes --> FinishGate\n'
+    '    ReportJudge -- No --> Nudged["You are being nudged: work not finished"]\n'
     '    Nudged --> CheckContinue["Check children and task status, continue working"]\n'
     '    CheckContinue --> TrulyDone{"Work truly complete?"}\n'
     '    TrulyDone -- "No, keep working" --> CheckContinue\n'
@@ -3230,6 +3232,116 @@ def create_attestation_gate_node(
                 "attestation_route": None,
                 "gate_exception_seen": True,
             }
+
+        # Phase 6 fastfollow (2026-09-07) — inline-LLM completion-report
+        # judge on the WOULD-BE-DENY path. Runs BEFORE the counter
+        # increment so a judge-yes verdict (legitimate completion
+        # report already in the tail) skips the increment entirely;
+        # a judge-no verdict proceeds to the existing deny+nudge path.
+        # Kill-switch via ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED``
+        # (Pattern C sibling resolver at
+        # ``daemon.services.attestation_judge_resolver``); default ON.
+        # The judge is fail-safe: error / timeout / unparsable JSON all
+        # resolve to ``is_complete_report=False`` and the existing
+        # deny+nudge path runs unchanged.
+        if decision.decision is Decision.DENIED:
+            try:
+                from .services.attestation_judge_resolver import (
+                    is_llm_judge_enabled,
+                )
+                judge_on = is_llm_judge_enabled() and gate_config.get(
+                    "llm_judge_enabled", True
+                )
+            except Exception:  # noqa: BLE001 — kill-switch resolver fault
+                judge_on = False
+            if judge_on:
+                judge_result = None
+                try:
+                    from .services.attestation_report_judge import (
+                        judge_completion_report_async,
+                    )
+                    # The manager facade exposes the live Config; fall
+                    # back to a direct ``load_config`` when the manager
+                    # stub is missing it (test embeddings pass a
+                    # MagicMock as the manager handle — those exercises
+                    # flip ``llm_judge_enabled`` False in the gate
+                    # config to bypass the real call).
+                    judge_config = None
+                    manager_config = getattr(manager, "config", None)
+                    if manager_config is not None:
+                        judge_config = manager_config
+                    else:
+                        from ..config import load_config
+                        judge_config = load_config()
+                    # The gate node is async — call the async entry
+                    # point directly. The sync wrapper
+                    # (``judge_completion_report_sync``) calls
+                    # ``asyncio.run`` and would ``RuntimeError`` from
+                    # inside this running loop.
+                    judge_result = await judge_completion_report_async(
+                        messages,
+                        config=judge_config,
+                        window=settings.window,
+                    )
+                except Exception as judge_exc:  # noqa: BLE001 — defense-in-depth
+                    # Belt-and-braces — the judge itself already
+                    # converts all internal failures to JudgeResult
+                    # with is_complete_report=False. This catch only
+                    # fires on a wrapper-layer bug (e.g. config load
+                    # failure); degrade conservatively to deny+nudge.
+                    logger.error(
+                        "event=leader_completion_gate_judge_error "
+                        "error_class=%s instance_id=%s "
+                        "gate_location=%s "
+                        "decision=fail_safe_deny",
+                        type(judge_exc).__name__,
+                        effective_instance_id,
+                        gate_config.get("gate_location", "graph_end_candidate"),
+                    )
+                    judge_result = None
+                if judge_result is not None:
+                    # One-shot structured log line — operators grep for
+                    # ``event=leader_completion_gate_judge``. Carries
+                    # the four diagnostic extras (verdict / model /
+                    # latency_ms / reason) outside the canonical 17-
+                    # field tuple — same pattern as the supplementary
+                    # conditional-attestation fields.
+                    logger.info(
+                        "event=leader_completion_gate_judge "
+                        "instance_id=%s verdict=%s "
+                        "llm_judge_verdict=%s llm_judge_model=%s "
+                        "llm_judge_latency_ms=%s "
+                        "llm_judge_reason=%s llm_judge_error_class=%s",
+                        effective_instance_id,
+                        judge_result.verdict,
+                        judge_result.verdict,
+                        judge_result.model,
+                        judge_result.latency_ms,
+                        judge_result.reason,
+                        judge_result.error_class or "<none>",
+                    )
+                    if judge_result.is_complete_report:
+                        # Judge-yes — flip to ALLOWED without
+                        # demanding the toolcall (the LLM confirmed a
+                        # genuine completion report). NO counter
+                        # increment (R1 reset trigger is attested-
+                        # allow only; this path is judge-yes, distinct
+                        # from attested-allow). Return END routing.
+                        logger.info(
+                            "[AttestationGate] judge-yes override "
+                            "instance=%s verdict=%s model=%s "
+                            "latency_ms=%s; allowing END without "
+                            "attestation",
+                            effective_instance_id,
+                            judge_result.verdict,
+                            judge_result.model,
+                            judge_result.latency_ms,
+                        )
+                        return {"attestation_route": None}
+                    # Judge-no (or unparsable / error / timeout) —
+                    # fall through to the existing deny+nudge path
+                    # below. The judge_result is informational; the
+                    # deny path does not consume it.
 
         # Phase 3 — ledger writes (C3 fail-open wrapper). NO writes on
         # the meta-conditions / dry / R2 un-attested allow paths. The

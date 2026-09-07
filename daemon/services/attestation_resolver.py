@@ -84,6 +84,11 @@ import os
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
+from .attestation_judge_resolver import (
+    is_llm_judge_enabled as _resolver_is_judge_enabled,
+    reset_llm_judge_resolver_for_tests as _reset_judge_resolver_for_tests,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,7 +195,9 @@ def reset_attestation_resolver_for_tests() -> None:
     resolver's ``_reset_wc_wake_enqueue_for_tests`` helper. The
     ``AttestationConfig`` dataclass is frozen, so callers should mutate
     env vars THEN call this helper THEN call :func:`get_config` to
-    re-resolve under the new env.
+    re-resolve under the new env. Also clears the sibling LLM-judge
+    resolver cache so a test that flips
+    ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`` sees the change.
     """
     global _CACHED_CONFIG, _BOOT_LOG_EMITTED, _INVALID_VALUE_WARN_EMITTED
     global _MIN_RECENT_WINDOW_FALLBACK_WARNED
@@ -201,6 +208,7 @@ def reset_attestation_resolver_for_tests() -> None:
     for key in _METRIC_COUNTERS:
         _METRIC_COUNTERS[key] = 0
         _METRIC_LOG_EMITTED[key] = False
+    _reset_judge_resolver_for_tests()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,13 +459,24 @@ def emit_attestation_boot_log() -> None:
 
         Leader completion attestation resolved: mode=<off|dry|enforce>
             window=<N> deny_bound=<N> attestation_enabled=<true|false>
-            N_le_min_recent_window=<PASS|WARN> (env MODE=, WINDOW=, BOUND=)
-            Restart required to flip.
+            llm_judge_enabled=<true|false> llm_judge_model=<model>
+            N_le_min_recent_window=<PASS|WARN> (env MODE=, WINDOW=, BOUND=,
+            JUDGE=) Restart required to flip.
 
     The line is emitted EXACTLY ONCE per process. The O1 WARN is
     appended as a SEPARATE WARN-level line — operator log-aggregators
     filter WARN separately from INFO (the runbook documents this
     dual-line shape).
+
+    The ``llm_judge_*`` fields surface the resolved judge kill-switch
+    state (Pattern C sibling resolver at
+    :mod:`daemon.services.attestation_judge_resolver`) and the
+    resolved quick-model (honors ``OPENAI_MODEL_KEYWORDS`` with
+    fallback to ``OPENAI_MODEL`` — see
+    :func:`daemon.services.attestation_report_judge.resolve_judge_model`).
+    When the judge is disabled (``llm_judge_enabled=false``) the
+    model field surfaces ``<disabled>`` so operators see at a glance
+    that no judge call will fire.
     """
     global _BOOT_LOG_EMITTED
     if _BOOT_LOG_EMITTED:
@@ -470,17 +489,33 @@ def emit_attestation_boot_log() -> None:
         config.window, floor
     )
 
+    judge_enabled = _resolver_is_judge_enabled()
+    # Resolve the model for the boot log only — the judge itself
+    # resolves per-call (config may mutate under test). The load is
+    # deferred to a try/except so a config-load failure during the
+    # boot-log emission does not break the rest of the resolver.
+    try:
+        from ..config import load_config
+        loaded_config = load_config()
+        from .attestation_report_judge import resolve_judge_model
+        judge_model = resolve_judge_model(loaded_config)
+    except Exception:  # noqa: BLE001 — boot log must not fail
+        judge_model = "<unresolved>"
+
     logger.info(
         "Leader completion attestation resolved: mode=%s window=%d "
         "deny_bound=%d attestation_enabled=%s "
+        "llm_judge_enabled=%s llm_judge_model=%s "
         "N_le_min_recent_window=%s "
-        "(env %s=%s, %s=%s, %s=%s). "
+        "(env %s=%s, %s=%s, %s=%s, %s=%s). "
         "Restart required to flip. See docs/setup.md "
         "(ENSEMBLE_LEADER_ATTESTATION_MODE).",
         config.mode,
         config.window,
         config.deny_bound,
         "true" if config.attestation_enabled else "false",
+        "true" if judge_enabled else "false",
+        judge_model if judge_enabled else "<disabled>",
         floor_status,
         ENSEMBLE_ATTESTATION_MODE_ENV,
         os.environ.get(ENSEMBLE_ATTESTATION_MODE_ENV, "<unset>"),
@@ -488,6 +523,8 @@ def emit_attestation_boot_log() -> None:
         os.environ.get(ENSEMBLE_ATTESTATION_WINDOW_ENV, "<unset>"),
         ENSEMBLE_ATTESTATION_DENY_BOUND_ENV,
         os.environ.get(ENSEMBLE_ATTESTATION_DENY_BOUND_ENV, "<unset>"),
+        "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED",
+        os.environ.get("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "<unset>"),
     )
 
     if floor_status == "WARN":

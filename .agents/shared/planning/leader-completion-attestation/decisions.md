@@ -848,3 +848,119 @@ The conditional scanner walks the AIMessage tail at-or-after the last real user 
 - `tests/unit/test_attestation_conditional_gate_outcomes.py` (NEW — 15 tests, evaluate()/graph-node matrix for cases (a)/(b)/(c)/(d)/(e)/(g) + canonical schema 17-field pin + full-graph delegated-still-denies pin).
 - All integration tests that previously hardcoded `NUDGE_TEXT = (...)` rewritten to `from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT` — the single-source-of-truth fix eliminates per-file prose drift.
 - All integration tests that previously inferred a non-delegated baseline updated to anchor the mission as DELEGATED (a `send_message` AIMessage as the scripted model's first response) — the legacy deny / wakeup-allow / bound-escalation / counter-reset semantics continue to exercise against the conditional-gate-ON branch.
+
+---
+
+## Phase 6 fastfollow (2026-09-07) — Inline-LLM completion-report judge
+
+### Context (append-only)
+
+The Phase 6 fastfollow adds a per-deny-attempt inline-LLM judge that asks "are the leader's last messages a REAL completion report?" before injecting the in-graph nudge. The judge is a pure inline chat completion (no instance spawn, no message persistence). It is invoked ONLY on the would-be-deny path: after the gate has resolved to `Decision.DENIED` and BEFORE the counter increments / the nudge is injected. The judge-yes verdict flips the would-be-deny to `Decision.ALLOWED` (no nudge, no counter increment); the judge-no verdict (or any error / timeout / unparsable JSON path) falls through to the existing deny+nudge path unchanged.
+
+The motivation: a leader LLM can satisfy the conditional-attestation branch (delegated mission, no `attest_completion` in window) yet still have authored a genuine, detailed completion report — outcomes, evidence, follow-ups. The gate's windowed scanner only looks for the `attest_completion` tool call. A short prose recap delivered as the final AIMessage is the false-positive pattern (the leader DID finish, but the tool call never happened because the LLM didn't think it was required when the work was already complete). The judge disambiguates: a conservative LLM yes-or-no on "is this a real completion report?" before the nudge.
+
+### RESOLVED-2026-09-07 — Judge service (D13)
+
+**Resolution:** Ship an inline-LLM judge service at `daemon/services/attestation_report_judge.py` that:
+
+* Takes the SAME scanned message window the gate already uses (last `ENSEMBLE_LEADER_ATTESTATION_WINDOW` AIMessages, content truncated to a sane cap);
+* Calls the LLM with a STRICT system prompt that judges whether the final messages constitute a genuine, detailed completion report (outcomes, evidence, follow-ups — NOT a short summary, NOT mid-work status text; conservative);
+* Demands STRICT JSON output `{"is_complete_report": <bool>, "reason": "<one-sentence rationale>"}`;
+* Parses STRICTLY — unparsable = NOT a report (conservative fall-through);
+* Returns a `JudgeResult` dataclass carrying `is_complete_report`, `verdict` (`"yes" | "no" | "error" | "timeout" | "unparsable"`), `reason`, `model`, `latency_ms`, `error_class`;
+* NEVER raises — every error path (timeout, exception, unparsable JSON) resolves to `is_complete_report=False` so the deny+nudge fall-through is always available.
+
+**Async entry point:** `judge_completion_report_async(messages, *, config, window, timeout_s)` — used by the gate node (the gate's `attestation_gate_node` is async).
+
+**Sync entry point:** `judge_completion_report_sync(messages, *, config, window, timeout_s)` — used by sync callers (worker threads, scripts). Uses `asyncio.run`. Cannot be called from inside a running event loop — gate node uses the async entry point.
+
+**Bounds:**
+* `JUDGE_TIMEOUT_S = 10.0` (wall-clock cap; belt-and-braces `asyncio.wait_for` wraps the facade-wrapped call; the HA facade's `wall_clock_cap_s` is the primary defense);
+* `JUDGE_MAX_INPUT_CHARS = 12,000` (per-message budget = `MAX / count` so the total stays below cap);
+* `JUDGE_MAX_OUTPUT_CHARS = 400` (defensive ceiling on LLM reply size; oversized payloads are truncated then re-parsed conservatively).
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Kill-switch (D14)
+
+**Resolution:** Pattern C sibling resolver at `daemon/services/attestation_judge_resolver.py` mirroring the existing `attestation_resolver.py` shape:
+
+* `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables; restart-read);
+* `is_llm_judge_enabled()` cached-global resolver (one-shot boot log via the parent resolver's `emit_attestation_boot_log`);
+* `reset_llm_judge_resolver_for_tests()` test-only cache reset (also wired into `reset_attestation_resolver_for_tests` so a single call clears both caches).
+
+The gate config dict gains a `llm_judge_enabled: bool` field (default `True`) via `attestation_gate.build_gate_config(...)`. The gate node reads both sources: the env resolver AND the gate-config field. Either being `False` skips the judge.
+
+OFF = pre-feature byte-identical: judge never invoked, deny+nudge path runs as before. The gate emits NO judge log lines when OFF.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Model resolution (D15)
+
+**Resolution:** Honor the existing `daemon/services/keyword_extraction.py` resolution semantics — `config.llm.model_keywords` when non-empty, else `config.llm.model`. The judge module exposes `resolve_judge_model(config) -> str` which is a single-line mirror of the keyword-extraction pattern:
+
+```python
+model_keywords = (config.llm.model_keywords or "").strip()
+return model_keywords or config.llm.model
+```
+
+The `set_title_model_fallback` validator at `daemon/config.py:424-431` already collapses empty `model_keywords` to `model` at config-load time, so the runtime branch above is defense-in-depth. Both paths yield identical behavior. The boot log surfaces the resolved model name (`llm_judge_model=<name>` when ON; `<disabled>` when OFF). The judge logs `llm_judge_model=<name>` on every call so operators can grep the resolved model per instance.
+
+**Flag (per the dispatcher's instruction):** The dispatcher's pre-flight note ("how does `daemon/config.py` resolve `OPENAI_MODEL_KEYWORDS` today? It may be a keyword-based model SELECTOR, not a plain model name") was INVESTIGATED. The actual semantics are: **`OPENAI_MODEL_KEYWORDS` is a plain model name string**, NOT a keyword-based selector. The LLMConfig field at `daemon/config.py:130-137` declares `model_keywords: str | None` (default `None`); `OPENAI_MODEL_KEYWORDS` is consumed via the `config.yaml` interpolation at `config.yaml:22`. The `set_title_model_fallback` model_validator at `daemon/config.py:424-431` collapses empty `model_keywords` to `model`. There is no keyword-to-model mapping logic in `daemon/config.py`. The operator docs at `config.yaml:22` and `.env.example:42` describe the field as "Optional. Set to 'quick' to mirror the explorer agent's llm_model" — i.e., a literal model name, not a selector. The judge's implementation matches this straightforward reading.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Observability (D16)
+
+**Resolution:** Diagnostic extras OUTSIDE the canonical 17-field tuple (same pattern as the supplementary conditional-attestation fields `last_real_user_found`, `last_real_user_index`, `first_delegation_after_last_user_index`, `delegation_tool_call_total`, `delegation_since_last_user`). One-shot structured log line per judge call:
+
+```
+event=leader_completion_gate_judge instance_id=%s verdict=%s llm_judge_verdict=%s llm_judge_model=%s llm_judge_latency_ms=%s llm_judge_reason=%s llm_judge_error_class=%s
+```
+
+Fields:
+* `verdict` — `yes` / `no` / `error` / `timeout` / `unparsable`
+* `llm_judge_verdict` — duplicate of `verdict` for grep convenience
+* `llm_judge_model` — the resolved quick model (or main model fallback)
+* `llm_judge_latency_ms` — wall-clock latency of the judge call
+* `llm_judge_reason` — the LLM's one-sentence rationale (empty on error paths)
+* `llm_judge_error_class` — exception class name on the error path; `<none>` otherwise
+
+A separate `event=leader_completion_gate_judge_error` log line carries `error_class` for wrapper-layer bugs (e.g. config-load failure). The canonical 17-field tuple remains unchanged — existing test pins coherent.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### RESOLVED-2026-09-07 — Nudge mermaid (D17)
+
+**Resolution:** The mermaid embedded in `ATTESTATION_NUDGE_TEXT` gains ONE new decision node between `"AttestRecent -- No"` and `"Nudged"`:
+
+```
+AttestRecent -- No --> ReportJudge{"Did the gate's report judge confirm a real completion report?"}
+ReportJudge -- Yes --> FinishGate
+ReportJudge -- No --> Nudged["You are being nudged: work not finished"]
+```
+
+The canonical byte-pin test `test_attestation_nudge_text_canonical_byte_pin` (and the `EXPECTED_NUDGE_TEXT_CANONICAL` constant) is updated in the same commit. All other `ATTESTATION_NUDGE_TEXT` import sites (the lane artifact at `.agents/tester/RESULTS/2026-09-06-lca-independent-e2e-testfile.py`, the scenarios at `.agents/tester/RESULTS/2026-09-07-lca-cond-e2e-scenarios.py`, the integration tests under `tests/integration/test_attestation_*.py`) import the constant via `from daemon.graph import ATTESTATION_NUDGE_TEXT` — single source of truth, no per-file byte drift.
+
+**Decision-owner:** architect (RESOLVED 2026-09-07).
+
+### Files (Phase 6 fastfollow judge)
+
+- `daemon/services/attestation_judge_resolver.py` (new) — Pattern C kill-switch resolver.
+- `daemon/services/attestation_report_judge.py` (new) — the judge service (`JudgeResult`, `resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`, `_invoke_judge_llm`, `judge_completion_report_async`, `judge_completion_report_sync`).
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_enabled` + `llm_judge_model` fields; `reset_attestation_resolver_for_tests` also clears the judge cache.
+- `daemon/services/attestation_gate.py` — `build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg; `GATE_CONFIG_KEYS` extended.
+- `daemon/graph.py` — `create_attestation_gate_node` runs the judge BEFORE the ledger write on the would-be-deny path (judge-yes → return END; judge-no / error / timeout / unparsable → fall through to existing deny+nudge). `ATTESTATION_NUDGE_TEXT` mermaid gains the `ReportJudge` decision node.
+- `tests/unit/test_attestation_report_judge.py` (new) — 33 tests: pure-function surface (`resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`) + async judge entry points (`_invoke_judge_llm` patched).
+- `tests/unit/test_attestation_judge_wiring.py` (new) — 16 tests: gate-level scenarios (a)–(i) per the spec.
+- `tests/unit/test_attestation_nudge_inject.py` — `EXPECTED_NUDGE_TEXT_CANONICAL` updated for the new mermaid; the byte-pin test continues to enforce the full literal.
+- `docs/setup.md` — new "Inline-LLM completion-report judge" section appended (judge behavior, env flag, model resolution, log fields).
+
+### DO NOT TOUCH (Phase 6 fastfollow)
+
+- The 5-value canonical decision enum (`ALLOWED` is reused with no new value added).
+- The counter-reset semantics (R1 — attested-allow only; the judge-yes path does NOT reset because it is distinct from attested-allow).
+- The marker kwargs on the deny-nudge injection (`attestation_nudge=True`, `attestation_nudge_denied_count=<n>`).
+- The canonical 17-field `leader_completion_gate` log schema tuple.
+- The conditional-attestation scanner / scanner's `delegation_since_last_user` flag.
+- The `_make_context_message` factory and the `[SYSTEM CONTEXT: ...]` prefix convention.

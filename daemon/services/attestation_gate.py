@@ -509,6 +509,12 @@ GATE_CONFIG_KEYS = (
     "scope_applicable",
     "leader_prompt_version",
     "gate_location",
+    # Phase 6 fastfollow (2026-09-07): inline-LLM completion-report
+    # judge kill-switch boolean. Wired through ``build_gate_config``
+    # so the gate node can read it via ``gate_config.get(
+    # "llm_judge_enabled", True)``. Default ``True`` on read — back-compat
+    # with test embeddings built without the new key.
+    "llm_judge_enabled",
 )
 
 #: Canonical ``gate_location`` value (Phase 4 task 4.5 schema).
@@ -553,6 +559,7 @@ def build_gate_config(
     attestation_enabled: bool = True,
     scope_applicable: bool = True,
     leader_prompt_version: str = "",
+    llm_judge_enabled: bool = True,
 ) -> dict[str, Any]:
     """Build the gate's config dict (the O8-audited shape).
 
@@ -560,6 +567,24 @@ def build_gate_config(
     checkpoint namespace material): the gate reads in-node
     ``state["messages"]`` only. ``tests/unit/test_attestation_gate.py``
     pins this via :data:`GATE_CONFIG_KEYS` and a direct key assertion.
+
+    Args:
+        instance_id: The leader instance id (for log fields).
+        settings: :class:`GateSettings` (window/bound/mode).
+        tool_name: Attestation tool name.
+        attestation_enabled: C2 master flag (False bypasses everything).
+        scope_applicable: D3 flag (False bypasses everything).
+        leader_prompt_version: ``agents/leader/meta.json`` version for
+            the canonical log schema.
+        llm_judge_enabled: Phase 6 fastfollow (2026-09-07) — whether
+            the inline-LLM completion-report judge runs on the
+            would-be-deny path. Pattern C kill-switch
+            (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED``,
+            default ON). The wiring layer resolves the env flag and
+            threads the boolean through; the gate node reads
+            ``gate_config["llm_judge_enabled"]`` (default ``True`` for
+            back-compat with legacy test embeddings that build the
+            node without the new flag).
     """
     return {
         "instance_id": instance_id,
@@ -571,6 +596,7 @@ def build_gate_config(
         "scope_applicable": scope_applicable,
         "leader_prompt_version": leader_prompt_version,
         "gate_location": GATE_LOCATION_GRAPH_END_CANDIDATE,
+        "llm_judge_enabled": llm_judge_enabled,
     }
 
 

@@ -580,6 +580,36 @@ Invalid env values (typo'd mode, non-integer window/bound) **fail OPEN to `enfor
 4. Check the instance row for `completion_gate_escalated=true` — find the escalation boundary.
 5. If the gate is firing on legitimate completions (false positive), flip to `dry` or `off` for instant revert + restart.
 
+**Inline-LLM completion-report judge (Phase 6 fastfollow, 2026-09-07)**
+
+The leader completion gate sits on the would-be-deny path BEFORE the in-graph nudge is injected. When the gate reaches `decision=denied` (delegated mission, no `attest_completion` in window, nothing pending), an inline LLM judge asks: "are the leader's last messages a REAL completion report?" — outcomes, evidence, follow-ups (not a short summary, not mid-work status text). If the judge says yes, the gate flips to `allowed` without demanding the toolcall and WITHOUT a counter increment. If the judge says no (or the call errors / times out / returns unparsable JSON), the existing deny+nudge path runs unchanged.
+
+The judge is a pure inline chat completion — no instance spawn, no message persistence. Model resolution honors `OPENAI_MODEL_KEYWORDS` (= `config.llm.model_keywords`) with fallback to `OPENAI_MODEL` (= `config.llm.model`). This mirrors the existing `daemon/services/keyword_extraction.py` model-resolution semantics — set `OPENAI_MODEL_KEYWORDS=quick` (or similar) to pin the judge to a fast model; leave unset to inherit the main `OPENAI_MODEL`.
+
+Kill-switch via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C restart-read resolver; default ON; `=0` / `=false` / `=no` / `=off` disables). When OFF, the gate's pre-feature byte-identical behavior is preserved (the judge is never invoked, the deny+nudge path runs as before). The boot log surfaces the resolved state plus the resolved quick model:
+
+```
+Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>). Restart required to flip.
+```
+
+When the kill-switch is OFF, the line carries `llm_judge_model=<disabled>` so operators see at a glance that no judge call will fire. Bounds: `JUDGE_TIMEOUT_S=10s` wall-clock cap; `JUDGE_MAX_INPUT_CHARS=12,000` chars of user-role payload; `JUDGE_MAX_OUTPUT_CHARS=400` chars of LLM response (a defensive ceiling against a runaway LLM that returns prose instead of JSON).
+
+Observability fields (logged on every judge call):
+
+| Field | Source | Purpose |
+|-------|--------|---------|
+| `event=leader_completion_gate_judge` | gate node | One-shot structured log line on the would-be-deny path; emitted after the judge call |
+| `verdict` | JudgeResult | `yes` / `no` / `error` / `timeout` / `unparsable` |
+| `llm_judge_verdict` | JudgeResult | Duplicate of `verdict` for grep convenience |
+| `llm_judge_model` | JudgeResult | The resolved quick model (or main model fallback) |
+| `llm_judge_latency_ms` | JudgeResult | Wall-clock latency of the judge call |
+| `llm_judge_reason` | JudgeResult | The LLM's one-sentence rationale (empty on error paths) |
+| `llm_judge_error_class` | JudgeResult | Exception class name on the error path; `<none>` otherwise |
+
+These fields are diagnostic extras (NOT in the canonical 17-field `leader_completion_gate` tuple). They live alongside the supplementary conditional-attestation fields (`last_real_user_found`, `last_real_user_index`, `delegation_tool_call_total`, etc.) — same shape, same grep pattern.
+
+The judge is fail-safe: every failure path (timeout, exception, unparsable JSON) returns `is_complete_report=False` so the existing deny+nudge path runs unchanged. The 3-deny escalation bound caps worst-case misfires. A judge-error wrapper-layer bug emits a separate `event=leader_completion_gate_judge_error` log line with `error_class` and degrades to the existing deny+nudge path.
+
 ## Database
 
 ### Overview

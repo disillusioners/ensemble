@@ -735,3 +735,86 @@ SUPPLEMENTARY DIAGNOSTIC FIELDS (NOT in the canonical 17-field schema tuple, but
 ### NFR-6 nudge text (VER-6.4 — verbatim pin remains, content amended)
 
 The NFR-6 verbatim pin of the in-graph nudge text remains in force — `tests/unit/test_attestation_nudge_inject.py::test_deny_injects_checkpoint_plain_dict_and_routes_to_agent` AND `tests/unit/test_attestation_nudge_inject.py::test_nudge_header_is_first_nonblank_line_and_marker_unchanged` pin the new content via `daemon.graph.ATTESTATION_NUDGE_TEXT` (the single source of truth, imported by all integration tests). The verbatim-pin convention is unchanged: integration tests import the canonical constant rather than hardcoding a per-file copy.
+
+---
+
+## Phase 6 fastfollow (2026-09-07) — Inline-LLM completion-report judge
+
+### FR-12 — Inline LLM judge on the would-be-deny path
+
+**Requirement:** After the gate reaches `Decision.DENIED` (delegated mission, no `attest_completion` in window, nothing pending) and BEFORE injecting the in-graph nudge, the gate MUST call an inline LLM (direct chat completion — NOT an instance spawn) to judge "are the leader's last messages a REAL completion report?". If the judge says YES → complete normally WITHOUT the toolcall (decision=ALLOWED, no nudge). If the judge says NO (or the call errors / times out / returns unparsable JSON) → existing deny+nudge path unchanged.
+
+**Implementation surface:**
+
+* New module `daemon/services/attestation_report_judge.py` (the judge service — pure-callable, no global state).
+* New module `daemon/services/attestation_judge_resolver.py` (Pattern C sibling resolver — kill-switch only).
+* Extension to `daemon/services/attestation_resolver.py` (`emit_attestation_boot_log` extended with `llm_judge_enabled` + `llm_judge_model`).
+* Extension to `daemon/services/attestation_gate.py` (`build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg; `GATE_CONFIG_KEYS` extended).
+* Extension to `daemon/graph.py::create_attestation_gate_node` (judge runs on the would-be-deny path BEFORE the counter increment; judge-yes → return END; judge-no / error / timeout / unparsable → fall through to existing deny+nudge).
+
+**Judge system prompt contract:** strict, role-anchored, conservative, demands strict JSON output `{"is_complete_report": <bool>, "reason": "<one-sentence rationale>"}` (no markdown, no prose, no code fences, no commentary). The single source of truth is `JUDGE_SYSTEM_PROMPT` at `daemon/services/attestation_report_judge.py`.
+
+**Fail-safe direction:** every error path (timeout, exception, unparsable JSON) returns `is_complete_report=False`. The judge NEVER raises. The judge emits `event=leader_completion_gate_judge_error` for wrapper-layer bugs and degrades to the existing deny+nudge path. The 3-deny escalation bound caps worst-case misfires.
+
+**Bounds:** `JUDGE_TIMEOUT_S=10.0` seconds; `JUDGE_MAX_INPUT_CHARS=12,000` chars (per-message budget = `MAX / count`); `JUDGE_MAX_OUTPUT_CHARS=400` chars.
+
+### FR-13 — Kill-switch (Pattern C, default ON)
+
+**Requirement:** `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C restart-read resolver; default ON; `=0` / `=false` / `=no` / `=off` disables). When OFF → judge never invoked; gate's pre-feature byte-identical behavior is preserved.
+
+**Surface:**
+* `daemon/services/attestation_judge_resolver.is_llm_judge_enabled()` cached-global resolver.
+* `daemon/services/attestation_judge_resolver.reset_llm_judge_resolver_for_tests()` test-only cache reset (also wired into `attestation_resolver.reset_attestation_resolver_for_tests`).
+* `daemon/services/attestation_gate.build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg (per-instance override — back-compat default True).
+* The gate node reads BOTH sources: `is_llm_judge_enabled()` AND `gate_config.get("llm_judge_enabled", True)`. Either being False skips the judge.
+
+**Boot log extension:** `Leader completion attestation resolved: … llm_judge_enabled=<true|false> llm_judge_model=<name>|<disabled> …` (the existing one-shot INFO line gains the judge state; O1 PASS/WARN tag preserved).
+
+### FR-14 — Model resolution (honors OPENAI_MODEL_KEYWORDS with fallback)
+
+**Requirement:** The judge MUST honor `OPENAI_MODEL_KEYWORDS` (= `config.llm.model_keywords`) with fallback to `OPENAI_MODEL` (= `config.llm.model`). The judge module exposes `resolve_judge_model(config) -> str` which mirrors `daemon/services/keyword_extraction.py` semantics verbatim. Setting `OPENAI_MODEL_KEYWORDS=quick` (or similar) pins the judge to a fast model; leaving unset inherits the main `OPENAI_MODEL`.
+
+**Investigation outcome (per the dispatcher's pre-flight flag):** The actual semantics of `OPENAI_MODEL_KEYWORDS` are PLAIN MODEL NAME STRING, not a keyword-based selector. The LLMConfig field is declared at `daemon/config.py:130-137` (`model_keywords: str | None = None`); the `set_title_model_fallback` model_validator at `daemon/config.py:424-431` collapses empty `model_keywords` to `model`. There is NO keyword-to-model mapping logic anywhere in `daemon/config.py`. The operator docs at `config.yaml:22` and `.env.example:42` describe the field as a literal model name ("Set to 'quick' to mirror the explorer agent's llm_model"). The judge's implementation matches this straightforward reading.
+
+### FR-15 — Observability (diagnostic extras outside the canonical 17-field tuple)
+
+**Requirement:** The judge MUST emit one structured log line per call carrying the diagnostic extras `verdict` / `llm_judge_verdict` / `llm_judge_model` / `llm_judge_latency_ms` / `llm_judge_reason` / `llm_judge_error_class`. These fields are diagnostic extras — NOT in the canonical 17-field `leader_completion_gate` tuple (same pattern as the supplementary conditional-attestation fields). Operators grep `event=leader_completion_gate_judge` to surface judge outcomes.
+
+**Surface:**
+* `event=leader_completion_gate_judge` — emitted on every judge call (yes / no / error / timeout / unparsable).
+* `event=leader_completion_gate_judge_error` — emitted for wrapper-layer bugs (defense-in-depth — the judge itself already converts all internal failures to JudgeResult with `is_complete_report=False`).
+* The canonical 17-field tuple is UNCHANGED; existing test pins coherent.
+
+### FR-16 — Nudge mermaid accuracy (ReportJudge decision node)
+
+**Requirement:** The mermaid embedded in `ATTESTATION_NUDGE_TEXT` gains ONE new decision node between `"AttestRecent -- No"` and `"Nudged"` — the `ReportJudge` decision ("Did the gate's report judge confirm a real completion report?"). Yes → `FinishGate`; No → `Nudged`. The canonical byte-pin (`EXPECTED_NUDGE_TEXT_CANONICAL`) is updated in the same commit. All other `ATTESTATION_NUDGE_TEXT` import sites (lane artifacts in `.agents/tester/RESULTS/`, integration tests under `tests/integration/`) import the constant via `from daemon.graph import ATTESTATION_NUDGE_TEXT` — single source of truth, no per-file byte drift.
+
+### Tests (acceptance suite — all required, all green at ship)
+
+The acceptance matrix below is the spec-driven suite (per the dispatcher's contract). All 9 scenarios are pinned.
+
+| # | Scenario | Pinned in |
+|---|----------|-----------|
+| (a) | judge-yes → ALLOWED, no nudge, no counter write | `tests/unit/test_attestation_judge_wiring.py::test_judge_yes_allows_without_nudge_no_counter_increment` |
+| (b) | judge-no → deny+nudge, counter increments | `tests/unit/test_attestation_judge_wiring.py::test_judge_no_falls_through_to_deny_nudge_increments_counter` |
+| (c) | judge-timeout → deny+nudge | `tests/unit/test_attestation_judge_wiring.py::test_judge_timeout_falls_through_to_deny_nudge` |
+| (d) | judge-error → deny+nudge | `tests/unit/test_attestation_judge_wiring.py::test_judge_generic_error_falls_through_to_deny_nudge` |
+| (e) | unparsable → deny+nudge | `tests/unit/test_attestation_judge_wiring.py::test_judge_unparsable_falls_through_to_deny_nudge` |
+| (f) | kill-switch OFF (env=0 AND gate-config flag=False) → judge never called | `tests/unit/test_attestation_judge_wiring.py::test_judge_not_called_when_gate_config_flag_off` + `test_judge_not_called_when_env_kill_switch_off` |
+| (g) | model fallback resolution (OPENAI_MODEL_KEYWORDS unset → falls back to OPENAI_MODEL; set → uses that) | `tests/unit/test_attestation_judge_wiring.py::test_model_fallback_to_main_when_keywords_empty` + `test_model_uses_keywords_when_set` |
+| (h) | log fields present on judge paths (verdict, model, latency_ms, reason, error_class) | `tests/unit/test_attestation_judge_wiring.py::test_log_fields_present_on_judge_yes` + `test_log_fields_present_on_judge_error` |
+| (i) | judge NOT called on non-deny paths (attested, not-required, pending-wakeup) | `tests/unit/test_attestation_judge_wiring.py::test_judge_not_called_on_attested_path` + `test_judge_not_called_on_unrequired_path` + `test_judge_not_called_on_pending_wakeup_path` |
+
+Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_judge.py`) cover `resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response` (strict JSON, code-fence leakage, substring match, multi-object, non-object, missing field, wrong type, reason-length cap, empty input), `judge_completion_report_async` (yes/no/unparsable/code-fence/timeout/error/empty-messages/truncation), `judge_completion_report_sync` (same shape), and the constants (`JUDGE_TIMEOUT_S`, `JUDGE_MAX_INPUT_CHARS`, `JUDGE_MAX_OUTPUT_CHARS`, `JUDGE_DEFAULT_WINDOW`, `JUDGE_SYSTEM_PROMPT` shape).
+
+### Files (Phase 6 fastfollow judge)
+
+- `daemon/services/attestation_judge_resolver.py` (new) — Pattern C kill-switch resolver (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`).
+- `daemon/services/attestation_report_judge.py` (new) — the judge service.
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended; `reset_attestation_resolver_for_tests` extended.
+- `daemon/services/attestation_gate.py` — `build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg; `GATE_CONFIG_KEYS` extended.
+- `daemon/graph.py` — judge wiring in `create_attestation_gate_node`; `ATTESTATION_NUDGE_TEXT` mermaid extended.
+- `tests/unit/test_attestation_report_judge.py` (new — 33 tests).
+- `tests/unit/test_attestation_judge_wiring.py` (new — 16 tests, acceptance matrix).
+- `tests/unit/test_attestation_nudge_inject.py` — `EXPECTED_NUDGE_TEXT_CANONICAL` updated for the new mermaid.
+- `docs/setup.md` — new "Inline-LLM completion-report judge" section appended.
