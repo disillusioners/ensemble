@@ -1371,10 +1371,19 @@ class MissionResponse(BaseModel):
     # rendering.
     title: str | None = Field(
         default=None,
+        # S-3 (second-pass review fold, 2026-09-07): sane display bound
+        # on the wire surface. NOTE — schemas.py has NO pre-existing
+        # max_length convention to match (this is the first constrained
+        # string field in this module); 500 is the reviewer-suggested
+        # bound. Response-side validation: a stored title longer than
+        # 500 chars fails response validation (500) rather than
+        # silently shipping an over-long wire payload.
+        max_length=500,
         description=(
             "Mission display title (instance_metadata['title']); null "
             "when unset, non-string, or whitespace-only — no "
-            "server-side fallback label is fabricated"
+            "server-side fallback label is fabricated. Bounded at 500 "
+            "chars on the wire (max_length)."
         ),
     )
     initiative_preview: str | None = Field(

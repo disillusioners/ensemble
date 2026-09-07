@@ -467,3 +467,268 @@ class TestJobsRouterMissionIdFilter:
         body = resp.json()
         assert body["total"] == 0
         assert body["jobs"] == []
+
+
+# ─── W-3/W-4: count-vs-page symmetry under a row-count-asymmetric page ────
+
+
+@pytest.fixture
+def row_count_asymmetric_page(engine: Engine) -> dict:
+    """W-3/W-4 (second-pass review fold, 2026-09-07): seed MORE
+    matching rows than one page holds.
+
+    5 jobs on ``m-1`` + 2 on ``m-2`` ⇒ with ``limit=3`` the filtered
+    TOTAL (5) exceeds the PAGE size (3). The asymmetry is the whole
+    point: it lets total-vs-page assertions discriminate the COUNT
+    query from the PAGE query —
+
+    * if the COUNT query ignored the filter ⇒ the repo-layer
+      ``total`` would read 7 (not 5);
+    * if the PAGE query ignored the filter (or the limit) ⇒ the rows
+      would include ``m-2`` jobs (or exceed 3).
+
+    (At the WIRE, ``total`` currently echoes the page size — the
+    S-5 wiring gap, deferred — so the discrimination runs at the
+    repository layer; see ``TestFilterCountPageSymmetry``.)
+
+    Returns the seeded page-size contract for the assertions.
+    """
+    for _ in range(5):
+        _seed_job(engine, instance_id="m-1")
+    for _ in range(2):
+        _seed_job(engine, instance_id="m-2")
+    return {"matching": 5, "other": 2, "page_size": 3}
+
+
+class TestFilterCountPageSymmetry:
+    """The ``mission_id`` filter is applied SYMMETRICALLY to the
+    count query and the page query — the filtered set's ``total`` and
+    its returned rows always describe the same filtered set.
+
+    Layer note: the WIRE ``JobListResponse.total`` currently ECHOES
+    the page (``total=len(job_responses)``, ``jobs_crud.py`` — the
+    S-5 wiring gap, explicitly DEFERRED by the second-pass review).
+    The total-vs-page DISCRIMINATION the W-3/W-4 fixture exists for
+    is therefore only reachable at the REPOSITORY layer, where
+    ``list()`` returns the count-query ``total`` and the page rows
+    separately. The wire test below pins the current echo behavior
+    so S-5's landing flips exactly one assertion here.
+    """
+
+    def test_count_and_page_legs_symmetric_at_repository(
+        self,
+        job_repo: JobRepository,
+        engine: Engine,
+        row_count_asymmetric_page: dict,
+    ) -> None:
+        """Repo: ``instance_id='m-1', limit=3`` ⇒ ``total == 5`` (the
+        COUNT leg respected the filter: NOT 7) while the page holds
+        exactly 3 rows, all on ``m-1`` (the PAGE leg respected both
+        the filter and the limit)."""
+        jobs, total = job_repo.list(instance_id="m-1", limit=3)
+        assert total == row_count_asymmetric_page["matching"], (
+            "count query must respect mission_id — a total of 7 here "
+            "means the COUNT query dropped the filter"
+        )
+        assert total != len(jobs), (
+            "fixture invariant broken: the asymmetric seed exists so "
+            "total and page size differ (5 vs 3)"
+        )
+        assert len(jobs) == row_count_asymmetric_page["page_size"]
+        assert {j.instance_id for j in jobs} == {"m-1"}, (
+            "page query must respect mission_id — m-2 rows here mean "
+            "the PAGE query dropped the filter"
+        )
+
+    def test_wire_total_echoes_page_under_current_wiring(
+        self,
+        client: TestClient,
+        engine: Engine,
+        row_count_asymmetric_page: dict,
+    ) -> None:
+        """Wire: ``?mission_id=m-1&limit=3`` returns 3 rows, all on
+        ``m-1``, and ``total`` ECHOES the page (3) — the current
+        S-5-deferred wiring (``total=len(job_responses)``), NOT the
+        SQL count (5).
+
+        S-5 FOLLOW-UP MARKER: when the SQL count is wired through to
+        ``JobListResponse.total``, this assertion flips to
+        ``body["total"] == 5`` — at which point the wire joins the
+        repository in discriminating the two legs (see
+        ``test_count_and_page_legs_symmetric_at_repository``).
+        """
+        resp = client.get(
+            "/api/jobs",
+            params={"mission_id": "m-1", "limit": 3},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["jobs"]) == row_count_asymmetric_page["page_size"]
+        assert {j["instance_id"] for j in body["jobs"]} == {"m-1"}
+        assert body["total"] == len(body["jobs"]), (
+            "wire total currently echoes the page (S-5 deferred); if "
+            "this fires, S-5 landed — flip the expectation to "
+            "body['total'] == 5 and re-discriminate at the wire"
+        )
+
+    def test_last_page_drains_to_exactly_total(
+        self, job_repo: JobRepository,
+        row_count_asymmetric_page: dict,
+    ) -> None:
+        """Paging drains the filtered set to exactly ``total`` —
+        3 + 2 = 5 — proving both legs track the same filtered set
+        across page boundaries.
+
+        Repo-layer (the wire route exposes ``limit`` but no
+        ``offset`` query param — pagination continuation lives at the
+        repository seam, which the router itself does not use yet).
+        """
+        first_jobs, first_total = job_repo.list(
+            instance_id="m-1", limit=3, offset=0
+        )
+        rest_jobs, rest_total = job_repo.list(
+            instance_id="m-1", limit=3, offset=3
+        )
+        assert first_total == rest_total == 5
+        assert len(first_jobs) == 3
+        assert len(first_jobs) + len(rest_jobs) == 5
+        assert {
+            j.instance_id for j in first_jobs + rest_jobs
+        } == {"m-1"}
+
+
+# ─── S-2: engine-bound query-count pin for the filtered list path ─────────
+
+
+class TestJobsMissionFilterQueryCount:
+    """S-2 (second-pass review fold, 2026-09-07): the ``mission_id``
+    filter adds NO extra SELECT vs the unfiltered path.
+
+    Ports the engine-listener pattern from
+    ``tests/unit/routers/test_missions_api.py::
+    TestEngineBoundQueryCount`` to the jobs mission_id filter path:
+    a ``before_cursor_execute`` spy counts SELECT statements against
+    the engine DURING the HTTP request. Mock counting is banned for
+    this contract.
+
+    Harness note: rows are seeded with ``admission_state='done'`` so
+    the router's per-row enrichment legs (queue-position probe for
+    QUEUED rows, DLQ lookup for DEAD rows) never fire — the baseline
+    is the pure ``JobRepository.list`` shape: exactly TWO SELECTs
+    (count + page, both on ``job_queue_items``), FLAT regardless of
+    seed size. The unfiltered baseline count is pinned EXACTLY; the
+    filtered request must issue the SAME count.
+    """
+
+    SEEDS_PER_MISSION = 5
+    OTHER_MISSION_SEEDS = 3
+
+    @staticmethod
+    def _count_selects(engine: Engine):
+        """Attach the spy; returns ``(counts, detach)`` where
+        ``counts`` is ``{"total": n, "job_queue_items": m}`` —
+        captured by reference and valid between attach and detach."""
+        counts = {"total": 0, "job_queue_items": 0}
+
+        def _before_cursor_execute(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            s = statement.strip().upper()
+            if s.startswith("SELECT"):
+                counts["total"] += 1
+                if "JOB_QUEUE_ITEMS" in s:
+                    counts["job_queue_items"] += 1
+
+        event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+
+        def _detach() -> None:
+            event.remove(
+                engine, "before_cursor_execute", _before_cursor_execute
+            )
+
+        return counts, _detach
+
+    def _seed_settled(self, engine: Engine) -> None:
+        for _ in range(self.SEEDS_PER_MISSION):
+            _seed_job(
+                engine,
+                instance_id="m-1",
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+            )
+        for _ in range(self.OTHER_MISSION_SEEDS):
+            _seed_job(
+                engine,
+                instance_id="m-2",
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+            )
+
+    def test_filter_baseline_is_two_selects(
+        self, client: TestClient, engine: Engine
+    ) -> None:
+        """Unfiltered baseline pins at EXACTLY 2 SELECTs (count +
+        page); the filtered request issues the SAME 2 — the filter is
+        a WHERE-clause narrowing on the existing queries, never an
+        extra round-trip."""
+        self._seed_settled(engine)
+
+        counts, detach = self._count_selects(engine)
+        try:
+            resp = client.get("/api/jobs")
+        finally:
+            detach()
+        assert resp.status_code == 200
+        assert counts["total"] == 2, (
+            f"unfiltered baseline must be exactly 2 SELECTs (count + "
+            f"page); got {counts} — an enrichment leg fired on this "
+            "seed shape"
+        )
+        assert counts["job_queue_items"] == 2, counts
+
+        counts, detach = self._count_selects(engine)
+        try:
+            resp = client.get("/api/jobs", params={"mission_id": "m-1"})
+        finally:
+            detach()
+        assert resp.status_code == 200
+        assert len(resp.json()["jobs"]) == self.SEEDS_PER_MISSION
+        assert counts["total"] == 2, (
+            f"filtered request must stay at the 2-SELECT baseline "
+            f"(the filter must add NO extra SELECT); got {counts}"
+        )
+        assert counts["job_queue_items"] == 2, counts
+
+    def test_filter_select_count_flat_as_seeds_double(
+        self, client: TestClient, engine: Engine
+    ) -> None:
+        """The 2-SELECT bound is FLAT: doubling the seed set does not
+        grow the filtered path's SELECT count (no N+1)."""
+        for multiplier in (1, 2):
+            # Fresh seed set per multiplier — the row count doubles.
+            for _ in range(self.SEEDS_PER_MISSION * multiplier):
+                _seed_job(
+                    engine,
+                    instance_id=f"m-flat-{multiplier}",
+                    admission_state=AdmissionState.DONE.value,
+                    terminal_reason="completed",
+                )
+
+            counts, detach = self._count_selects(engine)
+            try:
+                resp = client.get(
+                    "/api/jobs",
+                    params={"mission_id": f"m-flat-{multiplier}"},
+                )
+            finally:
+                detach()
+
+            assert resp.status_code == 200
+            assert (
+                len(resp.json()["jobs"])
+                == self.SEEDS_PER_MISSION * multiplier
+            )
+            assert counts["total"] == 2, (
+                f"SELECT count must stay flat at 2 as the seed set "
+                f"doubles (multiplier={multiplier}); got {counts}"
+            )

@@ -158,6 +158,27 @@ unchanged.
 
 ### Added
 
+#### Mission tree panel API surface (2026-09-07, `feature/job-queue-mission-tree`)
+
+`GET /api/missions` / `GET /api/missions/{id}` carry two additive nullable display
+fields sourced from `instance_metadata`: `title` (string-stripped; wire-bounded at
+500 chars) and `initiative_preview` (whitespace-collapsed FIRST, THEN truncated to
+140 chars — `INITIATIVE_PREVIEW_MAX_CHARS` — by a plain slice, no ellipsis). Honest
+nulls only: `null` when the key is absent, the value is non-string (the metadata JSON
+column is untyped), or it collapses to empty — the server never fabricates a fallback
+label and never stringifies (`str(123)` is forbidden).
+
+`GET /api/jobs` gains a `mission_id` filter (`mission_id == instance_id`; narrows
+`job_queue_items` by `JobItem.instance_id` on the EXISTING count + page queries — no
+extra SELECT, count/page symmetric) plus a **deprecated** `instance_id` alias (used
+only when `mission_id` is absent; OpenAPI `deprecated: true`). Empty-string
+semantics (second-pass review fold): the primary `mission_id` rejects empty with
+**422** (`min_length=1`); the alias accepts empty and means **filter-by-empty**
+(200 with an empty page, `total == 0`) — NOT "no filter". The same `is not None`
+semantics hold at the service and repository layers for direct callers. Unknown
+mission ⇒ 200 empty page. Read-only throughout — zero DML, census frozen at 23.
+Full contract: `docs/job-task-system.md` §8.6.
+
 #### Public `defer_pending_count` surface (Round-2 ITEM 7 → unblock-round ITEM 4)
 
 Originally a public free function

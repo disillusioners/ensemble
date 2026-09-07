@@ -1689,6 +1689,50 @@ the FE iterates the array to find the first paused holder; with `pending_count
   itself fails CLOSED on DB error, and a surface that serves no body can never
   falsely claim the gate is open.
 
+### 8.6 Mission Tree Panel API Surface — mission display fields + `GET /api/jobs?mission_id=` (read-only, always-on)
+
+> **Landed on `feature/job-queue-mission-tree` (2026-09-07, 327fdc1a; second-pass
+> review fold 301a3d77).** Read-only throughout: the filter only NARROWS the existing
+> `GET /api/jobs` queries — zero DML, no JobItem creation, no admission-state writes;
+> the census stays **frozen at 23**. The display fields are pure reads off the
+> already-loaded `Instance.instance_metadata` JSON (no extra SELECT — the 3-SELECT
+> page bound of §8.4 is untouched).
+
+#### Mission display fields on `MissionResponse` (`GET /api/missions`, `GET /api/missions/{id}`)
+
+Two additive, nullable fields sourced from `instance_metadata`:
+
+| Field | Shaping | `null` when |
+|---|---|---|
+| `title` | `instance_metadata['title']`, string-stripped; bounded at 500 chars on the wire (`max_length`) | key absent, value non-string (int/dict/list — the JSON column is untyped), or whitespace-only |
+| `initiative_preview` | `instance_metadata['initiative_message']` **whitespace-collapsed FIRST, THEN truncated** to 140 chars (`INITIATIVE_PREVIEW_MAX_CHARS`) by a plain slice — no ellipsis, no fabricated suffix; the FE owns any visual truncation affordance | key absent, value non-string, or whitespace-collapsed-to-empty |
+
+Honest nulls only — the server NEVER fabricates a fallback label and never
+stringifies a non-string value (`str(123) → "123"` is forbidden: a fabricated label
+is worse than an honest null). The FE owns fallback rendering.
+
+#### `GET /api/jobs?mission_id=` — filter to one mission's jobs
+
+- **Identity rule:** `mission_id == instance_id` — the filter narrows
+  `job_queue_items` by `JobItem.instance_id` in SQL (a WHERE-clause narrowing on the
+  EXISTING count + page queries; engine-listener-pinned: the filter adds NO extra
+  SELECT vs the unfiltered path — 2-SELECT baseline, flat under seed doubling).
+- **Symmetry:** the SAME predicate is applied to the count query and the page query,
+  so `total` and `jobs[]` always describe the same filtered set.
+- **Param hardening:** `mission_id` carries `min_length=1` — an empty primary value
+  is rejected with **422** by FastAPI before the handler runs.
+- **Precedence:** `mission_id` wins when both are supplied.
+
+#### Deprecated `instance_id` alias
+
+`?instance_id=` is a **deprecated** alias for the same filter (OpenAPI-marked
+`deprecated: true`), used ONLY when `mission_id` is absent. Unlike the primary, it
+carries NO `min_length` — an **empty** alias value is accepted and means
+**filter-by-empty** (matches no rows ⇒ 200 with an empty page and `total == 0`), NOT
+"no filter" and NOT a 422. The `is not None`-gated resolution holds at every layer
+(router, service, repository — the repository gate is `if instance_id is not None:`),
+so direct non-HTTP callers passing `instance_id=""` get the same empty result set.
+
 ---
 
 ## 9. What this means for reviewers
