@@ -395,11 +395,13 @@ class ReportInjectionRepository:
                     )
                 ).first()
             if delivered is not None:
+                _is_failed = delivered.state == _FAILED_STATE
                 logger.info(
                     f"[ReportInjection] ensure_deferred no-op: terminal "
                     f"row present (state={delivered.state}, "
-                    f"delivered_at={delivered.delivered_at}) — positive "
-                    f"delivery evidence for "
+                    f"delivered_at={delivered.delivered_at}) — "
+                    f"{'dead-letter marker present — obligation abandoned, not delivered' if _is_failed else 'positive delivery evidence'} "
+                    f"for "
                     f"parent={parent_instance_id[:8]}..., "
                     f"child={child_instance_id[:8]}..., "
                     f"msg={child_message_id[:8]}... "

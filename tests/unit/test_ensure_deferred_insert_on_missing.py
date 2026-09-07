@@ -286,6 +286,7 @@ def test_reason_differs_updates_in_place(repo, engine):
     [
         ReportInjectionState.INJECTED.value,
         ReportInjectionState.TASK_DELIVERED.value,
+        ReportInjectionState.FAILED.value,
     ],
 )
 def test_terminal_row_is_positive_delivery_evidence(
@@ -311,17 +312,24 @@ def test_terminal_row_is_positive_delivery_evidence(
             child_message_id=msg,
             deferred_reason=DEFERRED_REASON_PENDING_MESSAGES,
         )
-    assert result is None, "terminal row = delivered, legitimate no-op"
+    assert result is None, "terminal row = legitimate no-op"
     rows = _all_rows(engine, parent=parent, child=child, msg=msg)
-    assert len(rows) == 1, "no fresh marker on top of a delivered row"
-    # The no-op log must cite the terminal row (POSITIVE evidence),
-    # never the retired zero-row "racing delivery won" claim.
+    assert len(rows) == 1, "no fresh marker on top of a terminal row"
+    # The no-op log must cite the terminal row and use state-appropriate
+    # evidence wording. INJECTED / TASK_DELIVERED = positive delivery
+    # evidence; FAILED = dead-letter abandonment (NOT delivery, per
+    # models.py:113-118 sentinel semantics). Never the retired zero-row
+    # "racing delivery won" claim.
     noop_records = [
         r for r in caplog.records if "ensure_deferred no-op" in r.message
     ]
     assert noop_records, "terminal no-op must be logged"
+    evidence_word = (
+        "dead-letter" if terminal_state == ReportInjectionState.FAILED.value
+        else "positive"
+    )
     assert any(
-        f"state={terminal_state}" in r.message and "positive" in r.message
+        f"state={terminal_state}" in r.message and evidence_word in r.message
         for r in noop_records
     )
 
