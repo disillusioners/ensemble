@@ -567,16 +567,6 @@ export function buildQueueTree(
       return aid.localeCompare(bid);
     });
 
-  // 2) Index missions by id for O(1) attachment lookups.
-  const liveById = new Map<string, MissionSummary>();
-  for (const m of liveMissionsList) {
-    if (m.mission_id) liveById.set(m.mission_id, m);
-  }
-  const terminalById = new Map<string, MissionSummary>();
-  for (const m of terminalMissionsList) {
-    if (m.mission_id) terminalById.set(m.mission_id, m);
-  }
-
   // 3) Attach jobs to their live mission OR queue as unattached.
   const liveNodes = new Map<string, MissionNode>();
   for (const m of liveMissionsList) {

@@ -2,7 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable, tap, catchError, of, map } from 'rxjs';
 import { Job, JobCreate, JobFilters, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
-import { MissionListResponse, missionCountFromListResponse } from '../models/mission.model';
+import { MissionListResponse } from '../models/mission.model';
 import { DeferBlockedStatus } from '../models/defer-blocked.model';
 
 interface JobListResponse {
@@ -145,32 +145,6 @@ export class JobService {
   }
 
   /**
-   * Live-mission count from the authoritative missions projection —
-   * ``GET /api/missions?liveness=processing,pending,paused``.
-   *
-   * This is the badge's N (missions-aware display + panel live count);
-   * it REPLACES deriving live missions from recent job receipts, which
-   * went stale whenever the settled-token never reached the badge
-   * intake (badge read bare 0/0 while a leader mission was visibly
-   * working — /api/missions is correct and authoritative).
-   *
-   * ``limit=1`` keeps the payload bounded (one row); the count comes
-   * from the response's filter-aware ``total``. Returns ``null`` when
-   * the count leg degraded (per the §8.4 honesty contract, "count
-   * unavailable" is NOT zero) — callers retain their last known count.
-   * Errors propagate so the caller's per-participant error handler
-   * decides (the badge degrades to its previous value).
-   */
-  listLiveMissionCount(): Observable<number | null> {
-    const params = new HttpParams()
-      .set('liveness', 'processing,pending,paused')
-      .set('limit', '1');
-    return this.http
-      .get<MissionListResponse>('/api/missions', { params })
-      .pipe(map((response) => missionCountFromListResponse(response)));
-  }
-
-  /**
    * Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
    * — fetch the missions projection used by both the badge's segmented
    * pill and the panel's tree.
@@ -178,10 +152,9 @@ export class JobService {
    * ``GET /api/missions`` with optional ``liveness`` filter and
    * ``limit`` (BE clamps to ``[1, MAX_PAGE_LIMIT]``, default
    * ``DEFAULT_PAGE_LIMIT`` = 10; the badge calls with limit=20 to
-   * show a richer breakdown). The badge still uses
-   * ``listLiveMissionCount`` for the count leg, but the segmented
-   * pill's tooltip needs the per-liveness breakdown so it must pull
-   * the full page here.
+   * show a richer breakdown — the response's filter-aware ``total``
+   * is the badge's count leg, and the segmented pill's tooltip needs
+   * the per-liveness breakdown, so the full page is pulled here.
    *
    * Returns the full ``MissionSummary[]`` + ``total`` from the
    * envelope. ``null`` total ⇒ count leg degraded (NOT 0); the badge

@@ -56,18 +56,6 @@
     color: #475569;
     user-select: none;
   }
-
-  /* Legacy header count badge — kept for the spec mirror's
-     expectations; superseded by ``.header-stats`` above. */
-  .header-count {
-    font-size: 11px;
-    font-weight: 500;
-    color: #3b82f6;
-    background: rgba(59, 130, 246, 0.12);
-    border-radius: 4px;
-    padding: 2px 8px;
-    letter-spacing: 0.3px;
-  }
 }
 
 .panel-list {

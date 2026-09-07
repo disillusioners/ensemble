@@ -284,7 +284,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    */
   readonly pillState = computed<'segmented' | 'missions-only' | 'idle'>(() => {
     if (this.totalNonTerminal() > 0) {
-      return this.hasLiveMissions() ? 'segmented' : 'segmented';
+      return 'segmented';
     }
     if (this.hasLiveMissions()) return 'missions-only';
     return 'idle';
