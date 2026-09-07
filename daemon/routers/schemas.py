@@ -1364,6 +1364,26 @@ class MissionResponse(BaseModel):
         default=None,
         description="ISO-8601 pass-through of Instance.last_activity_at; null when unset or degraded",
     )
+    # Mission tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+    # — display-source fields. HONEST NULLS ONLY: ``null`` means the
+    # instance_metadata key is absent (or the lookup degraded); the
+    # server NEVER fabricates a fallback label — the FE owns fallback
+    # rendering.
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Mission display title (instance_metadata['title']); null "
+            "when unset — no server-side fallback label is fabricated"
+        ),
+    )
+    initiative_preview: str | None = Field(
+        default=None,
+        description=(
+            "First 140 chars of instance_metadata['initiative_message'], "
+            "whitespace-collapsed; null when unset — no server-side "
+            "fallback label is fabricated"
+        ),
+    )
 
 
 class MissionListResponse(BaseModel):

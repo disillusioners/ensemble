@@ -158,6 +158,11 @@ def _mission_record_to_response(record: MissionRecord) -> MissionResponse:
         linked_jobs=list(record.linked_jobs),
         started_at=record.started_at,
         last_activity_at=record.last_activity_at,
+        # Mission tree panel fields — honest nulls (no fallback
+        # labels fabricated server-side; the FE owns fallback
+        # rendering).
+        title=record.title,
+        initiative_preview=record.initiative_preview,
     )
 
 

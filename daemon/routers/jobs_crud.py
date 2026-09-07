@@ -651,6 +651,25 @@ async def list_jobs(
             "through the M3 window."
         ),
     ),
+    mission_id: str | None = Query(
+        default=None,
+        description=(
+            "Mission tree panel (2026-09-07): optional filter to a "
+            "single mission's jobs. Mission identity rule: "
+            "mission_id == instance_id, so this narrows "
+            "job_queue_items by JobItem.instance_id. Composes with "
+            "the other filters (status, project_id, queue_id, "
+            "job_types). Read-only."
+        ),
+    ),
+    instance_id: str | None = Query(
+        default=None,
+        description=(
+            "Deprecated alias for mission_id (the two names mean the "
+            "same filter — mission_id is primary). Ignored when "
+            "mission_id is also supplied."
+        ),
+    ),
     service: JobQueueService = Depends(get_job_queue_service),
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobListResponse:
@@ -664,6 +683,9 @@ async def list_jobs(
         - include_deleted: Include soft-deleted jobs (default: False)
         - job_types: M2 — comma-separated JobItem.job_type filter
           (task, message). Default: BOTH kinds.
+        - mission_id: Mission tree panel — filter to one mission's
+          jobs (mission_id == instance_id). ``instance_id`` is a
+          deprecated alias for the same filter.
 
     Returns:
         200 with list of jobs and total count
@@ -737,6 +759,13 @@ async def list_jobs(
             # below, so this is defense-in-depth at the router layer.
             job_types_list = []
 
+    # Mission tree panel (2026-09-07) — resolve the mission filter.
+    # ``mission_id`` is primary; ``instance_id`` is a deprecated
+    # alias for the same filter (ignored when both are supplied).
+    # Mission identity rule: mission_id == instance_id — the filter
+    # narrows job_queue_items by JobItem.instance_id in SQL.
+    effective_instance_id = mission_id or instance_id
+
     # List jobs
     jobs = await service.list_jobs(
         statuses=statuses,
@@ -745,6 +774,7 @@ async def list_jobs(
         queue_id=queue_id,
         include_deleted=include_deleted,
         job_types=job_types_list,
+        instance_id=effective_instance_id,
     )
 
     # Phase 1 (Job as Queue Proxy): batch-resolve every JobItem

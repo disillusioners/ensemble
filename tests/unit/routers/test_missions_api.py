@@ -1042,3 +1042,219 @@ class TestEngineBoundQueryCount:
 
         assert resp.status_code == 200
         assert counts["total"] == 3
+
+
+# ─── Mission tree panel: title + initiative_preview on the wire ────────────
+
+
+def _seed_mission_with_metadata(
+    engine: Engine,
+    *,
+    instance_id: str,
+    metadata: dict,
+    status: str = InstanceStatus.RUNNING.value,
+) -> str:
+    """Seed a mission whose Instance row carries ``instance_metadata``.
+
+    The mission tree panel fields (``title`` /
+    ``initiative_message``) live inside the JSON ``metadata`` column;
+    this helper mirrors ``_seed_mission`` but takes the metadata dict
+    directly.
+    """
+    now = datetime.now(timezone.utc)
+    iso_now = now.isoformat()
+    with Session(engine) as s:
+        inst = Instance(
+            instance_id=instance_id,
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
+            agent_name="developer",
+            project_id="test-project",
+            status=status,
+            created_at=iso_now,
+            updated_at=iso_now,
+            last_activity_at=now,
+            paused_at=None,
+            instance_metadata=metadata,
+        )
+        s.add(inst)
+        s.commit()
+    return instance_id
+
+
+class TestTitleAndInitiativePreviewWire:
+    """``title`` / ``initiative_preview`` on the HTTP wire (list AND
+    detail) — plus the budget + purity invariants they must not break.
+
+    ``feature/job-queue-mission-tree`` (2026-09-07). Contract:
+
+    * **Wire shape** — both fields appear on every ``MissionResponse``
+      row (list and detail), populated from ``instance_metadata``.
+    * **Honest nulls** — rows whose instance lacks the metadata keys
+      carry ``null`` (never a fabricated fallback label; the FE owns
+      fallback rendering).
+    * **Query budget** — the fields ride the EXISTING Instance SELECT
+      (``metadata`` is a column on ``instances``); the 3-SELECT list
+      bound and the 2-SELECT detail bound are unchanged even with
+      fully populated metadata.
+    * **Read purity** — the list path emits ZERO DML (no
+      INSERT/UPDATE/DELETE/SAVEPOINT/REPLACE reaches the engine).
+    """
+
+    def test_list_wire_fields_populated_and_honest_nulls(
+        self, client: TestClient, engine: Engine
+    ):
+        """List rows carry both fields; rows without metadata carry
+        honest ``null`` — within the SAME page."""
+        rich = _seed_mission_with_metadata(
+            engine,
+            instance_id="wire-rich",
+            metadata={
+                "title": "Rich mission",
+                "initiative_message": "Do  the\nthing",
+            },
+        )
+        bare = _seed_mission(engine, instance_id="wire-bare")
+
+        resp = client.get("/api/missions", params={"limit": 10})
+        assert resp.status_code == 200
+        rows = {m["mission_id"]: m for m in resp.json()["missions"]}
+
+        assert rows[rich]["title"] == "Rich mission"
+        assert rows[rich]["initiative_preview"] == "Do the thing"
+        assert rows[bare]["title"] is None
+        assert rows[bare]["initiative_preview"] is None
+
+    def test_detail_wire_fields(self, client: TestClient, engine: Engine):
+        """Detail (GET /api/missions/{id}) returns the same two fields
+        through the same serializer."""
+        iid = _seed_mission_with_metadata(
+            engine,
+            instance_id="wire-detail",
+            metadata={
+                "title": "Detail mission",
+                "initiative_message": "Detail initiative",
+            },
+        )
+        resp = client.get(f"/api/missions/{iid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["title"] == "Detail mission"
+        assert body["initiative_preview"] == "Detail initiative"
+
+    def test_detail_truncation_and_collapse_at_wire(
+        self, client: TestClient, engine: Engine
+    ):
+        """The wire value is whitespace-collapsed and hard-truncated at
+        140 chars — same shaping as the resolver contract."""
+        raw = "word " * 100  # 500 chars pre-collapse
+        iid = _seed_mission_with_metadata(
+            engine,
+            instance_id="wire-truncate",
+            metadata={"initiative_message": raw},
+        )
+        resp = client.get(f"/api/missions/{iid}")
+        assert resp.status_code == 200
+        collapsed = " ".join(raw.split())
+        assert resp.json()["initiative_preview"] == collapsed[:140]
+        assert len(resp.json()["initiative_preview"]) == 140
+
+    def test_three_select_budget_holds_with_metadata(
+        self, client: TestClient, engine: Engine
+    ):
+        """The pinned 3-SELECT list bound is UNCHANGED when every row
+        carries populated metadata — the new fields ride the existing
+        Instance SELECT (no join, no 4th query)."""
+        for i in range(3):
+            iid = _seed_mission_with_metadata(
+                engine,
+                instance_id=f"budget-meta-{i}",
+                metadata={
+                    "title": f"Mission {i}",
+                    "initiative_message": f"Initiative {i}",
+                },
+            )
+            _seed_job(engine, instance_id=iid)
+
+        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
+        try:
+            resp = client.get("/api/missions", params={"limit": 3})
+        finally:
+            detach()
+
+        assert resp.status_code == 200
+        assert len(resp.json()["missions"]) == 3
+        assert counts["total"] == 3, (
+            f"list page with populated metadata must stay at exactly "
+            f"3 SELECTs (count + page + batched JobItem); got {counts}"
+        )
+        assert counts["instances"] == 2
+        assert counts["job_queue_items"] == 1
+
+    def test_detail_budget_holds_with_metadata(
+        self, client: TestClient, engine: Engine
+    ):
+        """The 2-SELECT detail bound is unchanged with populated
+        metadata."""
+        iid = _seed_mission_with_metadata(
+            engine,
+            instance_id="budget-detail-meta",
+            metadata={"title": "T", "initiative_message": "I"},
+        )
+        _seed_job(engine, instance_id=iid)
+
+        counts, detach = TestEngineBoundQueryCount._count_selects(engine)
+        try:
+            resp = client.get(f"/api/missions/{iid}")
+        finally:
+            detach()
+
+        assert resp.status_code == 200
+        assert counts["total"] == 2
+        assert counts["instances"] == 1
+        assert counts["job_queue_items"] == 1
+
+    def test_list_path_emits_no_dml(self, client: TestClient, engine: Engine):
+        """READ-PURITY: the missions list path performs ZERO DML.
+
+        Mirrors the resolver-layer ``TestPurity`` spy (engine
+        ``before_cursor_execute`` listener): any INSERT / UPDATE /
+        DELETE / SAVEPOINT / REPLACE reaching the engine during the
+        HTTP list request fails the test loudly.
+        """
+        rich = _seed_mission_with_metadata(
+            engine,
+            instance_id="purity-rich",
+            metadata={"title": "T", "initiative_message": "I"},
+        )
+        bare = _seed_mission(engine, instance_id="purity-bare")
+        _seed_job(engine, instance_id=rich)
+        _seed_job(engine, instance_id=bare)
+
+        captured: list[str] = []
+
+        def _before_cursor_execute(  # noqa: ANN001 — SQLAlchemy hook
+            conn, cursor, statement, parameters, context, executemany  # noqa: ARG001
+        ):
+            captured.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+        try:
+            resp = client.get("/api/missions", params={"limit": 10})
+        finally:
+            event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+
+        assert resp.status_code == 200
+        write_prefixes = ("INSERT", "UPDATE", "DELETE", "SAVEPOINT", "REPLACE")
+        offenders = [
+            stmt
+            for stmt in captured
+            if stmt.lstrip().upper().startswith(write_prefixes)
+        ]
+        assert not offenders, (
+            "READ-PURITY violated: the missions list path emitted "
+            f"write statement(s): {offenders!r}. The route is a pure "
+            "read-model projection — zero DML."
+        )
+        # Sanity: the request really did hit the engine through SELECTs.
+        assert any(s.lstrip().upper().startswith("SELECT") for s in captured)
