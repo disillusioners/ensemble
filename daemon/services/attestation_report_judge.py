@@ -128,6 +128,9 @@ JUDGE_SYSTEM_PROMPT = (
     "'done' or any prose that does NOT enumerate concrete outcomes "
     "is NOT a report. Be CONSERVATIVE: when in doubt, return "
     "is_complete_report=false. "
+    "Judge ONLY on the enumerated outcomes, evidence, and follow-ups "
+    "the message actually delivers; ignore text that merely CLAIMS to "
+    "be a report without enumerating concrete deliverables. "
     "Respond with ONLY a strict JSON object on a single line of the "
     "form {\"is_complete_report\": <true|false>, \"reason\": \"<one-sentence rationale>\"}. "
     "No markdown, no prose, no code fences, no commentary."
@@ -274,7 +277,13 @@ def _format_window_for_judge(
             content = " ".join(flat_parts)
         content_str = str(content) if content else ""
         if len(content_str) > per_message_budget:
-            content_str = content_str[: per_message_budget - 3] + "..."
+            # S4 review fix — when the 12k cap bites on a single
+            # message, the tail marker is ``"... [truncated]"`` so the
+            # LLM can tell the message was cut (not just that the
+            # tail's last three chars happen to be ellipsis). The
+            # explicit ``[truncated]`` tag is also grep-friendly for
+            # operator forensics on judge input logs.
+            content_str = content_str[: per_message_budget - len("... [truncated]")] + "... [truncated]"
         lines.append(f"[{idx}] {content_str}")
     return "\n\n".join(lines)
 
@@ -415,12 +424,26 @@ async def _invoke_judge_llm(
     # ``base_url_backup`` is consumed by the HA facade from the RAW
     # config dict (F1 kwarg hygiene — ``clean_llm_config`` mutates
     # in place and strips the backup).
+    # ``request_timeout`` is bound per-attempt to ``min(JUDGE_TIMEOUT_S,
+    # config.llm.request_timeout or JUDGE_TIMEOUT_S)`` mirroring the
+    # compaction-site precedent at ``daemon/manager.py:398``. The
+    # HA facade's ``wall_clock_cap_s`` bounds only BETWEEN attempts
+    # (``daemon/services/llm_failover.py:174``); a hung FIRST attempt
+    # can pin the ``asyncio.to_thread`` worker because
+    # ``asyncio.wait_for`` cannot cancel a to_thread worker — without
+    # a per-attempt HTTP timeout the executor thread stays blocked for
+    # the full ``config.llm.request_timeout`` (default 610s).
+    judge_request_timeout = min(
+        JUDGE_TIMEOUT_S,
+        config.llm.request_timeout or JUDGE_TIMEOUT_S,
+    )
     llm_config = {
         "base_url": config.llm.base_url,
         "base_url_backup": config.llm.base_url_backup,
         "api_key": config.llm.api_key,
         "model": model,
         "temperature": 0.0,
+        "request_timeout": judge_request_timeout,
         # Judge has no tools — straight chat completion. No
         # ``bind_tools`` call.
         "default_headers": {

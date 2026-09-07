@@ -144,12 +144,23 @@ def test_format_window_for_judge_joins_with_separators():
 
 
 def test_format_window_for_judge_truncates_per_message():
-    """Oversized content is truncated to fit the per-message budget."""
+    """Oversized content is truncated to fit the per-message budget.
+
+    S4 review fix — the per-message tail marker is
+    ``"... [truncated]"`` (not the prior plain ``"..."``). The
+    explicit ``[truncated]`` tag lets the LLM distinguish a
+    truncation from an ellipsis that happened to land at the
+    message end; operators can also grep the judge-input log for
+    the marker when investigating a misfire.
+    """
     long_content = "x" * 5000
     msgs = [AIMessage(content=long_content)]
     formatted = _format_window_for_judge(msgs, per_message_budget=120)
-    assert formatted.endswith("...")
-    # Truncated marker + at most budget-3 chars + "..."
+    assert formatted.endswith("... [truncated]")
+    # Truncated marker + at most budget-3 chars + "... [truncated]"
+    # (16-char suffix) = total length at most budget + len("[1] ") +
+    # len("\n\n")... capped under per_message_budget + a constant
+    # for the prefix + the marker.
     assert len(formatted) < 130
 
 
@@ -492,3 +503,53 @@ def test_constants_pinned():
     # conservative parsing tolerates a single layer (defense-in-depth)
     # but the prompt makes it explicit.
     assert "No markdown" in JUDGE_SYSTEM_PROMPT or "no markdown" in JUDGE_SYSTEM_PROMPT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JudgeResult — frozen dataclass shape contract (W4 review punch-list)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_judge_result_is_frozen_and_error_class_defaults_none():
+    """Direct ``JudgeResult(...)`` construction pins:
+
+    * ``frozen=True`` — mutation raises ``FrozenInstanceError``;
+    * ``error_class=None`` is the default (success / parse-failure
+      paths set it ``None`` explicitly; only the exception paths
+      stamp the exception class name);
+    * ``hashable`` — frozen dataclasses are hashable by default,
+      required so callers can put ``JudgeResult`` instances into
+      ``set`` / use as ``dict`` keys without surprise ``TypeError``s.
+    """
+    from dataclasses import FrozenInstanceError, fields
+
+    # Default error_class=None — direct construction with the six
+    # positional fields suffices.
+    result = JudgeResult(
+        is_complete_report=False,
+        verdict="no",
+        reason="short status",
+        model="fake-quick",
+        latency_ms=42,
+    )
+    assert result.error_class is None
+    # Field set is exactly the six canonical fields — prevents a
+    # silent rename from breaking log-line / kwargs contracts.
+    field_names = [f.name for f in fields(JudgeResult)]
+    assert field_names == [
+        "is_complete_report",
+        "verdict",
+        "reason",
+        "model",
+        "latency_ms",
+        "error_class",
+    ]
+    # frozen=True — mutation raises FrozenInstanceError.
+    import pytest
+
+    with pytest.raises(FrozenInstanceError):
+        result.verdict = "yes"  # type: ignore[misc]
+    # hashable — the frozen dataclass generates ``__hash__``.
+    assert hash(result) == hash(result)
+    # Set membership proves hashability without extra ceremony.
+    assert result in {result}

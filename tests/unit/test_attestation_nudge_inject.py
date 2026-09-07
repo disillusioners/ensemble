@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from unittest.mock import MagicMock
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.graph import (
@@ -16,6 +18,33 @@ from daemon.graph import (
 )
 from daemon.services.attestation_gate import GateSettings, build_gate_config
 from daemon.services.attestation_ledger import safe_increment, safe_reset
+# Review punch-list W2: hermetic kill-switch isolation (NIT-7 mirror). The
+# deny-path tests in this file used to depend on deterministic MagicMock
+# construction failure for their deny paths. The pattern below clears the
+# LLM-judge kill-switch + both cached resolvers per-test so an outer
+# ``.env`` / CI env mutation of
+# ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`` cannot leak in and
+# silently disable the judge for the assertion that depends on the
+# deny+nudge fall-through running unchanged. Mirrors the autouse fixture
+# in ``tests/unit/test_attestation_judge_wiring.py``.
+from daemon.services.attestation_judge_resolver import (
+    reset_llm_judge_resolver_for_tests,
+)
+from daemon.services.attestation_resolver import (
+    reset_attestation_resolver_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_judge_kill_switch(monkeypatch):
+    monkeypatch.delenv(
+        "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", raising=False
+    )
+    reset_attestation_resolver_for_tests()
+    reset_llm_judge_resolver_for_tests()
+    yield
+    reset_attestation_resolver_for_tests()
+    reset_llm_judge_resolver_for_tests()
 
 
 def test_deny_injects_checkpoint_plain_dict_and_routes_to_agent():

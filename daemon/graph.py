@@ -3256,9 +3256,17 @@ def create_attestation_gate_node(
                 judge_on = False
             if judge_on:
                 judge_result = None
+                # S2 review fix — surface the resolved judge model on
+                # the judge-error log row so operators can correlate
+                # the wrapper-layer fault to the model that would
+                # have served the call. Default to ``"<unknown>"`` on
+                # the config-load-failure path (the resolver itself
+                # requires a loaded ``Config``).
+                judge_resolved_model = "<unknown>"
                 try:
                     from .services.attestation_report_judge import (
                         judge_completion_report_async,
+                        resolve_judge_model,
                     )
                     # The manager facade exposes the live Config; fall
                     # back to a direct ``load_config`` when the manager
@@ -3273,6 +3281,15 @@ def create_attestation_gate_node(
                     else:
                         from ..config import load_config
                         judge_config = load_config()
+                    # Best-effort — only stamp the resolved model when
+                    # ``resolve_judge_model`` actually succeeds; on a
+                    # malformed config the catch below handles it.
+                    try:
+                        judge_resolved_model = resolve_judge_model(
+                            judge_config
+                        )
+                    except Exception:  # noqa: BLE001 — keep `<unknown>`
+                        pass
                     # The gate node is async — call the async entry
                     # point directly. The sync wrapper
                     # (``judge_completion_report_sync``) calls
@@ -3292,28 +3309,33 @@ def create_attestation_gate_node(
                     logger.error(
                         "event=leader_completion_gate_judge_error "
                         "error_class=%s instance_id=%s "
+                        "llm_judge_model=%s "
                         "gate_location=%s "
                         "decision=fail_safe_deny",
                         type(judge_exc).__name__,
                         effective_instance_id,
+                        judge_resolved_model,
                         gate_config.get("gate_location", "graph_end_candidate"),
                     )
                     judge_result = None
                 if judge_result is not None:
                     # One-shot structured log line — operators grep for
                     # ``event=leader_completion_gate_judge``. Carries
-                    # the four diagnostic extras (verdict / model /
-                    # latency_ms / reason) outside the canonical 17-
+                    # the four diagnostic extras (model / latency_ms /
+                    # reason / error_class) outside the canonical 17-
                     # field tuple — same pattern as the supplementary
-                    # conditional-attestation fields.
+                    # conditional-attestation fields. NOTE: the verdict
+                    # value is logged once via ``verdict=%s``; the
+                    # earlier ``llm_judge_verdict=%s`` duplicate was
+                    # dropped (W3 review fix — both fields carried
+                    # ``judge_result.verdict`` and confused log grep).
                     logger.info(
                         "event=leader_completion_gate_judge "
                         "instance_id=%s verdict=%s "
-                        "llm_judge_verdict=%s llm_judge_model=%s "
+                        "llm_judge_model=%s "
                         "llm_judge_latency_ms=%s "
                         "llm_judge_reason=%s llm_judge_error_class=%s",
                         effective_instance_id,
-                        judge_result.verdict,
                         judge_result.verdict,
                         judge_result.model,
                         judge_result.latency_ms,

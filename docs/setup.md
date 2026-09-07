@@ -586,10 +586,10 @@ The leader completion gate sits on the would-be-deny path BEFORE the in-graph nu
 
 The judge is a pure inline chat completion — no instance spawn, no message persistence. Model resolution honors `OPENAI_MODEL_KEYWORDS` (= `config.llm.model_keywords`) with fallback to `OPENAI_MODEL` (= `config.llm.model`). This mirrors the existing `daemon/services/keyword_extraction.py` model-resolution semantics — set `OPENAI_MODEL_KEYWORDS=quick` (or similar) to pin the judge to a fast model; leave unset to inherit the main `OPENAI_MODEL`.
 
-Kill-switch via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C restart-read resolver; default ON; `=0` / `=false` / `=no` / `=off` disables). When OFF, the gate's pre-feature byte-identical behavior is preserved (the judge is never invoked, the deny+nudge path runs as before). The boot log surfaces the resolved state plus the resolved quick model:
+Kill-switch via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C restart-read resolver; default ON; `=0` / `=false` / `=no` / `=off` disables). When OFF, the judge is never invoked and the gate's `deny+nudge` fall-through runs as before — but OFF is NOT pre-feature byte-identical: the `attest_completion` mermaid block at `daemon/graph.py:2862-2864` (the `ReportJudge` decision node + its two edges) is rendered unconditionally in the leader prompt, so the prompt text itself is a Phase 6 fastfollow change. OFF toggles ATTESTATION BEHAVIOR only (judge call suppressed → existing deny+nudge path); the prompt-text change is permanent. The boot log surfaces the resolved state plus the resolved quick model:
 
 ```
-Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>). Restart required to flip.
+Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED).
 ```
 
 When the kill-switch is OFF, the line carries `llm_judge_model=<disabled>` so operators see at a glance that no judge call will fire. Bounds: `JUDGE_TIMEOUT_S=10s` wall-clock cap; `JUDGE_MAX_INPUT_CHARS=12,000` chars of user-role payload; `JUDGE_MAX_OUTPUT_CHARS=400` chars of LLM response (a defensive ceiling against a runaway LLM that returns prose instead of JSON).
@@ -600,7 +600,6 @@ Observability fields (logged on every judge call):
 |-------|--------|---------|
 | `event=leader_completion_gate_judge` | gate node | One-shot structured log line on the would-be-deny path; emitted after the judge call |
 | `verdict` | JudgeResult | `yes` / `no` / `error` / `timeout` / `unparsable` |
-| `llm_judge_verdict` | JudgeResult | Duplicate of `verdict` for grep convenience |
 | `llm_judge_model` | JudgeResult | The resolved quick model (or main model fallback) |
 | `llm_judge_latency_ms` | JudgeResult | Wall-clock latency of the judge call |
 | `llm_judge_reason` | JudgeResult | The LLM's one-sentence rationale (empty on error paths) |

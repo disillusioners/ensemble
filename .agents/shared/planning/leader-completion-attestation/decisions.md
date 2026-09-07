@@ -951,8 +951,9 @@ The canonical byte-pin test `test_attestation_nudge_text_canonical_byte_pin` (an
 - `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_enabled` + `llm_judge_model` fields; `reset_attestation_resolver_for_tests` also clears the judge cache.
 - `daemon/services/attestation_gate.py` — `build_gate_config(...)` grows `llm_judge_enabled: bool = True` kwarg; `GATE_CONFIG_KEYS` extended.
 - `daemon/graph.py` — `create_attestation_gate_node` runs the judge BEFORE the ledger write on the would-be-deny path (judge-yes → return END; judge-no / error / timeout / unparsable → fall through to existing deny+nudge). `ATTESTATION_NUDGE_TEXT` mermaid gains the `ReportJudge` decision node.
-- `tests/unit/test_attestation_report_judge.py` (new) — 33 tests: pure-function surface (`resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`) + async judge entry points (`_invoke_judge_llm` patched).
-- `tests/unit/test_attestation_judge_wiring.py` (new) — 16 tests: gate-level scenarios (a)–(i) per the spec.
+- `tests/unit/test_attestation_report_judge.py` (new) — 34 tests: pure-function surface (`resolve_judge_model`, `_slice_judge_window`, `_format_window_for_judge`, `_parse_judge_response`) + async judge entry points (`_invoke_judge_llm` patched) + the W4 `JudgeResult` frozen/dataclass construction pin.
+- `tests/unit/test_attestation_judge_wiring.py` (new) — 21 tests: gate-level scenarios (a)–(i) per the spec + the W3 `llm_judge_verdict` duplicate-field drop (test assertion was tightened) + the W5/S6 monkeypatch-to-real-env conversion + the S5 judge-yes-at-bound-1 counter-no-escalation regression pin.
+- `tests/unit/test_attestation_judge_resolver.py` (new) — parametrize the W5 `_parse_llm_judge_enabled` truth table (falsy / truthy / unset / cached-global / reset helper); 17 tests.
 - `tests/unit/test_attestation_nudge_inject.py` — `EXPECTED_NUDGE_TEXT_CANONICAL` updated for the new mermaid; the byte-pin test continues to enforce the full literal.
 - `docs/setup.md` — new "Inline-LLM completion-report judge" section appended (judge behavior, env flag, model resolution, log fields).
 

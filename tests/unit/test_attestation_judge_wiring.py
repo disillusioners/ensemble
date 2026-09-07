@@ -195,6 +195,70 @@ def test_judge_yes_allows_without_nudge_no_counter_increment(monkeypatch, caplog
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# S5 review punch-list — judge-yes at bound-1 keeps the counter, no
+# escalation. The existing (a) test exercises the deny path with
+# ``denied_count=0``; this regression pins the counter-no-escalation
+# invariant at the danger boundary — when the counter is already
+# ``bound-1 = 2`` and a judge-yes verdict lands, the counter MUST
+# stay at 2 (no increment; no terminal_after_bound escalation; the
+# judge-yes override returns END routing unchanged).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_judge_yes_at_bound_minus_one_does_not_escalate(
+    monkeypatch, caplog
+):
+    """Judge-yes at ``denied_count = bound - 1`` → counter stays, no escalation.
+
+    With ``bound=3`` and the live ``denied_count=2`` (``bound-1``),
+    the gate's deny predicate is still ``DENIED`` (since
+    ``denied_count + 1 <= bound`` ⇒ the bound-exceeded branch does
+    not fire); the judge-yes override MUST return END routing
+    without invoking the ledger, keeping the counter at 2 and
+    NOT escalating to ``terminal_after_bound``. A regression that
+    incremented the counter on a judge-yes override would push the
+    counter to 3 and the NEXT genuine deny would escalate — this
+    test pins the no-increment invariant at the danger boundary.
+    """
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_yes)
+
+    node, manager, ledger = _make_node(
+        instance_id="judge-yes-bound-it",
+        denied_count_getter=lambda: 2,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"):
+        result = asyncio.run(
+            node(
+                _delegated_mission_without_attest(),
+                config={"configurable": {"thread_id": "judge-yes-bound-it"}},
+            )
+        )
+
+    # ALLOWED — no nudge, no counter change, no escalation.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    # Judge-yes override does NOT increment (R1 — attested-allow
+    # only). The counter stays at 2.
+    ledger.increment.assert_not_called()
+    ledger.reset.assert_not_called()
+    # No terminal_after_bound escalation — the judge-yes path
+    # bypasses the bound-exceeded ledger write.
+    ledger.set_escalated_and_reset.assert_not_called()
+    # No durable delivery or revive seam.
+    manager.enqueue_message.assert_not_called()
+    manager.revive.assert_not_called()
+
+    # Log fields present — the judge-yes override fired.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_judge" in log_text
+    assert "verdict=yes" in log_text
+    assert "[AttestationGate] judge-yes override" in log_text
+    # The bound-exceeded log line MUST NOT fire — pinning the
+    # counter-no-escalation invariant.
+    assert "event=leader_completion_gate_terminal_after_bound" not in log_text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # (b) judge-no → deny+nudge, counter increments
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -343,8 +407,65 @@ def test_judge_not_called_when_gate_config_flag_off(monkeypatch, caplog):
     assert "event=leader_completion_gate_judge" not in log_text
 
 
+def test_judge_not_called_when_env_kill_switch_off_real_resolver(
+    monkeypatch, caplog
+):
+    """S6 review fix — real env var + resolver reset (NOT a
+    monkeypatched parser).
+
+    ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0`` →
+    ``is_llm_judge_enabled()`` resolves to ``False`` after a cache
+    reset → judge skipped. The earlier version monkeypatched
+    ``_parse_llm_judge_enabled``; this variant drives the REAL
+    resolver so the env-key wiring, the strip/lowercase pipeline,
+    and the cached-global reset are all exercised end-to-end.
+
+    The legacy monkeypatch variant is preserved below as
+    ``test_judge_not_called_when_env_kill_switch_off`` to keep both
+    flavors covered (the S6 punch-list requires at least one
+    monkeypatch variant remain).
+    """
+    calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        calls.append(True)
+        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+    # REAL env var + REAL resolver reset — drives the real kill-
+    # switch pipeline (strip + lower + falsy-set check + cache wipe).
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "0")
+    judge_resolver_mod.reset_llm_judge_resolver_for_tests()
+    # Sanity: the real resolver returns False under the mutated env.
+    assert judge_resolver_mod.is_llm_judge_enabled() is False
+
+    node, manager, ledger = _make_node(instance_id="judge-env-off-real-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"):
+        result = asyncio.run(
+            node(
+                _delegated_mission_without_attest(),
+                config={"configurable": {"thread_id": "judge-env-off-real-it"}},
+            )
+        )
+
+    assert calls == []
+    assert "messages" in result
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_judge" not in log_text
+
+
 def test_judge_not_called_when_env_kill_switch_off(monkeypatch, caplog):
-    """``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0`` → judge skipped."""
+    """``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0`` → judge skipped.
+
+    MONKEYPATCH variant — preserved for parity with the real-
+    resolver variant above (S6 punch-list requires at least one
+    monkeypatch case remain alongside the real-env conversion). This
+    pins the env-flag-parser seam independently: any future refactor
+    of the parser is caught here without requiring a real
+    ``setenv`` + cache-reset dance.
+    """
     calls = []
 
     async def must_not_be_called(config, user_payload, *, timeout_s):
@@ -696,7 +817,11 @@ def test_log_fields_present_on_judge_yes(monkeypatch, caplog):
     msg = judge_log[0]
     assert "event=leader_completion_gate_judge" in msg
     assert "verdict=yes" in msg
-    assert "llm_judge_verdict=yes" in msg
+    # W3 review fix — the duplicate ``llm_judge_verdict`` field was
+    # dropped (it carried the same value as ``verdict`` and confused
+    # log grep). The model name still lives on the dedicated
+    # ``llm_judge_model=`` field.
+    assert "llm_judge_verdict" not in msg
     assert "llm_judge_model=fake-quick" in msg
     assert "llm_judge_latency_ms=" in msg
     assert "llm_judge_reason=detailed outcomes delivered" in msg
