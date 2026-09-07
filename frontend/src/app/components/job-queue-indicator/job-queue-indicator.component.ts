@@ -532,9 +532,10 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    *   count signal either;
    * - ``deferBlocked === null`` hides the warning affordance;
    * - ``lastFetchAt`` only advances when AT LEAST ONE leg returned
-   *   a non-null payload — a tick where every leg failed leaves
-   *   the timestamp frozen so "refreshed Ns ago" doesn't lie about
-   *   the staleness.
+   *   a usable payload (a degraded missions envelope counts as NOT
+   *   returned) — a tick where every leg failed (or degraded)
+   *   leaves the timestamp frozen so "refreshed Ns ago" doesn't lie
+   *   about the staleness.
    */
   private applyFetchResults(
     active: Job[] | null,
@@ -557,16 +558,32 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       const count = missionCountFromListResponse(missions);
       this.liveMissionCountRaw.set(count);
     }
+    // A 200-OK ``degraded:true`` missions envelope never routes
+    // through the per-leg ``catchError`` (HTTP succeeded), so flag it
+    // here — same channel as the catchError paths — to flip the
+    // degraded modifier + aria state honestly.
+    const missionsDegraded = missions !== null && missions.degraded;
+    if (missionsDegraded) {
+      this.recordLegError('missions', 'degraded envelope');
+    }
     // Clear the per-leg error flag only when ALL legs returned a
-    // non-null payload — a partial-failure tick keeps the flag set
-    // so the UI continues to surface the degradation.
-    const anyNull = active === null || recent === null || missions === null || deferBlocked === null;
+    // non-null payload (missions: non-degraded) — a partial-failure
+    // or degraded tick keeps the flag set so the UI continues to
+    // surface the degradation.
+    const anyNull =
+      active === null || recent === null || missions === null || deferBlocked === null || missionsDegraded;
     if (!anyNull) {
       this.lastIntakeError.set(null);
     }
     // Stamp "last successful poll" only when at least one leg
-    // returned data; an all-null tick leaves the timestamp frozen.
-    if (active !== null || recent !== null || missions !== null || deferBlocked !== null) {
+    // returned data; an all-null (or all-degraded) tick leaves the
+    // timestamp frozen.
+    if (
+      active !== null ||
+      recent !== null ||
+      (missions !== null && !missions.degraded) ||
+      deferBlocked !== null
+    ) {
       this.lastFetchAt.set(Date.now());
     }
     this.deferBlockedPayload.set(deferBlocked);

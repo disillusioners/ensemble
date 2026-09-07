@@ -63,7 +63,9 @@ class MockJobQueueIndicatorComponent {
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
 
   /** Wall-clock time of the last successful forkJoin — used by ``refreshAgeSeconds``. */
-  private readonly lastFetchAt = signal<number | null>(null);
+  private readonly _lastFetchAt = signal<number | null>(null);
+  /** Readonly exposure so tests can pin the freeze semantics exactly. */
+  readonly lastFetchAt = this._lastFetchAt.asReadonly();
 
   /**
    * C3 mirror — the latest non-null count from the canonical helper.
@@ -339,9 +341,16 @@ class MockJobQueueIndicatorComponent {
    * - C3 fix: ``liveMissionCountRaw`` is updated only via the
    *   canonical ``missionCountFromListResponse`` helper, on a
    *   non-degraded tick;
+   * - degraded-200 flag parity: a non-null ``degraded:true`` envelope
+   *   ALSO raises ``lastIntakeError`` via ``onLegError`` (mirroring
+   *   the component's ``recordLegError``) and counts as a FAILED leg
+   *   for BOTH the clear gate and the ``lastFetchAt`` freeze gate —
+   *   a degraded tick never clears a previously-set flag and never
+   *   stamps a fresh "refreshed Ns ago" on an all-degraded tick;
    * - ``deferBlocked === null`` hides the warning; a payload is run
    *   through the canonical ``deferBlockIndicator`` helper;
-   * - ``lastFetchAt`` advances only when at least one leg succeeded.
+   * - ``lastFetchAt`` advances only when at least one leg succeeded
+   *   (missions: non-degraded).
    *
    * ``missions`` now carries the FULL ``MissionListResponse``
    * envelope (REPLACES the prior ``number | null`` signature) — the
@@ -360,11 +369,22 @@ class MockJobQueueIndicatorComponent {
       const count = missionCountFromListResponse(missions);
       this.liveMissionCountRaw.set(count);
     }
+    const missionsDegraded = missions !== null && missions.degraded;
+    if (missionsDegraded) this.onLegError('missions', 'degraded envelope');
     const anyNull =
-      active === null || recent === null || missions === null || deferBlocked === null;
+      active === null ||
+      recent === null ||
+      missions === null ||
+      deferBlocked === null ||
+      missionsDegraded;
     if (!anyNull) this.lastIntakeError.set(null);
-    if (active !== null || recent !== null || missions !== null || deferBlocked !== null) {
-      this.lastFetchAt.set(Date.now());
+    if (
+      active !== null ||
+      recent !== null ||
+      (missions !== null && !missions.degraded) ||
+      deferBlocked !== null
+    ) {
+      this._lastFetchAt.set(Date.now());
     }
     this.deferBlockWarning.set(
       deferBlocked === null ? null : deferBlockIndicator(deferBlocked)
@@ -759,6 +779,79 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(missionCountFromListResponse(degradedEnvelope)).toBeNull();
     });
 
+    it('degraded-200 envelope RAISES lastIntakeError — a degraded-200 tick is a leg degradation (flag set + C2/C3 retention intact)', () => {
+      // Re-verify finding: a 200-OK {degraded:true} envelope never
+      // routes through catchError, so ``lastIntakeError`` stayed null
+      // and the .degraded visual/aria modifier never flipped during a
+      // degraded-200-only outage. The intake now treats the envelope
+      // as a missions leg degradation.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [
+            { mission_id: 'leader-a', liveness: 'processing' },
+            { mission_id: 'leader-b', liveness: 'paused' },
+          ],
+          2
+        ),
+        null
+      );
+      expect(component.lastIntakeError()).toBeNull();
+
+      // REAL degraded-200 envelope: missions=[], total=null, degraded:true.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
+        null
+      );
+      // The flag is SET — the degraded modifier + aria-label flip.
+      expect(component.lastIntakeError()).toBe('missions: degraded envelope');
+      // C2/C3 retention stays EXACTLY as-is across the same tick.
+      expect(component.liveMissionCount()).toBe(2);
+      expect(component.missionsList().length).toBe(2);
+      expect(component.displayText()).toBe('missions: 2');
+      expect(component.lastMissionsPayload()!.degraded).toBe(false);
+    });
+
+    it('an all-degraded tick freezes lastFetchAt — degraded counts as a failed leg for the freshness stamp', () => {
+      // The freeze gate folds degraded-missions in: a tick where every
+      // leg failed OR degraded must NOT stamp a fresh timestamp ("N s
+      // ago" would lie about staleness). A healthy tick still stamps.
+      // Date.now is pinned because real-time ms resolution can make
+      // both ticks land on the same millisecond (vacuous pass).
+      const nowSpy = jest.spyOn(Date, 'now');
+      try {
+        nowSpy.mockReturnValue(1_000_000);
+        component.applyFetchResult(
+          [],
+          [],
+          MockJobQueueIndicatorComponent.buildMissionsPayload(
+            [{ mission_id: 'leader-a', liveness: 'processing' }],
+            1
+          ),
+          { defer_blocked: false, pending_count: 0, holders: [] }
+        );
+        const stampedAt = component.lastFetchAt();
+        expect(stampedAt).toBe(1_000_000);
+
+        // All-null legs + a degraded missions envelope: nothing usable
+        // returned — the timestamp must stay byte-identical even as
+        // the (controlled) wall clock advances.
+        nowSpy.mockReturnValue(2_000_000);
+        component.applyFetchResult(
+          null,
+          null,
+          MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
+          null
+        );
+        expect(component.lastFetchAt()).toBe(stampedAt);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
     it('shows pre-data state via null liveMissionCount + "0/0" displayText (no fake 0)', () => {
       // C3 fix: before any payload arrives the signal is ``null``,
       // not ``0`` — "count unavailable" must NOT be invented as 0.
@@ -915,6 +1008,34 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // verifiable without an Angular TestBed harness.
       const tree = buildQueueTree(component.activeJobs(), [], []);
       expect(tree.queued.map((j) => j.job_id)).toEqual(['q-orphan']);
+    });
+
+    // Template-source pin (no TestBed): the mirror tests above prove
+    // the signal's CONTENT, but nothing stopped the TEMPLATE from
+    // reverting to the old filtered binding — which compiles green
+    // and silently re-starves tree().queued (C1's exact regression
+    // class). Read the template HTML relative to this spec and pin
+    // the binding seam verbatim (same pattern as the instance-list
+    // template-contract block).
+    describe('template binding seam (source-text pin)', () => {
+      let templateHtml: string;
+
+      beforeAll(() => {
+        // Resolve relative to this spec file.
+        const path = require('path');
+        const fs = require('fs');
+        const specDir = __dirname;
+        const htmlPath = path.join(specDir, 'job-queue-indicator.component.html');
+        templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+      });
+
+      it('binds the panel to the FULL non-terminal set: [activeJobs]="activeJobs()"', () => {
+        expect(templateHtml).toContain('[activeJobs]="activeJobs()"');
+      });
+
+      it('does NOT bind [runningJobs] — the old running-only filter must not return', () => {
+        expect(templateHtml).not.toContain('[runningJobs]');
+      });
     });
   });
 
@@ -1295,6 +1416,36 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onLegError('active', new Error('transient'));
       expect(component.lastIntakeError()).not.toBeNull();
 
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        { defer_blocked: false, pending_count: 0, holders: [] }
+      );
+      expect(component.lastIntakeError()).toBeNull();
+    });
+
+    it('a previously-set lastIntakeError SURVIVES a degraded-200 tick (error leg → degraded-200 → flag still set)', () => {
+      // Re-verify finding: a degraded-200 tick is non-null on every
+      // leg, so the old clear gate fired and WIPED a previously-set
+      // error flag. The degraded envelope must keep the flag set
+      // (re-raised by the missions leg itself, last-error-wins —
+      // same overwrite semantics as concurrent per-leg catchError).
+      component.onLegError('active', new Error('backend down'));
+      expect(component.lastIntakeError()).toBe('active: backend down');
+
+      // Degraded-200 missions tick — every leg non-null, but the
+      // envelope is degraded. The flag must NOT be cleared.
+      component.applyFetchResult(
+        [],
+        [],
+        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
+        { defer_blocked: false, pending_count: 0, holders: [] }
+      );
+      expect(component.lastIntakeError()).toBe('missions: degraded envelope');
+
+      // Recovery contract unchanged: the next FULLY clean tick
+      // (non-null + non-degraded everywhere) clears the flag.
       component.applyFetchResult(
         [],
         [],
