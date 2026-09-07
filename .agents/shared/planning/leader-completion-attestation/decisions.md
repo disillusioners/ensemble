@@ -965,3 +965,47 @@ The canonical byte-pin test `test_attestation_nudge_text_canonical_byte_pin` (an
 - The canonical 17-field `leader_completion_gate` log schema tuple.
 - The conditional-attestation scanner / scanner's `delegation_since_last_user` flag.
 - The `_make_context_message` factory and the `[SYSTEM CONTEXT: ...]` prefix convention.
+
+### RESOLVED-2026-09-07 — Judge wall-clock cap env-tunable (D18)
+
+**Context (operator tuning decision, 2026-09-07):** the prior hardcoded `JUDGE_TIMEOUT_S = 10.0` (wall-clock cap on the inline-LLM judge) was timeslicing genuine-report quick-model calls. The tester live-LLM probe captured at `.agents/tester/RESULTS/2026-09-07-lca-judge-live-probe*` (evidence commits `b42f7237..2a43904c` on branch `feature/leader-completion-attestation`) showed real quick-model latencies of successes 2.6s–13.6s with **4/8 calls >15s** — the 10.0s cap was firing on a substantial fraction of genuine-report calls and silently flipping the gate to the conservative deny+nudge path, defeating the feature's purpose. The feature was working as designed (the judge timed out; the gate fell through to deny+nudge) — but the timeout was wrong.
+
+**Resolution:** Pattern C sibling resolver at `daemon/services/attestation_judge_timeout_resolver.py` mirroring the existing `attestation_judge_resolver.py` (boolean kill-switch) and `attestation_resolver.py` (main tri-state mode) shapes:
+
+* `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` (default `25.0` seconds; minimum clamp `5.0` seconds — values below clamp to `5.0` with a one-shot WARN; restart-read);
+* `get_judge_timeout_s()` cached-global resolver (one-shot boot log via the parent resolver's `emit_attestation_boot_log`, which now also carries the `llm_judge_timeout_s=<resolved>` field);
+* `reset_judge_timeout_resolver_for_tests()` test-only cache + one-shot WARN flag reset helper (sibling to `reset_llm_judge_resolver_for_tests`, both also called from the umbrella `reset_attestation_resolver_for_tests` in `daemon/services/attestation_resolver.py`);
+* the module constant `DEFAULT_JUDGE_TIMEOUT_S = 25.0` (was hardcoded `10.0`) and the documented bound `JUDGE_TIMEOUT_S = DEFAULT_JUDGE_TIMEOUT_S` in `daemon/services/attestation_report_judge.py` (kept as the canonical DOCUMENTED default reference; runtime value flows from the resolver).
+
+**Failure / clamp policy (fail-OPEN, one-shot WARN, restart-read):**
+
+| Env value | Resolved | One-shot WARN? |
+|-----------|----------|----------------|
+| unset / blank | `25.0` (default) | no |
+| `=30` / `=15.5` | parsed float | no |
+| `=abc` / `=1.5x` | `25.0` (default) | yes (invalid → default) |
+| `=0` / `=-1` | `25.0` (default) | yes (invalid → default) |
+| `=3` / `=4.9` | `5.0` (clamp) | yes (below clamp → floor) |
+
+**Trade-off:** a longer worst-case turn-end wait on the rare deny path (the judge runs only on the WOULD-BE-DENY branch, so the cost is bounded by the per-instance `deny_bound=3` escalation + the existing 3-deny escalation guard) vs fewer false nudges of genuine reports. The `25.0s` default keeps the wait bounded while letting the quick-model tail latency ride. Operators with a known-fast quick-model can tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` for a faster worst-case bound; operators with a slow quick-model can loosen to `=40`. Restart required to flip (Pattern C — no live flip).
+
+**Wiring (replaces the prior hardcoded references — all hardcoded `JUDGE_TIMEOUT_S=10.0` usage removed):**
+
+* The `asyncio.wait_for` cap in `_invoke_judge_llm` now reads the resolved value (`timeout_s` is resolved lazily inside `judge_completion_report_async` from the resolver; passed through to `_invoke_judge_llm`).
+* The W1 coupling (`request_timeout = min(resolved_timeout, config.llm.request_timeout or resolved_timeout)`) is computed inside `_invoke_judge_llm` from the resolver (was `min(JUDGE_TIMEOUT_S, config.llm.request_timeout or JUDGE_TIMEOUT_S)`).
+* The failover `wall_clock_cap_s=timeout_s` argument picks up the resolved value via the same `timeout_s` parameter (no separate reference).
+* The async + sync public entry points (`judge_completion_report_async`, `judge_completion_report_sync`) use `timeout_s: float | None = None` and resolve inside; explicit numeric `timeout_s` (test fixtures, hot-loop callers) passes through unchanged.
+
+**Files (this resolution):**
+
+- `daemon/services/attestation_judge_timeout_resolver.py` (new) — Pattern C timeout resolver (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`, `_parse_judge_timeout_s`, `get_judge_timeout_s`, `reset_judge_timeout_resolver_for_tests`; default `25.0`, min clamp `5.0`).
+- `daemon/services/attestation_report_judge.py` — `JUDGE_TIMEOUT_S` constant bumped to `DEFAULT_JUDGE_TIMEOUT_S` (25.0; documented default reference only); the `_invoke_judge_llm` W1 coupling + `asyncio.wait_for` cap + failover `wall_clock_cap_s` now all read from the resolver; the public async + sync entry points use `timeout_s: float | None = None` and resolve inside.
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_timeout_s=<resolved>` field + an additional env readout; `reset_attestation_resolver_for_tests` also clears the new timeout cache + one-shot WARN flags.
+- `docs/setup.md` — the inline-LLM completion-report judge section updated (bounds line shows `JUDGE_TIMEOUT_S=25.0s` env-tunable; boot-log example updated to include `llm_judge_timeout_s=25.0`; new "Judge wall-clock cap" subsection documents the env name, default, min clamp, fail-OPEN policy table, and the 2026-09-07 tuning rationale).
+- `tests/unit/test_attestation_judge_resolver.py` — extended with the timeout truth table: 29 new tests (valid parses / below-clamp clamp / invalid fail-OPEN / unset returns default / None defensive / one-shot WARN emission discipline for invalid + below-clamp + zero + valid + unset / cached-global restart-read / reset helper re-resolves / reset clears one-shot WARN flags / sibling-resolver-caches-are-independent). File total: 46 tests (was 17).
+- `tests/unit/test_attestation_judge_wiring.py` — 5 new wiring tests asserting the resolved timeout FLOWS to BOTH seams (`asyncio.wait_for` cap + W1 `request_timeout` coupling): the resolved-default case, the env=17 case, the below-clamp-clamp case, the explicit-kwarg-overrides-resolver case, and the W1-coupling-uses-min case (config-side request_timeout below resolved → request_timeout is the config value). File total: 26 tests (was 21).
+- `tests/unit/test_attestation_report_judge.py` — `test_constants_pinned` updated: `assert JUDGE_TIMEOUT_S == 25.0` (was `10.0`).
+
+**Test-count truth-table discipline (grep-verified 2026-09-07):** the three touched unit files ship **106 tests total** (`pytest --collect-only -q tests/unit/test_attestation_judge_resolver.py tests/unit/test_attestation_judge_wiring.py tests/unit/test_attestation_report_judge.py` → `106 tests collected`): `test_attestation_report_judge.py` 34, `test_attestation_judge_resolver.py` 46, `test_attestation_judge_wiring.py` 26. The full attestation matrix (40 files across `tests/unit/`, `tests/integration/`, `tests/migration/`, `tests/unit/tools/`) collects the baseline + these new tests; see the Coder final report for the exact run numbers (any drift here is a doc-truth violation — the matrix run is ground truth, not the numbers above).
+
+**Decision-owner:** architect (RESOLVED 2026-09-07) + operator tuning decision (RESOLVED 2026-09-07).

@@ -488,7 +488,16 @@ def test_judge_async_truncates_oversized_output(monkeypatch):
 
 def test_constants_pinned():
     """Pin the canonical bounds so a refactor can't drift them silently."""
-    assert JUDGE_TIMEOUT_S == 10.0
+    # JUDGE_TIMEOUT_S is the canonical DOCUMENTED default reference
+    # (kept for backward compatibility with this pin + the bounds
+    # docstring at attestation_report_judge.py :51). The runtime
+    # value comes from
+    # :mod:`daemon.services.attestation_judge_timeout_resolver` (Pattern C
+    # cached-global; default :data:`DEFAULT_JUDGE_TIMEOUT_S` = 25.0s,
+    # min clamp 5.0s). Bumped from 10.0s → 25.0s on 2026-09-07
+    # (operator tuning decision grounded in the tester live-LLM probe —
+    # see ``docs/setup.md`` rationale).
+    assert JUDGE_TIMEOUT_S == 25.0
     assert JUDGE_MAX_INPUT_CHARS == 12_000
     assert JUDGE_MAX_OUTPUT_CHARS == 400
     assert JUDGE_DEFAULT_WINDOW == 3

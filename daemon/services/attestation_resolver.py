@@ -88,6 +88,10 @@ from .attestation_judge_resolver import (
     is_llm_judge_enabled as _resolver_is_judge_enabled,
     reset_llm_judge_resolver_for_tests as _reset_judge_resolver_for_tests,
 )
+from .attestation_judge_timeout_resolver import (
+    get_judge_timeout_s as _resolver_get_judge_timeout_s,
+    reset_judge_timeout_resolver_for_tests as _reset_judge_timeout_resolver_for_tests,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +200,10 @@ def reset_attestation_resolver_for_tests() -> None:
     ``AttestationConfig`` dataclass is frozen, so callers should mutate
     env vars THEN call this helper THEN call :func:`get_config` to
     re-resolve under the new env. Also clears the sibling LLM-judge
-    resolver cache so a test that flips
-    ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`` sees the change.
+    resolver caches so a test that flips
+    ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`` or
+    ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` sees the
+    change on the next call.
     """
     global _CACHED_CONFIG, _BOOT_LOG_EMITTED, _INVALID_VALUE_WARN_EMITTED
     global _MIN_RECENT_WINDOW_FALLBACK_WARNED
@@ -209,6 +215,7 @@ def reset_attestation_resolver_for_tests() -> None:
         _METRIC_COUNTERS[key] = 0
         _METRIC_LOG_EMITTED[key] = False
     _reset_judge_resolver_for_tests()
+    _reset_judge_timeout_resolver_for_tests()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,8 +467,9 @@ def emit_attestation_boot_log() -> None:
         Leader completion attestation resolved: mode=<off|dry|enforce>
             window=<N> deny_bound=<N> attestation_enabled=<true|false>
             llm_judge_enabled=<true|false> llm_judge_model=<model>
-            N_le_min_recent_window=<PASS|WARN> (env MODE=, WINDOW=, BOUND=,
-            JUDGE=) Restart required to flip.
+            llm_judge_timeout_s=<resolved_float> N_le_min_recent_window=<PASS|WARN>
+            (env MODE=, WINDOW=, BOUND=, JUDGE=, JUDGE_TIMEOUT=)
+            Restart required to flip.
 
     The line is emitted EXACTLY ONCE per process. The O1 WARN is
     appended as a SEPARATE WARN-level line — operator log-aggregators
@@ -470,13 +478,19 @@ def emit_attestation_boot_log() -> None:
 
     The ``llm_judge_*`` fields surface the resolved judge kill-switch
     state (Pattern C sibling resolver at
-    :mod:`daemon.services.attestation_judge_resolver`) and the
-    resolved quick-model (honors ``OPENAI_MODEL_KEYWORDS`` with
-    fallback to ``OPENAI_MODEL`` — see
-    :func:`daemon.services.attestation_report_judge.resolve_judge_model`).
-    When the judge is disabled (``llm_judge_enabled=false``) the
-    model field surfaces ``<disabled>`` so operators see at a glance
-    that no judge call will fire.
+    :mod:`daemon.services.attestation_judge_resolver`), the resolved
+    quick-model (honors ``OPENAI_MODEL_KEYWORDS`` with fallback to
+    ``OPENAI_MODEL`` — see
+    :func:`daemon.services.attestation_report_judge.resolve_judge_model`),
+    and the resolved wall-clock cap (Pattern C sibling resolver at
+    :mod:`daemon.services.attestation_judge_timeout_resolver`,
+    default :data:`DEFAULT_JUDGE_TIMEOUT_S` 25.0s, min clamp 5.0s —
+    operator tuning decision 2026-09-07 grounded in the tester live-LLM
+    probe; see ``docs/setup.md``). When the judge is disabled
+    (``llm_judge_enabled=false``) the model field surfaces
+    ``<disabled>`` so operators see at a glance that no judge call will
+    fire (the timeout is still logged — the operator can audit the
+    resolved cap regardless of the kill-switch posture).
     """
     global _BOOT_LOG_EMITTED
     if _BOOT_LOG_EMITTED:
@@ -502,12 +516,19 @@ def emit_attestation_boot_log() -> None:
     except Exception:  # noqa: BLE001 — boot log must not fail
         judge_model = "<unresolved>"
 
+    # Resolve the timeout via the Pattern C cached-global. A typo'd
+    # env value would have already emitted its one-shot WARN (and
+    # potentially the below-clamp WARN) at the first resolution —
+    # this read returns the cached/resolved float.
+    judge_timeout_s = _resolver_get_judge_timeout_s()
+
     logger.info(
         "Leader completion attestation resolved: mode=%s window=%d "
         "deny_bound=%d attestation_enabled=%s "
         "llm_judge_enabled=%s llm_judge_model=%s "
+        "llm_judge_timeout_s=%s "
         "N_le_min_recent_window=%s "
-        "(env %s=%s, %s=%s, %s=%s, %s=%s). "
+        "(env %s=%s, %s=%s, %s=%s, %s=%s, %s=%s). "
         "Restart required to flip. See docs/setup.md "
         "(ENSEMBLE_LEADER_ATTESTATION_MODE).",
         config.mode,
@@ -516,6 +537,10 @@ def emit_attestation_boot_log() -> None:
         "true" if config.attestation_enabled else "false",
         "true" if judge_enabled else "false",
         judge_model if judge_enabled else "<disabled>",
+        # Format the float as "%.1f" so the boot line shows e.g.
+        # ``llm_judge_timeout_s=25.0`` (clean, no scientific
+        # notation, consistent across integer / float env values).
+        ("%.1f" % judge_timeout_s),
         floor_status,
         ENSEMBLE_ATTESTATION_MODE_ENV,
         os.environ.get(ENSEMBLE_ATTESTATION_MODE_ENV, "<unset>"),
@@ -525,6 +550,8 @@ def emit_attestation_boot_log() -> None:
         os.environ.get(ENSEMBLE_ATTESTATION_DENY_BOUND_ENV, "<unset>"),
         "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED",
         os.environ.get("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "<unset>"),
+        "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S",
+        os.environ.get("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", "<unset>"),
     )
 
     if floor_status == "WARN":

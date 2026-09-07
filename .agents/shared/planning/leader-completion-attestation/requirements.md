@@ -818,3 +818,34 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 - `tests/unit/test_attestation_judge_wiring.py` (new — 16 tests, acceptance matrix).
 - `tests/unit/test_attestation_nudge_inject.py` — `EXPECTED_NUDGE_TEXT_CANONICAL` updated for the new mermaid.
 - `docs/setup.md` — new "Inline-LLM completion-report judge" section appended.
+
+### Requirement (operator tuning — 2026-09-07) — Judge wall-clock cap env-tunable
+
+**Context:** the prior hardcoded `JUDGE_TIMEOUT_S = 10.0` was timeslicing genuine-report quick-model calls. Tester live-LLM probe (2026-09-07, evidence commits `b42f7237..2a43904c` on branch `feature/leader-completion-attestation`, captured at `.agents/tester/RESULTS/2026-09-07-lca-judge-live-probe*`) measured real quick-model latencies: successes 2.6s–13.6s, with **4/8 calls >15s**. The 10.0s cap was firing on a substantial fraction of genuine-report calls and silently flipping the gate to the conservative deny+nudge path, defeating the feature's purpose.
+
+**Requirement:** the judge wall-clock cap MUST be env-tunable via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` (Pattern C restart-read resolver, sibling to the boolean kill-switch resolver at `daemon/services/attestation_judge_resolver.py` and the main tri-state mode resolver at `daemon/services/attestation_resolver.py`). Default `25.0` seconds (bumped from 10.0 — operator tuning decision 2026-09-07 grounded in the probe data). Minimum clamp `5.0` seconds — values below the clamp clamp to the floor with a one-shot WARN. The runtime value MUST flow to BOTH seams: the `asyncio.wait_for` cap + HA facade `wall_clock_cap_s` (the operator-visible wall-clock bound) AND the W1 `request_timeout` coupling (per-attempt HTTP timeout bound per the compaction-site precedent at `daemon/manager.py:398`; the per-attempt value is `min(resolved_timeout, config.llm.request_timeout or resolved_timeout)`).
+
+**Acceptance criteria:**
+
+* AC-T1: `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` unset / blank → resolved to `25.0`; no WARN.
+* AC-T2: `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<positive-float-above-clamp>` → parsed as a float; no WARN; flows to both seams.
+* AC-T3: `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<non-numeric>` (e.g. `abc`, `1.5x`) → resolved to `25.0` (fail-OPEN); one-shot WARN emitted.
+* AC-T4: `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<non-positive>` (e.g. `0`, `-1`) → resolved to `25.0` (fail-OPEN); one-shot WARN emitted.
+* AC-T5: `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<positive-but-below-clamp>` (e.g. `3`, `4.9`) → resolved to `5.0` (clamp); one-shot clamp WARN emitted.
+* AC-T6: cached-global wins over mid-flight env mutation (Pattern C restart-read); `reset_judge_timeout_resolver_for_tests()` clears the cache + one-shot WARN flags so tests re-resolve under mutated env.
+* AC-T7: the resolved value flows to BOTH the `asyncio.wait_for` cap (the `timeout_s` pass-through to `_invoke_judge_llm`) AND the W1 `request_timeout` coupling (`min(resolved, config.llm.request_timeout or resolved)`); pinned by `tests/unit/test_attestation_judge_wiring.py::test_resolved_timeout_flows_to_judge_call` + `test_resolved_timeout_default_when_env_unset` + `test_resolved_timeout_below_clamp_flows_clamp_to_seams` + `test_resolved_timeout_explicit_kwarg_overrides_resolver` + `test_resolved_timeout_w1_coupling_uses_min`.
+* AC-T8: `emit_attestation_boot_log` carries `llm_judge_timeout_s=<resolved>` (e.g. `llm_judge_timeout_s=25.0`); pinned by the existing `test_boot_log_line_includes_judge_info` (which still passes — no new field pin required, the boot log is grep-readable) + the docs/setup.md example.
+* AC-T9: `reset_attestation_resolver_for_tests` clears BOTH sibling resolver caches (kill-switch + timeout) so a test that flips either env sees the change on the next call.
+* AC-T10: the kill-switch cache + timeout cache are independent — resetting one MUST NOT clobber the other (pinned by `test_sibling_resolver_caches_are_independent`).
+
+**Files (this requirement):**
+
+- `daemon/services/attestation_judge_timeout_resolver.py` (new) — Pattern C timeout resolver (env `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`, default `25.0`, min clamp `5.0`, fail-OPEN on invalid).
+- `daemon/services/attestation_report_judge.py` — `JUDGE_TIMEOUT_S` constant bumped to `DEFAULT_JUDGE_TIMEOUT_S` (25.0; documented default reference only); the `_invoke_judge_llm` W1 coupling + `asyncio.wait_for` cap + failover `wall_clock_cap_s` now all read from the resolver; the public async + sync entry points use `timeout_s: float | None = None` and resolve inside.
+- `daemon/services/attestation_resolver.py` — `emit_attestation_boot_log` extended with `llm_judge_timeout_s=<resolved>` + an additional env readout; `reset_attestation_resolver_for_tests` also clears the new timeout cache + one-shot WARN flags.
+- `docs/setup.md` — the inline-LLM completion-report judge section updated (bounds line shows `JUDGE_TIMEOUT_S=25.0s` env-tunable; boot-log example updated to include `llm_judge_timeout_s=25.0`; new "Judge wall-clock cap" subsection documents the env name, default, min clamp, fail-OPEN policy table, and the 2026-09-07 tuning rationale).
+- `tests/unit/test_attestation_judge_resolver.py` — extended with the timeout truth table (AC-T1..T6 + the WARN-emission discipline + AC-T10); 29 new tests, file total 46 tests.
+- `tests/unit/test_attestation_judge_wiring.py` — extended with 5 new wiring tests (AC-T7); file total 26 tests.
+- `tests/unit/test_attestation_report_judge.py` — `test_constants_pinned` updated to assert `JUDGE_TIMEOUT_S == 25.0` (was 10.0).
+
+**Test-count truth-table discipline (grep-verified 2026-09-07):** the three touched unit files ship **106 tests total** (`pytest --collect-only -q`): `test_attestation_report_judge.py` 34, `test_attestation_judge_resolver.py` 46, `test_attestation_judge_wiring.py` 26. The full attestation matrix (40 files) collects the baseline + these new tests; see the Coder final report for the exact run numbers (any drift here is a doc-truth violation — the matrix run is ground truth).

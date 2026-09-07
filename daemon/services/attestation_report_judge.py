@@ -48,10 +48,17 @@ intent); leaving it unset uses the main ``OPENAI_MODEL``.
 Bounds
 ------
 
-* Timeout: :data:`JUDGE_TIMEOUT_S` seconds (default 10.0). Belt-and-braces
-  ``asyncio.wait_for`` wraps the facade-wrapped call; the facade's
-  ``wall_clock_cap_s`` is the primary defense (the same pattern as
-  ``daemon/services/keyword_extraction.py:405-408``).
+* Timeout: :data:`JUDGE_TIMEOUT_S` seconds (default 25.0; env-tunable
+  via ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`` per Pattern C
+  restart-read resolver at
+  :mod:`daemon.services.attestation_judge_timeout_resolver`; minimum
+  clamp 5.0s — values below clamp to 5.0 with a one-shot WARN; restart
+  required to flip). Belt-and-braces ``asyncio.wait_for`` wraps the
+  facade-wrapped call; the facade's ``wall_clock_cap_s`` is the primary
+  defense (the same pattern as ``daemon/services/keyword_extraction.py:
+  405-408``). The default was bumped from 10.0s → 25.0s on 2026-09-07
+  (operator tuning decision grounded in the tester live-LLM probe — see
+  ``docs/setup.md`` rationale).
 * Input cap: :data:`JUDGE_MAX_INPUT_CHARS` chars (default 12000). Each
   AIMessage content is concatenated into a single user-role payload;
   the cap protects against pathological tails.
@@ -69,6 +76,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .attestation_judge_timeout_resolver import (
+    DEFAULT_JUDGE_TIMEOUT_S,
+    get_judge_timeout_s as _resolver_get_judge_timeout_s,
+)
+
 if TYPE_CHECKING:
     from ..config import Config
     from langchain_core.messages import BaseMessage
@@ -83,8 +95,17 @@ logger = logging.getLogger(__name__)
 
 #: Wall-clock cap (seconds) for the judge call. Async-wait_for backstop;
 #: the HA facade's wall_clock_cap_s is the primary defense (retry-budget
-#: stop_after_delay inside the tenacity retry loop).
-JUDGE_TIMEOUT_S: float = 10.0
+#: stop_after_delay inside the tenacity retry loop). The default was
+#: bumped from 10.0s to 25.0s on 2026-09-07 (operator tuning decision
+#: grounded in the tester live-LLM probe — see module docstring
+#: "Bounds" section + ``docs/setup.md``). The runtime value comes from
+#: :func:`daemon.services.attestation_judge_timeout_resolver.get_judge_timeout_s`
+#: (Pattern C restart-read env resolver); this constant is the canonical
+#: DOCUMENTED default reference, not the runtime value. Function
+#: signatures use ``timeout_s: float | None = None`` and resolve via the
+#: resolver inside the body so callers that omit the kwarg get the
+#: runtime-configured value.
+JUDGE_TIMEOUT_S: float = DEFAULT_JUDGE_TIMEOUT_S
 
 #: Max chars (UTF-8) of the user-role payload fed to the judge. Each
 #: AIMessage content is truncated to ``JUDGE_MAX_INPUT_CHARS / count``
@@ -424,18 +445,22 @@ async def _invoke_judge_llm(
     # ``base_url_backup`` is consumed by the HA facade from the RAW
     # config dict (F1 kwarg hygiene — ``clean_llm_config`` mutates
     # in place and strips the backup).
-    # ``request_timeout`` is bound per-attempt to ``min(JUDGE_TIMEOUT_S,
-    # config.llm.request_timeout or JUDGE_TIMEOUT_S)`` mirroring the
-    # compaction-site precedent at ``daemon/manager.py:398``. The
-    # HA facade's ``wall_clock_cap_s`` bounds only BETWEEN attempts
-    # (``daemon/services/llm_failover.py:174``); a hung FIRST attempt
-    # can pin the ``asyncio.to_thread`` worker because
-    # ``asyncio.wait_for`` cannot cancel a to_thread worker — without
-    # a per-attempt HTTP timeout the executor thread stays blocked for
+    # ``request_timeout`` is bound per-attempt to
+    # ``min(resolved_timeout, config.llm.request_timeout or resolved_timeout)``
+    # mirroring the compaction-site precedent at ``daemon/manager.py:398``.
+    # The ``resolved_timeout`` is the Pattern C cached value from
+    # :mod:`daemon.services.attestation_judge_timeout_resolver`
+    # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s,
+    # min clamp 5.0s). The HA facade's ``wall_clock_cap_s`` bounds only
+    # BETWEEN attempts (``daemon/services/llm_failover.py:174``); a hung
+    # FIRST attempt can pin the ``asyncio.to_thread`` worker because
+    # ``asyncio.wait_for`` cannot cancel a to_thread worker — without a
+    # per-attempt HTTP timeout the executor thread stays blocked for
     # the full ``config.llm.request_timeout`` (default 610s).
+    resolved_timeout = _resolver_get_judge_timeout_s()
     judge_request_timeout = min(
-        JUDGE_TIMEOUT_S,
-        config.llm.request_timeout or JUDGE_TIMEOUT_S,
+        resolved_timeout,
+        config.llm.request_timeout or resolved_timeout,
     )
     llm_config = {
         "base_url": config.llm.base_url,
@@ -493,7 +518,7 @@ async def judge_completion_report_async(
     *,
     config: "Config",
     window: int = JUDGE_DEFAULT_WINDOW,
-    timeout_s: float = JUDGE_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> JudgeResult:
     """Async judge — returns a :class:`JudgeResult`.
 
@@ -509,8 +534,13 @@ async def judge_completion_report_async(
             ``[1, JUDGE_MAX_WINDOW]``. Default
             :data:`JUDGE_DEFAULT_WINDOW` (3) — matches the gate's
             default window so the two views align.
-        timeout_s: Wall-clock cap. Default
-            :data:`JUDGE_TIMEOUT_S` (10.0s).
+        timeout_s: Wall-clock cap. ``None`` (default) → resolve via the
+            Pattern C cached-global at
+            :mod:`daemon.services.attestation_judge_timeout_resolver`
+            (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``,
+            default :data:`JUDGE_TIMEOUT_S` 25.0s, min clamp 5.0s).
+            Explicit numeric values pass through unchanged (callers
+            pin a tighter cap when needed).
 
     Returns:
         :class:`JudgeResult` — populated on every path (success /
@@ -534,6 +564,14 @@ async def judge_completion_report_async(
     user_payload = _format_window_for_judge(
         slice_, per_message_budget=per_message_budget
     )
+
+    # Resolve the wall-clock cap lazily — ``None`` means "use the
+    # env-configured runtime value" (Pattern C cached-global at
+    # :mod:`daemon.services.attestation_judge_timeout_resolver`). An
+    # explicit numeric ``timeout_s`` (test fixtures, hot-loop callers)
+    # passes through unchanged.
+    if timeout_s is None:
+        timeout_s = _resolver_get_judge_timeout_s()
 
     try:
         raw_text, model = await _invoke_judge_llm(
@@ -588,7 +626,7 @@ def judge_completion_report_sync(
     *,
     config: "Config",
     window: int = JUDGE_DEFAULT_WINDOW,
-    timeout_s: float = JUDGE_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> JudgeResult:
     """Sync entry point — drives the async judge from a sync caller.
 
@@ -608,7 +646,9 @@ def judge_completion_report_sync(
         messages: Full LangGraph message list.
         config: Loaded :class:`Config`.
         window: How many tail AIMessages to inspect.
-        timeout_s: Wall-clock cap.
+        timeout_s: Wall-clock cap. ``None`` (default) → resolve via the
+            Pattern C cached-global (env ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``).
+            Explicit numeric values pass through unchanged.
 
     Returns:
         :class:`JudgeResult` — populated on every path.

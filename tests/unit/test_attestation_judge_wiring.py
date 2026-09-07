@@ -988,3 +988,329 @@ def test_boot_log_disabled_when_env_zero(caplog, monkeypatch):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "llm_judge_enabled=false" in log_text
     assert "llm_judge_model=<disabled>" in log_text
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resolved timeout FLOWS to the judge call — Pattern C env-tunability
+# (operator tuning decision 2026-09-07 grounded in the tester live-LLM
+# probe; default 25.0s, min clamp 5.0s)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _TimeoutCapturingConfig:
+    """Captures both the resolved timeout (Pattern C) AND the W1 coupling.
+
+    The test writes a single spy ``_invoke_judge_llm`` (per-test closure
+    via ``monkeypatch``) that:
+    * records the ``timeout_s`` kwarg it received (the wait_for cap +
+      wall_clock_cap_s value — the operator-visible timeout);
+    * computes the W1 ``judge_request_timeout`` value the SAME WAY the
+      real ``_invoke_judge_llm`` does (mirrors
+      ``daemon/services/attestation_report_judge.py`` line 459-462), so
+      the test pins BOTH seams of the timeout wiring without depending
+      on ``ThinkingChatOpenAI`` internals.
+
+    Using the resolver directly (not the constant) is the point of the
+    test — a refactor that hardcodes the constant back into the call
+    site (re-introducing the bug class this resolver exists to fix)
+    would leave the wait_for cap at 25.0s regardless of the env value,
+    and the test would fail on the ``timeout_s`` assertion.
+
+    Mirrors the ``_FakeCfg`` stub shape at
+    ``tests/unit/test_attestation_report_judge.py`` (inner ``_LLM`` class
+    exposing ``model`` / ``model_keywords``) plus ``request_timeout``
+    so the W1 coupling math has a baseline to compare against.
+    """
+
+    def __init__(
+        self,
+        model="fake-main",
+        model_keywords="fake-quick",
+        request_timeout=None,
+    ):
+        class _LLM:
+            pass
+
+        self._llm = _LLM()
+        self._llm.model = model
+        self._llm.model_keywords = model_keywords
+        self._llm.request_timeout = request_timeout
+
+    @property
+    def llm(self):
+        return self._llm
+
+
+def _build_timeout_capture_spy(captured: dict, *, canned_response: str):
+    """Build a spy ``_invoke_judge_llm`` that captures both timeout seams.
+
+    The spy is shaped like the real ``_invoke_judge_llm`` signature
+    (``async def _invoke_judge_llm(config, user_payload, *, timeout_s)``)
+    so ``monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)``
+    substitutes cleanly. It:
+    1. Records the received ``timeout_s`` (wait_for cap +
+       wall_clock_cap_s value) into ``captured["timeout_s"]``.
+    2. Computes ``judge_request_timeout`` the same way the real
+       implementation does (W1 coupling — min(resolved, config.llm.
+       request_timeout OR resolved)) and records it into
+       ``captured["request_timeout"]``.
+    3. Returns a canned success response so the calling async judge
+       yields ``JudgeResult(is_complete_report=True, ...)`` and the
+       call returns without raising.
+    """
+
+    async def spy(config, user_payload, *, timeout_s):
+        captured["timeout_s"] = timeout_s
+        # Mirror the W1 coupling: ``min(resolved_timeout,
+        # config.llm.request_timeout or resolved_timeout)`` — see
+        # ``daemon/services/attestation_report_judge.py`` ~:459-462.
+        # We import the resolver here (lazy import — keeps the test
+        # hermetic against import-order side effects from the
+        # autouse fixture).
+        from daemon.services.attestation_judge_timeout_resolver import (
+            get_judge_timeout_s,
+        )
+
+        resolved_timeout = get_judge_timeout_s()
+        judge_request_timeout = min(
+            resolved_timeout,
+            config.llm.request_timeout or resolved_timeout,
+        )
+        captured["request_timeout"] = judge_request_timeout
+        return (canned_response, "fake-quick")
+
+    return spy
+
+
+def test_resolved_timeout_flows_to_judge_call(monkeypatch):
+    """Resolved timeout (Pattern C) FLOWS to both the wait_for cap and
+    the W1 request_timeout coupling.
+
+    Set ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=17``, reset
+    the resolver, and call :func:`judge_completion_report_async`
+    WITHOUT an explicit ``timeout_s=`` kwarg. The spy
+    :func:`_invoke_judge_llm` captures:
+    * the ``timeout_s`` it received (the ``asyncio.wait_for`` cap +
+      ``wall_clock_cap_s`` for the HA facade — the operator-visible
+      timeout); this MUST be the resolved value ``17.0``, not the
+      default ``25.0`` and not the prior hardcoded ``10.0``;
+    * the derived ``judge_request_timeout`` (the W1 coupling — the
+      per-attempt HTTP ``request_timeout`` passed to the LLM client).
+      With ``config.llm.request_timeout`` set to a high value (e.g.
+      the default 610s) and resolved=17, the min is 17.0 — the
+      resolved value drives both seams.
+    """
+    monkeypatch.setenv(
+        "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", "17"
+    )
+    # Reset the timeout cache so the next ``get_judge_timeout_s()``
+    # call re-resolves under the new env. The autouse fixture
+    # (``_reset_resolvers``) clears the env on entry, so we re-set
+    # AFTER the fixture ran and reset explicitly.
+    from daemon.services.attestation_judge_timeout_resolver import (
+        reset_judge_timeout_resolver_for_tests,
+    )
+
+    reset_judge_timeout_resolver_for_tests()
+
+    captured: dict = {}
+    spy = _build_timeout_capture_spy(
+        captured,
+        canned_response='{"is_complete_report": true, "reason": "ok"}',
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+    cfg = _TimeoutCapturingConfig(request_timeout=610.0)
+    messages = [
+        __import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(
+            content="please do it"
+        ),
+        __import__("langchain_core.messages", fromlist=["AIMessage"]).AIMessage(
+            content="done without attesting"
+        ),
+    ]
+    result = asyncio.run(
+        judge_mod.judge_completion_report_async(messages, config=cfg)
+    )
+
+    # Wait_for cap + wall_clock_cap_s — the operator-visible timeout.
+    assert captured["timeout_s"] == 17.0
+    # W1 coupling — ``min(resolved, config.llm.request_timeout or
+    # resolved)`` → ``min(17.0, 610.0)`` = 17.0. The resolved value
+    # drives both seams when ``config.llm.request_timeout`` is above
+    # the resolved value (the typical operator config).
+    assert captured["request_timeout"] == 17.0
+    # The judge ran to completion (canned success response).
+    assert result.is_complete_report is True
+    assert result.verdict == "yes"
+
+
+def test_resolved_timeout_default_when_env_unset(monkeypatch):
+    """With env unset, the default 25.0s flows to both seams.
+
+    Pins the "operator did not set the env" path — the runtime value
+    is :data:`DEFAULT_JUDGE_TIMEOUT_S` (25.0s, the operator tuning
+    decision default). A regression that dropped the resolver call
+    would re-introduce the prior hardcoded 10.0s and fail this test.
+    """
+    # Ensure unset (the autouse fixture cleared it; this is belt-and-braces).
+    monkeypatch.delenv(
+        "ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", raising=False
+    )
+    from daemon.services.attestation_judge_timeout_resolver import (
+        reset_judge_timeout_resolver_for_tests,
+    )
+
+    reset_judge_timeout_resolver_for_tests()
+
+    captured: dict = {}
+    spy = _build_timeout_capture_spy(
+        captured,
+        canned_response='{"is_complete_report": false, "reason": "not done"}',
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+    cfg = _TimeoutCapturingConfig(request_timeout=610.0)
+    messages = [
+        __import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(
+            content="please do it"
+        ),
+        __import__("langchain_core.messages", fromlist=["AIMessage"]).AIMessage(
+            content="not done"
+        ),
+    ]
+    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+
+    assert captured["timeout_s"] == 25.0
+    assert captured["request_timeout"] == 25.0
+
+
+def test_resolved_timeout_below_clamp_flows_clamp_to_seams(monkeypatch):
+    """Below-clamp env value clamps to ``MIN_JUDGE_TIMEOUT_S`` (5.0s) on both seams.
+
+    The W1 coupling + the wait_for cap BOTH carry the clamped value
+    (not the raw operator value). Pins the resolver's clamp
+    discipline: the floor propagates through the wiring, not just
+    through the env-parsing layer.
+    """
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", "2")
+    from daemon.services.attestation_judge_timeout_resolver import (
+        reset_judge_timeout_resolver_for_tests,
+    )
+
+    reset_judge_timeout_resolver_for_tests()
+
+    captured: dict = {}
+    spy = _build_timeout_capture_spy(
+        captured,
+        canned_response='{"is_complete_report": true, "reason": "ok"}',
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+    cfg = _TimeoutCapturingConfig(request_timeout=610.0)
+    messages = [
+        __import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(
+            content="please do it"
+        ),
+        __import__("langchain_core.messages", fromlist=["AIMessage"]).AIMessage(
+            content="done"
+        ),
+    ]
+    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+
+    assert captured["timeout_s"] == 5.0  # clamp, not the raw 2.0
+    assert captured["request_timeout"] == 5.0
+
+
+def test_resolved_timeout_explicit_kwarg_overrides_resolver(monkeypatch):
+    """Explicit ``timeout_s=`` kwarg to the async judge OVERRIDES the resolver.
+
+    Test fixtures + hot-loop callers sometimes pin a tighter cap than
+    the env-configured value. The function default (``None``) means
+    "use the resolver"; an explicit numeric value MUST pass through
+    unchanged. This pins the contract — a refactor that ignores the
+    explicit kwarg would break hot-loop tests.
+    """
+    # Set the env to a different value so the test discriminates.
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", "17")
+    from daemon.services.attestation_judge_timeout_resolver import (
+        reset_judge_timeout_resolver_for_tests,
+    )
+
+    reset_judge_timeout_resolver_for_tests()
+
+    captured: dict = {}
+    spy = _build_timeout_capture_spy(
+        captured,
+        canned_response='{"is_complete_report": true, "reason": "ok"}',
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+    cfg = _TimeoutCapturingConfig(request_timeout=610.0)
+    messages = [
+        __import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(
+            content="please do it"
+        ),
+        __import__("langchain_core.messages", fromlist=["AIMessage"]).AIMessage(
+            content="done"
+        ),
+    ]
+    # Pass an explicit ``timeout_s=`` that overrides the resolver.
+    asyncio.run(
+        judge_mod.judge_completion_report_async(
+            messages, config=cfg, timeout_s=7.0
+        )
+    )
+
+    # The explicit kwarg flows to the wait_for cap.
+    assert captured["timeout_s"] == 7.0
+    # The W1 coupling still uses the RESOLVED value (17.0) for the
+    # per-attempt request_timeout — the explicit ``timeout_s`` only
+    # overrides the wall-clock cap (wait_for + wall_clock_cap_s), NOT
+    # the inner request_timeout math. This is the intended behavior:
+    # the per-attempt HTTP timeout is derived from the resolver (the
+    # operator's documented contract) regardless of how the calling
+    # site tunes the wall-clock cap.
+    assert captured["request_timeout"] == 17.0
+
+
+def test_resolved_timeout_w1_coupling_uses_min(monkeypatch):
+    """W1 coupling: ``request_timeout = min(resolved, config.llm.request_timeout)``.
+
+    Pins the compaction-site precedent at ``daemon/manager.py:398``.
+    When ``config.llm.request_timeout`` is BELOW the resolved
+    timeout (an operator has the LLM-side request_timeout tight),
+    the request_timeout in the llm_config MUST be the config value
+    (not the resolved). The resolved timeout still drives the
+    wait_for cap + wall_clock_cap_s.
+    """
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S", "30")
+    from daemon.services.attestation_judge_timeout_resolver import (
+        reset_judge_timeout_resolver_for_tests,
+    )
+
+    reset_judge_timeout_resolver_for_tests()
+
+    captured: dict = {}
+    spy = _build_timeout_capture_spy(
+        captured,
+        canned_response='{"is_complete_report": true, "reason": "ok"}',
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+    # Config request_timeout is below the resolved 30.0s.
+    cfg = _TimeoutCapturingConfig(request_timeout=12.0)
+    messages = [
+        __import__("langchain_core.messages", fromlist=["HumanMessage"]).HumanMessage(
+            content="please do it"
+        ),
+        __import__("langchain_core.messages", fromlist=["AIMessage"]).AIMessage(
+            content="done"
+        ),
+    ]
+    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+
+    # The wait_for cap + wall_clock_cap_s carry the resolved value (30.0).
+    assert captured["timeout_s"] == 30.0
+    # The W1 request_timeout is the MIN — the config-side value (12.0)
+    # because it is below the resolved timeout.
+    assert captured["request_timeout"] == 12.0
