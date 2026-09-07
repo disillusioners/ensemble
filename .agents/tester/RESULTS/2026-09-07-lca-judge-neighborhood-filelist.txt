@@ -1,0 +1,88 @@
+# LCA judge Neighborhood — File Partition List (A/B: bb052fce vs d6e30d9d)
+# Generated: 2026-09-07 (Job 4 of 6 merge gate)
+# Source: pinned set from .agents/tester/RESULTS/2026-09-07-lca-cond-neighborhood-filelist.txt (committed 8eace79e)
+# Purpose: attribute failures pre-existing vs introduced by judge delta bb052fce..d6e30d9d
+#          (delta touches daemon/graph.py + attestation judge files; see name-status below)
+# TOTAL: 58 files
+#
+# Per-file existence at both commits (ok/ok = exists at BASE and HEAD):
+ok/ok  tests/integration/test_api_messages.py
+ok/ok  tests/integration/test_attestation_compaction.py
+ok/ok  tests/integration/test_compaction_e2e.py
+ok/ok  tests/integration/test_get_instance_messages_observed_count_zero.py
+ok/ok  tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+ok/ok  tests/integration/test_initiative_message_integration.py
+ok/ok  tests/integration/test_message_metadata_deletion_paths_prune.py
+ok/ok  tests/integration/test_message_metadata_hook_placement.py
+ok/ok  tests/integration/test_message_metadata_lifecycle_wiring.py
+ok/ok  tests/integration/test_message_metadata_liveness.py
+ok/ok  tests/integration/test_message_metadata_prune.py
+ok/ok  tests/integration/test_message_metadata_retry_recovery.py
+ok/ok  tests/integration/test_message_metadata_send_message_revive.py
+ok/ok  tests/integration/test_message_queue_e2e.py
+ok/ok  tests/integration/test_messages_response_fixture_capture.py
+ok/ok  tests/job_queue/test_message_job_queue.py
+ok/ok  tests/job_queue/test_option_b_message_routing.py
+ok/ok  tests/message_queue_redesign/test_message_flow.py
+ok/ok  tests/performance/test_message_api_cost.py
+ok/ok  tests/postgres/test_initiative_message_pg.py
+ok/ok  tests/services/test_instance_messaging_compaction_guard.py
+ok/ok  tests/services/test_instance_messaging_queue_routing.py
+ok/ok  tests/services/test_instance_messaging_shared_context_injection.py
+ok/ok  tests/services/test_instance_messaging_skill_injection.py
+ok/ok  tests/services/test_instance_messaging_task_context.py
+ok/ok  tests/services/test_option_b_message_branching.py
+ok/ok  tests/services/test_process_message_metrics.py
+ok/ok  tests/test_initiative_message.py
+ok/ok  tests/test_injection_compaction.py
+ok/ok  tests/test_message_job_bridge.py
+ok/ok  tests/test_message_job_serialization.py
+ok/ok  tests/tools/test_send_message_context_param.py
+ok/ok  tests/tools/test_send_message_load_skill.py
+ok/ok  tests/tools/test_send_message_status_guard.py
+ok/ok  tests/tools/test_send_message_task_repo_guard.py
+ok/ok  tests/unit/job_queue/test_fix_b_terminal_message_mirror_backstop.py
+ok/ok  tests/unit/persistence/test_get_instance_messages_no_alist.py
+ok/ok  tests/unit/repositories/test_message_metadata_paused_question_flow.py
+ok/ok  tests/unit/repositories/test_message_metadata_repository.py
+ok/ok  tests/unit/repositories/test_message_metadata_revive_stability.py
+ok/ok  tests/unit/repositories/test_message_tap_to_repo_liveness.py
+ok/ok  tests/unit/routers/test_message_status_endpoint.py
+ok/ok  tests/unit/services/test_message_tap_slot.py
+ok/ok  tests/unit/services/test_proactive_compaction_fix_p1.py
+ok/ok  tests/unit/services/test_proactive_compaction_fix_p1b.py
+ok/ok  tests/unit/services/test_proactive_compaction_fix_p2.py
+ok/ok  tests/unit/services/test_proactive_compaction_symptom_acceptance.py
+ok/ok  tests/unit/test_compaction.py
+ok/ok  tests/unit/test_compaction_model_config.py
+ok/ok  tests/unit/test_compaction_multimodal.py
+ok/ok  tests/unit/test_context_messages.py
+ok/ok  tests/unit/test_manager_enqueue_message_work_id_required.py
+ok/ok  tests/unit/test_message_queue_pending_predicate.py
+ok/ok  tests/unit/test_pause_cascade_message_queue_orphan.py
+ok/ok  tests/unit/test_ready_message_completion_report.py
+ok/ok  tests/unit/test_resume_message_append.py
+ok/ok  tests/unit/test_serialize_message.py
+ok/ok  tests/unit/tools/test_inner_soul_compaction.py
+# ---- Delta cross-reference ----
+# git diff --name-status bb052fce..d6e30d9d:
+# M	.agents/shared/planning/leader-completion-attestation/decisions.md
+# M	.agents/shared/planning/leader-completion-attestation/requirements.md
+# M	daemon/graph.py
+# M	daemon/services/attestation_gate.py
+# A	daemon/services/attestation_judge_resolver.py
+# A	daemon/services/attestation_report_judge.py
+# M	daemon/services/attestation_resolver.py
+# M	docs/setup.md
+# M	tests/unit/test_attestation_conditional_gate_outcomes.py
+# M	tests/unit/test_attestation_epoch_replay.py
+# A	tests/unit/test_attestation_judge_resolver.py
+# A	tests/unit/test_attestation_judge_wiring.py
+# M	tests/unit/test_attestation_nudge_inject.py
+# A	tests/unit/test_attestation_report_judge.py
+#
+# Delta-vs-neighborhood overlap: NONE — no neighborhood test file added/removed/renamed
+# Symbol reference check: only tests/integration/test_attestation_compaction.py references attestation symbols;
+#   it imports daemon.services.attestation_scanner (NOT touched by the delta). No neighborhood file
+#   references changed symbols in a shape-breaking way.
+# All 58 files verified present at BOTH commits (missing = 0).
