@@ -346,7 +346,7 @@ class TestSelfReferenceTrapEvaluateLevel:
         # The deny path fires again (still no attestation in the
         # latest N AIMessages); the bound check is the
         # deciding factor at this point — with denied_count=1
-        # and bound=3, the gate stays in branch (6) — DENIED.
+        # and bound=3, the gate stays in branch (7) — DENIED.
         assert result_2.decision is Decision.DENIED
         assert result_2.next_denied_count == 2
 

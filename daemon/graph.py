@@ -2595,9 +2595,17 @@ def nudge_node(state):
     # Construction-time stable id (same contract as the child-report /
     # seam-drain stamps): the checkpointed nudge carries one identity
     # across every later serialization instead of re-minting per read.
+    # ``injected_message=True`` (2026-09-07 review warning): the
+    # empty-response nudge is a SERVER-authored injection — stamped so
+    # the attestation scanner's exclusion ladder classifies it as NOT a
+    # real user message and it cannot reset the delegation window.
     return {
         'messages': [
-            HumanMessage(content=NUDGE_MESSAGE, id=str(uuid.uuid4()))
+            HumanMessage(
+                content=NUDGE_MESSAGE,
+                id=str(uuid.uuid4()),
+                additional_kwargs={"injected_message": True},
+            )
         ]
     }
 
@@ -2698,7 +2706,14 @@ def create_language_check_node(user_language: str):
                     # ``language_check_reminder`` kwarg, not the id, so
                     # stamping changes no routing behavior.
                     id=str(uuid.uuid4()),
-                    additional_kwargs={"language_check_reminder": True},
+                    additional_kwargs={
+                        "language_check_reminder": True,
+                        # Server-authored injection (2026-09-07 review
+                        # warning): stamped so the attestation scanner's
+                        # exclusion ladder classifies it as NOT a real
+                        # user message.
+                        "injected_message": True,
+                    },
                 )
                 logger.info(
                     f"[LanguageCheck] Wrong language detected "

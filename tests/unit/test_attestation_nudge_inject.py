@@ -188,3 +188,69 @@ def test_attested_allow_only_resets_and_dry_skip_writes_are_not_denial_delivery(
     safe_reset(ledger, "inst")
     ledger.increment.assert_called_once_with("inst", "epoch")
     ledger.reset.assert_called_once_with("inst")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CANONICAL BYTE PIN (2026-09-07 review suggestion, ADOPTED) — the full
+# literal of ``ATTESTATION_NUDGE_TEXT`` lives HERE, in ONE place. The pins
+# above compare the injected message against the auto-tracking import
+# (``assert x == ATTESTATION_NUDGE_TEXT``) — tautology-passing: they can
+# never fail on a constant edit. This literal anchor DOES: any byte change
+# to the constant fails this test and forces a conscious review of the
+# nudge text (header line through the mermaid closing fence). This file is
+# the canonical literal anchor for the constant.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXPECTED_NUDGE_TEXT_CANONICAL = (
+    "[SYSTEM CONTEXT: Completion Check Nudge]\n\n"
+    "The work is not yet finished — check current progress "
+    "(tasks/children status) and continue.\n\n"
+    "This gate is CONDITIONAL on delegation: it fires ONLY when a "
+    "child was dispatched (a send_message tool call happened) since "
+    "the last real user message. Plain questions, chart requests, "
+    "and other non-delegating turns do NOT trigger this gate. When "
+    "you have dispatched a child this mission, the work is not "
+    "complete until you attest.\n\n"
+    "Attestation is a SEPARATE step: FIRST deliver your full "
+    "detailed final report as its own message (outcomes, evidence, "
+    "follow-ups), THEN call attest_completion ALONE as a "
+    "subsequent step — never bundle the report into the attestation "
+    "tool-call message (at most a one-line ack such as \"Report "
+    "delivered above; attesting completion.\").\n\n"
+    "Reminder: when — and only when — the work is truly complete "
+    "(delegated children have all reported and you have the full "
+    "picture), you MUST call the attest_completion tool before "
+    "finishing; completions without that call are premature and "
+    "will be blocked again."
+    "\nCompletion flow:\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    '    TurnEnd["Your turn is about to end"] --> UsedSend{"Did you use send_message since the last user message?"}\n'
+    '    UsedSend -- No --> FinishFree["Finish freely - no attestation needed"]\n'
+    '    UsedSend -- Yes --> AttestRecent{"Is attest_completion in your last 3 messages?"}\n'
+    '    AttestRecent -- Yes --> FinishGate["Finish - gate allows"]\n'
+    '    AttestRecent -- No --> Nudged["You are being nudged: work not finished"]\n'
+    '    Nudged --> CheckContinue["Check children and task status, continue working"]\n'
+    '    CheckContinue --> TrulyDone{"Work truly complete?"}\n'
+    '    TrulyDone -- "No, keep working" --> CheckContinue\n'
+    '    TrulyDone -- Yes --> Report["Deliver detailed report as its own message"]\n'
+    '    Report --> Attest["Then call attest_completion alone"]\n'
+    '    Attest --> FinishGate\n'
+    "```"
+)
+
+
+def test_attestation_nudge_text_canonical_byte_pin():
+    """Full-literal byte pin of ``ATTESTATION_NUDGE_TEXT`` — the
+    canonical literal anchor (single home: this file). Fails on ANY
+    byte change to the constant (the auto-tracking import pins above
+    cannot). When the nudge text legitimately evolves, update
+    ``EXPECTED_NUDGE_TEXT_CANONICAL`` deliberately in the same commit
+    and note the wording change in the LCA planning decisions log."""
+    assert ATTESTATION_NUDGE_TEXT == EXPECTED_NUDGE_TEXT_CANONICAL
+    # Structural guards so a bad literal can't silently equal via
+    # empty/None tricks.
+    assert EXPECTED_NUDGE_TEXT_CANONICAL.startswith(
+        "[SYSTEM CONTEXT: Completion Check Nudge]"
+    )
+    assert EXPECTED_NUDGE_TEXT_CANONICAL.rstrip().endswith("```")

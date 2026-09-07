@@ -80,15 +80,26 @@ def system_context(content: str) -> HumanMessage:
 
 
 def child_report(content: str = "child completed") -> HumanMessage:
-    """An injected child-report HumanMessage (``_frame_injected_report``
-    constructs this)."""
-    return HumanMessage(
-        content=content,
-        additional_kwargs={
-            "injected_message": True,
-            "source": "internal_report:child-1",
-        },
+    """A child-report HumanMessage in the PRODUCTION enqueue-lane
+    shape — derived from the REAL ``_build_graph_input`` constructor
+    (stamped-shape contract: ``{"injected_message": True, "source":
+    "internal_report:<iid>:<mid>"}``) rather than hand-modeled kwargs.
+
+    Fixture blind spot closed (2026-09-07 review critical): this
+    fixture previously hand-modeled the live-drain shape only, so the
+    production enqueue lane — which delivered reports BARE (no
+    additional_kwargs) to parked parents — was never exercised and the
+    report-masquerade hole went untested. Deriving from the constructor
+    keeps this fixture honest if the stamp ever drifts.
+    """
+    from daemon.services.instance_messaging import _build_graph_input
+
+    built = _build_graph_input(
+        content,
+        "fixture-msg-id",
+        message_source="internal_report:child-1:fixture-msg-id",
     )
+    return built["messages"][-1]
 
 
 def internal_agent_msg(content: str = "internal ping") -> HumanMessage:
@@ -156,6 +167,77 @@ class TestRealUserMessageExclusionClassMatrix:
         message — a child report landing as the newest message MUST
         NOT reset the delegation window."""
         assert is_real_user_message(child_report()) is False
+
+    def test_enqueue_lane_stamped_shapes_all_excluded(self) -> None:
+        """2026-09-07 review critical: every internal namespace the
+        enqueue lane stamps (``internal_report:`` /
+        ``internal_error_report:`` / ``internal_agent:`` /
+        ``system:``) is classified NOT-a-real-user-message when
+        delivered in the stamped shape. ``system:`` and
+        ``internal_error_report:`` cover the watchdog hang / wedge
+        notices and error-report rows — the sub-exposures of the
+        same root cause."""
+        from daemon.services.instance_messaging import _build_graph_input
+
+        for source in (
+            "internal_report:child-1:m-1",
+            "internal_error_report:child-1:m-1",
+            "internal_agent:caller-iid",
+            "system:watchdog",
+            "system:watchdog:wedge",
+        ):
+            built = _build_graph_input(
+                "internal delivery", f"mid-{source[:12]}", message_source=source
+            )
+            msg = built["messages"][-1]
+            # The stamped-shape contract as implemented by the
+            # constructor.
+            assert msg.additional_kwargs == {
+                "injected_message": True,
+                "source": source,
+            }, source
+            assert is_real_user_message(msg) is False, source
+
+    def test_stamped_conjunction_requires_flag_and_prefix(self) -> None:
+        """The 4b branch is a CONJUNCTION — the stamped shape is
+        classified by (internal prefix AND injected flag) together.
+        Boundary pins:
+
+        * injected flag WITHOUT any source → excluded (ladder step 3,
+          the flag is the canonical signal);
+        * internal-looking source WITHOUT the flag → NOT classified
+          by 4b (and not by the prefix-only step 4 for the
+          ``system:`` / ``internal_error_report:`` namespaces) — bare
+          means real user per the stamped-shape contract. This is the
+          anti-overreach pin: the scanner classifies the STAMPED
+          SHAPE, never a bare content heuristic.
+        """
+        flag_only = HumanMessage(
+            content="anything",
+            additional_kwargs={"injected_message": True},
+        )
+        assert is_real_user_message(flag_only) is False
+
+        bare_source_system = HumanMessage(
+            content="watchdog-shaped text",
+            additional_kwargs={"source": "system:watchdog"},
+        )
+        assert is_real_user_message(bare_source_system) is True
+
+    def test_bare_internal_report_masquerades_without_stamp(self) -> None:
+        """HAZARD DOCUMENTATION (2026-09-07 review critical): a child
+        report HumanMessage with NO additional_kwargs — the pre-fix
+        enqueue-lane shape actually delivered to parked parents — IS
+        classified as a real user message. The scanner has no bare
+        content heuristic (by design), so the constructor stamp in
+        ``_build_graph_input`` is LOAD-BEARING: if the stamp is ever
+        dropped, this pin + the constructor sweep test
+        (``test_attestation_construction_site_sweep.py``) are the two
+        tripwires that fire."""
+        bare_report = HumanMessage(
+            content="child completed — all tasks done, report follows"
+        )
+        assert is_real_user_message(bare_report) is True
 
     def test_internal_agent_dispatch_is_excluded(self) -> None:
         """``internal_agent:*`` source-prefix messages (cascade
@@ -463,3 +545,100 @@ class TestDelegationScanResultShape:
         ``send_message`` until a future migration pins a new name
         and updates the trap documentation."""
         assert DEFAULT_DELEGATION_TOOL_NAME == "send_message"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE ENQUEUE-LANE REGRESSION (2026-09-07 review critical)
+#
+# Canonical failure chain: child completes → child_reports enqueues the
+# report row + PROCESS_REPORT task → the parked parent has NO live turn,
+# so the marker-stamping live-drain never runs → the report is delivered
+# as a BARE HumanMessage (constructed by ``_build_graph_input``) → the
+# scanner ladder fell through every step → is_real_user_message=True →
+# the delegation window RESET → the gate ALLOWED an un-attested
+# delegated END. Closed by (1) the constructor stamp and (2) ladder
+# branch 4b; these tests prove the post-fix behavior end-to-end through
+# the real ``evaluate()`` gate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEnqueueLaneReportDoesNotResetDelegationWindow:
+    """A child report delivered via the ENQUEUE lane (parked parent —
+    no live drain) must NOT reset the delegation window."""
+
+    @staticmethod
+    def _enqueue_lane_report() -> HumanMessage:
+        """The report shape exactly as the production enqueue lane
+        constructs it — the REAL ``_build_graph_input`` output for an
+        ``internal_report:`` queue-row source (post-fix stamped
+        shape)."""
+        from daemon.services.instance_messaging import _build_graph_input
+
+        built = _build_graph_input(
+            "child completed — all tasks done, full report",
+            "rq-1",
+            message_source="internal_report:child-iid:rq-1",
+        )
+        return built["messages"][-1]
+
+    @staticmethod
+    def _evaluate_tail():
+        """Run the REAL gate ``evaluate()`` over the canonical
+        delegated-mission tail whose newest turn-end follows an
+        enqueue-lane report delivery."""
+        from unittest.mock import MagicMock
+
+        from daemon.services.attestation_gate import (
+            GateSettings,
+            evaluate,
+        )
+
+        manager = MagicMock()
+        manager.count_pending_children.return_value = 0
+        manager.get_queued_or_expected_wakeups.return_value = 0
+        manager.count_live_descendants.return_value = 0
+        messages = [
+            real("delegate and finish"),
+            ai("dispatching", tool_calls=send_message_call()),
+            TestEnqueueLaneReportDoesNotResetDelegationWindow._enqueue_lane_report(),
+            ai("done without attest"),
+        ]
+        return evaluate(
+            "leader-iid",
+            0,
+            messages,
+            GateSettings("enforce", 3, 3),
+            manager,
+        )
+
+    def test_delegation_window_still_armed(self) -> None:
+        """``delegation_since_last_user`` stays True — the report did
+        NOT become the new window anchor."""
+        result = self._evaluate_tail()
+        assert result.delegation_since_last_user is True
+        assert result.last_real_user_index == 0
+        assert result.last_real_user_found is True
+
+    def test_attestation_required_stays_true_and_end_denied(self) -> None:
+        """``attestation_required`` stays True and the un-attested
+        delegated END is DENIED with the nudge queued — the exact
+        outcome the masquerade hole used to defeat."""
+        from daemon.services.attestation_gate import Decision
+
+        result = self._evaluate_tail()
+        assert result.attestation_required is True
+        assert result.decision is Decision.DENIED
+        assert result.should_inject_nudge is True
+        assert result.next_denied_count == 1
+
+    def test_report_is_not_the_window_anchor(self) -> None:
+        """Scanner-level pin: the enqueue-lane report is invisible to
+        ``find_last_real_user_index`` — the original user message
+        stays the anchor even though the report is the newest
+        HumanMessage before the final AI turn."""
+        msgs = [
+            real("delegate and finish"),
+            ai("dispatching", tool_calls=send_message_call()),
+            self._enqueue_lane_report(),
+        ]
+        assert find_last_real_user_index(msgs) == 0

@@ -288,8 +288,11 @@ def attestation_seen_outside_window(
 # :func:`is_real_user_message` predicate EXCLUDES every internal/injected
 # HumanMessage (attestation nudge, child-report, ``[SYSTEM CONTEXT: …]``
 # context block, synthetic system-message via ``is_synthetic``, every
-# ``internal_agent:*`` source). The exclusion reads the additional_kwargs
-# surface — the same metadata the codebase already carries.
+# ``internal_agent:*`` source, and the 2026-09-07 enqueue-lane STAMPED
+# shape — ``injected_message=True`` + internal ``source`` — that
+# ``_build_graph_input`` constructs for internal deliveries). The
+# exclusion reads the additional_kwargs surface — the same metadata the
+# codebase already carries.
 # ════════════════════════════════════════════════════════════════════════════════
 
 
@@ -299,20 +302,41 @@ def attestation_seen_outside_window(
 #: design (the child does nothing until messaged), so spawn alone does
 #: NOT count as delegation; the user spec pins this. The constant is
 #: local (not imported) so the module stays dependency-light; the value
-#: is pinned by ``tests/unit/test_attestation_scanner.py``.
+#: is pinned by ``tests/unit/test_attestation_conditional_scanner.py``.
 DEFAULT_DELEGATION_TOOL_NAME = "send_message"
 
 #: Prefix that marks ``additional_kwargs["source"]`` values for child-report
-#: injections (``daemon/graph.py`` ``_frame_injected_report`` constructs
-#: ``source = f"internal_report:{child_iid}"``). Kept local (defense in
-#: depth — the ``injected_message=True`` flag is the canonical signal, but
-#: the source prefix is the canonical NAME for an injected report).
+#: injections. TWO construction sites mint it: the live-drain injector
+#: (``daemon/graph.py`` ``_frame_injected_report`` constructs
+#: ``source = f"internal_report:{child_iid}"``) AND the enqueue-lane
+#: constructor (``daemon/services/instance_messaging.py``
+#: ``_build_graph_input`` materializes the queue-row source onto the
+#: HumanMessage per the 2026-09-07 stamped-shape contract). Kept local
+#: (defense in depth — the ``injected_message=True`` flag is the canonical
+#: signal, but the source prefix is the canonical NAME for an injected
+#: report).
 _INTERNAL_REPORT_SOURCE_PREFIX = "internal_report:"
 
 #: Prefix that marks ``additional_kwargs["source"]`` for any internal
 #: agent-to-agent message that is NOT user-authored
 #: (``daemon/services/instance_messaging.py`` ``internal_agent:*`` tokens).
 _INTERNAL_AGENT_SOURCE_PREFIX = "internal_agent:"
+
+#: The FULL internal namespace set the enqueue lane stamps onto
+#: constructed HumanMessages (``_build_graph_input`` /
+#: ``_stamped_additional_kwargs``, 2026-09-07): ``internal_report:`` +
+#: ``internal_error_report:`` (child report / error-report rows),
+#: ``internal_agent:`` (agent-tool dispatch + cascade + revive lanes),
+#: ``system:`` (waiting-children watchdog hang / wedge notices). The
+#: stamped shape is the CONJUNCTION ``injected_message=True`` AND a
+#: ``source`` in this set — classified by ladder branch 4b in
+#: :func:`is_real_user_message`.
+_INTERNAL_STAMPED_SOURCE_PREFIXES = (
+    _INTERNAL_REPORT_SOURCE_PREFIX,
+    "internal_error_report:",
+    _INTERNAL_AGENT_SOURCE_PREFIX,
+    "system:",
+)
 
 
 def is_real_user_message(message: BaseMessage) -> bool:
@@ -351,6 +375,14 @@ def is_real_user_message(message: BaseMessage) -> bool:
        ``internal_agent:`` (agent-to-agent dispatch convention)
        ⇒ excluded. Defense in depth if the dict shim ever drops an
        ``injected_message`` flag.
+    4b. **Enqueue-lane stamped internal shape** (2026-09-07 review
+        critical) — ``injected_message==True`` AND ``source`` starting
+        with one of ``internal_report:`` / ``internal_error_report:`` /
+        ``internal_agent:`` / ``system:`` ⇒ excluded. The CONJUNCTION
+        recognizes the exact shape ``_build_graph_input`` constructs
+        for internal enqueue-lane deliveries (the pre-fix hole: those
+        messages used to arrive bare and masquerade as real user
+        messages, resetting the delegation window).
     5. **Content sentinel** — the HumanMessage body starting with
        ``"[SYSTEM CONTEXT:"`` (the standard ``[SYSTEM CONTEXT: …]``
        block prefix — the same prefix the ``_make_context_message``
@@ -395,6 +427,27 @@ def is_real_user_message(message: BaseMessage) -> bool:
     if isinstance(source, str) and (
         source.startswith(_INTERNAL_REPORT_SOURCE_PREFIX)
         or source.startswith(_INTERNAL_AGENT_SOURCE_PREFIX)
+    ):
+        return False
+
+    # 4b. Enqueue-lane STAMPED internal shape (2026-09-07 review
+    #     critical) — messages constructed by ``_build_graph_input`` for
+    #     an internal ``message_source`` carry BOTH ``injected_message:
+    #     True`` AND the queue-row ``source`` token materialized on the
+    #     message. Classification of this shape is a CONJUNCTION: the
+    #     source prefix must match an internal namespace AND the
+    #     injected flag must be present. A bare user / API message (no
+    #     kwargs) can never match; a stamped internal message can never
+    #     slip through — including the ``internal_error_report:`` and
+    #     ``system:`` namespaces the prefix-only step 4 does not cover.
+    #     This is the branch that closes the report-masquerade hole: a
+    #     parked parent's child report delivered via the enqueue lane
+    #     no longer reads as the "last real user message" and can no
+    #     longer reset the delegation window.
+    if (
+        additional_kwargs.get("injected_message") is True
+        and isinstance(source, str)
+        and source.startswith(_INTERNAL_STAMPED_SOURCE_PREFIXES)
     ):
         return False
 
