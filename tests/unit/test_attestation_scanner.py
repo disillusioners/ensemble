@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT
 from daemon.services.attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
     attestation_seen_outside_window,
@@ -225,18 +226,7 @@ class TestD10EdgeCases:
             additional_kwargs={"language_check_reminder": True},
         )
         attestation_nudge = HumanMessage(
-            content=(
-                "The work is not yet finished — check current progress "
-                "(tasks/children status) and continue. Reminder: when "
-                "— and only when — the work is truly complete, you MUST "
-                "call the attest_completion tool before finishing; "
-                "completions without that call are premature and will be "
-                "blocked again. Attestation is a SEPARATE step: FIRST "
-                "deliver your full detailed final report as its own "
-                "message, THEN call attest_completion alone as a "
-                "subsequent step — never bundle the report into the "
-                "attestation tool-call message."
-            ),
+            content=ATTESTATION_NUDGE_TEXT,
             additional_kwargs={"attestation_nudge": True},
         )
         messages = [

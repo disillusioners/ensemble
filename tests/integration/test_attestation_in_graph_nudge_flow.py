@@ -17,22 +17,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from sqlmodel import Session, select, func
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from tests.support.scripted_chat_model import ScriptedChatModel
-
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
-)
 INSTANCE_ID = "attestation-leader-e2e"
 
 
@@ -137,6 +125,15 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
 
     model = ScriptedChatModel(
         responses=[
+            # 2026-09-06 amendment: anchor as delegated so the
+            # flagship deny → nudge → route-back → attest flow is
+            # exercised (gate ON, deny fires).
+            AIMessage(
+                content="Delegating to a child.",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "e2e-dispatch"}
+                ],
+            ),
             AIMessage(content="Hallucinated completion."),
             AIMessage(
                 content="Attesting now.",

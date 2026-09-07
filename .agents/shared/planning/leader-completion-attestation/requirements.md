@@ -695,3 +695,41 @@ Closes the 809e2a59 waiting_children false-deny incident class (transitive grand
 ### FR-10 schema amendment (additive — original 15 fields preserved, one appended)
 
 The FR-10 canonical log schema as ratified above is EXTENDED by ONE additive field — `live_descendants: int` — appended to `CANONICAL_LOG_SCHEMA_FIELDS` (now 16 fields, exported at `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS`). The DB-seam fail-open path (`event=leader_completion_gate_db_error`) emits `live_descendants=-1` alongside the existing two `-1` sentinels (`pending_children=-1`, `queued_or_expected_wakeups=-1`). The scanner-fail-open path (`event=leader_completion_gate_error`) emits `live_descendants=-1` alongside the existing UNKNOWN sentinels. `docs/setup.md:545, :548, :576` updated to document the 16-field schema and the three-input deny predicate.
+
+### FR-3 conditionality amendment (2026-09-06 — replace the unconditional deny with a delegation-gated deny)
+
+The FR-3 deny predicate as ratified above (unconditional: "NOT attested AND `pending_children == 0` AND `queued_or_expected_wakeups == 0` AND `live_descendants == 0`") is REPLACED by a CONDITIONAL predicate:
+
+- `attestation_required == True` (computed by the new R0 input `delegation_since_last_user := send_message tool call in AIMessages at-or-after the last real user message), AND
+- `NOT attested`, AND
+- `pending_children == 0`, AND
+- `queued_or_expected_wakeups == 0`, AND
+- `live_descendants == 0` ← preserved from the 2026-09-06 third-input amendment.
+
+When `attestation_required == False` (no `send_message` tool call since the last real user message), the gate ALLOWS without demanding `attest_completion` — a quick follow-up question, chart rendering, or other non-delegating turn completes normally. The decision value is `ALLOWED` (no new enum member; the schema field carries the verdict). The counter math is unchanged (a non-fire is NOT one of the four reset triggers per leader ruling 1).
+
+DEGENERATE FALLBACK: when no real user message exists in the conversation (`is_real_user_message` returns `False` for every HumanMessage; `find_last_real_user_index` returns `-1`), the conditional scanner falls back to walking the WHOLE message list — `delegation_since_last_user` becomes `True` IFF any `send_message` tool call appears anywhere. Conservative, preserves the prior deny protection if the real-user anchor drifts.
+
+SELF-REFERENCE TRAP (design trap, closed): the deny-path injection is a `HumanMessage` carrying `additional_kwargs["attestation_nudge"] == True`. The `is_real_user_message` predicate excludes this marker — the deny nudge does NOT shift the delegation anchor, so the gate stays ON across deny→nudge→next-turn-end cycles. Without this exclusion the feature would self-defeat on the first deny.
+
+### FR-4 nudge amendment (2026-09-06 — system-context header + self-sufficient body)
+
+The FR-4 in-graph nudge text as ratified above (the body starting with `"The work is not yet finished — check current progress ..."`) is AMENDED to:
+
+1. Lead with a single non-blank header line `[SYSTEM CONTEXT: Completion Check Nudge]` (so the LLM parses it as system-origin at read time). The header is the system-origin marker; the underlying message role remains user-authored (R1 — checkpoint-durable). The header DOES NOT change the `additional_kwargs["attestation_nudge"] == True` marker that the scanner exclusion predicate reads.
+2. Expand the body to RESTATE the conditional semantics ("This gate is CONDITIONAL on delegation: it fires ONLY when a child was dispatched (a `send_message` tool call happened) since the last real user message. Plain questions, chart requests, and other non-delegating turns do NOT trigger this gate. When you have dispatched a child this mission, the work is not complete until you attest.") — the runtime nudge is now self-sufficient because the prompts no longer teach the unconditional MUST-call contract.
+3. PRESERVE the substance ("The work is not yet finished — check current progress (tasks/children status) and continue") and the two-step teaching ("FIRST deliver your full detailed final report as its own message; THEN call `attest_completion` ALONE as a subsequent step — never bundle the report into the attestation tool-call message").
+
+All NUDGE_TEXT verbatim pin tests updated. The marker kwargs (`attestation_nudge: True`, `attestation_nudge_denied_count: int`) are UNCHANGED — back-compat with the scanner exclusion predicate. The text is pinned by `daemon.graph.ATTESTATION_NUDGE_TEXT` (the single source of truth) and imported by all tests via `from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT` (no per-file hardcoded copies).
+
+CONVENTION EXCEPTION (appendix): per the App Architecture blueprint, `[SYSTEM NOTE: …]` frames are data-only. The user explicitly asked for a `[SYSTEM CONTEXT: Completion Check Nudge]` header on the deny-path HumanMessage so the LLM recognizes it as system-origin. This APPEND-ONLY exception REUSES the existing `[SYSTEM CONTEXT: ` prefix deliberately so the same `is_real_user_message` content-sentinel exclusion (step 5 of the exclusion ladder — body starts with `[SYSTEM CONTEXT:`) catches it symmetrically. No new prefix is introduced; no existing prefix convention is broken.
+
+### FR-10 schema amendment #2 (2026-09-06 — schema grows 16→17 fields)
+
+The FR-10 canonical log schema as extended above (16 fields) is FURTHER EXTENDED by ONE additive field — `attestation_required: bool` — appended to `CANONICAL_LOG_SCHEMA_FIELDS` (now 17 fields, exported at `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS`). The field is positioned AFTER `live_descendants` in the canonical tuple (grouped with the conditional/R2 input family). The DB-seam fail-open path (`event=leader_completion_gate_db_error`) and the scanner-fail-open path (`event=leader_completion_gate_error`) emit `attestation_required=False` (the safe fail-OPEN default — failing closed would deny un-attested completion on the scanner fault class, which the C3 fail-open ruling rejects).
+
+SUPPLEMENTARY DIAGNOSTIC FIELDS (NOT in the canonical 17-field schema tuple, but emitted in the format-string log line for dry-mode soak and FR-3 conditionality audit): `delegation_since_last_user` (bool — mirror of the scanner verdict; the same exclusion-predicate semantics the gate uses), `last_real_user_found` (bool), `last_real_user_index` (int, -1 when no real user message exists), `first_delegation_after_last_user_index` (int, -1 when no `send_message` tool call at-or-after the last real user message), `delegation_tool_call_total` (int — normalized log shape). `docs/setup.md:545, :548, :576` updated to document the 17-field schema, the conditional predicate, and the deny-log diagnostic surface.
+
+### NFR-6 nudge text (VER-6.4 — verbatim pin remains, content amended)
+
+The NFR-6 verbatim pin of the in-graph nudge text remains in force — `tests/unit/test_attestation_nudge_inject.py::test_deny_injects_checkpoint_plain_dict_and_routes_to_agent` AND `tests/unit/test_attestation_nudge_inject.py::test_nudge_header_is_first_nonblank_line_and_marker_unchanged` pin the new content via `daemon.graph.ATTESTATION_NUDGE_TEXT` (the single source of truth, imported by all integration tests). The verbatim-pin convention is unchanged: integration tests import the canonical constant rather than hardcoding a per-file copy.

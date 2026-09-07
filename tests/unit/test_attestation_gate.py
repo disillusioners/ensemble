@@ -29,11 +29,23 @@ from daemon.services.attestation_gate import (
     Decision,
     GateSettings,
     build_gate_config,
-    decide,
+    decide as _decide_impl,
     evaluate,
     resolve_gate_settings,
 )
 from daemon.services.attestation_scanner import DEFAULT_ATTESTATION_TOOL_NAME
+
+
+# Helper for the decide() matrix: 2026-09-06 amendment made
+# ``attestation_required`` a keyword-only required parameter (the
+# user-spec'd conditional gate). All legacy decide()-matrix tests in
+# this file exercise the delegated-mission branch (gate ON), so the
+# helper defaults ``attestation_required=True``. Tests that exercise
+# the new conditional-gate-OFF branch import the bare ``decide`` and
+# pass ``attestation_required=False`` explicitly.
+def decide(*args, **kwargs):
+    kwargs.setdefault("attestation_required", True)
+    return _decide_impl(*args, **kwargs)
 
 
 def ai(content="working", tool_calls=None):
@@ -53,9 +65,22 @@ def attest_messages():
 
 
 def plain_messages():
-    """A message tail with NO attestation (hallucinated completion)."""
+    """A message tail with NO attestation but WITH a dispatched
+    child (delegated mission — the 2026-09-06 conditional-attestation
+    gate amendment requires a real delegation for the deny branch to
+    fire; without a ``send_message`` tool call the gate correctly
+    ALLOWS without demanding the toolcall — see the user-spec'd
+    chart-request / quick-follow-up cases).
+    """
     return [
         HumanMessage(content="go"),
+        # Delegated mission: the AI dispatched a child via send_message.
+        ai(
+            "",
+            tool_calls=[
+                {"name": "send_message", "args": {"target": "child"}, "id": "dispatch"}
+            ],
+        ),
         ai("Working on it."),
         ai("Everything is complete."),
     ]
@@ -339,7 +364,15 @@ class TestEvaluateComposition:
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP  # R2-allow (DEFAULT=enforce; pending=3, wakeups=1)
 
     def test_attest_seen_outside_window_populated(self):
+        # 2026-09-06 amendment: the conditional gate only fires for
+        # DELEGATED missions. Add a HumanMessage (real user) and a
+        # send_message tool call to represent the delegated-mission
+        # branch the test exercises.
         messages = [
+            HumanMessage(content="go"),
+            ai("dispatching child", tool_calls=[
+                {"name": "send_message", "args": {"target": "child"}, "id": "dispatch"}
+            ]),
             ai("stale", tool_calls=[{"name": DEFAULT_ATTESTATION_TOOL_NAME, "args": {}, "id": "old"}]),
         ]
         # 4 newer AIMessages push the attestation OUTSIDE the N=3 window.

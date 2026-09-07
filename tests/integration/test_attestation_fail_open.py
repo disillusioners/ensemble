@@ -102,7 +102,20 @@ async def test_ledger_operational_error_allows_completion_and_logs_db_error(
 ):
     repo, _instance = attestation_repository
     manager = attestation_manager_factory(file_sqlite_engine, repo)
-    model = ScriptedChatModel(responses=[AIMessage(content="unattested")], i=0)
+    # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+    # ledger-fail-open DB-seam path is exercised on a denied mission.
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            AIMessage(content="unattested"),
+        ],
+        i=0,
+    )
     graph = _build(real_graph_module, model, manager, memory_saver)
 
     def ledger_boom(*args, **kwargs):

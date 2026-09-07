@@ -133,7 +133,21 @@ async def test_pending_wakeup_inputs_allow_without_nudge_or_reset(
     repo.set_completion_gate_escalated(INSTANCE_ID)
     before = repo.get(INSTANCE_ID)
 
-    model = ScriptedChatModel(responses=[AIMessage(content="done without attestation")], i=0)
+    model = ScriptedChatModel(
+        responses=[
+            # 2026-09-06 amendment: gate is conditional on
+            # delegation. Anchor the mission as delegated so the
+            # legacy wakeup/pending allow path is exercised.
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            AIMessage(content="done without attestation"),
+        ],
+        i=0,
+    )
     graph = _build(real_graph_module, model, manager, memory_saver)
     with caplog.at_level(logging.INFO):
         state = await graph.ainvoke(
@@ -149,4 +163,8 @@ async def test_pending_wakeup_inputs_allow_without_nudge_or_reset(
     assert after.attestation_denied_count == before.attestation_denied_count == 2
     assert after.completion_gate_escalated is True
     manager.enqueue_message.assert_not_called()
-    assert model.calls_made == 1
+    # 2026-09-06 amendment: with the conditional gate, we must
+    # anchor as delegated so the legacy wakeup allow path is
+    # exercised. That adds one LLM call (the dispatch step) on top
+    # of the trailing "done without attestation" turn-end AIMessage.
+    assert model.calls_made == 2

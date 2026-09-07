@@ -747,3 +747,104 @@ existing two `-1` sentinels. The scanner-fail-open path also reports
   live_descendants arm; canonical schema field assertion grows to 16).
 - `tests/integration/test_attestation_live_descendants.py` (NEW —
   acceptance suite (a)-(g)).
+
+---
+
+## 2026-09-06 — Conditional attestation (delegation-gated) + system-context nudge header (Phase 6 fastfollow, user decision)
+
+**Status:** APPLIED 2026-09-06 on `feature/leader-completion-attestation`.
+**Trigger:** User decision after observing the unconditional `attest_completion` requirement produced unnecessary friction on quick-turn commands (the user's quoted examples: quick follow-up questions, chart requests). The unconditional-MUST gate forces a leader who produced a simple non-delegating answer to round-trip through `attest_completion` for no correctness reason — a "the leader is hallucinating completion" failure mode that the gate is built to prevent does NOT apply when no children were dispatched.
+
+### Context
+
+The original Phase 1 contract instructed the leader LLM to call `attest_completion` BEFORE declaring done in plain text, on every turn (unconditional). This catches the leader-hallucinating-completion failure mode BUT also fires on missions where the leader did not delegate to any child — plain text answers to follow-up questions, chart renderings (the `generate_chart` tool call alone), clarification responses. Each such turn would (a) require the toolcall and (b) on every would-be deny, the gate's in-graph nudge got injected — adding noise without protecting anything.
+
+The user-spec'd change: the gate is CONDITIONAL on delegation. A `send_message` tool call since the last real user message flips the conditional requirement ON. Without `send_message`, the gate allows END without demanding `attest_completion`. The user's quote: "no delegation, no hallucination risk."
+
+### Decision (option-a, additive — same as the prior third-input pattern)
+
+The conditional-attestation scanner walks the AIMessage tail at-or-after the last REAL user message and detects any `send_message` tool call. The denial predicate is gated on `delegation_since_last_user`:
+- `True` ⇒ existing deny / nudge / bound / escalation logic UNCHANGED.
+- `False` ⇒ ALLOWED without demanding the toolcall (counter untouched, no nudge, no metric tick).
+- DEGENERATE FALLBACK: if no real user message exists in the conversation, the conservative path falls back to walking the WHOLE message list — `delegation_since_last_user` becomes `True` IFF any `send_message` tool call appears anywhere in history. Defense against silent regression if the real-user anchor drifts.
+
+A 17th canonical log schema field `attestation_required: bool` (POSITIONED AFTER `live_descendants` in the canonical tuple, grouped with the conditional/R2 input family) carries the verdict into the operator log; supplementary diagnostic fields `last_real_user_found`, `last_real_user_index`, `first_delegation_after_last_user_index`, `delegation_tool_call_total`, `delegation_since_last_user` ride the format-string log alongside the canonical tuple. Same Pattern C additive shape as the prior `live_descendants` amendment.
+
+The R2 decision tree grows by ONE branch in `decide()` — `enforce + not attestation_required → ALLOWED` (counter unchanged, no nudge). Inserted as branch (3), BEFORE the existing attested-allow branch (now (4)); the rest of the tree is a re-numbering only.
+
+### Self-reference trap (the must-design-out failure mode)
+
+**Critical design trap:** the deny-path nudge is injected as a `HumanMessage`. If the `is_real_user_message` predicate allowed it through, the deny → nudge → next-turn-end sequence would reset the delegation window on every deny — the gate would relax as soon as a deny fired, and the feature would self-defeat.
+
+The exclusion predicate (defense in depth — every metadata surface the codebase already carries) reads:
+
+1. `not isinstance(HumanMessage)` — type gate (AIMessage / SystemMessage / ToolMessage / RemoveMessage excluded).
+2. `additional_kwargs["attestation_nudge"] == True` — the gate's own deny injection (THE critical exclusion).
+3. `additional_kwargs["injected_message"] == True` OR `additional_kwargs["is_synthetic"] == True` — the `_make_context_message` context-block factory marker AND the synthetic-system marker.
+4. `additional_kwargs["source"]` starting with `"internal_report:"` (child-report convention from `_frame_injected_report`) OR `"internal_agent:"` (agent-to-agent dispatch convention from `instance_messaging.py`).
+5. `content` starting with `"[SYSTEM CONTEXT:"` — content sentinel (canonical CONTEXT_PREFIX from `context_messages.py:_make_context_message`). Belt-and-suspenders if a future kwargs shim ever drops a flag.
+
+### Nudge amendment (system-context header + self-sufficiency)
+
+The `ATTESTATION_NUDGE_TEXT` constant is now led by a single non-blank header line:
+
+```
+[SYSTEM CONTEXT: Completion Check Nudge]
+```
+
+followed by a blank line and the body. The header is a system-origin marker so the LLM recognizes the message as system-authored at parse time (despite the underlying message role remaining user-authored — the header is the marker). The body has been expanded to:
+- restate the CONDITIONAL semantics ("This gate is CONDITIONAL on delegation: it fires ONLY when a child was dispatched (a `send_message` tool call happened) since the last real user message. Plain questions, chart requests, and other non-delegating turns do NOT trigger this gate. When you have dispatched a child this mission, the work is not complete until you attest.");
+- keep the two-step teaching ("FIRST deliver your full detailed final report as its own message; THEN call `attest_completion` ALONE as a subsequent step — never bundle the report into the attestation tool-call message");
+- keep the substance ("the work is not yet finished — check current progress (tasks/children status) and continue") and the MUST-for-delegated-missions reminder.
+
+The prompt contract is now SLIM:
+- `agents/leader/rule.md` — replaced the unconditional MUST-call block with a CONDITIONAL "When this mission DID delegate (any `send_message` tool call since the last user message)" block. The unconditional `Before declaring yourself done, you MUST call the attest_completion tool` sentence is RETRACTED.
+- `agents/leader/workflow.md` — the one-line pointer names the tool + the rule canonical home + the conditional semantics; no verbatim restatement.
+- `daemon/tools/attestation.py` — module docstring and `CATEGORY_DOC` softened from "the leader LLM MUST call" to "the leader LLM calls" + a CONDITIONAL-semantics paragraph pointing at `daemon/services/attestation_scanner.py` (`is_real_user_message` + `scan_delegation_after_last_user`).
+- The marker kwargs on the nudge `HumanMessage` are UNCHANGED (`additional_kwargs["attestation_nudge"] = True`); the in-graph seam stays the same.
+
+The unconditional-MUST contract fragments are GONE from `rule.md`; the prompt-contract test pins both the new conditional fragments AND the absence of the retracted unconditional fragments.
+
+### Convention exception (appendix — `[SYSTEM CONTEXT: ...]` on a deny-path HumanMessage)
+
+Per the "App Architecture blueprint", `[SYSTEM NOTE: ...]` frames are data-only. The user explicitly asked for a `[SYSTEM CONTEXT: Completion Check Nudge]` header on the deny-path HumanMessage so the LLM recognizes it as system-origin at parse time. This is an APPEND-ONLY exception: the existing `[SYSTEM CONTEXT: …]` injection convention (the `CONTEXT_PREFIX` from `daemon/services/context_messages.py`) is reserved for `_make_context_message` content blocks. The deny-nudge header REUSES the `[SYSTEM CONTEXT: ` prefix deliberately so the predicate's content-sentinel exclusion (exclusion ladder step 5) catches it symmetrically — a single exclusion class for "HumanMessages whose body starts with `[SYSTEM CONTEXT:`". No new prefix is introduced; no existing prefix convention is broken.
+
+### Performance
+
+The conditional scanner walks the AIMessage tail at-or-after the last real user message. In the worst case (long conversation with no real-user anchor, fallback to whole list) the walk is O(len(messages)) AIMessage inspections — bounded by the proactive-compaction summary boundary. The cost is amortized into the existing gate-decision budget; no new hot-path I/O. P95 timing unchanged.
+
+### DO NOT TOUCH
+
+- The decision enum value set (5-valued — no new member; `ALLOWED` is reused with the schema's `attestation_required=False` flag).
+- The marker kwargs on the deny-nudge injection (`attestation_nudge=True`, `attestation_nudge_denied_count=<n>`) — back-compat.
+- The R0 inputs (pending_children, queued_or_expected_wakeups, live_descendants) — unchanged.
+- The `attest_completion` tool semantics — unchanged (idempotent no-op).
+- The 5-value canonical decision enum.
+
+### Tests (acceptance suite — all required, all green at ship)
+
+(a) delegation mission without attest → DENY + nudge (unchanged protection) — pinned in `tests/unit/test_attestation_nudge_inject.py::test_deny_injects_checkpoint_plain_dict_and_routes_to_agent` with a `send_message` AIMessage in the mission state;
+(b) quick-question mission (real user msg, NO send_message, plain answer, no attest) → ALLOWED, `attestation_required=False` — pinned in `tests/unit/test_attestation_nudge_inject.py::test_quick_question_mission_allows_without_attest` AND in `tests/unit/test_attestation_conditional_gate_outcomes.py::test_quick_question_returns_allowed_with_attestation_required_false` + full-graph `test_quick_question_full_graph_terminates_without_nudge_or_attest`;
+(c) chart mission (`generate_chart` toolcall, no send_message) → ALLOWED — pinned in `tests/unit/test_attestation_conditional_gate_outcomes.py::test_chart_request_returns_allowed_with_attestation_required_false` + full-graph `test_chart_mission_full_graph_terminates_without_nudge_or_attest`;
+(d) delegation + attest → ALLOWED, counter reset — pinned in `tests/unit/test_attestation_conditional_gate_outcomes.py::test_delegation_attested_returns_allowed_with_reset`;
+(e) THE SELF-REFERENCE TRAP — deny-nudge fires, then next turn-end STILL requires attestation (nudge did NOT reset the window) — pinned in `tests/unit/test_attestation_conditional_scanner.py::TestSelfReferenceTrapDenyNudgeDoesNotResetWindow` (two tests) AND `tests/unit/test_attestation_conditional_gate_outcomes.py::TestSelfReferenceTrapEvaluateLevel::test_after_deny_nudge_gate_still_requires_attestation`;
+(f) child-report HumanMessage does not reset the window — pinned in `tests/unit/test_attestation_conditional_scanner.py::TestRealUserMessageExclusionClassMatrix::test_child_report_is_excluded` AND `tests/integration/test_attestation_live_descendants.py` (the original live_descendants tests retain their child-mission shape and continue to pass with the conditional gate ON);
+(g) no-real-user-message fallback — pinned in `tests/unit/test_attestation_conditional_scanner.py::TestScanDelegationAfterLastUser::test_no_real_user_message_falls_back_to_whole_list` + `TestConditionalGateEvaluateOutcomes::test_no_real_user_message_with_stale_delegation_flips_to_required`;
+(h) nudge header present + marker unchanged — pinned in `tests/unit/test_attestation_nudge_inject.py::test_nudge_header_is_first_nonblank_line_and_marker_unchanged`;
+(i) scanner unit matrix for the exclusion classes (real / nudge / [SYSTEM CONTEXT] / child_report / internal_agent / synthetic / AIMessage / SystemMessage / content-sentinel-only / combined-marker-and-source) — pinned in `tests/unit/test_attestation_conditional_scanner.py::TestRealUserMessageExclusionClassMatrix` (9 cases).
+
+### Files
+
+- `daemon/services/attestation_scanner.py` (new) — `is_real_user_message` predicate, `find_last_real_user_index`, `DelegationScanResult`, `scan_delegation_after_last_user`, `DEFAULT_DELEGATION_TOOL_NAME = "send_message"`. Pure-function module; no I/O.
+- `daemon/services/attestation_gate.py` — `decide()` grows `attestation_required` keyword-only param (branch (3) — `enforce + not attestation_required → ALLOWED`); `CANONICAL_LOG_SCHEMA_FIELDS` grows 16→17 fields (`attestation_required` appended after `live_descendants`); `GateDecision` grows 5 supplementary diagnostic fields (`delegation_since_last_user`, `last_real_user_found`, `last_real_user_index`, `first_delegation_after_last_user_index`, `delegation_tool_call_total`); `evaluate()` calls `scan_delegation_after_last_user` and threads the verdict through `decide()` + the format-string log emission.
+- `daemon/graph.py` — `ATTESTATION_NUDGE_TEXT` gains the `[SYSTEM CONTEXT: Completion Check Nudge]` header line + the conditional-semantics body + the self-sufficient two-step contract. Marker kwargs on the deny-path injection UNCHANGED.
+- `daemon/tools/attestation.py` — module docstring + `CATEGORY_DOC` + tool docstring + `_full_doc_` softened to conditional language.
+- `agents/leader/rule.md` — replaced the unconditional `### 📜 Completion Attestation (LCA feature, Phase 1)` block with `### 📜 Completion Attestation (LCA feature — conditional, 2026-09-06)` (the conditional MUST-for-delegated-missions contract).
+- `agents/leader/workflow.md` — the one-line pointer refreshed to identify the conditional semantics.
+- `requirements.md` — append-only amendment section (see immediately below).
+- `tests/unit/test_attestation_prompt_contract.py` — `CONTRACT_FRAGMENTS` rewritten for conditional semantics; `UNCONDITIONAL_MUST_CONTRACT_FRAGMENTS` (absent-pins the retracted unconditional contract); `CONTRACT_HEADING_ANCHOR` retargeted; new `test_unconditional_must_contract_removed` parameter; new `test_pointer_names_conditional_semantics` on workflow.md.
+- `tests/unit/test_attestation_nudge_inject.py` — `test_deny_injects_checkpoint_plain_dict_and_routes_to_agent` injects `send_message` AIMessage (delegated-mission matrix); NEW `test_quick_question_mission_allows_without_attest` (core case b); NEW `test_nudge_header_is_first_nonblank_line_and_marker_unchanged` (case h).
+- `tests/unit/test_attestation_conditional_scanner.py` (NEW — 26 tests, exclusion-class matrix + delegation walk + self-reference trap + DelegationScanResult shape pin).
+- `tests/unit/test_attestation_conditional_gate_outcomes.py` (NEW — 14 tests, evaluate()/graph-node matrix for cases (a)/(b)/(c)/(d)/(e)/(g) + canonical schema 17-field pin + full-graph delegated-still-denies pin).
+- All integration tests that previously hardcoded `NUDGE_TEXT = (...)` rewritten to `from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT` — the single-source-of-truth fix eliminates per-file prose drift.
+- All integration tests that previously inferred a non-delegated baseline updated to anchor the mission as DELEGATED (a `send_message` AIMessage as the scripted model's first response) — the legacy deny / wakeup-allow / bound-escalation / counter-reset semantics continue to exercise against the conditional-gate-ON branch.

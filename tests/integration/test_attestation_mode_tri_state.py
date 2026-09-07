@@ -60,9 +60,12 @@ def _nudge_count(messages) -> int:
 @pytest.mark.parametrize(
     "mode,expected_nudges,expected_decision,expected_calls,expected_denies",
     [
-        ("off", 0, None, 1, 0),
-        ("dry", 0, "dry_log", 1, 0),
-        ("enforce", 2, "denied", 4, 2),
+        # 2026-09-06 amendment: each "calls" count grows by 1 because
+        # the model now anchors the mission with a send_message
+        # delegation step before the un-attested hallucinated turns.
+        ("off", 0, None, 2, 0),
+        ("dry", 0, "dry_log", 2, 0),
+        ("enforce", 2, "denied", 5, 2),
     ],
     ids=["mode-off", "mode-dry", "mode-enforce"],
 )
@@ -84,6 +87,16 @@ async def test_tri_state_mode_semantics_are_separate(
     manager = attestation_manager_factory(file_sqlite_engine, repo)
     model = ScriptedChatModel(
         responses=[
+            # 2026-09-06 amendment: gate is conditional on
+            # delegation. Anchor as delegated so the
+            # deny/attest/dry-mode semantics continue to exercise
+            # the bound path.
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
             AIMessage(content="hallucinated end"),
             AIMessage(content="still not done"),
             AIMessage(

@@ -2804,17 +2804,39 @@ def create_should_continue(language_check_enabled: bool):
 
 #: Server-authored nudge text (R1 / NFR-6 — EXACT constant; Phase 6's
 #: recovery injector reuses the same text).
+#:
+#: 2026-09-06 conditional-attestation amendment: the nudge now leads
+#: with a ``[SYSTEM CONTEXT: …]`` header line so the LLM recognizes it
+#: as system-origin (mirroring the established
+#: ``_make_context_message`` factory style — same prefix discipline, a
+#: single non-blank header line). It also explains the conditional
+#: semantics: the gate fires ONLY when a ``send_message`` child
+#: dispatch occurred since the last real user message. Quick follow-up
+#: questions, chart requests, and other non-delegating turns do NOT
+#: trigger the gate. The nudge is now SELF-SUFFICIENT — the prompts no
+#: longer teach the unconditional MUST-call contract; this text IS the
+#: instruction source for delegated missions.
 ATTESTATION_NUDGE_TEXT = (
+    "[SYSTEM CONTEXT: Completion Check Nudge]\n\n"
     "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
+    "(tasks/children status) and continue.\n\n"
+    "This gate is CONDITIONAL on delegation: it fires ONLY when a "
+    "child was dispatched (a send_message tool call happened) since "
+    "the last real user message. Plain questions, chart requests, "
+    "and other non-delegating turns do NOT trigger this gate. When "
+    "you have dispatched a child this mission, the work is not "
+    "complete until you attest.\n\n"
+    "Attestation is a SEPARATE step: FIRST deliver your full "
+    "detailed final report as its own message (outcomes, evidence, "
+    "follow-ups), THEN call attest_completion ALONE as a "
+    "subsequent step — never bundle the report into the attestation "
+    "tool-call message (at most a one-line ack such as \"Report "
+    "delivered above; attesting completion.\").\n\n"
+    "Reminder: when — and only when — the work is truly complete "
+    "(delegated children have all reported and you have the full "
+    "picture), you MUST call the attest_completion tool before "
+    "finishing; completions without that call are premature and "
+    "will be blocked again."
 )
 
 #: Graph node name + conditional-route name for the attestation gate.

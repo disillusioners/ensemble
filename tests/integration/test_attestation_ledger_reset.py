@@ -54,6 +54,25 @@ def _build(graph_module, model, manager, checkpointer):
 def _script():
     return ScriptedChatModel(
         responses=[
+            # 2026-09-06 conditional gate: anchor the mission as
+            # delegated (send_message tool call) so the
+            # ``attestation_required==True`` branch is exercised
+            # and the deny/allow mix still produces
+            # ``decision=denied`` ×2 + ``decision=allowed`` ×2
+            # across the two mission calls below. Without the
+            # anchor the conditional gate routes everything to
+            # the ALLOWED-when-not-required branch and the deny
+            # counter is never incremented.
+            AIMessage(
+                content="delegating to a child",
+                tool_calls=[
+                    {
+                        "name": "send_message",
+                        "args": {"target": "child"},
+                        "id": "ledger-reset-anchor",
+                    }
+                ],
+            ),
             AIMessage(content="plain completion"),
             AIMessage(
                 content="attest",

@@ -1,14 +1,26 @@
 """Leader completion attestation tools.
 
 This module exposes a single tool, ``attest_completion``, that the
-leader LLM MUST call when its work for the current turn is genuinely
-complete (see ``agents/leader/rule.md`` for the prompt contract). The
-tool is a deterministic no-op aside from returning a confirmation
-frame; the attestation is recorded by virtue of the tool call existing
-in the leader's message stream. The Phase 2 in-graph completion gate
-(``D1 = B`` per ``architecture-recommendation.md``) scans the most
-recent ``N`` AIMessages for an ``attest_completion`` tool_call to
-decide whether to allow or deny the END transition.
+leader LLM calls when its work for the current turn is genuinely
+complete. The tool is a deterministic no-op aside from returning a
+confirmation frame; the attestation is recorded by virtue of the tool
+call existing in the leader's message stream. The Phase 2 in-graph
+completion gate (``D1 = B`` per ``architecture-recommendation.md``)
+scans the most recent ``N`` AIMessages for an ``attest_completion``
+tool_call to decide whether to allow or deny the END transition.
+
+**Conditional semantics (2026-09-06, FR-3 conditionality):** the gate
+is OFF for missions that did NOT delegate (no ``send_message`` tool
+call since the last real user message) — those complete normally
+without the gate firing. The gate is ON ONLY for delegated missions;
+``attest_completion`` is the leader's signal that delegated children
+have all reported and the work is finished. The full prompt contract
+(per-agent instruction) lives in ``agents/leader/rule.md`` under
+"📜 Completion Attestation (LCA feature — conditional, 2026-09-06)";
+the gate's runtime nudge (``ATTESTATION_NUDGE_TEXT`` in
+``daemon/graph.py``) is now self-sufficient and leads with a
+``[SYSTEM CONTEXT: Completion Check Nudge]`` header so the LLM
+recognizes it as system-origin.
 
 Scope and authorization
 -----------------------
@@ -67,8 +79,12 @@ logger = logging.getLogger(__name__)
 CATEGORY_NAME = "Attestation"
 CATEGORY_DOC = """\
 Leader completion attestation — a deterministic no-op signal that the
-leader LLM MUST call when its work for the current turn is genuinely
-complete.
+leader LLM calls when its work for the current turn is genuinely
+complete. The completion gate is CONDITIONAL on delegation
+(2026-09-06, FR-3): it fires ONLY when this mission dispatched a
+child via ``send_message``. Non-delegating turns (plain questions,
+chart requests, quick follow-ups) complete normally without the gate
+firing.
 
 - ``attest_completion()``: no-arg, idempotent. Returns a confirmation
   frame ``{"attested": true, "timestamp": "<iso8601>"}``. The
@@ -83,7 +99,11 @@ tri-state env ``ENSEMBLE_LEADER_ATTESTATION_MODE`` defaults to
 ``enforce`` at ship (operator override 2026-09-06 — flipped from
 ``dry``; dry-at-ship D2 rationale superseded). ``off`` is the
 instant-revert / kill-switch (restart-read Pattern C — no live flip);
-``dry`` remains available for observation-only operation.
+``dry`` remains available for observation-only operation. For
+CONDITIONAL semantics, see
+``daemon/services/attestation_scanner.py`` (``is_real_user_message``
+predicate + ``scan_delegation_after_last_user``) — the gate is OFF
+when the delegation scan returns ``delegation_since_last_user=False``.
 
 Scope: leader-scoped via explicit ``agents/leader/meta.json``
 ``tools.allow`` opt-in; NOT privileged per D7 (CLOSED-by-leader).
@@ -105,16 +125,19 @@ def attest_completion() -> dict[str, Any]:
     calling it any number of times in the same turn has the same
     effect as calling it once.
 
-    The leader MUST call this tool before declaring itself done (see
-    the prompt contract in ``agents/leader/rule.md``). Two-step
-    contract: FIRST deliver the full detailed final report as its own
-    message, THEN call this tool ALONE in a subsequent step — the
-    attestation tool-call message must NOT contain the report (at
-    most a one-line ack). If a
-    continuation nudge arrives ("The work is not yet finished —
-    check current progress (tasks/children status) and continue."), treat it as a real
-    user instruction, complete the remaining work, and call this
-    tool again.
+    The completion gate is CONDITIONAL on delegation (2026-09-06,
+    FR-3) — this tool only carries the attestation for a DELEGATED
+    mission (one that dispatched a child via ``send_message``). For a
+    non-delegating turn (plain question, chart request, quick
+    follow-up) the gate does not fire and this tool is not needed.
+    When you DID delegate: two-step contract — FIRST deliver the full
+    detailed final report as its own message, THEN call this tool
+    ALONE in a subsequent step — the attestation tool-call message
+    must NOT contain the report (at most a one-line ack). If a
+    continuation nudge arrives (a user message whose body begins with
+    ``[SYSTEM CONTEXT: Completion Check Nudge]``), treat it as a real
+    user instruction, complete the remaining delegated work, and call
+    this tool again.
 
     Returns:
         A confirmation frame ``{"attested": True,
@@ -129,13 +152,17 @@ def attest_completion() -> dict[str, Any]:
 attest_completion._full_doc_ = """\
 Record that the leader's work for this turn is genuinely complete.
 
-The leader LLM MUST call this tool before declaring itself done (see
-the prompt contract in ``agents/leader/rule.md``). The tool is a
-deterministic no-op aside from returning a confirmation frame; the
-attestation is recorded by virtue of the tool call existing in the
-leader's message stream. The Phase 2 in-graph completion gate scans
-the most recent ``N`` AIMessages for an ``attest_completion``
-tool_call to decide whether to allow or deny the END transition.
+The completion gate is CONDITIONAL on delegation (2026-09-06,
+FR-3) — this tool is the attestation signal ONLY for a delegated
+mission (a mission that dispatched a child via ``send_message``
+since the last real user message). For non-delegating turns the
+gate does not fire. The full prompt contract is in
+``agents/leader/rule.md``. The tool is a deterministic no-op aside
+from returning a confirmation frame; the attestation is recorded by
+virtue of the tool call existing in the leader's message stream.
+The Phase 2 in-graph completion gate scans the most recent ``N``
+AIMessages for an ``attest_completion`` tool_call to decide whether
+to allow or deny the END transition.
 
 Idempotency: calling this tool any number of times in the same turn
 has the same effect as calling it once. The Phase 2 scanner contract
@@ -148,17 +175,17 @@ NOT privileged per D7 (CLOSED-by-leader) — full argument in the
 does NOT mutate state, enqueue work, or write to the journal.
 
 Usage:
-- Call exactly once when the leader's work is genuinely complete
-  and the leader is about to be done.
-- Two-step contract: the full detailed final report is delivered as
-  its own message FIRST (normal completion-report discipline); this
-  tool is then called ALONE as a separate subsequent step — never
-  bundled into the report message (the attestation tool-call message
-  carries at most a one-line ack).
-- If a continuation nudge arrives ("The work is not yet finished
-  — check current progress (tasks/children status) and continue."), treat it as a real
-  user instruction: review your current progress, complete the
-  remaining work, and call this tool again.
+- When this mission dispatched a child, call this tool exactly once
+  at completion time (after the full detailed final report is
+  delivered as its own message). The attestation tool-call message
+  must NOT bundle the report (at most a one-line ack).
+- For non-delegating missions (plain questions, chart requests,
+  quick follow-ups), the gate does not fire — do not call this
+  tool unnecessarily.
+- If a continuation nudge arrives (a user message whose body begins
+  with ``[SYSTEM CONTEXT: Completion Check Nudge]``), treat it as a
+  real user instruction, complete the remaining delegated work, and
+  call this tool again.
 
 Returns:
     A confirmation frame ``{"attested": true, "timestamp":

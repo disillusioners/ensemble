@@ -51,23 +51,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from tests.helpers.checkpoint_prune_pg import (
     evict_langgraph_mocks,
     restore_langgraph_mocks,
-)
-
-#: The exact R1 nudge constant (server-authored; NFR-6 verbatim).
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
 )
 
 TEST_THREAD_ID = "test-leader-instance-1"
@@ -110,6 +97,18 @@ def plain_ai(text="Working on the mission."):
     return AIMessage(content=text)
 
 
+def delegate_ai():
+    # 2026-09-06 amendment: helper to anchor missions as delegated
+    # in the c2-both-branches activate test (which exercises the
+    # deny-nudge flow on both branches).
+    return AIMessage(
+        content="Delegating to a child.",
+        tool_calls=[
+            {"name": "send_message", "args": {"target": "child"}, "id": "dispatch-c2"}
+        ],
+    )
+
+
 def attest_ai():
     return AIMessage(
         content="Attesting now.",
@@ -139,17 +138,26 @@ def build_graph(
     attestation_enabled: bool,
     manager,
     mode: str = "enforce",
+    scripted: list | None = None,
 ):
     """Build a REAL compiled graph with a scripted mock LLM.
 
-    LLM script: first call — plain AIMessage (would-be END, NO
-    attestation → deny path); second call — ``attest_completion`` tool
-    call; third call — plain final AIMessage (attested END → allow).
+    LLM script (default): first call — plain AIMessage (would-be END,
+    NO attestation → deny path on delegated missions); second call —
+    ``attest_completion`` tool call; third call — plain final AIMessage
+    (attested END → allow).
+
+    Pass ``scripted=`` to override the default sequence. The 2026-09-06
+    conditional-attestation amendment requires delegated missions
+    (with a ``send_message`` tool call) for the gate to fire — tests
+    that exercise the deny/nudge flow inject a delegate AIMessage as
+    the first response via this override.
     """
     assert _real_graph_module is not None, "fixture did not run"
     build_instance_graph = _real_graph_module.build_instance_graph
 
-    scripted = [plain_ai(), attest_ai(), plain_ai("Done.")]
+    if scripted is None:
+        scripted = [plain_ai(), attest_ai(), plain_ai("Done.")]
 
     def _invoke(messages, *args, **kwargs):
         return scripted.pop(0)
@@ -232,8 +240,15 @@ class TestC2BothBranchesActivation:
     @pytest.mark.parametrize("language_check_enabled", [True, False])
     async def test_gate_invoked_on_both_branches(self, language_check_enabled, caplog):
         manager = make_manager(0, 0)  # R2 deny predicate satisfied
+        # 2026-09-06 amendment: anchor as delegated (gate ON) by
+        # injecting a send_message dispatch as the first scripted
+        # response. The activation test exercises the deny → nudge →
+        # attest flow on delegated missions.
         graph = build_graph(
-            language_check_enabled, attestation_enabled=True, manager=manager
+            language_check_enabled,
+            attestation_enabled=True,
+            manager=manager,
+            scripted=[delegate_ai(), plain_ai(), attest_ai(), plain_ai("Done.")],
         )
 
         with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
@@ -277,11 +292,15 @@ class TestC2BothBranchesActivation:
     @pytest.mark.parametrize("language_check_enabled", [True, False])
     async def test_dry_mode_passive_observer(self, language_check_enabled, caplog):
         manager = make_manager(0, 0)
+        # 2026-09-06 amendment: anchor as delegated (gate ON, dry
+        # mode) so the dry-mode log path records the conditional
+        # gate still firing on the delegated mission.
         graph = build_graph(
             language_check_enabled,
             attestation_enabled=True,
             manager=manager,
             mode="dry",
+            scripted=[delegate_ai(), plain_ai()],
         )
         with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
             messages = await run_turn(graph)
@@ -289,10 +308,16 @@ class TestC2BothBranchesActivation:
         # gate evaluated (facades consulted) ...
         manager.count_pending_children.assert_called()
         # ... but ZERO side effects: dry_log logged, no nudge, and the
-        # run ends on the first would-be END (no continuation loop)
+        # run ends on the first would-be END (no continuation loop).
+        # 2026-09-06 amendment: anchored as delegated, so the
+        # delegate_ai AIMessage sits in the message list alongside
+        # the trailing plain_ai.
         assert "decision=dry_log" in caplog.text
         assert nudge_messages(messages) == []
-        assert ai_contents(messages) == ["Working on the mission."]
+        assert ai_contents(messages) == [
+            "Delegating to a child.",
+            "Working on the mission.",
+        ]
         # the forbidden dual-delivery surface stays untouched
         manager.enqueue_message.assert_not_called()
 
@@ -308,8 +333,14 @@ class TestC3FailOpen:
         self, language_check_enabled, caplog, monkeypatch
     ):
         manager = make_manager(0, 0)
+        # 2026-09-06 amendment: anchor as delegated (gate ON) so
+        # the scanner-fail-open path is exercised on the legacy
+        # would-be-DENY path.
         graph = build_graph(
-            language_check_enabled, attestation_enabled=True, manager=manager
+            language_check_enabled,
+            attestation_enabled=True,
+            manager=manager,
+            scripted=[delegate_ai(), plain_ai()],
         )
 
         def boom(*args, **kwargs):
@@ -322,9 +353,15 @@ class TestC3FailOpen:
         with caplog.at_level(logging.ERROR, logger="daemon.services.attestation_gate"):
             messages = await run_turn(graph)
 
-        # fail-open: the END proceeded — no nudge, single AI turn
+        # fail-open: the END proceeded — no nudge. The graph made
+        # multiple AI calls because the delegate_ai tool call
+        # triggered tool execution before the next AIMessage;
+        # each AIMessage lands in the message list.
         assert nudge_messages(messages) == []
-        assert ai_contents(messages) == ["Working on the mission."]
+        assert ai_contents(messages) == [
+            "Delegating to a child.",
+            "Working on the mission.",
+        ]
         # structured error event with the error class
         assert "event=leader_completion_gate_error" in caplog.text
         assert "error_class=ValueError" in caplog.text
@@ -341,10 +378,22 @@ class TestR2AllowInGraph:
         self, language_check_enabled
     ):
         manager = make_manager(pending_children=2, wakeups=0)
+        # 2026-09-06 amendment: anchor as delegated (gate ON) so
+        # the test exercises the legitimate-pending-wakeup allow
+        # branch instead of the conditional-gate-OFF ALLOW.
         graph = build_graph(
-            language_check_enabled, attestation_enabled=True, manager=manager
+            language_check_enabled,
+            attestation_enabled=True,
+            manager=manager,
+            scripted=[delegate_ai(), plain_ai()],
         )
         messages = await run_turn(graph)
         manager.count_pending_children.assert_called()
         assert nudge_messages(messages) == []
-        assert ai_contents(messages) == ["Working on the mission."]
+        # 2026-09-06 amendment: anchored as delegated so the
+        # legitimate-pending-wakeup allow branch is exercised;
+        # both AIMessages are present in the message list.
+        assert ai_contents(messages) == [
+            "Delegating to a child.",
+            "Working on the mission.",
+        ]

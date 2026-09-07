@@ -40,24 +40,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from tests.helpers.checkpoint_prune_pg import (
     evict_langgraph_mocks,
     restore_langgraph_mocks,
-)
-
-#: The exact R1 nudge constant (server-authored; NFR-6 verbatim) —
-#: asserted to NEVER appear in the dry-mode message stream.
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
 )
 
 TEST_THREAD_ID = "test-leader-dry-instance-1"
@@ -116,15 +102,51 @@ def make_manager(pending_children=0, wakeups=0, live_descendants=0):
 def build_dry_graph(language_check_enabled: bool, manager):
     """Build a REAL compiled graph with mode=dry + a scripted mock LLM.
 
-    LLM script: a single plain AIMessage (would-be END, NO attestation).
-    Under mode=enforce this would deny + inject a nudge. Under mode=dry
-    we expect ZERO side effects.
+    LLM script (2026-09-06 conditional gate): a 2-step sequence — a
+    ``send_message`` AIMessage first (anchor the mission as
+    DELEGATED so the conditional-predicate ``attestation_required
+    == True`` arm flips ON — see
+    ``daemon/services/attestation_gate.py:873-880`` and the fix-3b
+    rationale) followed by a plain AIMessage with no attestation
+    on the second invocation so the gate evaluates an end-of-turn.
+    Under mode=enforce this would deny + inject a nudge. Under
+    mode=dry we expect ZERO side effects.
     """
     assert _real_graph_module is not None, "fixture did not run"
     build_instance_graph = _real_graph_module.build_instance_graph
 
+    # 2026-09-06 conditional-gate anchor: emit a ``send_message``
+    # tool call on the FIRST invocation so the
+    # ``delegation_since_last_user`` scanner flips the conditional
+    # flag ON; the SECOND invocation emits a plain AIMessage with
+    # no attestation so the gate evaluates end-of-turn and the
+    # documented dry-deny-predicate metric
+    # (``dry_log_deny_predicate_total``) ticks. Without the anchor
+    # the conditional gate would route through the
+    # ALLOWED-when-not-required branch and the metric would not
+    # fire — the same predicate-arm rationale as fix 2
+    # (test_attestation_observability.py) applied to the
+    # integration-graph path. The metric assertion at L309 stays
+    # ``>= 1`` unchanged.
+    script = [
+        AIMessage(
+            content="delegating to a child",
+            tool_calls=[
+                {
+                    "name": "send_message",
+                    "args": {"target": "child"},
+                    "id": "dry-mode-metrics-anchor",
+                }
+            ],
+        ),
+        plain_ai("Working on the mission — no attestation here."),
+    ]
+    _invoke_counter = {"i": 0}
+
     def _invoke(messages, *args, **kwargs):
-        return plain_ai("Working on the mission — no attestation here.")
+        idx = _invoke_counter["i"]
+        _invoke_counter["i"] = idx + 1
+        return script[idx]
 
     mock_llm = MagicMock()
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
