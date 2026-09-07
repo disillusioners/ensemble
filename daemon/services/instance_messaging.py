@@ -502,11 +502,54 @@ async def _heal_poisoned_checkpoint_tail(
     return synthesized
 
 
+#: Source-prefix namespaces that mark an enqueue-lane delivery as
+#: INTERNAL traffic (never user-authored). The four prefixes mirror the
+#: dispatch-side checks in
+#: :meth:`InstanceMessagingService._process_message_with_tracking` and
+#: the enqueue sites that mint them (``child_reports`` report rows,
+#: waiting-children watchdog hang / wedge notices, agent-tool
+#: ``send_message`` dispatches).
+_INTERNAL_STAMPED_SOURCE_PREFIXES = (
+    "internal_report:",
+    "internal_error_report:",
+    "internal_agent:",
+    "system:",
+)
+
+
+def _stamped_additional_kwargs(message_source: str | None) -> dict | None:
+    """``additional_kwargs`` for an enqueue-lane HumanMessage, or ``None``.
+
+    STAMPED-SHAPE CONTRACT (2026-09-07 review critical — the report
+    masquerade hole): when ``message_source`` starts with one of the
+    internal namespaces (``internal_report:`` / ``internal_error_report:`` /
+    ``internal_agent:`` / ``system:``), the constructed HumanMessage
+    carries ``additional_kwargs={"injected_message": True, "source":
+    message_source}`` so the attestation scanner's exclusion ladder
+    (``daemon/services/attestation_scanner.py``) can classify it as
+    internal traffic. User / API / telegram sources stay BARE — no
+    additional_kwargs — they genuinely are real user messages. Nothing
+    else is stamped.
+
+    Before this stamp, internal provenance rode ONLY the MessageQueue
+    row / ProcessingContext (out-of-band), so the in-graph HumanMessage
+    was indistinguishable from a real user message: a parked parent's
+    report delivery reset the delegation window and allowed an
+    un-attested delegated END.
+    """
+    if not message_source or not isinstance(message_source, str):
+        return None
+    if message_source.startswith(_INTERNAL_STAMPED_SOURCE_PREFIXES):
+        return {"injected_message": True, "source": message_source}
+    return None
+
+
 def _build_graph_input(
     content: str | list,
     message_id: str,
     persistent_context_msgs: list[HumanMessage] | None = None,
     prepended_msgs: list[HumanMessage] | None = None,
+    message_source: str | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -564,6 +607,16 @@ def _build_graph_input(
             content-block list from ``_build_message_content``).
         message_id: The queue message ID; becomes the user
             ``HumanMessage.id`` for ``add_messages`` dedup.
+        message_source: The queue-row source token for THIS delivery
+            (e.g. ``"api"``, ``"telegram:..."``, ``"internal_report:..."``,
+            ``"system:watchdog"``). When it starts with an internal
+            namespace (``_INTERNAL_STAMPED_SOURCE_PREFIXES``) the user
+            message is stamped ``{"injected_message": True, "source":
+            message_source}`` (the 2026-09-07 review-critical fix —
+            internal enqueue-lane deliveries must not masquerade as real
+            user messages in the attestation delegation window); any
+            other source leaves the message BARE. ``None`` (retry paths
+            without a source) also stays bare.
         persistent_context_msgs: Optional list of
             :class:`HumanMessage` carrying the persistent block
             (project + shared-context + skills). Prepended BEFORE
@@ -604,7 +657,17 @@ def _build_graph_input(
         leftover_fifo_msgs (oldest-first) + [user_message]``
         per the LOCKED C1-D2 spec.
     """
-    user_message = HumanMessage(content=content, id=message_id)
+    # Provenance stamp (see :func:`_stamped_additional_kwargs`): internal
+    # enqueue-lane deliveries carry the stamped shape
+    # ``{"injected_message": True, "source": message_source}``; user /
+    # API deliveries stay bare (no additional_kwargs).
+    stamped_kwargs = _stamped_additional_kwargs(message_source)
+    if stamped_kwargs is not None:
+        user_message = HumanMessage(
+            content=content, id=message_id, additional_kwargs=stamped_kwargs
+        )
+    else:
+        user_message = HumanMessage(content=content, id=message_id)
     # Hybrid split — prepend the persistent context block BEFORE the
     # user message so LangGraph's ``add_messages`` reducer checkpoints
     # it with the user message. Empty / None ``persistent_context_msgs``
@@ -3896,10 +3959,13 @@ class InstanceMessagingService:
                     # in the checkpoint, and re-prepending would double-
                     # inject on the resume). m1: thread leftover FIFO
                     # via the seam parameter (default-None when FIFO is
-                    # empty, byte-identical pre-m1 behavior).
+                    # empty, byte-identical pre-m1 behavior). The
+                    # provenance stamp threads the queue-row source so a
+                    # retried INTERNAL delivery keeps its stamped shape.
                     graph_input = _build_graph_input(
                         content, message_id,
                         prepended_msgs=leftover_fifo_msgs or None,
+                        message_source=message_source,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -3910,6 +3976,7 @@ class InstanceMessagingService:
                 graph_input = _build_graph_input(
                     content, message_id,
                     prepended_msgs=leftover_fifo_msgs or None,
+                    message_source=message_source,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -3929,6 +3996,7 @@ class InstanceMessagingService:
                 content, message_id,
                 persistent_context_msgs=persistent_context_msgs or None,
                 prepended_msgs=leftover_fifo_msgs or None,
+                message_source=message_source,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────

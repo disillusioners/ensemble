@@ -17,18 +17,7 @@ from langchain_core.tools import tool
 from tests.support.scripted_chat_model import ScriptedChatModel
 
 INSTANCE_ID = "attestation-leader-e2e"
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
-)
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +120,14 @@ async def test_stale_attestation_watermark_does_not_cross_mission_boundary(
 
     model = ScriptedChatModel(
         responses=[
+            # 2026-09-06 amendment: anchor as delegated so the
+            # stale-watermark deny path is exercised.
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
             AIMessage(content="new mission without a fresh attestation"),
             AIMessage(
                 content="attesting now",

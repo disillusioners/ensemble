@@ -53,7 +53,28 @@ def test_decision_log_counts_and_metrics_per_mode(
     reset_attestation_resolver_for_tests()
     monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_MODE", mode)
     manager = _manager()
-    messages = [AIMessage(content="no attestation")]
+    # 2026-09-06 conditional gate: anchor the mission as DELEGATED so
+    # the ``attestation_required==True`` arm of the dry-deny-predicate
+    # metric fires (the documented intent — the conditional predicate
+    # measures "would-have-denied AMONG delegated missions" so
+    # non-delegating traffic doesn't inflate the soak ratio). Without
+    # this anchor the dry metric would read 0 under the documented
+    # predicate and the enforce metric would read 0 (gate would
+    # ALLOW at the conditional-OFF branch before reaching the deny
+    # path).
+    messages = [
+        AIMessage(
+            content="delegating to a child",
+            tool_calls=[
+                {
+                    "name": "send_message",
+                    "args": {"target": "child"},
+                    "id": "observability-anchor",
+                }
+            ],
+        ),
+        AIMessage(content="no attestation"),
+    ]
     settings = GateSettings(mode=mode, window=3, deny_bound=3)
     with caplog.at_level(logging.INFO):
         for _ in range(1000):

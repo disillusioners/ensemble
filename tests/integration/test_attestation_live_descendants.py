@@ -49,9 +49,21 @@ from daemon.services.attestation_gate import (
     CANONICAL_LOG_SCHEMA_FIELDS,
     Decision,
     GateSettings,
-    decide,
+    decide as _decide_impl,
     evaluate,
 )
+
+
+# 2026-09-06 amendment: ``decide()`` requires ``attestation_required``
+# as a keyword-only arg (conditional-attestation gate). All live_descendants
+# tests in this file exercise the delegated-mission branch (the
+# ``live_descendants > 0`` allow predicate is meaningful only when the
+# mission did delegate). Default to ``True`` here; the new
+# conditional-gate tests import ``_decide_impl`` directly and pass
+# ``attestation_required=False`` explicitly.
+def decide(*args, **kwargs):
+    kwargs.setdefault("attestation_required", True)
+    return _decide_impl(*args, **kwargs)
 from tests.support.scripted_chat_model import ScriptedChatModel
 
 
@@ -186,8 +198,25 @@ async def test_live_grandchild_allows_via_third_input_without_nudge_or_reset(
     repo.set_completion_gate_escalated(INSTANCE_ID)
     before = repo.get(INSTANCE_ID)
 
+    # 2026-09-06 amendment: the conditional gate only fires for
+    # DELEGATED missions. Send a send_message tool call first so the
+    # mission is anchored as delegated (gate ON); the trailing
+    # ``done without attestation`` AIMessage (no attestation tool
+    # call) is the "end of turn" the gate then evaluates.
     model = ScriptedChatModel(
-        responses=[AIMessage(content="done without attestation")],
+        responses=[
+            AIMessage(
+                content="delegating to a child",
+                tool_calls=[
+                    {
+                        "name": "send_message",
+                        "args": {"target": "child"},
+                        "id": "dispatch-1",
+                    }
+                ],
+            ),
+            AIMessage(content="done without attestation"),
+        ],
         i=0,
     )
     graph = _build(real_graph_module, model, manager, memory_saver)
@@ -207,8 +236,10 @@ async def test_live_grandchild_allows_via_third_input_without_nudge_or_reset(
     assert "decision=allowed_legitimate_pending_wakeup" in log_text
     assert "decision=denied" not in log_text
     assert "decision=terminal_after_bound" not in log_text
-    # (a.iii) The log row carries live_descendants=1 (schema drift pin).
+    # (a.iii) The log row carries live_descendants=1 (schema drift pin)
+    # AND the new 17th schema field attestation_required=True.
     assert "live_descendants=1" in log_text
+    assert "attestation_required=True" in log_text
     # (a.iv) NO counter write — third-input allow is the same ruling-1
     # non-reset as the existing two R2 inputs.
     after = repo.get(INSTANCE_ID)
@@ -265,7 +296,18 @@ async def test_depth_two_descendant_grandchild_counts_via_third_input(
     )
 
     model = ScriptedChatModel(
-        responses=[AIMessage(content="hallucinated completion")],
+        responses=[
+            # 2026-09-06 amendment: gate is conditional on
+            # delegation. Anchor as delegated so this test continues
+            # to exercise the deny → allowed_legitimate path.
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            AIMessage(content="hallucinated completion"),
+        ],
         i=0,
     )
     graph = _build(real_graph_module, model, manager, memory_saver)
@@ -345,7 +387,19 @@ async def test_all_descendants_terminal_still_denies(
     model = ScriptedChatModel(
         # Bound is 3 ⇒ 3 denies + 1 escalation = 4 responses
         # (mirrors ``test_attestation_bound_escalation``).
-        responses=[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+        # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+        # bound-escalation path still fires. The first response
+        # dispatches a child; subsequent responses are un-attested.
+        responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            *[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+            AIMessage(content="final hallucinated"),
+        ],
         i=0,
     )
     graph = _build(real_graph_module, model, manager, memory_saver)
@@ -412,7 +466,19 @@ async def test_error_and_failed_descendants_are_terminal(
     model = ScriptedChatModel(
         # Bound is 3 ⇒ 3 denies + 1 escalation = 4 responses
         # (mirrors ``test_attestation_bound_escalation``).
-        responses=[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+        # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+        # bound-escalation path still fires. The first response
+        # dispatches a child; subsequent responses are un-attested.
+        responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            *[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+            AIMessage(content="final hallucinated"),
+        ],
         i=0,
     )
     graph = _build(real_graph_module, model, manager, memory_saver)
@@ -625,9 +691,11 @@ class TestCanonicalLogSchema:
     sanity check).
     """
 
-    def test_canonical_schema_has_16_fields(self):
-        # 15 original fields + 1 additive (live_descendants, 2026-09-06).
-        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 16
+    def test_canonical_schema_has_17_fields(self):
+        # 2026-09-06: 15 original + live_descendants (16th, 2026-09-06) +
+        # attestation_required (17th, 2026-09-06 fastfollow — conditional
+        # gate flag).
+        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 17
 
     def test_canonical_schema_includes_live_descendants(self):
         assert "live_descendants" in CANONICAL_LOG_SCHEMA_FIELDS

@@ -14,20 +14,9 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from tests.support.scripted_chat_model import ScriptedChatModel
 
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
-)
 INSTANCE_ID = "attestation-leader-e2e"
 
 
@@ -80,8 +69,21 @@ async def test_bound_plus_one_escalates_once_without_fourth_nudge(
 ):
     repo, _instance = attestation_repository
     manager = attestation_manager_factory(file_sqlite_engine, repo)
+    # Bound is 3 ⇒ 3 denies + 1 escalation = 4 responses (mirrors
+    # ``test_attestation_live_descendants``). Anchor as delegated
+    # (2026-09-06 amendment) so the bound-exhaustion path is
+    # exercised.
     model = ScriptedChatModel(
-        responses=[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+        responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            *[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+            AIMessage(content="final hallucinated"),
+        ],
         i=0,
     )
     graph = _build(real_graph_module, model, manager, memory_saver)
@@ -105,4 +107,6 @@ async def test_bound_plus_one_escalates_once_without_fourth_nudge(
     assert row.attestation_denied_count == 0
     assert row.completion_gate_escalated is True
     manager.enqueue_message.assert_not_called()
-    assert model.calls_made == 4
+    # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+    # bound-exhaustion path is exercised.
+    assert model.calls_made == 5  # 1 dispatch + 4 un-attested (3 deny + 1 terminal)

@@ -17,21 +17,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from tests.support.scripted_chat_model import ScriptedChatModel
 
 INSTANCE_ID = "attestation-leader-e2e"
-NUDGE_TEXT = (
-    "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue. Reminder: when "
-    "— and only when — the work is truly complete, you MUST "
-    "call the attest_completion tool before finishing; "
-    "completions without that call are premature and will be "
-    "blocked again. Attestation is a SEPARATE step: FIRST "
-    "deliver your full detailed final report as its own "
-    "message, THEN call attest_completion alone as a "
-    "subsequent step — never bundle the report into the "
-    "attestation tool-call message."
-)
 
 
 @pytest.fixture(autouse=True)
@@ -94,9 +83,18 @@ async def test_nudge_checkpoint_survives_restart_and_leads_to_attested_allow(
         denied_count_getter=lambda: 0,
         ledger=repo,
     )
+    # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+    # bound-nudge seed produces the in-graph nudge the test seeds
+    # into the checkpoint.
     checkpoint_input = {
         "messages": [
             HumanMessage(content="mission"),
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
             AIMessage(content="hallucinated completion"),
         ]
     }

@@ -85,7 +85,9 @@ from langchain_core.messages import BaseMessage
 
 from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
+    DEFAULT_DELEGATION_TOOL_NAME,
     attestation_seen_outside_window,
+    scan_delegation_after_last_user,
     scan_for_attestation_detailed,
 )
 
@@ -273,6 +275,15 @@ class GateDecision:
     attestation_present: bool = False
     messages_scanned: int = 0
     scanned_window_size: int = 0
+    #: 2026-09-06 conditional-attestation flag (FR-3 conditionality) —
+    #: ``True`` when the leader dispatched a child since the last real
+    #: user message (the gate is then ON for this turn-end). ``False``
+    #: means no delegation happened this mission — attestation is not
+    #: required (the gate allows END without demanding
+    #: ``attest_completion``). The 17th canonical log schema field.
+    #: Defaults to False so a never-evaluated path never accidentally
+    #: nudges on stale state.
+    attestation_required: bool = False
     # ——— R2 inputs (canonical schema fields) ———
     pending_children: int = 0
     queued_or_expected_wakeups: int = 0
@@ -283,6 +294,22 @@ class GateDecision:
     # either no descendants or every descendant terminal.
     live_descendants: int = 0
     denied_count: int = 0
+    # ——— Conditional-attestation scanner diagnostics (logged; NOT in the
+    # canonical 17-field schema tuple). The integration layer surfaces
+    # them in the format-string log line for dry-mode soak diagnostics
+    # and the FR-3 conditionality audit. Last real user index is -1 when
+    # no real user message exists (the gate's conservative fallback).
+    #: Mirror of :attr:`DelegationScanResult.delegation_since_last_user`
+    #: — a flat bool for tests + log lines that want the high-level
+    #: "did this mission dispatch a child" verdict without indexing
+    #: into the first_delegation_after_last_user_index sentinel
+    #: (-1 vs >= 0). Logged alongside the index fields; like the other
+    #: diagnostic fields, NOT in the canonical 17-field schema tuple.
+    delegation_since_last_user: bool = False
+    last_real_user_found: bool = False
+    last_real_user_index: int = -1
+    first_delegation_after_last_user_index: int = -1
+    delegation_tool_call_total: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,20 +327,34 @@ def decide(
     scope_applicable: bool,
     mode: str,
     attestation_enabled: bool,
+    *,
+    attestation_required: bool,
 ) -> GateDecision:
     """Pure gate decision over the R2 inputs (plan 2.2 logic tree).
 
-    Logic tree (plan 2.2, with leader ruling 1 counter semantics):
+    Logic tree (plan 2.2, with leader ruling 1 counter semantics +
+    2026-09-06 conditional-attestation requirement — FR-3 conditionality):
 
     1. Meta-conditions — ``attestation_enabled=False`` (C2 bypass),
        ``scope_applicable=False`` (D3 non-leader), or ``mode="off"``
        → :attr:`Decision.ALLOWED` with the counter UNCHANGED (the gate
        did not run; a non-run is NOT one of the four reset triggers).
+       ``attestation_required=False`` on this branch (no scan ran).
     2. ``mode="dry"`` → :attr:`Decision.DRY_LOG` — evaluation recorded,
-       ZERO side effects, counter unchanged.
-    3. enforce + attested → :attr:`Decision.ALLOWED` with
+       ZERO side effects, counter unchanged. ``attestation_required``
+       surfaces the scanned value (so dry-mode soak can observe the
+       conditional gate at work) but the decision is still DRY_LOG.
+    3. enforce + ``attestation_required=False`` (NEW, 2026-09-06,
+       FR-3 conditionality) → :attr:`Decision.ALLOWED` with the counter
+       UNCHANGED and ``should_inject_nudge=False``. The leader did not
+       dispatch a child since the last real user message — the gate is
+       OFF for this turn-end; a quick follow-up / chart request / plain
+       answer may complete without ``attest_completion``. This is the
+       core conditional-attestation branch (the user-spec'd "not
+       required → ALLOW without the toolcall" rule).
+    4. enforce + attested → :attr:`Decision.ALLOWED` with
        ``next_denied_count = 0`` (reset trigger 1).
-    4. enforce + not attested + any pending wakeup input > 0
+    5. enforce + not attested + any pending wakeup input > 0
        (THREE-input R2 — ``pending_children``,
        ``queued_or_expected_wakeups``, OR ``live_descendants``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
@@ -325,11 +366,11 @@ def decide(
        row (so ``queued_or_expected_wakeups`` stays 0). Without the
        third input the gate sees 0/0 as TRUE facts and escalates to
        ``terminal_after_bound`` while the descendant is alive.
-    5. enforce + not attested + no pending wakeups +
+    6. enforce + not attested + no pending wakeups +
        ``denied_count + 1 > bound`` → :attr:`Decision.TERMINAL_AFTER_BOUND`
        with ``next_denied_count = 0`` (reset trigger 2; the same reset
        clears the escalated flag per ruling 2 — persistence is Phase 3).
-    6. otherwise → :attr:`Decision.DENIED` with
+    7. otherwise → :attr:`Decision.DENIED` with
        ``next_denied_count = denied_count + 1`` and
        ``should_inject_nudge = True``.
 
@@ -352,6 +393,13 @@ def decide(
         scope_applicable: D3 scope — leader-only.
         mode: "off" | "dry" | "enforce" (validated upstream).
         attestation_enabled: C2 master flag from graph assembly.
+        attestation_required: Conditional-attestation gate flag (keyword
+            only — mandatory input from the wiring layer so an omitted
+            kwarg is a loud failure). ``True`` means a child was
+            dispatched since the last real user message — the gate is
+            ON. ``False`` means no delegation happened — the gate is
+            OFF for this turn-end and the leader does not need to
+            ``attest_completion``.
 
     Returns:
         :class:`GateDecision` — the decision core.
@@ -362,6 +410,7 @@ def decide(
             decision=Decision.ALLOWED,
             next_denied_count=denied_count,
             should_inject_nudge=False,
+            attestation_required=False,
         )
 
     # (2) dry — evaluate + log only; zero side effects.
@@ -370,6 +419,7 @@ def decide(
             decision=Decision.DRY_LOG,
             next_denied_count=denied_count,
             should_inject_nudge=False,
+            attestation_required=attestation_required,
         )
 
     if mode != "enforce":
@@ -378,19 +428,36 @@ def decide(
             decision=Decision.ALLOWED,
             next_denied_count=denied_count,
             should_inject_nudge=False,
+            attestation_required=attestation_required,
         )
 
     # ——— enforce ———
 
-    # (3) attested allow — reset trigger 1.
+    # (3) conditional gate OFF — the leader did not delegate since the
+    # last real user message, so attestation is not required. ALLOW
+    # without demanding the toolcall (FR-3 conditionality, 2026-09-06).
+    # This is the user-spec'd core branch: a quick follow-up question
+    # or a chart request (no ``send_message`` tool call) completes
+    # without the gate firing. Counter untouched (a non-fire is not a
+    # reset trigger per ruling 1).
+    if not attestation_required:
+        return GateDecision(
+            decision=Decision.ALLOWED,
+            next_denied_count=denied_count,
+            should_inject_nudge=False,
+            attestation_required=False,
+        )
+
+    # (4) attested allow — reset trigger 1.
     if attested:
         return GateDecision(
             decision=Decision.ALLOWED,
             next_denied_count=0,
             should_inject_nudge=False,
+            attestation_required=attestation_required,
         )
 
-    # (4) R2 allow — legitimate pending wakeup (THREE-input predicate:
+    # (5) R2 allow — legitimate pending wakeup (THREE-input predicate:
     # pending_children OR queued_or_expected_wakeups OR live_descendants);
     # counter unchanged (ruling 1: the R2 non-reset IS the loop
     # protection).
@@ -403,21 +470,24 @@ def decide(
             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             next_denied_count=denied_count,
             should_inject_nudge=False,
+            attestation_required=attestation_required,
         )
 
-    # (5) bound exceeded — escalation; counter reset (trigger 2).
+    # (6) bound exceeded — escalation; counter reset (trigger 2).
     if denied_count + 1 > bound:
         return GateDecision(
             decision=Decision.TERMINAL_AFTER_BOUND,
             next_denied_count=0,
             should_inject_nudge=False,
+            attestation_required=attestation_required,
         )
 
-    # (6) deny — increment + nudge.
+    # (7) deny — increment + nudge.
     return GateDecision(
         decision=Decision.DENIED,
         next_denied_count=denied_count + 1,
         should_inject_nudge=True,
+        attestation_required=attestation_required,
     )
 
 
@@ -465,6 +535,7 @@ CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
     "pending_children",
     "queued_or_expected_wakeups",
     "live_descendants",  # 2026-09-06 third R2 input (option-a fix)
+    "attestation_required",  # 2026-09-06 conditional-attestation flag (17th)
     "attest_seen_outside_window",
     "messages_scanned",
     "scanned_window_size",
@@ -619,6 +690,28 @@ def evaluate(
             messages, mode_resolver.window, tool_name
         )
 
+        # (v.b) Conditional-attestation scanner (2026-09-06, FR-3
+        # conditionality) — pure walk of the messages list that
+        # answers: was ``send_message`` called since the last REAL user
+        # message? The delegation scan is INDEPENDENT of the bounded
+        # in-window attestation scan above: it walks the FULL tail at-
+        # or-after the last real user message (no N-window bound),
+        # because the delegation check answers "did this mission
+        # dispatch children", not "did the LLM attest recently".
+        delegation_scan = scan_delegation_after_last_user(messages)
+
+        # Conditional gate ON iff delegation happened since the last
+        # real user message. When no real user message exists at all
+        # (degenerate state — should never happen for a live leader),
+        # the scan reports ``last_real_user_found=False``; we keep
+        # the conservative semantics of "if ANY delegation seen
+        # anywhere in the tail, require attestation" by inheriting
+        # the ``delegation_since_last_user`` boolean (which becomes
+        # True on the first send_message anywhere in the whole list
+        # when no real user message anchors the tail — the tail_start
+        # fallback is 0).
+        attestation_required = delegation_scan.delegation_since_last_user
+
         # (ii) R2 inputs — the THREE NEW manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
         # DB seam: `except Exception` (KeyboardInterrupt stays fail-closed).
@@ -692,6 +785,7 @@ def evaluate(
             scope_applicable=scope_applicable,
             mode=mode_resolver.mode,
             attestation_enabled=attestation_enabled,
+            attestation_required=attestation_required,
         )
 
         # Attach diagnostics + R2 inputs → log-ready object.
@@ -707,16 +801,26 @@ def evaluate(
             queued_or_expected_wakeups=queued_or_expected_wakeups,
             live_descendants=live_descendants,
             denied_count=denied_count,
+            delegation_since_last_user=delegation_scan.delegation_since_last_user,
+            last_real_user_found=delegation_scan.last_real_user_found,
+            last_real_user_index=delegation_scan.last_real_user_index,
+            first_delegation_after_last_user_index=delegation_scan.first_delegation_after_last_user_index,
+            delegation_tool_call_total=delegation_scan.delegation_tool_call_total,
         )
 
         # (iv) canonical structured log entry (Phase 4 task 4.5 schema —
-        # every field, every evaluation, no omissions).
+        # every canonical field; the conditional-attestation
+        # supplementary fields are emitted alongside for dry-mode soak
+        # and the FR-3 conditionality audit log).
         logger.info(
             "event=leader_completion_gate decision=%s instance_id=%s "
             "gate_location=%s leader_prompt_version=%s mode=%s "
             "attestation_present=%s denied_count=%s next_denied_count=%s "
             "pending_children=%s queued_or_expected_wakeups=%s "
-            "live_descendants=%s "
+            "live_descendants=%s attestation_required=%s "
+            "last_real_user_found=%s last_real_user_index=%s "
+            "first_delegation_after_last_user_index=%s "
+            "delegation_tool_call_total=%s "
             "attest_seen_outside_window=%s messages_scanned=%s "
             "scanned_window_size=%s scanner_window_truncated=%s "
             "scanner_summary_seen=%s should_inject_nudge=%s",
@@ -731,6 +835,11 @@ def evaluate(
             result.pending_children,
             result.queued_or_expected_wakeups,
             result.live_descendants,
+            result.attestation_required,
+            result.last_real_user_found,
+            result.last_real_user_index,
+            result.first_delegation_after_last_user_index,
+            result.delegation_tool_call_total,
             result.attest_seen_outside_window,
             result.messages_scanned,
             result.scanned_window_size,
@@ -746,17 +855,24 @@ def evaluate(
         # observer: ``dry_log_total`` ticks on every dry evaluation;
         # ``dry_log_deny_predicate_total`` ticks on the SUBSET whose R2
         # deny predicate would have fired under ``enforce``
-        # (``not attested AND pending_children == 0 AND
-        # queued_or_expected_wakeups == 0 AND live_descendants == 0``
-        # — the THREE-input R2 predicate). Enforce-mode denied:
-        # ``enforce_denied_total`` ticks on ``Decision.DENIED`` only —
-        # ``terminal_after_bound`` is the escalation path, NOT a "denied
-        # under enforce" event.
+        # (``attestation_required == True AND not attested AND
+        # pending_children == 0 AND queued_or_expected_wakeups == 0 AND
+        # live_descendants == 0`` — the FOUR-input R2 predicate with the
+        # 2026-09-06 conditional-attestation arm). The
+        # ``attestation_required == True`` arm is the documented
+        # conditional predicate: the soak signal measures
+        # "would-have-denied AMONG delegated missions" so the
+        # non-delegating traffic the feature exempts does NOT inflate
+        # the deny ratio (matching ``docs/setup.md`` dry-mode section).
+        # Enforce-mode denied: ``enforce_denied_total`` ticks on
+        # ``Decision.DENIED`` only — ``terminal_after_bound`` is the
+        # escalation path, NOT a "denied under enforce" event.
         if attestation_enabled and scope_applicable:
             if mode_resolver.mode == "dry":
                 record_promotion_metric(METRIC_DRY_LOG_TOTAL)
                 if (
-                    not result.attestation_present
+                    result.attestation_required
+                    and not result.attestation_present
                     and result.pending_children == 0
                     and result.queued_or_expected_wakeups == 0
                     and result.live_descendants == 0

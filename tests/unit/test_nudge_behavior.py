@@ -369,6 +369,21 @@ class TestNudgeNode:
         assert isinstance(msg, HumanMessage)
         assert msg.content == NUDGE_MESSAGE
 
+    def test_nudge_message_is_stamped_injected_and_not_real_user(self):
+        """2026-09-07 review warning: the empty-response nudge is a
+        SERVER-authored injection — it must be constructed with
+        ``injected_message=True`` so the attestation scanner's
+        exclusion ladder (``daemon/services/attestation_scanner.py``)
+        classifies it as NOT a real user message. Without the stamp
+        the nudge would reset the delegation window and could relax
+        the conditional attestation gate mid-mission."""
+        from daemon.services.attestation_scanner import is_real_user_message
+
+        result = nudge_node({"messages": []})
+        msg = result["messages"][0]
+        assert msg.additional_kwargs == {"injected_message": True}
+        assert is_real_user_message(msg) is False
+
 
 class TestBuildInstanceGraph:
     """Tests for build_instance_graph with nudge node."""

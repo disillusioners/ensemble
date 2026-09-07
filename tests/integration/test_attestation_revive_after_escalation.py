@@ -79,8 +79,19 @@ async def test_terminal_reset_and_fresh_episode_rearm_next_mission(
     manager = attestation_manager_factory(file_sqlite_engine, repo)
 
     # Mission 1: three nudges followed by terminal escalation.
+    # 2026-09-06 amendment: anchor as delegated (gate ON) so the
+    # bound-exhaustion → terminal-after-bound path is exercised.
     first_model = ScriptedChatModel(
-        responses=[AIMessage(content=f"missed {i}") for i in range(4)], i=0
+        responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
+            *[AIMessage(content=f"missed {i}") for i in range(4)],
+        ],
+        i=0,
     )
     first_graph = _build(real_graph_module, first_model, manager, memory_saver)
     with caplog.at_level(logging.INFO):
@@ -119,8 +130,16 @@ async def test_terminal_reset_and_fresh_episode_rearm_next_mission(
 
     # Mission 2 starts unburdened. It must need a full bound of misses
     # again, rather than escalating on its first deny.
+    # 2026-09-06 amendment: anchor mission 2 as delegated (gate ON)
+    # so the bound-exhaustion path is exercised.
     second_model = ScriptedChatModel(
         responses=[
+            AIMessage(
+                content="delegating",
+                tool_calls=[
+                    {"name": "send_message", "args": {"target": "child"}, "id": "d"}
+                ],
+            ),
             AIMessage(content="hallucinated second mission"),
             AIMessage(
                 content="attesting",

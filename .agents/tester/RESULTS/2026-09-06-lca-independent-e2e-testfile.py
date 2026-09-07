@@ -20,6 +20,19 @@ Scenarios: S1 (deny → in-graph nudge → attest → allow, no delivery),
 S2 (active child ⇒ allowed_legitimate_pending_wakeup, counter NOT reset),
 S3 (bound exhaustion ⇒ terminal_after_bound exactly once), M-dry (zero
 side effects on a DIRTY ledger row), M-off (gate not even wired).
+
+2026-09-07 conditional-attestation amendment (fixed lane artifact): the
+gate is now DELEGATION-GATED — it fires ONLY when a ``send_message``
+tool call happened since the last real user message. S1/S2/S3 therefore
+OPEN with a real ``send_message`` tool call (test-local stub tool wired
+into the ToolNode — the scanner matches the NAME in
+``AIMessage.tool_calls``), and S1's child-report input carries the
+enqueue-lane stamp ``{"injected_message": True, "source":
+"internal_report:..."}`` so it classifies as internal traffic, exactly
+as the fixed enqueue lane delivers it. M-dry/M-off are mode-level and
+needed no scenario change. The manager stub also gained the THIRD R2
+facade ``count_live_descendants`` (added upstream 2026-09-06; without
+it every gate evaluation fail-opens at the DB seam).
 """
 
 from __future__ import annotations
@@ -32,6 +45,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from sqlmodel import Session, func, select
 
+from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from daemon.repositories.dependency_bus.models import (
     DependencyWatcher,
     DependencyWatcherState,
@@ -42,8 +56,13 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from tests.support.scripted_chat_model import ScriptedChatModel
 
-#: NFR-6 verbatim nudge — hard-coded HERE independently of daemon.graph.
-NUDGE_TEXT = "The work is not yet finished — check current progress and continue."
+#: NFR-6 verbatim nudge — CONSTANT-PARITY import from daemon.graph (was
+#: a hard-coded local literal, stale after the conditional-attestation
+#: amendment). The new text is LARGER (header + body + two-step teaching
+#: + mermaid flowchart) and the graph injects it verbatim
+#: (``content=ATTESTATION_NUDGE_TEXT`` — no ``.format``), so equality
+#: assertions against the imported constant track the real injected
+#: bytes instead of duplicating the literal here.
 
 LEADER_ID = "indep-verify-leader"
 CHILD_ID = "indep-verify-child"
@@ -53,6 +72,18 @@ CHILD_ID = "indep-verify-child"
 def attest_completion() -> dict:
     """Leader attestation tool wired into the graph's ToolNode."""
     return {"attested": True, "timestamp": "2026-09-06T00:00:00+00:00"}
+
+
+@tool
+def send_message(target_instance_id: str, message: str) -> dict:
+    """Leader delegation tool STUB (test-local).
+
+    The conditional scanner counts delegation by the tool NAME found in
+    ``AIMessage.tool_calls`` (``DEFAULT_DELEGATION_TOOL_NAME ==
+    "send_message"``); this stub exists so the graph's ToolNode can
+    execute the scripted call without any messaging stack.
+    """
+    return {"delivered": True, "target": target_instance_id}
 
 
 # ---------------------------------------------------------------------------
@@ -80,15 +111,6 @@ def _manager(engine, repo: SQLModelInstanceRepository, *, queued_wakeups: int = 
     class IndependentVerifyManager:
         _instance_repository = repo  # gate ledger wiring seam
 
-        def __init__(self) -> None:
-            self.count_pending_children = MagicMock(
-                side_effect=self._real_count_pending_children
-            )
-            self.get_queued_or_expected_wakeups = MagicMock(
-                return_value=queued_wakeups
-            )
-            self.enqueue_message = MagicMock(name="enqueue_message")
-
         @staticmethod
         def _real_count_pending_children(target_instance_id: str) -> int:
             with Session(engine) as session:
@@ -105,6 +127,42 @@ def _manager(engine, repo: SQLModelInstanceRepository, *, queued_wakeups: int = 
                     )
                     or 0
                 )
+
+        @staticmethod
+        def _real_count_live_descendants(target_instance_id: str) -> int:
+            """Third R2 input (upstream 2026-09-06): real BFS over the
+            permanent lineage — non-terminal descendants only (mirrors
+            the production ``InstanceManager.count_live_descendants``).
+            Without this facade every gate evaluation hits AttributeError
+            inside the DB seam and fail-opens to ALLOWED."""
+            from daemon.repositories.instance.models import InstanceStatus
+
+            terminal_statuses = {
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            }
+            count = 0
+            for iid in repo.get_tree_ids_permanent(target_instance_id):
+                if iid == target_instance_id:
+                    continue
+                row = repo.get(iid)
+                if row is not None and row.status not in terminal_statuses:
+                    count += 1
+            return count
+
+        def __init__(self) -> None:
+            self.count_pending_children = MagicMock(
+                side_effect=self._real_count_pending_children
+            )
+            self.get_queued_or_expected_wakeups = MagicMock(
+                return_value=queued_wakeups
+            )
+            self.count_live_descendants = MagicMock(
+                side_effect=self._real_count_live_descendants
+            )
+            self.enqueue_message = MagicMock(name="enqueue_message")
 
         @staticmethod
         def is_watchover_enabled(_target_instance_id: str) -> bool:
@@ -182,7 +240,7 @@ def _build_graph(real_graph_module, model, manager):
     """Patch ONLY the LLM seam; the gate settings resolve for real."""
     real_graph_module.build_instance_llms = lambda **_: (model, model)
     return real_graph_module.build_instance_graph(
-        tools=[attest_completion],
+        tools=[attest_completion, send_message],
         checkpointer=_memory_saver(),
         llm_config={"model": "scripted-independent", "api_key": "test"},
         system_prompt="independent attestation verifier",
@@ -238,10 +296,26 @@ async def test_s1_hallucinated_end_denied_nudged_in_graph_then_attested_allow(
     _seed_baseline_queues(file_sqlite_engine)
     before = _queue_task_counts(file_sqlite_engine)
 
-    # A hallucinated in-progress child report sits in history, then the
-    # leader hallucinates a completion (plain END, NO tool call).
+    # The mission OPENS with a real delegation (send_message tool call —
+    # this arms the conditional gate), a STAMPED in-progress child report
+    # (internal traffic per the fixed enqueue lane — it must NOT count as
+    # the last real user message) sits in history, then the leader
+    # hallucinates a completion (plain END, NO attestation).
     model = ScriptedChatModel(
         responses=[
+            AIMessage(
+                content="Dispatching the verification child.",
+                tool_calls=[
+                    {
+                        "name": "send_message",
+                        "args": {
+                            "target_instance_id": CHILD_ID,
+                            "message": "verify the subtask",
+                        },
+                        "id": "indep-s1-send",
+                    }
+                ],
+            ),
             AIMessage(content="All work is complete. Nothing pending."),
             AIMessage(
                 content="Attesting now.",
@@ -261,7 +335,11 @@ async def test_s1_hallucinated_end_denied_nudged_in_graph_then_attested_allow(
             HumanMessage(content="finish the mission"),
             HumanMessage(
                 content="[child report | indep-verify-child] Still in progress — "
-                "2 of 5 tasks done."
+                "2 of 5 tasks done.",
+                additional_kwargs={
+                    "injected_message": True,
+                    "source": f"internal_report:{CHILD_ID}",
+                },
             ),
         )
 
@@ -276,11 +354,12 @@ async def test_s1_hallucinated_end_denied_nudged_in_graph_then_attested_allow(
     }
     assert state["attestation_nudge_denied_count"] == 1
 
-    # (iv) SAME execution continued: the attest tool_call turn and the
-    # post-nudge final message all happened inside this one ainvoke.
+    # (iv) SAME execution continued: the send_message turn, the attest
+    # tool_call turn, and the post-nudge final message all happened
+    # inside this one ainvoke.
     assert any(isinstance(m, AIMessage) and m.tool_calls for m in messages)
     assert messages[-1].content == "Genuinely finished after checking progress."
-    assert model.calls_made == 3
+    assert model.calls_made == 4
 
     # Decision ledger: one deny, one attested allow, never escalation.
     assert caplog.text.count("decision=denied") == 1
@@ -335,8 +414,26 @@ async def test_s2_active_child_allows_without_nudge_or_counter_reset(
     repo.increment_attestation_denied_count(LEADER_ID, "indep-s2-epoch-b")
     assert repo.get_attestation_denied_count(LEADER_ID) == 2
 
+    # The conditional gate must see a REAL delegation: the mission opens
+    # with a send_message tool call (name-match arms the gate), then the
+    # leader ends its turn while the child is still running.
     model = ScriptedChatModel(
-        responses=[AIMessage(content="Delegated to the child; ending my turn.")],
+        responses=[
+            AIMessage(
+                content="Delegating to the child now.",
+                tool_calls=[
+                    {
+                        "name": "send_message",
+                        "args": {
+                            "target_instance_id": CHILD_ID,
+                            "message": "do the delegated work",
+                        },
+                        "id": "indep-s2-send",
+                    }
+                ],
+            ),
+            AIMessage(content="Delegated to the child; ending my turn."),
+        ],
         i=0,
     )
     graph = _build_graph(real_graph_module, model, manager)
@@ -351,8 +448,9 @@ async def test_s2_active_child_allows_without_nudge_or_counter_reset(
 
     # R1 non-reset: counter still exactly 2 after the allow.
     assert repo.get_attestation_denied_count(LEADER_ID) == 2
-    # The turn ended (single LLM call) with zero delivery side effects.
-    assert model.calls_made == 1
+    # The turn ended (send_message turn + final END) with zero delivery
+    # side effects.
+    assert model.calls_made == 2
     manager.enqueue_message.assert_not_called()
     # The PENDING watcher was consumed by nothing — allow path mutated
     # no rows.
@@ -380,9 +478,26 @@ async def test_s3_bound_exhaustion_escalates_exactly_once_and_terminates(
     manager = _manager(file_sqlite_engine, repo)
     assert manager.count_pending_children(LEADER_ID) == 0
 
-    # The leader NEVER attests: four plain END attempts against bound=3.
+    # The mission arms the conditional gate with ONE real delegation,
+    # then the leader NEVER attests: four plain END attempts against
+    # bound=3.
     model = ScriptedChatModel(
         responses=[
+            AIMessage(
+                content="Delegating the work before I begin.",
+                tool_calls=[
+                    {
+                        "name": "send_message",
+                        "args": {
+                            "target_instance_id": CHILD_ID,
+                            "message": "handle the subtask",
+                        },
+                        "id": "indep-s3-send",
+                    }
+                ],
+            ),
+        ]
+        + [
             AIMessage(content=f"Hallucinated completion attempt {n}.")
             for n in range(1, 5)
         ],
@@ -408,10 +523,10 @@ async def test_s3_bound_exhaustion_escalates_exactly_once_and_terminates(
     assert row.attestation_denied_count == 0
     assert row.completion_gate_escalated is True
 
-    # Not hung: the run terminated at the bound+1 attempt (a fifth LLM
+    # Not hung: the run terminated at the bound+1 attempt (a sixth LLM
     # call would raise ScriptedChatModel IndexError), END allowed with
     # no route-back hint left armed.
-    assert model.calls_made == 4
+    assert model.calls_made == 5
     assert state["attestation_route"] is None
     manager.enqueue_message.assert_not_called()
     # No lifecycle write came from the gate path itself.

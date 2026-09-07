@@ -138,7 +138,13 @@ async def test_all_six_must_not_break_surfaces_under_each_mode(
         result = evaluate(
             INSTANCE_ID,
             0,
-            [AIMessage(content="unattested")],
+            # 2026-09-06 amendment: anchor as delegated (gate ON) so
+            # the wakeup-allow path continues to exercise the
+            # legitimate-pending-wakeup branch.
+            [HumanMessage(content="go"), AIMessage(
+                content="delegating",
+                tool_calls=[{"name": "send_message", "args": {"target": "child"}, "id": "d"}],
+            ), AIMessage(content="unattested")],
             _settings(mode),
             manager,
         )

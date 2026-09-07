@@ -1,0 +1,110 @@
+# LCA cond-attestation Neighborhood — FAILED/ERROR IDs + A/B Attribution
+# Generated: 2026-09-07
+# Delta: 26f908a4..7be6b1d8 (4 commits, feature/leader-completion-attestation)
+# Files: 58 recon-verified at both heads (none dropped)
+# Flags identical on both sides: .venv/bin/python -m pytest <58 files>
+#                                -o addopts="" --tb=short -q
+#                                wrapped in `timeout 300` (cap did not fire)
+
+# ============================================================
+# HEAD — feature/leader-completion-attestation @ 7be6b1d8 (CLEAN)
+# ============================================================
+# Counts: 872 passed, 7 failed, 5 skipped, 16 errors (900 collected, 205.81s)
+
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_composes_with_other_keys
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_overwrites_with_same_key
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_round_trips_unicode
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_round_trip_initiative_message
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_empty_string_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_none_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_backslash_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_percent_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_underscore_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_lowercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_uppercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_coexists_with_title_and_agent_fields
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_handles_non_string_initiative_message_value
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_matches_initiative_message_substring
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_no_match_returns_empty
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_skips_when_initiative_message_absent
+FAILED tests/integration/test_compaction_e2e.py::test_compaction_and_graph_continuation
+FAILED tests/integration/test_compaction_e2e.py::test_crash_recovery_after_compaction
+FAILED tests/integration/test_message_queue_e2e.py::test_debug_llm_invocation_count
+FAILED tests/integration/test_message_queue_e2e.py::test_single_message_no_duplicate_llm_calls
+FAILED tests/integration/test_message_queue_e2e.py::test_sse_events_count
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+FAILED tests/test_injection_compaction.py::TestProactiveCompactionPreservesInjection::test_all_injected_messages_skips_compaction
+
+# ============================================================
+# BASE — 26f908a4 (Merge 'feature/leader-completion-attestation' into latest)
+# ============================================================
+# Counts: 872 passed, 7 failed, 5 skipped, 16 errors (900 collected, 207.96s)
+
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_composes_with_other_keys
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_overwrites_with_same_key
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_initiative_message_round_trips_unicode
+ERROR tests/postgres/test_initiative_message_pg.py::TestCaptureOnPostgres::test_round_trip_initiative_message
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_empty_string_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestEmptySearchOnPostgres::test_none_search_returns_all
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_backslash_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_percent_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestInitiativeMessageEscapingOnPostgres::test_underscore_is_literal
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_lowercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_case_insensitive_uppercase_query
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_coexists_with_title_and_agent_fields
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_handles_non_string_initiative_message_value
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_matches_initiative_message_substring
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_no_match_returns_empty
+ERROR tests/postgres/test_initiative_message_pg.py::TestSearchByInitiativeMessageJsonb::test_search_skips_when_initiative_message_absent
+FAILED tests/integration/test_compaction_e2e.py::test_compaction_and_graph_continuation
+FAILED tests/integration/test_compaction_e2e.py::test_crash_recovery_after_compaction
+FAILED tests/integration/test_message_queue_e2e.py::test_debug_llm_invocation_count
+FAILED tests/integration/test_message_queue_e2e.py::test_single_message_no_duplicate_llm_calls
+FAILED tests/integration/test_message_queue_e2e.py::test_sse_events_count
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+FAILED tests/test_injection_compaction.py::TestProactiveCompactionPreservesInjection::test_all_injected_messages_skips_compaction
+
+# ============================================================
+# DIFF SUMMARY
+# ============================================================
+# Total unique FAILED+ERROR nodes HEAD:        23
+# Total unique FAILED+ERROR nodes BASE:       23
+# Introduced by delta (HEAD-only):             0   ← ZERO introduced
+# Fixed by delta (BASE-only):                  0
+# Pre-existing (intersection on both sides):  23
+#
+# Sorted FAILED+ERROR node lists are byte-IDENTICAL between HEAD and BASE
+# (diff returns no lines; full failure sections including summary are 2794 chars
+#  and 24 lines on both sides). No flake classification chain needed because
+#  there are 0 HEAD-only failures to rule out.
+#
+# Notable pre-existing families on both sides:
+#  1. messages.py:258 MagicMock-await family — registered pre-existing at e866c116
+#     (instrumented as RuntimeWarning 'coroutine ... was never awaited'; not a
+#     hard failure, but reflective of an older async-await fixture pattern).
+#  2. tests/postgres/test_initiative_message_pg.py — ALL 16 tests ERROR on both
+#     sides. Root cause: KNOWN TRAP — migration 20260714_000001 uses PG-only
+#     'DROP CONSTRAINT IF EXISTS' which SQLite rejects with 'near CONSTRAINT:
+#     syntax error'. The test file is postgres-marked but at HEAD runs against
+#     SQLite (no PG env wired), so the migration fails and every test that
+#     depends on the schema errors. Identical on both sides → environmental,
+#     not a delta regression. (See critical note 'TRAP: fresh-SQLite boot
+#     BROKEN' in project shared context.)
+#  3. test_compaction_e2e.py::test_compaction_and_graph_continuation +
+#     test_crash_recovery_after_compaction — pre-existing, byte-identical
+#     assertion text on both sides.
+#  4. test_message_queue_e2e.py trio (test_single_message_no_duplicate_llm_calls,
+#     test_sse_events_count, test_debug_llm_invocation_count) — pre-existing.
+#  5. test_instance_messaging_queue_routing.py::test_router_forwards_queue_id_to_enqueue_message_job
+#     — pre-existing, byte-identical on both sides.
+#  6. test_injection_compaction.py::test_all_injected_messages_skips_compaction
+#     — pre-existing, byte-identical on both sides. Likely related to the
+#     'skipped_injections_dominate on 100% injected-flagged payloads' first-soak
+#     observation noted in critical context (fix candidate 9674b95b under review);
+#     behavior unchanged across delta.
+#
+# Recommendation: delta 26f908a4..7be6b1d8 is CLEAN for this neighborhood.
+# The 23 pre-existing failures are unrelated to LCA-cond-attestation work and
+# are part of the established pre-existing baseline (acknowledged ~27 messages-
+# neighborhood failures from developer/reviewer at f965345a; this partition
+# observed 23 on a different file selection, both sides, both runs identical).

@@ -83,13 +83,25 @@ def repo(engine):
 
 LEADER_ID = "epoch-replay-leader"
 
-#: The would-be-END input state: a HumanMessage instruction and the
-#: leader's un-attested AIMessage. Built fresh (deepcopy) per invocation
-#: so a test cannot accidentally share mutable message objects across
+#: The would-be-END input state: a HumanMessage instruction, an AI
+#: AIMessage that dispatched a child via ``send_message`` (this is a
+#: DELEGATED mission — the conditional-attestation gate at the 2026-09-06
+#: amendment only fires for delegated missions), and a final
+#: un-attested AIMessage. Built fresh (deepcopy) per invocation so a
+#: test cannot accidentally share mutable message objects across
 #: "replays" — a real checkpoint replay rehydrates EQUAL-BUT-DISTINCT
 #: message objects, which is the scenario under test.
+DELEGATION_AI = AIMessage(
+    content="",
+    tool_calls=[
+        {"name": "send_message", "args": {"target": "child-id"}, "id": "dispatch-1"}
+    ],
+    id="dispatch-ai",
+)
+
 BASE_MESSAGES = [
     HumanMessage(content="ship the feature", id="hm-1"),
+    DELEGATION_AI,
     AIMessage(content="done — final report follows", id="aim-1"),
 ]
 
@@ -180,11 +192,16 @@ class TestGateNodeReplayIdempotency:
 
         # The leader tried again after the nudge: a NEW AIMessage (new
         # id AND new content) rides on top of the injected nudge.
+        # 2026-09-06 amendment: the nudge text now leads with a
+        # ``[SYSTEM CONTEXT: Completion Check Nudge]`` header —
+        # import the canonical constant so any future tweak doesn't
+        # require updating this replay fixture too.
+        from daemon.graph import ATTESTATION_NUDGE_TEXT
+
         replayed_state = _state()
         replayed_state["messages"].append(
             HumanMessage(
-                content="The work is not yet finished — check current "
-                "progress and continue.",
+                content=ATTESTATION_NUDGE_TEXT,
                 id="nudge-1",
                 additional_kwargs={"attestation_nudge": True},
             )
@@ -305,9 +322,20 @@ class TestRuntimeIdGetterFallback:
             ledger=repo,
         )
 
+        # Delegated mission (the conditional-attestation gate at the
+        # 2026-09-06 amendment only fires for delegated missions) —
+        # seed a HumanMessage instruction, an AI dispatching via
+        # ``send_message``, and an un-attested AIMessage.
         state = {
             "messages": [
                 HumanMessage(content="go", id="hm-r"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "send_message", "args": {"target": "child-r"}, "id": "dispatch-r"}
+                    ],
+                    id="dispatch-ai-r",
+                ),
                 AIMessage(content="done, no attestation", id="aim-r"),
             ]
         }
