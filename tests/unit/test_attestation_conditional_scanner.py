@@ -557,7 +557,11 @@ class TestDelegationScanResultShape:
 # scanner ladder fell through every step → is_real_user_message=True →
 # the delegation window RESET → the gate ALLOWED an un-attested
 # delegated END. Closed by (1) the constructor stamp and (2) ladder
-# branch 4b; these tests prove the post-fix behavior end-to-end through
+# STEP 3 (the ``injected_message`` flag branch) — the PRIMARY defense;
+# branch 4b is fail-closed defense in depth, currently unreachable as
+# an exclusion for constructor-produced shapes because Step 3 returns
+# False first whenever the flag is True (and 4b requires the flag
+# True). These tests prove the post-fix behavior end-to-end through
 # the real ``evaluate()`` gate.
 # ─────────────────────────────────────────────────────────────────────────────
 

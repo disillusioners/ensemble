@@ -329,8 +329,13 @@ _INTERNAL_AGENT_SOURCE_PREFIX = "internal_agent:"
 #: ``internal_agent:`` (agent-tool dispatch + cascade + revive lanes),
 #: ``system:`` (waiting-children watchdog hang / wedge notices). The
 #: stamped shape is the CONJUNCTION ``injected_message=True`` AND a
-#: ``source`` in this set — classified by ladder branch 4b in
-#: :func:`is_real_user_message`.
+#: ``source`` in this set. For constructor-produced shapes the PRIMARY
+#: ladder defense is the stamp + Step 3 (the ``injected_message`` flag
+#: branch in :func:`is_real_user_message`), which returns False first
+#: whenever the flag is True; branch 4b is fail-closed defense in
+#: depth for that conjunction and is currently unreachable as an
+#: exclusion for constructor-produced shapes (it requires the same
+#: flag Step 3 has already excluded on).
 _INTERNAL_STAMPED_SOURCE_PREFIXES = (
     _INTERNAL_REPORT_SOURCE_PREFIX,
     "internal_error_report:",
@@ -380,9 +385,13 @@ def is_real_user_message(message: BaseMessage) -> bool:
         with one of ``internal_report:`` / ``internal_error_report:`` /
         ``internal_agent:`` / ``system:`` ⇒ excluded. The CONJUNCTION
         recognizes the exact shape ``_build_graph_input`` constructs
-        for internal enqueue-lane deliveries (the pre-fix hole: those
-        messages used to arrive bare and masquerade as real user
-        messages, resetting the delegation window).
+        for internal enqueue-lane deliveries — the shape at the center
+        of the pre-fix masquerade hole. This is NOT the primary
+        defense: for constructor-produced shapes the stamp + Step 3
+        (the ``injected_message`` flag branch) returns False first
+        whenever the flag is True, and 4b requires that same flag, so
+        4b is currently unreachable as an exclusion for those shapes
+        and stands as fail-closed defense in depth.
     5. **Content sentinel** — the HumanMessage body starting with
        ``"[SYSTEM CONTEXT:"`` (the standard ``[SYSTEM CONTEXT: …]``
        block prefix — the same prefix the ``_make_context_message``
@@ -440,10 +449,15 @@ def is_real_user_message(message: BaseMessage) -> bool:
     #     kwargs) can never match; a stamped internal message can never
     #     slip through — including the ``internal_error_report:`` and
     #     ``system:`` namespaces the prefix-only step 4 does not cover.
-    #     This is the branch that closes the report-masquerade hole: a
-    #     parked parent's child report delivered via the enqueue lane
-    #     no longer reads as the "last real user message" and can no
-    #     longer reset the delegation window.
+    #     This branch does NOT close the report-masquerade hole by
+    #     itself: the PRIMARY defense is the constructor stamp + Step 3
+    #     (the ``injected_message`` flag branch above), which returns
+    #     False first whenever the flag is True — and this branch
+    #     requires that same flag — so 4b is currently unreachable as
+    #     an exclusion for constructor-produced shapes; it stands as
+    #     fail-closed defense in depth (the parked parent's child
+    #     report no longer reads as the "last real user message" and
+    #     can no longer reset the delegation window).
     if (
         additional_kwargs.get("injected_message") is True
         and isinstance(source, str)
