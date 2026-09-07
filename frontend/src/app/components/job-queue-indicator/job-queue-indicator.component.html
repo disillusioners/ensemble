@@ -106,7 +106,8 @@
         [projectNameMap]="projectNameMap()"
         [liveMissionCount]="liveMissionCount()"
         [missions]="missionsList()"
-        (jobClick)="onJobClick($event)">
+        (jobClick)="onJobClick($event)"
+        (footerClick)="onFooterClick()">
       </app-job-queue-panel>
     </ng-template>
   </mat-menu>

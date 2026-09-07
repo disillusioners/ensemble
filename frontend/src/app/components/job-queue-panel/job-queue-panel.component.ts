@@ -3,7 +3,21 @@ import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus, MissionSummary, MissionLiveness, missionLivenessChip, buildQueueTree, shouldAutoExpand, missionDisplayTitle } from '../../models/job.model';
+import {
+  getStatusColor as modelGetStatusColor,
+  Job,
+  JobStatus,
+  MissionSummary,
+  MissionLiveness,
+  missionLivenessChip,
+  buildQueueTree,
+  shouldAutoExpand,
+  missionDisplayTitle,
+  visibleTreeItems,
+  nextVisibleItem,
+  visibleTreeItemId,
+  VisibleTreeItem,
+} from '../../models/job.model';
 import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-liveness-chip.component';
 
 /**
@@ -89,6 +103,14 @@ export class JobQueuePanelComponent {
   jobClick = output<Job>();
 
   /**
+   * T1 (2026-09-07, mission-tree final gaps) — emitted when the
+   * user activates the footer's "Open full queue →" link. The
+   * indicator handles it (navigate + close menu) so the panel stays
+   * DUMB/presentational, exactly like ``jobClick`` does for rows.
+   */
+  footerClick = output<void>();
+
+  /**
    * Per-mission-id expansion state for LIVE MISSIONS. Survives data
    * refreshes by being keyed on mission_id (not array index) — a
    * poll refresh that re-orders the live missions does NOT collapse
@@ -101,6 +123,24 @@ export class JobQueuePanelComponent {
    * survival guarantee as ``expandedLiveMissions``.
    */
   private readonly expandedRecentMissions = signal<Set<string>>(new Set());
+
+  /**
+   * T3 (2026-09-07, mission-tree final gaps) — id of the row that
+   * currently owns keyboard focus inside the trees (LIVE + RECENT).
+   * Drives the ``.focused`` CSS class so sighted users can see where
+   * the arrow keys would land; Enter/Space still fire on the focused
+   * row's own handler.
+   *
+   * ``null`` = no row owns focus yet (initial state, after the user
+   * tabs away, or when the trees are empty). The arrow handler uses
+   * ``null`` as the "no current focus" sentinel and lands on the
+   * first / last item depending on direction.
+   *
+   * The id is the stable ``visibleTreeItemId`` string — see
+   * ``models/job.model.ts``. It carries the tree prefix so LIVE and
+   * RECENT focus are independent.
+   */
+  private readonly focusedItemId = signal<string | null>(null);
 
   /**
    * Tree derivation — wraps the pure ``buildQueueTree`` model
@@ -175,6 +215,20 @@ export class JobQueuePanelComponent {
     shouldAutoExpand(this.tree().liveMissions)
   );
 
+  /**
+   * T3 — flattened list of items the arrow-key handler can land on
+   * (LIVE MISSIONS tree + RECENT tree). Wraps the pure
+   * ``visibleTreeItems`` helper so the spec can pin the traversal
+   * logic without a DOM harness.
+   *
+   * The QUEUED section lives outside any ``role="tree"`` and is
+   * reached via Tab, NOT arrows — by design, so the QUEUED rows
+   * don't have to follow the WAI-ARIA tree keyboard contract.
+   */
+  readonly visibleItems = computed<VisibleTreeItem[]>(() =>
+    visibleTreeItems(this.tree(), this.expandedLiveMissions(), this.expandedRecentMissions())
+  );
+
   constructor() {
     // Auto-seed the LIVE MISSIONS expansion set when the set of live
     // mission ids changes AND the auto-expand rule says we should.
@@ -242,6 +296,135 @@ export class JobQueuePanelComponent {
   isRecentExpanded(missionId: string | null | undefined): boolean {
     if (!missionId) return false;
     return this.expandedRecentMissions().has(missionId);
+  }
+
+  /**
+   * T3 — true iff the given ``visibleTreeItemId`` is the row that
+   * currently owns keyboard focus. Drives the ``.focused`` class in
+   * the template so sighted users can see where an arrow-key press
+   * would land. Pure read; the actual ``focus()`` call lives in the
+   * template's ``#row`` ref binding (Angular handles it).
+   */
+  isFocusedItem(id: string | null | undefined): boolean {
+    if (!id) return false;
+    return this.focusedItemId() === id;
+  }
+
+  /**
+   * T3 — handler bound from the template to each row's
+   * ``(focus)``. We let the browser give focus to the row
+   * naturally; the ``focusedItemId`` signal mirrors it so the
+   * ``.focused`` class is in sync with the real DOM focus state.
+   *
+   * Cheaper than re-focusing from the arrow handler — we just
+   * record what the browser already did.
+   */
+  onRowFocus(id: string): void {
+    this.focusedItemId.set(id);
+  }
+
+  /**
+   * T3 — arrow-key handler bound to the panel container. Resolves
+   * the focused item's index in ``visibleItems``, calls the pure
+   * ``nextVisibleItem`` helper, and applies the action:
+   *
+   *   * ArrowDown / ArrowUp  → move focus by +1 / -1 in the flat
+   *     visible list. Boundary behaviour is CLAMP (not wrap) — the
+   *     first item stays at index 0 when ↑ is pressed from the top;
+   *     the last item stays at the tail when ↓ is pressed from the
+   *     bottom. We chose clamp over wrap because wrap is jarring in
+   *     a two-tree layout (jumping from the last RECENT row back to
+   *     the first LIVE mission reads as a glitch, not a navigation).
+   *
+   *   * ArrowRight          → expand a collapsed mission node. On a
+   *     job child or already-expanded node this is a no-op so the
+   *     keypress doesn't fight other affordances.
+   *
+   *   * ArrowLeft           → collapse an expanded mission node. On
+   *     a job child, collapse the parent (WAI-ARIA tree pattern).
+   *     On an already-collapsed node this is a no-op.
+   *
+   * Enter / Space / Esc are NOT handled here — those key bindings
+   * stay on the individual rows so a Tab-focused row's existing
+   * (keydown.enter) / (keydown.space) handlers fire as before. Esc
+   * already closes the mat-menu from the trigger's own binding, so
+   * the panel doesn't need to repeat it.
+   */
+  onTreeKeydown(event: KeyboardEvent): void {
+    const items = this.visibleItems();
+    if (items.length === 0) return;
+    const key = event.key;
+    if (
+      key !== 'ArrowDown' &&
+      key !== 'ArrowUp' &&
+      key !== 'ArrowRight' &&
+      key !== 'ArrowLeft'
+    ) {
+      return;
+    }
+    // Prevent the page from scrolling on ArrowDown/Up inside the menu
+    // and stop the event from bubbling to ancestor handlers that
+    // might double-handle the same key.
+    event.preventDefault();
+    event.stopPropagation();
+
+    const currentId = this.focusedItemId();
+    const currentIndex = currentId
+      ? items.findIndex((it) => visibleTreeItemId(it) === currentId)
+      : -1;
+
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const delta: -1 | 1 = key === 'ArrowUp' ? -1 : 1;
+      const nextIndex = nextVisibleItem(items, currentIndex, delta);
+      const nextId = visibleTreeItemId(items[nextIndex]);
+      this.focusedItemId.set(nextId);
+      return;
+    }
+
+    // ArrowRight / ArrowLeft target the focused row, not its index
+    // (a "no focus yet" + ← / → is a no-op so we don't surprise the
+    // user with an unintended expansion).
+    if (currentIndex < 0) return;
+    const current = items[currentIndex];
+
+    if (key === 'ArrowRight') {
+      if (current.kind !== 'mission') return; // child rows: no-op
+      const id = current.node.mission.mission_id;
+      if (!id) return;
+      if (current.tree === 'live') {
+        if (!this.isLiveExpanded(id)) this.toggleLiveMission(id);
+      } else {
+        if (!this.isRecentExpanded(id)) this.toggleRecentMission(id);
+      }
+      return;
+    }
+
+    // ArrowLeft: collapse if expanded; on a child row, collapse the
+    // parent (WAI-ARIA tree pattern — child → parent).
+    if (key === 'ArrowLeft') {
+      let missionId: string | null | undefined;
+      let tree: 'live' | 'recent';
+      if (current.kind === 'mission') {
+        missionId = current.node.mission.mission_id;
+        tree = current.tree;
+      } else {
+        missionId = current.mission.mission_id;
+        tree = current.tree;
+      }
+      if (!missionId) return;
+      const isExpanded =
+        tree === 'live'
+          ? this.isLiveExpanded(missionId)
+          : this.isRecentExpanded(missionId);
+      if (!isExpanded) return;
+      if (tree === 'live') this.toggleLiveMission(missionId);
+      else this.toggleRecentMission(missionId);
+    }
+  }
+
+  /** T1 — emitted when the user activates the footer's "Open full queue →". */
+  onFooterClick(): void {
+    this.footerClick.emit();
   }
 
   /**

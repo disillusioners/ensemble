@@ -425,6 +425,16 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * Set ONLY when a leg's per-participant catchError swallowed a
    * failure — the forkJoin outer error handler is a safety net for
    * operator-thrown values that escaped the per-leg isolation.
+   *
+   * T2 (2026-09-07, mission-tree final gaps) — the missions leg is
+   * split into two parallel legs: ``missionsCount`` (filtered,
+   * ``limit:1``) and ``missionsList`` (unfiltered, ``limit:20``).
+   * Each carries its own per-participant catchError so a failure in
+   * one does NOT cascade into the other. Both legs feed
+   * ``recordLegError`` with their respective leg name
+   * (``missionsCount`` / ``missionsList``) so the degraded flag
+   * honestly reflects which leg tripped — the original contract's
+   * "any per-leg failure raises the flag" still holds.
    */
   readonly lastIntakeError = signal<string | null>(null);
 
@@ -435,11 +445,18 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * name understated it):
    *
    * - jobs intake — active + recent (``X/Y`` + the Recent section);
-   * - ``missions`` — authoritative missions projection
-   *   (``GET /api/missions?limit=20`` — REPLACES the former
-   *   ``listLiveMissionCount(limit=1)`` call; the segmented pill's
-   *   tooltip needs the per-liveness breakdown, which means we have
-   *   to fetch the actual rows, not just a count);
+   * - ``missionsCount`` — LIVE count leg
+   *   (``GET /api/missions?liveness=processing,pending,paused&limit=1``).
+   *   The response's filter-aware ``total`` is the badge's live-mission
+   *   count — authoritative when present. Filtered + limit=1 keeps
+   *   this leg cheap.
+   * - ``missionsList`` — CONTENT leg
+   *   (``GET /api/missions?limit=20`` — unfiltered page; the panel's
+   *   ``tree().liveMissions`` + ``tree().recent`` derive from this).
+   *   The split (T2 fix) closes the 82-vs-7 self-contradiction:
+   *   ``total`` from the count leg is the live count; ``total`` from
+   *   the content leg is the total mission count (which includes
+   *   terminal rows) and would falsely inflate the badge.
    * - ``deferBlocked`` — defer-gate warning payload
    *   (``GET /api/queues/defer-blocked``).
    *
@@ -448,13 +465,15 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * THAT leg to ``null`` without failing the whole ``forkJoin`` —
    * the healthy legs keep flowing.
    *
-   * ``null`` missions ⇒ the last known payload is RETAINED (never
-   * falsely idle); ``null`` deferBlocked ⇒ the warning icon hides;
-   * ``null`` active/recent ⇒ the last known job list is RETAINED
-   * (W-jobs-intake honesty — a reset to ``[]`` plus a stale
-   * ``refreshed Ns ago`` would impersonate a successful "0/0"
-   * poll). ``lastIntakeError`` flips non-null on any per-leg error
-   * so the UI can flag the degradation honestly.
+   * ``null`` missionsCount ⇒ the last known count is RETAINED
+   * (never falsely idle); ``null`` missionsList ⇒ the last known
+   * list is RETAINED (the panel never flashes empty); ``null``
+   * deferBlocked ⇒ the warning icon hides; ``null`` active/recent
+   * ⇒ the last known job list is RETAINED (W-jobs-intake honesty —
+   * a reset to ``[]`` plus a stale ``refreshed Ns ago`` would
+   * impersonate a successful "0/0" poll). ``lastIntakeError`` flips
+   * non-null on any per-leg error so the UI can flag the degradation
+   * honestly.
    */
   private fetchBadgeSignals(): void {
     forkJoin({
@@ -470,9 +489,29 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
           return of(null);
         })
       ),
-      missions: this.jobService.listMissions({ limit: 20 }).pipe(
+      // T2 fix — count leg. The response's ``total`` is the live
+      // mission count (filter-aware). Filter ``processing,pending,paused``
+      // matches ``missionCountFromListResponse``'s expectation: when
+      // BE honors the filter, ``total`` is the live count; when BE
+      // can't honour the filter (degraded envelope), the envelope
+      // returns ``degraded:true`` + ``total=null`` and the helper
+      // returns ``null`` (count unavailable, retain last).
+      missionsCount: this.jobService.listMissions({
+        liveness: 'processing,pending,paused',
+        limit: 1,
+      }).pipe(
         catchError((err) => {
-          this.recordLegError('missions', err);
+          this.recordLegError('missionsCount', err);
+          return of(null);
+        })
+      ),
+      // T2 fix — content leg. Unfiltered, limit 20. The panel feeds
+      // this through ``buildQueueTree`` to derive its live + recent
+      // mission nodes; the per-liveness breakdown still derives from
+      // this list (the tooltip's processing/pending/paused counts).
+      missionsList: this.jobService.listMissions({ limit: 20 }).pipe(
+        catchError((err) => {
+          this.recordLegError('missionsList', err);
           return of(null);
         })
       ),
@@ -485,8 +524,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: ({ active, recent, missions, deferBlocked }) =>
-          this.applyFetchResults(active, recent, missions, deferBlocked),
+        next: ({ active, recent, missionsCount, missionsList, deferBlocked }) =>
+          this.applyFetchResults(active, recent, missionsCount, missionsList, deferBlocked),
         // Safety net only — per-leg catchError above means this
         // path is unreachable for routine HTTP failures. It still
         // exists for synchronous throws from operator pipes that
@@ -516,20 +555,31 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * its own method so the logic-mirror spec can replicate it 1:1
    * with mocked service payloads.
    *
+   * T2 fix (2026-09-07, mission-tree final gaps) — the missions
+   * leg is split into two independent legs:
+   *   * ``missionsCount`` — the live count (filter-aware ``total``).
+   *     Updates ``liveMissionCountRaw`` via the canonical
+   *     ``missionCountFromListResponse`` helper on a non-degraded
+   *     tick; ``null`` on a degraded envelope (retain last good
+   *     count, never falsely idle).
+   *   * ``missionsList`` — the unfiltered content page. Updates
+   *     ``missionsPayload`` on a non-degraded tick so the panel's
+   *     ``missions`` input keeps the live + recent mission nodes.
+   *
+   * Each leg is treated independently for retention / degraded-flag
+   * / lastFetchAt-freeze purposes: a degraded envelope on the count
+   * leg does NOT clobber the list leg's last good payload, and vice
+   * versa. Either leg's per-participant catchError or degraded-200
+   * envelope raises ``lastIntakeError`` so the UI honestly reports
+   * the degradation.
+   *
+   * Other legs unchanged:
    * - jobs (active + recent) — ``null`` means the per-leg
    *   catchError swallowed a failure; we RETAIN the previous list
    *   rather than resetting to ``[]`` (W-jobs-intake honesty — a
    *   bare 0/0 plus a stale "refreshed Ns ago" would impersonate a
    *   healthy poll). ``lastIntakeError`` already records the leg
    *   failure for the UI to surface;
-   * - ``missions === null`` (degraded list / fetch failure) RETAINS
-   *   the previous payload — "data unavailable" must not collapse to
-   *   a bare 0/0, so the badge never falsely reports an idle system;
-   * - C2 fix: a 200-OK ``degraded:true`` envelope (empty rows + null
-   *   total) ALSO retains the previous payload — same logic. The
-   *   canonical ``missionCountFromListResponse`` helper returns
-   *   ``null`` for the degraded envelope so we don't update the
-   *   count signal either;
    * - ``deferBlocked === null`` hides the warning affordance;
    * - ``lastFetchAt`` only advances when AT LEAST ONE leg returned
    *   a usable payload (a degraded missions envelope counts as NOT
@@ -540,7 +590,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private applyFetchResults(
     active: Job[] | null,
     recent: Job[] | null,
-    missions: MissionListResponse | null,
+    missionsCount: MissionListResponse | null,
+    missionsList: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     if (active !== null) {
@@ -549,29 +600,46 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     if (recent !== null) {
       this.allRecentJobs.set(recent);
     }
-    if (missions !== null && !missions.degraded) {
-      this.missionsPayload.set(missions);
-      // C3 fix: route through the canonical helper. The helper
-      // returns ``number | null`` — ``null`` only on degraded (already
-      // filtered above). A healthy tick with total=0 returns 0 and
-      // IS recorded (legitimate update, not a degraded gap).
-      const count = missionCountFromListResponse(missions);
+    // T2 fix — count leg drives ``liveMissionCountRaw``; list leg
+    // drives ``missionsPayload``. Each is independently gated on
+    // non-null + non-degraded so a degraded count envelope cannot
+    // clobber the list (and vice versa).
+    if (missionsCount !== null && !missionsCount.degraded) {
+      const count = missionCountFromListResponse(missionsCount);
+      // ``count === null`` only when the envelope is degraded — already
+      // filtered above. A healthy tick with ``total = 0`` returns 0
+      // and IS recorded (legitimate update, not a degraded gap).
       this.liveMissionCountRaw.set(count);
     }
-    // A 200-OK ``degraded:true`` missions envelope never routes
-    // through the per-leg ``catchError`` (HTTP succeeded), so flag it
-    // here — same channel as the catchError paths — to flip the
-    // degraded modifier + aria state honestly.
-    const missionsDegraded = missions !== null && missions.degraded;
-    if (missionsDegraded) {
-      this.recordLegError('missions', 'degraded envelope');
+    if (missionsList !== null && !missionsList.degraded) {
+      this.missionsPayload.set(missionsList);
+    }
+    // 200-OK ``degraded:true`` envelopes never route through the
+    // per-leg ``catchError`` (HTTP succeeded), so flag each here —
+    // same channel as the catchError paths — to flip the degraded
+    // modifier + aria state honestly. Each leg is reported
+    // independently so the UI can tell the operator which projection
+    // degraded (the live count leg vs the content page leg).
+    const missionsCountDegraded = missionsCount !== null && missionsCount.degraded;
+    const missionsListDegraded = missionsList !== null && missionsList.degraded;
+    if (missionsCountDegraded) {
+      this.recordLegError('missionsCount', 'degraded envelope');
+    }
+    if (missionsListDegraded) {
+      this.recordLegError('missionsList', 'degraded envelope');
     }
     // Clear the per-leg error flag only when ALL legs returned a
-    // non-null payload (missions: non-degraded) — a partial-failure
-    // or degraded tick keeps the flag set so the UI continues to
-    // surface the degradation.
+    // non-null payload (missions legs: non-degraded) — a partial-
+    // failure or degraded tick keeps the flag set so the UI
+    // continues to surface the degradation.
     const anyNull =
-      active === null || recent === null || missions === null || deferBlocked === null || missionsDegraded;
+      active === null ||
+      recent === null ||
+      missionsCount === null ||
+      missionsList === null ||
+      deferBlocked === null ||
+      missionsCountDegraded ||
+      missionsListDegraded;
     if (!anyNull) {
       this.lastIntakeError.set(null);
     }
@@ -581,7 +649,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     if (
       active !== null ||
       recent !== null ||
-      (missions !== null && !missions.degraded) ||
+      (missionsCount !== null && !missionsCount.degraded) ||
+      (missionsList !== null && !missionsList.degraded) ||
       deferBlocked !== null
     ) {
       this.lastFetchAt.set(Date.now());
@@ -696,6 +765,21 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       ? ['/projects', projectKey, 'instances', job.instance_id]
       : ['/projects', projectKey, 'instances'];
     this.router.navigate(navigateTo);
+  }
+
+  /**
+   * T1 (2026-09-07, mission-tree final gaps) — handle the panel
+   * footer's "Open full queue →" activation. The panel stays
+   * DUMB/presentational and emits ``footerClick``; this handler
+   * closes the dropdown and routes to the dedicated Jobs page
+   * (``/jobs`` — confirmed in app.routes.ts as the lazy-loaded
+   * ``JobsComponent``). Same flow as ``onJobClick`` for closing the
+   * menu: drop the surface FIRST, then mutate route state, so the
+   * user sees the menu disappear before the page transition.
+   */
+  onFooterClick(): void {
+    this.menuTrigger?.closeMenu();
+    this.router.navigate(['/jobs']);
   }
 }
 

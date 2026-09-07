@@ -24,6 +24,9 @@ import {
   buildQueueTree,
   shouldAutoExpand,
   MAX_RECENT_JOBS,
+  visibleTreeItems,
+  nextVisibleItem,
+  visibleTreeItemId,
 } from './job.model';
 
 describe('Job Model', () => {
@@ -1063,6 +1066,215 @@ describe('Job Model', () => {
       expect(shouldAutoExpand([])).toBe(false);
       expect(shouldAutoExpand([mkNode('m-1'), mkNode('m-2')])).toBe(false);
       expect(shouldAutoExpand([mkNode('m-1'), mkNode('m-2'), mkNode('m-3')])).toBe(false);
+    });
+  });
+
+  // ── Tree-keyboard navigation (T3, 2026-09-07) ─────────────────────────
+  //
+  // Pure helpers — exercised here WITHOUT the panel component so the
+  // traversal logic is pinned at the model layer (the panel spec
+  // mirrors these via the same imports).
+
+  describe('visibleTreeItems', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: null,
+        last_activity_at: null,
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+    function mkJob(id: string, mid: string | null): Job {
+      return {
+        job_id: id,
+        agent_id: 'leader',
+        project_id: null,
+        priority: 5,
+        status: 'processing',
+        created_at: '2026-09-07T10:00:00Z',
+        started_at: null,
+        completed_at: null,
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        job_metadata: null,
+        cancelled_at: null,
+        mission_id: mid,
+      } as Job;
+    }
+
+    it('returns mission nodes only when nothing is expanded (no children surface)', () => {
+      const tree = {
+        liveMissions: [
+          { mission: mkMission({ mission_id: 'a' }), jobs: [mkJob('j-1', 'a')] },
+          { mission: mkMission({ mission_id: 'b' }), jobs: [] },
+        ],
+        recent: [],
+      };
+      const items = visibleTreeItems(tree, undefined, undefined);
+      expect(items.length).toBe(2);
+      expect(items.every((it) => it.kind === 'mission')).toBe(true);
+    });
+
+    it('flattens expanded mission children AFTER the parent in display order', () => {
+      const tree = {
+        liveMissions: [
+          { mission: mkMission({ mission_id: 'a' }), jobs: [mkJob('j-1', 'a'), mkJob('j-2', 'a')] },
+        ],
+        recent: [],
+      };
+      const items = visibleTreeItems(tree, new Set(['a']), undefined);
+      expect(items.length).toBe(3);
+      expect(items[0].kind).toBe('mission');
+      expect(items[1].kind).toBe('job');
+      expect(items[2].kind).toBe('job');
+    });
+
+    it('skips children of COLLAPSED nodes — they are invisible to the arrow handler', () => {
+      const tree = {
+        liveMissions: [
+          { mission: mkMission({ mission_id: 'a' }), jobs: [mkJob('j-1', 'a')] },
+          { mission: mkMission({ mission_id: 'b' }), jobs: [mkJob('j-2', 'b')] },
+        ],
+        recent: [],
+      };
+      // Only 'a' is expanded — 'b's children are hidden.
+      const items = visibleTreeItems(tree, new Set(['a']), undefined);
+      const ids = items.map((it) =>
+        it.kind === 'mission' ? it.node.mission.mission_id : it.job.job_id
+      );
+      expect(ids).toEqual(['a', 'j-1', 'b']);
+    });
+
+    it('LIVE tree items come before RECENT tree items (cross-tree order)', () => {
+      const tree = {
+        liveMissions: [{ mission: mkMission({ mission_id: 'live' }), jobs: [] }],
+        recent: [{ mission: mkMission({ mission_id: 'rec' }), jobs: [] }],
+      };
+      const items = visibleTreeItems(tree, undefined, undefined);
+      expect(items[0].tree).toBe('live');
+      expect(items[1].tree).toBe('recent');
+    });
+
+    it('treats undefined expansion sets as "nothing expanded"', () => {
+      const tree = {
+        liveMissions: [
+          { mission: mkMission({ mission_id: 'a' }), jobs: [mkJob('j-1', 'a')] },
+        ],
+        recent: [],
+      };
+      const items = visibleTreeItems(tree, undefined, undefined);
+      expect(items.length).toBe(1);
+    });
+  });
+
+  describe('nextVisibleItem', () => {
+    function makeItems() {
+      return [
+        { kind: 'mission' as const, tree: 'live' as const, node: { mission: { mission_id: 'a' } as MissionSummary, jobs: [] } },
+        { kind: 'mission' as const, tree: 'live' as const, node: { mission: { mission_id: 'b' } as MissionSummary, jobs: [] } },
+        { kind: 'mission' as const, tree: 'live' as const, node: { mission: { mission_id: 'c' } as MissionSummary, jobs: [] } },
+      ];
+    }
+
+    it('ArrowDown from index 0 → 1, from 1 → 2', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, 1)).toBe(1);
+      expect(nextVisibleItem(items, 1, 1)).toBe(2);
+    });
+
+    it('ArrowUp from index 2 → 1, from 1 → 0', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 2, -1)).toBe(1);
+      expect(nextVisibleItem(items, 1, -1)).toBe(0);
+    });
+
+    it('clamps at the LAST item (no wrap on ArrowDown)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 2, 1)).toBe(2);
+    });
+
+    it('clamps at the FIRST item (no wrap on ArrowUp)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, -1)).toBe(0);
+    });
+
+    it('ArrowDown with currentIndex=-1 lands at the first item (natural first-focus)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, 1)).toBe(0);
+    });
+
+    it('ArrowUp with currentIndex=-1 lands at the last item (natural first-focus)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, -1)).toBe(2);
+    });
+
+    it('returns -1 for an empty list regardless of direction', () => {
+      expect(nextVisibleItem([], 0, 1)).toBe(-1);
+      expect(nextVisibleItem([], -1, -1)).toBe(-1);
+    });
+  });
+
+  describe('visibleTreeItemId', () => {
+    function mkMission(mid: string): MissionSummary {
+      return {
+        mission_id: mid,
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: null,
+        last_activity_at: null,
+        title: null,
+        initiative_preview: null,
+      };
+    }
+    function mkJob(id: string): Job {
+      return {
+        job_id: id,
+        agent_id: 'leader',
+        project_id: null,
+        priority: 5,
+        status: 'processing',
+        created_at: '2026-09-07T10:00:00Z',
+        started_at: null,
+        completed_at: null,
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        job_metadata: null,
+        cancelled_at: null,
+      } as Job;
+    }
+
+    it('encodes a live mission node as "tree:live|mission:<id>"', () => {
+      const item = { kind: 'mission' as const, tree: 'live' as const, node: { mission: mkMission('m-1'), jobs: [] } };
+      expect(visibleTreeItemId(item)).toBe('tree:live|mission:m-1');
+    });
+
+    it('encodes a recent mission node as "tree:recent|mission:<id>"', () => {
+      const item = { kind: 'mission' as const, tree: 'recent' as const, node: { mission: mkMission('m-7'), jobs: [] } };
+      expect(visibleTreeItemId(item)).toBe('tree:recent|mission:m-7');
+    });
+
+    it('encodes a job child as "tree:<tree>|mission:<mid>|job:<job_id>"', () => {
+      const item = {
+        kind: 'job' as const,
+        tree: 'live' as const,
+        mission: mkMission('m-1'),
+        job: mkJob('j-abc'),
+      };
+      expect(visibleTreeItemId(item)).toBe('tree:live|mission:m-1|job:j-abc');
     });
   });
 });

@@ -677,3 +677,115 @@ export function buildQueueTree(
 export function shouldAutoExpand(liveMissions: ReadonlyArray<MissionNode>): boolean {
   return liveMissions.length === 1;
 }
+
+// ── Tree-keyboard navigation (T3, 2026-09-07, mission-tree final gaps) ──
+
+/**
+ * A visible item in the panel's keyboard-navigable trees (LIVE
+ * MISSIONS + RECENT). Each item carries the discriminated ``kind``
+ * so the arrow-key handler can decide whether to expand/collapse,
+ * toggle the mission row, or navigate to a job.
+ *
+ * Items are FLATTENED in display order: a mission node appears at
+ * its slot; when the node is expanded, its child jobs follow the
+ * node in the array (one slot per child). Collapsed nodes carry no
+ * children — those slots are omitted entirely so arrow-up/down skips
+ * over them as the brief asks.
+ *
+ * Pure, no Angular deps — specable without DOM.
+ */
+export type VisibleTreeItem =
+  | { kind: 'mission'; tree: 'live' | 'recent'; node: MissionNode }
+  | { kind: 'job'; tree: 'live' | 'recent'; mission: MissionSummary; job: Job };
+
+/**
+ * Flatten the LIVE MISSIONS + RECENT trees into the ordered list of
+ * items a keyboard user can land on. Order matches the rendered DOM:
+ *   1. Live mission nodes (in tree order); each expanded node's
+ *      children follow the parent (one slot per child).
+ *   2. Recent mission nodes (in tree order); same flatten rule.
+ *
+ * The QUEUED section is NOT in scope — it lives outside any
+ * ``role="tree"`` and its rows are reached via Tab, not arrows.
+ *
+ * ``expandedLiveIds`` / ``expandedRecentIds`` are the current per-tree
+ * expansion sets so the function can decide whether to include a
+ * node's children. ``undefined`` for either set is treated as
+ * "nothing expanded" — the safe default before the user has touched
+ * anything.
+ */
+export function visibleTreeItems(
+  tree: Pick<QueueTree, 'liveMissions' | 'recent'>,
+  expandedLiveIds: ReadonlySet<string> | undefined,
+  expandedRecentIds: ReadonlySet<string> | undefined
+): VisibleTreeItem[] {
+  const items: VisibleTreeItem[] = [];
+  for (const node of tree.liveMissions) {
+    items.push({ kind: 'mission', tree: 'live', node });
+    const id = node.mission.mission_id;
+    if (id && expandedLiveIds?.has(id)) {
+      for (const job of node.jobs) {
+        items.push({ kind: 'job', tree: 'live', mission: node.mission, job });
+      }
+    }
+  }
+  for (const node of tree.recent) {
+    items.push({ kind: 'mission', tree: 'recent', node });
+    const id = node.mission.mission_id;
+    if (id && expandedRecentIds?.has(id)) {
+      for (const job of node.jobs) {
+        items.push({ kind: 'job', tree: 'recent', mission: node.mission, job });
+      }
+    }
+  }
+  return items;
+}
+
+/**
+ * Move from ``currentIndex`` by ``+1`` (down) or ``-1`` (up) in the
+ * given ``items`` list. CLAMPS at the ends — the first item stays at
+ * index 0 when ↑ is pressed from the top; the last item stays at the
+ * tail when ↓ is pressed from the bottom. We chose clamp over wrap
+ * because wrap is jarring in a tree (jumping from the last RECENT
+ * row back to the first LIVE mission reads as a glitch, not a
+ * navigation). Pure.
+ *
+ * ``currentIndex === -1`` (no current focus) treats ↑ as "go to last"
+ * and ↓ as "go to first" — the natural first-focus behaviour when
+ * the user opens the menu and presses an arrow before any row is
+ * tab-focused.
+ */
+export function nextVisibleItem(
+  items: ReadonlyArray<VisibleTreeItem>,
+  currentIndex: number,
+  delta: -1 | 1
+): number {
+  if (items.length === 0) return -1;
+  if (currentIndex < 0 || currentIndex >= items.length) {
+    return delta === 1 ? 0 : items.length - 1;
+  }
+  const next = currentIndex + delta;
+  if (next < 0) return 0;
+  if (next >= items.length) return items.length - 1;
+  return next;
+}
+
+/**
+ * Stable string id for a VisibleTreeItem — used by the panel as the
+ * ``focusedItemId`` signal so the template can apply the ``.focused``
+ * class on exactly one row at a time.
+ *
+ *   - mission:    "tree:live|mission:m-1" / "tree:recent|mission:m-7"
+ *   - job child:  "tree:live|mission:m-1|job:job-abc"
+ *
+ * Including the tree prefix keeps the LIVE and RECENT trees
+ * addressable independently — the two sections never bleed focus.
+ */
+export function visibleTreeItemId(item: VisibleTreeItem): string {
+  if (item.kind === 'mission') {
+    const mid = item.node.mission.mission_id ?? '';
+    return `tree:${item.tree}|mission:${mid}`;
+  }
+  const mid = item.mission.mission_id ?? '';
+  return `tree:${item.tree}|mission:${mid}|job:${item.job.job_id}`;
+}

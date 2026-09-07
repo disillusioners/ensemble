@@ -8,7 +8,9 @@
     </span>
   </div>
 
-  <div class="panel-list">
+  <div
+    class="panel-list"
+    (keydown)="onTreeKeydown($event)">
     @if (isEmpty()) {
       <div class="empty-state">
         <mat-icon>pending_actions</mat-icon>
@@ -33,12 +35,15 @@
               <li
                 class="tree-node mission-node"
                 role="treeitem"
+                [class.focused]="isFocusedItem('tree:live|mission:' + (node.mission.mission_id ?? ''))"
                 [attr.aria-expanded]="isLiveExpanded(node.mission.mission_id)">
                 <div
                   class="mission-row"
+                  [id]="'tree:live|mission:' + (node.mission.mission_id ?? '')"
                   (click)="onLiveMissionClick(node.mission.mission_id)"
                   (keydown.enter)="onLiveMissionClick(node.mission.mission_id)"
                   (keydown.space)="$event.preventDefault(); onLiveMissionClick(node.mission.mission_id)"
+                  (focus)="onRowFocus('tree:live|mission:' + (node.mission.mission_id ?? ''))"
                   tabindex="0">
                   <mat-icon class="mission-chevron" aria-hidden="true">
                     {{ liveChevron(node.mission.mission_id) }}
@@ -68,9 +73,12 @@
                         <div
                           class="job-row"
                           [class.running]="job.status === 'processing' || job.status === 'paused'"
+                          [class.focused]="isFocusedItem('tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
+                          [id]="'tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id"
                           (click)="onRowClick(job)"
                           (keydown.enter)="onRowClick(job)"
                           (keydown.space)="$event.preventDefault(); onRowClick(job)"
+                          (focus)="onRowFocus('tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
                           role="button"
                           tabindex="0"
                           [matTooltip]="job.instance_id">
@@ -179,12 +187,15 @@
               <li
                 class="tree-node mission-node mission-recent"
                 role="treeitem"
+                [class.focused]="isFocusedItem('tree:recent|mission:' + (node.mission.mission_id ?? ''))"
                 [attr.aria-expanded]="isRecentExpanded(node.mission.mission_id)">
                 <div
                   class="mission-row"
+                  [id]="'tree:recent|mission:' + (node.mission.mission_id ?? '')"
                   (click)="onRecentMissionClick(node.mission.mission_id)"
                   (keydown.enter)="onRecentMissionClick(node.mission.mission_id)"
                   (keydown.space)="$event.preventDefault(); onRecentMissionClick(node.mission.mission_id)"
+                  (focus)="onRowFocus('tree:recent|mission:' + (node.mission.mission_id ?? ''))"
                   tabindex="0">
                   <mat-icon class="mission-chevron" aria-hidden="true">
                     {{ recentChevron(node.mission.mission_id) }}
@@ -216,9 +227,12 @@
                           [class.status-failed]="job.status === 'failed'"
                           [class.status-cancelled]="job.status === 'cancelled'"
                           [class.status-dead_letter]="job.status === 'dead_letter'"
+                          [class.focused]="isFocusedItem('tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
+                          [id]="'tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id"
                           (click)="onRowClick(job)"
                           (keydown.enter)="onRowClick(job)"
                           (keydown.space)="$event.preventDefault(); onRowClick(job)"
+                          (focus)="onRowFocus('tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
                           role="button"
                           tabindex="0"
                           [matTooltip]="job.instance_id">
@@ -320,5 +334,20 @@
         </div>
       }
     }
+    <!-- T1 footer — "Open full queue →" link to the Jobs page. The
+         panel stays DUMB/presentational: it emits ``footerClick`` on
+         activation and the indicator handles navigation + menu close. -->
+    <div class="panel-footer">
+      <button
+        type="button"
+        class="panel-footer-link"
+        (click)="onFooterClick()"
+        (keydown.enter)="onFooterClick()"
+        (keydown.space)="$event.preventDefault(); onFooterClick()"
+        aria-label="Open full job queue">
+        Open full queue
+        <mat-icon class="panel-footer-chevron" aria-hidden="true">chevron_right</mat-icon>
+      </button>
+    </div>
   </div>
 </div>

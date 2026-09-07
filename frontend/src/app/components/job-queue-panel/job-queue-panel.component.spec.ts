@@ -9,6 +9,10 @@ import {
   buildQueueTree,
   shouldAutoExpand,
   missionDisplayTitle,
+  visibleTreeItems,
+  nextVisibleItem,
+  visibleTreeItemId,
+  VisibleTreeItem,
 } from '../../models/job.model';
 import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-test-helpers';
 
@@ -47,6 +51,33 @@ class MockJobQueuePanelComponent {
 
   /** Mock output — mirrors the real component's `output<Job>()`. */
   readonly jobClick = { emit: jest.fn() };
+
+  /**
+   * T1 mock output — mirrors the real component's ``output<void>()``
+   * for the panel footer's "Open full queue →" activation. The
+   * indicator handles it (navigate + close menu); the panel stays
+   * DUMB/presentational, exactly like ``jobClick`` does for rows.
+   */
+  readonly footerClick = { emit: jest.fn() };
+
+  /**
+   * T3 mock — ``visibleTreeItems`` mirror: the flattened list of
+   * items the arrow-key handler can land on. Built from the panel's
+   * tree + expansion sets so the spec can pin the helper output
+   * without an Angular harness.
+   */
+  readonly visibleItems = computed(() =>
+    visibleTreeItems(this.tree(), this._expandedLiveMissions(), this._expandedRecentMissions())
+  );
+
+  /**
+   * T3 mock — ``focusedItemId`` signal mirror (the row that owns
+   * keyboard focus inside the trees). Drives the ``.focused`` class
+   * in the template; tests drive it directly to exercise the
+   * traversal logic.
+   */
+  private readonly _focusedItemId = signal<string | null>(null);
+  readonly focusedItemId = this._focusedItemId.asReadonly();
 
   /** Tree derivation — mirrors the real component's ``tree`` computed. */
   readonly tree = computed(() =>
@@ -111,6 +142,113 @@ class MockJobQueuePanelComponent {
   /** Read-only view of the expansion set — used by the survival test
    *  to assert the user's expanded state survived a poll refresh. */
   readonly expandedLiveMissions = this._expandedLiveMissions.asReadonly();
+
+  /**
+   * T3 mock — per-mission-id expansion state for RECENT mission
+   * nodes. Same survival guarantee as the live expansion set.
+   */
+  private readonly _expandedRecentMissions = signal<Set<string>>(new Set());
+  toggleRecentMission(missionId: string): void {
+    this._expandedRecentMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+  isRecentExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this._expandedRecentMissions().has(missionId);
+  }
+
+  /**
+   * T3 mock — true iff the given ``visibleTreeItemId`` is the row
+   * that currently owns keyboard focus. Mirrors the real
+   * component's ``isFocusedItem`` read-side.
+   */
+  isFocusedItem(id: string | null | undefined): boolean {
+    if (!id) return false;
+    return this._focusedItemId() === id;
+  }
+
+  /** T3 mock — drives the focused item (mirrors ``onRowFocus``). */
+  onRowFocus(id: string): void {
+    this._focusedItemId.set(id);
+  }
+
+  /**
+   * T3 mock — arrow-key handler. Mirrors the real component's
+   * ``onTreeKeydown`` 1:1 so the key→action map and the
+   * nextVisibleItem traversal can be pinned without DOM. Other
+   * keys are no-ops; Enter/Space/Esc are NOT handled here (those
+   * stay on the individual rows).
+   */
+  onTreeKeydown(event: KeyboardEvent): void {
+    const items = this.visibleItems();
+    if (items.length === 0) return;
+    const key = event.key;
+    if (
+      key !== 'ArrowDown' &&
+      key !== 'ArrowUp' &&
+      key !== 'ArrowRight' &&
+      key !== 'ArrowLeft'
+    ) {
+      return;
+    }
+    // Prevent the page from scrolling on ArrowDown/Up inside the
+    // menu and stop the event from bubbling — mirrors the real
+    // component bit-for-bit.
+    event.preventDefault();
+    event.stopPropagation();
+    const currentId = this._focusedItemId();
+    const currentIndex = currentId
+      ? items.findIndex((it) => visibleTreeItemId(it) === currentId)
+      : -1;
+
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const delta: -1 | 1 = key === 'ArrowUp' ? -1 : 1;
+      const nextIndex = nextVisibleItem(items, currentIndex, delta);
+      this._focusedItemId.set(visibleTreeItemId(items[nextIndex]));
+      return;
+    }
+
+    if (currentIndex < 0) return;
+    const current = items[currentIndex];
+    if (key === 'ArrowRight') {
+      if (current.kind !== 'mission') return;
+      const id = current.node.mission.mission_id;
+      if (!id) return;
+      if (current.tree === 'live') {
+        if (!this.isLiveExpanded(id)) this.toggleLiveMission(id);
+      } else {
+        if (!this.isRecentExpanded(id)) this.toggleRecentMission(id);
+      }
+      return;
+    }
+    // ArrowLeft
+    let missionId: string | null | undefined;
+    let tree: 'live' | 'recent';
+    if (current.kind === 'mission') {
+      missionId = current.node.mission.mission_id;
+      tree = current.tree;
+    } else {
+      missionId = current.mission.mission_id;
+      tree = current.tree;
+    }
+    if (!missionId) return;
+    const isExpanded =
+      tree === 'live'
+        ? this.isLiveExpanded(missionId)
+        : this.isRecentExpanded(missionId);
+    if (!isExpanded) return;
+    if (tree === 'live') this.toggleLiveMission(missionId);
+    else this.toggleRecentMission(missionId);
+  }
+
+  /** T1 mock — footer activation emits ``footerClick``. */
+  onFooterClick(): void {
+    this.footerClick.emit();
+  }
 
   /**
    * Resolves the best available title for a job. Priority chain:
@@ -867,6 +1005,365 @@ describe('JobQueuePanelComponent Logic', () => {
         },
       ]);
       expect(component.missions().length).toBe(1);
+    });
+  });
+
+  // ── Template binding seams (source-text pin) ────────────────────────
+  //
+  // Mirror tests prove the component METHODS exist. These source-text
+  // pins prove the TEMPLATE actually wires the bindings up — without
+  // them, a typo in the HTML would compile green and silently drop
+  // the user's footer click / arrow-key navigation. Same pattern as
+  // the indicator's panel-binding seam.
+
+  describe('template binding seams (source-text pin)', () => {
+    let templateHtml: string;
+
+    beforeAll(() => {
+      // Resolve relative to this spec file.
+      const path = require('path');
+      const fs = require('fs');
+      const specDir = __dirname;
+      const htmlPath = path.join(specDir, 'job-queue-panel.component.html');
+      templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+    });
+
+    it('binds (keydown) on the panel-list to onTreeKeydown — T3 arrow nav', () => {
+      expect(templateHtml).toContain('(keydown)="onTreeKeydown($event)"');
+    });
+
+    it('binds (click) on the footer to onFooterClick — T1 footer link', () => {
+      expect(templateHtml).toContain('(click)="onFooterClick()"');
+    });
+
+    it('binds (focus) on the live mission row — T3 focused-state mirroring', () => {
+      // Each tree row needs the (focus) handler so the
+      // ``focusedItemId`` signal mirrors the browser's actual focus.
+      expect(templateHtml).toContain('(focus)="onRowFocus(');
+    });
+
+    it('binds [class.focused] on each tree row — T3 visible focus indicator', () => {
+      expect(templateHtml).toContain('[class.focused]="isFocusedItem(');
+    });
+  });
+
+  // ── T1 panel footer — "Open full queue →" link ──────────────────────
+  //
+  // Acceptance item dropped from the approved design (2026-09-07,
+  // mission-tree final gaps). The panel stays DUMB/presentational
+  // and emits ``footerClick``; the indicator handles the navigation
+  // + menu close (mirror-level, see job-queue-indicator.spec.ts).
+
+  describe('T1: footer activation emits footerClick (panel stays DUMB)', () => {
+    beforeEach(() => {
+      (component.footerClick.emit as jest.Mock).mockClear();
+    });
+
+    it('exposes footerClick.emit as a function', () => {
+      expect(typeof component.footerClick.emit).toBe('function');
+    });
+
+    it('emits exactly one footerClick on a single onFooterClick', () => {
+      component.onFooterClick();
+      expect(component.footerClick.emit).toHaveBeenCalledTimes(1);
+      expect(component.footerClick.emit).toHaveBeenCalledWith();
+    });
+
+    it('emits on every successive onFooterClick call', () => {
+      component.onFooterClick();
+      component.onFooterClick();
+      expect(component.footerClick.emit).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT mutate the jobClick surface (separate output channel)', () => {
+      // The footer is its own output — accidentally piping through
+      // ``jobClick.emit(job)`` would surface a bogus navigation to
+      // the indicator. Keep the two channels cleanly separated.
+      (component.jobClick.emit as jest.Mock).mockClear();
+      component.onFooterClick();
+      expect(component.jobClick.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── T3 arrow-key tree navigation ─────────────────────────────────────
+  //
+  // Pure traversal logic lives in ``models/job.model.ts``;
+  // ``nextVisibleItem`` + ``visibleTreeItems`` + ``visibleTreeItemId``
+  // are imported and exercised directly. The arrow-key handler
+  // (``onTreeKeydown``) is mirrored 1:1 so the key→action map can be
+  // pinned without DOM.
+
+  describe('T3: visibleTreeItems — flatten the trees in display order', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('returns only mission nodes when nothing is expanded', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'paused' }),
+        mkMission({ mission_id: 'rec-a', liveness: 'completed' }),
+      ]);
+      const items = component.visibleItems();
+      expect(items.length).toBe(3);
+      expect(items.map((it) => it.kind)).toEqual(['mission', 'mission', 'mission']);
+      expect(items.every((it) => it.kind === 'mission')).toBe(true);
+    });
+
+    it('includes child jobs only when the parent mission is expanded', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'live-a', status: 'processing' }),
+        createMockJob({ job_id: 'j-2', mission_id: 'live-a', status: 'pending' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'paused' }),
+      ]);
+      // Collapsed: only mission nodes.
+      let items = component.visibleItems();
+      expect(items.length).toBe(2);
+      // Expand live-a → its two child jobs appear AFTER the parent
+      // in the flat list.
+      component.toggleLiveMission('live-a');
+      items = component.visibleItems();
+      expect(items.length).toBe(4);
+      expect(items.map((it) => it.kind)).toEqual(['mission', 'job', 'job', 'mission']);
+      expect(items.map((it) =>
+        it.kind === 'mission' ? it.node.mission.mission_id : it.job.job_id
+      )).toEqual(['live-a', 'j-1', 'j-2', 'live-b']);
+    });
+
+    it('skips children of COLLAPSED nodes — they are invisible to arrow nav', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'live-a', status: 'processing' }),
+        createMockJob({ job_id: 'j-2', mission_id: 'live-b', status: 'processing' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'processing' }),
+      ]);
+      // Expand ONLY live-a — live-b stays collapsed. live-b's
+      // child j-2 must NOT appear in the visible list.
+      component.toggleLiveMission('live-a');
+      const items = component.visibleItems();
+      expect(items.length).toBe(3); // live-a, j-1, live-b
+      expect(items.map((it) =>
+        it.kind === 'mission' ? it.node.mission.mission_id : it.job.job_id
+      )).toEqual(['live-a', 'j-1', 'live-b']);
+    });
+
+    it('emits LIVE tree items before RECENT tree items', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'rec-a', liveness: 'completed' }),
+      ]);
+      const items = component.visibleItems();
+      expect(items[0].tree).toBe('live');
+      expect(items[1].tree).toBe('recent');
+    });
+  });
+
+  describe('T3: nextVisibleItem — clamped boundary behaviour', () => {
+    function makeItems(): VisibleTreeItem[] {
+      return [
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'a' } as MissionSummary, jobs: [] } },
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'b' } as MissionSummary, jobs: [] } },
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'c' } as MissionSummary, jobs: [] } },
+      ];
+    }
+
+    it('ArrowDown from index 0 → 1, 1 → 2', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, 1)).toBe(1);
+      expect(nextVisibleItem(items, 1, 1)).toBe(2);
+    });
+
+    it('ArrowDown clamps at the LAST item (no wrap)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 2, 1)).toBe(2);
+    });
+
+    it('ArrowUp clamps at the FIRST item (no wrap)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, -1)).toBe(0);
+    });
+
+    it('ArrowDown from -1 (no current focus) lands on the FIRST item', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, 1)).toBe(0);
+    });
+
+    it('ArrowUp from -1 (no current focus) lands on the LAST item', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, -1)).toBe(2);
+    });
+
+    it('returns -1 for an empty list regardless of direction', () => {
+      expect(nextVisibleItem([], 0, 1)).toBe(-1);
+      expect(nextVisibleItem([], -1, -1)).toBe(-1);
+    });
+
+    it('out-of-range currentIndex (-5 or 99) is treated as no-focus (lands at edge in direction of travel)', () => {
+      // ``-5`` is below range, ``99`` is above range — both are
+      // collapsed to the "no focus" branch. Down from any
+      // out-of-range lands at the first item; Up lands at the last.
+      const items = makeItems();
+      expect(nextVisibleItem(items, -5, 1)).toBe(0);
+      expect(nextVisibleItem(items, -5, -1)).toBe(2);
+      expect(nextVisibleItem(items, 99, 1)).toBe(0);
+      expect(nextVisibleItem(items, 99, -1)).toBe(2);
+    });
+  });
+
+  describe('T3: onTreeKeydown — key→action map', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    function makeKeyboardEvent(key: string): KeyboardEvent {
+      // Minimal KeyboardEvent stub — the handler only reads ``key``
+      // and calls ``preventDefault`` + ``stopPropagation``. Both
+      // methods exist on the real KeyboardEvent so a plain object
+      // with those methods is sufficient for the spec.
+      return { key, preventDefault: jest.fn(), stopPropagation: jest.fn() } as unknown as KeyboardEvent;
+    }
+
+    it('ArrowDown advances focus to the next visible item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+      component.onTreeKeydown(makeKeyboardEvent('ArrowDown'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:b');
+    });
+
+    it('ArrowUp moves focus to the previous visible item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[1]));
+      expect(component.focusedItemId()).toBe('tree:live|mission:b');
+      component.onTreeKeydown(makeKeyboardEvent('ArrowUp'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+    });
+
+    it('ArrowDown with no current focus (-1) lands on the first item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onTreeKeydown(makeKeyboardEvent('ArrowDown'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+    });
+
+    it('ArrowRight expands a collapsed live mission node', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowRight is a no-op on an already-expanded mission (no toggle-fight)', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      // Still expanded (not collapsed by an extra ArrowRight).
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowRight on a JOB CHILD row is a no-op (children have no children of their own)', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'a', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      const childItem = component.visibleItems().find((it) => it.kind === 'job');
+      expect(childItem).toBeDefined();
+      component.onRowFocus(visibleTreeItemId(childItem!));
+      // ArrowRight on a job child does nothing.
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      // The mission is still expanded (no state change).
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowLeft collapses an expanded mission node', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('ArrowLeft on a JOB CHILD collapses the parent mission', () => {
+      // WAI-ARIA tree pattern: ← on a child collapses the parent so
+      // keyboard focus returns to a navigable level.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'a', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      const childItem = component.visibleItems().find((it) => it.kind === 'job');
+      expect(childItem).toBeDefined();
+      component.onRowFocus(visibleTreeItemId(childItem!));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('ArrowLeft on an already-collapsed node is a no-op', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('Enter, Space, Escape, and other keys are NOT handled by the panel arrow handler', () => {
+      // Enter/Space stay on the individual rows; Esc already closes
+      // the mat-menu. The panel-level handler must NOT swallow them.
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      const beforeId = component.focusedItemId();
+      const event = makeKeyboardEvent('Enter');
+      component.onTreeKeydown(event);
+      // No state change — focus id stays the same, no expansion.
+      expect(component.focusedItemId()).toBe(beforeId);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      // preventDefault / stopPropagation were NOT called for an
+      // unrelated key (the function returns before reaching them).
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+
+    it('prevents the default page scroll on ArrowDown/ArrowUp inside the panel', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      const event = makeKeyboardEvent('ArrowDown');
+      component.onTreeKeydown(event);
+      // The handler calls preventDefault so the page doesn't scroll
+      // while the user is navigating the menu.
+      expect(event.preventDefault).toHaveBeenCalled();
     });
   });
 });

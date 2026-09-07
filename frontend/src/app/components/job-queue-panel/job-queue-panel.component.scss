@@ -370,3 +370,68 @@
     }
   }
 }
+
+// ── T3 keyboard focus ring (arrow-key tree navigation) ──────────────────
+//
+// Tab focus is already styled via ``:focus-visible`` on
+// ``.mission-row`` / ``.job-row``. The arrow-key handler routes
+// focus through the same ``(focus)`` binding that Tab uses, so the
+// :focus-visible rule naturally surfaces focus on a keyboard arrow
+// press too. The ``.focused`` class adds a SECONDARY, more obvious
+// highlight (slightly darker background + left border accent) so the
+// user can track arrow-key movement even when the panel was opened
+// from a non-keyboard surface (the click target keeps the row
+// focusable without re-rendering the focus-visible state).
+
+.tree-node.focused > .mission-row,
+.mission-row.focused {
+  background: rgba(59, 130, 246, 0.12);
+  border-left-color: #3b82f6;
+}
+
+.job-row.focused {
+  background: rgba(59, 130, 246, 0.10);
+  border-left-color: #3b82f6;
+}
+
+// ── T1 footer row — "Open full queue →" ────────────────────────────────
+
+.panel-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-start;
+  padding: 10px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: #0f172a;
+}
+
+.panel-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  padding: 4px 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: #60a5fa;
+  cursor: pointer;
+  letter-spacing: 0.2px;
+  font-family: inherit;
+
+  &:hover {
+    color: #93c5fd;
+  }
+
+  &:focus-visible {
+    outline: none;
+    color: #bfdbfe;
+    text-decoration: underline;
+  }
+
+  .panel-footer-chevron {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}

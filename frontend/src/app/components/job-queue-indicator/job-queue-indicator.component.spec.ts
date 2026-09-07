@@ -247,6 +247,17 @@ class MockJobQueueIndicatorComponent {
   /** Last navigation path decided by ``onJobClick``. */
   lastNavigated: (string | null)[] | null = null;
 
+  /**
+   * T1 mirror — last navigation decided by ``onFooterClick``. Captured
+   * separately from ``lastNavigated`` so the spec can assert that the
+   * footer activation routes to ``/jobs`` (the Jobs page route
+   * confirmed in app.routes.ts) WITHOUT conflating it with the
+   * ``onJobClick`` navigation surface. ``menuClosedAfterClick`` is
+   * also flipped so the mirror's "menu close before navigation"
+   * contract stays identical for both entry points.
+   */
+  lastFooterNavigated: (string | null)[] | null = null;
+
   onJobClick(job: Job): void {
     // 1. Close the menu first — mirrors the real component's ordering.
     this.menuClosedAfterClick = true;
@@ -265,6 +276,16 @@ class MockJobQueueIndicatorComponent {
     this.lastNavigated = job.instance_id
       ? ['/projects', projectKey, 'instances', job.instance_id]
       : ['/projects', projectKey, 'instances'];
+  }
+
+  /**
+   * T1 mirror — ``onFooterClick`` closes the menu and routes to the
+   * dedicated Jobs page (confirmed lazy route at ``/jobs`` in
+   * app.routes.ts). Mirrors the real component bit-for-bit.
+   */
+  onFooterClick(): void {
+    this.menuClosedAfterClick = true;
+    this.lastFooterNavigated = ['/jobs'];
   }
 
   // ---------------------------------------------------------------------------
@@ -330,58 +351,77 @@ class MockJobQueueIndicatorComponent {
    * payloads so tests prove the intake wiring without HTTP.
    *
    * Parity contract with the component (C2/C3/W-jobs-intake
-   * honesty):
+   * honesty + T2 mission-leg split):
    * - ``active`` / ``recent`` may be ``null`` (per-leg catchError
    *   swallowed a failure); on ``null`` we RETAIN the previous list
    *   rather than resetting to ``[]``;
-   * - ``missions === null`` (degraded count leg / 404-skew failure)
-   *   RETAINS the previous payload — never falsely idle;
-   * - C2 fix: a 200-OK ``degraded:true`` envelope ALSO retains the
-   *   previous payload and DOES NOT touch the count signal;
+   * - ``missionsCount === null`` (degraded count leg / 404-skew
+   *   failure) RETAINS the previous live count — never falsely idle;
+   * - ``missionsList === null`` (degraded content leg / 404-skew
+   *   failure) RETAINS the previous payload — the panel never
+   *   flashes empty;
+   * - T2 fix: ``missionsCount`` and ``missionsList`` are independent.
+   *   A degraded envelope on ONE does not touch the OTHER's last
+   *   good payload. Each is reported via ``onLegError`` with its
+   *   own leg name so the UI can flag which projection degraded.
+   * - C2 fix: a 200-OK ``degraded:true`` envelope on EITHER missions
+   *   leg ALSO retains the previous payload and DOES NOT touch the
+   *   corresponding signal;
    * - C3 fix: ``liveMissionCountRaw`` is updated only via the
    *   canonical ``missionCountFromListResponse`` helper, on a
-   *   non-degraded tick;
+   *   non-degraded count tick;
    * - degraded-200 flag parity: a non-null ``degraded:true`` envelope
-   *   ALSO raises ``lastIntakeError`` via ``onLegError`` (mirroring
-   *   the component's ``recordLegError``) and counts as a FAILED leg
-   *   for BOTH the clear gate and the ``lastFetchAt`` freeze gate —
-   *   a degraded tick never clears a previously-set flag and never
-   *   stamps a fresh "refreshed Ns ago" on an all-degraded tick;
+   *   on EITHER missions leg ALSO raises ``lastIntakeError`` via
+   *   ``onLegError`` (mirroring the component's ``recordLegError``)
+   *   and counts as a FAILED leg for BOTH the clear gate and the
+   *   ``lastFetchAt`` freeze gate;
    * - ``deferBlocked === null`` hides the warning; a payload is run
    *   through the canonical ``deferBlockIndicator`` helper;
    * - ``lastFetchAt`` advances only when at least one leg succeeded
-   *   (missions: non-degraded).
+   *   (either missions leg: non-degraded).
    *
-   * ``missions`` now carries the FULL ``MissionListResponse``
-   * envelope (REPLACES the prior ``number | null`` signature) — the
-   * segmented pill needs the per-liveness breakdown, not just a count.
+   * T2 (2026-09-07, mission-tree final gaps) — ``missionsCount`` and
+   * ``missionsList`` are now SEPARATE parameters; the segmented
+   * pill's N reads from the count leg's ``total`` (live-only), and
+   * the panel's content reads from the list leg's ``missions``
+   * (unfiltered page). Closes the 82-vs-7 self-contradiction where
+   * the unfiltered page's ``total`` was being mis-routed as the
+   * live-mission count.
    */
   applyFetchResult(
     active: Job[] | null,
     recent: Job[] | null,
-    missions: MissionListResponse | null,
+    missionsCount: MissionListResponse | null,
+    missionsList: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     if (active !== null) this._activeJobs.set(active);
     if (recent !== null) this.allRecentJobs.set(recent);
-    if (missions !== null && !missions.degraded) {
-      this._missionsPayload.set(missions);
-      const count = missionCountFromListResponse(missions);
+    if (missionsCount !== null && !missionsCount.degraded) {
+      const count = missionCountFromListResponse(missionsCount);
       this.liveMissionCountRaw.set(count);
     }
-    const missionsDegraded = missions !== null && missions.degraded;
-    if (missionsDegraded) this.onLegError('missions', 'degraded envelope');
+    if (missionsList !== null && !missionsList.degraded) {
+      this._missionsPayload.set(missionsList);
+    }
+    const missionsCountDegraded = missionsCount !== null && missionsCount.degraded;
+    const missionsListDegraded = missionsList !== null && missionsList.degraded;
+    if (missionsCountDegraded) this.onLegError('missionsCount', 'degraded envelope');
+    if (missionsListDegraded) this.onLegError('missionsList', 'degraded envelope');
     const anyNull =
       active === null ||
       recent === null ||
-      missions === null ||
+      missionsCount === null ||
+      missionsList === null ||
       deferBlocked === null ||
-      missionsDegraded;
+      missionsCountDegraded ||
+      missionsListDegraded;
     if (!anyNull) this.lastIntakeError.set(null);
     if (
       active !== null ||
       recent !== null ||
-      (missions !== null && !missions.degraded) ||
+      (missionsCount !== null && !missionsCount.degraded) ||
+      (missionsList !== null && !missionsList.degraded) ||
       deferBlocked !== null
     ) {
       this._lastFetchAt.set(Date.now());
@@ -625,6 +665,13 @@ describe('JobQueueIndicatorComponent Logic', () => {
           ],
           2
         ),
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [
+            { mission_id: 'leader-a', liveness: 'processing' },
+            { mission_id: 'leader-b', liveness: 'processing' },
+          ],
+          2
+        ),
         null
       );
       expect(component.liveMissionCount()).toBe(2);
@@ -633,6 +680,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
 
     it('CASE B — missions projection reports 0: badge reads bare "0/0" idle', () => {
+      const emptyPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
       component.applyFetchResult(
         [],
         [
@@ -642,7 +690,8 @@ describe('JobQueueIndicatorComponent Logic', () => {
             instance_id: 'done-leader', job_type: 'message', mission_liveness: 'completed',
           }),
         ],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
+        emptyPayload,
+        emptyPayload,
         null
       );
       expect(component.liveMissionCount()).toBe(0);
@@ -653,6 +702,10 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
 
     it('CASE C — jobs present + missions projection reports 1: X/Y display unchanged, tooltip explains both numbers', () => {
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'leader-a', liveness: 'processing' }],
+        1
+      );
       component.applyFetchResult(
         [createMockJob({ status: 'processing' })],
         [
@@ -661,10 +714,8 @@ describe('JobQueueIndicatorComponent Logic', () => {
             instance_id: 'leader-a', job_type: 'message', mission_liveness: 'processing',
           }),
         ],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [{ mission_id: 'leader-a', liveness: 'processing' }],
-          1
-        ),
+        onePayload,
+        onePayload,
         null
       );
       expect(component.displayText()).toBe('1/1'); // intake count keeps primary billing
@@ -681,6 +732,10 @@ describe('JobQueueIndicatorComponent Logic', () => {
           [{ mission_id: 'leader-a', liveness: 'processing' }],
           2
         ),
+        MockJobQueueIndicatorComponent.buildMissionsPayload(
+          [{ mission_id: 'leader-a', liveness: 'processing' }],
+          2
+        ),
         null
       );
       expect(component.displayText()).toBe('missions: 2');
@@ -688,17 +743,13 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // Degraded count leg (total=null) or a failed fetch: "data
       // unavailable" must NOT collapse to 0 — the badge retains the
       // last good payload.
-      component.applyFetchResult([], [], null, null);
+      component.applyFetchResult([], [], null, null, null);
       expect(component.liveMissionCount()).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
 
       // ...and the next healthy tick corrects downward.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
-        null
-      );
+      const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
+      component.applyFetchResult([], [], zeroPayload, zeroPayload, null);
       expect(component.displayText()).toBe('0/0');
     });
 
@@ -709,35 +760,33 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // collapse the badge to "0/0" during an outage. After C2, the
       // canonical helper returns ``null`` and the indicator treats
       // the tick as a no-op against the last good payload.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [
-            { mission_id: 'leader-a', liveness: 'processing' },
-            { mission_id: 'leader-b', liveness: 'paused' },
-          ],
-          2
-        ),
-        null
+      const twoPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'leader-a', liveness: 'processing' },
+          { mission_id: 'leader-b', liveness: 'paused' },
+        ],
+        2
       );
+      component.applyFetchResult([], [], twoPayload, twoPayload, null);
       expect(component.liveMissionCount()).toBe(2);
       expect(component.missionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
 
-      // Now the BE returns a degraded envelope — empty rows, null total,
-      // degraded:true. The intake MUST NOT write this payload.
-      component.applyFetchResult(
+      // Now the BE returns a degraded envelope on the count leg —
+      // empty rows, null total, degraded:true. The intake MUST NOT
+      // write the count leg's signal. The list leg is still healthy
+      // so the panel's payload retains.
+      const degradedPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
-        null
+        undefined,
+        { degraded: true }
       );
-      // Last good data retained across the degraded tick.
+      component.applyFetchResult([], [], degradedPayload, twoPayload, null);
+      // Last good data retained across the degraded count tick.
       expect(component.liveMissionCount()).toBe(2);
       expect(component.missionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
-      // The raw payload signal was NOT overwritten either — the
+      // The raw list payload signal was NOT overwritten either — the
       // canonical helper's null branch keeps the missions projection
       // honest. A subsequent healthy tick re-syncs both.
       const payload = component.lastMissionsPayload();
@@ -745,12 +794,8 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(payload!.degraded).toBe(false);
 
       // The next healthy tick DOES update both signals.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
-        null
-      );
+      const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
+      component.applyFetchResult([], [], zeroPayload, zeroPayload, null);
       expect(component.liveMissionCount()).toBe(0);
       expect(component.missionsList().length).toBe(0);
       expect(component.displayText()).toBe('0/0');
@@ -761,15 +806,11 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // Even if a future bug re-introduced the degraded-200 write,
       // the count helper routes through missionCountFromListResponse
       // and would refuse to zero the signal.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [{ mission_id: 'leader-a', liveness: 'processing' }],
-          1
-        ),
-        null
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'leader-a', liveness: 'processing' }],
+        1
       );
+      component.applyFetchResult([], [], onePayload, onePayload, null);
       // Direct helper sanity: degraded envelope returns null.
       const degradedEnvelope = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
@@ -785,29 +826,25 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // and the .degraded visual/aria modifier never flipped during a
       // degraded-200-only outage. The intake now treats the envelope
       // as a missions leg degradation.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [
-            { mission_id: 'leader-a', liveness: 'processing' },
-            { mission_id: 'leader-b', liveness: 'paused' },
-          ],
-          2
-        ),
-        null
+      const twoPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'leader-a', liveness: 'processing' },
+          { mission_id: 'leader-b', liveness: 'paused' },
+        ],
+        2
       );
+      component.applyFetchResult([], [], twoPayload, twoPayload, null);
       expect(component.lastIntakeError()).toBeNull();
 
-      // REAL degraded-200 envelope: missions=[], total=null, degraded:true.
-      component.applyFetchResult(
+      // REAL degraded-200 envelope on the count leg: empty rows, null
+      // total, degraded:true. The flag is SET on the new leg name.
+      const degradedPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
-        null
+        undefined,
+        { degraded: true }
       );
-      // The flag is SET — the degraded modifier + aria-label flip.
-      expect(component.lastIntakeError()).toBe('missions: degraded envelope');
+      component.applyFetchResult([], [], degradedPayload, twoPayload, null);
+      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
       // C2/C3 retention stays EXACTLY as-is across the same tick.
       expect(component.liveMissionCount()).toBe(2);
       expect(component.missionsList().length).toBe(2);
@@ -831,19 +868,24 @@ describe('JobQueueIndicatorComponent Logic', () => {
             [{ mission_id: 'leader-a', liveness: 'processing' }],
             1
           ),
+          MockJobQueueIndicatorComponent.buildMissionsPayload(
+            [{ mission_id: 'leader-a', liveness: 'processing' }],
+            1
+          ),
           { defer_blocked: false, pending_count: 0, holders: [] }
         );
         const stampedAt = component.lastFetchAt();
         expect(stampedAt).toBe(1_000_000);
 
-        // All-null legs + a degraded missions envelope: nothing usable
-        // returned — the timestamp must stay byte-identical even as
-        // the (controlled) wall clock advances.
+        // All-null legs + a degraded missions count envelope: nothing
+        // usable returned — the timestamp must stay byte-identical
+        // even as the (controlled) wall clock advances.
         nowSpy.mockReturnValue(2_000_000);
         component.applyFetchResult(
           null,
           null,
           MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
+          null,
           null
         );
         expect(component.lastFetchAt()).toBe(stampedAt);
@@ -864,12 +906,8 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('returns to "0/0" once a healthy tick reports zero live missions (legitimate update, not a degraded gap)', () => {
       // After a healthy tick with total=0 the signal is ``0`` (a real
       // value, not null). The display still reads "0/0" / "idle".
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
-        null
-      );
+      const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
+      component.applyFetchResult([], [], zeroPayload, zeroPayload, null);
       expect(component.liveMissionCount()).toBe(0);
       expect(component.hasLiveMissions()).toBe(false);
       expect(component.displayText()).toBe('0/0');
@@ -887,7 +925,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     };
 
     it('AMBER warning derived through the canonical helper when a paused holder blocks jobs', () => {
-      component.applyFetchResult([], [], null, {
+      component.applyFetchResult([], [], null, null, {
         defer_blocked: true,
         pending_count: 1,
         holders: [pausedHolder],
@@ -904,7 +942,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // P0 type-truth companion: the wire type is ``string | null``; the
       // component-level intake must surface the helper's null handling
       // verbatim (no undefined/NaN leaking into the tooltip).
-      component.applyFetchResult([], [], null, {
+      component.applyFetchResult([], [], null, null, {
         defer_blocked: true,
         pending_count: 1,
         holders: [{ ...pausedHolder, since: null }],
@@ -916,15 +954,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
 
     it('warning hidden when the endpoint degrades to null (404/503 rollout skew)', () => {
-      component.applyFetchResult([], [], null, { defer_blocked: true, pending_count: 1, holders: [pausedHolder] });
+      component.applyFetchResult([], [], null, null, { defer_blocked: true, pending_count: 1, holders: [pausedHolder] });
       expect(component.deferBlockWarning()).not.toBeNull();
 
-      component.applyFetchResult([], [], null, null);
+      component.applyFetchResult([], [], null, null, null);
       expect(component.deferBlockWarning()).toBeNull();
     });
 
     it('no render when pending_count is 0 — the gate lives in the helper', () => {
-      component.applyFetchResult([], [], null, { defer_blocked: false, pending_count: 0, holders: [] });
+      component.applyFetchResult([], [], null, null, { defer_blocked: false, pending_count: 0, holders: [] });
       expect(component.deferBlockWarning()).toBeNull();
     });
   });
@@ -1035,6 +1073,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
       it('does NOT bind [runningJobs] — the old running-only filter must not return', () => {
         expect(templateHtml).not.toContain('[runningJobs]');
+      });
+
+      it('binds (footerClick)="onFooterClick()" so the panel footer activation reaches the indicator', () => {
+        // T1 pin — without this binding, the panel's footerClick
+        // emit fires into the void and the indicator never navigates
+        // to /jobs. Mirror tests prove the component method exists;
+        // the source-text pin proves the TEMPLATE actually wires it
+        // up.
+        expect(templateHtml).toContain('(footerClick)="onFooterClick()"');
       });
     });
   });
@@ -1416,12 +1463,12 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onLegError('active', new Error('transient'));
       expect(component.lastIntakeError()).not.toBeNull();
 
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
-        { defer_blocked: false, pending_count: 0, holders: [] }
-      );
+      const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
+      component.applyFetchResult([], [], zeroPayload, zeroPayload, {
+        defer_blocked: false,
+        pending_count: 0,
+        holders: [],
+      });
       expect(component.lastIntakeError()).toBeNull();
     });
 
@@ -1434,24 +1481,30 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onLegError('active', new Error('backend down'));
       expect(component.lastIntakeError()).toBe('active: backend down');
 
-      // Degraded-200 missions tick — every leg non-null, but the
-      // envelope is degraded. The flag must NOT be cleared.
-      component.applyFetchResult(
+      // Degraded-200 missions count tick — every leg non-null, but
+      // the count envelope is degraded. The flag must NOT be
+      // cleared; the new leg name surfaces the degradation.
+      const degradedPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], undefined, { degraded: true }),
-        { defer_blocked: false, pending_count: 0, holders: [] }
+        undefined,
+        { degraded: true }
       );
-      expect(component.lastIntakeError()).toBe('missions: degraded envelope');
+      component.applyFetchResult([], [], degradedPayload, null, {
+        defer_blocked: false,
+        pending_count: 0,
+        holders: [],
+      });
+      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
 
       // Recovery contract unchanged: the next FULLY clean tick
-      // (non-null + non-degraded everywhere) clears the flag.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([], 0),
-        { defer_blocked: false, pending_count: 0, holders: [] }
-      );
+      // (non-null + non-degraded on EVERY leg including both missions
+      // legs) clears the flag.
+      const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
+      component.applyFetchResult([], [], zeroPayload, zeroPayload, {
+        defer_blocked: false,
+        pending_count: 0,
+        holders: [],
+      });
       expect(component.lastIntakeError()).toBeNull();
     });
 
@@ -1462,7 +1515,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
 
-      component.applyFetchResult(null, null, null, null);
+      component.applyFetchResult(null, null, null, null, null);
 
       expect(component.displayText()).toBe('1/1');
       expect(component.runningJobs().length).toBe(1);
@@ -1473,15 +1526,11 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // A live leader mission is proven by the missions projection;
       // the jobs intake then errors. The badge must show the last
       // good "missions: N" — NEVER a false bare 0/0 idle.
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [{ mission_id: 'leader-a', liveness: 'processing' }],
-          2
-        ),
-        null
+      const twoPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'leader-a', liveness: 'processing' }],
+        2
       );
+      component.applyFetchResult([], [], twoPayload, twoPayload, null);
       expect(component.displayText()).toBe('missions: 2');
 
       component.onLegError('active', new Error('backend down'));
@@ -1496,14 +1545,18 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // Real RxJS, mirroring ``fetchBadgeSignals()`` 1:1: each additive
       // participant isolates its own error with ``catchError(() => of(null))``
       // so a missions/defer-blocked failure degrades to ``null`` while the
-      // jobs intake still emits.
+      // jobs intake still emits. T2 fix: both missions legs (count + list)
+      // isolate independently — a count leg 500 must not kill the list leg
+      // or the jobs intake.
       const result = await firstValueFrom(forkJoin({
         active: of([createMockJob({ status: 'processing' })]),
-        missions: throwError(() => new Error('missions 500')).pipe(catchError(() => of(null))),
+        missionsCount: throwError(() => new Error('missionsCount 500')).pipe(catchError(() => of(null))),
+        missionsList: throwError(() => new Error('missionsList 500')).pipe(catchError(() => of(null))),
         deferBlocked: throwError(() => new Error('defer-blocked 404')).pipe(catchError(() => of(null))),
       }));
-      expect(result.active.length).toBe(1); // jobs intake survived both failures
-      expect(result.missions).toBeNull();
+      expect(result.active.length).toBe(1); // jobs intake survived all failures
+      expect(result.missionsCount).toBeNull();
+      expect(result.missionsList).toBeNull();
       expect(result.deferBlocked).toBeNull();
     });
   });
@@ -1518,15 +1571,11 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
     it('returns "missions-only" when no jobs but live missions exist', () => {
       component.setActiveJobs([]);
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [{ mission_id: 'm-1', liveness: 'processing' }],
-          1
-        ),
-        null
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'm-1', liveness: 'processing' }],
+        1
       );
+      component.applyFetchResult([], [], onePayload, onePayload, null);
       expect(component.pillState()).toBe('missions-only');
     });
 
@@ -1547,35 +1596,27 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
 
     it('missionsSegmentText: just the integer N', () => {
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload(
-          [
-            { mission_id: 'm-1', liveness: 'processing' },
-            { mission_id: 'm-2', liveness: 'paused' },
-          ],
-          2
-        ),
-        null
+      const twoPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'm-1', liveness: 'processing' },
+          { mission_id: 'm-2', liveness: 'paused' },
+        ],
+        2
       );
+      component.applyFetchResult([], [], twoPayload, twoPayload, null);
       expect(component.missionsSegmentText()).toBe('2');
     });
   });
 
   describe('segmented pill — liveMissionBreakdown (per-liveness counts)', () => {
     it('tallies processing / pending / paused from the missions list', () => {
-      component.applyFetchResult(
-        [],
-        [],
-        MockJobQueueIndicatorComponent.buildMissionsPayload([
-          { mission_id: 'm-1', liveness: 'processing' },
-          { mission_id: 'm-2', liveness: 'processing' },
-          { mission_id: 'm-3', liveness: 'paused' },
-          { mission_id: 'm-4', liveness: 'pending' },
-        ]),
-        null
-      );
+      const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
+        { mission_id: 'm-1', liveness: 'processing' },
+        { mission_id: 'm-2', liveness: 'processing' },
+        { mission_id: 'm-3', liveness: 'paused' },
+        { mission_id: 'm-4', liveness: 'pending' },
+      ]);
+      component.applyFetchResult([], [], payload, payload, null);
       const bd = component.liveMissionBreakdown();
       expect(bd.processing).toBe(2);
       expect(bd.paused).toBe(1);
@@ -1596,7 +1637,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
         { mission_id: 'm-1', liveness: 'processing' },
         { mission_id: 'm-2', liveness: 'paused' },
       ]);
-      component.applyFetchResult([], [], payload, null);
+      component.applyFetchResult([], [], payload, payload, null);
       expect(component.missionsList().length).toBe(2);
       expect(component.missionsList().map((m) => m.mission_id).sort()).toEqual(['m-1', 'm-2']);
     });
@@ -1605,10 +1646,222 @@ describe('JobQueueIndicatorComponent Logic', () => {
       const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
         { mission_id: 'm-1', liveness: 'processing' },
       ]);
-      component.applyFetchResult([], [], payload, null);
-      component.applyFetchResult([], [], null, null);
+      component.applyFetchResult([], [], payload, payload, null);
+      component.applyFetchResult([], [], null, null, null);
       expect(component.missionsList().length).toBe(1);
       expect(component.missionsList()[0].mission_id).toBe('m-1');
+    });
+  });
+
+  // ── T2 mission-tree final gaps (2026-09-07) ──────────────────────────
+  //
+  // F-1 closed: the badge's live-mission count (82-vs-7 self-
+  // contradiction) was being driven by the unfiltered content page's
+  // ``total`` (which includes terminal missions). The fix splits
+  // the missions leg into TWO independent legs — a filtered
+  // ``missionsCount`` (limit=1, liveness=processing,pending,paused)
+  // and the unfiltered ``missionsList`` (limit=20). Each carries its
+  // own per-participant catchError so a failure on one does not
+  // cascade into the other.
+
+  describe('T2: live-mission count comes from the count leg, NOT the content list leg', () => {
+    it('badge shows the count leg total (live=7) even when the list leg total is much larger (total=82)', () => {
+      // F-1 repro: live count = 7 (filter-aware total from
+      // missionsCount leg), list total = 82 (unfiltered page total
+      // including terminal missions). The badge MUST use the count
+      // leg — never the list leg — so the visible number stays
+      // honest.
+      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'live-1', liveness: 'processing' },
+          { mission_id: 'live-2', liveness: 'processing' },
+          { mission_id: 'live-3', liveness: 'pending' },
+          { mission_id: 'live-4', liveness: 'paused' },
+          { mission_id: 'live-5', liveness: 'paused' },
+          { mission_id: 'live-6', liveness: 'processing' },
+          { mission_id: 'live-7', liveness: 'processing' },
+        ],
+        7
+      );
+      // The list leg's payload is much larger — it includes terminal
+      // (completed/failed/cancelled) missions that the count filter
+      // excluded. This is the bug-class payload: 82 rows total.
+      const listPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 82 }, (_, i) => ({
+          mission_id: `m-${i}`,
+          liveness: i < 7 ? ('processing' as const) : ('completed' as const),
+        })),
+        82
+      );
+      component.applyFetchResult([], [], countPayload, listPayload, null);
+      // Badge shows 7 (count leg), NOT 82 (list leg).
+      expect(component.liveMissionCount()).toBe(7);
+      expect(component.missionsSegmentText()).toBe('7');
+      // The list leg's payload feeds the panel — it carries 82 rows.
+      expect(component.missionsList().length).toBe(82);
+    });
+
+    it('live count is correct when live missions > 20 (count comes from filtered total, NOT the 20-item page)', () => {
+      // 25 live missions. The list leg's ``limit:20`` truncates the
+      // page to 20 rows (so a naïve ``missions.length`` count would
+      // read 20). The count leg's ``total`` is the authoritative
+      // live count.
+      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 25 }, (_, i) => ({
+          mission_id: `live-${i}`,
+          liveness: 'processing' as const,
+        })),
+        25
+      );
+      // The list leg returns its first 20 — ``total`` is the
+      // filter-aware page total the BE returns for the unfiltered
+      // mission list (the bug class would have the FE derive live
+      // count from this number, which would be wrong). To prove the
+      // split, we make the list leg's total 75 (a plausible
+      // unfiltered total) while the count leg says 25.
+      const listPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 20 }, (_, i) => ({
+          mission_id: `m-${i}`,
+          liveness: 'processing' as const,
+        })),
+        75
+      );
+      component.applyFetchResult([], [], countPayload, listPayload, null);
+      // Badge shows 25 (count leg), NOT 75 (list leg), NOT 20 (list
+      // page size).
+      expect(component.liveMissionCount()).toBe(25);
+      expect(component.missionsSegmentText()).toBe('25');
+    });
+
+    it('count-leg degraded envelope retains the LAST good live count (no false bare 0/0)', () => {
+      // Seed a healthy count.
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
+      );
+      component.applyFetchResult([], [], onePayload, onePayload, null);
+      expect(component.liveMissionCount()).toBe(1);
+      // Now the count leg degrades (the list leg is still healthy so
+      // the panel keeps its content).
+      const degradedCount = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [],
+        undefined,
+        { degraded: true }
+      );
+      const healthyList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
+      );
+      component.applyFetchResult([], [], degradedCount, healthyList, null);
+      // The flag is set (count leg degraded) AND the count signal
+      // retains the last good value.
+      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
+      expect(component.liveMissionCount()).toBe(1);
+    });
+
+    it('count-leg catchError failure does NOT kill the content leg (leg independence)', () => {
+      // Healthy content leg first so the panel has rows to retain.
+      const healthyList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
+      );
+      component.applyFetchResult([], [], healthyList, healthyList, null);
+      expect(component.missionsList().length).toBe(1);
+      // Now the count leg fails (per-leg catchError fires FIRST —
+      // sets ``lastIntakeError`` — and the forkJoin next-handler
+      // receives ``missionsCount: null``). The list leg is still
+      // healthy so it UPDATES the panel's payload.
+      component.onLegError('missionsCount', new Error('count 500'));
+      const updatedList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'live-1', liveness: 'processing' },
+          { mission_id: 'live-2', liveness: 'paused' },
+        ],
+        2
+      );
+      component.applyFetchResult([], [], null, updatedList, null);
+      // The flag remains set from the catchError call — the
+      // count leg's error is recorded.
+      expect(component.lastIntakeError()).toBe('missionsCount: count 500');
+      // The list leg updated — the panel's content reflects the
+      // new, larger payload (2 missions).
+      expect(component.missionsList().length).toBe(2);
+    });
+
+    it('content-leg degraded envelope retains the LAST good list (panel never flashes empty)', () => {
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
+      );
+      component.applyFetchResult([], [], onePayload, onePayload, null);
+      expect(component.missionsList().length).toBe(1);
+      // Now the list leg degrades while the count leg is still
+      // healthy.
+      const degradedList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [],
+        undefined,
+        { degraded: true }
+      );
+      component.applyFetchResult([], [], onePayload, degradedList, null);
+      expect(component.lastIntakeError()).toBe('missionsList: degraded envelope');
+      // The list payload retains the last good value — the panel
+      // never flashes empty.
+      expect(component.missionsList().length).toBe(1);
+    });
+
+    it('content-leg catchError failure does NOT kill the count leg (leg independence)', () => {
+      // Seed a healthy count.
+      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
+      );
+      component.applyFetchResult([], [], countPayload, countPayload, null);
+      expect(component.liveMissionCount()).toBe(1);
+      // Now the list leg fails (per-leg catchError fires FIRST —
+      // sets ``lastIntakeError`` — and the forkJoin next-handler
+      // receives ``missionsList: null``). The count leg is still
+      // healthy so it UPDATES the badge's N.
+      component.onLegError('missionsList', new Error('list 500'));
+      const updatedCount = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        3
+      );
+      component.applyFetchResult([], [], updatedCount, null, null);
+      // The flag remains set from the catchError call — the list
+      // leg's error is recorded.
+      expect(component.lastIntakeError()).toBe('missionsList: list 500');
+      // The count leg updated — the badge's N reflects the new count.
+      expect(component.liveMissionCount()).toBe(3);
+    });
+  });
+
+  // ── T1 panel footer — "Open full queue →" navigation ────────────────
+
+  describe('T1: onFooterClick closes the menu and routes to /jobs', () => {
+    it('closes the menu and routes to /jobs (the dedicated Jobs page)', () => {
+      component.onFooterClick();
+      expect(component.menuClosedAfterClick).toBe(true);
+      expect(component.lastFooterNavigated).toEqual(['/jobs']);
+    });
+
+    it('does NOT mutate lastTabAction (footer navigation has no project context)', () => {
+      // onJobClick's tab-decision logic should NOT fire from the
+      // footer activation — the footer is a navigation-only action
+      // with no project context. ``lastTabAction`` stays null.
+      component.lastTabAction = null;
+      component.onFooterClick();
+      expect(component.lastTabAction).toBeNull();
+    });
+
+    it('does NOT mutate lastNavigated (the indicator route is the source of truth for footer navigation)', () => {
+      // The footer navigation lands on ``lastFooterNavigated`` (its
+      // own captured side-effect), NOT on ``lastNavigated`` (which
+      // is onJobClick's surface). This keeps the two navigation
+      // paths cleanly separable for the spec.
+      component.lastNavigated = null;
+      component.onFooterClick();
+      expect(component.lastNavigated).toBeNull();
+      expect(component.lastFooterNavigated).toEqual(['/jobs']);
     });
   });
 });
