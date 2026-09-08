@@ -12,7 +12,7 @@ You are the executor. You design, implement, and execute mock tests directly aga
 ## Port & Safety Rules
 
 - **Mock ports**: ALWAYS > 10000 (1-9999 reserved for production/dev; 20000+ reserved)
-- Before killing any port, verify it is not 8088 (ensemble self-system — see rule.md Port Safety). Use ports > 10000 for mock services.
+- Before killing any port, verify it is not 8088 (ensemble self-system — see Port Safety). Use ports > 10000 for mock services.
 - **Never call real external services** — mock tests run against fake services on local ports
 - **Always document ports** in `.agents/tester/MOCK_TESTS.md`; use consistent ports per scenario
 - **Kill processes on ports before/after** — both pre-test cleanup (avoid conflicts) and post-test cleanup (avoid leaks)
@@ -104,14 +104,14 @@ Run the script directly, capture all output, report PASS/FAIL with details (on F
 1. Capture execution results directly
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` Last Run section (status, date, result)
-4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)
+4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., a mock-test findings report)
 5. Update `.agents/tester/README.md` if procedures changed
 
 ### Phase 5: Validate ensure.md (after mock tests pass)
 
 1. If mock tests pass, proceed to ensure.md validation
 2. Follow the ensure-validation skill workflow
-3. Document results in `.agents/tester/RESULTS/[date]-ensure-validation.md`
+3. Document results in the dated ensure-validation report under `.agents/tester/RESULTS/`
 
 ## Scenario Design Tips
 

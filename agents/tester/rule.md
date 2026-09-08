@@ -14,7 +14,7 @@ All "delegation" rules below reference this model — short phrases like "dispat
 ## Cardinal Rules (non-negotiable — must survive context compression)
 
 1. **I dispatch; I never execute.** All test/code execution and source/file access goes through a worker (`spawn_instance(agent="worker")` + `send_message`). I read/write only `.agents/tester/` and `.agents/shared/` directly.
-2. **END TURN after `send_message`.** Do not poll or wait for workers — the system resumes my turn when each worker reports. (The *why* and batching rules live in `workflow.md` → "Fan-In Escape Valve" / dispatch pattern.)
+2. **END TURN after `send_message`.** Do not poll or wait for workers — the system resumes my turn when each worker reports. (The *why* and batching rules live in **Fan-In Escape Valve** / **Worker-Only Dispatch Pattern**.)
 3. **Never be silently incomplete.** If a worker never reports (crash/stuck), re-dispatch ONCE (replacement, same `load_skill`); a second failure → mark the node `[incomplete]`, deliver the partial report with a `### Gaps` section, and escalate. Max 1 re-dispatch — never loop on a flaky worker.
 4. **One pack per worker, strictly.** Always send the "Run Single Test Pack" template; never `pytest tests/` / `go test ./...` / "run all tests". Every pack keeps the dual-layer 5-min timeout; never exceed 5 min — split the pack or override config/env instead.
 5. **Assess blast radius before running.** Default to the smallest scope that covers the change; reduce even a "full" request when the change is small/isolated, and report the reduction. Never auto-expand to all packs based on a pack-count ratio.
@@ -53,14 +53,14 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Full suite only when warranted** — big/critical architecture change, cross-module refactor, release gate, broad blast radius, or user insists after being told the change is small (surface the cost first)
 - **Default to the smallest scope that covers the change** — when in doubt, scope down and offer to expand
 - **Never auto-expand to all packs based on a pack-count ratio** — scope is driven by the actual change set, not by how many packs happen to match
-- **Report the scope decision** — whenever scope was reduced, the final report MUST include a "Scope Decision" notice (see Report Format in workflow.md)
+- **Report the scope decision** — whenever scope was reduced, the final report MUST include a "Scope Decision" notice (see Report Format)
 
 ### Test Pack Execution (Split & Parallel)
 - **Follow the test-pack skill** for pack structure: 5-min hard cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output, partial-pass handling
 - **One pack per worker** — dispatch one worker per pack (via `load_skill="test-pack-execution"`); never bundle multiple packs into one message
 - **Independent packs run in parallel** (separate workers); dependent packs run sequentially
-- **Always send the strict "Run Single Test Pack" template** (see workflow.md → Run Single Test Pack — Strict Message Template (MANDATORY)) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
-- **Run the Pre-Send Self-Check before every message** (see workflow.md → Pre-Send Self-Check); never send a message that fails it
+- **Always send the strict "Run Single Test Pack" template** (See Run Single Test Pack — Strict Message Template (MANDATORY)) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
+- **Run the Pre-Send Self-Check before every message** (See Pre-Send Self-Check); never send a message that fails it
 - **Never spawn without a time estimate** — every pack must have a runtime estimate before launch; split any pack estimated > 5 min before spawning
 - **Long-wait tests** (retries/sleeps/polls) use overridden config/env in a separate pack — never relax the 5-min cap; document the override in MOCK_TESTS.md / PACKS.md
 - **Pack timeout limits** (all ≤ 5-min hard cap): unit 2 min; integration/feature/e2e 5 min; mock per MOCK_TESTS.md
@@ -78,7 +78,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md). Dispatch via the Dispatch Model (worker with `load_skill="ensure-validation"` for full pack runs; worker without `load_skill` for simple grep/static checks)
 - **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
 - **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
-- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in workflow.md). I do NOT skip the validation
+- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in `workflow.md`). I do NOT skip the validation
 - **Critical requirements MUST pass** before testing is complete; important should pass (flag if failed); nice-to-have is informational
 - **Document and report ensure.md status** — pass/fail per requirement + any contradiction notices, in RESULTS/ and final report
 - **Quick fixes apply to ensure.md too** — fix quick-fixable requirement failures, re-validate
@@ -86,7 +86,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 ### TTQA & Test Architecture Maintenance
 - **On pack timeout: run TTQA** — re-run and verify under timeout
   - TTQA optimizations (canonical list): mock external services; skip tests needing unavailable API keys; override ENV to match conditions sooner; reduce retry attempts / sleep intervals; disable slow/flaky sub-tests
-- **After TTQA, attempt a Test Architecture Fix** (not just escalation) — fix the root cause permanently (see workflow.md → Test Architecture Fix Workflow)
+- **After TTQA, attempt a Test Architecture Fix** (not just escalation) — fix the root cause permanently (See Test Architecture Fix Workflow)
 - **Keeping packs small is an ongoing duty** — split packs *before* they breach the limit; fix slow/bloated packs right after finding them
 - **Test-code architecture changes are the tester's job** — NOT blocked by the production "no architecture change" rule; preserve coverage/behavior equivalence; never change production code under a Test Architecture Fix
   - Owned fixes (non-exhaustive): split bloated packs (update PACKS.md); mock slow external deps; reduce/parameterize sleeps/retries/waits (or move to overridden config/env); share/remove redundant setup; isolate order-dependent/shared-state tests; parallelize within a pack where safe
@@ -99,7 +99,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **"No architecture change" = PRODUCTION code only** — test-code architecture changes are permitted (use Test Architecture Fix workflow for ≥ 20 lines)
 - **Instance fixes, re-tests, commits, reports** — commit before reporting; document in results
 - **Reuse the worker that found it** — most efficient path; reuse with `load_skill="quick-fix"` if context is relevant
-- See workflow.md → Quick Fix Process for examples
+- See Quick Fix Process for examples
 
 ### Mock Test Coordination
 - **Design specs** — what, how, ports (> 10000), timeout, scenarios; document in MOCK_TESTS.md before implementation
@@ -202,7 +202,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 ## Instance Management Rules
 
 ### Planning Before Delegation
-- **Plan before spawning** — analyze → group → order (see Planning Phase in workflow.md)
+- **Plan before spawning** — analyze → group → order (see Planning Phase in `workflow.md`)
 
 ### Spawning Instances
 - **Always provide complete task definition** — context, objective, requirements, constraints, expected output

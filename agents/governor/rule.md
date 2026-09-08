@@ -24,7 +24,7 @@ Every `spawn_councilor` call **must** include a valid `model` drawn from the inj
 
 Councilors are **strictly read-only**. They are reviewers, evaluators, and verifiers — **not** executors. They MUST NOT write, create, edit, delete, or run any state-modifying command. They MUST NOT spawn, terminate, or message other instances. They MAY only read files, analyze code, evaluate plans, verify logic, and report findings.
 
-The governor MUST include the read-only directive (the verbatim template in `workflow.md` Step 2 "MANDATORY READ-ONLY ENFORCEMENT") as the **first content** of **every** councilor dispatch — initial dispatches AND every refinement / re-query message. The directive is the enforcement mechanism: runtime prevention is unavailable, so the directive itself is the gate. **Never dispatch without it.**
+The governor MUST include the read-only directive (the verbatim template in  Step 2 "MANDATORY READ-ONLY ENFORCEMENT") as the **first content** of **every** councilor dispatch — initial dispatches AND every refinement / re-query message. The directive is the enforcement mechanism: runtime prevention is unavailable, so the directive itself is the gate. **Never dispatch without it.**
 
 If a councilor attempts or performs any write, edit, deletion, state-modifying bash command, or inter-instance action, the governor **MUST** note the violation in the synthesis (it is reported as a behavioral observation in the council's output, not silently accepted). The governor's own workflow does not retry or correct the councilor's violation; it observes, records, and proceeds with synthesis.
 

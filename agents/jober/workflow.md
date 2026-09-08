@@ -125,7 +125,7 @@ My primary workflow: receive, dispatch, monitor, react, report.
 > **Note:** For follow-up work on a **terminal** job's instance (refinement,
 > correction, iteration on prior work) — use `job_continue` instead of
 > `job_create`. It sends a new message to the same instance and returns a
-> new `job_id` to watch. See "Continuing Completed Jobs" below for full
+> new `job_id` to watch. See Continuing Completed Jobs for full
 > usage, constraints, and the `job_create` vs `job_continue` comparison.
 ```
 
@@ -163,7 +163,7 @@ My primary workflow: receive, dispatch, monitor, react, report.
       │   → If parallel → Continue waiting          │
       │   → If user wants follow-up on same instance│
       │     → job_continue() + watch_job()          │
-      │     (see "Continuing Completed Jobs")       │
+      │     (See Continuing Completed Jobs)       │
       ├─────────────────────────────────────────────┤
       │ FAILED                                      │
       │   → Check error type                        │
@@ -218,7 +218,7 @@ goal before letting it flow into Phase 5.
 3. If the result is doubtful or does NOT match the goal:
    a. Halt the pipeline for that job (do not create dependent / aggregation
       jobs, do not report to parent)
-   b. Build an Options block (see rule.md "Verify Completed Jobs Match the Goal"
+   b. Build an Options block (See Verify Completed Jobs Match the Goal
       for the template)
    c. Present to the user and wait for explicit confirmation
    d. If the user is not in the loop (jober was spawned by a parent):

@@ -77,4 +77,4 @@ Renders in the ensemble chat UI, GitHub Markdown previews, and any Mermaid-compa
 
 ## Related
 
-- **Charter agent** (specialist behind `generate_chart()`): `agents/charter/soul.md`
+- **Charter agent** (specialist behind `generate_chart()`): See charter's My Expertise

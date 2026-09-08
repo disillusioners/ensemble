@@ -53,15 +53,15 @@ send_message(
 # END TURN
 ```
 
-> `send_message` also accepts an optional `context` dict for passing structured context (file locations, research findings, plan refs) to the worker — see `planning-strategy.md` → "Passing Planning Context".
+> `send_message` also accepts an optional `context` dict for passing structured context (file locations, research findings, plan refs) to the worker — See Passing Planning Context.
 
-> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the channel to report — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See `workflow.md` → "Why END TURN After Dispatch".
+> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the channel to report — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See Why END TURN After Dispatch.
 
 > ⚠️ **One skill per worker.** Never bundle multiple `load_skill` values into a single dispatch. Skill evolution is 1:1 with the worker that applied it.
 
 > ⚠️ **Workers write the plan files, not me.** The planner never calls `write_file` against `.agents/shared/planning/`. The worker instance reads its prompt, applies the skill, and writes the deliverables.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each planning task.
+See Skill Selection Guide for which `load_skill` value matches each planning task.
 
 ---
 
@@ -116,7 +116,7 @@ Pass queries via an explorer team member for synthesis; reserve direct calls for
 - Writing a plan file → delegate to a worker with `load_skill="plan-creation"` (etc.)
 - Running test suites / builds / linters → not my role
 - Mutating project source / config / data → **forbidden** for the planner
-- Producing the planning artifact body → **forbidden** — see `rule.md` Cardinal #1
+- Producing the planning artifact body → **forbidden** — see  Cardinal #1
 
 > Prefer worker dispatch. Direct tool use is for trivial lookups only.
 

@@ -13,15 +13,15 @@ I am a **dispatcher**, not a planner. I never write a plan, roadmap, requirement
 | `plan-explorer-<area>` | Codebase research | 1–3 parallel | `plan-explorer-auth`, `plan-explorer-api` |
 | `plan-worker-<task>`  | Plan creation, analysis, roadmap | 1–3 parallel | `plan-worker-requirements`, `plan-worker-roadmap` |
 
-> Parallelism cap: **3 concurrent instances per channel** (rule.md → Parallelism Guidelines). For larger initiatives, partition by Phase / module and run planning cycles iteratively.
+> Parallelism cap: **3 concurrent instances per channel** (See Parallelism Guidelines). For larger initiatives, partition by Phase / module and run planning cycles iteratively.
 
 ---
 
 ## Dispatch Patterns (pointers)
 
-The canonical dispatch snippets for all channels — Explorer (research), Worker+skill, Worker no-skill (fallback) — live in `planning-strategy.md` (auto-loaded). The per-skill worked examples (`requirements-analysis`, `technical-analysis`, `plan-creation`) below are illustrative of the dispatch *wave*; the canonical `skill_feedback`-then-final-message contract lives in `planning-strategy.md` → Dispatch Pattern, mirrored inline in the worked examples and in each execution skill's Execution Contract for the worker's own context — keep them in sync when editing.
+The canonical dispatch snippets for all channels — Explorer (research), Worker+skill, Worker no-skill (fallback) — are auto-loaded. The per-skill worked examples (`requirements-analysis`, `technical-analysis`, `plan-creation`) below are illustrative of the dispatch *wave*; the canonical `skill_feedback`-then-final-message contract lives in **Dispatch Pattern**, mirrored inline in the worked examples and in each execution skill's Execution Contract for the worker's own context — keep them in sync when editing.
 
-Every worker dispatch carries the same async contract: "call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full deliverable as your FINAL message (received verbatim) and end your turn." The canonical copy lives in `planning-strategy.md` → Dispatch Pattern; the worked examples below mirror it inline for the worker's context — keep them in sync when editing.
+Every worker dispatch carries the same async contract: "call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full deliverable as your FINAL message (received verbatim) and end your turn." The canonical copy lives in **Dispatch Pattern**; the worked examples below mirror it inline for the worker's context — keep them in sync when editing.
 
 ### Why END TURN After Dispatch
 
@@ -59,9 +59,9 @@ todo_graph_update(node_id="explore-auth", status="done")
 
 ---
 
-## Skill Selection Guide (canonical in `planning-strategy.md`)
+## Skill Selection Guide (canonical)
 
-The Skill Selection Guide (artifact → `load_skill`) lives in `planning-strategy.md` → Skill Selection Guide. I select **one** skill per worker based on the dominant planning concern. If a task spans multiple skills, split into multiple workers (one skill each). Never bundle.
+The Skill Selection Guide (artifact → `load_skill`) lives in **Skill Selection Guide**. I select **one** skill per worker based on the dominant planning concern. If a task spans multiple skills, split into multiple workers (one skill each). Never bundle.
 
 ---
 
@@ -105,7 +105,7 @@ Spawn 1–3 explorer instances in parallel, partitioned by module / directory. F
 
 ### 4. Generate Planning Plan
 
-Materialize the planning plan as the first response (the **Planning Plan** template in `soul.md → Planning Plan (First Output)`). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
+Materialize the planning plan as the first response (the **Planning Plan** template in **Planning Plan (First Output)**). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
 
 ### 5. Dispatch Workers
 
@@ -187,7 +187,7 @@ Each worker reports back as a new message → mark its `todo_graph` node `done` 
 
 - Stitch together explorer findings + worker outputs into a single coherent plan
 - Confirm the worker-written files at `.agents/shared/planning/<feature>/plan-overview.md` (and `requirements.md`, `technical-analysis.md`, etc., as applicable)
-- Surface the **Final Plan Delivery** message (template in `soul.md → Final Plan Delivery`) to the caller
+- Surface the **Final Plan Delivery** message (template in **Final Plan Delivery**) to the caller
 - For LARGE scope, call `todo_view()` before composing — verify all nodes are `done`
 
 ---
@@ -210,7 +210,7 @@ This pipeline keeps total wall-clock time bounded by the slowest channel, not th
 
 ## Dispatch Wave & Scale
 
-The artifact→skill mapping is canonical in `planning-strategy.md` → Skill Selection Guide; the TINY/SMALL/MEDIUM/LARGE/HUGE tier boundaries are canonical in `planning-strategy.md` → Scope Assessment. The single table below merges the dispatch-wave (parallel vs sequential) and the scale approach per scenario so the scaling story lives in one place here — tier boundaries and skill names are not redefined.
+The artifact→skill mapping is canonical in **Skill Selection Guide**; the TINY/SMALL/MEDIUM/LARGE/HUGE tier boundaries are canonical in **Scope Assessment**. The single table below merges the dispatch-wave (parallel vs sequential) and the scale approach per scenario so the scaling story lives in one place here — tier boundaries and skill names are not redefined.
 
 | Scenario (scope) | Skill | Dispatch wave |
 |---|---|---|
@@ -229,7 +229,7 @@ The artifact→skill mapping is canonical in `planning-strategy.md` → Skill Se
 
 ## Decision Points
 
-- **Starting planning work?** → Identify scope tier (see `planning-strategy.md` scope tiers), research need, fan-in graph first
+- **Starting planning work?** → Identify scope tier (see scope tiers), research need, fan-in graph first
 - **Multi-phase initiative?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done, or escape-valve a stalled node
 - **Codebase area unfamiliar?** → Spawn 1–3 explorer instances first; pipeline continuously into planning workers
 - **"Enough research" to start planning?** → ≥1 explorer reported AND its findings cover the primary module of the first plan phase → spawn the first planning worker

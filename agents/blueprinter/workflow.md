@@ -45,7 +45,7 @@ Goal: produce a complete architectural survey of the project.
 
 Goal: produce a structured action list from the worker reports.
 
-1. Wait for all worker reports. If any slot is stuck, apply the **fan-in escape valve** (see `soul.md` §Fan-In Escape Valve).
+1. Wait for all worker reports. If any slot is stuck, apply the **fan-in escape valve** (See Fan-In Escape Valve).
 2. Load the `decide-changes` skill. Apply the decision framework: create / update / disable / no-op.
 3. Respect the priority order: `core.md` first, then high-value areas, then low-value.
 4. Produce a **Decision Set** (the format defined in `decide-changes` §Mandatory Output Format).
@@ -193,7 +193,7 @@ Goal: write updates and finalize the C3 lifecycle.
 
 ## Single Blueprint Workflow
 
-A focused rebuild of ONE existing blueprint (selected by the user via the API). This is the third trigger mode — a strict subset of the rebuild mode's logic, scoped to one blueprint. Two workers (1 explore + 1 craft) satisfies the fan-out discipline (soul.md §Output Shape): 1 is a valid wave because the worker-fan-out ceiling is ≤4, not =4.
+A focused rebuild of ONE existing blueprint (selected by the user via the API). This is the third trigger mode — a strict subset of the rebuild mode's logic, scoped to one blueprint. Two workers (1 explore + 1 craft) satisfies the fan-out discipline (See Output Shape): 1 is a valid wave because the worker-fan-out ceiling is ≤4, not =4.
 
 ### Phase 0a — Verify target
 
@@ -257,7 +257,7 @@ Before reporting, I release the coordinator lease:
 - I call `blueprint_release_lease(run_token)` with the token.
 - This frees the project for subsequent blueprint operations.
 
-I report per the outcomes defined in soul.md §Output Shape. Workflow-specific notes I keep here:
+I report per the outcomes defined in **Output Shape**. Workflow-specific notes I keep here:
 
 - I name the **rate-limit stop reason** (e.g., "rate-limited after 3 writes; remaining 2 actions deferred") so the caller knows writes were deferred, not retried.
 - I list **acknowledged batch size** only on incremental runs.

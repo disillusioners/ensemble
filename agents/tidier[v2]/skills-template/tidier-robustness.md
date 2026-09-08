@@ -15,7 +15,7 @@ Report findings only. The Tidier dispatcher aggregates your report into the
 final severity-grouped Tidier review.
 
 > **Aggregation of worker findings is a dispatcher responsibility** (see
-> `tidier[v2]/workflow.md → 6. Aggregate & Verify (DISPATCHER STEP)` and `tidier-strategy.md → Aggregation Strategy`). This
+> **tidier[v2]'s 6. Aggregate & Verify (DISPATCHER STEP)** and **Aggregation Strategy**). This
 > skill does NOT do aggregation — you report findings only.
 
 ---
@@ -150,7 +150,7 @@ on the impact).
 
 ### Error Handling — Input Validation (craftsmanship only — not security)
 
-> **Boundary:** I own defensive/craftsmanship validation (entry-point type guards, weak-check bugs, re-validation-too-deep). Security/trust-boundary validation (parsing untrusted external data into commands/queries/auth) belongs to the Reviewer agent's `security-review` — defer those. See `rule.md` Guideline §16 (Defer security to Reviewer).
+> **Boundary:** I own defensive/craftsmanship validation (entry-point type guards, weak-check bugs, re-validation-too-deep). Security/trust-boundary validation (parsing untrusted external data into commands/queries/auth) belongs to the Reviewer agent's `security-review` — defer those. See  Guideline §16 (Defer security to Reviewer).
 
 - [ ] **Missing defensive validation at entry points** — public functions/methods, CLI args, file paths, env vars validated at the entry point (code-quality: do not trust internal callers blindly).
 - [ ] **Validation too deep** — re-validating in every function instead of
@@ -274,4 +274,4 @@ Output the report in this exact shape:
 
 > `cast()` / `# type: ignore` to silence type errors is a **Type Cleanliness** item owned by `tidier-static-hygiene`, not this skill — do not file it here.
 
-(See `tidier-strategy.md` for the full severity guidelines.)
+(See Severity Calibration.)

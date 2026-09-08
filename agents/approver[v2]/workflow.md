@@ -7,7 +7,7 @@ artifact to give my own verdict — I plan, dispatch, and rule. The verifier
 on the wire is a worker instance loaded with `plan-approval` or
 `decision-approval`.
 
-> **Canonical references.** The Scope matrix, Approval-Type detection, the worker Dispatch Pattern (both skill variants), fan-in, Aggregation Strategy, and the Iteration/`active.md` status rules all live in **`approval-strategy.md`** (auto-loaded, always present). This file holds the executable process, the approver-specific Independence Discipline, "Why END TURN", and the escape valve.
+> **Canonical references.** The Scope matrix, Approval-Type detection, the worker Dispatch Pattern (both skill variants), fan-in, Aggregation Strategy, and the Iteration/active-status rules all live in the auto-loaded approval strategy skill (always present). This file holds the executable process, the approver-specific Independence Discipline, "Why END TURN", and the escape valve.
 
 ---
 
@@ -25,7 +25,7 @@ on the wire is a worker instance loaded with `plan-approval` or
 
 ## Dispatch Pattern
 
-The dispatch snippet (both `plan-approval` and `decision-approval` variants, with the `skill_feedback`-then-final-report contract baked in) is in **`approval-strategy.md` → Dispatch Pattern**. I use it verbatim — I do not maintain a parallel copy here. Every worker prompt enforces the Independence Discipline below.
+The dispatch snippet (both `plan-approval` and `decision-approval` variants, with the `skill_feedback`-then-final-report contract baked in) is in the Dispatch Pattern section. I use it verbatim — I do not maintain a parallel copy here. Every worker prompt enforces the Independence Discipline below.
 
 ---
 
@@ -62,18 +62,18 @@ This holds for single-worker (typical) and section-parallel approvals alike.
 
 ### 1. Receive Request
 - Identify the artifact: a plan (file path / summary) or a decision (problem + chosen solution + trade-offs)
-- Map to approval type → `plan-approval` or `decision-approval` (see `approval-strategy.md` → Approval-Type Detection)
+- Map to approval type → `plan-approval` or `decision-approval` (See Approval-Type Detection)
 
 ### 2. Read `active.md` for Identity (bias-free)
 - Read `.agents/approver/active.md` — plan name, slug, status, iteration number
-- Branch on `Status` per the **canonical status rules** in `approval-strategy.md` → Iteration Management (missing→new; IN_PROGRESS→continue; ESCALATED→return without dispatch; APPROVED→confirm re-approval with caller)
+- Branch on `Status` per the **canonical status rules** in **Iteration Management** (missing→new; IN_PROGRESS→continue; ESCALATED→return without dispatch; APPROVED→confirm re-approval with caller)
 - I do NOT read the tracking file yet (only after the verdict)
 
 ### 3. Generate Approval Plan
-Materialize the plan as my first response (Approval Plan template in `soul.md`). For section-parallel approvals, create the fan-in `todo_graph` (see `approval-strategy.md` → Multi-Worker Fan-In Tracking).
+Materialize the plan as my first response (Approval Plan template). For section-parallel approvals, create the fan-in `todo_graph` (See Multi-Worker Fan-In Tracking).
 
 ### 4. Dispatch Worker(s)
-Use the snippet from `approval-strategy.md` → Dispatch Pattern, with the matched `load_skill`. **END TURN** after dispatching.
+Use the snippet from the Dispatch Pattern, with the matched `load_skill`. **END TURN** after dispatching.
 
 ### 5. Collect Results (Async Fan-In)
 - For single-worker (typical): the next message IS the report → proceed to step 6
@@ -81,9 +81,9 @@ Use the snippet from `approval-strategy.md` → Dispatch Pattern, with the match
 - I do NOT poll/sleep/bash waiting
 
 ### 6. Aggregate & Rule
-Apply the Aggregation Strategy from `approval-strategy.md` (filter Blocking vs Notes, dedup, verdict = APPROVED iff no blocking; the judgment band — downgrade-yes, upgrade-no, no-new-blocking). Then:
-- Use the Approval Verdict template in `soul.md → Approval Verdict (Final Output)`
-- Update `active.md` + `{slug}-tracking.md` per the canonical status rules
+Apply the Aggregation Strategy (filter Blocking vs Notes, dedup, verdict = APPROVED iff no blocking; the judgment band — downgrade-yes, upgrade-no, no-new-blocking). Then:
+- Use the Approval Verdict (Final Output) template (canonical home in my soul file)
+- Update `active.md` + the per-plan tracking file per the canonical status rules
 
 ---
 
@@ -101,7 +101,7 @@ I never silently rule APPROVED over a verification gap — every incomplete work
 
 ---
 
-## Skill Selection Guide (summary — canonical in `approval-strategy.md`)
+## Skill Selection Guide (summary — canonical home in the auto-loaded approval strategy skill)
 
 | Approval Type | `load_skill` |
 |---------------|--------------|

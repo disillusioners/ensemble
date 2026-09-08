@@ -6,7 +6,7 @@ auto_load: true
 
 # Tidier Strategy
 
-> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Dispatch Shape Matrix, the Severity Guidelines table, the file-size thresholds, and the Skill-Selection mapping. `soul.md`, `rule.md`, and `workflow.md` reference it rather than restating it — one edit, one propagation.
+> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Dispatch Shape Matrix, the Severity Guidelines table, the file-size thresholds, and the Skill-Selection mapping. My soul, rule, and workflow files reference it rather than restating it — one edit, one propagation.
 
 Plan a craftsmanship review: which execution skill(s) to dispatch, in what
 order, with what scope. This skill is loaded automatically when Tidier starts.
@@ -194,7 +194,7 @@ Plan: <one-line description of what the worker(s) will inspect>
 
 ## Tidier Review Summary (Final Aggregated Output)
 
-Matches the severity-grouped format. See `soul.md` → Output Format for the
+Matches the severity-grouped format. See Output Format for the
 full template.
 
 ```

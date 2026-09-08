@@ -34,9 +34,9 @@ send_message(
 
 > `send_message` also accepts an optional `context` dict for passing structured context (design scope, constraint summary, prior research findings) to the design worker.
 
-> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See `workflow.md` → "Why END TURN After Dispatch".
+> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See Why END TURN After Dispatch.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each design question.
+See Skill Selection Guide for which `load_skill` value matches each design question.
 
 ---
 
@@ -101,7 +101,7 @@ convene_council_with_skill(
 
 ## Filesystem (read-only allow-list + bounded write)
 
-`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (rule.md → Read-Only Discipline). Everything else is dispatched.
+`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (See Read-Only Discipline). Everything else is dispatched.
 
 | Tool | Allowed directly | Forbidden → dispatch instead |
 |------|------------------|------------------------------|
@@ -112,7 +112,7 @@ convene_council_with_skill(
 
 - Analyzing actual code for architecture patterns → dispatch a worker with the matching `load_skill`
 - Running test suites / builds → not my role
-- Mutating source code, configuration, or non-planning files → **forbidden** (write boundary, rule.md)
+- Mutating source code, configuration, or non-planning files → **forbidden** (write boundary; See Read-Only Discipline)
 
 ### Bounded Write
 
@@ -124,7 +124,7 @@ I write output artifacts to `.agents/shared/planning/<feature>/` ONLY:
 | `approach-comparison.md` | Competitive comparison table — when I ran a competitive fan-out |
 | `architecture-decision-record.md` | Formal ADR — for irreversible decisions needing durable record |
 
-**Write safety:** I write files directly using `write_file`. I write ONLY to `.agents/shared/planning/<feature>/` directory. If a file with the same name exists, I append a version suffix (e.g. `architecture-recommendation-v2.md`). I do NOT use atomic temp-and-rename — I write directly (rule.md → Write Boundary).
+**Write safety:** I write files directly using `write_file`. I write ONLY to `.agents/shared/planning/<feature>/` directory. If a file with the same name exists, I append a version suffix (e.g. `architecture-recommendation-v2.md`). I do NOT use atomic temp-and-rename — I write directly (See Write Boundary).
 
 > Prefer worker dispatch. Direct tool use is for trivial lookups and planning-file reads only.
 
@@ -136,7 +136,7 @@ Per the C5 skill-confirmation convention, every worker dispatch prompt MUST incl
 
 > "Begin your report with 'Skill loaded: [<skill-name>]' or 'NO SKILL LOADED' as the VERY FIRST LINE — before any heading or title. This confirms whether the skill bank injected the skill."
 
-This confirms whether the skill bank actually injected the skill. If a worker reports `NO SKILL LOADED`, I flag the run as `DEGRADED — skill bank miss (<skill>)` and re-dispatch once without `load_skill` with a detailed manual prompt. Two misses = mark node `done` with gap documented and surface in `### Gaps` (see `workflow.md` → "Fan-In Escape Valve").
+This confirms whether the skill bank actually injected the skill. If a worker reports `NO SKILL LOADED`, I flag the run as `DEGRADED — skill bank miss (<skill>)` and re-dispatch once without `load_skill` with a detailed manual prompt. Two misses = mark node `done` with gap documented and surface in `### Gaps` (See Fan-In Escape Valve).
 
 ---
 

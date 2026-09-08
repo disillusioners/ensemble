@@ -33,11 +33,11 @@ send_message(
 )
 ```
 
-> `send_message` also accepts an optional `context` dict for passing structured context (artifact paths, evaluation criteria, prior notes) to the worker — see `approval-strategy.md` → "Passing Approval Context".
+> `send_message` also accepts an optional `context` dict for passing structured context (artifact paths, evaluation criteria, prior notes) to the worker — See Passing Approval Context.
 
-> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See `workflow.md` → "Why END TURN After Dispatch".
+> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See Why END TURN After Dispatch.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each approval type.
+See Skill Selection Guide for which `load_skill` value matches each approval type.
 
 ---
 
@@ -51,7 +51,7 @@ See `workflow.md` → "Skill Selection Guide" for which `load_skill` value match
 ### When to Use Directly
 
 - Writing/updating `.agents/approver/active.md` (iteration tracking)
-- Writing/updating `.agents/approver/{slug}-tracking.md` (rejection history)
+- Writing/updating the per-plan tracking file under `.agents/approver/` (rejection history)
 - A single `Read` to peek at `.agents/approver/` memory file
 - A quick `glob` to confirm a plan file exists
 

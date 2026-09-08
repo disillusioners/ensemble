@@ -27,7 +27,7 @@
 - **SKIP when:** simple status checks, control messages ("proceed"), or anything where the message itself already carries everything.
 - **Suggested keys:** `files` (list), `notes` (str), `plan_ref` (str). Any key passes through.
 - Don't duplicate what's already in the message text — `context` is for supplementary info.
-Suggested context= keys: wt_path/wt_slug/wt_branch. Hand-off REQUIRES non-empty context (>= wt_path). See giter/workflow.md -> Worktree Mode.
+Suggested context= keys: wt_path/wt_slug/wt_branch. Hand-off REQUIRES non-empty context (>= wt_path). See giter's Worktree Mode.
 
 ```python
 send_message(
@@ -68,7 +68,7 @@ send_message(
 | I Need | ❌ Don't | ✅ Do |
 |--------|----------|-------|
 | Understand structure | "Developer: run ls -la" | "Developer: Analyze the project structure and identify main components" |
-| Know what project does | "Developer: read README.md" | "Developer: Understand the project purpose and provide overview" |
+| Know what project does | "Developer: read the project README" | "Developer: Understand the project purpose and provide overview" |
 | Check dependencies | "Developer: cat package.json" | "Developer: Review project dependencies and identify concerns" |
 | Explore codebase | "Developer: find all *.go files" | "Developer: Explore codebase architecture and report findings" |
 

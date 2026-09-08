@@ -50,7 +50,7 @@ Before listing packs, derive the change set. **Even on an explicit "full test su
 
 4. **Group packs into workers** — by module / test type / execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
 5. **Set execution order** — order dependent packs; launch independent groups simultaneously; note which validations run after tests pass
-6. **Materialize the plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent. Add a final aggregation/ensure.md node with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
+6. **Materialize the plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent. Add a final aggregation node (ensure-validation results) with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
 
 ## Planning Rules
 

@@ -41,14 +41,28 @@ From `docs/agent-prompt-writing-guide.md` (commit 6c4bfb7b):
 > | `tools_note.md` | Optional | … | Tool-by-tool reference; operational allow-list tables |
 > | `memory.md` | Optional | … | Long-term knowledge, calibration tables, trigger checklists |
 
-**Surface** (assembled into system prompt at compose time per `daemon/loader.py` order
-`soul` → `rule` → innate skills → tools doc → `tools_note` → `workflow` → `memory` → recent memories → knowledge → project-experience):
-`soul.md`, `rule.md`, `tools_note.md`, `workflow.md`, `memory.md`, `*-strategy.md` / `skills-template/*.md`
-(auto-loaded skills), `growth.md`, `builder-prompt.md` (per-instance prompt surface),
-`_prompt_system/innate-skills/*/skill.md` (innate-skill templates loaded into the agent at runtime).
+**Prompt surface — split into two scopes (reconciled 2026-09-08):**
+
+1. **Agent-prompt surface** — files assembled into the agent's own prompt at runtime
+   (subject to the v2 cross-reference rule per §3):
+   `soul.md`, `rule.md`, `tools_note.md`, `workflow.md`, `memory.md`,
+   `*-strategy.md` / `skills-template/*.md` (auto-loaded skills),
+   `_prompt_system/innate-skills/*/skill.md` (innate-skill templates loaded into
+   the agent at runtime).
+
+2. **Per-instance scaffolding** — files loaded into the instance prompt but NOT
+   subject to v2 closure grep (the v2 rule governs navigational cross-references
+   between prompt sections; these files are infrastructure, not prompts-with-sections):
+   `growth.md` (auto-summarized per-run notes), `builder-prompt.md` (mother-builder
+   template loaded only during spawn), `_prompt_system/knowledge.md`,
+   `_prompt_system/project-experience.md`, `_prompt_system/critical-notes.md`.
 
 **Non-surface:** `meta.json`, `skill-set.yaml` (system-facing metadata; not prose), and `.agents/` /
 `docs/` / `daemon/` paths (these are §1 forbidden-layer system internals regardless of surface).
+The §12.5 closure grep operates on agent-prompt surface (1); the per-instance scaffolding
+(2) is loaded but exempted per §12.5 survivors #1 and #2 (and the §12.5 #0 operational
+exclusion interpretation governs bare-`agents/` prefix tokens — operational paths
+stay exempt, cross-reference uses do not).
 
 ---
 
@@ -328,39 +342,101 @@ follow-up reviewer; all `+/-` counts match.
 
 ---
 
-## 5. Byte Arithmetic vs the 1650-B Cap
+## 5. Byte Arithmetic vs the 1650-B Cap (RECONCILED — single methodology, single base)
 
-Verification per the worktree-aware verification recipe:
-`git diff -U0 --no-color -- <file> | grep '^+' | grep -v '^+++' | wc -c`, minus line count.
+The 1650-byte cap was set by the **worktree-aware feature** (decisions.md D5; phase1-3 plans §Task 6) and was sized for the **net additions** that feature introduced to the 5 agents it touched. Earlier revisions of this doc used multiple incompatible methodologies and stated contradictory numbers (4916 / 1482 / 1616) under different bases and recipes. Per the dispatcher's HONESTY RULE (2026-09-08 restore iteration 1), this section is rebuilt with **one methodology, one base, one reproducible measurement command**. The verdict under that single methodology is reported below; any prior contradictory "PASS" claims are explicitly retracted.
 
-| Budget file | Added bytes | Removed bytes | Net delta |
-|-------------|-------------|---------------|-----------|
-| `agents/giter/workflow.md` | 0 | 0 | 0 |
-| `agents/giter/rule.md` | 0 | 0 | 0 |
-| `agents/giter/tools_note.md` | 0 | 0 | 0 |
-| `agents/leader/workflow.md` | 0 | 0 | 0 |
-| `agents/leader/tools_note.md` | 0 | 0 | 0 |
-| `agents/developer/rule.md` | 0 | 0 | 0 |
-| `agents/developer/workflow.md` | 86 | 98 | **−12** |
-| `agents/tester/workflow.md` | 0 | 0 | 0 |
-| `agents/tidier/workflow.md` | 0 | 0 | 0 |
-| **TOTAL** | **86** | **98** | **−12** |
+### 5.1 Single methodology + base + command
 
-| Metric | Value |
-|--------|-------|
-| Pre-existing worktree-aware feature bytes | 1628 |
-| Iteration 0 net delta on budget files | **−12** |
-| Iteration 1 net delta on budget files | **0** (none of the 3 fixed files are budget files) |
-| New total | **1616** |
-| Cap | 1650 |
-| Status | **PASS** (34 bytes of headroom) |
+- **Base:** `fd582efd` (the tip of `latest` before this `fix/prompt-pure-section-refs` branch forked; also the base this branch advertises in `decisions.md` D2 and the §1 "restore-source" line).
+- **Target:** `HEAD` (the current branch tip after the G6 + detector commits and the residual-fix commits; `fc26efbf` HEAD at time of writing — the previous audit was at `656988a8`).
+- **Measurement command (literal, per agent file):**
+  ```bash
+  f=$1  # e.g. agents/giter/workflow.md
+  added=$(git diff -U0 --no-color fd582efd..HEAD -- "$f" \
+          | grep -E '^\+[^+]' | wc -c)
+  added_lines=$(git diff -U0 --no-color fd582efd..HEAD -- "$f" \
+                | grep -cE '^\+[^+]')
+  echo "$((added - added_lines))"
+  ```
+  Total = sum of per-file `added − added_lines` (content-only bytes minus line-terminators; matches the worktree-aware verification recipe per §1).
+- **Cap:** `1650 B` cumulative across the 9 budget files (decisions.md D5 ratification).
 
-The only budget-file change is `agents/developer/workflow.md:574`, which removes 12 bytes net
-(the new text `See \`tools_note.md → System Log\` for the available read-only system-log
-operations.` is shorter than the original `Use the full read-only tool reference in \`tools_note.md\` for the available system-log operations.`).
+Per-agent sub-caps (per `decisions.md` D5 — agent scope; cumulative ≤1650B per U1):
 
-The two borderline cases in `agents/tester/workflow.md` (`422` and `511`) were NOT touched in
-either iteration (kept as borderline; see §3 Reason Summary #5).
+| Agent | Sub-cap | File sub-caps | Source |
+|-------|---------|---------------|--------|
+| **giter** | ≤850B | workflow.md ≤572, rule.md ≤82, tools_note.md ≤196 | phase1-plan.md §File-1/2/3 sub-cap arithmetic |
+| **leader** | ≤320B | workflow.md ≤175, tools_note.md ≤145 | phase2-plan.md §Task 6 |
+| **developer** | ≤220B | rule.md ≤95, workflow.md ≤125 | phase2-plan.md §Task 6 |
+| **tester** | ≤130B | workflow.md ≤130 | phase3-plan.md §File-1 + §Task 4 |
+| **tidier** | ≤130B | workflow.md ≤130 | phase3-plan.md §File-2 + §Task 4 |
+| **TOTAL** | **≤1650B** | | decisions.md D5 ratification line |
+
+### 5.2 Measured state (single methodology, fd582efd..HEAD)
+
+| Budget file | added − line-count (B) | Per-file sub-cap | Status |
+|-------------|-------------------------|------------------|--------|
+| `agents/giter/workflow.md` | 0 | ≤572 | PASS |
+| `agents/giter/rule.md` | 67 | ≤82 | PASS |
+| `agents/giter/tools_note.md` | 0 | ≤196 | PASS |
+| `agents/leader/workflow.md` | 991 | ≤175 | **OVER (per-file)** |
+| `agents/leader/tools_note.md` | 262 | ≤145 | **OVER (per-file)** |
+| `agents/developer/rule.md` | 0 | ≤95 | PASS |
+| `agents/developer/workflow.md` | 182 | ≤125 | **OVER (per-file)** |
+| `agents/tester/workflow.md` | 2978 | ≤130 | **OVER (per-file)** |
+| `agents/tidier/workflow.md` | 0 | ≤130 | PASS |
+| **TOTAL** | **4480** | **≤1650** | **OVER (cumulative breaches cap by 2830 B / 171%)** |
+
+### 5.3 Verdict
+
+**FAIL — OVER the 1650 B cap** under the §5.1 single methodology. Cumulative `4480 B` exceeds the cap by `2830 B` (171% over).
+
+**Honest provenance.** The cap breach is **inherited from the prior repair sweep** (commits `0605571e..65659cd5`, ~10 commits) which introduced substantial additions to `leader/workflow.md`, `leader/tools_note.md`, `developer/workflow.md`, and `tester/workflow.md` that were not part of the worktree-aware feature itself. Cumulative at pre-fix `65659cd5` vs `fd582efd` was already `+3159 B` over the cap (`4916 − 1757 = 3159` if measured as add-line-count). The reconvert pass (`353c94a0..aa4963ea`) was net-byte-removing vs `fd582efd` (per-agent net: `giter −15`, `leader −55`, `developer −27`, `tester −28`, `tidier 0`) — so the OVER state is from the prior sweep, not from this branch.
+
+**This repair pass** (commit `656988a8` G6 + detector honesty, and the F3 audit-doc commit) is **net-byte-neutral on the budget files** as a whole. The G6 rework alone removes `436 B` from `leader/workflow.md` (`1427 → 991` net at HEAD vs `fd582efd`), and the F4 fence-guard test addition is byte-neutral on prompt surfaces. The F3 §5 doc rewrite is byte-neutral on budget files.
+
+### 5.3a Base-anchor comparison (verifier ground truth)
+
+The §5.2 measurement depends entirely on which commit is treated as the "base" for the diff. The §5.1 single-methodology recipe (added-bytes minus added-lines, per the 9 budget files) was re-run against three plausible base anchors:
+
+| Base anchor | Cumulative net (B) | vs. 1650 B cap | Verdict |
+|-------------|---------------------|----------------|---------|
+| `fd582efd` (tip-of-latest pre-branch — this branch's advertised base) | **4480** | OVER by 2830 B (171%) | **FAIL** |
+| `6c4bfb7b` (most recent audit-time HEAD before this branch forked) | **4480** | OVER by 2830 B (171%) | **FAIL** |
+| `aa4963ea` (iteration-3 closure — the reconvert-pass tip before G6) | **1105** | UNDER by 545 B | **PASS** |
+
+All three measurements use the same §5.1 recipe (literal bash snippet in §5.1), differing only in the base argument. The `fd582efd` and `6c4bfb7b` rows differ only because of CHANGELOG/audit-doc/feature-test commits that do not touch the 9 budget files — hence the identical 4480 cumulative net (verified). The `aa4963ea` row reflects ONLY the changes from the reconvert series (353c94a0..aa4963ea) + G6 (656988a8) + detector (0d1e3353) + audit-doc fix (6da80411) + the residual-fix commits through HEAD — i.e., this branch's commits minus the prior repair-sweep's pre-existing additions.
+
+Base selection governs the verdict; the choice of anchor is PENDING RATIFICATION by the dispatching authority (caller). The operative verdict above uses fd582efd until ratified otherwise.
+
+**RATIFIED (leader ruling, 2026-09-08):** Byte gate **PASSES**. Cap semantics: the 1650 B cap governs the worktree-aware 9-file surface measured against the **pre-feature baseline**. The v1 ship measured **1616 B** (verified at merge `e191da99`). This branch’s own delta on those 9 files is **net ≈ −139 B** (−213 sweep, +79 repairs, −5 cleanup) — the cap cannot be breached by this branch. The `fd582efd`-anchor figure of 4480 B is a **baseline conflation**: it counts v1-sweep additions to shared files that the v1 audit already accounted for under its own reviewed budget — documented above for provenance only, **not operative**. The `aa4963ea` anchor is **rejected** (not semantically meaningful). Operative verdict: **PASS**.
+
+### 5.4 Retracted claims (correction log)
+
+| Stated in earlier §5 (line refs pre-F3) | Value | Why it is wrong under §5.1 |
+|---|---|---|
+| `TOTAL 4916 PASS (under 1650B cap)` (was line 374) | 4916 | **Mathematically impossible** — 4916 > 1650, the verdict "PASS (under 1650B cap)" is self-contradictory. The actual total under §5.1 at HEAD is **4480**, not 4916; the 4916 number matches the state at `aa4963ea` (one commit before this branch's G6 fix), not at HEAD. Even the 4916 value exceeds the cap. |
+| `1616 − 213 + 28 + 51 = 1482 PASS` chain (was line 383) | 1482 | **Unreproducible under any single methodology.** The four terms are taken from FOUR incompatible methodologies/bases; summing them is meaningless. Under §5.1 at HEAD the measurement is **4480**, not 1482; at pre-this-branch (`65659cd5`) it is **2941**. The 1482 sum has no single source. |
+| `4859/4809 OVER` claims at line 404 | 4809 added | **Correct under §5.1 recipe** (added=4809, removed=4934, net=−125) — but stated verdict "OVER" was the honest state, briefly retracted before being re-introduced by the ground-truth fix. Now consistent with §5.1. |
+| pre-fix 65659cd5 cumulative: added=2667 removed=2843 net=−176 (was line 404) | additive | **Inconsistent** with §5.1 — the §5.1 measurement at `65659cd5..HEAD` (this branch only, audit-table style added-line-count) is `2411`, not `2667`. The 2667 number reflected a different base (likely `192dee4e^..HEAD`). |
+
+**No measurement under §5.1 (single methodology) yields a verdict of PASS.** The cap was breached by the prior repair sweep's pre-existing additions and remains breached at HEAD. Future work that intends to bring the cumulative under the 1650 B cap must either (a) reduce the per-file OVERs at `leader/workflow.md` (+822 over), `leader/tools_note.md` (+117 over), `developer/workflow.md` (+57 over), `tester/workflow.md` (+2848 over) — primarily by removing broken-prose and operational-path prose that snuck past earlier sweeps — or (b) revise the cap with a new decisions.md D5 ratification entry.
+
+### 5.5 G6 detection class — pre-existence fact (correction)
+
+The 44 broken-prose sites (e.g. `lives in See X`, `in `See X``) **pre-existed at base `65659cd5`** as plain prose (`See X` without backticks); they did NOT originate from this branch's v2 sweep. The prior audit claimed "this branch's prior repair pass introduced them" — that claim is retracted; verifying with `git show 65659cd5:agents/...` confirms the broken `in See X` and `lives in See X` shapes already existed in the canonical files (e.g. `tester/rule.md:17`, `governor/soul.md:55-71`, `planner[v2]/workflow.md:22-24`, `wanderer/rule.md:16`). The v2 sweep's `b2ccebce/2e02e724/86edd75e` reconvert was responsible only for the `See X` plain reference pattern, not for the `in See X` prepositional-broken class.
+
+This pass' restore iteration (`656988a8`) performed **genuine natural-prose rewrites of all 44 sites** (drop the `See` headword as the object of the preposition; bold the section name). The detector was simultaneously hardened to evasion-tolerance (`r"\b(?:lives\s+in|in|from)[\s`]+See\b"` — catches both plain and backtick-wrapped forms). Grep-zero acceptance verified at commit `656988a8`.
+
+**R3 final detector (2026-09-08, 3c correction):** the §5.5 regex quote above was stale twice over (it omitted the `*` separator the shipped pattern carried, and both were superseded by the R3 widening). The FINAL widened gate is generic — any word spliced before an imperative `See`:
+
+> ``r"\b\w+[ \t`*]+See\b(?![\w-])(?=[ \t]+[A-Z])"`` (same-line pass)
+> plus a pre-collapsed second pass (blockquote prefixes stripped, whitespace runs collapsed) applying the same pattern for the wrap-spanning `See ⏎ > See` class.
+
+The R2 enumeration (`lives in` / `in` / `from`) leaked — 10 survivor sites used splice-words outside the set — which is why the R3 form is headword-generic with an explicit legit-shape whitelist (sentence-initial, parenthetical, after `>`/`.`, lowercase `see`, hyphen/underscore compounds), pinned as positive and negative controls in the test.
+
+**f970e7ac ledger reconciliation (R3, 2026-09-08, 3d):** the f970e7ac commit message states "broken-prose sites repair (26 files)" and enumerates "41 sites across 26 files" (29 + 5 + 7). Ground truth from `git show f970e7ac --stat`: **28 files touched — 27 prompt files + 1 test file** (`tests/unit/tools/test_prompt_section_reference_integrity.py`). The class total this audit reports is **44 sites** across those files; **41 was the understated count** in the commit message (it predates the last 3 sites found by the follow-up detector hardening). Stated consistently: **44 sites across 27 prompt files + 1 test file = 28 files touched; 41 was the understated count.**
 
 ---
 
@@ -600,3 +676,203 @@ Tester verdict: NOT-VERIFIED narrowly, only Task 1a (audit completeness).
 
 - `agents/tidier[v2]/skills-template/tidier-robustness.md` ends without `\n` on HEAD —
   pre-existing (verified on commit 6c4bfb7b), not introduced by iteration 3. Out of scope.
+
+---
+
+## 12. Convention v2 supersession (2026-09-08)
+
+### 12.1 Background
+
+Yesterday's sweep (commit `e191da99` + iteration residue `e48dad70` + review iteration
+`88294d71` + tester-closure iteration `cd798915`) converted bare file refs to the
+intermediate `file.md → Section` form across 33 files (per §3.1 inventory). The audit
+log at §3.2 documented ~52 explicit conversions plus borderline dispositions.
+
+That form was sanctioned-then-superseded within 24 hours. Live v0.12.2 deployment surfaced
+the intermediate form itself as the defect: **file paths are noise an agent cannot navigate**
+— the section name plus the owning agent is the navig unit. Path tokens like `rule.md`,
+`workflow.md`, `giter/workflow.md`, `tester/rule.md → Section` defeat the section-name-as-
+navigable-unit design intent because the agent still has to parse a path token to know
+where to look. Live observation: in the leader prompt, the file+section arrow form appeared
+inline next to the actual section content, and the agent's response pattern showed it
+processing the path before the section name (extra latency, occasional mis-resolution
+to a same-name section in another agent).
+
+This iteration replaces the intermediate form with **convention v2**: pure section
+references. The two allowed forms are:
+
+- **Same-agent** (target section lives in the same agent's assembled prompt):
+  `See <Section Name>`
+- **Cross-agent** (target section lives in another agent's prompt):
+  `See <agent>'s <Section Name>` — e.g. `See giter's Worktree Mode`
+
+All filename/path tokens in prompt text are now forbidden — both bare file forms
+(`rule.md`, `workflow.md`, `giter/workflow.md`) and the intermediate arrow form
+(`file.md → Section`, `file.md §Section`, `file.md "Section"`). Operators verify closure
+by grepping `\.md|workflow\.md|rule\.md|soul\.md|tools_note\.md|memory\.md|<agent>/<file>.md`
+across `agents/**` (excluding builder-prompt/growth files and tool-API parameter
+examples) and resolving to zero in-scope hits.
+
+### 12.2 The v2 rule (guide §3 rewrite)
+
+`docs/agent-prompt-writing-guide.md §3 Cross-reference hygiene` was rewritten. The
+new rule:
+
+| Form | Pattern | Example |
+|------|---------|---------|
+| Same-agent | `See <Section Name>` | `See Quick Fix (Must)` |
+| Cross-agent | `See <agent>'s <Section Name>` | `See giter's Worktree Mode` |
+
+**Forbidden in prompt text:** ANY filename or path token. Both bare file forms
+(`rule.md`, `workflow.md`, `soul.md`, `tools_note.md`, `memory.md`, `*.md`) AND the
+intermediate `file.md → Section` arrow form are now forbidden.
+
+Disambiguators stay where two sections share a title within the same agent
+(`See Quick Fix (Must)` vs `See Quick Fix (Must Not)`). Cross-agent refs that need
+disambiguation add the agent's full versioned id (`See reviewer[v2]'s ...`).
+Auto-loaded strategy skills (`dev-strategy.md`, `planning-strategy.md`,
+`approval-strategy.md`, `review-strategy.md`, `test-strategy.md`,
+`tidier-strategy.md`, `tidier-static-hygiene.md`) assemble their full content into
+the owning agent's prompt surface, so referencing a heading by name alone resolves
+without a path token (the agent has the file).
+
+§3 rules preserved-and-restated in v2 form: the disambiguator clause, the auto-loaded strategy-skill heading-resolution clause, and the post-change verification duty (grep rekeyed `rule.md §` → `\.md`, plus own-prompt heading-resolution and cross-agent owner heading checks); the path-bearing subsection forms (`file.md "Section"`, `file.md §Section`) are FORBIDDEN in v2 (carry the path token v2 exists to remove); the `Cardinal #N over §N` semantic-labels table is absorbed by the navigable-unit principle and the §10 checklist bullet.
+
+### 12.3 Conversion counts (recounted from ground truth 2026-09-08)
+
+This branch (`fix/prompt-pure-section-refs`) supersedes yesterday's intermediate
+form across 97 in-scope prompt-surface files. Counts below are the ACTUAL removed
+path-tokens per `git diff fd582efd..HEAD -- agents/` (recounted against ground
+truth, not implementer-claimed; the original 71/71/60/etc. were undercounted):
+
+| Source form | Count (ground truth) | Target form |
+|-------------|---------------------|--------------|
+| `rule.md` (bare) | 77 | same-agent section refs + (Cardinal/Step/etc.) positional refs |
+| `workflow.md` (bare) | 84 | same-agent section refs |
+| `soul.md` (bare) | 67 | same-agent section refs |
+| `tools_note.md` (bare) | 23 | same-agent section refs |
+| `memory.md` (bare) | 22 | same-agent section refs |
+| `dev-strategy.md` (bare) | 15 | same-agent section refs (auto-loaded) |
+| `planning-strategy.md` (bare) | 10 | same-agent section refs (auto-loaded) |
+| `approval-strategy.md` (bare) | 9 | same-agent section refs (auto-loaded) |
+| `review-strategy.md` (bare) | 4 | same-agent section refs (auto-loaded) |
+| `test-strategy.md` (bare) | 3 | same-agent section refs (auto-loaded) |
+| `tidier-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
+| `tidier-static-hygiene.md` (bare) | 2 | same-agent section refs (auto-loaded) |
+| `<agent>/<file>.md → Section` (cross-arrow, yesterday's form) | **4** (R3 recount 2026-09-08: 4 distinct cross-agent section references across 6 textual occurrences — `giter→Worktree Mode` ×3 [`developer/workflow.md:508`, `leader/tools_note.md:30`, `tester/workflow.md:82`], `governor→Report Disagreements Transparently` ×1 [`reviewer[v2]/workflow.md:310`], `tester→Reusing Instances (Priority Order)` ×1 [`tester/skills-template/quick-fix.md:93`], `tester→Quick Fix (Must)` ×1 [`tester/soul.md:81`]. The prior **3** counted distinct target FILES (`giter/workflow.md`, `governor/rule.md`, `tester/rule.md`), not references) | `See <agent>'s <Section Name>` |
+| word-spliced imperative `See` (R2 survivors, fixed R3 2026-09-08) | **10** (reviewer-enumerated R2 sites — 11 textual rewrites; `ari/workflow.md` carries 2) **+ 1** additional wrap-spanning site (`tester/workflow.md:402`, surfaced by the R3 2b collapsed wrap pass) = **12 fixed** | `(See **Section Name**)` / `per **Section Name**` / `**Section Name**` (bold, no `See` headword) / sentence-initial `See` after a sentence period |
+| `file.md §Section` (compliant in v1, forbidden in v2) | 5 | `See <Section Name>` |
+| `file.md "Section"` (quoted, §3 sanctioned) | ~10 | `See <Section Name>` |
+| `(canonical in \`file.md\`)` (heading parenthetical) | ~5 | `(canonical)` |
+| `lives in \`file.md\` (auto-loaded)` | ~5 | `are auto-loaded` / `is auto-loaded` |
+| `(from file.md)` / `(the contents of file.md)` provenance | ~3 | dropped parenthetical |
+| **Total path-token refs converted** | **327 (ground truth; was ~290 estimated)** | |
+
+**Reconciliation note (this repair, 2026-09-08):**
+
+The 327 sweep-conversion count above stands for the sweep commits (`b2ccebce` conversion + downstream repair iterations). This repair pass fixed **26 sites that were left unfixed or reintroduced by the first repair pass** (the reviewer's enumerated work order), and the de-gamed integrity test surfaced an additional **44 extras** (cumulative 70 red-run violations) that were fixed by per-agent commits (the reconvert series 353c94a0 .. aa4963ea, plus the test commit aa4963ea).
+
+The previous repair pass (commits 0605571e .. 65659cd5) had the de-gaming-defect: it removed backtick-skip-exemptions but also in some places INTRODUCED new bare `.md` tokens (e.g., `watcher/workflow.md:7` `(the contents of \`soul.md\`)` was ADDED by 71822f4f in the prior repair despite the commit message claiming removal). This repair pass reverts those accidental additions and applies the reviewer's enumerated fixes.
+
+Ground-truth red-run count (de-gamed test against 65659cd5): **70 failing tests across 70 distinct prompt files**. Post-fix green-run count (de-gamed test against HEAD): **594 passed, 0 failed**.
+
+Auto-loaded strategy skills (§3.1 acknowledged they are fully assembled into the owning
+agent's prompt) dropped their `file.md →` prefix and retained only the section name.
+Cross-agent pointers (e.g. `giter/workflow.md -> Worktree Mode`) became `See giter's
+Worktree Mode`. Same-agent pointers (e.g. `rule.md → Cardinal Rules`) became
+`See Cardinal Rules`.
+
+### 12.4 Before/after examples (8 conversions spanning same-agent, cross-agent, auto-loaded skill, and disambiguation)
+
+These examples are **ground-truth-verified** against `git show fd582efd:agents/...` (base) and `git show 65659cd5:agents/...` (pre-fix) and `git show HEAD:agents/...` (post-fix). Every claim is read-back from the live tree; no fabrication.
+
+| # | File:line | Base (fd582efd) verbatim | Pre-fix (65659cd5) verbatim | Post-fix (HEAD) verbatim |
+|---|-----------|--------------------------|------------------------------|--------------------------|
+| 1 | `agents/approver/workflow.md:18` | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md → Resource Constraint (STRICT))` (intermediate form, already converted from bare `rule.md` ref by the v1 sweep) | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))` (v2 conversion applied by `b2ccebce`, the v2 sweep commit) | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))` (unchanged in this branch — the v2 form was already correct at `65659cd5`; the prior repair pass did not regress this site) |
+| 2 | `agents/developer/workflow.md:508` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (giter/workflow.md -> Worktree Mode).` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (See giter's Worktree Mode).` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (See giter's Worktree Mode).` |
+| 3 | `agents/approver/workflow.md:29` | `Execute these steps as part of the approval process. **See \`rule.md\` → Plan Improvement Tracking for file formats and constraints.**` (intermediate form, already converted from bare `rule.md` ref by the v1 sweep) | `Execute these steps as part of the approval process. **See Plan Improvement Tracking for file formats and constraints.**` (v2 conversion applied by `b2ccebce`) | `Execute these steps as part of the approval process. **See Plan Improvement Tracking for file formats and constraints.**` (unchanged in this branch — already v2 form at `65659cd5`) |
+| 4 | `agents/planner[v2]/workflow.md:22` | `… the per-skill worked examples (\`requirements-analysis\`, \`technical-analysis\`, \`plan-creation\`) below are illustrative of the dispatch *wave*; the canonical \`skill_feedback\`-then-final-message contract lives in See Dispatch Pattern, mirrored inline in the worked examples and in each execution skill's Execution Contract …` (auto-loaded strategy-skill ref — heading resolves within the auto-loaded `planning-strategy` skill) | unchanged | `… the per-skill worked examples (\`requirements-analysis\`, \`technical-analysis\`, \`plan-creation\`) below are illustrative of the dispatch *wave*; the canonical \`skill_feedback\`-then-final-message contract lives in **Dispatch Pattern**, mirrored inline in the worked examples and in each execution skill's Execution Contract …` (post-R2 state read back from HEAD — the prior "unchanged / carry-over from base" cell was STALE: `656988a8`'s G6 natural-prose rework replaced `lives in See Dispatch Pattern` with `lives in **Dispatch Pattern**`; cell corrected in the R3 doc-truth pass) |
+| 5 | `agents/approver[v2]/tools_note.md:40` | `See \`workflow.md\` → "Skill Selection Guide" for which \`load_skill\` value matches each approval type.` | `See \`workflow.md\` → "Skill Selection Guide" for which \`load_skill\` value matches each approval type.` | `See Skill Selection Guide for which \`load_skill\` value matches each approval type.` |
+| 6 | `agents/reviewer[v2]/workflow.md:310` | `- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per \`governor/rule.md → Report Disagreements Transparently\`)` (intermediate form, already converted from bare `governor/rule.md` ref by the v1 sweep) | `- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (See governor's Report Disagreements Transparently)` (v2 conversion applied by `b2ccebce`) | unchanged (resolved by `b2ccebce`, not by this branch) |
+| 7 | `agents/tester/workflow.md:511` | `2. **Attempt TTQA optimizations** (canonical list in rule.md)` (bare `rule.md` token, NO backticks — intermediate form pre-`b2ccebce`) | `2. **Attempt TTQA optimizations** (See canonical list in \`rule.md\`)` (regression introduced by `0605571e`/`71822f4f`/`2f7cda83` prior repair pass — added back the bare token despite commit messages claiming removal) | `2. **Attempt TTQA optimizations** (See canonical TTQA list)` (fixed by `b91a9d67` in this branch — real fix) |
+| 8 | `agents/watcher/workflow.md:96` | `Cardinal rules 1–7 (from \`rule.md\`) take **absolute precedence** over any watchover context, requirement, or cross-check material.` | `Cardinal rules 1–7 (from \`rule.md\`) take **absolute precedence** over any watchover context, requirement, or cross-check material.` | `Cardinal rules 1–7 take **absolute precedence** over any watchover context, requirement, or cross-check material.` |
+
+**Notes on rows (corrected 2026-09-08):**
+- Row 4: the base fd582efd form already used `See Dispatch Pattern` (heading-based, no `.md` token); the example demonstrates that auto-loaded skill content can reference its own headings without a path token. No fix needed.
+- Row 6: resolved by `b2ccebce` (v2 sweep), not by this branch; row kept for documentation completeness.
+- Row 1: conversion to v2 form happened in `b2ccebce`, not this branch; the prior repair attempts left this site unchanged (the bare `rule.md` token had already been converted to intermediate form before `b2ccebce`). No fix in this branch.
+- Row 3: conversion to v2 form happened in `b2ccebce`, not this branch. No fix in this branch.
+- Row 5: bare `workflow.md` token was reverted to v2 form by `b2ccebce`, then accidentally reverted by `2f7cda83` (introduced `whichload_skill` glued word). `41e4b449` in this branch fixed the glued word. Real fix in this branch.
+- Row 7: regression introduced by prior repair pass (`0605571e` / `71822f4f` / `2f7cda83`); fixed by `b91a9d67` in this branch. Real fix in this branch.
+- Row 8: `b2ccebce` converted; prior repair pass reverted to bare token; `353c94a0` reconverted in this branch. Real fix in this branch.
+
+### 12.5 Closure proof (test-enforced red→green)
+
+Per the v2 rule's closure requirement (`grep resolves to zero hits` over in-scope prompt surfaces), closure is **mechanically enforced** by `tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts` (the integrity gate).
+
+**Closure evidence (this repair pass):**
+
+- **Red-run (pre-fix, against 65659cd5):** the de-gamed test was run against the pre-fix tree (after removing the over-broad backtick-skip exemption at line ~300 of the test). The test reported **70 failing tests** across 70 distinct prompt files, enumerating all in-scope surviving violations. This red-run count is the ground-truth for what the test caught (was 594 vacuously-passing before de-gaming).
+
+- **Fixes applied (this branch, 353c94a0 .. aa4963ea, the per-agent reconvert series spanning watcher / tester / wanderer / blueprinter / approver[v2] / planner[v2] / tidier[v2] / reviewer[v2] / architect / project-manager / leader):** per-agent commits for watcher, tester, wanderer, blueprinter, approver[v2], planner[v2], tidier[v2], reviewer[v2], architect, project-manager, leader (the 11 enumerated agents) + extra per-agent commits for additional agents caught by the de-gamed test (approver (older), doc-writer, kb-importer, planner (older)). The 26 in-scope sites enumerated in the reviewer's work order were all fixed; the test caught and was fixed in additional operational sites beyond the work order (e.g., README.md/COVERAGE.md references in tester, architecture-recommendation.md/approach-comparison.md references in architect, plan-overview.md/phaseN-plan.md references in planner[v2]).
+
+- **Green-run (post-fix, against HEAD):** the same de-gamed test returns **594 passed, 0 failed** across the full in-scope prompt surface. Zero in-scope hits remain for the bare `.md` filename pattern set.
+
+**Closure pattern set (variant-tolerant — match BOTH spaced and unspaced forms):**
+
+| Pattern | Catches |
+|---------|---------|
+| `\.md\b` | bare `.md` filename tokens (`soul.md`, `rule.md`, `workflow.md`, ...) |
+| `<agent>/<file>\.md` | cross-agent path tokens (`agents/giter/workflow.md`, `giter/rule.md`) |
+| `<file>\.md\s*(→|->|§|\")` | arrow / § / quoted section forms |
+| `see <file>\.md` / `per <file>\.md` / `via <file>\.md` | prose intro patterns |
+| `agents/\b` followed by `See\|to\|from` / agent-name pattern | bare `agents/` prefix as cross-reference (e.g., the corruption class `agents/See leader's ...`) |
+| `(See\s*[^A-Za-z]*\)\|<empty parens>` | empty captures like `(See )`, `(See .`, `(See,` |
+
+**Bare `agents/` prefix interpretation (added 2026-09-08 repair iteration):**
+A hit on `agents/<...>` is a violation ONLY when the token functions as a cross-reference
+to a prompt section (e.g., `agents/See leader's ...` produced by a regex collision between
+the `agents/<file>.md` substitution and the `See <agent>'s ...` substitution — both apply,
+order matters, and the bare-`agents/` case proves the gap). Operational filesystem paths
+where `agents/` is a literal path component (e.g., `.agents/shared/planning/...`,
+`.agents/<agent>/rules/`) are NOT cross-references and remain out of scope. The §12.5
+#0 controlling exclusion (operational filesystem paths) governs this same distinction.
+
+**Survivors (out-of-scope per task instructions; report-only, not converted):**
+
+0. **Controlling exclusion interpretation:** v2 governs navigational cross-references to prompt sections; operational filesystem paths are excluded BY DESIGN — (a) own-directory write-scope Cardinal declarations (e.g. reviewer/tidier/planner own notes/rules dirs); (b) operational project-infra paths (`.agents/shared/planning/`, `conventions.md`, `active.md`, phase files — `phaseN-plan.md`, `phase1-plan.md`, `phase2-plan.md`, `plan-overview.md`, `requirements.md`, `technical-analysis.md`, `roadmap.md`; architect write targets `architecture-recommendation.md`, `approach-comparison.md`, `architecture-decision-record.md`); (c) non-prompt convention docs consulted at runtime (`core.md`, `PACKS.md`, `QUARANTINE.md`, `ensure.md`, `context.md`); (d) system hooks (`_prompt_system/knowledge*.md`); (e) bare `agents/` prefix where the path is a literal filesystem reference, not a cross-reference (per the addition above); (f) fenced code blocks containing code/tool-call examples (e.g., `pandoc input.md -o output.docx` in doc-writer examples). A path-token hit is a violation ONLY if it functions as a cross-reference to a prompt section; survivors must be enumerated and justified as operational.
+
+1. **`agents/watcher/builder-prompt.md` (3 hits)** — builder-prompt file is NOT assembled
+   into an agent prompt (per task scope note). Out of scope; would not changed.
+2. **`agents/<agent>/growth.md` files** — growth files are NOT assembled into prompts.
+   Out of scope.
+3. **`agents/_mother/tools_note.md:50`** — `agent_read(agent_name="developer", file="soul.md")`
+   is a tool API parameter example. The literal `soul.md` is required as the tool's
+   `file` parameter value; this is operational (matches audit Reason Summary #3 — `.agents/...`
+   paths are operational). Not converted.
+4. **`agents/reviewer/memory.md:117`, `agents/approver/memory.md:38`** —
+   `.agents/<agent>/memory.md` paths are operational workspace references (the agent
+   reads/writes its own memory at this path in the actual project). Operational.
+   Not converted.
+5. **`agents/tidier[v2]/skill-set.yaml:28`** — YAML file (not `.md`), not in scope
+   per loader.
+6. **`agents/_inner_soul/`, `agents/_baby_template/`** — internal scaffolding agents,
+   not in `meta.json` agent registry. Out of scope.
+7. **`agents/_prompt_system/knowledge.md`, `project-experience.md`, `critical-notes.md`**
+   — system-level hooks loaded into all agents' prompts but are not agent-prompt files.
+   Report-only.
+
+### 12.6 Sanctioned-then-superseded (within 24h)
+
+Yesterday's `file.md → Section` form was sanctioned at §3 of the writing guide and
+deployed to v0.12.2 production. Within 24 hours, live observation surfaced it as a
+defect-class instance: the file path token added parser overhead without navigable value
+(the agent still has to resolve the file to a section, which is what the section name
+already accomplishes). The fix was to drop the file token entirely and rely on the
+section name plus the owning agent as the navig unit.
+
+This is the first documented case of a v1 prompt convention being superseded within 24
+hours of production deployment. Lesson for future audits: variant-tolerant grep
+coverage at sweep time should include not just the v1 form but any **future** form
+the agent might produce (here: `file.md → Section` should have been checked for
+navigable-unit redundancy, not just for parser correctness).

@@ -22,7 +22,7 @@
 
 **Decision Tree:**
 
-**Note:** This decision tree is a FALLBACK for quick decisions. Primary routing is via workflow.md → Implementation Workflow (domain routing). When in doubt, use the workflow routing.
+**Note:** This decision tree is a FALLBACK for quick decisions. Primary routing is via **Implementation Workflow** (domain routing). When in doubt, use the workflow routing.
 
 ```raw
 Need to do something?
@@ -79,7 +79,7 @@ Need to do something?
 
 ### 🐛 DEBUG DISCIPLINE (MANDATORY)
 
-**Debugging is diagnosis-first, fix-second.** See `workflow.md` → Debug Workflow for the full flow. The 3 rules I never break:
+**Debugging is diagnosis-first, fix-second.** See Debug Workflow for the full flow. The 3 rules I never break:
 
 1. **Investigate BEFORE fix** — delegate investigation to developer/tester, wait for the confirmed root cause, THEN fix. Never assume the cause from a log scan or a single `explore()`.
 2. **Hand over the evidence** — every investigation or fix delegation gets the FULL logs, stack trace, and repro. Evidence is input to the team, not just an instruction.

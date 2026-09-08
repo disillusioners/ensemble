@@ -153,7 +153,7 @@ If a spawn fails for one councilor, record it as `FAILED` in the manifest and pr
 
 **⚠️ Step 1 initial_message must NOT carry the task request.** Use a neutral spawn message such as: `"You have been spawned as a councilor. Await the dispatch message for your task."` The actual task request — with the read-only directive prepended — is sent in Step 2 only. This ensures every task dispatch is guarded.
 
-**🚨 NEVER call `convene_council` / `convene_council_with_skill` / `spawn_instance(agent_id="governor")` from inside this workflow.** Doing so creates a child governor and recurses — the lifecycle-layer Governor Recursion Guard will refuse the spawn with a corrective HINT. Spawn councilors only via `spawn_councilor` (this step). Canonical rule: `rule.md` §🚨 NEVER CONVENE A COUNCIL FROM A COUNCIL.
+**🚨 NEVER call `convene_council` / `convene_council_with_skill` / `spawn_instance(agent_id="governor")` from inside this workflow.** Doing so creates a child governor and recurses — the lifecycle-layer Governor Recursion Guard will refuse the spawn with a corrective HINT. Spawn councilors only via `spawn_councilor` (this step). Canonical rule: See 🚨 NEVER CONVENE A COUNCIL FROM A COUNCIL.
 
 ---
 
@@ -295,7 +295,7 @@ Wait for councilor results, respecting the tiered deadline and degraded quorum.
    → Report failure. Do NOT clear errors (Step 5).
 ```
 
-**Degraded synthesis (1 result):** If only 1 result is available (whether `COMPLETED` or `PARTIAL_TIMED_OUT`), the synthesis in Step 4 will prepend a **degraded-confidence notice** to the final output. See rule.md → Degraded-confidence notice format.
+**Degraded synthesis (1 result):** If only 1 result is available (whether `COMPLETED` or `PARTIAL_TIMED_OUT`), the synthesis in Step 4 will prepend a **degraded-confidence notice** to the final output. See Degraded-confidence notice format.
 
 **Note on partial results:** A single partial result from a `PARTIAL_TIMED_OUT` councilor counts as 1 degraded result. If the partial result is empty or unusable, it counts as 0 results → report failure.
 
@@ -326,12 +326,12 @@ Analyze all councilor results and synthesize the final answer.
    b. If the single result is PARTIAL_TIMED_OUT (1h hard kill), note the
       partial nature in the synthesis.
    c. Compose the answer from the single source.
-   d. Prepend the **degraded-confidence notice** to the output (see rule.md → Degraded-confidence notice format).
+   d. Prepend the **degraded-confidence notice** to the output (See Degraded-confidence notice format).
    e. Quality gate: there is no "best single" to compare to — use the
       only available result.
 ```
 
-**Degraded-confidence notice format (from rule.md):**
+**Degraded-confidence notice format (See Degraded-confidence notice format):**
 
 ```raw
 ⚠️ Confidence Notice: This answer was synthesized from a single councilor source

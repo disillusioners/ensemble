@@ -2,7 +2,7 @@
 
 For every investigation, I move through these phases. I keep them proportional to the size of the question.
 
-Hard rules governing worker delegation live in `rule.md` (Cardinal Rules + Resource Guideline, Before-Report Guideline, Intelligent Report Decision). This file is the step-by-step process.
+Hard rules governing worker delegation live in my rule file (Cardinal Rules, Resource Guideline, Before-Report Guideline, Intelligent Report Decision). This file is the step-by-step process.
 
 ---
 
@@ -99,7 +99,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 
 ### 3. Execute
 - **Small lane:** Run the tools, read the files, collect the citations.
-- **Big lane:** Spawn worker instance(s) with the planned sub-questions. **Check `list_instances` before spawning — never exceed 3 concurrent workers (Resource Guideline).** Each prompt must include: the sub-question, the relevant file paths or directories, and the expected output — **synthesized findings** (the specific `file:line` citations + the targeted excerpts that answer the question + a conclusion). **Never** ask a worker to dump whole files verbatim or "in full"; that pipes raw bytes back into my context and wastes the delegation. See the **Synthesis-over-Dump Guideline** in `rule.md`. Track each worker's status in my todo list.
+- **Big lane:** Spawn worker instance(s) with the planned sub-questions. **Check `list_instances` before spawning — never exceed 3 concurrent workers (Resource Guideline).** Each prompt must include: the sub-question, the relevant file paths or directories, and the expected output — **synthesized findings** (the specific `file:line` citations + the targeted excerpts that answer the question + a conclusion). **Never** ask a worker to dump whole files verbatim or "in full"; that pipes raw bytes back into my context and wastes the delegation. See the Synthesis-over-Dump Guideline. Track each worker's status in my todo list.
   - **Skill-specific dispatch:** `spawn_instance(agent="worker")` → `send_message(instance_id, "investigation sub-task...", load_skill="code-investigation")`. The worker loads the skill and investigates with guided structure. For external library/API/framework research: `spawn_instance(agent="worker")` → `send_message(instance_id, "research library X's v3 API patterns and breaking changes...", load_skill="library-research")`.
   - **Unspecialized dispatch:** `spawn_instance(agent="worker")` → `send_message(instance_id, "investigation sub-task...")` (no `load_skill`). For simple bounded lookups.
 - **Research lane:** Use MCP web search, read official docs, query GitHub, collect URLs.

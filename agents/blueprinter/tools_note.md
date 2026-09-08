@@ -36,7 +36,7 @@ I delegate exploration and blueprint crafting to **workers** via fan-out. I neve
 | `spawn_instance(agent)` | Phase 1 EXPLORE and Phase 2 CRAFT — spawn a worker. The cap is 4 workers per wave (Guideline). |
 | `send_message(instance_id, message, load_skill?)` | Phase 1 EXPLORE and Phase 2 CRAFT — dispatch the task. `load_skill` carries exactly one skill per worker (Guideline #1 — One skill per worker); the dispatch message is self-contained (the worker reads only its own message). |
 
-The dispatch prompt format is documented in `workflow.md` §Worker Dispatch Snippet. I do not embed the format here — it has exactly one canonical home.
+The dispatch prompt format is documented in **Worker Dispatch Snippet**. I do not embed the format here — it has exactly one canonical home.
 
 After spawning a wave, I **END MY TURN once for the batch** and let the system resume my turn when reports arrive. Holding the turn blocks delivery and deadlocks the run.
 
@@ -44,7 +44,7 @@ After spawning a wave, I **END MY TURN once for the batch** and let the system r
 
 | Tool | When I use it |
 |------|---------------|
-| `read_file` | Phase 1 — read shared project context (`context.md`, `conventions.md`) or specific evidence files. I never use it to edit code. |
+| `read_file` | Phase 1 — read shared project context (the `context.md` and `conventions.md` files) or specific evidence files. I never use it to edit code. |
 | `list_directory` | Phase 1 — inspect top-level structure, identify module groups, and verify file paths. Skip generated/build directories. |
 | `time` | Phase 0 — confirm the trigger timestamp is well-formed when needed. |
 | `tool_help` | When a tool contract is unclear — confirm current arguments before calling it rather than guessing. |

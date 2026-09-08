@@ -88,18 +88,38 @@ Flat 30-rule lists dilute the load-bearing invariants. Models obey short top-of-
 
 Delete duplicates. If `rule.md:14` and `rule.md:30` say the same thing, they were the same rule — collapse to one.
 
-### Cross-reference hygiene
+### Cross-reference hygiene (convention v2 — pure section references)
 
-If you renumber `rule.md`, **sweep every `§N` pointer in sibling files the same commit.** Stale positional refs (`rule.md §9` now pointing at an unrelated rule) are the most common regression from a cardinal-split refactor.
+> **Convention v2 (2026-09-08)** supersedes yesterday's `file.md → Section` form. The
+> prior form was sanctioned-then-superseded within 24 hours: file paths are noise an
+> agent cannot navigate; the **section name + owning agent** is the navigable unit. **Every**
+> prompt-surface cross-reference — both bare file refs and the intermediate
+> `file.md → Section` arrow form — is now forbidden.
 
-Prefer **semantic labels** that survive renumbering:
+**The two allowed forms** for any cross-reference inside a prompt surface:
 
-| ❌ Fragile | ✅ Stable |
-|---|---|
-| "rule §9" | "Cardinal #3" / "Guideline #19 – Read-Only Discipline" |
-| "rule.md §14" | "rule.md → Skill-Bank & Fallback" (section name) |
+| Form | Pattern | Example |
+|------|---------|---------|
+| **Same-agent** | `See <Section Name>` | `See Quick Fix (Must)` |
+| **Cross-agent** | `See <agent>'s <Section Name>` | `See giter's Worktree Mode` |
 
-After any `rule.md` change, run a grep for `rule.md §` / `rule §` across the agent's directory and verify every hit still resolves.
+**Forbidden** in prompt text: ANY filename or path token. Both bare file forms (`rule.md`,
+`workflow.md`, `soul.md`, `tools_note.md`, `memory.md`, `*.md`) AND the intermediate
+`file.md → Section` arrow form are now forbidden. Operators grep `\.md|workflow\.md|rule\.md|soul\.md|tools_note\.md|memory\.md` over prompt surfaces and resolve to zero hits — that is the closure proof. **Scope:** the closure grep excludes operational filesystem paths — tool parameter values (e.g. `file="soul.md"`) and runtime read/write targets (own memory/notes dirs, planning/convention docs like `conventions.md`, `PACKS.md`, `QUARANTINE.md`) — which are not cross-references to prompt sections; any survivor hit must be enumerated and justified as operational.
+
+Disambiguators stay where two sections share a title within the same agent
+(`See Quick Fix (Must)` vs `See Quick Fix (Must Not)`). Cross-agent refs that need
+disambiguation add the agent's full versioned id (`See reviewer[v2]'s ...`).
+Auto-loaded strategy skills (`dev-strategy.md`, `planning-strategy.md`,
+`approval-strategy.md`, `review-strategy.md`, `test-strategy.md`,
+`tidier-strategy.md`, `tidier-static-hygiene.md`) assemble their full content into
+the owning agent's prompt surface, so referencing a heading by name alone resolves
+without a path token (the agent has the file).
+
+After any `rule.md` change, run a grep for `\.md` across the agent's directory and
+verify every hit still resolves to a real heading (the agent must be able to find
+it in its own assembled prompt). For cross-agent refs, verify the heading exists in
+the owner agent's files before merging.
 
 ---
 
@@ -229,7 +249,7 @@ Before committing changes to any agent prompt:
 - [ ] **One canonical home per repeated artifact** — no verbatim table/snippet/template duplicated across files. Cross-references use section names or stable labels.
 - [ ] **No false "stated once" claims** — if you write "I do not maintain parallel copies," verify the copies are actually gone.
 - [ ] **`rule.md` has ≤7 Cardinal rules**; the rest are Guidelines; no literal duplicates.
-- [ ] **Cross-references resolve** — after any `rule.md` renumber, grep `rule.md §` / `rule §` and confirm every hit still points at the intended rule. Prefer `Cardinal #N` / `Guideline #N` / section-name labels.
+- [ ] **Cross-references resolve** — after any `rule.md` renumber, grep `\.md` AND bare `agents/`-prefix tokens (e.g. `agents/...` for cross-agent corruption like `agents/See <agent>'s ...`) across the agent's directory and confirm every hit still points at the intended rule (convention v2: no path tokens in prompt text; section name + owning agent is the navigable unit). Apply the §12.5 #0 interpretation when judging hits: bare-`agents/` tokens are violations ONLY when they function as cross-references to prompt sections, not operational paths. See §3.
 - [ ] **Tone directive present** in `soul.md` (caller voice + dispatch voice + per-severity framing if applicable).
 - [ ] **Fan-in escape valve defined** in `workflow.md` for any dispatcher (stuck-worker ladder, max-re-dispatch cap).
 - [ ] **Skill versions consistent** — `.md` frontmatter matches the manifest; no drift.

@@ -53,7 +53,7 @@
 ## Skill-Bank & Fallback
 
 18. **`code-review` lives in the project skill bank** — I dispatch workers with `load_skill="code-review"` for quick verification of changes I've dispatched.
-19. **If a skill bank load silently fails** *(Guideline #19 – Skill-bank fallback)* (skill absent at runtime — see Skill-Seed Gotcha in `workflow.md`), I fall back **within my own tier**: spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt covering correctness, regressions, and tests, and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report's Verification section.
+19. **If a skill bank load silently fails** *(Guideline #19 – Skill-bank fallback)* (skill absent at runtime — see Skill-Seed Gotcha ), I fall back **within my own tier**: spawn a second `coder` (or `worker` without `load_skill`) with a detailed manual-review prompt covering correctness, regressions, and tests, and flag the run as `DEGRADED — skill bank miss (code-review)` in the Dev Report's Verification section.
 
 ---
 

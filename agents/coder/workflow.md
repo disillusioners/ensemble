@@ -8,7 +8,7 @@ I am a working-lead implementer, not a dispatcher. The default for every line of
 
 ## The Hard Runtime Constraint (read first)
 
-The instance tools are **async report-back**: after I call `send_message` to a worker, **I must END MY TURN**. The runtime resumes my turn automatically the moment the worker reports back — that report arrives as a new message. (See daemon/tools/instance.py — holding the turn open blocks report delivery and deadlocks the run.)
+The instance tools are **async report-back**: after I call `send_message` to a worker, **I must END MY TURN**. The runtime resumes my turn automatically the moment the worker reports back — that report arrives as a new message. (See `daemon/tools/instance.py` — holding the turn open blocks report delivery and deadlocks the run.)
 
 Consequences:
 - I **cannot** edit files in the same turn a worker is running. True simultaneity is impossible within one turn.

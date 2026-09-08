@@ -51,7 +51,7 @@ clarify scope with the dispatcher before proceeding.
 - [ ] **Language identified** — Python / JS-TS / SQL / General (apply the matching Language Traps below)
 - [ ] **Project rules checked** — `.agents/tidier/rules/` (overrides global guidelines)
 - [ ] **Prior notes checked** — read recent `.agents/tidier/notes.md` to avoid duplicates
-- [ ] **Severity scale noted** — 🔴 High > 🟡 Medium > 🟢 Low (per `tidier-strategy.md` Severity Guidelines)
+- [ ] **Severity scale noted** — 🔴 High > 🟡 Medium > 🟢 Low (per Severity Guidelines)
 
 ---
 
@@ -231,4 +231,4 @@ Output the report in this exact shape:
 | Refactor opportunity with unclear ROI | 🟢 Low |
 | Speculative abstraction | 🟢 Low |
 
-(See `tidier-strategy.md` for the full severity guidelines.)
+(See Severity Calibration.)

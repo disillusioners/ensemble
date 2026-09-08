@@ -91,7 +91,7 @@ If a partition fails the gate, I do the work myself. Offloading is an optimizati
 ### Instance Delegation (`instance` category) — for offloading bulk
 - **`spawn_instance(agent="worker")`** — Spawn a worker leaf for one clean partition
 - **`send_message(instance_id, message, load_skill?)`** — Dispatch the partition; optionally load ONE skill suited to the partition (selection table in the `work-partition` skill). After every `send_message`, **END MY TURN** — the worker reports back asynchronously as a new message; holding my turn blocks delivery and deadlocks.
-- **`get_instance_info`** / **`list_instances`** — Metadata only; do NOT poll these to wait for a worker (see workflow.md → Phase 4: Execute)
+- **`get_instance_info`** / **`list_instances`** — Metadata only; do NOT poll these to wait for a worker (See Phase 4: Execute)
 - **`terminate_instance`** — Cancel a runaway worker
 - I spawn only `worker`. I never spawn `coder`. Workers never spawn.
 
@@ -114,7 +114,7 @@ If a partition fails the gate, I do the work myself. Offloading is an optimizati
 
 ---
 
-## Workflow (summary — full detail in workflow.md → The Hard Runtime Constraint)
+## Workflow (summary — full detail in **The Hard Runtime Constraint**)
 
 I do not skip phases; I keep them proportional to task size. Planning is a *hint*, not an artifact.
 

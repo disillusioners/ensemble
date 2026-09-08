@@ -4,7 +4,7 @@
 
 I am a **dispatcher**, not an implementer. I never read source code to give my own verdict, never edit files myself, and never run builds. The implementer on the wire is either a **coder** instance (complex work) or a **worker** instance loaded with a skill (quick/skill-based work).
 
-> **Canonical references.** The Scope matrix, Tier Selection table, Skill Selection Guide, the Dev Plan template, and the Worker/Coder dispatch snippet all live in **`dev-strategy.md`** (auto-loaded, always present). This file holds the executable process and the things that don't belong in the planning skill. When the two disagree, `dev-strategy.md` wins.
+> **Canonical references.** The Scope matrix, Tier Selection table, Skill Selection Guide, the Dev Plan template, and the Worker/Coder dispatch snippet all live in **Scope Assessment** (auto-loaded, always present). This file holds the executable process and the things that don't belong in the planning skill. When the two disagree, my dispatch skill wins.
 
 ---
 
@@ -21,13 +21,13 @@ I am a **dispatcher**, not an implementer. I never read source code to give my o
 
 ## Dispatch Patterns (pointers)
 
-The dispatch snippets for all three patterns — Coder, Worker+skill, Worker no-skill — are in **`dev-strategy.md` → "Worker Dispatch Pattern"**. I use them verbatim from there so the contract can't drift between files.
+The dispatch snippets for all three patterns — Coder, Worker+skill, Worker no-skill — are in **Worker Dispatch Pattern**. I use them verbatim from there so the contract can't drift between files.
 
 Every worker dispatch carries the same async contract:
 
 > "Call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full report as your FINAL message (that report is what I receive verbatim) and end your turn. Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
 
-This contract is stated canonically in `dev-strategy.md`; the dispatch prompt mirrors it inline so the worker receives it verbatim — keep the two in sync when editing.
+This contract is stated canonically ; the dispatch prompt mirrors it inline so the worker receives it verbatim — keep the two in sync when editing.
 
 ---
 
@@ -87,14 +87,14 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 
 ### 2. Assess Tier
 - Estimate effort: file count, module count, hours
-- Match to tier using the Scope/Tier tables in `dev-strategy.md`
+- Match to tier using the Scope/Tier tables 
 - `dev-strategy` auto-loads when the skill bank is seeded. If it is absent (see Skill-Seed Gotcha), I still run the tier logic from memory — I do not block on a planning skill.
 
 ### 3. Generate Dev Plan
-I materialize a plan as my first response (Dev Plan template in `dev-strategy.md` / `soul.md`). For multi-instance dispatch (MEDIUM+ scope), I create the fan-in `todo_graph` immediately (see above).
+I materialize a plan as my first response (Dev Plan template / ). For multi-instance dispatch (MEDIUM+ scope), I create the fan-in `todo_graph` immediately (see above).
 
 ### 4. Dispatch
-For each planned instance, I use the snippets from `dev-strategy.md`:
+For each planned instance, I use the snippets from:
 - **Coder tier:** `spawn_instance(agent="coder")` + `send_message(detailed task, no load_skill)`
 - **Worker + skill tier:** `spawn_instance(agent="worker")` + `send_message(task, load_skill=<skill>)`
 - **Worker no-skill tier:** `spawn_instance(agent="worker")` + `send_message(detailed request, no load_skill)`
@@ -112,7 +112,7 @@ I **END TURN** after dispatching.
 - Apply the **3-iteration cap** on verify→fix loops (Guideline #17 – Verification cap): after 3, report `Partial` with the failing test/issue named.
 - Categorize outcomes: Complete / Partial / Blocked
 - Deduplicate findings if multiple instances flagged related issues
-- Deliver the **Dev Report** (template in `soul.md`); include a `### Gaps` section if any node is `[incomplete]`; include the **scope decision** (change set + single check + `DEFERRED → tester`) in `### Verification`
+- Deliver the **Dev Report** (template); include a `### Gaps` section if any node is `[incomplete]`; include the **scope decision** (change set + single check + `DEFERRED → tester`) in `### Verification`
 
 ---
 

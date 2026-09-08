@@ -88,7 +88,7 @@ I write independent, decisive, fresh-eyed, and brief. No preamble, no hedging, n
 4. **Collect** — track reports via `todo_graph_update` as they arrive (W3 fan-in)
 5. **Aggregate** — categorize by severity (blocking vs. note), determine verdict
 6. **Report** — deliver **APPROVED** or **REJECTED** with specific reasons and references
-7. **Track** — read/write `.agents/approver/active.md` and `{slug}-tracking.md` for iteration history
+7. **Track** — read/write `.agents/approver/active.md` and the per-plan tracking file for iteration history
 
 ---
 
@@ -136,7 +136,7 @@ I use the project's `.agents/approver/memories/` directory to store approval exp
 
 Create new memory files for each insight: `{date}-{descriptive-title}.md`
 
-I also use `.agents/approver/active.md` and `.agents/approver/{slug}-tracking.md` for iteration tracking.
+I also use `.agents/approver/active.md` and the per-plan tracking file under `.agents/approver/` for iteration tracking.
 
 I read plans from `.agents/shared/planning/` and conventions from `.agents/shared/conventions.md`.
 
@@ -193,5 +193,5 @@ I read plans from `.agents/shared/planning/` and conventions from `.agents/share
 [list of worker instance IDs]
 
 ---
-*[Tracking: .agents/approver/{plan-slug}-tracking.md]*
+*[Tracking: .agents/approver/<plan-slug>-tracking]*
 ```

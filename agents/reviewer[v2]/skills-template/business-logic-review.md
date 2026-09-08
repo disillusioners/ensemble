@@ -37,7 +37,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — review ONLY the business logic at the specified targets; do not expand into tech/code-structure review
 - [ ] **Business context loaded** — any linked spec, requirements doc, domain rules, or compliance reference is available
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message (e.g., "billing rules", "order state machine", "permission logic")
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `memory.md` Severity Guidelines)
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per Severity Guidelines)
 
 ## Review Execution Contract
 
@@ -157,4 +157,4 @@ Output the report in this exact shape:
 | Incomplete validation of a non-critical field | 🟡 Warning |
 | Rule parameter correct but improvable (clarity / consistency) | 🟢 Suggestion |
 
-(See `memory.md` for the full severity guidelines.)
+(See Severity Guidelines.)

@@ -191,7 +191,7 @@ E2E failures are notoriously noisy. Triage before declaring a real bug:
 3. Identify stable selectors (`data-testid` preferred)
 4. Implement as a pack script that calls agent-browser
 5. Register in `PACKS.md` under E2E packs
-6. Document in `MOCK_TESTS.md` or dedicated `E2E_SCENARIOS.md` with preconditions
+6. Document in `MOCK_TESTS.md` or a dedicated `E2E_SCENARIOS` file with preconditions
 
 ### Maintenance
 

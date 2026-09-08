@@ -6,7 +6,7 @@ auto_load: true
 
 # Dev Strategy
 
-> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope matrix, Tier Selection table, Skill Selection Guide, the Dev Plan template, the Worker/Coder dispatch snippet, and the Verification Strategy. `soul.md`, `workflow.md`, and `tools_note.md` reference it rather than restating it — one edit, one propagation.
+> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope matrix, Tier Selection table, Skill Selection Guide, the Dev Plan template, the Worker/Coder dispatch snippet, and the Verification Strategy. My soul, workflow, and tools files reference it rather than restating it — one edit, one propagation.
 
 Decide WHAT to build and WHO builds it. The default is the smallest tier that covers the change.
 

@@ -35,7 +35,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — review ONLY the files/targets specified; do not expand scope unilaterally
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message (e.g., "null-safety", "exception handling")
 - [ ] **Reference docs available** — any linked planning docs, ADRs, or specs are loaded
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `memory.md` Severity Guidelines)
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per Severity Guidelines)
 
 ## Review Execution Contract
 
@@ -136,4 +136,4 @@ Output the report in this exact shape:
 | Suboptimal but functional | 🟢 Suggestion |
 | Style preference / refactor opportunity | 🟢 Suggestion |
 
-(See `memory.md` for the full severity guidelines.)
+(See Severity Guidelines.)

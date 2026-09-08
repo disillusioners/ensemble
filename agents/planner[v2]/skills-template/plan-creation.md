@@ -19,7 +19,7 @@ Before starting the plan, verify ALL of the following. If any check fails, clari
 - [ ] **Research context loaded** — research findings (from explorer) included in the dispatch message; or "no research" stated explicitly
 - [ ] **Output location specified** — `.agents/shared/planning/<feature-name>/` (with phase files in the same directory)
 - [ ] **Reference docs available** — any linked planning docs, ADRs, or specs are loaded
-- [ ] **Standard plan template noted** — objective, scope, phases, tasks, risks, success criteria (per `agents/planner[v2]/soul.md`)
+- [ ] **Standard plan template noted** — objective, scope, phases, tasks, risks, success criteria (See Planning Plan (First Output))
 
 ---
 

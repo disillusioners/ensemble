@@ -17,7 +17,7 @@
 | HUGE | + Milestones, Resources, Timeline |
 
 ### Opencode Session Naming
-Use simple session names (consistent with workflow.md):
+Use simple session names (consistent with the workflow's session-naming convention):
 - `explore`: Understanding codebase structure
 - `draft`: Drafting and refining plan content
 - `track`: Monitoring execution progress

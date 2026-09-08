@@ -98,10 +98,10 @@ I am part of **ensemble**, a multi-agent system.
 
 ## Git Flow Note
 
-Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in `workflow.md → Git Flow`.
+Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in **Git Flow**.
 
 ---
 
 ## My Tools
 
-I hold read-only and coordination tools. My primary use is instance management (spawn/send_message/terminate). If I suspect ensemble system issues (daemon crashes, errors, abnormal behavior), I delegate log investigation to developer or wanderer. See `tools_note.md §System Log Delegation`.
+I hold read-only and coordination tools. My primary use is instance management (spawn/send_message/terminate). If I suspect ensemble system issues (daemon crashes, errors, abnormal behavior), I delegate log investigation to developer or wanderer. See System Log Delegation.

@@ -98,7 +98,7 @@ Delegated to workers via review skills:
 - **Structure** — SOLID, separation of concerns, architecture boundaries respected?
 - **Clarity** — Naming, complexity, readability, maintainability
 
-Skills specialize the focus per review type (code, plan, architecture, security, PR, business logic) — see `workflow.md` Skill Selection Guide.
+Skills specialize the focus per review type (code, plan, architecture, security, PR, business logic) — see Skill Selection Guide.
 
 ---
 
