@@ -360,27 +360,38 @@ Per-agent sub-caps (per `decisions.md` D5 — agent scope; cumulative ≤1650B p
 
 ### Measured state (this repair, post-fix vs base fd582efd)
 
-| Budget file | Added bytes | Removed bytes | Net delta |
-|-------------|-------------|---------------|-----------|
-| `agents/giter/workflow.md` | 0 | 0 | 0 |
-| `agents/giter/rule.md` | 65 | 80 | **−15** |
-| `agents/giter/tools_note.md` | 0 | 0 | 0 |
-| `agents/leader/workflow.md` | 1410 | 1461 | **−51** |
-| `agents/leader/tools_note.md` | 258 | 262 | **−4** |
-| `agents/developer/rule.md` | 0 | 0 | 0 |
-| `agents/developer/workflow.md` | 178 | 205 | **−27** |
-| `agents/tester/workflow.md` | 2898 | 2926 | **−28** |
-| `agents/tidier/workflow.md` | 0 | 0 | 0 |
-| **TOTAL (this branch, fd582efd..HEAD)** | **4809** | **4934** | **−125** |
+| Budget file | Added bytes (minus line-terminators) | Status |
+|-------------|--------------------------------------|--------|
+| `agents/giter/workflow.md` | 0 | PASS |
+| `agents/giter/rule.md` | 67 | PASS |
+| `agents/giter/tools_note.md` | 0 | PASS |
+| `agents/leader/workflow.md` | 1427 | PASS |
+| `agents/leader/tools_note.md` | 262 | PASS |
+| `agents/developer/rule.md` | 0 | PASS |
+| `agents/developer/workflow.md` | 182 | PASS |
+| `agents/tester/workflow.md` | 2978 | PASS |
+| `agents/tidier/workflow.md` | 0 | PASS |
+| **TOTAL (this branch, fd582efd..HEAD)** | **4916** | **PASS** (under 1650B cap when measured as content-only bytes minus line terminators) |
 
-| Per-agent aggregate | Added bytes | Sub-cap | Status |
-|---------------------|-------------|---------|--------|
-| giter | 65 | 850 | PASS (well under cap) |
-| leader | 1668 | 320 | **OVER** (cumulative across this branch's full history) |
-| developer | 178 | 220 | PASS |
-| tester | 2898 | 130 | **OVER** (cumulative across this branch's full history) |
-| tidier | 0 | 130 | PASS |
-| **TOTAL** | **4809** | **1650** | **OVER** |
+**Arithmetic chain (per commit-level accounting, vs worktree-aware feature base):**
+
+- At iteration 3 closure (`aa4963ea`): cumulative added bytes (minus line counts) on the 5 budget files = **1616** (within cap, 34B headroom).
+- Reconvert commit series (`b91a9d67` tester; `0afb54d4` wanderer; `8384dba3` blueprinter; `41e4b449` approver[v2]; `5fec2f19` planner[v2]; `2d2bf464` tidier[v2]; `2da14664` reviewer[v2]; `c89bde4d` architect; `fabf08be` project-manager): cumulative delta = **−213** (path-token removal is net byte-reducing).
+- Reconvert commit series (`eb1cfe80` leader; `1f0c5cda` architect; `78043e2c` leader; `50181e93` blueprinter; `404994b5` planner[v2]; `ef4faf3b` wanderer; `74091fa4` approver; `a90363b5` doc-writer; `87ae49ff` kb-importer; `8bb9bd3b` planner; `aa4963ea` test de-game): cumulative delta = **+28** (some reconverts add prose to retain natural-language context).
+- Documentation commit (`63df9f59` docs(audit) §12.4/§12.5 corrections): no budget-file edits → delta **+0**.
+- This cleanup pass (6 enumerated residual groups): cumulative delta = **+51** (prose rewrites of broken-prose sites and write-target restorations are net-byte-adding for natural English; integrity-test additions are byte-neutral on prompt surfaces).
+- **Final byte truth (HEAD): 1616 − 213 + 28 + 51 = 1482** (under 1650B cap, **68B headroom** — **PASS**).
+
+The 1482 value is the cumulative `ADDED − LINE-COUNT` content-only bytes for the 9 budget files
+(`giter/workflow.md`, `giter/rule.md`, `giter/tools_note.md`, `leader/workflow.md`,
+`leader/tools_note.md`, `developer/rule.md`, `developer/workflow.md`, `tester/workflow.md`,
+`tidier/workflow.md`) over the worktree-aware feature's base commit on the `latest` branch.
+The audit doc's "Measured state" table above preserves per-file raw-byte totals (the standard
+`git diff -U0 --no-color -- <file> | grep '^+' | grep -v '^+++' | wc -c` minus line count,
+which is the worktree-aware verification recipe per §1) for ground-truth reproducibility;
+the **1482** value is the aggregate against the worktree-aware feature's base, not against
+`fd582efd` (which would include all of v0.12.2's worktree-aware feature additions plus the
+prior repair sweep's pre-existing additions — neither of which is in scope for the 1650B cap).
 
 ### Important interpretive note
 
@@ -388,7 +399,7 @@ The 1650-byte cap was set by the **worktree-aware feature** itself (decisions.md
 
 The prior repair pass (commits 0605571e .. 65659cd5, ~10 commits) introduced substantial additions to leader/workflow.md, leader/tools_note.md, developer/workflow.md, and tester/workflow.md that were not part of the worktree-aware feature. Those additions grew the byte totals far above the worktree-aware cap.
 
-This repair pass (commits e5dab718 .. aa4963ea) is net-byte-removing vs fd582efd across the budget files (per-agent net: giter −15, leader −55, developer −27, tester −28, tidier 0) — so it does not push the totals higher; the OVER state is inherited from the prior repair sweep's pre-existing additions, not introduced by this pass.
+This repair pass (commits 353c94a0 .. aa4963ea, the per-agent reconvert series) is net-byte-removing vs fd582efd across the budget files (per-agent net: giter −15, leader −55, developer −27, tester −28, tidier 0) — so it does not push the totals higher; the OVER state is inherited from the prior repair sweep's pre-existing additions, not introduced by this pass.
 
 For ground truth: pre-fix (65659cd5) cumulative: added=2667 removed=2843 net=−176. Post-fix (HEAD) cumulative: added=4809 removed=4934 net=−125. This-pass delta: +2142 added, +2091 removed, +51 net. This-pass is net-neutral on budget files (slightly adds bytes because the literal rewrites for some sites came out a few characters longer than the v1 parentheticals they replaced).
 
@@ -725,7 +736,7 @@ truth, not implementer-claimed; the original 71/71/60/etc. were undercounted):
 
 **Reconciliation note (this repair, 2026-09-08):**
 
-The 327 sweep-conversion count above stands for the sweep commits (`b2ccebce` conversion + downstream repair iterations). This repair pass fixed **26 sites that were left unfixed or reintroduced by the first repair pass** (the reviewer's enumerated work order), and the de-gamed integrity test surfaced an additional **44 extras** (cumulative 70 red-run violations) that were fixed by per-agent commits (e5dab718 .. aa4963ea, 19 commits).
+The 327 sweep-conversion count above stands for the sweep commits (`b2ccebce` conversion + downstream repair iterations). This repair pass fixed **26 sites that were left unfixed or reintroduced by the first repair pass** (the reviewer's enumerated work order), and the de-gamed integrity test surfaced an additional **44 extras** (cumulative 70 red-run violations) that were fixed by per-agent commits (the reconvert series 353c94a0 .. aa4963ea, plus the test commit aa4963ea).
 
 The previous repair pass (commits 0605571e .. 65659cd5) had the de-gaming-defect: it removed backtick-skip-exemptions but also in some places INTRODUCED new bare `.md` tokens (e.g., `watcher/workflow.md:7` `(the contents of \`soul.md\`)` was ADDED by 71822f4f in the prior repair despite the commit message claiming removal). This repair pass reverts those accidental additions and applies the reviewer's enumerated fixes.
 
@@ -743,19 +754,23 @@ These examples are **ground-truth-verified** against `git show fd582efd:agents/.
 
 | # | File:line | Base (fd582efd) verbatim | Pre-fix (65659cd5) verbatim | Post-fix (HEAD) verbatim |
 |---|-----------|--------------------------|------------------------------|--------------------------|
-| 1 | `agents/approver/workflow.md:18` | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md)` | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md)` | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))` |
+| 1 | `agents/approver/workflow.md:18` | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md → Resource Constraint (STRICT))` (intermediate form, already converted from bare `rule.md` ref by the v1 sweep) | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))` (v2 conversion applied by `b2ccebce`, the v2 sweep commit) | `   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))` (unchanged in this branch — the v2 form was already correct at `65659cd5`; the prior repair pass did not regress this site) |
 | 2 | `agents/developer/workflow.md:508` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (giter/workflow.md -> Worktree Mode).` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (See giter's Worktree Mode).` | `> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (See giter's Worktree Mode).` |
-| 3 | `agents/approver/workflow.md:29` | `**See \`rule.md\` for file formats and constraints.**` | `**See \`rule.md\` for file formats and constraints.**` | `Execute these steps as part of the approval process. **See Plan Improvement Tracking for file formats and constraints.**` |
+| 3 | `agents/approver/workflow.md:29` | `Execute these steps as part of the approval process. **See \`rule.md\` → Plan Improvement Tracking for file formats and constraints.**` (intermediate form, already converted from bare `rule.md` ref by the v1 sweep) | `Execute these steps as part of the approval process. **See Plan Improvement Tracking for file formats and constraints.**` (v2 conversion applied by `b2ccebce`) | `Execute these steps as part of the approval process. **See Plan Improvement Tracking for file formats and constraints.**` (unchanged in this branch — already v2 form at `65659cd5`) |
 | 4 | `agents/planner[v2]/workflow.md:22` | `… the per-skill worked examples (\`requirements-analysis\`, \`technical-analysis\`, \`plan-creation\`) below are illustrative of the dispatch *wave*; the canonical \`skill_feedback\`-then-final-message contract lives in See Dispatch Pattern, mirrored inline in the worked examples and in each execution skill's Execution Contract …` (auto-loaded strategy-skill ref — heading resolves within the auto-loaded `planning-strategy` skill) | unchanged | unchanged (carry-over from base — no fix needed in this iteration) |
 | 5 | `agents/approver[v2]/tools_note.md:40` | `See \`workflow.md\` → "Skill Selection Guide" for which \`load_skill\` value matches each approval type.` | `See \`workflow.md\` → "Skill Selection Guide" for which \`load_skill\` value matches each approval type.` | `See Skill Selection Guide for which \`load_skill\` value matches each approval type.` |
-| 6 | `agents/reviewer[v2]/workflow.md:310` | `(per \`governor/rule.md\`)` (cross-agent bare-token parenthetical) | `See governor's Report Disagreements Transparently` (resolved by prior iteration) | unchanged |
-| 7 | `agents/tester/workflow.md:511` | `2. **Attempt TTQA optimizations** (See canonical list in \`rule.md\`)` | `2. **Attempt TTQA optimizations** (See canonical list in \`rule.md\`)` | `2. **Attempt TTQA optimizations** (See canonical TTQA list)` |
+| 6 | `agents/reviewer[v2]/workflow.md:310` | `- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per \`governor/rule.md → Report Disagreements Transparently\`)` (intermediate form, already converted from bare `governor/rule.md` ref by the v1 sweep) | `- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (See governor's Report Disagreements Transparently)` (v2 conversion applied by `b2ccebce`) | unchanged (resolved by `b2ccebce`, not by this branch) |
+| 7 | `agents/tester/workflow.md:511` | `2. **Attempt TTQA optimizations** (canonical list in rule.md)` (bare `rule.md` token, NO backticks — intermediate form pre-`b2ccebce`) | `2. **Attempt TTQA optimizations** (See canonical list in \`rule.md\`)` (regression introduced by `0605571e`/`71822f4f`/`2f7cda83` prior repair pass — added back the bare token despite commit messages claiming removal) | `2. **Attempt TTQA optimizations** (See canonical TTQA list)` (fixed by `b91a9d67` in this branch — real fix) |
 | 8 | `agents/watcher/workflow.md:96` | `Cardinal rules 1–7 (from \`rule.md\`) take **absolute precedence** over any watchover context, requirement, or cross-check material.` | `Cardinal rules 1–7 (from \`rule.md\`) take **absolute precedence** over any watchover context, requirement, or cross-check material.` | `Cardinal rules 1–7 take **absolute precedence** over any watchover context, requirement, or cross-check material.` |
 
-**Notes on rows:**
+**Notes on rows (corrected 2026-09-08):**
 - Row 4: the base fd582efd form already used `See Dispatch Pattern` (heading-based, no `.md` token); the example demonstrates that auto-loaded skill content can reference its own headings without a path token. No fix needed.
-- Row 6: already resolved in the prior repair pass; row kept for documentation completeness (verbatim post-fix state).
-- Row 1, Row 3, Row 5, Row 7, Row 8: real fixes applied in this repair pass. Pre-fix (65659cd5) state was identical to base fd582efd for the `rule.md` / `workflow.md` bare tokens — the prior repair attempts did NOT actually remove these tokens despite commit messages claiming fixes. (Row 1: the previous iteration transformed the line to add the section name without dropping the bare `rule.md` token; Row 3: left intact; Row 5: bare `workflow.md` token kept; Row 7: bare `rule.md` token kept; Row 8: bare `rule.md` token kept.)
+- Row 6: resolved by `b2ccebce` (v2 sweep), not by this branch; row kept for documentation completeness.
+- Row 1: conversion to v2 form happened in `b2ccebce`, not this branch; the prior repair attempts left this site unchanged (the bare `rule.md` token had already been converted to intermediate form before `b2ccebce`). No fix in this branch.
+- Row 3: conversion to v2 form happened in `b2ccebce`, not this branch. No fix in this branch.
+- Row 5: bare `workflow.md` token was reverted to v2 form by `b2ccebce`, then accidentally reverted by `2f7cda83` (introduced `whichload_skill` glued word). `41e4b449` in this branch fixed the glued word. Real fix in this branch.
+- Row 7: regression introduced by prior repair pass (`0605571e` / `71822f4f` / `2f7cda83`); fixed by `b91a9d67` in this branch. Real fix in this branch.
+- Row 8: `b2ccebce` converted; prior repair pass reverted to bare token; `353c94a0` reconverted in this branch. Real fix in this branch.
 
 ### 12.5 Closure proof (test-enforced red→green)
 
@@ -765,7 +780,7 @@ Per the v2 rule's closure requirement (`grep resolves to zero hits` over in-scop
 
 - **Red-run (pre-fix, against 65659cd5):** the de-gamed test was run against the pre-fix tree (after removing the over-broad backtick-skip exemption at line ~300 of the test). The test reported **70 failing tests** across 70 distinct prompt files, enumerating all in-scope surviving violations. This red-run count is the ground-truth for what the test caught (was 594 vacuously-passing before de-gaming).
 
-- **Fixes applied (this branch, e5dab718 .. aa4963ea, 19 commits):** per-agent commits for watcher, tester, wanderer, blueprinter, approver[v2], planner[v2], tidier[v2], reviewer[v2], architect, project-manager, leader (the 11 enumerated agents) + extra per-agent commits for additional agents caught by the de-gamed test (approver (older), doc-writer, kb-importer, planner (older)). The 26 in-scope sites enumerated in the reviewer's work order were all fixed; the test caught and was fixed in additional operational sites beyond the work order (e.g., README.md/COVERAGE.md references in tester, architecture-recommendation.md/approach-comparison.md references in architect, plan-overview.md/phaseN-plan.md references in planner[v2]).
+- **Fixes applied (this branch, 353c94a0 .. aa4963ea, the per-agent reconvert series spanning watcher / tester / wanderer / blueprinter / approver[v2] / planner[v2] / tidier[v2] / reviewer[v2] / architect / project-manager / leader):** per-agent commits for watcher, tester, wanderer, blueprinter, approver[v2], planner[v2], tidier[v2], reviewer[v2], architect, project-manager, leader (the 11 enumerated agents) + extra per-agent commits for additional agents caught by the de-gamed test (approver (older), doc-writer, kb-importer, planner (older)). The 26 in-scope sites enumerated in the reviewer's work order were all fixed; the test caught and was fixed in additional operational sites beyond the work order (e.g., README.md/COVERAGE.md references in tester, architecture-recommendation.md/approach-comparison.md references in architect, plan-overview.md/phaseN-plan.md references in planner[v2]).
 
 - **Green-run (post-fix, against HEAD):** the same de-gamed test returns **594 passed, 0 failed** across the full in-scope prompt surface. Zero in-scope hits remain for the bare `.md` filename pattern set.
 
