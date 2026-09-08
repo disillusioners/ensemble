@@ -262,12 +262,14 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     ``conventions.md`` / ``PACKS.md`` / ``QUARANTINE.md`` / own memory path).
     """
     text = path.read_text(encoding="utf-8")
-    # Allow operational convention/memory references explicitly exempted
-    # per §12.5 #0 controlling exclusion interpretation.
+    # Allowed operational filesystem paths (per §12.5 #0 controlling exclusion).
+    # These are operational references (convention docs, planning paths, etc.),
+    # NOT cross-references to prompt sections.
     allowed_operational = {
         "PACKS.md",
         "QUARANTINE.md",
         "conventions.md",
+        "context.md",
         "ensure.md",
         "MOCK_TESTS.md",
         # Per-instance scaffolding references (own growth.md / builder-prompt.md
@@ -277,6 +279,22 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         "builder-prompt.md",
         "meta.json",
         "core.md",
+        "active.md",
+        # Operational planner write targets (per §12.5 #0 controlling exclusion:
+        # "operational project-infra paths (.agents/shared/planning/, ..., phase files)").
+        # These are worker-written plan artifacts the planner orchestrates and
+        # cites — operational filesystem references, not cross-references.
+        "plan-overview.md",
+        "phase1-plan.md",
+        "phase2-plan.md",
+        "phaseN-plan.md",
+        "requirements.md",
+        "technical-analysis.md",
+        "roadmap.md",
+        # Operational architect write targets.
+        "architecture-recommendation.md",
+        "approach-comparison.md",
+        "architecture-decision-record.md",
         # Date-prefixed memory files (own memory references) are operational
         # filesystem paths to dated memory entries (e.g.,
         # 2026-04-23-architecture-report.md); they are NOT cross-references
@@ -286,18 +304,46 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     # own memory file references ARE operational filesystem paths, not prompt-
     # section cross-references (per §12.5 #0 controlling exclusion).
     BARE_MD_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}-[\w-]+\.md|[a-zA-Z][\w./-]*\.md)\b")
+    # Operational workspace-path shapes (per §12.5 #0). These are filesystem
+    # references, NOT cross-references to prompt sections.
+    OPERATIONAL_PATH_RE = re.compile(
+        r"(?:"
+        r"\.agents/"                 # shared planning/convention dir (with leading dot)
+        r"|agents/shared/"           # shared conventions/planning/context dir (no leading dot)
+        r"|agents/[a-zA-Z0-9_\[\]-]+/"  # any agent's own subdir (notes, rules, etc.)
+        r"|daemon/"                  # daemon code paths (operational tool/runtime targets)
+        r"|agents/_prompt_system/"   # system hooks
+        r"|agents/_mother/"          # mother scaffolding
+        r"|agents/_baby_template/"   # baby template scaffolding
+        r"|agents/_inner_soul/"      # inner-soul scaffolding
+        r"|projects/"                # user-project example paths in docs
+        r"|path/to/"                 # example paths in docs (path/to/plan.md etc.)
+        r")"
+    )
+    # Fenced code blocks (` ```...``` `) contain code/tool-call examples, not
+    # prose cross-references. Tokens inside them are operational.
+    FENCED_CODE_BLOCKS_RE = re.compile(r"```.*?```", re.DOTALL)
     hits = []
     for m in BARE_MD_RE.finditer(text):
         tok = m.group(0)
+        # Skip tokens inside fenced code blocks (code/tool-call examples)
+        block_start = 0
+        in_fenced = False
+        for block_m in FENCED_CODE_BLOCKS_RE.finditer(text):
+            if block_m.start() <= m.start() < block_m.end():
+                in_fenced = True
+                break
+        if in_fenced:
+            continue
         if tok in allowed_operational:
             continue
         # Date-prefixed memory files are operational own-memory paths
         if re.match(r"^\d{4}-\d{2}-\d{2}-[\w-]+\.md$", tok):
             continue
-        # Exclude tool parameter values inside fenced code blocks (operational)
-        # — heuristic: ignore hits that look like `key="path.md"` or
-        # `key='path.md'` patterns (those are API parameters, not prose).
-        if re.search(r"""[`'"][^`'\"]*""" + re.escape(tok) + r"""[^`'\"]*[`'"]""", text):
+        # Operational workspace-path shapes (per §12.5 #0): .agents/...,
+        # daemon/..., and internal scaffolding agents. These are filesystem
+        # references where the path token is part of an operational target.
+        if "/" in tok and OPERATIONAL_PATH_RE.search(tok):
             continue
         # Exclude self-references (the file mentioning its own filename).
         if _is_operational_self_reference(path, tok):
