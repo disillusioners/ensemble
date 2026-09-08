@@ -61,7 +61,7 @@ send_message(
 
 > ⚠️ **Workers write the plan files, not me.** The planner never calls `write_file` against `.agents/shared/planning/`. The worker instance reads its prompt, applies the skill, and writes the deliverables.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each planning task.
+See Skill Selection Guide for which `load_skill` value matches each planning task.
 
 ---
 
