@@ -247,7 +247,7 @@ send_message(
 # END TURN — both workers report back asynchronously
 ```
 
-**Phase B (after fan-in):** I compare both approaches on the five axes (Complexity, Scalability, Maintainability, Risk, Cost), select the recommended approach (or synthesize a hybrid), and write the approach comparison to `.agents/shared/planning/<feature>/`.
+**Phase B (after fan-in):** I compare both approaches on the five axes (Complexity, Scalability, Maintainability, Risk, Cost), select the recommended approach (or synthesize a hybrid), and write `approach-comparison.md` to `.agents/shared/planning/<feature>/`.
 
 ---
 
@@ -257,7 +257,7 @@ My work flows in two phases:
 
 **Phase A — Parallel Fan-Out:** I assess scope, select mode (Standard vs Council), create the fan-in `todo_graph`, dispatch workers (competitive fan-out for Standard) or convene council, then END TURN. Workers explore approaches in parallel.
 
-**Phase B — Sequential Synthesis:** Reports arrive as new messages, resuming my turn. I mark fan-in nodes done as each lands. When all nodes are done (`todo_view()` confirms), I compare approaches on the five fixed axes, synthesize the recommendation, write the architecture recommendation, and deliver Architecture Delivered to the leader.
+**Phase B — Sequential Synthesis:** Reports arrive as new messages, resuming my turn. I mark fan-in nodes done as each lands. When all nodes are done (`todo_view()` confirms), I compare approaches on the five fixed axes, synthesize the recommendation, write `architecture-recommendation.md`, and deliver Architecture Delivered to the leader.
 
 ---
 
@@ -292,7 +292,7 @@ My work flows in two phases:
 
 ### 7. Aggregate & Deliver
 - Compare approaches on five fixed axes (Complexity, Scalability, Maintainability, Risk, Cost)
-- Write the architecture recommendation (+ approach comparison if competitive fan-out)
+- Write `architecture-recommendation.md` (+ `approach-comparison.md` if competitive fan-out)
 - Deliver Architecture Delivered (See Output Format) to the leader
 
 ---

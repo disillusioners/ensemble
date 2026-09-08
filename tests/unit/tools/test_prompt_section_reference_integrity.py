@@ -301,6 +301,12 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         # prose cross-reference (e.g., "See input.md") is still a violation — only the pandoc-
         # command-argument use is exempt (per the W4 use-blindness contract).
         "input.md",
+        # Operational versioned forms of operational write targets (architect appends a version
+        # suffix when a file with the same name already exists; the versioned form is still an
+        # operational filesystem reference, not a prompt-section cross-reference).
+        # W4 contract: whitelisting the versioned form does NOT unban a use of it as a prose
+        # cross-reference (e.g., "See architecture-recommendation-v2.md" remains a violation).
+        "architecture-recommendation-v2.md",
         # Date-prefixed memory files (own memory references) are operational
         # filesystem paths to dated memory entries (e.g.,
         # 2026-04-23-architecture-report.md); they are NOT cross-references

@@ -161,7 +161,7 @@ Instance IDs: [list]
 [Complete / Partial / Blocked]
 
 ### Location
-[Path to architecture recommendation]
+[Path to architecture-recommendation.md]
 
 ### Summary
 [1-paragraph summary of the architecture recommendation]
