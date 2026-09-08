@@ -160,14 +160,14 @@
 ```
 .agents/shared/planning/{feature_name}/
 ├── plan-overview.md          ← Summary: objectives, phase list, dependencies, risks
-├── phase1-plan.md            ← Phase 1: self-contained plan
-├── phase2-plan.md            ← Phase 2: self-contained plan
-├── phaseN-plan.md            ← Phase N: ...
-├── decisions.md              ← Architecture decisions (if any)
-└── notes.md                  ← Working notes (if any)
+├── phase1-plan            ← Phase 1: self-contained plan
+├── phase2-plan            ← Phase 2: self-contained plan
+├── phaseN-plan            ← Phase N: ...
+├── decisions                ← Architecture decisions (if any)
+└── notes                    ← Working notes (if any)
 ```
 
-**For SMALL scope:** Single `plan.md` file is fine.
+**For SMALL scope:** Single `plan` file is fine.
 **For MEDIUM scope:** Minimum 1 `plan-overview.md` + individual phase files if 2+ phases.
 **For LARGE/HUGE scope:** Multi-file output is MANDATORY.
 
@@ -227,7 +227,7 @@ For each pair of consecutive phases, assess their coupling:
 - Status: [draft/active/complete]
 ```
 
-#### phaseN-plan.md Template (per phase)
+#### phaseN-plan Template (per phase)
 
 ```markdown
 # Phase N: [Phase Name]
@@ -366,8 +366,8 @@ external_opencode_wait_for_result(project="<project>", session_name="plan-track"
 
 Plan overview: .agents/shared/planning/{feature_name}/plan-overview.md
 Phase files:
-  - .agents/shared/planning/{feature_name}/phase1-plan.md
-  - .agents/shared/planning/{feature_name}/phase2-plan.md
+  - .agents/shared/planning/{feature_name}/phase1-plan
+  - .agents/shared/planning/{feature_name}/phase2-plan
 
 [1-2 sentence summary]
 ```
@@ -380,7 +380,7 @@ Phase files:
 **Phases**: 1
 **Est. Time**: [estimate]
 
-Plan file: .agents/shared/planning/{feature_name}/plan.md
+Plan file: .agents/shared/planning/{feature_name}/plan
 
 [1-2 sentence summary]
 ```
