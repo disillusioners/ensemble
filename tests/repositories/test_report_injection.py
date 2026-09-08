@@ -284,7 +284,14 @@ class TestEnsureDeferredWriteOnceGate:
         assert row.state == ReportInjectionState.DEFERRED.value
         assert row.deferred_reason == DEFERRED_REASON_PAUSE_TOCTOU
         assert row.report_message_id is None
-        assert row.content is None
+        # Sentinel content (incident 2026-09-08): prod schema has
+        # ``content NOT NULL`` (legacy, predates Phase 1 C4), so the
+        # marker carries an empty-string sentinel rather than None.
+        # No consumer reads DEFERRED rows' content — see
+        # ``daemon/repositories/report_injection/repository.py``
+        # ``_DEFERRED_MARKER_CONTENT_SENTINEL`` docstring for the
+        # audit checklist.
+        assert row.content == ""
         assert row.recovery_attempted_at is None
 
     def test_ensure_deferred_twice_returns_no_op(
@@ -557,6 +564,80 @@ class TestTransitionDeferredToPending:
         second = repo.transition_deferred_to_pending(marker.injection_id)
         assert first is True
         assert second is False
+
+    def test_hardened_claim_filter_legit_drains_sentinel_blocked(
+        self, repo, engine
+    ) -> None:
+        """W1 (Reviewer 2026-09-08) claim-filter hardening.
+
+        (a) A legitimate real-content PENDING row still drains
+        successfully through ``claim_for_injection`` — the drain's
+        ``WHERE report_message_id IS NOT NULL`` clause admits every
+        post-backfill row.
+
+        (b) A pre-backfill sentinel PENDING row
+        (``report_message_id=None``, ``content=""``) is NOT claimable
+        by ``claim_for_injection`` — the new
+        ``WHERE report_message_id IS NOT NULL`` clause prevents the
+        sentinel from reaching the INJECTED lane
+        (terminal-INJECTED-without-report-text race). The row stays
+        PENDING; the consumer's falsy guard at graph.py:4436 is no
+        longer the only line of defense.
+        """
+        # (a) Legit real-content PENDING row drains cleanly through
+        # the hardened drain.
+        _enqueue(
+            repo,
+            engine,
+            parent="parent-legit",
+            child="child-legit",
+            msg="msg-legit",
+            report_msg="rmsg-legit",
+            content="real report body",
+        )
+        drained = repo.claim_for_injection("parent-legit")
+        assert len(drained) == 1
+        assert drained[0]["content"] == "real report body"
+        assert drained[0]["report_message_id"] == "rmsg-legit"
+
+        # (b) Pre-backfill sentinel PENDING row cannot be drained.
+        # Construct the sentinel-in-PENDING shape: ensure_deferred
+        # inserts the sentinel DEFERRED row, then transition moves
+        # it to PENDING WITHOUT backfill (mirrors the recovery flow's
+        # pre-backfill state).
+        sentinel = repo.ensure_deferred(
+            parent_instance_id="parent-sentinel",
+            child_instance_id="child-sentinel",
+            child_message_id="msg-sentinel",
+            deferred_reason=DEFERRED_REASON_PAUSE_TOCTOU,
+        )
+        # Sanity: the sentinel is in the pre-backfill shape.
+        assert sentinel.report_message_id is None
+        assert sentinel.content == ""
+
+        transitioned = repo.transition_deferred_to_pending(
+            sentinel.injection_id
+        )
+        assert transitioned is True
+
+        # The drain's hardened WHERE clause filters out the sentinel
+        # even though state=PENDING — the bug class is closed at the
+        # DB layer (no INJECTED stamp on a sentinel row).
+        drained_sentinel = repo.claim_for_injection("parent-sentinel")
+        assert drained_sentinel == []
+
+        # The sentinel row is STILL PENDING with report_message_id=None
+        # — no INJECTED stamp, no delivered_at.
+        with Session(engine) as session:
+            row = session.exec(
+                select(ReportInjection).where(
+                    ReportInjection.injection_id == sentinel.injection_id
+                )
+            ).first()
+        assert row is not None
+        assert row.state == ReportInjectionState.PENDING.value
+        assert row.report_message_id is None
+        assert row.content == ""
 
 
 class TestClaimMethodsIgnoreDeferred:

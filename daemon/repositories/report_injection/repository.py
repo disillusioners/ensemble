@@ -141,6 +141,119 @@ _TASK_DELIVERED_STATE: str = ReportInjectionState.TASK_DELIVERED.value
 _FAILED_STATE: str = ReportInjectionState.FAILED.value
 _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
 
+# DEFERRED marker content sentinel (incident 2026-09-08 b7ead8a4).
+#
+# The :class:`ReportInjection` model declares ``content: str | None``
+# (nullable) per the Phase 1 marker design — a DEFERRED marker carries
+# no artifact yet, ``report_message_id IS NULL`` is the pre-artifact
+# Site-1 shape. Production schema, however, has ``content NOT NULL``
+# because the table was originally created with a non-nullable
+# ``content`` column (predates Phase 1 C4). The Phase 1 commit
+# ``eeb4b286`` (2026-08-20) flipped the model to nullable but never
+# added a PG ``ALTER COLUMN content DROP NOT NULL`` to
+# ``InstanceManager._ensure_postgres_columns`` — the migration runner
+# is SQLite-only and the SQLite companion migration doesn't touch the
+# column either. The drift is documented and pinned by
+# ``tests/unit/test_ensure_deferred_schema_pin.py::test_legacy_not_null_schema_accepts_marker``.
+#
+# Self-heal contract: the marker INSERT must satisfy whichever schema
+# the deployment carries. An empty string is the truthful sentinel —
+# "no content available yet, will be filled at reconciliation time by
+# ``_create_subshape_a_artifacts``". No consumer of the column reads
+# DEFERRED rows: ``claim_for_injection`` filters ``state='PENDING'``
+# and ``claim_for_task_delivery`` keys on ``report_message_id`` (which
+# is NULL on DEFERRED rows). The recovery path
+# ``_create_subshape_a_artifacts`` always overwrites ``content`` with
+# the fetched last-assistant content before transitioning DEFERRED →
+# PENDING, so the sentinel never reaches a delivery lane.
+#
+# DOC-TRUTH (Reviewer W3, 2026-09-08): actually transition happens
+# first; functionally moot via the backfill's blind overwrite —
+# content is real by the time any consumer reads it. The W1
+# claim-filter hardening on ``claim_for_injection`` (requires
+# ``report_message_id IS NOT NULL``) is the structural guarantee:
+# a sentinel row CANNOT reach the INJECTED lane.
+_DEFERRED_MARKER_CONTENT_SENTINEL: str = ""
+
+# IntegrityError classification (incident 2026-09-08, post-mortem on
+# b7ead8a4/d90b18f9 sweep). The obligation-triple partial unique
+# index ``uq_report_injections_oblig_triple`` is the ONLY constraint
+# that ``ensure_deferred`` may legitimately race against — the
+# W6 phantom-conflict re-read path exists exclusively to absorb
+# concurrent duplicates on that index. Any OTHER constraint violation
+# (NOT NULL / FOREIGN KEY / CHECK / a different UNIQUE) is a
+# deterministic write defect; the current code routed them through
+# the same re-read path, which produced a misleading "phantom conflict"
+# log AND a wasted second INSERT — for the content-NOT-NULL case the
+# second INSERT also raised NotNullViolation, leaving the marker
+# stranded forever (production: leader b7ead8a4 children aae1539c /
+# 8629bc77 / 50b7c9a9, all DEFERRED every sweep pass).
+#
+# ``_is_obligation_triple_unique_violation`` discriminates via the
+# constraint NAME (PG renders it) or the column SET (SQLite renders
+# the columns) — same dialect-aware discriminator the natural
+# completion path uses at
+# ``daemon/services/child_reports.py::_is_obligation_triple_integrity_error``.
+_OBLIGATION_TRIPLE_INDEX_NAME: str = "uq_report_injections_oblig_triple"
+_OBLIGATION_TRIPLE_COLUMNS: tuple[str, ...] = (
+    "parent_instance_id",
+    "child_instance_id",
+    "child_message_id",
+)
+
+
+def _is_obligation_triple_unique_violation(exc: IntegrityError) -> bool:
+    """Return ``True`` iff ``exc`` is the obligation-triple unique violation.
+
+    Dialect-aware discriminator for :meth:`ensure_deferred`'s
+    IntegrityError handling — mirrors the contract at
+    ``daemon/services/child_reports.py::_is_obligation_triple_integrity_error``.
+
+    * **PostgreSQL** — the constraint NAME is embedded in
+      ``str(exc.orig)`` (driver renders
+      ``"duplicate key value violates unique constraint
+      \"uq_report_injections_oblig_triple\""``). The SQLSTATE
+      ``23505`` (unique_violation) is also a hint, but other UNIQUE
+      constraints on ``report_injections`` could yield the same code
+      (the PK on ``injection_id`` is one); the constraint-NAME match
+      is the discriminator.
+    * **SQLite** — the index NAME is NOT in the error message.
+      Instead, the columns covered by the index appear:
+      ``"UNIQUE constraint failed: report_injections.parent_instance_id,
+      report_injections.child_instance_id, report_injections.child_message_id"``.
+      The simultaneous presence of all three column names is the
+      SQLite discriminator. This is sound because no OTHER UNIQUE
+      constraint on ``report_injections`` covers all three columns
+      (the PK is on ``injection_id``; the other indexes are non-unique).
+
+    Args:
+        exc: The :class:`sqlalchemy.exc.IntegrityError` raised by
+            ``session.commit()`` (or ``session.flush()``) on the
+            deferred-marker INSERT.
+
+    Returns:
+        ``True`` iff the error is from the obligation-triple index.
+        Any other IntegrityError (NOT NULL / FOREIGN KEY / CHECK /
+        a different UNIQUE) returns ``False`` and the caller MUST
+        re-raise — silently absorbing a deterministic write defect is
+        exactly the b7ead8a4 bug class.
+    """
+    orig = getattr(exc, "orig", None)
+    msg = str(orig) if orig is not None else str(exc)
+
+    # Constraint-name match (PG; SQLite future-proof if the driver
+    # ever starts emitting the index name).
+    if _OBLIGATION_TRIPLE_INDEX_NAME in msg:
+        return True
+
+    # Column-set match (SQLite). All three obligation-triple columns
+    # must appear together — a UNIQUE on a strict subset (none
+    # exist on ``report_injections`` today) would not match all
+    # three, and a multi-column UNIQUE that includes all three
+    # alongside an extra column would still match — which is
+    # acceptable (the obligation triple is still violated).
+    return all(col in msg for col in _OBLIGATION_TRIPLE_COLUMNS)
+
 # Phase 2 (pause-report-recovery) sweep: the parent terminal set is
 # the same set the pause-cascade selectors use
 # (``InstanceStatus.is_valid`` terminal set + FAILED for task-level
@@ -297,7 +410,11 @@ class ReportInjectionRepository:
         ('PENDING','DEFERRED')`` — the write-once gate):
 
         * **No existing non-terminal row**: insert a fresh DEFERRED
-          row with ``report_message_id=None``, ``content=None``.
+          row with ``report_message_id=None`` and
+          ``content=_DEFERRED_MARKER_CONTENT_SENTINEL`` (empty string
+          — satisfies legacy prod ``content NOT NULL`` schema; see
+          the sentinel's module-level docstring for the audit
+          checklist of consumers).
         * **Concurrent duplicate** (e.g. router vs sweep vs Site 1
           racing the same triple): the partial unique index rejects
           the second INSERT with ``sqlalchemy.exc.IntegrityError``;
@@ -338,6 +455,28 @@ class ReportInjectionRepository:
           delivered" is the bug class this method must never
           exhibit. Callers already wrap this method best-effort.
 
+        IntegrityError subtype classification (incident 2026-09-08,
+        post-mortem on b7ead8a4/d90b18f9 sweep):
+        ``_is_obligation_triple_unique_violation`` discriminates the
+        obligation-triple unique violation from every other
+        ``IntegrityError`` (NOT NULL / FOREIGN KEY / CHECK / a
+        different UNIQUE). Deterministic violations re-raise
+        IMMEDIATELY without the phantom-conflict retry — that retry
+        can only absorb an obligation-triple race. A NOT NULL on the
+        ``content`` column (the legacy prod schema, NOT NULL on a
+        column the model declares nullable) raises ``NotNullViolation``
+        every pass; the pre-fix code silently logged "phantom
+        conflict" and tried a second INSERT with the SAME params,
+        which raised the SAME error — leader b7ead8a4's three
+        children (aae1539c / 8629bc77 / 50b7c9a9) stayed DEFERRED
+        every sweep forever. The fix routes NOT NULL / FK / CHECK /
+        non-triple-UNIQUE straight to a truthful "deterministic
+        IntegrityError — re-raising without phantom-conflict retry"
+        ERROR log + re-raise; the per-row callers (sweep /
+        ``message_processing_pipeline`` Site 1) already log + count
+        errors, so the row is retried next cycle after the schema
+        mismatch is fixed.
+
         Args:
             parent_instance_id: The parent that should eventually
                 receive the report.
@@ -357,11 +496,16 @@ class ReportInjectionRepository:
             NEVER returned for a zero-row triple.
 
         Raises:
-            Any non-integrity DB error propagates. ``IntegrityError``
-            on the obligation-triple index is absorbed EXCEPT in the
-            persistent-conflict-with-zero-rows case (insert-on-
-            missing retry also rejected with still no row visible),
-            where it re-raises.
+            Any non-integrity DB error propagates.
+            ``IntegrityError`` on the obligation-triple index is
+            absorbed EXCEPT in the persistent-conflict-with-zero-rows
+            case (insert-on-missing retry also rejected with still no
+            row visible), where it re-raises. ``IntegrityError`` on ANY
+            OTHER constraint (NOT NULL / FOREIGN KEY / CHECK /
+            different UNIQUE) re-raises IMMEDIATELY — the
+            phantom-conflict retry path can only legitimately absorb
+            the obligation-triple race, and routing deterministic
+            violations through it was the b7ead8a4 bug class.
         """
         try:
             # Positive-evidence pre-check (Debug Phase 4): the partial
@@ -415,7 +559,59 @@ class ReportInjectionRepository:
                 child_message_id=child_message_id,
                 deferred_reason=deferred_reason,
             )
-        except IntegrityError:
+        except IntegrityError as exc:
+            # IntegrityError subtype classification (incident 2026-09-08,
+            # post-mortem on b7ead8a4/d90b18f9). Only the obligation-
+            # triple unique violation is the legitimate phantom-conflict
+            # case — concurrent INSERTs racing the partial unique index
+            # ``uq_report_injections_oblig_triple``. Every OTHER
+            # IntegrityError is a deterministic write defect:
+            #   * NOT NULL (e.g. legacy ``content NOT NULL`` schema) →
+            #     real schema mismatch, retrying with another None
+            #     will raise the same constraint every pass.
+            #   * FOREIGN KEY / CHECK → storage-shape defect.
+            #   * UNIQUE on a different column (e.g. ``injection_id``
+            #     PK collision) → caller defect (UUID collision is
+            #     effectively impossible, but the contract still
+            #     applies).
+            #
+            # Routing ALL IntegrityErrors through the phantom-conflict
+            # re-read path produced two production-visible failures:
+            #   1. The misleading "phantom conflict (row deleted or
+            #      escalated between INSERT and re-read)" log fired
+            #      for what was actually a schema-mismatch NotNull
+            #      violation (incident 2026-09-08 15:27+07 on leader
+            #      b7ead8a4 children aae1539c/8629bc77/50b7c9a9).
+            #   2. The insert-on-missing retry ALSO raised NotNull
+            #      (same INSERT params → same violation), so the row
+            #      was stranded forever — every sweep pass produced
+            #      the same error pair.
+            #
+            # Deterministic violations must re-raise immediately and
+            # be observable by the caller / log infrastructure. The
+            # only path that benefits from the re-read is the
+            # obligation-triple unique violation.
+            if not _is_obligation_triple_unique_violation(exc):
+                # Deterministic constraint violation — NOT a delivery
+                # race. Surface the bug; the per-row caller (the
+                # sweep's ``_recover_one_no_row`` and the Site 1
+                # dispatcher in ``message_processing_pipeline.py``)
+                # is best-effort and logs+swallows, but the log line
+                # must NOT lie about a phantom conflict.
+                logger.error(
+                    f"[ReportInjection] ensure_deferred: "
+                    f"deterministic IntegrityError (NOT a delivery race) "
+                    f"for parent={parent_instance_id[:8]}..., "
+                    f"child={child_instance_id[:8]}..., "
+                    f"msg={child_message_id[:8]}..., "
+                    f"reason={deferred_reason}: "
+                    f"{type(exc).__name__}: {exc.orig if exc.orig else exc} — "
+                    f"re-raising without phantom-conflict retry "
+                    f"(schema/write defect; no row state change)"
+                )
+                raise
+            # ── Obligation-triple unique violation → existing
+            # convergence path (W6 / Debug Phase 4 insert-on-missing).
             with Session(self.engine) as session:
                 # W6: concurrent duplicate (router/sweep/Site 1 races
                 # the same triple). The child-keyed bus lock does
@@ -554,6 +750,9 @@ class ReportInjectionRepository:
             )
             return None
 
+    # OPS-RUNBOOK (Reviewer W3, 2026-09-08): pre-backfill DEFERRED
+    # rows legitimately carry content='' — do not interpret as missing
+    # report; backfill overwrites.
     def _insert_deferred_marker(
         self,
         *,
@@ -570,6 +769,19 @@ class ReportInjectionRepository:
         ``IntegrityError`` on the first attempt without mocking the
         engine.
 
+        Sentinel content (incident 2026-09-08, post-mortem on
+        b7ead8a4/d90b18f9): production schema has ``content NOT NULL``
+        (legacy from before Phase 1 C4 made the model nullable).
+        Inserting ``None`` raised
+        ``psycopg.errors.NotNullViolation`` on every sweep pass and
+        stranded the leader's recovery forever. The sentinel is an
+        empty string (``_DEFERRED_MARKER_CONTENT_SENTINEL``) — truthful
+        "no content yet, will be filled by
+        ``_create_subshape_a_artifacts`` at reconciliation" — and
+        satisfies both the legacy NOT NULL schema and the
+        Phase-1-intended nullable schema. No consumer of ``content``
+        reads a DEFERRED row (see module docstring's audit checklist).
+
         Returns:
             The persisted :class:`ReportInjection` row.
 
@@ -583,7 +795,7 @@ class ReportInjectionRepository:
                 child_instance_id=child_instance_id,
                 child_message_id=child_message_id,
                 report_message_id=None,
-                content=None,
+                content=_DEFERRED_MARKER_CONTENT_SENTINEL,
                 state=_DEFERRED_STATE,
                 deferred_reason=deferred_reason,
                 delivered_at=None,
@@ -1130,6 +1342,17 @@ class ReportInjectionRepository:
                 sa_update(ReportInjection)
                 .where(ReportInjection.parent_instance_id == parent_instance_id)
                 .where(ReportInjection.state == _PENDING_STATE)
+                # W1 (Reviewer 2026-09-08) claim-filter hardening:
+                # a pre-backfill sentinel row (report_message_id=None,
+                # content="") MUST NOT be claimed by the drain — the
+                # terminal-INJECTED-without-report-text race. The
+                # consumer's falsy guard at graph.py:4436 would skip
+                # the empty content but the DB UPDATE would still
+                # stamp state=INJECTED + delivered_at=now on a row
+                # that was never backfilled. Only post-backfill rows
+                # (recovery path's UPDATE-in-place set both
+                # report_message_id + content) pass this WHERE.
+                .where(ReportInjection.report_message_id.is_not(None))
                 .values(state=_INJECTED_STATE, delivered_at=now_iso)
                 .returning(
                     ReportInjection.content,
