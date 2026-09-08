@@ -1004,7 +1004,7 @@ class TestExploreJobEnqueue:
 # =============================================================================
 
 
-class TestExploreAutoInjection:
+class TestExploreNoManualInjection:
     """Tests for explore() with system-driven Shared Context injection.
 
     Migrated 2026-09: the explore tool no longer manually attaches

@@ -64,7 +64,6 @@ from __future__ import annotations
 import shutil
 import uuid
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

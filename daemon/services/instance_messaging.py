@@ -3651,12 +3651,6 @@ class InstanceMessagingService:
                 if _skill_getter is not None:
                     _cached_skill = _skill_getter(instance_id)
 
-                # Resolve ``project_id`` for the orchestrator.
-                # ``agent_node`` reads it from instance metadata
-                # each turn; mirror the same lookup here so the
-                # persistent block on the first turn matches
-                # what subsequent turns will see in
-                # ``state['messages']``.
                 # Resolve ``project_id`` AND ``parent_id`` from the
                 # permanent ``instances`` row in one fetch — these are
                 # the two columns ``assemble_context_messages`` needs

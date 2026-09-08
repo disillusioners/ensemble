@@ -900,7 +900,7 @@ async def _build_context_dicts_for_response(
     # treats None as "root instance, use own id" and any other string
     # (including "") would resolve to an empty context partition. The
     # messaging path (instance_messaging.py:3683-3692) and the
-    # restore path (instance_lifecycle.py:3982-3998) already
+    # restore path (instance_lifecycle.py:3984-3994) already
     # normalize this exact shape; mirror them on the read-rebuild.
     parent_id = getattr(instance_meta, "parent_id", None) or None
     agent_meta = ctx["agent_meta"]

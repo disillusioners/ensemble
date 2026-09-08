@@ -36,8 +36,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from daemon.services.instance_messaging import InstanceMessagingService
 
 

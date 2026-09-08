@@ -5,16 +5,17 @@ parent rows to ``None`` before calling
 ``assemble_context_messages``. Without the fix, a legacy row with
 ``parent_id=""`` resolved ``context_key=""`` (an empty string) via
 ``_resolve_tree_root_id`` — a mispartition symptom analogous to the
-messaging-path defect fixed in commit 1.
+messaging-path defect fixed in commit 80bb61dd.
 
-The messaging path (instance_messaging.py:3683-3692, my commit 1)
-and the restore path (instance_lifecycle.py:3982-3998) already
+The messaging path (instance_messaging.py:3683-3692, commit 80bb61dd)
+and the restore path (instance_lifecycle.py:3984-3994) already
 normalize this exact shape; this test mirrors those normalization
 contracts on the read-rebuild surface.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,211 +37,128 @@ def _make_messages_with_user_query(query: str) -> list:
     return [HumanMessage(content=query)]
 
 
+def _build_instance_meta(parent_id_value, project_id, use_simple_namespace):
+    """Construct the ``instance_meta`` stand-in for a single case.
+
+    Three of the four cases use a ``MagicMock`` (a fully-shaped row);
+    the missing-attribute case uses ``SimpleNamespace`` to simulate a
+    pre-2026-08 row that lacks the ``parent_id`` attribute entirely.
+    """
+    if use_simple_namespace:
+        return SimpleNamespace(
+            project_id=project_id,
+            instance_metadata={"project_id": project_id},
+        )
+    instance_meta = MagicMock()
+    instance_meta.parent_id = parent_id_value
+    instance_meta.project_id = project_id
+    instance_meta.instance_metadata = {"project_id": project_id}
+    return instance_meta
+
+
+async def _run_w2_case(
+    parent_id_value, expected_parent_id, instance_id, project_id, use_simple_namespace,
+):
+    """Drive a single W2 case through ``_build_context_dicts_for_response``.
+
+    Captures the kwargs threaded to ``assemble_context_messages`` so the
+    post-call assertion can pin the parent_id handed to the orchestrator.
+    """
+    captured: dict = {}
+
+    async def _capture(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return ([], [])  # no synthetic context messages
+
+    ctx = {
+        "instance_meta": _build_instance_meta(
+            parent_id_value, project_id, use_simple_namespace,
+        ),
+        "agent_meta": MagicMock(),
+    }
+    manager = MagicMock()
+    manager._instance_repository = MagicMock()
+    messages = _make_messages_with_user_query("any user query")
+
+    with patch(
+        "daemon.services.context_messages.assemble_context_messages",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        await _build_context_dicts_for_response(
+            instance_id=instance_id,
+            ctx=ctx,
+            manager=manager,
+            messages=messages,
+        )
+
+    assert captured, "orchestrator was never called"
+    return captured["kwargs"].get("parent_id")
+
+
 # ─── Tests ───────────────────────────────────────────────────────────────────
 
 
 class TestReadRebuildParentIdNormalization:
     """Pin the W2 ``or None`` normalization on the read-rebuild path."""
 
+    @pytest.mark.parametrize(
+        "parent_id_value, expected_parent_id, instance_id, project_id, use_simple_namespace",
+        [
+            # Legacy empty-string parent row → must collapse to None
+            # (was the silent mispartition symptom).
+            ("", None, "legacy-empty-parent", "proj-w2-1", False),
+            # Non-empty parent_id → must thread unchanged.
+            ("caller-tree-root", "caller-tree-root", "normal-parent", "proj-w2-2", False),
+            # Canonical root instance (parent_id is None) → must thread None
+            # (the ``or None`` is a no-op here; this guards against
+            # accidental truthy-coercion regressions).
+            (None, None, "root-instance", "proj-w2-3", False),
+            # Pre-2026-08 row lacks the parent_id attribute entirely
+            # → getattr(..., None) default + ``or None`` → None.
+            (None, None, "legacy-no-parent-col", "proj-w2-4", True),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_legacy_empty_parent_id_normalizes_to_none(self):
-        """A row with ``parent_id=""`` must thread ``None`` to the orchestrator.
+    async def test_parent_id_normalization(
+        self,
+        parent_id_value,
+        expected_parent_id,
+        instance_id,
+        project_id,
+        use_simple_namespace,
+    ):
+        """Every W2 row shape must yield the expected ``parent_id`` at the orchestrator seam.
 
-        Pin the W2 fix: legacy rows where ``instances.parent_id`` is
-        an empty string (pre-2026-08 schema drift surface) would
-        thread ``""`` to ``assemble_context_messages`` →
-        ``_resolve_tree_root_id``. The orchestrator would then treat
-        ``""`` as a non-None parent and call
-        ``get_tree_root_id("")``, which walks an empty ancestor chain
-        and resolves to ``""`` — an empty context partition, never
-        the instance's own.
+        Companion pins for the W2 fix at ``daemon/persistence.py:899``:
 
-        With the fix, ``""`` collapses to ``None`` and the
-        orchestrator returns the instance's own id (legacy root
-        behavior).
+        * legacy ``""`` → ``None`` (empty-partition guard)
+        * non-empty parent → unchanged (no-op for the canonical caller case)
+        * canonical root ``None`` → unchanged (no-op for the root case)
+        * missing attribute → graceful ``None`` (schema-drift tolerance)
+
+        Same assertions as the four pre-parametrize tests
+        (``test_legacy_empty_parent_id_normalizes_to_none``,
+        ``test_normal_parent_id_threads_unchanged``,
+        ``test_none_parent_id_threads_unchanged``,
+        ``test_missing_parent_id_attribute_threads_none``); the
+        parametrize simply collapses the 4× ~25-line setup duplication.
         """
-        captured: dict = {}
-
-        async def _capture(*args, **kwargs):
-            captured["kwargs"] = kwargs
-            return ([], [])  # no synthetic context messages
-
-        instance_meta = MagicMock()
-        instance_meta.parent_id = ""  # legacy: empty string
-        instance_meta.project_id = "proj-w2-1"
-        instance_meta.instance_metadata = {"project_id": "proj-w2-1"}
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": MagicMock(),
-        }
-
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-
-        messages = _make_messages_with_user_query("any user query")
-
-        with patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(side_effect=_capture),
-        ):
-            await _build_context_dicts_for_response(
-                instance_id="legacy-empty-parent",
-                ctx=ctx,
-                manager=manager,
-                messages=messages,
+        actual = await _run_w2_case(
+            parent_id_value=parent_id_value,
+            expected_parent_id=expected_parent_id,
+            instance_id=instance_id,
+            project_id=project_id,
+            use_simple_namespace=use_simple_namespace,
+        )
+        if expected_parent_id is None:
+            assert actual is None, (
+                f"W2 normalization must produce parent_id=None for "
+                f"parent_id_value={parent_id_value!r} "
+                f"(use_simple_namespace={use_simple_namespace}); "
+                f"got parent_id={actual!r}. See daemon/persistence.py:899."
             )
-
-        assert captured, "orchestrator was never called"
-        # Pin: parent_id was normalized to None before the call.
-        assert captured["kwargs"].get("parent_id") is None, (
-            f"read-rebuild must normalize legacy empty-string parent_id to "
-            f"None before calling assemble_context_messages; got "
-            f"parent_id={captured['kwargs'].get('parent_id')!r}. "
-            f"This is the W2 surface of the mispartition defect "
-            f"(daemon/persistence.py:899)."
-        )
-
-    @pytest.mark.asyncio
-    async def test_normal_parent_id_threads_unchanged(self):
-        """Non-empty parent_id strings pass through unchanged.
-
-        Companion pin: the normalization must not regress non-empty
-        parent ids. A row with ``parent_id="caller-tree-root"``
-        must still thread that exact string to the orchestrator.
-        """
-        captured: dict = {}
-
-        async def _capture(*args, **kwargs):
-            captured["kwargs"] = kwargs
-            return ([], [])
-
-        instance_meta = MagicMock()
-        instance_meta.parent_id = "caller-tree-root"
-        instance_meta.project_id = "proj-w2-2"
-        instance_meta.instance_metadata = {"project_id": "proj-w2-2"}
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": MagicMock(),
-        }
-
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-
-        messages = _make_messages_with_user_query("any user query")
-
-        with patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(side_effect=_capture),
-        ):
-            await _build_context_dicts_for_response(
-                instance_id="normal-parent",
-                ctx=ctx,
-                manager=manager,
-                messages=messages,
+        else:
+            assert actual == expected_parent_id, (
+                f"non-empty parent_id must thread unchanged; expected "
+                f"{expected_parent_id!r}, got {actual!r}."
             )
-
-        assert captured, "orchestrator was never called"
-        assert captured["kwargs"].get("parent_id") == "caller-tree-root", (
-            f"non-empty parent_id must thread unchanged; got "
-            f"{captured['kwargs'].get('parent_id')!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_none_parent_id_threads_unchanged(self):
-        """A row with ``parent_id=None`` threads ``None`` (root unchanged).
-
-        Root instance pin: a row with ``parent_id is None`` (the
-        canonical root-instance shape) must still thread ``None``
-        through to the orchestrator. The ``or None`` normalization
-        is a no-op for the canonical None case — this test verifies
-        that the canonical contract is preserved.
-        """
-        captured: dict = {}
-
-        async def _capture(*args, **kwargs):
-            captured["kwargs"] = kwargs
-            return ([], [])
-
-        instance_meta = MagicMock()
-        instance_meta.parent_id = None
-        instance_meta.project_id = "proj-w2-3"
-        instance_meta.instance_metadata = {"project_id": "proj-w2-3"}
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": MagicMock(),
-        }
-
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-
-        messages = _make_messages_with_user_query("any user query")
-
-        with patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(side_effect=_capture),
-        ):
-            await _build_context_dicts_for_response(
-                instance_id="root-instance",
-                ctx=ctx,
-                manager=manager,
-                messages=messages,
-            )
-
-        assert captured, "orchestrator was never called"
-        assert captured["kwargs"].get("parent_id") is None, (
-            f"root instance (parent_id=None) must still pass parent_id=None "
-            f"to the orchestrator; got "
-            f"{captured['kwargs'].get('parent_id')!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_missing_parent_id_attribute_threads_none(self):
-        """Row lacking the ``parent_id`` attribute → ``None`` (graceful default).
-
-        Pre-2026-08 schema surface: rows that pre-date the
-        ``parent_id`` column lack the attribute entirely.
-        ``getattr(..., None)`` returns the default, and the ``or None``
-        is a no-op. The orchestrator must receive ``None``.
-        """
-        captured: dict = {}
-
-        async def _capture(*args, **kwargs):
-            captured["kwargs"] = kwargs
-            return ([], [])
-
-        # Use SimpleNamespace without parent_id to simulate pre-2026-08 row.
-        from types import SimpleNamespace
-        instance_meta = SimpleNamespace(
-            project_id="proj-w2-4",
-            instance_metadata={"project_id": "proj-w2-4"},
-        )
-
-        ctx = {
-            "instance_meta": instance_meta,
-            "agent_meta": MagicMock(),
-        }
-
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-
-        messages = _make_messages_with_user_query("any user query")
-
-        with patch(
-            "daemon.services.context_messages.assemble_context_messages",
-            new=AsyncMock(side_effect=_capture),
-        ):
-            await _build_context_dicts_for_response(
-                instance_id="legacy-no-parent-col",
-                ctx=ctx,
-                manager=manager,
-                messages=messages,
-            )
-
-        assert captured, "orchestrator was never called"
-        assert captured["kwargs"].get("parent_id") is None, (
-            f"row missing parent_id attribute must resolve to None; "
-            f"got {captured['kwargs'].get('parent_id')!r}"
-        )

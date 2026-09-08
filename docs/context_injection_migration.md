@@ -12,7 +12,7 @@ Ensemble supplies runtime context to agents as discrete `HumanMessage` objects. 
 
 These messages are separate from both the agent's system prompt and the user's message body. This keeps runtime data structurally distinct from persona instructions and user input.
 
-Context-message delivery is unconditional. Agents do not configure or opt into it through `meta.json`.
+Block-emission (Related Project, Project Blueprint, and shared-context KV metadata) is unconditional and does not require agent opt-in. However, the heuristic `.md` Shared Context sub-step IS per-agent opt-in: an agent sets `context_injection.heuristic_match_shared_md_files: true` in `meta.json` to enable the filesystem-driven `[SYSTEM CONTEXT: Shared Context]` message. The gate lives in `daemon/services/context_messages.py:1363-1369` and is declared by `daemon/registry.py:119-129` (`ContextInjectionConfig.heuristic_match_shared_md_files`, default `False`). The explorer agent is the newest opted-in agent.
 
 ## Orchestrator
 
@@ -93,7 +93,7 @@ The runtime controls persistence and reuse details for individual context catego
 
 ## Operational Guidance
 
-- Do not add a context-delivery field to agent `meta.json`; there is no per-agent toggle.
+- Block-emission (Related Project, Project Blueprint, and shared-context KV metadata) requires no agent opt-in; do not add a context-delivery field to agent `meta.json` for these categories. The heuristic `.md` Shared Context sub-step IS opt-in via `context_injection.heuristic_match_shared_md_files` in `meta.json` (gate at `daemon/services/context_messages.py:1363-1369`, config at `daemon/registry.py:119-129`, default `False`).
 - Add or update project information through the project repositories and APIs rather than editing agent prompts.
 - Store hierarchy-wide runtime values in shared-context metadata when that scope is appropriate.
 - Use critical notes for important project constraints and recent history for project events.
