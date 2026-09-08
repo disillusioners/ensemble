@@ -307,7 +307,7 @@ docs: .agents/shared/planning/...
 - **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
 - **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
 - **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup
-- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md`)
+- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md → Report Disagreements Transparently`)
 - **Need project context for scope decisions?** → Use `knowledge` (explorer team member), not direct DB
 
 ---

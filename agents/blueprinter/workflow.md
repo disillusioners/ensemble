@@ -193,7 +193,7 @@ Goal: write updates and finalize the C3 lifecycle.
 
 ## Single Blueprint Workflow
 
-A focused rebuild of ONE existing blueprint (selected by the user via the API). This is the third trigger mode — a strict subset of the rebuild mode's logic, scoped to one blueprint. Two workers (1 explore + 1 craft) satisfies the fan-out discipline (soul.md line 87): 1 is a valid wave because the worker-fan-out ceiling is ≤4, not =4.
+A focused rebuild of ONE existing blueprint (selected by the user via the API). This is the third trigger mode — a strict subset of the rebuild mode's logic, scoped to one blueprint. Two workers (1 explore + 1 craft) satisfies the fan-out discipline (soul.md §Output Shape): 1 is a valid wave because the worker-fan-out ceiling is ≤4, not =4.
 
 ### Phase 0a — Verify target
 
