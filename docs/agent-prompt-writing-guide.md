@@ -249,7 +249,7 @@ Before committing changes to any agent prompt:
 - [ ] **One canonical home per repeated artifact** — no verbatim table/snippet/template duplicated across files. Cross-references use section names or stable labels.
 - [ ] **No false "stated once" claims** — if you write "I do not maintain parallel copies," verify the copies are actually gone.
 - [ ] **`rule.md` has ≤7 Cardinal rules**; the rest are Guidelines; no literal duplicates.
-- [ ] **Cross-references resolve** — after any `rule.md` renumber, grep `\.md` across the agent's directory and confirm every hit still points at the intended rule (convention v2: no path tokens in prompt text; section name + owning agent is the navigable unit). See §3.
+- [ ] **Cross-references resolve** — after any `rule.md` renumber, grep `\.md` AND bare `agents/`-prefix tokens (e.g. `agents/...` for cross-agent corruption like `agents/See <agent>'s ...`) across the agent's directory and confirm every hit still points at the intended rule (convention v2: no path tokens in prompt text; section name + owning agent is the navigable unit). Apply the §12.5 #0 interpretation when judging hits: bare-`agents/` tokens are violations ONLY when they function as cross-references to prompt sections, not operational paths. See §3.
 - [ ] **Tone directive present** in `soul.md` (caller voice + dispatch voice + per-severity framing if applicable).
 - [ ] **Fan-in escape valve defined** in `workflow.md` for any dispatcher (stuck-worker ladder, max-re-dispatch cap).
 - [ ] **Skill versions consistent** — `.md` frontmatter matches the manifest; no drift.
