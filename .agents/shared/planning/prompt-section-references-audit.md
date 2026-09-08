@@ -41,14 +41,28 @@ From `docs/agent-prompt-writing-guide.md` (commit 6c4bfb7b):
 > | `tools_note.md` | Optional | … | Tool-by-tool reference; operational allow-list tables |
 > | `memory.md` | Optional | … | Long-term knowledge, calibration tables, trigger checklists |
 
-**Surface** (assembled into system prompt at compose time per `daemon/loader.py` order
-`soul` → `rule` → innate skills → tools doc → `tools_note` → `workflow` → `memory` → recent memories → knowledge → project-experience):
-`soul.md`, `rule.md`, `tools_note.md`, `workflow.md`, `memory.md`, `*-strategy.md` / `skills-template/*.md`
-(auto-loaded skills), `growth.md`, `builder-prompt.md` (per-instance prompt surface),
-`_prompt_system/innate-skills/*/skill.md` (innate-skill templates loaded into the agent at runtime).
+**Prompt surface — split into two scopes (reconciled 2026-09-08):**
+
+1. **Agent-prompt surface** — files assembled into the agent's own prompt at runtime
+   (subject to the v2 cross-reference rule per §3):
+   `soul.md`, `rule.md`, `tools_note.md`, `workflow.md`, `memory.md`,
+   `*-strategy.md` / `skills-template/*.md` (auto-loaded skills),
+   `_prompt_system/innate-skills/*/skill.md` (innate-skill templates loaded into
+   the agent at runtime).
+
+2. **Per-instance scaffolding** — files loaded into the instance prompt but NOT
+   subject to v2 closure grep (the v2 rule governs navigational cross-references
+   between prompt sections; these files are infrastructure, not prompts-with-sections):
+   `growth.md` (auto-summarized per-run notes), `builder-prompt.md` (mother-builder
+   template loaded only during spawn), `_prompt_system/knowledge.md`,
+   `_prompt_system/project-experience.md`, `_prompt_system/critical-notes.md`.
 
 **Non-surface:** `meta.json`, `skill-set.yaml` (system-facing metadata; not prose), and `.agents/` /
 `docs/` / `daemon/` paths (these are §1 forbidden-layer system internals regardless of surface).
+The §12.5 closure grep operates on agent-prompt surface (1); the per-instance scaffolding
+(2) is loaded but exempted per §12.5 survivors #1 and #2 (and the §12.5 #0 operational
+exclusion interpretation governs bare-`agents/` prefix tokens — operational paths
+stay exempt, cross-reference uses do not).
 
 ---
 
@@ -662,32 +676,34 @@ without a path token (the agent has the file).
 
 §3 rules preserved-and-restated in v2 form: the disambiguator clause, the auto-loaded strategy-skill heading-resolution clause, and the post-change verification duty (grep rekeyed `rule.md §` → `\.md`, plus own-prompt heading-resolution and cross-agent owner heading checks); the path-bearing subsection forms (`file.md "Section"`, `file.md §Section`) are FORBIDDEN in v2 (carry the path token v2 exists to remove); the `Cardinal #N over §N` semantic-labels table is absorbed by the navigable-unit principle and the §10 checklist bullet.
 
-### 12.3 Conversion counts
+### 12.3 Conversion counts (recounted from ground truth 2026-09-08)
 
 This branch (`fix/prompt-pure-section-refs`) supersedes yesterday's intermediate
-form across 97 in-scope prompt-surface files:
+form across 97 in-scope prompt-surface files. Counts below are the ACTUAL removed
+path-tokens per `git diff fd582efd..HEAD -- agents/` (recounted against ground
+truth, not implementer-claimed; the original 71/71/60/etc. were undercounted):
 
-| Source form | Count (approx.) | Target form |
-|-------------|-----------------|--------------|
-| `rule.md` (bare) | 71 | same-agent section refs + (Cardinal/Step/etc.) positional refs |
-| `workflow.md` (bare) | 71 | same-agent section refs |
-| `soul.md` (bare) | 60 | same-agent section refs |
-| `tools_note.md` (bare) | 11 | same-agent section refs |
+| Source form | Count (ground truth) | Target form |
+|-------------|---------------------|--------------|
+| `rule.md` (bare) | 77 | same-agent section refs + (Cardinal/Step/etc.) positional refs |
+| `workflow.md` (bare) | 84 | same-agent section refs |
+| `soul.md` (bare) | 67 | same-agent section refs |
+| `tools_note.md` (bare) | 23 | same-agent section refs |
 | `memory.md` (bare) | 22 | same-agent section refs |
 | `dev-strategy.md` (bare) | 15 | same-agent section refs (auto-loaded) |
-| `planning-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
-| `approval-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
-| `review-strategy.md` (bare) | 3 | same-agent section refs (auto-loaded) |
+| `planning-strategy.md` (bare) | 10 | same-agent section refs (auto-loaded) |
+| `approval-strategy.md` (bare) | 9 | same-agent section refs (auto-loaded) |
+| `review-strategy.md` (bare) | 4 | same-agent section refs (auto-loaded) |
 | `test-strategy.md` (bare) | 3 | same-agent section refs (auto-loaded) |
-| `tidier-strategy.md` (bare) | 10 | same-agent section refs (auto-loaded) |
+| `tidier-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
 | `tidier-static-hygiene.md` (bare) | 2 | same-agent section refs (auto-loaded) |
-| `<agent>/<file>.md → Section` (cross-arrow, yesterday's form) | ~12 | `See <agent>'s <Section Name>` |
-| `file.md §Section` (compliant in v1, forbidden in v2) | ~5 | `See <Section Name>` |
+| `<agent>/<file>.md → Section` (cross-arrow, yesterday's form) | **3** (NOT ~12 — implementer overcounted) | `See <agent>'s <Section Name>` |
+| `file.md §Section` (compliant in v1, forbidden in v2) | 5 | `See <Section Name>` |
 | `file.md "Section"` (quoted, §3 sanctioned) | ~10 | `See <Section Name>` |
 | `(canonical in \`file.md\`)` (heading parenthetical) | ~5 | `(canonical)` |
 | `lives in \`file.md\` (auto-loaded)` | ~5 | `are auto-loaded` / `is auto-loaded` |
 | `(from file.md)` / `(the contents of file.md)` provenance | ~3 | dropped parenthetical |
-| **Total path-token refs converted** | **~290 (per initial inventory; §2.1)** | |
+| **Total path-token refs converted** | **327 (ground truth; was ~290 estimated)** | |
 
 Auto-loaded strategy skills (§3.1 acknowledged they are fully assembled into the owning
 agent's prompt) dropped their `file.md →` prefix and retained only the section name.
@@ -699,14 +715,14 @@ Worktree Mode`. Same-agent pointers (e.g. `rule.md → Cardinal Rules`) became
 
 | # | Before (v1 form) | After (v2 form) |
 |---|------------------|-----------------|
-| 1 | `See \`rule.md\` → Resource Constraint (STRICT)` | `See Resource Constraint (STRICT)` |
-| 2 | `(giter/workflow.md -> Worktree Mode)` | `See giter's Worktree Mode` |
-| 3 | `(see Plan Improvement Tracking in \`workflow.md\`)` | `See Plan Improvement Tracking` |
-| 4 | `lives in \`planning-strategy.md\` (auto-loaded)` | `is auto-loaded` |
-| 5 | `(canonical in \`approval-strategy.md\`)` heading parenthetical | `(canonical)` |
-| 6 | `(per \`governor/rule.md → Report Disagreements Transparently\`)` (cross-agent) | `See governor's Report Disagreements Transparently` |
-| 7 | `See workflow.md → Skill Selection (canonical reference)` (skill-name disambiguation) | `See Skill Selection (canonical reference)` |
-| 8 | `Cardinal rules 1–7 (from \`rule.md\`)` (provenance) | `Cardinal rules 1–7` |
+| 1 | `approver/workflow.md`: `See \`rule.md\` → Resource Constraint (STRICT)` | `See Resource Constraint (STRICT)` |
+| 2 | `developer/workflow.md`: `(giter/workflow.md -> Worktree Mode)` | `See giter's Worktree Mode` |
+| 3 | `approver/workflow.md`: `Execute these steps as part of the approval process. **See \`rule.md\` → Plan Improvement Tracking for file formats and constraints.**` | `**See Plan Improvement Tracking for file formats and constraints.**` (heading exists at `approver/rule.md:86` and `approver/memory.md:40`) |
+| 4 | `planner[v2]/workflow.md`: `lives in \`planning-strategy.md\` (auto-loaded)` | `is auto-loaded` |
+| 5 | `approver[v2]/tools_note.md`: `(canonical in \`approval-strategy.md\`)` heading parenthetical | `(See Approval-Strategy Skill Selection Guide)` (heading-based ref, not bare parenthetical) |
+| 6 | `reviewer[v2]/workflow.md`: `(per \`governor/rule.md → Report Disagreements Transparently\`)` (cross-agent) | `See governor's Report Disagreements Transparently` |
+| 7 | `tester/workflow.md`: `See workflow.md → Skill Selection (canonical reference)` (skill-name disambiguation) | `See Skill Selection (canonical reference)` |
+| 8 | `watcher/workflow.md`: `Cardinal rules 1–7 (from \`rule.md\`)` (provenance) | `Cardinal rules 1–7` |
 
 ### 12.5 Closure proof (variant-tolerant re-grep, zero in-scope hits)
 
@@ -714,11 +730,33 @@ Per the v2 rule's closure requirement (`grep resolves to zero hits` over in-scop
 prompt surfaces), the final variant-tolerant sweep returned **zero in-scope prompt-file
 hits** for the canonical pattern set: `\.md` (prompt-file tokens), `<agent>/<file>.md`
 (cross-agent paths), `file.md → Section` (arrow form), `file.md §Section` (§-form),
-`file.md "Section"` (quoted form), `see <file>.md`-style prose.
+`file.md "Section"` (quoted form), `see <file>.md`-style prose, **and the bare
+`agents/`-prefix pattern** (`agents/<name>/<file>` and `agents/See <agent>'s ...`-style
+fragments that produced the leader/workflow.md:662 class of cross-agent corruption).
+
+**Closure pattern set (variant-tolerant — match BOTH spaced and unspaced forms):**
+
+| Pattern | Catches |
+|---------|---------|
+| `\.md\b` | bare `.md` filename tokens (`soul.md`, `rule.md`, `workflow.md`, ...) |
+| `<agent>/<file>\.md` | cross-agent path tokens (`agents/giter/workflow.md`, `giter/rule.md`) |
+| `<file>\.md\s*(→|->|§|\")` | arrow / § / quoted section forms |
+| `see <file>\.md` / `per <file>\.md` / `via <file>\.md` | prose intro patterns |
+| `agents/\b` followed by `See\|to\|from` / agent-name pattern | bare `agents/` prefix as cross-reference (e.g., the corruption class `agents/See leader's ...`) |
+| `(See\s*[^A-Za-z]*\)\|<empty parens>` | empty captures like `(See )`, `(See .`, `(See,` |
+
+**Bare `agents/` prefix interpretation (added 2026-09-08 repair iteration):**
+A hit on `agents/<...>` is a violation ONLY when the token functions as a cross-reference
+to a prompt section (e.g., `agents/See leader's ...` produced by a regex collision between
+the `agents/<file>.md` substitution and the `See <agent>'s ...` substitution — both apply,
+order matters, and the bare-`agents/` case proves the gap). Operational filesystem paths
+where `agents/` is a literal path component (e.g., `.agents/shared/planning/...`,
+`.agents/<agent>/rules/`) are NOT cross-references and remain out of scope. The §12.5
+#0 controlling exclusion (operational filesystem paths) governs this same distinction.
 
 **Survivors (out-of-scope per task instructions; report-only, not converted):**
 
-0. **Controlling exclusion interpretation:** v2 governs navigational cross-references to prompt sections; operational filesystem paths are excluded BY DESIGN — (a) own-directory write-scope Cardinal declarations (e.g. reviewer/tidier/planner own notes/rules dirs); (b) operational project-infra paths (`.agents/shared/planning/`, `conventions.md`, `active.md`, phase files); (c) non-prompt convention docs consulted at runtime (`core.md`, `PACKS.md`, `QUARANTINE.md`, `ensure.md`); (d) system hooks (`_prompt_system/knowledge*.md`). A path-token hit is a violation ONLY if it functions as a cross-reference to a prompt section; survivors must be enumerated and justified as operational.
+0. **Controlling exclusion interpretation:** v2 governs navigational cross-references to prompt sections; operational filesystem paths are excluded BY DESIGN — (a) own-directory write-scope Cardinal declarations (e.g. reviewer/tidier/planner own notes/rules dirs); (b) operational project-infra paths (`.agents/shared/planning/`, `conventions.md`, `active.md`, phase files); (c) non-prompt convention docs consulted at runtime (`core.md`, `PACKS.md`, `QUARANTINE.md`, `ensure.md`); (d) system hooks (`_prompt_system/knowledge*.md`); (e) bare `agents/` prefix where the path is a literal filesystem reference, not a cross-reference (per the addition above). A path-token hit is a violation ONLY if it functions as a cross-reference to a prompt section; survivors must be enumerated and justified as operational.
 
 1. **`agents/watcher/builder-prompt.md` (3 hits)** — builder-prompt file is NOT assembled
    into an agent prompt (per task scope note). Out of scope; would not changed.
