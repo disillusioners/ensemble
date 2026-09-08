@@ -51,6 +51,7 @@ from langchain_core.messages import HumanMessage
 
 from daemon import constants as _constants
 from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.config import _resolve_kv_ambient_system_default_enabled
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,14 @@ CONTEXT_KIND_SKILLS = "skills"
 CONTEXT_KIND_TASK_CONTEXT = "task_context"
 CONTEXT_KIND_BLUEPRINT = "blueprint"
 CONTEXT_KIND_PROJECT_SCOPE_GUIDE = "project_scope_guide"
+# Standalone ambient shared-meta-KV host (kv-ambient-awareness-fix
+# C2 / decisions.md D7 — RATIFIED). The system-default project path
+# (which substitutes the scope guide for the project JSON dump) has
+# no KV renderer of its own; this kind is the durable key downstream
+# consumers (FE styling, compaction re-append, ``GET /messages``
+# filters) key on — phase3-plan.md Risk 4: consumers filter by
+# ``context_kind``, never by index or title.
+CONTEXT_KIND_SHARED_META_KV = "shared_meta_kv"
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -611,6 +620,93 @@ def build_project_scope_guide_message() -> HumanMessage:
         kind=CONTEXT_KIND_PROJECT_SCOPE_GUIDE,
         title="Project Scope Guide",
         content=_PROJECT_SCOPE_GUIDE_CONTENT,
+    )
+
+
+# ─── Shared Meta KV (standalone ambient host, kv-ambient C2) ─────────────────
+
+
+def build_shared_meta_kv_message(
+    kv_metadata: dict[str, Any] | None,
+    *,
+    stable_id: str | None = None,
+) -> HumanMessage | None:
+    """Build the ``[SYSTEM CONTEXT: Shared Meta KV]`` message.
+
+    The standalone ambient KV host (kv-ambient-awareness-fix C2;
+    decisions.md D7 RATIFIED, extended to all projects by D4). Mirrors
+    the KV render path that :func:`build_project_context_message` uses
+    for non-default projects, but as a standalone block so the
+    system-default project path (which substitutes the scope guide
+    instead of the project JSON dump) also surfaces ambient KV.
+
+    Serialization is ``json.dumps(kv_metadata, sort_keys=True,
+    indent=2)`` — byte-stable between turns when the data is
+    unchanged, so a stable-id re-emit is a zero-cost no-op from the
+    reducer's perspective (D7 rationale).
+
+    Degradation contract (all failure modes return ``None`` — the same
+    observable outcome as an empty partition; never a truncated or
+    malformed block):
+
+    * empty / ``None`` partition → ``None`` (no empty-host noise).
+    * non-JSON-serializable value → ``None`` + WARNING (Risk 9;
+      mirrors the ``_fetch_kv_metadata`` swallow-and-log posture).
+    * serialized payload over the 32k cap → ``None`` + WARNING (W10
+      skip-on-overflow — the same value-size discipline as the inline
+      ``_format_kv_metadata_section`` cap; a runaway KV set must never
+      balloon the prompt).
+
+    Args:
+        kv_metadata: ``{meta_key: meta_value}`` dict for the resolved
+            tree-root partition, or ``None`` / empty when the repo
+            returned nothing.
+        stable_id: Optional deterministic message id (C0
+            :func:`_stable_id_for` contract — ``kv:{context_key}``).
+            When ``None`` a fresh ``uuid4`` is minted (pre-C0
+            behavior). Callers that re-emit a refreshable block MUST
+            pass the stable id so ``add_messages`` supersedes in place
+            instead of appending (Message-id invariant).
+
+    Returns:
+        Tagged :class:`HumanMessage` carrying the escaped JSON body,
+        or ``None`` when there is nothing to render.
+    """
+    if not kv_metadata:
+        return None
+
+    try:
+        payload = json.dumps(kv_metadata, sort_keys=True, indent=2)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            f"[ContextMessages] Failed to serialize shared meta KV "
+            f"({len(kv_metadata)} entries): {exc}"
+        )
+        return None
+
+    # W10 cap (2026-09-08 revision): bound the serialized payload. The
+    # standalone host carries the SAME value-size discipline as the
+    # rest of the KV surface — on overflow log a WARNING and SKIP the
+    # block this turn (skip-on-overflow, never a truncated output).
+    if len(payload) > 32 * 1024:
+        logger.warning(
+            "[ContextMessages] shared_meta_kv payload exceeds 32k "
+            "(%d bytes); skipping ambient KV block this turn",
+            len(payload),
+        )
+        return None
+
+    # Same character escaping as ``escape_for_context_block``
+    # (defense-in-depth so an attacker-controlled KV value cannot
+    # escape the block) — the module's standard escape helper, shared
+    # with ``build_project_context_message``'s KV section.
+    body = escape_for_context_block(payload)
+
+    return _make_context_message(
+        kind=CONTEXT_KIND_SHARED_META_KV,
+        title="Shared Meta KV",
+        content=body,
+        id_=stable_id,
     )
 
 
@@ -1414,10 +1510,18 @@ async def assemble_context_messages(
         )
     )
 
-    # KV metadata is only consumed by build_project_context_message;
-    # skip the DB read for system-default instances (scope guide path).
+    # ── Ambient shared-meta-KV gate (kv-ambient-awareness-fix C2) ──
+    # Pre-C2 the fetch was skipped unconditionally for system-default
+    # instances ("KV metadata is only consumed by
+    # build_project_context_message") — which silently dropped the
+    # entire ambient KV signal for every default-project tree. The
+    # gate now honors the ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+    # kill-switch (Shape A, default ON; =0 restores the legacy
+    # skip-the-DB-read behavior byte-for-byte — restart-to-flip).
+    kv_ambient_enabled = _resolve_kv_ambient_system_default_enabled()
+
     kv_metadata: dict[str, Any] | None = None
-    if not is_system_default:
+    if not is_system_default or kv_ambient_enabled:
         kv_metadata = await asyncio.to_thread(
             _fetch_kv_metadata, context_key, manager
         )
@@ -1427,6 +1531,24 @@ async def assemble_context_messages(
         # JSON dump.
         project_msg = build_project_scope_guide_message()
         persistent_msgs.append(project_msg)
+        # Ambient KV block (flag-gated, default ON) — the STANDALONE
+        # host (decisions.md D7), rendered only when the tree-root
+        # partition is non-empty (builder returns ``None`` otherwise —
+        # no empty-host noise). The scope guide above is untouched:
+        # scope-guide content edits are out of scope (phase3-plan
+        # Scope). Stable id ``kv:{context_key}`` = the FULL resolved
+        # tree-root partition key (D3 canonical table; split-
+        # extraction is a WRONG-ID hazard, S19) so a C3 refresh
+        # supersedes this entry in place instead of appending.
+        if kv_ambient_enabled:
+            kv_msg = build_shared_meta_kv_message(
+                kv_metadata,
+                stable_id=_stable_id_for(
+                    "shared_meta_kv", context_key=context_key
+                ),
+            )
+            if kv_msg is not None:
+                persistent_msgs.append(kv_msg)
     else:
         project_msg = build_project_context_message(
             project=project,
@@ -1628,9 +1750,11 @@ __all__ = [
     "CONTEXT_KIND_TASK_CONTEXT",
     "CONTEXT_KIND_BLUEPRINT",
     "CONTEXT_KIND_PROJECT_SCOPE_GUIDE",
+    "CONTEXT_KIND_SHARED_META_KV",
     # Pure builder functions
     "build_project_context_message",
     "build_project_scope_guide_message",
+    "build_shared_meta_kv_message",
     "build_shared_context_message",
     "build_auto_load_skills_message",
     "auto_load_skills_message_id",

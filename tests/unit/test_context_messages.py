@@ -48,6 +48,7 @@ from daemon.services.context_messages import (
     assemble_context_messages,
     build_project_context_message,
     build_project_scope_guide_message,
+    build_shared_meta_kv_message,
     build_shared_context_message,
     build_skills_message,
     escape_for_context_block,
@@ -501,6 +502,96 @@ class TestBuildProjectScopeGuideMessage:
         assert "project_search" in msg.content
         assert "project_list" in msg.content
         assert "project_id" in msg.content
+
+
+# ─── build_shared_meta_kv_message (kv-ambient C2) ────────────────────────────
+
+
+class TestBuildSharedMetaKvMessage:
+    """Builder-direct tests for the standalone ambient KV host.
+
+    Covers the W10 skip-on-overflow cap and the Risk 9
+    serialization-failure contract (both land with the builder in
+    C2), plus the stable-id / kind / title surface.
+    """
+
+    def test_returns_none_for_none_and_empty(self) -> None:
+        """Empty / ``None`` partition → ``None`` (no empty-host noise)."""
+        assert build_shared_meta_kv_message(None) is None
+        assert build_shared_meta_kv_message({}) is None
+
+    def test_renders_kind_title_and_stable_id(self) -> None:
+        """Happy path: kind, title, serialized body, and the caller's
+        stable id pass through verbatim (D7 + C0 ``id_=`` contract)."""
+        msg = build_shared_meta_kv_message(
+            {"council_manifest": "alpha/beta"},
+            stable_id="kv:root-1",
+        )
+        assert msg is not None
+        assert isinstance(msg, HumanMessage)
+        assert msg.id == "kv:root-1"
+        assert msg.additional_kwargs["context_kind"] == "shared_meta_kv"
+        assert msg.additional_kwargs["injected_message"] is True
+        assert msg.content.startswith("[SYSTEM CONTEXT: Shared Meta KV]")
+        assert '"council_manifest"' in msg.content
+
+    def test_id_mints_uuid4_when_stable_id_omitted(self) -> None:
+        """``stable_id=None`` → pre-C0 uuid4 mint (back-compat)."""
+        msg = build_shared_meta_kv_message({"k": "v"})
+        assert msg is not None
+        assert msg.id != build_shared_meta_kv_message({"k": "v"}).id
+
+    def test_body_is_escaped(self) -> None:
+        """KV values cannot break out of the block (ADR-7 escape)."""
+        msg = build_shared_meta_kv_message({"evil": "<script>&</script>"})
+        assert msg is not None
+        assert "<script>" not in msg.content
+        assert "\\u003cscript\\u003e" in msg.content
+        assert "\\u0026" in msg.content
+
+    def test_w10_cap_over_32k_skips_with_warning(self, caplog) -> None:
+        """W10 skip-on-overflow: payload > 32k → ``None`` + WARNING.
+
+        The standalone host carries the same value-size discipline as
+        the inline KV section — on overflow the block is SKIPPED, never
+        truncated (a truncated JSON block would be worse than none).
+        """
+        import logging
+
+        big = {"big": "x" * 33_000}  # serialized well past 32 * 1024
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.context_messages"
+        ):
+            msg = build_shared_meta_kv_message(big)
+        assert msg is None, (
+            "a >32k serialized KV payload must skip the ambient block "
+            "entirely (skip-on-overflow), never emit a truncated block"
+        )
+        assert any(
+            "shared_meta_kv payload exceeds 32k" in rec.message
+            for rec in caplog.records
+        ), "the W10 overflow must log a WARNING naming the cap"
+
+    def test_non_serializable_value_returns_none_with_warning(
+        self, caplog
+    ) -> None:
+        """Risk 9: non-JSON-serializable value → ``None`` + WARNING.
+
+        Mirrors the ``_fetch_kv_metadata`` swallow-and-log posture —
+        a bad value degrades to the empty-partition outcome instead of
+        crashing the assembly or rendering malformed content.
+        """
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.context_messages"
+        ):
+            msg = build_shared_meta_kv_message({"bad": object()})
+        assert msg is None
+        assert any(
+            "Failed to serialize shared meta KV" in rec.message
+            for rec in caplog.records
+        ), "the serialization failure must log a WARNING"
 
 
 # ─── build_shared_context_message ────────────────────────────────────────────
@@ -1196,15 +1287,54 @@ class TestAssembleContextMessages:
         finally:
             consts.SYSTEM_DEFAULT_PROJECT_ID = original
 
-    def test_kv_metadata_not_fetched_for_system_default(self) -> None:
-        """Scope-guide path skips the ``_fetch_kv_metadata`` DB read.
+    def test_kv_ambient_on_default_project_renders_block_when_partition_has_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag ON + default project + non-empty partition → KV block renders.
 
-        The scope guide does not consume KV metadata, so the
-        orchestrator must NOT spend a DB round-trip on it for every
-        system-default turn. This guards the wasted-I/O fix.
+        THE FLIP (phase3-plan Test Strategy §1a): under
+        ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=1`` (default), a
+        first turn on the system-default project fetches the tree-root
+        KV partition and renders the standalone
+        ``[SYSTEM CONTEXT: Shared Meta KV]`` block with the stable id
+        ``kv:{context_key}`` (D3 canonical table — FULL resolved
+        tree-root key, never split-extracted, S19).
+
+        Regression-proof portability (phase3-plan §8): this test
+        asserts ONLY through ``assemble_context_messages`` — it never
+        imports the C2 builder symbol — and enables the flag by
+        patching the resolver seam with ``raising=False`` so the
+        identical test body can be copied into a pre-C2 worktree,
+        where it must fail with the ORIGINAL symptom (fetch
+        ``call_count == 0`` / ``shared_meta_kv`` kind absent), not an
+        ImportError/AttributeError.
+
+        Worktree proof (recorded 2026-09-08): git worktree at
+        ``1aa98f93`` (C1′ HEAD, pre-C2), this test body appended
+        verbatim as ``TestKvAmbientRegressionProofCopy`` →
+        ``3 failed, 15 passed`` — this test FAILED with:
+
+        ``AssertionError: ambient KV fetch must run for system-default
+        instances when ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED is
+        ON — call_count == 0 is the pre-C2 suppression symptom`` /
+        ``assert 0 == 1``; the kinds list observed was
+        ``['project_scope_guide']`` (no KV fetch, no KV block — the
+        defect).
         """
         from daemon import constants as consts
+        from daemon.services.context_messages import _stable_id_for
 
+        # Unit-level flag control (§7): patch the resolver seam. The
+        # string target + raising=False keeps this body copyable into
+        # a pre-C2 worktree (attribute absent → created, harmless —
+        # the pre-fix assembler never reads it, so the pre-fix
+        # behavior is exercised and the test fails on the symptom).
+        monkeypatch.setattr(
+            "daemon.services.context_messages."
+            "_resolve_kv_ambient_system_default_enabled",
+            lambda: True,
+            raising=False,
+        )
         original = consts.SYSTEM_DEFAULT_PROJECT_ID
         consts.SYSTEM_DEFAULT_PROJECT_ID = "default-id"
         try:
@@ -1214,20 +1344,236 @@ class TestAssembleContextMessages:
                 "project_id": "default-id",
                 "name": "__system_default__",
             }
-            manager, instance_repo, agent_meta = self._make_manager(project=project)
-            self._run(
+            manager, instance_repo, agent_meta = self._make_manager(
+                project=project,
+                kv={"key": "value"}
+            )
+            result = _flatten_context_result(self._run(
                 assemble_context_messages(
                     instance_id="inst-1", user_query="hi",
                     project_id="default-id",
                     agent_meta=agent_meta, manager=manager,
                     instance_repository=instance_repo,
                 )
+            ))
+            # KV repo WAS called (this is the flip).
+            assert manager._shared_meta_kv_repo.get_all_as_dict.call_count == 1, (
+                "ambient KV fetch must run for system-default instances "
+                "when ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED is ON — "
+                "call_count == 0 is the pre-C2 suppression symptom"
             )
+            kinds = [m.additional_kwargs["context_kind"] for m in result]
+            assert "project_scope_guide" in kinds
+            assert "shared_meta_kv" in kinds, (
+                "ambient KV block must render when the tree-root "
+                "partition has rows (flag ON) — a missing "
+                "shared_meta_kv kind is the pre-C2 suppression symptom"
+            )
+            # KV block content matches what was stored.
+            kv_msg = next(
+                m for m in result
+                if m.additional_kwargs["context_kind"] == "shared_meta_kv"
+            )
+            assert '"key"' in kv_msg.content
+            assert '"value"' in kv_msg.content
+            # Stable id: deterministic per C0 contract — kv:{context_key}
+            # where context_key is the resolved tree-root ("inst-1" is
+            # its own root here: parent_id=None).
+            assert kv_msg.id == _stable_id_for(
+                "shared_meta_kv", context_key="inst-1"
+            )
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    def test_kv_ambient_disabled_keeps_old_no_fetch_behavior(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag OFF → byte/value-identical legacy pin (no fetch, no block).
+
+        KEPT-AS-PIN (phase3-plan Test Strategy §1b): the original
+        ``test_kv_metadata_not_fetched_for_system_default`` assertion
+        body, now guarded by
+        ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=0`` — the
+        kill-switch must preserve the original skip-the-DB-read
+        behavior so the revert path stays honest.
+        """
+        from daemon import constants as consts
+
+        monkeypatch.setattr(
+            "daemon.services.context_messages."
+            "_resolve_kv_ambient_system_default_enabled",
+            lambda: False,
+            raising=False,
+        )
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-id"
+        try:
+            project = MagicMock()
+            project.name = "__system_default__"
+            project.to_dict.return_value = {
+                "project_id": "default-id",
+                "name": "__system_default__",
+            }
+            manager, instance_repo, agent_meta = self._make_manager(
+                project=project,
+                kv={"key": "value"}
+            )
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-id",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
             # The kv repo's ``get_all_as_dict`` must NOT have been called.
             assert manager._shared_meta_kv_repo.get_all_as_dict.call_count == 0, (
-                "_fetch_kv_metadata must be skipped for system-default "
-                "instances — the scope guide path does not consume KV "
-                "metadata and the DB read is wasted I/O"
+                "ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=0 must preserve "
+                "the original skip-the-DB-read behavior — guard the revert "
+                "path"
+            )
+            # Value-identical surface: scope guide only, no KV block.
+            kinds = [m.additional_kwargs["context_kind"] for m in result]
+            assert "project_scope_guide" in kinds
+            assert "shared_meta_kv" not in kinds
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    def test_kv_ambient_skipped_when_partition_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag ON + empty partition → scope guide only, no empty host.
+
+        (phase3-plan Test Strategy §2): the empty-partition skip is
+        the builder's ``if not kv_metadata: return None``
+        short-circuit observed through the assembler — the fetch DID
+        happen (the gate is ON) but nothing was appended, so a
+        default-project tree with no KV rows looks exactly like the
+        legacy scope-guide-only surface.
+
+        Regression-proof portability: same ``raising=False`` seam as
+        §1a — copyable into a pre-C2 worktree where it must fail with
+        the ORIGINAL symptom (``call_count == 0`` — the fetch never
+        ran at all pre-fix).
+
+        Worktree proof (recorded 2026-09-08): git worktree at
+        ``1aa98f93`` (pre-C2), verbatim copy → FAILED with:
+        ``AssertionError: the KV fetch must run when the ambient gate
+        is ON even if the partition turns out empty — call_count == 0
+        is the pre-C2 suppression symptom`` / ``assert 0 == 1``.
+        """
+        from daemon import constants as consts
+
+        monkeypatch.setattr(
+            "daemon.services.context_messages."
+            "_resolve_kv_ambient_system_default_enabled",
+            lambda: True,
+            raising=False,
+        )
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-id"
+        try:
+            project = MagicMock()
+            project.name = "__system_default__"
+            project.to_dict.return_value = {
+                "project_id": "default-id",
+                "name": "__system_default__",
+            }
+            manager, instance_repo, agent_meta = self._make_manager(
+                project=project,
+                kv={},
+            )
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-id",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+            kinds = [m.additional_kwargs["context_kind"] for m in result]
+            # Scope guide still renders (UX choice unchanged).
+            assert "project_scope_guide" in kinds, (
+                "the scope guide must render regardless of the KV "
+                "partition state"
+            )
+            # KV block DOES NOT render (empty-partition skip).
+            assert "shared_meta_kv" not in kinds, (
+                "an empty tree-root partition must not produce an "
+                "empty [SYSTEM CONTEXT: Shared Meta KV] host block"
+            )
+            # But the fetch DID happen (gate is ON; builder returned None).
+            assert manager._shared_meta_kv_repo.get_all_as_dict.call_count == 1, (
+                "the KV fetch must run when the ambient gate is ON even "
+                "if the partition turns out empty — call_count == 0 is "
+                "the pre-C2 suppression symptom"
+            )
+        finally:
+            consts.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    def test_kv_block_position_after_scope_guide(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Assembly order: scope guide first (UX), KV block second.
+
+        (phase3-plan Test Strategy §5): pins the persistent-block
+        ordering — the scope guide keeps its first position and the
+        ambient KV block appends AFTER it. Consumers filter by
+        ``context_kind`` (Risk 4), but the emission order is still a
+        contract: the scope guide is the orchestration UX, the KV
+        block is ambient data beneath it.
+
+        Regression-proof portability: same ``raising=False`` seam as
+        §1a — copyable into a pre-C2 worktree where it must fail with
+        the ORIGINAL symptom (``shared_meta_kv`` not in kinds).
+
+        Worktree proof (recorded 2026-09-08): git worktree at
+        ``1aa98f93`` (pre-C2), verbatim copy → FAILED with:
+        ``AssertionError: ambient KV block must render when the
+        tree-root partition has rows (flag ON) — a missing
+        shared_meta_kv kind is the pre-C2 suppression symptom`` /
+        ``assert 'shared_meta_kv' in ['project_scope_guide']``.
+        """
+        from daemon import constants as consts
+
+        monkeypatch.setattr(
+            "daemon.services.context_messages."
+            "_resolve_kv_ambient_system_default_enabled",
+            lambda: True,
+            raising=False,
+        )
+        original = consts.SYSTEM_DEFAULT_PROJECT_ID
+        consts.SYSTEM_DEFAULT_PROJECT_ID = "default-id"
+        try:
+            project = MagicMock()
+            project.name = "__system_default__"
+            project.to_dict.return_value = {
+                "project_id": "default-id",
+                "name": "__system_default__",
+            }
+            manager, instance_repo, agent_meta = self._make_manager(
+                project=project,
+                kv={"ordering": "probe"}
+            )
+            result = _flatten_context_result(self._run(
+                assemble_context_messages(
+                    instance_id="inst-1", user_query="hi",
+                    project_id="default-id",
+                    agent_meta=agent_meta, manager=manager,
+                    instance_repository=instance_repo,
+                )
+            ))
+            kinds = [m.additional_kwargs["context_kind"] for m in result]
+            assert "shared_meta_kv" in kinds, (
+                "ambient KV block must render when the tree-root "
+                "partition has rows (flag ON) — a missing "
+                "shared_meta_kv kind is the pre-C2 suppression symptom"
+            )
+            assert "project_scope_guide" in kinds
+            scope_idx = kinds.index("project_scope_guide")
+            kv_idx = kinds.index("shared_meta_kv")
+            assert scope_idx < kv_idx, (
+                "scope guide must precede KV block in persistent block"
             )
         finally:
             consts.SYSTEM_DEFAULT_PROJECT_ID = original

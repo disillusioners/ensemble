@@ -29,6 +29,7 @@ from .llm_error_classifier import (
 from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
+    ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
     REPORT_REPAIR_EXCLUDED_AGENTS,
@@ -1793,6 +1794,87 @@ class ReportIntegrityConfig(BaseSettings):
     )
 
 
+class ContextMessagesConfig(BaseSettings):
+    """Context-message builder configuration (kv-ambient-awareness-fix C2).
+
+    Hosts the DEFECT 3 kill-switch
+    (``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` — the name is
+    single-homed in ``daemon/constants.py``; the binding below uses
+    that NAME constant so no literal env-name fork can appear —
+    B.S.8 registry discipline, mirroring
+    :class:`ReportIntegrityConfig` above).
+
+    Shape A (decisions.md D5 RATIFIED): a daemon-config concern with
+    an immediate same-class peer — ``ENSEMBLE_PROACTIVE_COMPACTION``
+    (``CompactionConfig.proactive_enabled``) solves the same class of
+    bug (silent ambient suppression; behavior-BUG fix default ON) and
+    shares the empty-string-safe bool vocabulary
+    (:data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`).
+
+    Polarity (decisions.md D8 RATIFIED): **default ON**; ``=0`` (or
+    ``=false``/``=no``/``=off``) disables. The un-fixed behavior IS
+    the bug — every default-project instance silently dropped ambient
+    shared-meta-KV (phase3-plan Root Cause) — so ``=0`` restores the
+    legacy suppression as the incident-revert path, not the default.
+
+    Flip semantics: **restart-to-flip**. ``load_config`` resolves the
+    effective bool once (env > yaml > default, via
+    :func:`_resolve_kv_ambient_from_sources`), installs it into the
+    module cache (:func:`_install_kv_ambient_system_default_enabled`)
+    and emits the boot INFO line naming the resolved state; the
+    runtime gate in ``daemon/services/context_messages.py`` reads the
+    cache via :func:`_resolve_kv_ambient_system_default_enabled`.
+    Flipping the env mid-flight has no effect until restart.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CONTEXT_MESSAGES_")
+
+    kv_ambient_system_default_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "kv_ambient_system_default_enabled",
+            ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
+        ),
+        description=(
+            "Surface ambient shared-meta-KV on the system-default "
+            "project path (standalone [SYSTEM CONTEXT: Shared Meta KV] "
+            "block when the tree-root partition has rows). Default ON. "
+            "Env: ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED (0/false/"
+            "no/off disables — restores the legacy skip-the-DB-read "
+            "suppression). Restart required to flip."
+        ),
+    )
+
+    @field_validator("kv_ambient_system_default_enabled", mode="before")
+    @classmethod
+    def _parse_kv_ambient_system_default_enabled(cls, value: Any) -> Any:
+        """Permissive bool parser (mirror of
+        ``CompactionConfig._parse_proactive_enabled``).
+
+        Bare ``KEY=`` lines in ``.env`` reach pydantic as the empty
+        string; empty / whitespace-only values normalize to the
+        documented ``True`` default DIRECTLY (in a ``mode="before"``
+        validator ``None`` is an EXPLICIT value and would raise
+        ``bool_type`` — boot crash). ``0``/``false``/``no``/``off``
+        (any case) → False; ``1``/``true``/``yes``/``on`` → True;
+        non-empty unrecognized strings pass through (pydantic raises a
+        clear type error so a typo is caught at startup). The
+        spellings live in the shared module-level
+        :data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`
+        vocabularies so this validator cannot drift from
+        :func:`_resolve_kv_ambient_from_sources` (Risk 7).
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return True
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in _PROACTIVE_FALSE_BOOLS:
+                return False
+            if v in _PROACTIVE_TRUE_BOOLS:
+                return True
+        return value
+
+
 class LanguageConfig(BaseSettings):
     """Language check configuration."""
 
@@ -1911,6 +1993,9 @@ class Config(BaseSettings):
     language: LanguageConfig = Field(default_factory=LanguageConfig)
     vscode: VSCodeConfig = Field(default_factory=VSCodeConfig)
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
+    context_messages: ContextMessagesConfig = Field(
+        default_factory=ContextMessagesConfig
+    )
 
 
 # Warn-only deprecation guard for the removed reasoning-echo allowlist env
@@ -2215,6 +2300,161 @@ def _resolve_proactive_enabled(
     return bool(yaml_value)
 
 
+# ── kv-ambient ambient KV gate (C2 — kv-ambient-awareness-fix, Shape A) ──────
+#
+# Resolved-once cache (restart-to-flip; phase3-plan Kill-Switch Design →
+# Restart-to-flip). ``load_config`` resolves the effective bool via
+# :func:`_resolve_kv_ambient_from_sources`, installs it here via
+# :func:`_install_kv_ambient_system_default_enabled`, and emits the
+# one boot INFO line naming the resolved state (S13: the line is
+# emitted AT CONFIG-RESOLUTION TIME — a lazy first-call emit would
+# make quiet-daemon boot-log grep false-fail). The runtime gate
+# (``daemon/services/context_messages.py::assemble_context_messages``)
+# reads the cache via :func:`_resolve_kv_ambient_system_default_enabled`
+# — flipping the env mid-flight has no effect until restart.
+#
+# Cache discipline (mirrors the Shape-B ``ENSEMBLE_WC_WAKE_ENQUEUE``
+# precedent — instance_messaging.py:110-197 — for the caching half
+# only; the CONFIG surface here is Shape A per decisions.md D5):
+# ``None`` = cold (no ``load_config`` yet in this process — tests /
+# programmatic boots). The cold path resolves ONCE from the env var
+# directly (same vocabulary, SILENT — the boot INFO is owned by
+# ``load_config``, never by the per-call accessor) so a direct
+# assembler call without a boot neither crashes nor logs.
+_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED: bool | None = None
+
+
+def _parse_kv_ambient_env_value(v: str) -> bool:
+    """Parse a permissive ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED``
+    value to ``bool``.
+
+    Accepts (case-insensitive, leading/trailing whitespace ignored):
+    ``"0"`` / ``"false"`` / ``"no"`` / ``"off"`` → ``False``;
+    ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"`` → ``True``. Shares the
+    module-level ``_PROACTIVE_TRUE_BOOLS`` / ``_PROACTIVE_FALSE_BOOLS``
+    vocabularies (Risk 7 — one vocabulary, two consumers: this parser
+    and the ``ContextMessagesConfig`` field validator).
+
+    Any other non-empty string raises :class:`ValueError` with a
+    message naming the bad value (caught by ``load_config`` and
+    re-raised so the operator sees a clear boot failure).
+    """
+    s = v.strip().lower()
+    if s in _PROACTIVE_FALSE_BOOLS:
+        return False
+    if s in _PROACTIVE_TRUE_BOOLS:
+        return True
+    raise ValueError(
+        f"Invalid {ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED} value "
+        f"{v!r} — expected one of 0/false/no/off (disable) or "
+        f"1/true/yes/on (enable)"
+    )
+
+
+def _resolve_kv_ambient_from_sources(
+    yaml_value: Any,
+    *,
+    ens_value: str | None,
+) -> bool:
+    """Pure resolver for the ``context_messages`` KV-ambient kill-switch.
+
+    Mirror of :func:`_resolve_proactive_enabled` (minus the legacy
+    alias layer — this flag has no legacy alias). Explicit resolution
+    for the SAME reason: pydantic-settings treats a passed-in init
+    kwarg as taking priority over env vars, so a YAML
+    ``kv_ambient_system_default_enabled: true`` would silently defeat
+    an operator ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=0``
+    kill-switch and weaken the incident-revert path. ``load_config``
+    reads the env once, calls this function, and passes the resolved
+    ``bool`` as an init kwarg so pydantic-settings never re-reads the
+    env itself.
+
+    Precedence (documented contract):
+
+      1. ``ens_value`` (``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED``)
+         — when SET and NON-EMPTY (empty/whitespace treated as UNSET
+         per :func:`_clean_env_value`), wins outright.
+      2. ``yaml_value`` (``context_messages.kv_ambient_system_default_enabled``)
+         — when env is unset/empty, used as-is if it's already a
+         ``bool``; parsed via :func:`_parse_kv_ambient_env_value` if
+         it's a string.
+      3. Default ``True`` (documented ON; decisions.md D8) — only
+         reached when env is unset/empty AND yaml is absent or
+         explicit ``None``.
+
+    An operator typo on the kill-switch itself MUST NEVER brick boot
+    via the empty-string crash class (W-1 precedent): a bare ``KEY=``
+    line falls through to the yaml value (or the documented ON
+    default); an unrecognized NON-empty value raises here so the
+    typo is caught at startup with a flag-naming error.
+    """
+    ens_clean = _clean_env_value(ens_value)
+    if ens_clean is not None:
+        return _parse_kv_ambient_env_value(ens_clean)
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return True  # documented default ON
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            # Defensive — yaml shipped an empty string. Same as unset.
+            return True
+        return _parse_kv_ambient_env_value(yaml_value)
+    # Anything else (int, etc.) — coerce via truthiness, mirroring
+    # :func:`_resolve_proactive_enabled`.
+    return bool(yaml_value)
+
+
+def _install_kv_ambient_system_default_enabled(value: bool) -> None:
+    """Install the resolved flag into the module cache (boot path).
+
+    Called by ``load_config`` after the ``Config`` model is
+    constructed — the installed value is the post-validation field
+    value, so the boot log and the runtime gate can never disagree.
+    Production callers only; tests use
+    :func:`_reset_kv_ambient_for_tests` to go back to cold.
+    """
+    global _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+    _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED = bool(value)
+
+
+def _resolve_kv_ambient_system_default_enabled() -> bool:
+    """Read the resolved KV-ambient kill-switch (no-arg, cached).
+
+    This is the runtime gate's ONLY read path — the assembler imports
+    it from this module and calls it per assembly, so it must be
+    cheap and SILENT (the boot INFO line is owned by ``load_config``;
+    this accessor never logs — S13 reviewer gate).
+
+    Warm cache (``load_config`` already ran in this process): return
+    the installed value. Restart-to-flip semantics — env changes
+    mid-flight are invisible.
+
+    Cold cache (tests / programmatic boots that never call
+    ``load_config``): resolve ONCE from the env var directly — same
+    permissive vocabulary as :func:`_parse_kv_ambient_env_value` — and
+    cache the result. Unset / empty env → the documented ``True``
+    default (an unrecognized non-empty value raises, matching the
+    boot-path fail-loud posture).
+    """
+    global _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+    if _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED is None:
+        raw = os.environ.get(ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+        if raw is None or not raw.strip():
+            _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED = True
+        else:
+            _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED = _parse_kv_ambient_env_value(raw)
+    return _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+
+
+def _reset_kv_ambient_for_tests() -> None:
+    """Clear the cached kill-switch state so tests can re-resolve after
+    mutating the env. Test-only — production code never invokes this
+    (mirror of ``_reset_wc_wake_enqueue_for_tests``)."""
+    global _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+    _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED = None
+
+
 def resolve_injected_notes_absorb() -> bool:
     """Resolve the ``ENSEMBLE_INJECTED_NOTES_ABSORB`` kill-switch.
 
@@ -2406,6 +2646,26 @@ def load_config(config_path: str | None = None) -> Config:
         ens_value=os.environ.get("ENSEMBLE_PROACTIVE_COMPACTION"),
         cpe_value=os.environ.get("COMPACTION_PROACTIVE_ENABLED"),
     )
+    # kv-ambient C2 (kv-ambient-awareness-fix) — explicit resolution
+    # for ``context_messages.kv_ambient_system_default_enabled``
+    # mirrors ``_resolve_proactive_enabled`` directly above
+    # (init-kwarg-beats-env inversion + empty-string normalization).
+    # The section is ALWAYS present in ``config_dict`` so an env-only
+    # deployment (no ``context_messages:`` key in yaml) still
+    # resolves the kill-switch. See ``_resolve_kv_ambient_from_sources``
+    # for the precedence + empty-string contract.
+    context_messages_config: Dict[str, Any] = {}
+    if "context_messages" in processed_config:
+        context_messages_config = processed_config["context_messages"].copy()
+    context_messages_config["kv_ambient_system_default_enabled"] = (
+        _resolve_kv_ambient_from_sources(
+            context_messages_config.get("kv_ambient_system_default_enabled"),
+            ens_value=os.environ.get(
+                ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED
+            ),
+        )
+    )
+    config_dict["context_messages"] = context_messages_config
     # Boot-time validation for the injected-notes absorb kill-switch
     # (``ENSEMBLE_INJECTED_NOTES_ABSORB``). The resolver is read-at-call by
     # ``daemon/compaction.py::_injected_note_absorbed_ids``; invoking it
@@ -2471,6 +2731,25 @@ def load_config(config_path: str | None = None) -> Config:
 
     # Create and validate config
     config = Config(**config_dict)
+
+    # kv-ambient C2 (S13 reviewer gate) — install the RESOLVED flag
+    # into the module cache and emit the boot INFO line HERE, at
+    # config-resolution time. This line MUST stay on the boot path:
+    # moving it into the per-call accessor
+    # (``_resolve_kv_ambient_system_default_enabled``) would make a
+    # quiet-daemon boot-log grep false-fail (no traffic since restart
+    # → line never printed → operator misreads the flag as OFF).
+    # Operators verify the live state via: grep
+    # 'kv_ambient_system_default_enabled' data/logs/ensemble.log
+    _install_kv_ambient_system_default_enabled(
+        config.context_messages.kv_ambient_system_default_enabled
+    )
+    logger.info(
+        "[ContextMessages] kv_ambient_system_default_enabled=%s "
+        "(env %s)",
+        config.context_messages.kv_ambient_system_default_enabled,
+        ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
+    )
 
     # Push the non-status transient-channel pattern lists into the
     # classifier module (docs/plans/transient-channel-retry-widening.md
