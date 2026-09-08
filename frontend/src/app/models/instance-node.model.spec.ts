@@ -237,6 +237,75 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       expect(tree.liveRoots[0].children[0].attachedJobs.map((j) => j.job_id)).toEqual(['jk']);
     });
 
+    describe('F1 real-wire-shape attachment — grouping key mission_id ?? instance_id', () => {
+      // SPEC HONESTY (2026-09-08 live-smoke fix F1): every fixture
+      // above mocks ``mission_id`` directly — which is exactly why
+      // they were BLIND to the real wire. On the live jobs LIST
+      // (``GET /api/jobs``), ``JobQueueService.list_work(root_only=True)``
+      // drops child-bound JobItems from work-record enrichment, so a
+      // receipt bound to a CHILD instance ships ``mission_id: null``
+      // while the raw ``JobItem`` column ``instance_id`` stays
+      // populated. These fixtures therefore replicate the REAL list
+      // wire shape (child-bound: instance_id set, mission_id null) —
+      // a regression here means child receipts silently land in
+      // Queued/recentFlat instead of under their child nodes again.
+
+      it('attaches a child-bound receipt shipped as mission_id:null + instance_id set (REAL list wire shape)', () => {
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', children: ['kid'] }),
+          mkRow({ instance_id: 'kid', parent_id: 'root', agent_id: 'worker' }),
+        ]);
+        // The REAL wire shape for a child-bound row: scalar mission_id
+        // is NULL (BE list enrichment drops child-bound JobItems under
+        // root_only=True); instance_id (the raw JobItem column) is
+        // always populated. Must attach under the CHILD node — NOT
+        // Queued, NOT recentFlat.
+        const tree = buildInstanceTree(
+          roots,
+          [createMockJob({ job_id: 'j-child', mission_id: null, instance_id: 'kid', status: 'processing' })],
+          []
+        );
+        expect(tree.liveRoots[0].attachedJobs).toEqual([]);
+        expect(tree.liveRoots[0].children[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-child']);
+        expect(tree.queued).toEqual([]);
+        expect(tree.recentFlat).toEqual([]);
+      });
+
+      it('mixed wire page: root-bound (mission_id set) + child-bound (mission_id null) BOTH attach under their own nodes', () => {
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', children: ['kid'] }),
+          mkRow({ instance_id: 'kid', parent_id: 'root', agent_id: 'worker' }),
+        ]);
+        const tree = buildInstanceTree(
+          roots,
+          [
+            createMockJob({ job_id: 'j-root-bound', mission_id: 'root', instance_id: 'root', status: 'processing' }),
+            createMockJob({ job_id: 'j-child-bound', mission_id: null, instance_id: 'kid', status: 'processing' }),
+          ],
+          []
+        );
+        // Root-bound receipt: under the ROOT node.
+        expect(tree.liveRoots[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-root-bound']);
+        // Child-bound receipt: under the CHILD node (not the root, not queued).
+        expect(tree.liveRoots[0].children[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-child-bound']);
+        expect(tree.queued).toEqual([]);
+      });
+
+      it('a terminal child-bound receipt with mission_id:null attaches under its child node (not recentFlat)', () => {
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', children: ['kid'] }),
+          mkRow({ instance_id: 'kid', parent_id: 'root', agent_id: 'worker' }),
+        ]);
+        const tree = buildInstanceTree(
+          roots,
+          [],
+          [createMockJob({ job_id: 'j-term-child', mission_id: null, instance_id: 'kid', status: 'settled' })]
+        );
+        expect(tree.recentFlat).toEqual([]);
+        expect(tree.liveRoots[0].children[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-term-child']);
+      });
+    });
+
     it('routes unattached NON-TERMINAL jobs to queued — at depth, orphans included (NEVER hide)', () => {
       const roots = buildInstanceNodes([
         mkRow({ instance_id: 'root', children: ['kid'] }),
@@ -801,6 +870,32 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       };
       expect(instanceTreeItemId(inst)).toBe('inst:live|inst:a');
       expect(instanceTreeItemId(job)).toBe('inst:live|inst:a|job:j1');
+    });
+  });
+
+  // F1 source-drift pin (2026-09-08): the REAL production grouping
+  // key must be the COALESCED ``job.mission_id ?? job.instance_id``.
+  // The behavioural fixtures above run against buildInstanceTree, but
+  // a scalar-only revert of the ``route`` keying (``mission_id ??
+  // null``) would slip past any fixture whose mocks populate
+  // mission_id directly — the exact test-blindness that let F1 ship.
+  // This pin reads the production source so a scalar-only revert
+  // fails loudly.
+  describe('production source pin — coalesced grouping key', () => {
+    let modelTs: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      modelTs = fs.readFileSync(path.join(__dirname, 'instance-node.model.ts'), 'utf-8');
+    });
+
+    it('route() keys attachments via job.mission_id ?? job.instance_id ?? null', () => {
+      expect(modelTs).toContain('job.mission_id ?? job.instance_id ?? null');
+    });
+
+    it('does NOT key attachments on the scalar mission_id alone', () => {
+      expect(modelTs).not.toContain('job.mission_id ?? null');
     });
   });
 });

@@ -166,7 +166,10 @@ export interface InstanceRow {
 export interface InstanceNode {
   instance: InstanceRow;
   children: InstanceNode[];
-  /** Jobs attached to THIS node (``mission_id === instance_id``). */
+  /** Jobs attached to THIS node (grouping key ``mission_id ??
+   *  instance_id`` — the two are equal by the mission identity rule;
+   *  the fallback covers the list wire's null ``mission_id`` on
+   *  child-bound rows). */
   attachedJobs: Job[];
 }
 
@@ -316,9 +319,11 @@ function subtreeIsLive(node: InstanceNode): boolean {
  * - ``recentJobs`` — terminal jobs.
  *
  * Rules (user-locked design V1):
- * - Each job attaches to its instance node AT ANY DEPTH via
- *   ``job.mission_id === instance_id`` (mission_id IS instance_id —
- *   the grouping key).
+ * - Each job attaches to its instance node AT ANY DEPTH via the
+ *   coalesced grouping key ``job.mission_id ?? job.instance_id``
+ *   (mission identity rule: ``mission_id == instance_id``; the
+ *   fallback exists because the BE jobs LIST wire ships ``mission_id:
+ *   null`` for child-bound rows — see the ``route`` comment below).
  * - Jobs matching NO node: non-terminal → ``queued``, terminal →
  *   ``recentFlat`` (NEVER-hide preserved — orphans always surface).
  * - A root is LIVE if the root itself is live OR ANY descendant is
@@ -358,11 +363,24 @@ export function buildInstanceTree(
   // 3) Attach each job to its node AT ANY DEPTH; unmatched jobs fall
   //    back to queued (non-terminal) / recentFlat (terminal) — a job
   //    never silently vanishes.
+  //
+  //    Grouping key coalescing (2026-09-08 live-smoke fix F1): the
+  //    mission identity rule is ``mission_id == instance_id``, but the
+  //    BE jobs LIST wire does NOT always populate the scalar
+  //    ``mission_id`` — ``JobQueueService.list_work(root_only=True)``
+  //    (the ``GET /api/jobs`` enrichment default) drops child-bound
+  //    JobItems from work-record enrichment, so a receipt bound to a
+  //    CHILD instance ships ``mission_id: null`` on the list wire
+  //    while the raw ``JobItem`` column ``instance_id`` stays
+  //    populated. Falling back to ``instance_id`` restores attachment
+  //    under the child node; for rows where both are populated they
+  //    are equal by the identity rule, so the fallback can never
+  //    re-key a job to a DIFFERENT node.
   const jobsByNode = new Map<string, Job[]>();
   const queued: Job[] = [];
   const orphanRecentFlat: Job[] = [];
   const route = (job: Job): void => {
-    const mid = job.mission_id ?? null;
+    const mid = job.mission_id ?? job.instance_id ?? null;
     const node = mid ? nodesById.get(mid) : undefined;
     if (node) {
       const list = jobsByNode.get(node.instance.instance_id);

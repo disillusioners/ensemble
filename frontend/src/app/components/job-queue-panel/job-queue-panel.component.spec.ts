@@ -1308,8 +1308,39 @@ describe('JobQueuePanelComponent Logic', () => {
     });
 
     it('Enter on instance rows routes through the SAME navigate handler (keymap)', () => {
-      const hits = templateHtml.split('(keydown.enter)="onInstanceRowClick(item.node)"').length - 1;
+      const hits = templateHtml.split(
+        '(keydown.enter)="$event.preventDefault(); onInstanceRowClick(item.node)"'
+      ).length - 1;
       expect(hits).toBeGreaterThanOrEqual(2);
+    });
+
+    it('F2: EVERY row (keydown.enter) binding preventDefaults the event', () => {
+      // Live-smoke fix F2 (2026-09-08): Enter's browser default action
+      // synthesizes a click on the element focused at default-action
+      // time. closeMenu() restores focus to the menu TRIGGER mid-
+      // dispatch, so without preventDefault the synthetic click hits
+      // the trigger and toggleMenu() RE-OPENS the menu right after the
+      // close — the panel "stays open" after keyboard navigation
+      // (reproduced live 2×; mechanism + fix validated in a real
+      // browser with a mock BE). A revert of ANY row binding to the
+      // scalar `(keydown.enter)="handler(x)"` form re-opens the bug:
+      // pin all three binding shapes (live+recent instance rows, live
+      // +recent job rows, queued+recent-flat rows).
+      const shapes = [
+        ['$event.preventDefault(); onInstanceRowClick(item.node)', 2],
+        ['$event.preventDefault(); onRowClick(item.job)', 2],
+        ['$event.preventDefault(); onRowClick(job)', 2],
+      ] as const;
+      for (const [binding, min] of shapes) {
+        const hits = templateHtml.split(`(keydown.enter)="${binding}"`).length - 1;
+        expect(hits).toBeGreaterThanOrEqual(min);
+      }
+      // And NO bare (non-preventDefault) row Enter binding survives.
+      // The lookahead is bounded to the attribute value ([^"]*) so it
+      // can't be satisfied by preventDefault text appearing LATER in
+      // the template.
+      const bare = templateHtml.match(/\(keydown\.enter\)="(?![^"]*preventDefault)[^"]*(?:onInstanceRowClick|onRowClick)[^"]*"/g) ?? [];
+      expect(bare).toEqual([]);
     });
 
     it('W2 chevron is a REAL focusable button (native activation for keyboard)', () => {

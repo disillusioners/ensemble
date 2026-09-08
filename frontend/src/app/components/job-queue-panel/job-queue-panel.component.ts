@@ -39,9 +39,10 @@ import { MissionLivenessChipComponent } from '../mission-liveness-chip/mission-l
  *     have ANY live descendant (first 2 auto-expand; further live
  *     roots collapsed). Child instance rows indent beneath; receipt
  *     jobs indent under their node.
- *   * QUEUED section — non-terminal jobs whose ``mission_id`` matched
- *     NO instance node. Always falls back so a job never silently
- *     vanishes (only rendered when non-empty).
+ *   * QUEUED section — non-terminal jobs whose grouping key
+ *     (``mission_id ?? instance_id``) matched NO instance node.
+ *     Always falls back so a job never silently vanishes (only
+ *     rendered when non-empty).
  *   * RECENT section — terminal roots (newest first, capped at 10
  *     TOTAL rows across node headers + their jobs + flat rows; jobs
  *     that don't fit overflow to ``recentFlat``) + orphan terminal
@@ -93,9 +94,12 @@ export class JobQueuePanelComponent {
 
   /**
    * All non-terminal jobs (running + pending + paused). Jobs whose
-   * ``mission_id`` resolves to an instance node (at ANY depth)
-   * attach to that node; the rest reach ``tree().queued`` — the
-   * NEVER-hide contract keeps every job visible exactly once.
+   * grouping key (``mission_id ?? instance_id`` — the BE list wire
+   * ships ``mission_id: null`` for child-bound rows, the raw
+   * ``instance_id`` column is always populated) resolves to an
+   * instance node (at ANY depth) attach to that node; the rest reach
+   * ``tree().queued`` — the NEVER-hide contract keeps every job
+   * visible exactly once.
    */
   activeJobs = input<Job[]>([]);
 

@@ -94,8 +94,12 @@ export interface Job {
   // equals ``instance_id`` for mirror rows and the task row's own
   // instance for task rows) and ``mission_ref`` (the cross-reference
   // payload the BE added in M2) on EVERY job payload — FE consumes
-  // them verbatim and uses ``mission_id`` as the grouping key for
-  // the new tree panel. Both optional for backward compatibility.
+  // them verbatim. NOTE (2026-09-08 live-smoke fix F1): the jobs LIST
+  // wire ships ``mission_id: null`` for CHILD-bound rows (the BE list
+  // enrichment drops child-bound JobItems under ``root_only=True``) —
+  // the tree panel therefore groups by the COALESCED key
+  // ``mission_id ?? instance_id``, not the scalar alone. Both fields
+  // optional for backward compatibility.
   mission_id?: string | null;
   mission_ref?: { mission_id: string; agent_id: string; liveness: string } | null;
 }

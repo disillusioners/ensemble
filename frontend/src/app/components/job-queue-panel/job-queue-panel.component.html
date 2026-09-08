@@ -41,6 +41,19 @@
           <ul class="tree" role="tree" aria-label="Live conversations">
             @for (item of liveItems(); track itemId(item)) {
               @if (item.kind === 'instance') {
+                <!-- F2 (2026-09-08 live-smoke fix): row Enter keydowns
+                     MUST preventDefault. Enter's browser default action
+                     synthesizes a click on the element focused at
+                     default-action time — and closeMenu() restores
+                     focus to the menu TRIGGER mid-dispatch, so the
+                     synthetic click hits the trigger button and
+                     toggleMenu() re-opens the menu right after the
+                     close (panel "stays open" — live-reproduced 2×,
+                     mechanism + fix validated in a real browser).
+                     Click rows close normally: a click event has no
+                     keydown default action to synthesize. The SAME
+                     preventDefault guard applies to every row Enter
+                     binding below (job rows, queued, recent). -->
                 <li
                   class="tree-node instance-node"
                   role="treeitem"
@@ -52,7 +65,7 @@
                     [id]="itemId(item)"
                     [style.padding-left.px]="indentPx(item.depth)"
                     (click)="onInstanceRowClick(item.node)"
-                    (keydown.enter)="onInstanceRowClick(item.node)"
+                    (keydown.enter)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (focus)="onRowFocus(itemId(item))"
                     tabindex="0">
@@ -90,7 +103,7 @@
                     [id]="itemId(item)"
                     [style.padding-left.px]="indentPx(item.depth)"
                     (click)="onRowClick(item.job)"
-                    (keydown.enter)="onRowClick(item.job)"
+                    (keydown.enter)="$event.preventDefault(); onRowClick(item.job)"
                     (keydown.space)="$event.preventDefault(); onRowClick(item.job)"
                     (focus)="onRowFocus(itemId(item))"
                     role="button"
@@ -140,9 +153,9 @@
       }
 
       <!-- QUEUED section — non-terminal unattached jobs. NEVER-hide rule
-           guarantees any non-terminal job whose mission_id doesn't
-           resolve to an instance node lands here. Reached via Tab
-           (outside any role="tree"). -->
+           guarantees any non-terminal job whose grouping key
+           (mission_id ?? instance_id) doesn't resolve to an instance
+           node lands here. Reached via Tab (outside any role="tree"). -->
       @if (tree().queued.length > 0) {
         <div class="section">
           <div class="section-title">Queued</div>
@@ -150,7 +163,7 @@
             <div
               class="job-row queued-row"
               (click)="onRowClick(job)"
-              (keydown.enter)="onRowClick(job)"
+              (keydown.enter)="$event.preventDefault(); onRowClick(job)"
               (keydown.space)="$event.preventDefault(); onRowClick(job)"
               role="button"
               tabindex="0"
@@ -208,7 +221,7 @@
                     [id]="itemId(item)"
                     [style.padding-left.px]="indentPx(item.depth)"
                     (click)="onInstanceRowClick(item.node)"
-                    (keydown.enter)="onInstanceRowClick(item.node)"
+                    (keydown.enter)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (focus)="onRowFocus(itemId(item))"
                     tabindex="0">
@@ -248,7 +261,7 @@
                     [id]="itemId(item)"
                     [style.padding-left.px]="indentPx(item.depth)"
                     (click)="onRowClick(item.job)"
-                    (keydown.enter)="onRowClick(item.job)"
+                    (keydown.enter)="$event.preventDefault(); onRowClick(item.job)"
                     (keydown.space)="$event.preventDefault(); onRowClick(item.job)"
                     (focus)="onRowFocus(itemId(item))"
                     role="button"
@@ -302,7 +315,7 @@
                   [class.status-cancelled]="job.status === 'cancelled'"
                   [class.status-dead_letter]="job.status === 'dead_letter'"
                   (click)="onRowClick(job)"
-                  (keydown.enter)="onRowClick(job)"
+                  (keydown.enter)="$event.preventDefault(); onRowClick(job)"
                   (keydown.space)="$event.preventDefault(); onRowClick(job)"
                   role="button"
                   tabindex="0"
