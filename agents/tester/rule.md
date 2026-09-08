@@ -59,8 +59,8 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Follow the test-pack skill** for pack structure: 5-min hard cap, dual-layer timeout, `<scope>_<type>_test` naming, PASS/FAIL/TIMEOUT output, partial-pass handling
 - **One pack per worker** — dispatch one worker per pack (via `load_skill="test-pack-execution"`); never bundle multiple packs into one message
 - **Independent packs run in parallel** (separate workers); dependent packs run sequentially
-- **Always send the strict "Run Single Test Pack" template** (see workflow.md) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
-- **Run the Pre-Send Self-Check before every message** (see workflow.md); never send a message that fails it
+- **Always send the strict "Run Single Test Pack" template** (see workflow.md → Run Single Test Pack — Strict Message Template (MANDATORY)) — never a free-form "run the tests" / "run unit tests" / "run all tests" / `go test ./...` / `pytest tests/` message
+- **Run the Pre-Send Self-Check before every message** (see workflow.md → Pre-Send Self-Check); never send a message that fails it
 - **Never spawn without a time estimate** — every pack must have a runtime estimate before launch; split any pack estimated > 5 min before spawning
 - **Long-wait tests** (retries/sleeps/polls) use overridden config/env in a separate pack — never relax the 5-min cap; document the override in MOCK_TESTS.md / PACKS.md
 - **Pack timeout limits** (all ≤ 5-min hard cap): unit 2 min; integration/feature/e2e 5 min; mock per MOCK_TESTS.md
@@ -86,7 +86,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 ### TTQA & Test Architecture Maintenance
 - **On pack timeout: run TTQA** — re-run and verify under timeout
   - TTQA optimizations (canonical list): mock external services; skip tests needing unavailable API keys; override ENV to match conditions sooner; reduce retry attempts / sleep intervals; disable slow/flaky sub-tests
-- **After TTQA, attempt a Test Architecture Fix** (not just escalation) — fix the root cause permanently (see workflow.md)
+- **After TTQA, attempt a Test Architecture Fix** (not just escalation) — fix the root cause permanently (see workflow.md → Test Architecture Fix Workflow)
 - **Keeping packs small is an ongoing duty** — split packs *before* they breach the limit; fix slow/bloated packs right after finding them
 - **Test-code architecture changes are the tester's job** — NOT blocked by the production "no architecture change" rule; preserve coverage/behavior equivalence; never change production code under a Test Architecture Fix
   - Owned fixes (non-exhaustive): split bloated packs (update PACKS.md); mock slow external deps; reduce/parameterize sleeps/retries/waits (or move to overridden config/env); share/remove redundant setup; isolate order-dependent/shared-state tests; parallelize within a pack where safe
@@ -99,7 +99,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **"No architecture change" = PRODUCTION code only** — test-code architecture changes are permitted (use Test Architecture Fix workflow for ≥ 20 lines)
 - **Instance fixes, re-tests, commits, reports** — commit before reporting; document in results
 - **Reuse the worker that found it** — most efficient path; reuse with `load_skill="quick-fix"` if context is relevant
-- See workflow.md for examples
+- See workflow.md → Quick Fix Process for examples
 
 ### Mock Test Coordination
 - **Design specs** — what, how, ports (> 10000), timeout, scenarios; document in MOCK_TESTS.md before implementation

@@ -94,7 +94,7 @@ Exit codes:
 
 ## TTQA
 
-When timeout occurs, apply TTQA optimizations per rule.md.
+When timeout occurs, apply TTQA optimizations per rule.md → TTQA & Test Architecture Maintenance.
 
 ---
 

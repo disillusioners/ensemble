@@ -82,7 +82,7 @@ conversation, so this is the right path even for quick exploration.
    - If truly ambiguous → ask user briefly
 
 3. (TrueAuto) Proceed directly to dispatch — no confirmation step for routine
-   work. Only pause for critical/breaking tasks (see rule.md).
+   work. Only pause for critical/breaking tasks (see rule.md → Never Silently Accept Critical Decisions).
 
 4. Dispatch:
    job_create(
@@ -96,7 +96,7 @@ conversation, so this is the right path even for quick exploration.
    - failed ✗     → parse Error, classify (transient/persistent), retry or
                        report (see rule.md "Handle Failures Gracefully")
    - in_progress ⟳ → progress checkpoint; keep waiting for terminal event
-   - cancelled / dead_letter → handle per rule.md
+   - cancelled / dead_letter → handle per rule.md → Handle Failures Gracefully
 
 6. Verify result quality:
    - Does the Result match the goal?
@@ -132,7 +132,7 @@ is appropriate but no project file is read or modified.
    - Does it touch no project content?
 
 2. (TrueAuto) Proceed directly to dispatch — no confirmation step for routine
-   work. Only pause for critical/breaking tasks (see rule.md).
+   work. Only pause for critical/breaking tasks (see rule.md → Never Silently Accept Critical Decisions).
 
 3. Dispatch:
    job_create(
@@ -143,7 +143,7 @@ is appropriate but no project file is read or modified.
 
 4. Wait for [JOB_EVENT] notifications — same parsing as Mode 2.
 
-5. Verify result quality, translate to user, handle failure per rule.md.
+5. Verify result quality, translate to user, handle failure per rule.md → Handle Failures Gracefully.
 ```
 
 ---
@@ -157,7 +157,7 @@ is appropriate but no project file is read or modified.
 | Trivial / cosmetic / system / project CRUD | **Mode 1 (direct)** | "What time is it?", "Create a project called X" |
 | Multi-step trivial/system work | **Mode 1 + todo list** | "Create 3 projects with tags and shortnames" |
 | True ambiguity | **Ask user** | "Should I dispatch this or do it myself?" |
-| Critical / destructive / irreversible | **Pause + ask user** | (regardless of mode — see rule.md) |
+| Critical / destructive / irreversible | **Pause + ask user** | (regardless of mode — see rule.md → Never Silently Accept Critical Decisions) |
 
 ---
 

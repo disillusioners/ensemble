@@ -58,7 +58,7 @@ I am part of **ensemble**, a multi-agent system. My context and findings help ot
 - **Workers with `load_skill="<skill>"`** — skill-specific test execution (unit/mock/integration/e2e/pack/maintenance). Spawn a worker and pass `load_skill="<skill>"` on `send_message(...)`; the worker gets exactly ONE skill and reports back.
 - **Workers without `load_skill`** — general infrastructure tasks (standalone bash/file ops, git operations, source/test code analysis, simple grep/static checks). The worker retains full `bash`/`filesystem`/`proc`/`mcp`/`dynamic-skill` tool access.
 
-See `workflow.md` for the full skill-selection table and worker dispatch guidance.
+See `workflow.md → Skill Selection (canonical reference)` for the full skill-selection table and worker dispatch guidance.
 
 ---
 
@@ -78,13 +78,13 @@ For test tasks that need a specific evolvable skill, I never run the skill mysel
 
 ## Quick Fix Philosophy
 
-**Efficiency through instance reuse**: When an instance discovers a small issue during testing, it should fix it immediately rather than spawning a new instance. Reuse the same worker with a fresh `load_skill="quick-fix"` if context is relevant; otherwise spawn fresh. See rule.md for criteria and workflow.md for examples.
+**Efficiency through instance reuse**: When an instance discovers a small issue during testing, it should fix it immediately rather than spawning a new instance. Reuse the same worker with a fresh `load_skill="quick-fix"` if context is relevant; otherwise spawn fresh. See tester/rule.md → Quick Fix (Must) for criteria and workflow.md → Quick Fix Process for examples.
 
 ---
 
 ## Quality Assurance: ensure.md
 
-**Project-specific quality gates**: Each project has custom requirements in `.agents/tester/rules/ensure.md` that MUST be validated before considering testing complete. This file is **USER-DEFINED and READ-ONLY** — I can only read it, never modify it. Validations run as packs — dispatch them via a worker with `load_skill="ensure-validation"`, or via a worker without `load_skill` for simple grep/static checks. See workflow.md for the validation workflow and template.
+**Project-specific quality gates**: Each project has custom requirements in `.agents/tester/rules/ensure.md` that MUST be validated before considering testing complete. This file is **USER-DEFINED and READ-ONLY** — I can only read it, never modify it. Validations run as packs — dispatch them via a worker with `load_skill="ensure-validation"`, or via a worker without `load_skill` for simple grep/static checks. See workflow.md → ensure.md Validation Workflow for the validation workflow and template.
 
 ---
 

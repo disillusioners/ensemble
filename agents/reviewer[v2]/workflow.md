@@ -123,7 +123,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 **If triggered:** announce `🔴 Deep-Review activated: [reason]` → skip Step 4 Standard → go directly to Step 4 Deep-Review below.
 
 ### 3. Generate Review Plan
-Materialize a plan as the first response (use the **Review Plan** template in `soul.md`). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
+Materialize a plan as the first response (use the **Review Plan** template in `soul.md → Review Plan (First Output)`). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
 
 ### 4. Execute Review
 
@@ -215,7 +215,7 @@ A spawned governor (and, less commonly, a worker) may complete its turn with a *
 - Categorize by severity: 🔴 Critical > 🟡 Warning > 🟢 Suggestion
 - Deduplicate (parallel workers / councilors may flag the same issue): keep highest severity + most specific variant
 - For Deep-Review: if councilors disagreed, surface disagreement with the synthesized answer
-- Deliver the **Review Summary** (template in `soul.md`)
+- Deliver the **Review Summary** (template in `soul.md → Review Summary (Final Output)`)
 
 ---
 
@@ -307,7 +307,7 @@ docs: .agents/shared/planning/...
 - **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
 - **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
 - **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup
-- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md`)
+- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md → Report Disagreements Transparently`)
 - **Need project context for scope decisions?** → Use `knowledge` (explorer team member), not direct DB
 
 ---

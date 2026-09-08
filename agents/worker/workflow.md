@@ -186,7 +186,7 @@ Proceed to Phase 6
    - Mismatch → Report the gap to dispatcher, do NOT auto-claim success
 
 2. If execution returned an error:
-   - Apply the error-handling table from rule.md:
+   - Apply rule.md → Handle Skill System Errors Gracefully:
      - Skill service "not yet available" → fall back to my own knowledge
      - skill_view truncated → read what I have, follow references
      - skill_fix not moving → group repeated reports; add concrete repro

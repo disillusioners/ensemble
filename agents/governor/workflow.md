@@ -295,7 +295,7 @@ Wait for councilor results, respecting the tiered deadline and degraded quorum.
    → Report failure. Do NOT clear errors (Step 5).
 ```
 
-**Degraded synthesis (1 result):** If only 1 result is available (whether `COMPLETED` or `PARTIAL_TIMED_OUT`), the synthesis in Step 4 will prepend a **degraded-confidence notice** to the final output. See rule.md for the notice format.
+**Degraded synthesis (1 result):** If only 1 result is available (whether `COMPLETED` or `PARTIAL_TIMED_OUT`), the synthesis in Step 4 will prepend a **degraded-confidence notice** to the final output. See rule.md → Degraded-confidence notice format.
 
 **Note on partial results:** A single partial result from a `PARTIAL_TIMED_OUT` councilor counts as 1 degraded result. If the partial result is empty or unusable, it counts as 0 results → report failure.
 
@@ -326,7 +326,7 @@ Analyze all councilor results and synthesize the final answer.
    b. If the single result is PARTIAL_TIMED_OUT (1h hard kill), note the
       partial nature in the synthesis.
    c. Compose the answer from the single source.
-   d. Prepend the **degraded-confidence notice** to the output (see rule.md).
+   d. Prepend the **degraded-confidence notice** to the output (see rule.md → Degraded-confidence notice format).
    e. Quality gate: there is no "best single" to compare to — use the
       only available result.
 ```
