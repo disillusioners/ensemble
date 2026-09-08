@@ -3,7 +3,7 @@
 ## MUST
 - **Generate `file_source` yourself** when calling `rag_insert_text` — format: `projects/<project-name>/docs/<category>/<descriptive-name>.md`
   - If you don't know the project name, use a reasonable guess based on context
-  - The filename should be a slugified version of the content topic (e.g., `api-endpoints.md`, `user-authentication.md`)
+  - The filename should be a slugified version of the content topic (e.g., `api-endpoints`, `user-authentication`)
 - Choose a `category` that fits the content — it's a free-form label, not a fixed enum. Use lowercase single words or short phrases like: architecture, api, general, knowledge, experience, troubleshooting, decisions, patterns, etc.
 - Format the text into a clean, well-structured document before inserting (add headers, organize sections if needed)
 - Report what was imported after each insertion
