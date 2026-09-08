@@ -29,8 +29,12 @@
            jobs at leaves. The panel renders FROM the flattened
            visibleItems() list (per-section view), so keyboard order ==
            DOM order by construction. ROW CLICK = NAVIGATE (emits
-           instanceClick); the chevron is the ONLY expand toggle (its
-           handler stops propagation). -->
+           instanceClick); the chevron is a real <button
+           type="button"> with aria-expanded bound to the expansion
+           state — native activation (Enter/Space via native button
+           activation emits click, which the stopPropagation'd chevron
+           handler consumes) handles keyboard support, so no separate
+           (keydown.enter) handler is needed. -->
       @if (liveItems().length > 0) {
         <div class="section section-live-instances">
           <div class="section-title">Live conversations</div>
@@ -52,14 +56,14 @@
                     (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (focus)="onRowFocus(itemId(item))"
                     tabindex="0">
-                    <span
+                    <button
+                      type="button"
                       class="instance-chevron"
-                      role="button"
                       [attr.aria-label]="'Toggle expansion for ' + instanceTitle(item.node.instance)"
-                      (click)="onChevronClick($event, item.node.instance.instance_id)"
-                      (keydown.enter)="onChevronClick($event, item.node.instance.instance_id)">
+                      [attr.aria-expanded]="isExpanded(item.node.instance.instance_id)"
+                      (click)="onChevronClick($event, item.node.instance.instance_id)">
                       <mat-icon aria-hidden="true">{{ chevron(item.node.instance.instance_id) }}</mat-icon>
-                    </span>
+                    </button>
                     <span
                       class="instance-status"
                       [style.color]="instanceStatusColor(item.node.instance.status)"
@@ -208,14 +212,14 @@
                     (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
                     (focus)="onRowFocus(itemId(item))"
                     tabindex="0">
-                    <span
+                    <button
+                      type="button"
                       class="instance-chevron"
-                      role="button"
                       [attr.aria-label]="'Toggle expansion for ' + instanceTitle(item.node.instance)"
-                      (click)="onChevronClick($event, item.node.instance.instance_id)"
-                      (keydown.enter)="onChevronClick($event, item.node.instance.instance_id)">
+                      [attr.aria-expanded]="isExpanded(item.node.instance.instance_id)"
+                      (click)="onChevronClick($event, item.node.instance.instance_id)">
                       <mat-icon aria-hidden="true">{{ chevron(item.node.instance.instance_id) }}</mat-icon>
-                    </span>
+                    </button>
                     <span
                       class="instance-status"
                       [style.color]="instanceStatusColor(item.node.instance.status)">

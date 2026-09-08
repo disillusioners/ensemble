@@ -178,8 +178,11 @@
   }
 
   // CHEVRON = the ONLY expand toggle (row click navigates). The
-  // chevron span swallows its own click (stopPropagation in
-  // onChevronClick); keep it visually a quiet affordance.
+  // chevron is a real <button type="button"> with aria-expanded bound
+  // to the expansion state — native click + Enter/Space activation
+  // emit a click event the chevron handler stops propagating so the
+  // row's navigate-click never fires. Reset button defaults so the
+  // visual affordance stays a quiet icon button.
   .instance-chevron {
     flex-shrink: 0;
     display: inline-flex;
@@ -187,13 +190,22 @@
     justify-content: center;
     width: 18px;
     height: 18px;
+    padding: 0;
+    border: none;
+    background: transparent;
     border-radius: 3px;
     color: #94a3b8;
     cursor: pointer;
+    font: inherit; // native <button> would otherwise inherit a different baseline
 
     &:hover {
       background: rgba(255, 255, 255, 0.08);
       color: #e2e8f0;
+    }
+
+    &:focus-visible {
+      outline: 2px solid rgba(148, 163, 184, 0.6);
+      outline-offset: 1px;
     }
 
     mat-icon {

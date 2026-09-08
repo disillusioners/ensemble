@@ -121,7 +121,21 @@ class MockJobQueuePanelComponent {
    */
   private readonly _expandedInstances = signal<Set<string>>(new Set());
 
+  /**
+   * G1 mirror — ids the user has manually toggled. The real
+   * component's auto-seed effect filters these out of
+   * ``shouldAutoExpandInstanceTree`` and never re-toggles them. The
+   * mirror needs the same bookkeeping to drive the G1 pin.
+   */
+  private readonly _userTouchedInstances = signal<Set<string>>(new Set());
+
   toggleInstance(instanceId: string): void {
+    this._userTouchedInstances.update((s) => {
+      if (s.has(instanceId)) return s;
+      const next = new Set(s);
+      next.add(instanceId);
+      return next;
+    });
     this._expandedInstances.update((s) => {
       const next = new Set(s);
       if (next.has(instanceId)) next.delete(instanceId);
@@ -137,6 +151,36 @@ class MockJobQueuePanelComponent {
 
   /** Read-only view — used by the survival test. */
   readonly expandedInstances = this._expandedInstances.asReadonly();
+
+  /** Read-only view — used by the G1 pin (user-touched ids). */
+  readonly userTouchedInstances = this._userTouchedInstances.asReadonly();
+
+  /**
+   * G1 auto-seed mirror — equivalent to the real component's
+   * constructor effect: when the LIVE-root set drifts, auto-seed the
+   * UNTOUCHED first-2-live ids, MERGING onto the existing expansion
+   * set. NEVER un-toggle or re-expand a user-decided id. The mirror
+   * exposes this as a method (instead of an effect) so the test can
+   * drive it deterministically across successive live-set changes.
+   */
+  applyAutoSeed(): void {
+    const liveRoots = this.tree().liveRoots;
+    const touched = this._userTouchedInstances();
+    const seedIds = shouldAutoExpandInstanceTree(liveRoots).filter(
+      (id) => !touched.has(id)
+    );
+    if (seedIds.length === 0) return;
+    const current = this._expandedInstances();
+    const next = new Set(current);
+    let changed = false;
+    for (const id of seedIds) {
+      if (!next.has(id)) {
+        next.add(id);
+        changed = true;
+      }
+    }
+    if (changed) this._expandedInstances.set(next);
+  }
 
   /** Mirror of the real read-side ``isFocusedItem``. */
   isFocusedItem(id: string | null | undefined): boolean {
@@ -713,10 +757,11 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual(['i-root']);
     });
 
-    it('structured band ≤ MAX + every-job-surfaces: partial fit keeps fitting jobs, overflow spills to recentFlat', () => {
-      // Terminal root with 12 attached jobs → header (1) + 9 jobs fit
-      // = structured band 10; the remaining 3 overflow into recentFlat
-      // (NEVER-hide — total rendered = 12 > MAX by design).
+    it('JOB-row band ≤ MAX + every-job-surfaces: partial fit keeps fitting jobs, overflow spills to recentFlat', () => {
+      // Terminal root with 12 attached jobs → 10 jobs fit (JOB-row
+      // band = MAX); the remaining 2 overflow into recentFlat
+      // (NEVER-hide). Headers ride along — the root's own header is
+      // free structure, no capacity consumed.
       component.setInstances([mkInstance({ instance_id: 'i-big', status: 'completed' })]);
       const jobs = Array.from({ length: 12 }, (_, k) =>
         createMockJob({ job_id: `j-${k}`, mission_id: 'i-big', status: 'completed' })
@@ -725,14 +770,13 @@ describe('JobQueuePanelComponent Logic', () => {
       const tree = component.tree();
       expect(tree.recentRoots.length).toBe(1);
       const visible = tree.recentRoots[0].attachedJobs.length;
-      // Structured band = header + visible jobs = 10 (exactly MAX).
-      expect(1 + visible).toBe(10);
-      // Total rendered = header + visible + overflow = 13 — exceeds
-      // MAX by design (every-job-surfaces, NEVER-hide).
-      expect(1 + visible + tree.recentFlat.length).toBe(13);
+      // JOB-row band = MAX (10 fit), headers ride along.
+      expect(visible).toBe(10);
+      // Every job surfaces — 2 overflow into recentFlat.
+      expect(tree.recentFlat.length).toBe(2);
     });
 
-    it('structured band ≤ MAX: orphan flat rows fill remaining capacity, then overflow appends after', () => {
+    it('JOB-row band ≤ MAX: orphan flat rows fill remaining capacity, then overflow appends after', () => {
       component.setInstances([
         mkInstance({ instance_id: 'i-1', status: 'completed' }),
         mkInstance({ instance_id: 'i-2', status: 'failed' }),
@@ -745,13 +789,15 @@ describe('JobQueuePanelComponent Logic', () => {
       );
       component.setRecentJobs([...flatJobs, ...nodeJobs]);
       const tree = component.tree();
-      // Structured band: i-1 (1 header + jn-1) + i-2 (1 header) + 7
-      // in-band flat = 10 (≤ MAX). The remaining 5 flat jobs overflow
-      // — total rendered = 15 = 12 jobs + 3 header rows + 0 missing.
-      const nodeVisible = tree.recentRoots.reduce((s, n) => s + 1 + n.attachedJobs.length, 0);
-      expect(nodeVisible).toBe(3); // i-1 header+jn-1, i-2 header
-      expect(tree.recentFlat.length).toBe(12); // 7 in-band + 5 overflow
-      expect(nodeVisible + tree.recentFlat.length).toBe(15); // nothing lost
+      // JOB-row band: jn-1 (1) + 9 in-band flat = 10 (≤ MAX). The
+      // remaining 3 flat jobs overflow — 2 node headers ride along
+      // (free structure). total rendered = 1 + 1 + 9 + 3 = 14.
+      const nodeVisible = tree.recentRoots.reduce((s, n) => s + n.attachedJobs.length, 0);
+      expect(nodeVisible).toBe(1); // jn-1 on i-1, i-2 contributes 0
+      expect(tree.recentFlat.length).toBe(12); // 9 in-band + 3 overflow
+      // Nothing lost: every job surfaces (1 in-band + 12 flat).
+      const totalSurfaced = nodeVisible + tree.recentFlat.length;
+      expect(totalSurfaced).toBe(13); // 1 jn-1 + 12 flat
     });
 
     it('sorts liveRoots pinned-first then activity desc (instance-list pattern)', () => {
@@ -836,6 +882,104 @@ describe('JobQueuePanelComponent Logic', () => {
       const items = component.visibleItems().filter((it) => it.tree === 'recent');
       expect(items.length).toBe(2);
       expect(items.map((it) => it.kind)).toEqual(['instance', 'job']);
+    });
+  });
+
+  // G1 (2026-09-08 review fold) — auto-seed must NEVER clobber a
+  // user-decided expansion. Track user-touched ids in a second set;
+  // auto-seed only seeds UNTOUCHED first-2-live ids and MERGES onto
+  // the existing expansion set instead of replacing it. User choices
+  // survive any subsequent live-set drift.
+  describe('G1 — auto-seed clobber fix: user decisions survive live-set drift', () => {
+    it('G1: user expansion of a non-top-2 root SURVIVES a new live root arriving', () => {
+      // Initial state: 2 live roots → auto-seed would expand i-a, i-b.
+      component.setInstances([
+        mkInstance({ instance_id: 'i-a', status: 'running', updated_at: '2026-09-08T08:00:00Z' }),
+        mkInstance({ instance_id: 'i-b', status: 'running', updated_at: '2026-09-08T09:00:00Z' }),
+      ]);
+      component.applyAutoSeed();
+      expect(component.isExpanded('i-a')).toBe(true);
+      expect(component.isExpanded('i-b')).toBe(true);
+      // User collapses an auto-seeded root (i-b) AND expands a non-
+      // top-2 root (i-c will arrive in the next poll).
+      component.toggleInstance('i-b'); // user collapse
+      expect(component.isExpanded('i-b')).toBe(false);
+      // New poll: i-c arrives as a 3rd live root.
+      component.setInstances([
+        mkInstance({ instance_id: 'i-a', status: 'running', updated_at: '2026-09-08T08:00:00Z' }),
+        mkInstance({ instance_id: 'i-b', status: 'running', updated_at: '2026-09-08T09:00:00Z' }),
+        mkInstance({ instance_id: 'i-c', status: 'running', updated_at: '2026-09-08T10:00:00Z' }),
+      ]);
+      // User expands i-c (non-top-2 — i-c is 3rd by activity).
+      component.toggleInstance('i-c');
+      expect(component.isExpanded('i-c')).toBe(true);
+      // Poll again with a NEW live root (i-d) — user decisions on i-b
+      // (collapsed) and i-c (expanded) MUST survive verbatim.
+      component.setInstances([
+        mkInstance({ instance_id: 'i-a', status: 'running', updated_at: '2026-09-08T08:00:00Z' }),
+        mkInstance({ instance_id: 'i-b', status: 'running', updated_at: '2026-09-08T09:00:00Z' }),
+        mkInstance({ instance_id: 'i-c', status: 'running', updated_at: '2026-09-08T10:00:00Z' }),
+        mkInstance({ instance_id: 'i-d', status: 'running', updated_at: '2026-09-08T11:00:00Z' }),
+      ]);
+      component.applyAutoSeed();
+      // Auto-seed runs, but UNTOUCHED-only — i-b and i-c are
+      // user-touched, so the auto-seed skips them.
+      expect(component.isExpanded('i-b')).toBe(false); // user-collapsed, NOT re-seeded
+      expect(component.isExpanded('i-c')).toBe(true); // user-expanded, NOT re-seeded
+      // First-2-live roots are auto-expanded (a, d — sorted by activity).
+      expect(component.isExpanded('i-d')).toBe(true);
+      expect(component.isExpanded('i-a')).toBe(true);
+      // Touched set is exactly the user decisions.
+      expect(component.userTouchedInstances().has('i-b')).toBe(true);
+      expect(component.userTouchedInstances().has('i-c')).toBe(true);
+      expect(component.userTouchedInstances().has('i-a')).toBe(false);
+      expect(component.userTouchedInstances().has('i-d')).toBe(false);
+    });
+
+    it('G1: auto-seed MERGES onto the existing expansion set (never replaces)', () => {
+      // Start with 1 live root + 1 recent root. User expanded i-pre
+      // (a non-live recent root).
+      component.setInstances([
+        mkInstance({ instance_id: 'i-pre', status: 'completed' }),
+      ]);
+      component.toggleInstance('i-pre'); // user-expanded a recent root
+      expect(component.isExpanded('i-pre')).toBe(true);
+      // Poll refresh: 2 NEW live roots arrive.
+      component.setInstances([
+        mkInstance({ instance_id: 'i-pre', status: 'completed' }),
+        mkInstance({ instance_id: 'i-a', status: 'running', updated_at: '2026-09-08T10:00:00Z' }),
+        mkInstance({ instance_id: 'i-b', status: 'running', updated_at: '2026-09-08T11:00:00Z' }),
+      ]);
+      component.applyAutoSeed();
+      // User-decided i-pre survives (merge, not replace).
+      expect(component.isExpanded('i-pre')).toBe(true);
+      // First-2-live get auto-seeded alongside.
+      expect(component.isExpanded('i-a')).toBe(true);
+      expect(component.isExpanded('i-b')).toBe(true);
+    });
+
+    it('G1: toggleInstance marks the id as user-touched exactly once', () => {
+      component.setInstances([mkInstance({ instance_id: 'i-a', status: 'running' })]);
+      expect(component.userTouchedInstances().has('i-a')).toBe(false);
+      component.toggleInstance('i-a');
+      expect(component.userTouchedInstances().has('i-a')).toBe(true);
+      const sizeAfterFirst = component.userTouchedInstances().size;
+      component.toggleInstance('i-a');
+      component.toggleInstance('i-a');
+      // Idempotent — same size regardless of how many toggles.
+      expect(component.userTouchedInstances().size).toBe(sizeAfterFirst);
+    });
+
+    it('G1: first-2-live auto-seed expansion does NOT mark ids as user-touched', () => {
+      component.setInstances([
+        mkInstance({ instance_id: 'i-a', status: 'running' }),
+        mkInstance({ instance_id: 'i-b', status: 'running' }),
+      ]);
+      component.applyAutoSeed();
+      expect(component.isExpanded('i-a')).toBe(true);
+      expect(component.isExpanded('i-b')).toBe(true);
+      // Auto-seed is system-driven — these are NOT user decisions.
+      expect(component.userTouchedInstances().size).toBe(0);
     });
   });
 
@@ -1168,6 +1312,24 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(hits).toBeGreaterThanOrEqual(2);
     });
 
+    it('W2 chevron is a REAL focusable button (native activation for keyboard)', () => {
+      // The chevron must be a <button type="button"> — the native
+      // button activation emits click for Enter/Space, no separate
+      // (keydown.enter) handler is needed or wanted.
+      const buttonHits = templateHtml.split('<button').length - 1;
+      expect(buttonHits).toBeGreaterThanOrEqual(2); // live + recent sections
+      expect(templateHtml).toContain('class="instance-chevron"');
+      expect(templateHtml).toContain('type="button"');
+      // The OLD shape (role="button" span + dead (keydown.enter)) is gone.
+      expect(templateHtml).not.toMatch(/class="instance-chevron"[^>]*role="button"/);
+      expect(templateHtml).not.toMatch(/\(keydown\.enter\)="onChevronClick/);
+    });
+
+    it('W2 chevron binds aria-expanded to the expansion state (both sections)', () => {
+      const hits = templateHtml.split('[attr.aria-expanded]="isExpanded(item.node.instance.instance_id)"').length - 1;
+      expect(hits).toBeGreaterThanOrEqual(2); // live + recent sections
+    });
+
     it('CHEVRON-ONLY expand: the chevron is a separate click surface calling onChevronClick', () => {
       // The chevron must NOT navigate — it calls the toggle handler
       // with $event so it can stopPropagation.
@@ -1263,6 +1425,21 @@ describe('JobQueuePanelComponent Logic', () => {
 
     it('auto-seed effect uses shouldAutoExpandInstanceTree (first-2-live lock)', () => {
       expect(componentTs).toContain('shouldAutoExpandInstanceTree');
+    });
+
+    it('G1: auto-seed tracks user-touched ids in a second Set (auto-seed filter)', () => {
+      expect(componentTs).toContain('userTouchedInstances');
+      // Auto-seed filters seeds by `!touched.has(id)` so user-decided
+      // ids never enter the seed set. Multiline-tolerant regex.
+      expect(componentTs).toMatch(/shouldAutoExpandInstanceTree\([\s\S]*?\)\s*\.filter\(/);
+      expect(componentTs).toContain('!touched.has(id)');
+      // Auto-seed MERGES onto the existing expansion set, never replaces.
+      expect(componentTs).toMatch(/expandedInstances\.set\(next\)/);
+      expect(componentTs).not.toMatch(/expandedInstances\.set\(new Set\(seedIds\)\)/);
+    });
+
+    it('G1: toggleInstance marks the id as user-touched', () => {
+      expect(componentTs).toMatch(/toggleInstance[\s\S]*userTouchedInstances\.update/);
     });
 
     it('expansion state is ONE Set keyed by instance_id (survives polls)', () => {

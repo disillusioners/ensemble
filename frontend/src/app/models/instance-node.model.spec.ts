@@ -114,6 +114,93 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       expect(roots.map((n) => n.instance.instance_id).sort()).toEqual(['orphan', 'root']);
     });
 
+    // W4 — cycle guard. A self-loop / cyclic `parent_id` degrades the
+    // row to a ROOT so the recursive helpers (collectSubtreeJobs,
+    // sortInstanceNodes, visibleInstanceTreeItems walk, findNodeById)
+    // cannot infinite-recurse. BE defends too; FE must not stack-
+    // overflow on data skew. NEVER-hide preserved — the row still
+    // renders, just not under its cyclic parent.
+    it('W4 cycle guard — self-loop (parent_id === instance_id) degrades to root', () => {
+      const rows = [mkRow({ instance_id: 'self', parent_id: 'self' })];
+      const roots = buildInstanceNodes(rows);
+      expect(roots.map((n) => n.instance.instance_id)).toEqual(['self']);
+      expect(roots[0].children).toEqual([]);
+    });
+
+    it('W4 cycle guard — mutual A↔B cycle degrades one row to root (no stack overflow)', () => {
+      const rows = [
+        mkRow({ instance_id: 'A', parent_id: 'B' }),
+        mkRow({ instance_id: 'B', parent_id: 'A' }),
+      ];
+      // Guard pin — must terminate and produce a finite tree (the
+      // earlier walk-the-children helpers infinite-looped here).
+      const roots = buildInstanceNodes(rows);
+      expect(roots.length).toBeGreaterThan(0);
+      const allIds = (ns: InstanceNode[]): string[] => {
+        const out: string[] = [];
+        const walk = (n: InstanceNode): void => {
+          out.push(n.instance.instance_id);
+          for (const c of n.children) walk(c);
+        };
+        for (const n of ns) walk(n);
+        return out;
+      };
+      const ids = allIds(roots);
+      expect(ids.sort()).toEqual(['A', 'B']);
+      // No node's children should re-enter itself.
+      const hasCycle = (n: InstanceNode, seen: Set<string>): boolean => {
+        if (seen.has(n.instance.instance_id)) return true;
+        seen.add(n.instance.instance_id);
+        return n.children.some((c) => hasCycle(c, new Set(seen)));
+      };
+      for (const root of roots) {
+        expect(hasCycle(root, new Set())).toBe(false);
+      }
+    });
+
+    it('W4 cycle guard — 3-cycle A→B→C→A degrades to a finite tree', () => {
+      const rows = [
+        mkRow({ instance_id: 'A', parent_id: 'C' }),
+        mkRow({ instance_id: 'B', parent_id: 'A' }),
+        mkRow({ instance_id: 'C', parent_id: 'B' }),
+      ];
+      const roots = buildInstanceNodes(rows);
+      const walk = (n: InstanceNode): string[] => [
+        n.instance.instance_id,
+        ...n.children.flatMap(walk),
+      ];
+      const ids = roots.flatMap(walk);
+      expect(ids.sort()).toEqual(['A', 'B', 'C']);
+    });
+
+    // G6 — depth ≥ 3 job attach. The builder walks arbitrary depth
+    // via `buildInstanceNodes` parent-child attachment; pin that a
+    // grandchild instance (depth 3 from the root) is the one whose
+    // receipts attach correctly.
+    it('G6 depth ≥ 3 — a job attaches to a GRANDCHILD instance (root → mid → leaf)', () => {
+      const rows = [
+        mkRow({ instance_id: 'root', children: ['mid'] }),
+        mkRow({ instance_id: 'mid', parent_id: 'root', children: ['leaf'] }),
+        mkRow({ instance_id: 'leaf', parent_id: 'mid', agent_id: 'grandchild' }),
+      ];
+      const roots = buildInstanceNodes(rows);
+      const tree = buildInstanceTree(
+        roots,
+        [createMockJob({ job_id: 'j-grandchild', mission_id: 'leaf', status: 'processing' })],
+        []
+      );
+      const rootNode = tree.liveRoots[0];
+      const midNode = rootNode.children[0];
+      const leafNode = midNode.children[0];
+      // The grandchild is the receipt's owner.
+      expect(leafNode.instance.instance_id).toBe('leaf');
+      expect(leafNode.instance.agent_id).toBe('grandchild');
+      expect(leafNode.attachedJobs.map((j) => j.job_id)).toEqual(['j-grandchild']);
+      // Higher-level nodes carry no attached jobs.
+      expect(rootNode.attachedJobs).toEqual([]);
+      expect(midNode.attachedJobs).toEqual([]);
+    });
+
     it('returns [] for an empty page and fresh nodes each call', () => {
       expect(buildInstanceNodes([])).toEqual([]);
       const rows = [mkRow({ instance_id: 'a' })];
@@ -242,27 +329,28 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       expect(roots[0].attachedJobs).toEqual([]); // annotation lands on clones only
     });
 
-    describe('Recent cap — structured band ≤ MAX_RECENT_INSTANCE_ROWS + every-job-surfaces (overflow → recentFlat)', () => {
+    describe('Recent cap — JOB-row band ≤ MAX_RECENT_INSTANCE_ROWS + every-job-surfaces (overflow → recentFlat)', () => {
       it('cap constant stays in the shared 10-row cap class', () => {
         expect(MAX_RECENT_INSTANCE_ROWS).toBe(10);
       });
 
-      it('structured band ≤ MAX: a flat terminal root with more jobs than fit keeps a PARTIAL fit; the rest overflow to recentFlat', () => {
-        // No intermediate child-instance headers → headerCost = 1.
-        // 12 jobs on a childless root: header (1) + 9 jobs fit =
-        // structured band = 10; the remaining 3 overflow to recentFlat
-        // (every-job-surfaces — NEVER-hide).
+      it('JOB-row band ≤ MAX: a flat terminal root with more jobs than fit keeps a PARTIAL fit; the rest overflow to recentFlat', () => {
+        // Headers ride along — no intermediate child-instance headers,
+        // no header consumption. 12 jobs on a childless root: 10 jobs
+        // fit (JOB-row band = MAX); the remaining 2 overflow to
+        // recentFlat (every-job-surfaces — NEVER-hide). The recent
+        // root's own header is free structure, not counted.
         const roots = buildInstanceNodes([mkRow({ instance_id: 'big', status: 'completed' })]);
         const jobs = Array.from({ length: 12 }, (_, k) =>
           createMockJob({ job_id: `j-${k}`, mission_id: 'big', status: 'completed' })
         );
         const tree = buildInstanceTree(roots, [], jobs);
         expect(tree.recentRoots.length).toBe(1);
-        expect(1 + tree.recentRoots[0].attachedJobs.length).toBe(10); // header + 9 fit
-        expect(tree.recentFlat.length).toBe(3); // 3 overflow — never hidden
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(10); // JOB-row band = MAX
+        expect(tree.recentFlat.length).toBe(2); // 2 overflow — never hidden
       });
 
-      it('structured band ≤ MAX: a node past the cap spills ALL its jobs to overflow', () => {
+      it('JOB-row band ≤ MAX: a node past the cap spills ALL its jobs to overflow (header still rides along)', () => {
         const roots = buildInstanceNodes([
           mkRow({ instance_id: 'a', status: 'failed', updated_at: '2026-09-08T08:00:00Z' }),
           mkRow({ instance_id: 'b', status: 'completed', updated_at: '2026-09-08T07:00:00Z' }),
@@ -276,11 +364,14 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
           ),
         ];
         const tree = buildInstanceTree(roots, [], jobs);
-        // Node a: header + 9 fit (rowCount 10), its other 3 overflow.
-        // Node b: past the cap — its 4 jobs spill entirely.
-        expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual(['a']);
-        expect(tree.recentRoots[0].attachedJobs.length).toBe(9);
-        expect(tree.recentFlat.length).toBe(7); // 3 from a + 4 from b
+        // Node a: 10 fit (JOB-row band = MAX), its other 2 overflow.
+        // Node b: JOB-row band already at cap — its 4 jobs spill
+        // entirely. But node b's HEADER rides along (free structure)
+        // so it still appears in recentRoots with zero visible jobs.
+        expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual(['a', 'b']);
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(10);
+        expect(tree.recentRoots[1].attachedJobs.length).toBe(0);
+        expect(tree.recentFlat.length).toBe(6); // 2 from a + 4 from b
       });
 
       it('orphan flat rows fill remaining capacity, then overflow appends after', () => {
@@ -290,24 +381,23 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
           createMockJob({ job_id: `jf-${k}`, mission_id: null, status: 'cancelled' })
         );
         const tree = buildInstanceTree(roots, [], [nodeJob, ...flatJobs]);
-        // header + jn + 8 flat = 10; 4 flat overflow.
+        // JOB-row band: jn (1) + 9 in-band flat = 10 (≤ MAX); 3 flat overflow.
         expect(tree.recentRoots[0].attachedJobs.length).toBe(1);
-        expect(tree.recentFlat.length).toBe(12); // 8 in-band + 4 overflow
+        expect(tree.recentFlat.length).toBe(12); // 9 in-band + 3 overflow
       });
 
-      it('a childless terminal root still costs its 1 header row and renders if it fits', () => {
+      it('a childless terminal root still renders its header (free structure, zero-job consumption)', () => {
         const roots = buildInstanceNodes([mkRow({ instance_id: 'empty', status: 'terminated' })]);
         const tree = buildInstanceTree(roots, [], []);
         expect(tree.recentRoots.length).toBe(1);
         expect(tree.recentRoots[0].attachedJobs).toEqual([]);
       });
 
-      it('structured band ≤ MAX: intermediate CHILD-instance headers consume capacity (NOT just root headers)', () => {
+      it('JOB-row band: intermediate CHILD-instance headers ride along (do NOT consume capacity)', () => {
         // Recent root with 2 intermediate child-instance headers +
-        // 6 attached receipts → headerCost = 1 (root) + 2 (kids) = 3.
-        // Capacity = 10 - 0 - 3 = 7 → fitCount = min(6, 7) = 6.
-        // Structured band = 3 + 6 = 9 (≤ MAX, no overflow).
-        // No orphan flat, so total rendered rows = 9 (within MAX).
+        // 6 attached receipts. Headers ride along — no capacity
+        // consumed by child-instance headers. 6 jobs ≤ MAX → all fit.
+        // JOB-row band = 6 (≤ MAX, no overflow).
         const roots = buildInstanceNodes([
           mkRow({ instance_id: 'root', status: 'completed', children: ['kid-1', 'kid-2'] }),
           mkRow({ instance_id: 'kid-1', parent_id: 'root', status: 'failed' }),
@@ -318,18 +408,17 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
         );
         const tree = buildInstanceTree(roots, [], jobs);
         expect(tree.recentRoots.length).toBe(1);
-        // Structured band: root (1) + 2 intermediate headers (2) + 6 in-band jobs = 9.
-        expect(1 + 2 + tree.recentRoots[0].attachedJobs.length).toBe(9);
+        // JOB-row band = 6 (headers ride along).
         expect(tree.recentRoots[0].attachedJobs.length).toBe(6);
-        expect(tree.recentFlat.length).toBe(0); // 6 fit inside capacity
+        expect(tree.recentFlat.length).toBe(0); // 6 fit inside JOB-row band
       });
 
-      it('structured band ≤ MAX + every-job-surfaces: deep subtree (root + 2 kids + 9 jobs) overflows the cap to recentFlat', () => {
-        // headerCost = 1 + 2 = 3. Capacity = 10 - 0 - 3 = 7.
-        // 9 jobs → fitCount = min(9, 7) = 7; remaining 2 overflow.
-        // Structured band = 3 + 7 = 10 (exactly MAX). Total rendered
-        // = 10 (in-band) + 2 (overflow) = 12 > MAX by design — never
-        // hidden.
+      it('JOB-row band ≤ MAX + every-job-surfaces: 9 jobs + headers still fit when under MAX', () => {
+        // 9 jobs on a subtree with 2 intermediate child-instance
+        // headers. Headers ride along → 9 jobs fit in the JOB-row band
+        // (9 ≤ MAX). No overflow. Total rendered = 1 root header + 2
+        // kid headers + 9 job rows = 12 (> MAX by design — never hidden
+        // is job-row semantics, not row-count).
         const roots = buildInstanceNodes([
           mkRow({ instance_id: 'root', status: 'completed', children: ['kid-1', 'kid-2'] }),
           mkRow({ instance_id: 'kid-1', parent_id: 'root', status: 'failed' }),
@@ -339,14 +428,179 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
           createMockJob({ job_id: `j-${k}`, mission_id: 'root', status: 'completed' })
         );
         const tree = buildInstanceTree(roots, [], jobs);
-        // Structured band exactly MAX.
-        expect(1 + 2 + tree.recentRoots[0].attachedJobs.length).toBe(10);
-        // Every job surfaces — 2 overflow into recentFlat.
+        // JOB-row band exactly 9 (≤ MAX, headers ride along).
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(9);
+        // No overflow — every job fits the JOB-row band.
+        expect(tree.recentFlat.length).toBe(0);
+      });
+
+      it('JOB-row band ≤ MAX + every-job-surfaces: 13 jobs on deep subtree overflows the JOB-row band to recentFlat', () => {
+        // 13 jobs on a subtree with 2 intermediate child-instance
+        // headers. Headers ride along → JOB-row band = min(13, 10) = 10;
+        // remaining 3 overflow. JOB-row band = MAX exactly.
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', status: 'completed', children: ['kid-1', 'kid-2'] }),
+          mkRow({ instance_id: 'kid-1', parent_id: 'root', status: 'failed' }),
+          mkRow({ instance_id: 'kid-2', parent_id: 'root', status: 'completed' }),
+        ]);
+        const jobs = Array.from({ length: 13 }, (_, k) =>
+          createMockJob({ job_id: `j-${k}`, mission_id: 'root', status: 'completed' })
+        );
+        const tree = buildInstanceTree(roots, [], jobs);
+        // JOB-row band exactly MAX.
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(10);
+        // Every job surfaces — 3 overflow into recentFlat.
+        expect(tree.recentFlat.length).toBe(3);
+      });
+
+      // W1 — multi-root deep-subtree pin (reviewer's 3-root trace).
+      // Reviewer's failing case hit 12 > 10 under the OLD
+      // structured-band cap. With JOB-row semantics, the same shape
+      // fits: 3 roots × 2 intermediate headers + 6 jobs total = 3
+      // root headers + 6 kid headers + 6 jobs in band; JOB-row band
+      // = 6 (≤ MAX), no overflow. The trace the reviewer hit becomes
+      // a passing pin.
+      it('W1 multi-root deep-subtree pin (3 roots × kid-headers + 6 jobs): JOB-row band ≤ MAX, headers ride along, every job surfaces', () => {
+        const roots = buildInstanceNodes([
+          mkRow({
+            instance_id: 'r1',
+            status: 'completed',
+            updated_at: '2026-09-08T12:00:00Z',
+            children: ['r1-k1', 'r1-k2'],
+          }),
+          mkRow({ instance_id: 'r1-k1', parent_id: 'r1', status: 'failed' }),
+          mkRow({ instance_id: 'r1-k2', parent_id: 'r1', status: 'completed' }),
+          mkRow({
+            instance_id: 'r2',
+            status: 'completed',
+            updated_at: '2026-09-08T11:00:00Z',
+            children: ['r2-k1', 'r2-k2'],
+          }),
+          mkRow({ instance_id: 'r2-k1', parent_id: 'r2', status: 'failed' }),
+          mkRow({ instance_id: 'r2-k2', parent_id: 'r2', status: 'completed' }),
+          mkRow({
+            instance_id: 'r3',
+            status: 'completed',
+            updated_at: '2026-09-08T10:00:00Z',
+            children: ['r3-k1', 'r3-k2'],
+          }),
+          mkRow({ instance_id: 'r3-k1', parent_id: 'r3', status: 'failed' }),
+          mkRow({ instance_id: 'r3-k2', parent_id: 'r3', status: 'completed' }),
+        ]);
+        // 6 receipts across the 3 subtrees (2 each) — well under MAX.
+        const jobs = [
+          ...Array.from({ length: 2 }, (_, k) =>
+            createMockJob({ job_id: `r1-j-${k}`, mission_id: 'r1', status: 'completed' })
+          ),
+          ...Array.from({ length: 2 }, (_, k) =>
+            createMockJob({ job_id: `r2-j-${k}`, mission_id: 'r2', status: 'completed' })
+          ),
+          ...Array.from({ length: 2 }, (_, k) =>
+            createMockJob({ job_id: `r3-j-${k}`, mission_id: 'r3', status: 'completed' })
+          ),
+        ];
+        const tree = buildInstanceTree(roots, [], jobs);
+        // All 3 recent roots push (headers ride along, no skip path).
+        expect(tree.recentRoots.length).toBe(3);
+        // JOB-row band ≤ MAX (6 ≤ 10).
+        const inBandJobs = tree.recentRoots.reduce(
+          (sum, n) => sum + n.attachedJobs.length,
+          0
+        );
+        expect(inBandJobs).toBe(6);
+        expect(inBandJobs).toBeLessThanOrEqual(MAX_RECENT_INSTANCE_ROWS);
+        // No overflow (6 fits).
+        expect(tree.recentFlat.length).toBe(0);
+        // Every job surfaces (6 in-band + 0 overflow = 6 = total input).
+        const totalSurfaced = inBandJobs + tree.recentFlat.length;
+        expect(totalSurfaced).toBe(6);
+      });
+
+      it('W1 multi-root deep-subtree pin (3 roots × kid-headers + 18 jobs): JOB-row band ≤ MAX, every job surfaces (8 overflow)', () => {
+        // 18 jobs across 3 subtrees of 6 each. JOB-row band = 10;
+        // remaining 8 overflow.
+        const roots = buildInstanceNodes([
+          mkRow({
+            instance_id: 'r1',
+            status: 'completed',
+            updated_at: '2026-09-08T12:00:00Z',
+            children: ['r1-k1', 'r1-k2'],
+          }),
+          mkRow({ instance_id: 'r1-k1', parent_id: 'r1', status: 'failed' }),
+          mkRow({ instance_id: 'r1-k2', parent_id: 'r1', status: 'completed' }),
+          mkRow({
+            instance_id: 'r2',
+            status: 'completed',
+            updated_at: '2026-09-08T11:00:00Z',
+            children: ['r2-k1', 'r2-k2'],
+          }),
+          mkRow({ instance_id: 'r2-k1', parent_id: 'r2', status: 'failed' }),
+          mkRow({ instance_id: 'r2-k2', parent_id: 'r2', status: 'completed' }),
+          mkRow({
+            instance_id: 'r3',
+            status: 'completed',
+            updated_at: '2026-09-08T10:00:00Z',
+            children: ['r3-k1', 'r3-k2'],
+          }),
+          mkRow({ instance_id: 'r3-k1', parent_id: 'r3', status: 'failed' }),
+          mkRow({ instance_id: 'r3-k2', parent_id: 'r3', status: 'completed' }),
+        ]);
+        const jobs = [
+          ...Array.from({ length: 6 }, (_, k) =>
+            createMockJob({ job_id: `r1-j-${k}`, mission_id: 'r1', status: 'completed' })
+          ),
+          ...Array.from({ length: 6 }, (_, k) =>
+            createMockJob({ job_id: `r2-j-${k}`, mission_id: 'r2', status: 'completed' })
+          ),
+          ...Array.from({ length: 6 }, (_, k) =>
+            createMockJob({ job_id: `r3-j-${k}`, mission_id: 'r3', status: 'completed' })
+          ),
+        ];
+        const tree = buildInstanceTree(roots, [], jobs);
+        // All 3 recent roots push (headers ride along).
+        expect(tree.recentRoots.length).toBe(3);
+        // JOB-row band ≤ MAX (10 exactly).
+        const inBandJobs = tree.recentRoots.reduce(
+          (sum, n) => sum + n.attachedJobs.length,
+          0
+        );
+        expect(inBandJobs).toBe(10);
+        expect(inBandJobs).toBeLessThanOrEqual(MAX_RECENT_INSTANCE_ROWS);
+        // 8 overflow into recentFlat.
+        expect(tree.recentFlat.length).toBe(8);
+        // Every job surfaces (10 + 8 = 18 = total input).
+        const totalSurfaced = inBandJobs + tree.recentFlat.length;
+        expect(totalSurfaced).toBe(18);
+      });
+
+      // W1 — empty-subtree node rule (leader-decided). A recent root
+      // with zero subtree jobs pushes UNCONDITIONALLY (zero-capacity
+      // consumption; pure structure). The next candidate still gets its
+      // full MAX allotment.
+      it('W1 empty-subtree rule: a recent root with zero jobs pushes unconditionally (no capacity consumed)', () => {
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'empty-1', status: 'completed', updated_at: '2026-09-08T11:00:00Z' }),
+          mkRow({ instance_id: 'empty-2', status: 'terminated', updated_at: '2026-09-08T10:00:00Z' }),
+          mkRow({ instance_id: 'big', status: 'completed', updated_at: '2026-09-08T09:00:00Z' }),
+        ]);
+        // 12 jobs on `big` — under the JOB-row-only cap, all 12 fit
+        // the band because empty-1/empty-2 consumed zero capacity.
+        const jobs = Array.from({ length: 12 }, (_, k) =>
+          createMockJob({ job_id: `j-${k}`, mission_id: 'big', status: 'completed' })
+        );
+        const tree = buildInstanceTree(roots, [], jobs);
+        // All 3 recent roots push (empty-1 + empty-2 + big).
+        expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual([
+          'empty-1',
+          'empty-2',
+          'big',
+        ]);
+        // The empty ones carry zero jobs (pure structure).
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(0);
+        expect(tree.recentRoots[1].attachedJobs.length).toBe(0);
+        // `big` got its full MAX allotment because empties were free.
+        expect(tree.recentRoots[2].attachedJobs.length).toBe(10);
         expect(tree.recentFlat.length).toBe(2);
-        // Total rendered = 12 > MAX — never hidden.
-        const totalRendered =
-          1 + 2 + tree.recentRoots[0].attachedJobs.length + tree.recentFlat.length;
-        expect(totalRendered).toBe(12);
       });
     });
   });
@@ -411,28 +665,57 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       });
     });
 
-    describe('instanceMetaLine — "agent · N jobs · M agents · ago"', () => {
+    describe('instanceMetaLine — "agent · N jobs · M agents · ago" (W3: M = built children, not wire row.children)', () => {
       const fmt = (d: string | null | undefined) => (d ? '5m ago' : '');
 
-      it('joins agent, job count, child-agent count, and time', () => {
+      // Helper — wrap a row into a built InstanceNode (mimics the
+      // tree builder output the panel sees). The row's wire `children`
+      // field is intentionally DISTINCT from node.children in the
+      // over-count fixture below — the wire is pre-KB-strip; the tree
+      // is what the user sees.
+      const wrap = (row: InstanceRow, builtChildIds: string[] = row.children): InstanceNode => ({
+        instance: row,
+        children: builtChildIds.map((id) => ({
+          instance: { ...mkRow({ instance_id: id }), children: [] },
+          children: [],
+          attachedJobs: [],
+        })),
+        attachedJobs: [],
+      });
+
+      it('joins agent, job count, built-child count, and time', () => {
         const row = mkRow({ agent_id: 'lead', children: ['a', 'b'] });
-        expect(instanceMetaLine(row, 3, fmt)).toBe('lead · 3 jobs · 2 agents · 5m ago');
+        const node = wrap(row, ['a', 'b']);
+        expect(instanceMetaLine(node, 3, fmt)).toBe('lead · 3 jobs · 2 agents · 5m ago');
       });
 
       it('singularises 1 job / 1 agent', () => {
         const row = mkRow({ agent_id: 'lead', children: ['a'] });
-        expect(instanceMetaLine(row, 1, fmt)).toBe('lead · 1 job · 1 agent · 5m ago');
+        const node = wrap(row, ['a']);
+        expect(instanceMetaLine(node, 1, fmt)).toBe('lead · 1 job · 1 agent · 5m ago');
       });
 
       it('drops zero-count segments', () => {
-        expect(instanceMetaLine(mkRow({ agent_id: 'lead' }), 0, fmt)).toBe('lead · 5m ago');
+        const node = wrap(mkRow({ agent_id: 'lead' }), []);
+        expect(instanceMetaLine(node, 0, fmt)).toBe('lead · 5m ago');
       });
 
       it('falls back to created_at then "idle" when no timestamps exist', () => {
         const row = mkRow({ agent_id: 'lead', updated_at: null, created_at: '2026-09-08T09:00:00Z' });
-        expect(instanceMetaLine(row, 0, fmt)).toBe('lead · 5m ago');
-        const bare = mkRow({ agent_id: 'lead', updated_at: null, created_at: '' });
+        const node = wrap(row, []);
+        expect(instanceMetaLine(node, 0, fmt)).toBe('lead · 5m ago');
+        const bare = wrap(mkRow({ agent_id: 'lead', updated_at: null, created_at: '' }), []);
         expect(instanceMetaLine(bare, 0, fmt)).toBe('lead · idle');
+      });
+
+      // W3 pin — the meta line MUST count BUILT nested children
+      // (node.children.length), not the wire row.children pre-KB-
+      // strip list. A wire over-count degrades to the BUILT count.
+      it('W3: M agents counts node.children.length (BUILT), NOT row.children (wire pre-KB-strip)', () => {
+        const row = mkRow({ agent_id: 'lead', children: ['a', 'b', 'c'] });
+        const node = wrap(row, ['a']); // wire=3, built=1
+        expect(instanceMetaLine(node, 0, fmt)).toBe('lead · 1 agent · 5m ago');
+        // Wire over-count would have read "3 agents" — the BUILT count wins.
       });
     });
   });

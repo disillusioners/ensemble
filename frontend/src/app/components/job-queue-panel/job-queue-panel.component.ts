@@ -139,6 +139,17 @@ export class JobQueuePanelComponent {
   private readonly expandedInstances = signal<Set<string>>(new Set());
 
   /**
+   * G1 (2026-09-08 review fold) — ids the user has MANUALLY toggled
+   * (expanded OR collapsed via chevron / ArrowRight / ArrowLeft /
+   * row click — i.e. anything but the auto-seed). Auto-seed only
+   * seeds UNTOUCHED first-2-live ids; once an id is touched, the
+   * auto-seed effect NEVER un-toggles or re-expands it, regardless
+   * of how the live-root set drifts across polls. The user's choice
+   * wins.
+   */
+  private readonly userTouchedInstances = signal<Set<string>>(new Set());
+
+  /**
    * Id of the row that currently owns keyboard focus inside the
    * trees (LIVE + RECENT). Drives the ``.focused`` CSS class so
    * sighted users can see where the arrow keys would land;
@@ -227,6 +238,12 @@ export class JobQueuePanelComponent {
     // 2); further live roots and ALL terminal roots stay collapsed.
     // Tracked by a sorted-join-key so unrelated input changes don't
     // fight the user's manual toggles.
+    //
+    // G1 (2026-09-08 review fold): only seed ids the user has NOT
+    // manually touched (see userTouchedInstances). NEVER un-toggle or
+    // re-expand a user-decided id; the auto-seed MERGES onto the
+    // existing expansion set instead of replacing it. The user's
+    // choice survives any subsequent live-set drift.
     let seededForKey = '';
     let lastSeenSet: Set<string> = new Set();
     const liveIds = computed(() =>
@@ -249,15 +266,39 @@ export class JobQueuePanelComponent {
         current.size === ids.length && ids.every((id) => current.has(id));
       if (sameSet) return;
       lastSeenSet = new Set(ids);
-      const seedIds = shouldAutoExpandInstanceTree(this.tree().liveRoots);
-      if (seedIds.length > 0) {
-        this.expandedInstances.set(new Set(seedIds));
+      // G1: filter out ids the user has already touched — auto-seed
+      // only acts on UNTOUCHED first-2-live.
+      const touched = this.userTouchedInstances();
+      const seedIds = shouldAutoExpandInstanceTree(this.tree().liveRoots).filter(
+        (id) => !touched.has(id)
+      );
+      if (seedIds.length === 0) return;
+      // G1: MERGE onto the existing expansion set — never overwrite.
+      const currentExpanded = this.expandedInstances();
+      let changed = false;
+      const next = new Set(currentExpanded);
+      for (const id of seedIds) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
       }
+      if (changed) this.expandedInstances.set(next);
     });
   }
 
-  /** Toggle an instance node's expansion state (chevron ONLY). */
+  /**
+   * Toggle an instance node's expansion state (chevron / arrow nav).
+   * Marks the id as user-touched so the auto-seed effect will NEVER
+   * re-expand or un-collapse it across subsequent live-set drifts.
+   */
   toggleInstance(instanceId: string): void {
+    this.userTouchedInstances.update((s) => {
+      if (s.has(instanceId)) return s;
+      const next = new Set(s);
+      next.add(instanceId);
+      return next;
+    });
     this.expandedInstances.update((s) => {
       const next = new Set(s);
       if (next.has(instanceId)) next.delete(instanceId);
@@ -290,7 +331,11 @@ export class JobQueuePanelComponent {
   /**
    * CHEVRON click — the ONLY expand toggle. Stops propagation so the
    * row's own click (navigate) never fires: chevron click does NOT
-   * navigate. The template passes ``$event`` explicitly.
+   * navigate. The template passes ``$event`` explicitly. The toggle
+   * marks the id as user-touched (G1), so the auto-seed effect won't
+   * re-expand or un-collapse it across subsequent live-set drifts.
+   * Native ``<button type="button">`` activation also fires click on
+   * Enter/Space — no separate ``(keydown.enter)`` handler is needed.
    */
   onChevronClick(event: Event, instanceId: string): void {
     event.stopPropagation();
@@ -480,11 +525,13 @@ export class JobQueuePanelComponent {
   /**
    * Instance node meta line — ``agent · N jobs · M agents · timeAgo``
    * (zero-count segments dropped by the model helper). Job count =
-   * the receipts attached anywhere in the node's subtree.
+   * the receipts attached anywhere in the node's subtree. "M agents"
+   * counts the BUILT nested children (W3 — what the tree actually
+   * shows), not the wire ``row.children`` pre-KB-strip field.
    */
   instanceMeta(node: InstanceNode): string {
     return instanceMetaLine(
-      node.instance,
+      node,
       instanceSubtreeJobs(node).length,
       (d) => this.timeAgo(d)
     );

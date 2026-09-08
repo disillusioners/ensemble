@@ -177,6 +177,16 @@ export interface InstanceNode {
  * lookup, parent-child attachment via ``parent_id``; a row whose
  * parent is NOT in the page (paginated-away ancestor, data skew)
  * degrades to a ROOT so it still renders — NEVER hide an instance.
+ *
+ * CYCLE GUARD (W4) — a row whose ``parent_id`` chains back to itself
+ * (self-loop) OR lands on a node we already placed as our descendant
+ * degrades to a ROOT (NEVER-hide preserved — the row still renders,
+ * just not under a cyclic parent). Without this guard, a mutual cycle
+ * in the wire data would build a tree the recursive helpers
+ * (``collectSubtreeJobs``, ``sortInstanceNodes``,
+ * ``visibleInstanceTreeItems`` walk, ``findNodeById``) cannot traverse
+ * without infinite recursion. BE defends too; FE must not stack-overflow
+ * on data skew.
  */
 export function buildInstanceNodes(rows: ReadonlyArray<InstanceRow>): InstanceNode[] {
   if (!rows.length) return [];
@@ -185,10 +195,27 @@ export function buildInstanceNodes(rows: ReadonlyArray<InstanceRow>): InstanceNo
     nodeMap.set(row.instance_id, { instance: row, children: [], attachedJobs: [] });
   }
   const rootNodes: InstanceNode[] = [];
+  // `parentInDescendants`: true when `row.parent_id` resolves to a node
+  // that is already a descendant of `row` in the built tree (i.e. we'd
+  // close a cycle). Walked recursively; cheap given the small
+  // root-paginated page size and bounded by row count.
+  const parentInDescendants = (parentNode: InstanceNode, childId: string): boolean => {
+    if (parentNode.instance.instance_id === childId) return true;
+    for (const c of parentNode.children) {
+      if (parentInDescendants(c, childId)) return true;
+    }
+    return false;
+  };
   for (const row of rows) {
     const node = nodeMap.get(row.instance_id)!;
-    if (row.parent_id && nodeMap.has(row.parent_id)) {
-      nodeMap.get(row.parent_id)!.children.push(node);
+    const parentId = row.parent_id;
+    if (
+      parentId &&
+      parentId !== row.instance_id &&
+      nodeMap.has(parentId) &&
+      !parentInDescendants(node, parentId)
+    ) {
+      nodeMap.get(parentId)!.children.push(node);
     } else {
       rootNodes.push(node);
     }
@@ -203,18 +230,27 @@ export function buildInstanceNodes(rows: ReadonlyArray<InstanceRow>): InstanceNo
 /**
  * Defensive cap for the Recent section — the same 10-row cap class the
  * legacy mission tree used (``MAX_RECENT_JOBS``). The Recent band is
- * CAPPED, not HARD-LIMITED: two invariants are enforced together:
+ * CAPPED at JOB-row granularity (leader-decided, 2026-09-08 review
+ * fold):
  *
- *   (a) STRUCTURED BAND ≤ MAX_RECENT_INSTANCE_ROWS — the in-band row
- *       count is headers-at-all-depths + fitting subtree jobs + flat
- *       rows. A node's header cost includes ITSELF plus every
- *       intermediate child-instance header that renders when the user
- *       expands the recent root (per ``visibleInstanceTreeItems``'s
- *       walk).
+ *   (a) JOB-ROW BAND ≤ MAX_RECENT_INSTANCE_ROWS — only JOB rows
+ *       (receipts attached anywhere in a recent root's subtree, plus
+ *       orphan flat rows) count toward the cap. INSTANCE HEADERS ride
+ *       along (headers are structure, not content): a recent root's
+ *       own header AND every intermediate child-instance header in
+ *       its subtree renders for free — no capacity consumed.
  *   (b) EVERY JOB SURFACES — partial-fit keeps the fitting jobs and
- *       overflows the remainder into ``recentFlat`` (NEVER-hide). Total
- *       rendered rows may therefore EXCEED MAX by design under
- *       never-hide; the cap is a visible-band hint, not a hard gate.
+ *       overflows the remainder into ``recentFlat`` (NEVER-hide).
+ *       Total rendered rows may therefore EXCEED MAX by design when a
+ *       recent root pushes many job receipts AND the orphan flat is
+ *       also large; the cap is a JOB-row budget, not a hard row gate.
+ *
+ * Empty-subtree node rule: a recent candidate with zero subtree jobs
+ * pushes UNCONDITIONALLY (zero-capacity-consumed structure). A recent
+ * candidate with jobs fits ``min(subtreeJobs.length, MAX - rowCount)``
+ * into the band; the remainder overflows to ``recentFlat``. Because
+ * headers are free, the band can hold at most MAX jobs even when many
+ * structural headers render underneath.
  */
 export const MAX_RECENT_INSTANCE_ROWS = 10;
 
@@ -291,11 +327,11 @@ function subtreeIsLive(node: InstanceNode): boolean {
  * - ``liveRoots`` sorted pinned-first then activity desc (the
  *   instance-list pattern), applied recursively to children too.
  * - ``recentRoots`` = terminal roots, newest activity first, capped at
- *   ``MAX_RECENT_INSTANCE_ROWS`` TOTAL rows across node headers +
- *   their attached jobs + ``recentFlat`` rows. A node that only
- *   PARTIALLY fits keeps its fitting jobs; the remainder OVERFLOWS
- *   into ``recentFlat`` so every job still surfaces (same partial-fit
- *   + overflow semantics as the legacy mission-tree builder).
+ *   ``MAX_RECENT_INSTANCE_ROWS`` JOB ROWS (headers ride along — see
+ *   ``MAX_RECENT_INSTANCE_ROWS`` docstring). A node whose subtree
+ *   jobs exceed the remaining JOB-row budget keeps a partial fit; the
+ *   remainder OVERFLOWS into ``recentFlat`` so every job still surfaces
+ *   (partial-fit + overflow semantics, same as legacy mission tree).
  *
  * Purity: the output nodes are fresh annotated clones (structure +
  * row references shared, ``attachedJobs`` filled per node) — the
@@ -354,43 +390,36 @@ export function buildInstanceTree(
     else recentCandidates.push(root);
   }
 
-  // 5) Cap Recent at MAX_RECENT_INSTANCE_ROWS — STRUCTURED BAND
-  //    contract. A node's header cost = 1 (its own header) + every
-  //    INTERMEDIATE child-instance header in its subtree (any depth)
-  //    — those render when the user expands the recent root per
-  //    visibleInstanceTreeItems' walk. Subtree jobs fill the remaining
-  //    capacity in display order; jobs that don't fit OVERFLOW into
-  //    recentFlat (NEVER-hide — total rendered rows may exceed MAX by
-  //    design; the cap is a structured-band hint, not a hard gate).
+  // 5) Cap Recent at MAX_RECENT_INSTANCE_ROWS JOB ROWS (W1 leader-
+  //    decided: only JOB rows count; instance headers ride along).
+  //    For each recent candidate: ALWAYS push the structural clone
+  //    (its header is free — a node with zero subtree jobs is
+  //    pure structure, no capacity consumed), fit
+  //    min(subtreeJobs.length, MAX - rowCount) jobs into the band,
+  //    overflow the rest to recentFlat (NEVER-hide). Empty-subtree
+  //    nodes (no jobs anywhere) push with visibleJobs=[]; the cap
+  //    sees them as zero consumption so the next candidate still gets
+  //    its full MAX allotment.
   const recentRoots: InstanceNode[] = [];
   const overflowFlat: Job[] = [];
   let rowCount = 0;
   for (const node of recentCandidates) {
     const subtreeJobs: Job[] = [];
     collectSubtreeJobs(node, subtreeJobs);
-    if (rowCount >= MAX_RECENT_INSTANCE_ROWS) {
-      overflowFlat.push(...subtreeJobs);
-      continue;
-    }
-    const headerCost = 1 + countSubtreeIntermediateHeaders(node);
-    const capacity = Math.max(0, MAX_RECENT_INSTANCE_ROWS - rowCount - headerCost);
+    const capacity = Math.max(0, MAX_RECENT_INSTANCE_ROWS - rowCount);
     const fitCount = Math.min(subtreeJobs.length, capacity);
     const visibleJobs = subtreeJobs.slice(0, fitCount);
     const overflowJobs = subtreeJobs.slice(fitCount);
-    // Keep the node's STRUCTURE (child instances render when the user
-    // expands it) but distribute the VISIBLE jobs: they ride on the
-    // root clone; deeper clones carry none (the panel renders a recent
-    // node's receipts flattened under its header either way).
     recentRoots.push(cloneWithJobs(node, visibleJobs));
-    rowCount += headerCost + fitCount;
+    rowCount += fitCount;
     overflowFlat.push(...overflowJobs);
   }
 
-  // 6) Fill remaining capacity from the orphan flat list, then append
-  //    everything that overflowed AFTER the capped rows. Same
-  //    structured-band + never-hide contract as step 5 — the cap
-  //    applies to the in-band row count; overflow jobs surface
-  //    unconditionally.
+  // 6) Fill remaining JOB-row capacity from the orphan flat list, then
+  //    append everything that overflowed AFTER the capped rows. Same
+  //    JOB-row-cap + never-hide contract as step 5 — only JOB rows
+  //    count toward MAX; orphan flat rows surface unconditionally via
+  //    recentFlat (in-band up to the cap, overflow after).
   const recentFlat: Job[] = [];
   for (const job of orphanRecentFlat) {
     if (rowCount >= MAX_RECENT_INSTANCE_ROWS) {
@@ -430,22 +459,6 @@ function collectSubtreeJobs(node: InstanceNode, out: Job[]): Job[] {
   }
   out.push(...node.attachedJobs);
   return out;
-}
-
-/**
- * Count of INTERMEDIATE child-instance headers in a node's subtree
- * (any depth) — every descendant instance that renders its header
- * when the user expands the root (per ``visibleInstanceTreeItems``'
- * walk). The root itself is NOT counted (the caller adds 1). Used by
- * step 5 of ``buildInstanceTree`` to compute the structured-band
- * header cost.
- */
-function countSubtreeIntermediateHeaders(node: InstanceNode): number {
-  let count = 0;
-  for (const child of node.children) {
-    count += 1 + countSubtreeIntermediateHeaders(child);
-  }
-  return count;
 }
 
 /** All receipt jobs attached anywhere in a node's subtree (display order). */
@@ -503,19 +516,33 @@ export function instanceDisplayTitle(
  * ``agent · N jobs · M agents · timeAgo(updated_at)``. Zero-count
  * segments are dropped so a childless, jobless node reads
  * ``agent · timeAgo`` instead of ``agent · 0 jobs · 0 agents · …``.
+ *
+ * W3 (2026-09-08 review fold): "M agents" counts the ACTUAL nested
+ * child-instance NODES the tree builder produced
+ * (``node.children.length``), NOT the wire ``row.children`` field. The
+ * wire field is the pre-KB-strip child-id list — it can over-report
+ * children that the tree builder degraded to roots (cyclic / orphan
+ * parent) or filtered out for any reason. The TREE shape is what the
+ * user sees; the meta line must mirror it. The function takes the
+ * built ``InstanceNode`` so the caller doesn't have to thread the
+ * derived child count in.
  */
 export function instanceMetaLine(
-  row: InstanceRow,
+  node: InstanceNode,
   jobCount: number,
   timeAgoFn?: (d: string | null | undefined) => string
 ): string {
+  const row = node.instance;
   const agent = row.agent_id ?? '—';
   const formatter = timeAgoFn ?? defaultInstanceTimeAgo;
   const ago = formatter(row.updated_at) || formatter(row.created_at) || 'idle';
-  const parts = [agent];
+  const parts: string[] = [agent];
   if (jobCount > 0) parts.push(`${jobCount} job${jobCount === 1 ? '' : 's'}`);
-  if (row.children.length > 0) {
-    parts.push(`${row.children.length} agent${row.children.length === 1 ? '' : 's'}`);
+  // W3: count the BUILT nested children (what the tree actually shows),
+  // not the wire ``row.children`` field (pre-KB-strip).
+  const childCount = node.children.length;
+  if (childCount > 0) {
+    parts.push(`${childCount} agent${childCount === 1 ? '' : 's'}`);
   }
   parts.push(ago);
   return parts.join(' · ');
