@@ -62,26 +62,31 @@ echo "=== Test Pack: violation_classification_unit_test ==="
 echo "HEAD: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 echo "(IntegrityError classification: obligation-triple unique → converge; everything else → immediate re-raise)"
 
-# Pre-flight venv discipline check: the pytest binary MUST resolve into
-# the worktree's .venv (a prior incident class ran the main checkout's
-# venv against a worktree — silently testing the wrong code).
-EXPECTED_VENV_PREFIX="$(pwd -P)/.venv/bin/python"
-RESOLVED_PYTHON="$(realpath .venv/bin/python 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' .venv/bin/python)"
-if [[ "$RESOLVED_PYTHON" != "$EXPECTED_VENV_PREFIX" ]]; then
-  echo "[FATAL] .venv/bin/python resolves to '$RESOLVED_PYTHON' but the worktree root is '$EXPECTED_VENV_PREFIX'."
-  echo "         The worktree has no proper venv — re-run \`uv sync\` and retry."
+# Pre-flight venv discipline check (uv-venv-aware): the daemon module
+# imported via the worktree's .venv MUST resolve to a real path inside
+# this worktree root. This validates the EDITABLE-INSTALL target — the
+# actual incident class (running tests against the main checkout while
+# claiming to test a worktree). Note: uv-managed venvs symlink
+# .venv/bin/python to the shared uv interpreter dir BY DESIGN, so a
+# python-binary realpath-equality check is NOT a valid gate here; the
+# authoritative signal is the importable daemon module's real path.
+WORKTREE_ROOT="$(pwd -P)"
+DAEMON_FILE="$(.venv/bin/python -c 'import daemon,sys; print(daemon.__file__)' 2>/dev/null)" || {
+  echo "[FATAL] .venv/bin/python failed to import daemon (exit $?)."
+  echo "         The worktree venv is broken — re-run \`uv sync\` and retry."
   echo "RESULT: FAIL"
   exit 1
-fi
-DAEMON_FILE="$($RESOLVED_PYTHON -c 'import daemon; print(daemon.__file__)' 2>&1)"
-EXPECTED_DAEMON_PREFIX="$(pwd -P)/daemon/__init__.py"
+}
 RESOLVED_DAEMON="$(realpath "$DAEMON_FILE" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$DAEMON_FILE")"
-if [[ "$RESOLVED_DAEMON" != "$EXPECTED_DAEMON_PREFIX" ]]; then
-  echo "[FATAL] daemon.__file__ resolves to '$RESOLVED_DAEMON' but the worktree root is '$EXPECTED_DAEMON_PREFIX'."
-  echo "         Editable install points at a different checkout — testing the wrong code."
-  echo "RESULT: FAIL"
-  exit 1
-fi
+case "$RESOLVED_DAEMON" in
+  "$WORKTREE_ROOT"/*) ;;
+  *)
+    echo "[FATAL] daemon.__file__ resolves to '$RESOLVED_DAEMON' which is NOT inside the worktree root '$WORKTREE_ROOT'."
+    echo "         Editable install points at a different checkout — testing the wrong code."
+    echo "RESULT: FAIL"
+    exit 1
+    ;;
+esac
 echo "(venv OK: daemon.__file__ resolves into worktree)"
 
 cd "$PROJECT_DIR"
