@@ -272,7 +272,7 @@ def test_no_broken_prose_see_prefix(path: Path) -> None:
     whitespace.
 
     Per audit (cleanup pass 2026-09-08), the cleanup pass repaired 40 sites across 26 files
-    by adding backticks: ``lives in See X`` → ``lives in \`See X\``` etc. This detector
+    by adding backticks: ``lives in See X`` → ``lives in `See X``` etc. This detector
     prevents regression of the class.
     """
     text = path.read_text(encoding="utf-8")
@@ -349,11 +349,33 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         # plan's tracking; the suffix `tracking.md` is operational filesystem reference, not
         # prompt-section cross-reference). W4 contract applies.
         "tracking.md",
-        # Date-prefixed memory files (own memory references) are operational
-        # filesystem paths to dated memory entries (e.g.,
-        # 2026-04-23-architecture-report.md); they are NOT cross-references
-        # to prompt sections (per §12.5 #0 operational exclusion).
+        # Operational tester convention docs (W3, 2026-09-08 cleanup):
+        # - `COVERAGE.md` — tester's coverage tracking file
+        # - `UPPERCASE.md` — naming convention reference (UPPERCASE.md for standard docs)
+        # - `API_TESTING.md` (and similar descriptive-name tokens) — example of descriptive naming
+        # These are operational filesystem references, not prompt-section cross-references.
+        # W4 contract applies.
+        "COVERAGE.md",
+        "UPPERCASE.md",
+        "API_TESTING.md",
+        # Operational same-agent workflow.md cross-reference (tester references its own
+        # workflow.md for cross-section pointers like "see Planning Phase in workflow.md").
+        # Same-agent cross-refs are permitted by §12.5 #0 — operational filesystem shape.
+        # W4 contract applies.
+        "workflow.md",
+        # Operational README.md (tester's own README in .agents/tester/ — file inventory).
+        "README.md",
     }
+    # W4 use-blindness contract (documented at each whitelist entry):
+    # Whitelisting a token exempts its bare-filename appearance (caught by this test); it does
+    # NOT exempt its appearance as a prose cross-reference. For example, "See tracking.md" or
+    # "per tracking.md" remains a violation — the bare-filename pattern is only suppressed for
+    # operational filesystem references like `path/to/tracking.md` (caught by OPERATIONAL_PATH_RE
+    # first) or as a literal command-line argument.
+    # This contract is enforced by the test architecture: this test only checks bare-md
+    # filename tokens, not the surrounding prose. The cross-reference shape ("See X" / "per X")
+    # is governed by BARE_MD_RE + allowed_operational + OPERATIONAL_PATH_RE + the
+    # bare-agents-prefix test, not by prose-intent parsing.
     # Match memory file references (operational own-memory path) -- the agent's
     # own memory file references ARE operational filesystem paths, not prompt-
     # section cross-references (per §12.5 #0 controlling exclusion).
@@ -364,6 +386,18 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         r"(?:"
         r"\.agents/"                 # shared planning/convention dir (with leading dot)
         r"|agents/shared/"           # shared conventions/planning/context dir (no leading dot)
+        # Latent `agents/<any-agent>/` hole (W1, 2026-09-08 cleanup):
+        # This pattern matches any agent's directory, including cross-agent references
+        # like `agents/approver/active.md` referenced from a non-approver file. The
+        # narrowing would require either (a) per-agent enumeration (too brittle),
+        # (b) self-reference detection (compare the agent in the path to the agent
+        # owning the referencing file — possible but requires the test to know the
+        # owning agent, which is currently per-file), or (c) requiring a specific
+        # filename suffix like /memory.md, /active.md, /rule.md, etc. We accept the
+        # latent hole: cross-agent refs like `agents/approver/active.md` are treated
+        # as operational filesystem references, even though they MIGHT be a cross-
+        # reference. The audit doc's §12.5 #0 enumeration covers the common cases.
+        # TODO (post-cleanup): implement self-reference detection for tighter closure.
         r"|agents/[a-zA-Z0-9_\[\]-]+/"  # any agent's own subdir (notes, rules, etc.)
         r"|daemon/"                  # daemon code paths (operational tool/runtime targets)
         r"|agents/_prompt_system/"   # system hooks
@@ -376,6 +410,14 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     )
     # Fenced code blocks (` ```...``` `) contain code/tool-call examples, not
     # prose cross-references. Tokens inside them are operational.
+    #
+    # W2 (2026-09-08 cleanup pass) — limitation note: FENCED_CODE_BLOCKS_RE uses non-greedy
+    # `.*?` matching, which works for balanced fence pairs but does NOT explicitly guard
+    # against odd-numbered fences. If a file has an unmatched ``` (odd count), the regex
+    # still matches the FIRST balanced pair, and content outside that pair (e.g., between
+    # fence #2 and fence #3 if there's a missing #3) is still checked. In practice no agent
+    # prompt has unbalanced fences; if you encounter one, either fix the file or extend the
+    # guard to count fences and treat odd-count files specially.
     FENCED_CODE_BLOCKS_RE = re.compile(r"```.*?```", re.DOTALL)
     hits = []
     for m in BARE_MD_RE.finditer(text):

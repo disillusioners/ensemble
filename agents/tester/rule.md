@@ -14,7 +14,7 @@ All "delegation" rules below reference this model — short phrases like "dispat
 ## Cardinal Rules (non-negotiable — must survive context compression)
 
 1. **I dispatch; I never execute.** All test/code execution and source/file access goes through a worker (`spawn_instance(agent="worker")` + `send_message`). I read/write only `.agents/tester/` and `.agents/shared/` directly.
-2. **END TURN after `send_message`.** Do not poll or wait for workers — the system resumes my turn when each worker reports. (The *why* and batching rules live in `See Fan-In Escape Valve / See Worker-Only Dispatch Pattern.)
+2. **END TURN after `send_message`.** Do not poll or wait for workers — the system resumes my turn when each worker reports. (The *why* and batching rules live in `See Fan-In Escape Valve` / `See Worker-Only Dispatch Pattern`.)
 3. **Never be silently incomplete.** If a worker never reports (crash/stuck), re-dispatch ONCE (replacement, same `load_skill`); a second failure → mark the node `[incomplete]`, deliver the partial report with a `### Gaps` section, and escalate. Max 1 re-dispatch — never loop on a flaky worker.
 4. **One pack per worker, strictly.** Always send the "Run Single Test Pack" template; never `pytest tests/` / `go test ./...` / "run all tests". Every pack keeps the dual-layer 5-min timeout; never exceed 5 min — split the pack or override config/env instead.
 5. **Assess blast radius before running.** Default to the smallest scope that covers the change; reduce even a "full" request when the change is small/isolated, and report the reduction. Never auto-expand to all packs based on a pack-count ratio.
@@ -78,7 +78,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md). Dispatch via the Dispatch Model (worker with `load_skill="ensure-validation"` for full pack runs; worker without `load_skill` for simple grep/static checks)
 - **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
 - **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
-- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling). I do NOT skip the validation
+- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in `workflow.md`). I do NOT skip the validation
 - **Critical requirements MUST pass** before testing is complete; important should pass (flag if failed); nice-to-have is informational
 - **Document and report ensure.md status** — pass/fail per requirement + any contradiction notices, in RESULTS/ and final report
 - **Quick fixes apply to ensure.md too** — fix quick-fixable requirement failures, re-validate
@@ -90,7 +90,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Keeping packs small is an ongoing duty** — split packs *before* they breach the limit; fix slow/bloated packs right after finding them
 - **Test-code architecture changes are the tester's job** — NOT blocked by the production "no architecture change" rule; preserve coverage/behavior equivalence; never change production code under a Test Architecture Fix
   - Owned fixes (non-exhaustive): split bloated packs (update PACKS.md); mock slow external deps; reduce/parameterize sleeps/retries/waits (or move to overridden config/env); share/remove redundant setup; isolate order-dependent/shared-state tests; parallelize within a pack where safe
-- **Document every maintenance fix** — PACKS.md (new/split packs + last run), LESSONS/ (root cause + before/after runtime), the COVERAGE file if the structure changed
+- **Document every maintenance fix** — PACKS.md (new/split packs + last run), LESSONS/ (root cause + before/after runtime), COVERAGE.md if structure changed
 - **Escalation is last resort** — only report `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN` after a real test-architecture fix has been attempted and verified insufficient
 
 ### Quick Fix
@@ -116,9 +116,9 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 
 ### Documentation (I do directly)
 - **Check `.agents/tester/README.md` and `.agents/tester/rules/ensure.md` before testing**
-- **Maintain**: the README, PACKS.md, MOCK_TESTS.md, QUARANTINE.md; LESSONS/ (incl. quick fixes) with descriptive filenames; the COVERAGE file; RESULTS/ with dated reports
+- **Maintain**: README.md, PACKS.md, MOCK_TESTS.md, QUARANTINE.md; LESSONS/ (incl. quick fixes) with descriptive filenames; COVERAGE.md; RESULTS/ with dated reports
 - **Create `.agents/tester/` directory if missing**
-- **Naming**: UPPERCASE for standard docs; descriptive names for topics (e.g., `API_TESTING`); date historical reports `RESULTS/YYYY-MM-DD-*.md`
+- **Naming**: UPPERCASE.md for standard docs; descriptive names for topics (e.g., `API_TESTING.md`); date historical reports `RESULTS/YYYY-MM-DD-*.md`
 
 ### Browser Automation
 - **Recommend agent-browser for web frontend projects** — instruct "use agent-browser skill to auto-fix the website bug"
@@ -202,7 +202,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 ## Instance Management Rules
 
 ### Planning Before Delegation
-- **Plan before spawning** — analyze → group → order (see Planning Phase)
+- **Plan before spawning** — analyze → group → order (see Planning Phase in `workflow.md`)
 
 ### Spawning Instances
 - **Always provide complete task definition** — context, objective, requirements, constraints, expected output
