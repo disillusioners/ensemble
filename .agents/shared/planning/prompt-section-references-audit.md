@@ -102,7 +102,7 @@ Scan glob iteration 1 (after residue re-grep): extended to `agents/*/skills-temp
 | `agents/blueprinter/soul.md` | 60 | `I operate under the safety contract defined in my rules (rule.md): … See rule.md for the operational detail.` | yes | `… (rule.md → Cardinal Rules): … See rule.md → Cardinal Rules for the operational detail.` |
 | `agents/coder/soul.md` | 94 | `- **\`get_instance_info\`** / **\`list_instances\`** — Metadata only; do NOT poll these to wait for a worker (see workflow.md)` | yes | `… (see workflow.md → Phase 4: Execute)` |
 | `agents/coder/soul.md` | 117 | `## Workflow (summary — full detail in workflow.md)` | yes | `## Workflow (summary — full detail in workflow.md → The Hard Runtime Constraint)` |
-| `agents/developer/soul.md` | 13 | `- Can use specialized tools (see knowledge.md for tool details)` | yes (broken — knowledge.md does not exist) | `- Can use specialized tools (see opencode tool catalog for details)` |
+| `agents/developer/soul.md` | 13 | `- Can use specialized tools (see knowledge.md for tool details)` | yes (broken — knowledge.md does not exist) | `- Can use specialized tools` (parenthetical dropped in iteration 2 to remove phantom-target reference; per leader adjudication) |
 | `agents/developer/soul.md` | 52 | `I can inspect daemon logs read-only via the \`system-log\` tool category (see \`tools_note.md\`).` | yes | `… (see \`tools_note.md → System Log\`).` |
 | `agents/developer/workflow.md` | 574 | `Use the full read-only tool reference in \`tools_note.md\` for the available system-log operations.` | yes (BUDGET file) | `See \`tools_note.md → System Log\` for the available read-only system-log operations.` |
 | `agents/devops/soul.md` | 49 | `1. Explicit confirmation (or TrueAuto self-approval per \`rule.md\`)` | yes | `… per \`rule.md\` → TrueAuto Self-Approval Protocol)` |
@@ -334,21 +334,21 @@ Verification per the worktree-aware verification recipe:
 | `agents/leader/workflow.md` | 0 | 0 | 0 |
 | `agents/leader/tools_note.md` | 0 | 0 | 0 |
 | `agents/developer/rule.md` | 0 | 0 | 0 |
-| `agents/developer/workflow.md` | 82 | 96 | **−14** |
+| `agents/developer/workflow.md` | 86 | 98 | **−12** |
 | `agents/tester/workflow.md` | 0 | 0 | 0 |
 | `agents/tidier/workflow.md` | 0 | 0 | 0 |
-| **TOTAL** | **82** | **96** | **−14** |
+| **TOTAL** | **86** | **98** | **−12** |
 
 | Metric | Value |
 |--------|-------|
 | Pre-existing worktree-aware feature bytes | 1628 |
-| Iteration 0 net delta on budget files | **−14** |
+| Iteration 0 net delta on budget files | **−12** |
 | Iteration 1 net delta on budget files | **0** (none of the 3 fixed files are budget files) |
-| New total | **1614** |
+| New total | **1616** |
 | Cap | 1650 |
-| Status | **PASS** (36 bytes of headroom) |
+| Status | **PASS** (34 bytes of headroom) |
 
-The only budget-file change is `agents/developer/workflow.md:574`, which removes 14 bytes net
+The only budget-file change is `agents/developer/workflow.md:574`, which removes 12 bytes net
 (the new text `See \`tools_note.md → System Log\` for the available read-only system-log
 operations.` is shorter than the original `Use the full read-only tool reference in \`tools_note.md\` for the available system-log operations.`).
 
@@ -363,11 +363,13 @@ either iteration (kept as borderline; see §3 Reason Summary #5).
 |--------|-----|---------|
 | Fix (iteration 0) | **705e9f52b4c51c19778be1b9ac23a96634fb05ef** | `fix(prompts): replace file references with section-name references per agent-prompt-writing-guide` |
 | Fix (iteration 1) | **e48dad7069ae6996940e5f04455721ca20f12078** | `fix(prompts): residue iteration 1 — add section names to descriptor-hint refs in worker/workflow, tester quick-fix skill, and innate test-pack skill` |
+| Fix (iteration 2) | **88294d715f2d345de9108a74c382d918ffecc598** | `fix(prompts): reviewer optionals — heading promotion, phantom target, cross-frame refs, audit arithmetic` |
 | Report | (this file's commit, see `git log --oneline -1`) | `docs: prompt section-reference audit report` |
 
-`git log --oneline -3` on the branch tip:
+`git log --oneline -4` on the branch tip:
 
 ```
+88294d71 fix(prompts): reviewer optionals — heading promotion, phantom target, cross-frame refs, audit arithmetic
 e48dad70 fix(prompts): residue iteration 1 — add section names to descriptor-hint refs in worker/workflow, tester quick-fix skill, and innate test-pack skill
 705e9f52 fix(prompts): replace file references with section-name references per agent-prompt-writing-guide
 6c4bf7b Merge branch 'feature/leader-completion-attestation' into latest
@@ -412,7 +414,7 @@ Per task instructions: NO test suites (prompt-text only). Verification scope:
 6. **`git show --stat` for each fix commit**: confirms selective staging landed only the
    intended agents/*.md files (no unintended file inclusions).
 7. **Byte budget verification**: `git diff -U0 --no-color` per budget file; net delta on
-   `agents/developer/workflow.md` = −14 bytes; total = 1614 (cap 1650, PASS).
+   `agents/developer/workflow.md` = −12 bytes; total = 1616 (cap 1650, PASS).
 
 ---
 
@@ -455,3 +457,55 @@ assembled prompt surface (loaded via `load_skill="..."`), and sites there should
 with the same §3 standard as the in-glob files. None of them rise to the level of a clear
 violation needing a fix — all have either a section-name descriptor (COMPLIANT), an
 auto-loaded-skill ref (Reason Summary #1), or an operational file path (Reason Summary #3).
+
+---
+
+## 10. Iteration 2 — Reviewer Optionals (pre-merge fix pass)
+
+The branch's reviewer returned APPROVE 0-critical with optionals #1–#6 (and #7–#9 REJECTED
+as out-of-scope scope-expansion). Leader ratified 5 accepted optionals (#1, #2, #3, #4, #6).
+This iteration applies exactly those 5 and updates the report.
+
+### Per-fix disposition
+
+| Reviewer # | File | Line | Disposition | Reasoning |
+|------------|------|------|-------------|-----------|
+| #1 (resolution bug) | `agents/governor/rule.md` | 147 | **FIXED** | Bold-prose line `**Degraded-confidence notice format (prepended to the output when synthesizing from 1 result):**` was inside `### 🎯 QUORUM + DEADLINE (D9 — degraded quorum + tiered deadlines)` and was referenced from `governor/workflow.md:298` and `:329` via the form `rule.md → Degraded-confidence notice format` — but the target was bold prose, not a real heading, so the references dangles. Promoted to a real `#### Degraded-confidence notice format` heading (dropped the verbose parenthetical per heading-convention; the verbose content lives in the prose paragraph immediately after the heading). Post-fix verification: the heading `Degraded-confidence notice format` now appears as `####` at `governor/rule.md:147`; both workflow.md references resolve to that heading. |
+| #2 (phantom target) | `agents/developer/soul.md` | 13 | **FIXED** | The iteration-0 v1 fix replaced the broken `knowledge.md` ref with `(see opencode tool catalog for details)` — but "opencode tool catalog" is also a phantom target (no such file). Simplest sanctioned fix: drop the parenthetical. Line now reads `- Can use specialized tools`. Report's FIXED-table row for this site updated to reflect the FINAL state (parenthetical dropped), not the v1 "opencode tool catalog" wording. |
+| #3 (audit arithmetic) | `.agents/shared/planning/prompt-section-references-audit.md` | §5 table + §5 metric rows + §5 prose + §8 verification | **FIXED** | Leader cited four numbers: 82→86 (added bytes), 96→98 (removed bytes), −14→−12 (net delta), 1614→1616 (new total), 36→34 (headroom bytes), plus the §5 prose "removes 14 bytes net" → "removes 12 bytes net". Variant-tolerant sweep: enumerated every occurrence of 1614/1616, −14/−12, 82/96 in arithmetic-table context, 36/34 bytes-of-headroom, "removes 14 bytes net"/"removes 12 bytes net", and the §8 verification line — all aligned. Verified byte counts via `git diff -U0 --no-color 6c4bfb7b HEAD -- agents/developer/workflow.md`: added = 87 raw bytes − 1 newline = **86** net; removed = 99 raw bytes − 1 newline = **98** net; net = **−12**. New total = 1628 + 86 − 98 = **1616**. Headroom = 1650 − 1616 = **34**. |
+| #4 (resolution bug, cross-frame) | `agents/tester/skills-template/quick-fix.md` | 93 | **FIXED** | The skill runs in worker frames where bare `rule.md` dangles. Changed `(see rule.md → Reusing Instances (Priority Order)):` to `(see tester/rule.md → Reusing Instances (Priority Order)):`. Resolution re-check: heading `### Reusing Instances (Priority Order)` exists at `tester/rule.md:213` (verified). |
+| #6 (disambiguation) | `agents/tester/soul.md` | 81 | **FIXED** | `tester/rule.md` has TWO `### Quick Fix` sections: (a) `:96` under `## Must` (permissive — when IS a quick fix authorized); (b) `:173` under `## Must Not` (restrictive — what NOT to authorize). The sentence "See rule.md → Quick Fix for criteria" — the word "criteria" points to the permissive `## Must` section which defines the criteria. Disambiguated to `See tester/rule.md → Quick Fix (Must) for criteria and workflow.md → Quick Fix Process for examples`. |
+
+### Budget confirmation
+
+Per the worktree-aware verification-summary, the 9 budget files are:
+
+```
+agents/giter/workflow.md
+agents/giter/rule.md
+agents/giter/tools_note.md
+agents/leader/workflow.md
+agents/leader/tools_note.md
+agents/developer/rule.md
+agents/developer/workflow.md
+agents/tester/workflow.md
+agents/tidier/workflow.md
+```
+
+The 5 iteration-2 edits targeted files:
+
+```
+agents/governor/rule.md         — NOT a budget file ✓
+agents/developer/soul.md        — NOT a budget file ✓
+agents/tester/skills-template/quick-fix.md — NOT a budget file ✓
+agents/tester/soul.md           — NOT a budget file ✓
+agents/_prompt_system/.../skill.md  — NOT a budget file (and not edited in iteration 2) ✓
+```
+
+**None of the 5 iteration-2 targets are budget files.** The worktree-aware byte
+arithmetic stays at 1616 / 1650 (PASS, 34 bytes headroom) after iteration 2 — only the §3
+arithmetic correction in this report affected any number, not the prompt files.
+
+### Reviewer optionals #7, #8, #9 — REJECTED for this branch
+
+Per the leader adjudication: scope-expansion backlog, do NOT touch them on this branch.
