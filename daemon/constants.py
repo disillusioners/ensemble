@@ -636,3 +636,32 @@ WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED: str = (
 WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED: str = (
     "WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED"
 )
+
+
+# ── kv-ambient-awareness-fix (C0 prereq — B.S.8 PARTIAL) ─────────────────────
+#
+# Kill-switch registry entries for the ambient shared_meta_kv fixes.
+# Both env names are RESERVED at this commit; the env BINDINGS land at
+# their owning commits:
+#
+#   * ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` — Shape A (pydantic
+#     ``ContextMessagesConfig`` field + ``_resolve_*`` in ``config.py``,
+#     mirroring the ``ENSEMBLE_PROACTIVE_COMPACTION`` precedent) — binds
+#     at C2 (fix(D3): standalone KV host + system-default un-suppression).
+#   * ``ENSEMBLE_AMBIENT_KV_FRESH`` — Shape B (service-module cached
+#     resolver + boot INFO, mirroring the ``ENSEMBLE_WC_WAKE_ENQUEUE``
+#     precedent) — binds at C3 (fix(D1): split block + per-turn refresh).
+#
+# A third historical name, ``ENSEMBLE_CONTEXT_PERSISTENT_KV_TREE_ROOT``,
+# is deliberately NOT reserved: its defect (spawned-child mispartition)
+# is FIXED AT BASE by 80bb61dd and the flag-wrap was adjudicated
+# negative-value (decisions.md D12) — a reserved-unused entry would
+# contradict B.S.8's own rationale.
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED: str = (
+    "ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED"
+)
+
+ENSEMBLE_AMBIENT_KV_FRESH: str = "ENSEMBLE_AMBIENT_KV_FRESH"

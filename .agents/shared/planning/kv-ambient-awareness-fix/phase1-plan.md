@@ -518,10 +518,10 @@ with engine.connect() as conn:
 
 ### Pre-Deployment: Re-Anchor at Latest
 
-**Mandatory**: before branching for implementation, `git fetch origin && git checkout latest` in a new worktree. The implicated-file drift since `2750c815` is **7 commits** (`2750c815..9eebf3ff` — supersedes this draft's 3-commit injected-notes list; see decisions.md **D13**): `d348ad4e`, `80bb61dd`, `d6e30d9d`, `7a899517`, `e321bdb3`, `f965345a`, `53baef57`. Re-anchor all anchors in the implicated files. Key files to re-grep after checkout:
-- `daemon/compaction.py`: `ENSEMBLE_INJECTED_NOTES_ABSORB` resolver, `_injected_note_absorbed_ids` caller
-- `daemon/config.py`: `resolve_injected_notes_absorb()` boot validation call
+**Mandatory**: before branching for implementation, `git fetch origin && git checkout latest` in a new worktree. The implicated-file drift since `2750c815` is **7 commits** (`2750c815..9eebf3ff` — supersedes this draft's 3-commit injected-notes list; see decisions.md **D13**): `d348ad4e`, `80bb61dd`, `d6e30d9d`, `7a899517`, `e321bdb3`, `f965345a`, `53baef57`. Re-anchor all anchors in the implicated files. Key files to re-grep after checkout (**D13-addendum erratum, 2026-09-08**: `compaction.py`/`config.py` were listed by this draft only because the superseded injected-notes arc touched them — `git log 2750c815..9eebf3ff` shows that arc hit exactly those two files and NEVER the three seam files, while the 7-commit drift set hit exactly the three seam files; the two bullets are dropped and the three seam files are now named explicitly — see the addendum under decisions.md D13):
 - `daemon/services/context_messages.py`: full re-grep of all anchors listed in Root Cause table above
+- `daemon/services/instance_messaging.py`: injection-seam anchors (`:3637` gate, landed threading block `:3671-3686`, flag capture `:2907-2949` / stamp `:3050-3056`)
+- `daemon/graph.py`: discard seam `:4059-4065` + ContextSlot assemble `:674-684`
 
 ### Branch Strategy
 Branch from `latest` on a new worktree: `feature/kv-freshness-cadenza` (or similar). Do NOT branch from the worktree-aware-prompts branch (`2750c815` worktree is externally owned).

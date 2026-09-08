@@ -176,7 +176,7 @@ Functional (each mapped to its phase's acceptance suite):
 | 3 | Wrong-behavior pin flipped, revert pin kept | Phase3 tests 1a (flip) + 1b (OFF identical, phase3-plan.md:310-322) | `call_count == 1` ON / `== 0` OFF |
 | 4 | KV block refreshes every non-retry turn; `is_retry` excluded | Phase1 tests (phase1-plan.md:353-364) | Fresh content on turn 2+; same stable id across calls; no KV on retry turns |
 | 5 | Stable-id supersede holds (no checkpoint growth) | `test_kv_stable_id_supersedes` + compaction pins (phase1-plan.md:163-170, :397-406) | Identical ids; constant 1-entry contribution |
-| 6 | Flag-composition matrix correct | D4 2×2 table cells pinned by NAMED tests per cell (decisions.md D4 + W7): ON×ON = phase3 test 1a + phase1 refresh suite; ON×OFF = `test_composition_c2_on_c3_off`; OFF×ON = `test_composition_c2_off_c3_on`; OFF×OFF = phase3 1b + `test_kv_block_absent_when_flag_off` | All four observable states reachable and pinned |
+| 6 | Flag-composition matrix correct | D4 2×2 table cells pinned by NAMED tests per cell (decisions.md D4 + W7): ON×ON = phase3 test 1a + phase1 refresh suite; ON×OFF = `test_composition_c2_on_c3_off`; OFF×ON = `test_composition_c2_off_c3_on`; OFF×OFF = phase3 1b + `test_kv_block_absent_when_flag_off` + `test_kv_block_present_on_turn1_when_flag_off` (W3: turn-1 block present, never refreshed — cadence-only reversion) | All four observable states reachable and pinned |
 
 Non-functional / process:
 

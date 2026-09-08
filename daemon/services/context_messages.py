@@ -82,7 +82,12 @@ CONTEXT_KIND_PROJECT_SCOPE_GUIDE = "project_scope_guide"
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 
-def _make_context_message(kind: str, title: str, content: str) -> HumanMessage:
+def _make_context_message(
+    kind: str,
+    title: str,
+    content: str,
+    id_: str | None = None,
+) -> HumanMessage:
     """Factory for any ``[SYSTEM CONTEXT: …]`` tagged HumanMessage.
 
     Forces prefix and ``additional_kwargs`` consistency across all builders
@@ -98,6 +103,13 @@ def _make_context_message(kind: str, title: str, content: str) -> HumanMessage:
             does NOT escape or trim — callers must run
             :func:`escape_for_context_block` on any untrusted content
             before it lands here.
+        id_: Optional stable message id. When ``None`` (the default)
+            a fresh ``uuid4`` is minted — identical to the pre-``C0``
+            behavior, so every existing caller is unchanged. Callers
+            that re-emit a refreshable block pass an explicit stable
+            id (via :func:`_stable_id_for`) so LangGraph's
+            ``add_messages`` reducer SUPERSEDES the prior checkpoint
+            entry in place instead of appending a duplicate.
 
     Returns:
         A fresh ``HumanMessage`` with the canonical
@@ -106,8 +118,74 @@ def _make_context_message(kind: str, title: str, content: str) -> HumanMessage:
     """
     return HumanMessage(
         content=f"{CONTEXT_PREFIX}{title}{CONTEXT_SUFFIX}{content}",
-        id=str(uuid.uuid4()),
+        id=id_ if id_ is not None else str(uuid.uuid4()),
         additional_kwargs={"injected_message": True, "context_kind": kind},
+    )
+
+
+def _stable_id_for(
+    kind: str,
+    *,
+    instance_id: str | None = None,
+    context_key: str | None = None,
+    agent_id: str | None = None,
+) -> str:
+    """Compose the deterministic stable id for a refreshable block.
+
+    Canonical id-format table (decisions.md D3 — kv-ambient-awareness-fix;
+    single source of truth — all callers route through this helper so
+    the mint site stays grep-able and the formats stay append-only):
+
+    ================  ==============================  =====================
+    ``kind``          id format                       required parts
+    ================  ==============================  =====================
+    ``project``       ``project:{instance_id}``       ``instance_id``
+    ``shared_meta_kv``  ``kv:{context_key}``          ``context_key``
+    ================  ==============================  =====================
+
+    ``context_key`` is the FULL resolved tree-root partition key — the
+    id suffix IS the partition the block content was read from, so
+    supersede granularity matches data granularity exactly. Splitting
+    the key (e.g. ``context_key.split(':')[-1]``) is a WRONG-ID hazard
+    and must never be reintroduced (S19/D3 erratum).
+
+    C0 scope: only the ``project`` + ``shared_meta_kv`` kinds mint ids
+    (S16). Any other kind — including the existing auto-load /
+    synthetic precedents, which have their own stable-id helpers —
+    raises: this helper is not a universal mint and must not silently
+    grow kinds without a decision.
+
+    Args:
+        kind: The block kind (see table above).
+        instance_id: Owning instance id (``project`` kind).
+        context_key: Full resolved tree-root partition key
+            (``shared_meta_kv`` kind).
+        agent_id: Agent id. Accepted for signature stability across the
+            canonical table; unused by the C0 kinds.
+
+    Returns:
+        The deterministic stable id string.
+
+    Raises:
+        ValueError: unknown ``kind``, or a required part for the kind
+            is missing/empty.
+    """
+    if kind == "project":
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('project') requires instance_id"
+            )
+        return f"project:{instance_id}"
+    if kind == "shared_meta_kv":
+        if not context_key:
+            raise ValueError(
+                "_stable_id_for('shared_meta_kv') requires the FULL "
+                "context_key (resolved tree-root partition key)"
+            )
+        return f"kv:{context_key}"
+    raise ValueError(
+        f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
+        "for 'project' and 'shared_meta_kv' blocks"
     )
 
 

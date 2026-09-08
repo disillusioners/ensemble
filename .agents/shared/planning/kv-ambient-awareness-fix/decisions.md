@@ -123,7 +123,7 @@ Implementation shape: the fetch gate at context_messages.py:1339-1345 becomes `i
 | ON × ON | `test_kv_ambient_on_default_project_renders_block_when_partition_has_rows` (phase3 1a) + phase1 turn-2+ refresh suite | Block emitted turn 1 AND refreshed every non-retry turn |
 | ON × OFF | `test_composition_c2_on_c3_off` (**NEW, W7**) | Block emitted on turn 1, NEVER refreshed on turns 2+ (cadence-only reversion — block still present) |
 | OFF × ON | `test_composition_c2_off_c3_on` (**NEW, W7**) | NO KV block on any turn — the refresh flag alone must NOT re-add a suppressed block (cross-flag independence) |
-| OFF × OFF | `test_kv_ambient_disabled_keeps_old_no_fetch_behavior` (phase3 1b) + `test_kv_block_absent_when_flag_off` (phase1, turn-2+ scope) | Byte/value-identical legacy state |
+| OFF × OFF | `test_kv_ambient_disabled_keeps_old_no_fetch_behavior` (phase3 1b) + `test_kv_block_absent_when_flag_off` (phase1, turn-2+ scope) + `test_kv_block_present_on_turn1_when_flag_off` (phase1, W3 turn-1-surface pin — turn-1 block present, never refreshed) | Byte/value-identical legacy state |
 
 The two new tests are cross-flag independence pins: flipping either flag alone must produce exactly its row/column of this table, not a blend.
 
@@ -283,6 +283,26 @@ All prose in the overview and this file uses "DEFECT n" / "Cn" only; the string 
 | persistence.py synthetic id / enumerate | :943 | **:949** (enumerate region :937-949) |
 
 **Migration record.** `instances.parent_id` exists since migration `daemon/migrations/versions/20260402_000001_rename_session_to_instance.sql` (2026-04-02; column at :46, index `ix_instances_parent_id` at :225) — it predates base by months. The landed fix (80bb61dd) reads a long-established, indexed column: **no migration risk, no schema change** in this initiative.
+
+**Addendum (2026-09-08, C0 implementer — re-grep file-list adjudication for phase1-plan.md:519-527).** The phase1 re-anchor step still carried `daemon/compaction.py` + `daemon/config.py` in its "key files to re-grep" list — implicated only by the SUPERSEDED 3-commit injected-notes list. Adjudicated by direct git evidence at C0 kickoff (worktree `agents-ensemble-wt-kvfix` @ `aaa93a1d`, base `9eebf3ff`):
+
+```
+$ git log --oneline 2750c815..9eebf3ff -- daemon/services/context_messages.py daemon/services/instance_messaging.py daemon/graph.py
+d348ad4e chore(context): tidier follow-ups — doc truth + comment fixes + test hygiene
+80bb61dd fix(context): resolve first-turn tree-root from instance parent_id in messaging path
+d6e30d9d fix(lca): judge pre-merge punch list (request_timeout, fixtures, log fields, pins)
+7a899517 feat(lca): inline LLM report judge on deny path (quick model, conservative fallback)
+e321bdb3 fix(lca): stamp internal enqueue-lane messages - close report masquerade hole (review critical)
+f965345a feat(lca): nudge embeds completion-flow mermaid diagram
+53baef57 feat(lca): conditional attestation (delegation-gated) + system-context nudge header
+
+$ git log --oneline 2750c815..9eebf3ff -- daemon/compaction.py daemon/config.py
+c2142c69 fix(compaction): validate ENSEMBLE_INJECTED_NOTES_ABSORB at boot
+4e1e6698 feat(compaction): ENSEMBLE_INJECTED_NOTES_ABSORB absorb kill-switch
+bb4e3e89 fix(compaction): absorb answered injected notes into compacted span
+```
+
+The two file sets are **disjoint**: the injected-notes arc touched exactly `compaction.py`/`config.py` and never the seam files; the 7-commit drift set touched exactly the three seam files and never `compaction.py`/`config.py`. Per D13's supersession, `compaction.py`/`config.py` are DROPPED from phase1's re-grep step; the step now names the three seam files explicitly. No other phase file's re-grep list required this correction (phase2/phase3 name the seam files only).
 
 **Reversibility.** Documentation-only; re-grep at C0 kickoff remains mandatory (R2) — this table is the starting point, not a substitute.
 
