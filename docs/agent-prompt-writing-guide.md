@@ -105,7 +105,7 @@ Delete duplicates. If `rule.md:14` and `rule.md:30` say the same thing, they wer
 
 **Forbidden** in prompt text: ANY filename or path token. Both bare file forms (`rule.md`,
 `workflow.md`, `soul.md`, `tools_note.md`, `memory.md`, `*.md`) AND the intermediate
-`file.md → Section` arrow form are now forbidden. Operators grep `\.md|workflow\.md|rule\.md|soul\.md|tools_note\.md|memory\.md` over prompt surfaces and resolve to zero hits — that is the closure proof.
+`file.md → Section` arrow form are now forbidden. Operators grep `\.md|workflow\.md|rule\.md|soul\.md|tools_note\.md|memory\.md` over prompt surfaces and resolve to zero hits — that is the closure proof. **Scope:** the closure grep excludes operational filesystem paths — tool parameter values (e.g. `file="soul.md"`) and runtime read/write targets (own memory/notes dirs, planning/convention docs like `conventions.md`, `PACKS.md`, `QUARANTINE.md`) — which are not cross-references to prompt sections; any survivor hit must be enumerated and justified as operational.
 
 Disambiguators stay where two sections share a title within the same agent
 (`See Quick Fix (Must)` vs `See Quick Fix (Must Not)`). Cross-agent refs that need

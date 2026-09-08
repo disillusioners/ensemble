@@ -660,9 +660,7 @@ Auto-loaded strategy skills (`dev-strategy.md`, `planning-strategy.md`,
 the owning agent's prompt surface, so referencing a heading by name alone resolves
 without a path token (the agent has the file).
 
-The §3 subsection rules that still hold are preserved unchanged: quoted-section
-form (with `→` or `§`), positional-fragility guidance (`Cardinal #3` over `§9`), and
-descriptor patterns (`(canonical — File Hygiene owns them)`).
+§3 rules preserved-and-restated in v2 form: the disambiguator clause, the auto-loaded strategy-skill heading-resolution clause, and the post-change verification duty (grep rekeyed `rule.md §` → `\.md`, plus own-prompt heading-resolution and cross-agent owner heading checks); the path-bearing subsection forms (`file.md "Section"`, `file.md §Section`) are FORBIDDEN in v2 (carry the path token v2 exists to remove); the `Cardinal #N over §N` semantic-labels table is absorbed by the navigable-unit principle and the §10 checklist bullet.
 
 ### 12.3 Conversion counts
 
@@ -719,6 +717,8 @@ hits** for the canonical pattern set: `\.md` (prompt-file tokens), `<agent>/<fil
 `file.md "Section"` (quoted form), `see <file>.md`-style prose.
 
 **Survivors (out-of-scope per task instructions; report-only, not converted):**
+
+0. **Controlling exclusion interpretation:** v2 governs navigational cross-references to prompt sections; operational filesystem paths are excluded BY DESIGN — (a) own-directory write-scope Cardinal declarations (e.g. reviewer/tidier/planner own notes/rules dirs); (b) operational project-infra paths (`.agents/shared/planning/`, `conventions.md`, `active.md`, phase files); (c) non-prompt convention docs consulted at runtime (`core.md`, `PACKS.md`, `QUARANTINE.md`, `ensure.md`); (d) system hooks (`_prompt_system/knowledge*.md`). A path-token hit is a violation ONLY if it functions as a cross-reference to a prompt section; survivors must be enumerated and justified as operational.
 
 1. **`agents/watcher/builder-prompt.md` (3 hits)** — builder-prompt file is NOT assembled
    into an agent prompt (per task scope note). Out of scope; would not changed.
