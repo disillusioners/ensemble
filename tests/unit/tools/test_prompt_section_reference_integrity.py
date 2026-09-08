@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from unicodedata import normalize
 
 import pytest
 
@@ -78,7 +79,12 @@ NON_SURFACE_PATTERNS = (
 
 def _is_in_scope(rel_path: str) -> bool:
     """Return True if ``rel_path`` is an agent-prompt surface (v2 closure grep applies)."""
-    if rel_path.startswith("_prompt_system/innate-skills/"):
+    # 2e (R3 2026-09-08) DEAD-SCOPE-BRANCH FIX: the prior prefix was
+    # ``_prompt_system/innate-skills/`` — but every rel_path iterated here begins
+    # with ``agents/``, so the branch never fired and the 8 innate-skill files
+    # were silently OUTSIDE the sweep. The ``agents/`` prefix is now part of the
+    # match, and test_innate_skill_files_in_scope guards the branch's liveness.
+    if rel_path.startswith("agents/_prompt_system/innate-skills/"):
         return True
     parts = rel_path.split("/")
     if len(parts) < 3:
@@ -136,12 +142,22 @@ def _iter_prompt_files() -> list[Path]:
     return out
 
 
+# 2g (R3): NFKC normalization — cheap unicode lookalike fold (fullwidth parens,
+# NBSP, compatibility forms) so detectors cannot be evaded by visually-identical
+# codepoints. Applied to every prompt text before matching.
+def _read_prompt_text(path: Path) -> str:
+    """Return the file's text, NFKC-normalized (2g)."""
+    return normalize("NFKC", path.read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Corruption-pattern detectors (mirror audit §12 + repair commit series)
 # ---------------------------------------------------------------------------
 
 # Empty captures like ``(See )``, ``(See .``, ``(See,``
-EMPTY_CAPTURE_RE = re.compile(r"\(See\s*[^A-Za-z]*\)")
+# (2c, R3 2026-09-08): re.IGNORECASE added — the sweep also produced lowercase
+# headwords (``(see )``), which the case-sensitive form let through.
+EMPTY_CAPTURE_RE = re.compile(r"\(See\s*[^A-Za-z]*\)", re.IGNORECASE)
 
 # Known glued words from the council list (and the general camelcase junction).
 KNOWN_GLUED_WORDS = [
@@ -151,22 +167,54 @@ KNOWN_GLUED_WORDS = [
     re.compile(r"\bmatchedload_skill\b"),
 ]
 
-# Broken-prose pattern from v2-sweep over-conversion (2026-09-08 cleanup pass, separator
-# extension + hyphen-compound guard added 2026-09-08 iteration 2):
-# The v2 sweep produced ungrammatical prose like "lives in See X", "in See X", "from See X"
-# where a preposition (`lives in` / `in` / `from`) was kept and `See` was added before the section
-# name. **Evasion-tolerant:** accepts ANY mix of whitespace + backtick + asterisk characters between
-# the preposition and `See` — catches the plain form (`in See X`), the backtick-mechanically-evading
-# form (`in `See X``), the bold-wrapped form (`in **See X**`), and any future cosmetic-separator
-# variant an LLM might invent (e.g., `in ` See X`` or `in` `See X`). The pattern requires at
-# least one character from the set (whitespace, backtick, or asterisk) between the preposition
-# and `See`, so it does not over-match prose like `in the See Table column` only when there is
-# a genuine separator. **Hyphen-compound guard:** the trailing negative lookahead `(?![\w-])`
-# ensures `See-layer`, `See_X`, `Seesomething` (no whitespace separator after `See`) do NOT match
-# — only genuine space/boundary-separated `See` headwords trigger the violation.
-# Final pattern (after 2026-09-08 restore — G6 natural-prose rework, separator-class extended to bold + hyphen-compound guard added):
-#     r"\b(?:lives\s+in|in|from)[\s`*]+See\b(?![\w-])"
-BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)[\s`*]+See\b(?![-\w])", re.IGNORECASE)
+# Broken-prose pattern from v2-sweep over-conversion.
+#
+# R3 GENERIC WIDENING (2026-09-08, final iteration — replaces verb enumeration):
+# The R2 form enumerated splice headwords (`lives in` / `in` / `from`) and the R2
+# review proved enumeration LEAKS — 10 survivor sites used splice-words outside the
+# enumerated set (`handle See X`, `is See X`, `Apply See X`, `template See X`,
+# `and See X`, `optimizations See X`, `approval See X`, bold `**See X`). The
+# headword class is therefore GENERIC: any `\w+` spliced directly before an
+# imperative `See <Capital>` is the defect, regardless of part of speech.
+#
+#     r"\b\w+[ \t`*]+See\b(?![\w-])(?=[ \t]+[A-Z])"
+#
+# - Separators `[ \t`*]+` SUBSUME the R2 hardening class (`[\s`*]+` restricted to
+#   the same line): plain (`word See X`), backtick-mechanically-evading
+#   (`word `See X``), and bold-wrapped (`word **See X**) forms all match.
+# - Trailing negative lookahead `(?![\w-])` keeps the hyphen-compound guard:
+#   `See-layer`, `See_X`, `Seesomething` do NOT match.
+# - The lookahead `(?=[ \t]+[A-Z])` requires the `See` to govern a Capitalized
+#   section name (the sweep's output shape).
+# - Same-line spacer ONLY: wrap-spanning splices (`See ⏎ > See` class, where the
+#   splice crosses a line break or blockquote marker) are caught by the SEPARATE
+#   collapsed pass (2b) — test_no_broken_prose_see_prefix_wrap_spanning — so line
+#   attribution stays reportable on the primary pass.
+#
+# Legit shapes that must NOT match (each verified against the full 205-file corpus
+# at 27f023ea; pinned as negative controls in test_see_splice_negative_controls):
+#   - sentence-initial `See X` (preceded by `.` / `!` / `?` / line start) — no
+#     word directly before `See`
+#   - parenthetical `(See X)` — `(` is not a word char
+#   - after a `>` blockquote marker — not a word char
+#   - lowercase `see X` — the pattern requires the capitalized imperative `See`
+#   - hyphen/underscore compounds (`See-layer`, `See_X`) — lookahead guard
+BROKEN_PROSE_RE = re.compile(r"\b\w+[ \t`*]+See\b(?![\w-])(?=[ \t]+[A-Z])")
+
+# 2b (R3): pre-collapsed newline→space SECOND PASS for the wrap-spanning class
+# (`See ⏎ > See` — a splice whose headword and `See` are separated by a line
+# break, optionally with `> ` blockquote prefixes between). The same generic
+# pattern is applied to normalized text (blockquote prefixes stripped per line,
+# then every whitespace run collapsed to one space) so wrapped splices are
+# visible to the detector. Kept as a SEPARATE pass — the collapsed text has no
+# meaningful line numbers, so the primary pass stays line-attributable.
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"^[ \t]*>[ \t]?", re.MULTILINE)
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _collapse_wrap_whitespace(text: str) -> str:
+    """Strip ``> `` blockquote prefixes per line, then collapse whitespace runs (2b)."""
+    return _WHITESPACE_RUN_RE.sub(" ", _BLOCKQUOTE_PREFIX_RE.sub("", text))
 # A general lowercase-then-Capital pattern (e.g., ``<lowercase-word><Capital-word>``
 # glued at a word boundary, like ``eitherAllowed``) is NOT included here because
 # it cannot reliably distinguish the corruption class from legitimate CamelCase
@@ -193,7 +241,14 @@ CROSS_AGENT_PATH_RE = re.compile(r"(?<!agents/)\b[a-zA-Z][\w-]*/(rule|workflow|s
 # Bare ``agents/`` prefix tokens (added in the 2026-09-08 repair iteration).
 # This pattern catches the corruption class ``agents/See <agent>'s ...`` where
 # the sweep accidentally produced a literal ``agents/`` followed by a See form.
-BARE_AGENTS_PREFIX_RE = re.compile(r"\bagents/(?=[A-Z]|see\b|See\b)")
+# 2d (R3 2026-09-08): the lookahead was widened so SINGLE-CHAR SEPARATORS are
+# caught — the prior form (`(?=[A-Z]|see\b|See\b)`) required `See` to start at
+# the character right after `agents/`, missing the backtick/bold-wrapped
+# corruption shapes (``agents/`See ...``, ``agents/**See ...**``). The zero-width
+# separator run `[\s`*]*` skips any mix of whitespace/backtick/asterisk before
+# the capital or paren; lowercase path forms (`agents/ari/workflow.md`,
+# `agents/_prompt_system/`) still do not match.
+BARE_AGENTS_PREFIX_RE = re.compile(r"\bagents/[\s`*]*(?=[A-Z(])")
 
 # §12.5 #0 controlling exclusion: operational filesystem paths are NOT cross-references.
 # These patterns describe where a bare ``agents/`` hit is OPERATIONAL and stays exempt.
@@ -231,7 +286,7 @@ def test_no_empty_capture_in_see_form(path: Path) -> None:
     (See ) empty parens in many sites (FIX CLASS B in the audit). This test
     enforces zero empty-capture violations across all in-scope prompt surfaces.
     """
-    text = path.read_text(encoding="utf-8")
+    text = _read_prompt_text(path)
     matches = list(EMPTY_CAPTURE_RE.finditer(text))
     assert not matches, (
         f"{path.relative_to(REPO_ROOT)} contains {len(matches)} empty-capture violation(s): "
@@ -254,7 +309,7 @@ def test_no_known_glued_words(path: Path) -> None:
     diagrams, ``loadSkill`` tool names, etc.). Future corruption of
     this shape should be added to KNOWN_GLUED_WORDS as it is discovered.
     """
-    text = path.read_text(encoding="utf-8")
+    text = _read_prompt_text(path)
     hits = []
     for pat in KNOWN_GLUED_WORDS:
         for m in pat.finditer(text):
@@ -272,24 +327,36 @@ def test_no_known_glued_words(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _iter_prompt_files(), ids=lambda p: p.name)
 def test_no_broken_prose_see_prefix(path: Path) -> None:
-    """No broken-prose `in See X` / `from See X` / `lives in See X` patterns.
+    r"""No word-spliced imperative `See` (generic splice heuristic, R3 widened).
 
     Background: the v2 sweep over-converted prepositions (`lives in`, `in`, `from`) before
     file references into broken prose like "lives in See X" / "from See X". The natural
     English form replaces `in See X` with `in **X**` (bold or backticked section name
     without the See headword) — the preposition stays but no longer governs `See`.
 
-    Detector is **evasion-tolerant**: BROKEN_PROSE_RE matches BOTH the plain form
-    (`in See X`) AND backtick-wrapped variants (`in \`See X\``, `in\`See X\``, `in\`\`See X`),
-    AND bold-wrapped variants (`in **See X**`), AND any future cosmetic-separator variant
-    an LLM might invent (mix of whitespace, backticks, and asterisks between preposition
-    and `See`). The pattern requires at least one character from the separator class
-    (whitespace, backtick, or asterisk) between the preposition and `See`, so it does not
-    match `in there See something` (which would have other words in between, not just
-    separator characters). **Hyphen-compound guard:** the trailing negative lookahead
+    R3 GENERIC WIDENING (final iteration, 2026-09-08): the R2 pattern enumerated splice
+    headwords and the R2 review proved enumeration leaks (10 survivor sites used
+    `handle See X` / `is See X` / `Apply See X` / `template See X` / `and See X` /
+    `optimizations See X` / `approval See X` / bold `**See X`). BROKEN_PROSE_RE is now
+    GENERIC — any `\w+` + separators + imperative `See` + Capitalized section name:
+
+        r"\b\w+[ \t`*]+See\b(?![\w-])(?=[ \t]+[A-Z])"
+
+    Evasion-tolerance is retained and WIDENED: the separator class (whitespace,
+    backtick, asterisk — same line) catches the plain form (`word See X`),
+    backtick-wrapped variants (`word `See X``), and bold-wrapped variants
+    (`word **See X**`). **Hyphen-compound guard:** the trailing negative lookahead
     `(?![\w-])` ensures compound words like `See-layer`, `See_X`, `Seesomething` (no
-    whitespace separator after `See`) do NOT match \u2014 only genuine space/boundary-separated
-    `See` headwords trigger the violation.
+    whitespace separator after `See`) do NOT match — only genuine space/boundary-
+    separated `See` headwords trigger the violation.
+
+    Legit shapes stay un-flagged (pinned in test_see_splice_negative_controls):
+    sentence-initial `See X`, parenthetical `(See X)`, after a `>` blockquote marker,
+    lowercase `see X`, and hyphen/underscore compounds.
+
+    Wrap-spanning splices (`See ⏎ > See` class) are caught by the SEPARATE collapsed
+    pass — test_no_broken_prose_see_prefix_wrap_spanning (2b) — keeping this pass
+    line-attributable.
 
     Per audit (restore iteration, 2026-09-08), the G6 fix performs genuine natural-prose
     rewrites (drop the preposition-or-See headword pair; keep the section reference as
@@ -298,11 +365,41 @@ def test_no_broken_prose_see_prefix(path: Path) -> None:
     dodged. The detector's evasion-tolerance is the safety net against re-introduction
     via future sweeps. Test file: `agents/` only — 44 sites / 26 files pre-fix (audited at 65659cd5).
     """
-    text = path.read_text(encoding="utf-8")
+    text = _read_prompt_text(path)
     matches = list(BROKEN_PROSE_RE.finditer(text))
     assert not matches, (
         f"{path.relative_to(REPO_ROOT)} contains {len(matches)} broken-prose violation(s): "
         + ", ".join(m.group(0) for m in matches[:5])
+    )
+
+
+@pytest.mark.parametrize("path", _iter_prompt_files(), ids=lambda p: p.name)
+def test_no_broken_prose_see_prefix_wrap_spanning(path: Path) -> None:
+    r"""No WRAP-SPANNING word-spliced `See` (2b pre-collapsed second pass).
+
+    The wrap-spanning class is a splice whose headword and `See` are separated by a
+    line break — with or without `> ` blockquote markers between:
+
+        Holding the turn open blocks report delivery (deadlocks the run). See
+        > See Why END TURN After Dispatch.
+
+    The primary pass (test_no_broken_prose_see_prefix) uses a same-line separator
+    class, so it cannot see across the break. This pass normalizes the text first
+    (strip `> ` prefixes per line, collapse every whitespace run to one space) and
+    applies the SAME generic pattern — catching the class at the cost of line
+    attribution (collapsed text has no meaningful line numbers, hence a separate
+    check; failures report the collapsed context around the match instead).
+    """
+    text = _read_prompt_text(path)
+    collapsed = _collapse_wrap_whitespace(text)
+    matches = list(BROKEN_PROSE_RE.finditer(collapsed))
+    assert not matches, (
+        f"{path.relative_to(REPO_ROOT)} contains {len(matches)} wrap-spanning broken-prose "
+        "violation(s) (collapsed context — line numbers not attributable): "
+        + " | ".join(
+            "…" + collapsed[max(0, m.start() - 50):m.end() + 50] + "…"
+            for m in matches[:5]
+        )
     )
 
 
@@ -319,7 +416,7 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     text (excluding §12.5 #0 operational filesystem paths like
     ``conventions.md`` / ``PACKS.md`` / ``QUARANTINE.md`` / own memory path).
     """
-    text = path.read_text(encoding="utf-8")
+    text = _read_prompt_text(path)
     # Allowed operational filesystem paths (per §12.5 #0 controlling exclusion).
     # These are operational references (convention docs, planning paths, etc.),
     # NOT cross-references to prompt sections.
@@ -505,7 +602,7 @@ def test_no_cross_agent_path_tokens_in_prompts() -> None:
     """No cross-agent path tokens like ``giter/workflow.md`` in prompt text."""
     violations = []
     for path in _iter_prompt_files():
-        text = path.read_text(encoding="utf-8")
+        text = _read_prompt_text(path)
         for m in CROSS_AGENT_PATH_RE.finditer(text):
             violations.append((path, m.group(0)))
     assert not violations, (
@@ -526,7 +623,7 @@ def test_no_bare_agents_prefix_as_cross_reference() -> None:
     """
     violations: list[tuple[Path, str]] = []
     for path in _iter_prompt_files():
-        text = path.read_text(encoding="utf-8")
+        text = _read_prompt_text(path)
         for m in BARE_AGENTS_PREFIX_RE.finditer(text):
             # Get the line containing the hit
             start = text.rfind("\n", 0, m.start()) + 1
@@ -578,7 +675,7 @@ def test_odd_fence_count_fails(path: Path) -> None:
     The guard also reports the offenders with line numbers so the
     fix-up is mechanical: the missing fence is at the indicated line.
     """
-    text = path.read_text(encoding="utf-8")
+    text = _read_prompt_text(path)
     count = _count_fences(text)
     assert count % 2 == 0, (
         f"{path.relative_to(REPO_ROOT)} has {count} ``` fences (odd). "
@@ -602,4 +699,122 @@ def test_scope_is_nonempty() -> None:
     assert len(files) > 10, (
         f"prompt-surface scope returned only {len(files)} files — "
         "scope detection may be broken (regression guard)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. R3 scope-liveness + positive/negative controls (2026-09-08 final iteration)
+# ---------------------------------------------------------------------------
+
+
+def test_innate_skill_files_in_scope() -> None:
+    """Scope-liveness guard (2e): innate-skill files MUST be swept.
+
+    Regression guard for the dead-scope-branch defect: `_is_in_scope` tested the
+    prefix ``_prompt_system/innate-skills/`` against rel paths that all begin with
+    ``agents/``, so the branch never fired and every innate skill.md was silently
+    OUTSIDE the sweep (never scanned by any detector). The prefix is fixed; this
+    test fails if the innate files are ever collected as zero again.
+    """
+    innate = [
+        p
+        for p in _iter_prompt_files()
+        if "_prompt_system/innate-skills/" in p.relative_to(REPO_ROOT).as_posix()
+    ]
+    assert innate, (
+        "zero innate-skill files in sweep scope — the dead-scope-branch defect "
+        "(2e) has regressed; the 8 innate skill.md files are unswept"
+    )
+
+
+# 2h (R3): positive controls — one fixture per R2 survivor shape (the 10 review
+# sites, in file order) plus the wrap-spanning class, the bold-See form, and the
+# backtick form. Each asserts the WIDENED gate matches (same-line pass and/or
+# collapsed wrap pass). RED PROOF (R2 pattern vs these fixtures): the R2 form
+# `r"\b(?:lives\s+in|in|from)[\s`*]+See\b(?![-\w])"` matched ONLY the backtick
+# fixture — 11 of 12 shapes escaped it (see the R3 report for the throwaway run).
+R2_SURVIVOR_FIXTURES = [
+    # (fixture_id, text, same_line_matches, collapsed_matches)
+    ("site1-verb-splice-ari",
+     "- cancelled / dead_letter → handle See Handle Failures Gracefully",
+     True, True),
+    ("site2-noun-splice-ari",
+     "5. Verify result quality, translate to user, handle failure See Handle Failures Gracefully.",
+     True, True),
+    ("site3-copula-splice-leader",
+     "**Note:** This decision tree is a FALLBACK for quick decisions. "
+     "Primary routing is See Implementation Workflow (domain routing).",
+     True, True),
+    ("site4-imperative-splice-worker",
+     "- Apply See Handle Skill System Errors Gracefully:",
+     True, True),
+    ("site5-compound-noun-splice-devops",
+     "1. Explicit confirmation (or TrueAuto self-approval See TrueAuto Self-Approval Protocol)",
+     True, True),
+    ("site6-bold-see-tester",
+     "the dispatch rules live canonically in the auto-loaded "
+     "**See Worker Skill Selection (Dispatcher Contract)**.",
+     True, True),
+    ("site7-wrap-spanning-tidier-tools-note",
+     "Holding the turn open blocks report delivery (deadlocks the run). See\n"
+     "> See Why END TURN After Dispatch.",
+     False, True),  # wrap-spanning ONLY — the same-line pass cannot see across the break
+    ("site8-quote-wrap-plus-and-splice-tidier-template",
+     "dispatcher responsibility** (see\n"
+     "> See tidier[v2]'s 6. Aggregate & Verify (DISPATCHER STEP)` and See Aggregation Strategy).",
+     True, True),  # same-line via the `and See` splice; the `see ⏎ > See` duplication via the wrap pass
+    ("site9-flow-noun-splice-project-manager",
+     "Default is Terse; switch to Full or a named flow template See Cardinal #3.",
+     True, True),
+    ("site10-verb-splice-innate-test-pack",
+     "When timeout occurs, apply TTQA optimizations See TTQA & Test Architecture Maintenance.",
+     True, True),
+    ("site11-conjunction-splice-tester-soul",
+     "Reuse the same worker with a fresh `load_skill=\"quick-fix\"` if context is relevant; "
+     "otherwise spawn fresh. See Quick Fix (under Must) for criteria and See Quick Fix Process for examples.",
+     True, True),
+    ("hardening-backtick-form",
+     "the canonical copy lives in `See Handle Failures Gracefully` for recovery",
+     True, True),
+]
+
+
+@pytest.mark.parametrize("fixture_id,text,same_line,collapsed", R2_SURVIVOR_FIXTURES, ids=lambda v: v if isinstance(v, str) else None)
+def test_r2_survivor_positive_controls(fixture_id: str, text: str, same_line: bool, collapsed: bool) -> None:
+    """Each R2 survivor shape MUST be caught by the widened gate (2h).
+
+    Red→green contract: against the R2 pattern, 11 of these 12 fixtures produced
+    ZERO matches (only the backtick form was caught); against the R3 widened gate,
+    every fixture matches on at least one pass, with the per-shape pass attribution
+    pinned by the ``same_line`` / ``collapsed`` expectations.
+    """
+    same_match = BROKEN_PROSE_RE.search(text)
+    collapsed_match = BROKEN_PROSE_RE.search(_collapse_wrap_whitespace(text))
+    assert (same_match is not None) == same_line, (
+        f"[{fixture_id}] same-line pass expectation violated: "
+        f"matched={same_match is not None} (group={same_match.group(0)!r} if matched)"
+    )
+    assert (collapsed_match is not None) == collapsed, (
+        f"[{fixture_id}] collapsed wrap-pass expectation violated: "
+        f"matched={collapsed_match is not None}"
+    )
+
+
+# 2h negative controls: the legit `See` shapes that MUST keep passing (the
+# whitelist contract of the 2a widening, each documented at BROKEN_PROSE_RE).
+LEGIT_SEE_SHAPE_FIXTURES = [
+    ("sentence-initial", "Decision tree is a FALLBACK for quick decisions. See Implementation Workflow (domain routing)."),
+    ("parenthetical", "- MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))"),
+    ("blockquote-marker", "> See Why END TURN After Dispatch."),
+    ("lowercase-see", "If execution returned an error, see Handle Skill System Errors Gracefully for recovery."),
+    ("hyphen-compound-guard", "the See-layer marker and the See_X identifier are not splices"),
+]
+
+
+@pytest.mark.parametrize("fixture_id,text", LEGIT_SEE_SHAPE_FIXTURES, ids=lambda v: v if isinstance(v, str) else None)
+def test_see_splice_negative_controls(fixture_id: str, text: str) -> None:
+    """Legit `See` shapes MUST NOT match either pass (whitelist contract of 2a)."""
+    assert BROKEN_PROSE_RE.search(text) is None, f"[{fixture_id}] legit shape flagged by same-line pass"
+    assert BROKEN_PROSE_RE.search(_collapse_wrap_whitespace(text)) is None, (
+        f"[{fixture_id}] legit shape flagged by collapsed wrap pass"
     )
