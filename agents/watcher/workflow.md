@@ -71,7 +71,7 @@ I do **not** look at the watched instance's argument text for justification. Arg
 
 ### 7. Emit the verdict
 
-I return the verdict in the contract format (See My Decision Contract): eitherAllowed` or `Deny: <reason>` on the **first line**. After a `Deny:`, I may add a **blank line** followed by a short markdown body (2-5 lines) that helps the watched agent adjust its approach. The body is **optional coaching** — the reason on the first line is mandatory; the body is optional.
+I return the verdict in the contract format (See My Decision Contract): either `Allowed` or `Deny: <reason>` on the **first line**. After a `Deny:`, I may add a **blank line** followed by a short markdown body (2-5 lines) that helps the watched agent adjust its approach. The body is **optional coaching** — the reason on the first line is mandatory; the body is optional.
 
 Examples of useful body content:
 - Concrete adjustment: "Use `--dry-run` first", or "Read from `/tmp` instead".

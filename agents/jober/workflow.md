@@ -218,7 +218,7 @@ goal before letting it flow into Phase 5.
 3. If the result is doubtful or does NOT match the goal:
    a. Halt the pipeline for that job (do not create dependent / aggregation
       jobs, do not report to parent)
-   b. Build an Options block (See 
+   b. Build an Options block (See Verify Completed Jobs Match the Goal
       for the template)
    c. Present to the user and wait for explicit confirmation
    d. If the user is not in the loop (jober was spawned by a parent):
