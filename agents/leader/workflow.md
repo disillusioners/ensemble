@@ -130,8 +130,8 @@ Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> s
    ├─ SMALL scope → Skip Approver (plan is simple, Reviewer sufficient)
    └─ BIG+ scope OR complex plan → Spawn Approver:
       - Provide ONLY the plan file/summary — no planning history, no Reviewer's notes
-      - Include plan name for tracking: "Plan: [plan-name] | File: [path/to/plan.md]"
-      - Message example: "Evaluate this plan. Plan: My Feature Plan | File: .agents/shared/planning/my-feature/plan.md. Approve or reject."
+      - Include plan name for tracking: "Plan: [plan-name] | File: [path/to/plan]"
+      - Message example: "Evaluate this plan. Plan: My Feature Plan | File: .agents/shared/planning/my-feature/plan. Approve or reject."
       - ⚠️ DO NOT guide the Approver — let it evaluate independently
       - Approver Decision:
          - REJECTED → Review rejection reasons → back to Planner with specific feedback → loop back to step 2
@@ -180,7 +180,7 @@ Fan-out >=2 committing editors: pre-write wt.active.<branch>.<task-id> rows -> s
 | **REJECTED** (blocking issues) | **ACCEPT** — Back to Planner with Approver's specific rejection reasons |
 | **APPROVED** | **PROCEED** — Plan is ready |
 
-**Note:** When Approver rejects, rejection reasons are tracked in `.agents/approver/{plan-slug}-tracking.md`. Include the tracking file path when sending feedback to the Planner so it can reference previous issues.
+**Note:** When Approver rejects, rejection reasons are tracked in `.agents/approver/<plan-slug>-tracking`. Include the tracking file path when sending feedback to the Planner so it can reference previous issues.
 
 ### Approver Call Limit
 **Max 3 calls** to Approver per plan. After 3 rejections:

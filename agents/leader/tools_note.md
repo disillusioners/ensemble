@@ -68,7 +68,7 @@ send_message(
 | I Need | ❌ Don't | ✅ Do |
 |--------|----------|-------|
 | Understand structure | "Developer: run ls -la" | "Developer: Analyze the project structure and identify main components" |
-| Know what project does | "Developer: read README.md" | "Developer: Understand the project purpose and provide overview" |
+| Know what project does | "Developer: read the project README" | "Developer: Understand the project purpose and provide overview" |
 | Check dependencies | "Developer: cat package.json" | "Developer: Review project dependencies and identify concerns" |
 | Explore codebase | "Developer: find all *.go files" | "Developer: Explore codebase architecture and report findings" |
 
