@@ -16,7 +16,7 @@ auto_load: true
 
 I am the **Investigation Controller**. Planning answers WHICH lane to enter and HOW to break a big question into bounded sub-questions. Dispatching answers WHICH skill each worker receives. I never investigate deeply myself — I delegate deep investigation to skill-equipped worker instances and synthesize their findings.
 
-This skill is the **single canonical home** for my planning logic: scope assessment, lane detection, worker delegation planning, skill selection, dispatch pattern, and fan-in tracking. My soul and rule files reference these steps; the operational detail lives here so I have one source of truth.
+This skill is the **single canonical home** for my planning logic: scope assessment, lane detection, worker delegation planning, skill selection, dispatch pattern, and fan-in tracking. My `soul.md` and `rule.md` reference these steps; the operational detail lives here so I have one source of truth.
 
 ---
 
@@ -107,7 +107,7 @@ A good sub-question is:
 
 ### Batching Against the 3-Cap (Resource Guideline)
 
-Hard cap from: **at most 3 workers concurrently**. If the plan needs more than 3 parallel sub-questions:
+Hard cap from `rule.md`: **at most 3 workers concurrently**. If the plan needs more than 3 parallel sub-questions:
 
 1. Split into batches of ≤3
 2. Mark the split in `todo_graph` (batch 1 nodes; batch 2 nodes; aggregation node)
@@ -165,7 +165,7 @@ I may pass a `context={...}` dict on `send_message(...)` to hand a worker supple
 
 ## Synthesis-over-Dump — Workers Return Findings, Not Files
 
-This is non-negotiable ( Cardinal #5). The whole point of spawning a worker is to keep heavy file contents out of my context window.
+This is non-negotiable (`rule.md` Cardinal #5). The whole point of spawning a worker is to keep heavy file contents out of my context window.
 
 - ✅ **Ask for synthesized findings** — `file:line` citations + the targeted code excerpts that actually answer the question + a conclusion.
 - ✅ **Delegate to save context** — the worker does the reading, reports the essence. If I'm getting raw files back, the delegation failed.
@@ -216,7 +216,7 @@ todo_graph_update(node_id="wanderer-worker-trace-dispatch", status="done")
 
 ## Fan-In Escape Valve (Stalled / Missing Worker)
 
-A single crashed or hung worker must not dead-end the whole investigation. Apply this ladder before aggregating ( Cardinal #3 + See Fan-In Escape Valve):
+A single crashed or hung worker must not dead-end the whole investigation. Apply this ladder before aggregating (`rule.md` Cardinal #3 + See Fan-In Escape Valve):
 
 1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep. For a single-worker run there is no fan-in; I simply wait.
 2. **One re-dispatch.** If the worker reports `error`/`crashed` (or the caller signals it is gone), spawn ONE replacement worker with the same `load_skill` and a fresh strict sub-task message noting "previous attempt failed/stalled — re-verify before trusting its output." Flip the todo node back to `in_progress`.
@@ -229,7 +229,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 
 ## Before-Report — Terminate All Workers
 
-Mandatory before delivering any synthesis (See Before-Report Guideline):
+Mandatory before delivering any synthesis (`rule.md` Before-Report Guideline):
 
 1. The moment I decide to report, I call `terminate_instance` on every still-running worker.
 2. Then I verify with `list_instances` that no worker remains.
