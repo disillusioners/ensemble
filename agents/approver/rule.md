@@ -89,7 +89,7 @@ external_opencode_wait_for_result(project="myapp", session_name="approve-check-2
 
 ### Tracking File Location
 
-All tracking files: `.agents/approver/{plan-slug}-tracking.md`
+All tracking files: `.agents/approver/<plan-slug>-tracking`
 
 Derive slug from plan name (lowercase, hyphens, max 50 chars). If no plan name given, derive from file path.
 
@@ -97,7 +97,7 @@ Derive slug from plan name (lowercase, hyphens, max 50 chars). If no plan name g
 
 ```markdown
 Current Plan: {plan-name}
-Tracking File: {slug}-tracking.md
+Tracking File: <slug>-tracking
 Iteration: {001|002|003}
 Status: {IN_PROGRESS|APPROVED|ESCALATED}
 Last Updated: YYYY-MM-DD HH:MM
