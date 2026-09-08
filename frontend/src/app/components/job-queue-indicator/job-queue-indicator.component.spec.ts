@@ -44,20 +44,28 @@ class MockJobQueueIndicatorComponent {
   private readonly allRecentJobs = signal<Job[]>([]);
 
   /**
-   * Raw missions-list payload — mirrors the private ``missionsPayload``
-   * signal. ``null`` = count unavailable (degraded leg / fetch failure);
-   * the last known payload is RETAINED so the badge never falsely reads idle.
+   * F-5 mirror (2026-09-08) — TWO raw missions-payload signals.
    *
-   * REPLACES the former ``missionCountRaw: number | null`` signal — the
-   * segmented pill needs the per-liveness breakdown so we carry the full
-   * page here, not just a count.
+   * ``_liveMissionsPayload`` mirrors the LEG A
+   * (``listMissions({ liveness: 'processing,pending,paused',
+   * limit: 20 })``) response. The single source of truth for the
+   * badge count + panel LIVE MISSIONS rows + tooltip per-liveness
+   * breakdown. Mirrors the real component's ``liveMissionsPayload``.
    *
-   * The mirror exposes this signal as ``lastMissionsPayload`` (read-only)
-   * so the C2 retention test can assert the raw payload wasn't
-   * overwritten by a degraded-200 envelope.
+   * ``_recentMissionsPayload`` mirrors the LEG B
+   * (``listMissions({ limit: 20 })``) response — the unfiltered
+   * page that feeds the panel's terminal mission nodes + recentFlat
+   * ONLY. Mirrors the real component's ``recentMissionsPayload``.
+   *
+   * The mirror exposes LEG A as ``lastLiveMissionsPayload`` and LEG
+   * B as ``lastRecentMissionsPayload`` (both read-only) so the F-5
+   * pins can assert the per-leg retention semantics independently.
    */
-  private readonly _missionsPayload = signal<MissionListResponse | null>(null);
-  readonly lastMissionsPayload = this._missionsPayload.asReadonly();
+  private readonly _liveMissionsPayload = signal<MissionListResponse | null>(null);
+  readonly lastLiveMissionsPayload = this._liveMissionsPayload.asReadonly();
+
+  private readonly _recentMissionsPayload = signal<MissionListResponse | null>(null);
+  readonly lastRecentMissionsPayload = this._recentMissionsPayload.asReadonly();
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
@@ -165,8 +173,15 @@ class MockJobQueueIndicatorComponent {
     () => `${this.liveMissionCount() ?? 0}`
   );
 
+  /**
+   * F-5 mirror (2026-09-08) — breakdown reads from LEG A only. The
+   * real component derives its breakdown from ``liveMissionsList``
+   * (LEG A), never from the panel's combined input, so the tooltip's
+   * per-liveness counts always match what the badge counts. Mirrors
+   * the real component's ``liveMissionBreakdown``.
+   */
   liveMissionBreakdown = computed(() => {
-    const list = this.lastMissionsPayload()?.missions ?? [];
+    const list = this.lastLiveMissionsPayload()?.missions ?? [];
     let processing = 0;
     let pending = 0;
     let paused = 0;
@@ -178,8 +193,29 @@ class MockJobQueueIndicatorComponent {
     return { processing, pending, paused } as Record<string, number>;
   });
 
+  /**
+   * F-5 mirror — LEG A's mission rows verbatim. Mirrors the real
+   * component's ``liveMissionsList``. Read-only exposure so the F-5
+   * pins can assert the live-only rows without going through the
+   * panel composition.
+   */
+  liveMissionsList = computed<MissionSummary[]>(() => {
+    return this.lastLiveMissionsPayload()?.missions ?? [];
+  });
+
+  /**
+   * F-5 mirror — the panel's ``[missions]`` input. Composed of LEG A
+   * rows + LEG B rows filtered to terminal liveness so the two sets
+   * are disjoint by construction. Mirrors the real component's
+   * ``missionsList``.
+   */
   missionsList = computed<MissionSummary[]>(() => {
-    return this.lastMissionsPayload()?.missions ?? [];
+    const live = this.liveMissionsList();
+    const recentPayload = this.lastRecentMissionsPayload();
+    const recentOnly = (recentPayload?.missions ?? []).filter(
+      (m) => m.liveness !== null && m.liveness !== 'processing' && m.liveness !== 'pending' && m.liveness !== 'paused'
+    );
+    return [...live, ...recentOnly];
   });
 
   refreshAgeSeconds = computed(() => {
@@ -351,25 +387,29 @@ class MockJobQueueIndicatorComponent {
    * payloads so tests prove the intake wiring without HTTP.
    *
    * Parity contract with the component (C2/C3/W-jobs-intake
-   * honesty + T2 mission-leg split):
+   * honesty + F-5 mission-leg single-source pin):
    * - ``active`` / ``recent`` may be ``null`` (per-leg catchError
    *   swallowed a failure); on ``null`` we RETAIN the previous list
    *   rather than resetting to ``[]``;
-   * - ``missionsCount === null`` (degraded count leg / 404-skew
-   *   failure) RETAINS the previous live count — never falsely idle;
-   * - ``missionsList === null`` (degraded content leg / 404-skew
+   * - ``liveMissions === null`` (degraded live leg / 404-skew
+   *   failure) RETAINS the previous live count + payload — never
+   *   falsely idle; the panel's LIVE MISSIONS rows + tooltip
+   *   breakdown stay sourced from LEG A so the F-5 bug class
+   *   stays closed;
+   * - ``recentMissions === null`` (degraded recent leg / 404-skew
    *   failure) RETAINS the previous payload — the panel never
    *   flashes empty;
-   * - T2 fix: ``missionsCount`` and ``missionsList`` are independent.
-   *   A degraded envelope on ONE does not touch the OTHER's last
-   *   good payload. Each is reported via ``onLegError`` with its
-   *   own leg name so the UI can flag which projection degraded.
+   * - F-5 fix: ``liveMissions`` and ``recentMissions`` are
+   *   independent. A degraded envelope on ONE does not touch the
+   *   OTHER's last good payload. Each is reported via ``onLegError``
+   *   with its own leg name so the UI can flag which projection
+   *   degraded.
    * - C2 fix: a 200-OK ``degraded:true`` envelope on EITHER missions
    *   leg ALSO retains the previous payload and DOES NOT touch the
    *   corresponding signal;
    * - C3 fix: ``liveMissionCountRaw`` is updated only via the
    *   canonical ``missionCountFromListResponse`` helper, on a
-   *   non-degraded count tick;
+   *   non-degraded LEG A tick;
    * - degraded-200 flag parity: a non-null ``degraded:true`` envelope
    *   on EITHER missions leg ALSO raises ``lastIntakeError`` via
    *   ``onLegError`` (mirroring the component's ``recordLegError``)
@@ -380,48 +420,53 @@ class MockJobQueueIndicatorComponent {
    * - ``lastFetchAt`` advances only when at least one leg succeeded
    *   (either missions leg: non-degraded).
    *
-   * T2 (2026-09-07, mission-tree final gaps) — ``missionsCount`` and
-   * ``missionsList`` are now SEPARATE parameters; the segmented
-   * pill's N reads from the count leg's ``total`` (live-only), and
-   * the panel's content reads from the list leg's ``missions``
-   * (unfiltered page). Closes the 82-vs-7 self-contradiction where
-   * the unfiltered page's ``total`` was being mis-routed as the
-   * live-mission count.
+   * F-5 (2026-09-08, mission-tree single-source pin) — LEG A is
+   * ``liveMissions`` (filter-aware, liveness=processing,pending,paused,
+   * limit=20) and is the SINGLE source of truth for the badge count +
+   * panel LIVE MISSIONS rows + tooltip per-liveness breakdown. LEG B
+   * is ``recentMissions`` (unfiltered, limit=20) and feeds the
+   * panel's RECENT terminal mission nodes + recentFlat ONLY. Closes
+   * the "header ● 7, live section empty" self-contradiction where
+   * the unfiltered page's top-20 happened to be all-terminal.
    */
   applyFetchResult(
     active: Job[] | null,
     recent: Job[] | null,
-    missionsCount: MissionListResponse | null,
-    missionsList: MissionListResponse | null,
+    liveMissions: MissionListResponse | null,
+    recentMissions: MissionListResponse | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     if (active !== null) this._activeJobs.set(active);
     if (recent !== null) this.allRecentJobs.set(recent);
-    if (missionsCount !== null && !missionsCount.degraded) {
-      const count = missionCountFromListResponse(missionsCount);
+    if (liveMissions !== null && !liveMissions.degraded) {
+      const count = missionCountFromListResponse(liveMissions);
       this.liveMissionCountRaw.set(count);
+      // F-5: also store the LEG A payload so ``liveMissionBreakdown``
+      // and ``liveMissionsList`` can read its ``missions`` rows
+      // (the count-only write leaves the breakdown at 0).
+      this._liveMissionsPayload.set(liveMissions);
     }
-    if (missionsList !== null && !missionsList.degraded) {
-      this._missionsPayload.set(missionsList);
+    if (recentMissions !== null && !recentMissions.degraded) {
+      this._recentMissionsPayload.set(recentMissions);
     }
-    const missionsCountDegraded = missionsCount !== null && missionsCount.degraded;
-    const missionsListDegraded = missionsList !== null && missionsList.degraded;
-    if (missionsCountDegraded) this.onLegError('missionsCount', 'degraded envelope');
-    if (missionsListDegraded) this.onLegError('missionsList', 'degraded envelope');
+    const liveMissionsDegraded = liveMissions !== null && liveMissions.degraded;
+    const recentMissionsDegraded = recentMissions !== null && recentMissions.degraded;
+    if (liveMissionsDegraded) this.onLegError('liveMissions', 'degraded envelope');
+    if (recentMissionsDegraded) this.onLegError('recentMissions', 'degraded envelope');
     const anyNull =
       active === null ||
       recent === null ||
-      missionsCount === null ||
-      missionsList === null ||
+      liveMissions === null ||
+      recentMissions === null ||
       deferBlocked === null ||
-      missionsCountDegraded ||
-      missionsListDegraded;
+      liveMissionsDegraded ||
+      recentMissionsDegraded;
     if (!anyNull) this.lastIntakeError.set(null);
     if (
       active !== null ||
       recent !== null ||
-      (missionsCount !== null && !missionsCount.degraded) ||
-      (missionsList !== null && !missionsList.degraded) ||
+      (liveMissions !== null && !liveMissions.degraded) ||
+      (recentMissions !== null && !recentMissions.degraded) ||
       deferBlocked !== null
     ) {
       this._lastFetchAt.set(Date.now());
@@ -786,10 +831,10 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.liveMissionCount()).toBe(2);
       expect(component.missionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
-      // The raw list payload signal was NOT overwritten either — the
-      // canonical helper's null branch keeps the missions projection
-      // honest. A subsequent healthy tick re-syncs both.
-      const payload = component.lastMissionsPayload();
+      // The raw recent-payload signal was NOT overwritten either —
+      // the canonical helper's null branch keeps the missions
+      // projection honest. A subsequent healthy tick re-syncs both.
+      const payload = component.lastRecentMissionsPayload();
       expect(payload).not.toBeNull();
       expect(payload!.degraded).toBe(false);
 
@@ -844,12 +889,12 @@ describe('JobQueueIndicatorComponent Logic', () => {
         { degraded: true }
       );
       component.applyFetchResult([], [], degradedPayload, twoPayload, null);
-      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
+      expect(component.lastIntakeError()).toBe('liveMissions: degraded envelope');
       // C2/C3 retention stays EXACTLY as-is across the same tick.
       expect(component.liveMissionCount()).toBe(2);
       expect(component.missionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
-      expect(component.lastMissionsPayload()!.degraded).toBe(false);
+      expect(component.lastRecentMissionsPayload()!.degraded).toBe(false);
     });
 
     it('an all-degraded tick freezes lastFetchAt — degraded counts as a failed leg for the freshness stamp', () => {
@@ -1093,14 +1138,26 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // up.
         expect(templateHtml).toContain('(footerClick)="onFooterClick()"');
       });
+
+      it('binds [missions]="missionsList()" so the panel sees the LEG A + LEG B composition (no third source)', () => {
+        // F-5 structural pin: the panel's [missions] input must come
+        // from the indicator's ``missionsList()`` (the LEG A + LEG B
+        // composition computed). An F-5 revert that re-binds directly
+        // to a single leg (or to the legacy ``missionsPayload()``
+        // signal) would slip past every behavioural test (the
+        // composition would be the same if only one leg had rows)
+        // but the template's wiring would be wrong.
+        expect(templateHtml).toContain('[missions]="missionsList()"');
+      });
     });
 
     // W4 — source-drift pins on the REAL component TS. Mirror tests
     // prove behaviour against the same logic; these pins prove the
     // REAL component still has the wiring the badge depends on.
-    // An F-1-style revert (e.g. dropping the count leg's filter,
-    // swapping closeMenu/navigate order) would slip past mirror
-    // tests but flip at least one of these assertions.
+    // An F-1-style revert (e.g. dropping LEG A's filter, swapping
+    // closeMenu/navigate order, or reverting LEG A back to limit:1)
+    // would slip past mirror tests but flip at least one of these
+    // assertions.
     describe('component TS source-drift pins', () => {
       let componentTs: string;
 
@@ -1112,26 +1169,42 @@ describe('JobQueueIndicatorComponent Logic', () => {
         componentTs = fs.readFileSync(tsPath, 'utf-8');
       });
 
-      it('count leg still uses liveness: \'processing,pending,paused\' (live-only filter)', () => {
-        // The count leg feeds the badge's live-mission count via the
-        // filter-aware ``total``. Removing the liveness filter would
-        // re-introduce the 82-vs-7 self-contradiction where the
-        // unfiltered content leg's ``total`` is mis-routed as the
-        // live count.
+      it('LEG A (live) still uses liveness: \'processing,pending,paused\' (live-only filter)', () => {
+        // LEG A is the single source of truth for the badge count,
+        // panel LIVE MISSIONS rows, AND the tooltip's per-liveness
+        // breakdown. Removing the liveness filter would re-introduce
+        // the F-5 bug class where LEG B's terminal rows silently
+        // inflate the live count + breakdown.
         expect(componentTs).toContain("liveness: 'processing,pending,paused'");
       });
 
-      it('count leg still uses limit: 1 (cheap probe)', () => {
-        // The count leg is a cheap filter-aware probe — ``limit: 1``
-        // keeps it bounded. Removing it would make every poll pull
-        // the full page just to read the count.
-        expect(componentTs).toContain('limit: 1');
+      it('LEG A still uses limit: 20 (was 1; F-5 unification needs the full live page)', () => {
+        // F-5 fix: LEG A is no longer a cheap probe. It now pulls the
+        // FULL live page (``limit: 20``) so the panel's LIVE MISSIONS
+        // rows and the tooltip's per-liveness breakdown both have
+        // rows to work with — a ``limit: 1`` probe only returned one
+        // row, which couldn't drive both consumers from a single
+        // source. The count comes from ``total ?? missions.length`` so
+        // the badge still survives the >20 ceiling.
+        expect(componentTs).toContain('limit: 20');
       });
 
-      it('content leg still uses listMissions({ limit: 20 })', () => {
-        // The content leg feeds the panel's tree via the unfiltered
-        // ``missions`` page. The list-page limit must stay at 20
-        // (the brief's panel cap) so the panel renders consistently.
+      it('LEG A does NOT use limit: 1 (the old probe would re-introduce the F-5 contradiction)', () => {
+        // Structural anti-pin: a revert of LEG A's limit back to 1
+        // would pass the ``limit: 20`` positive pin above (since both
+        // would co-exist) but would silently re-introduce the F-5
+        // bug: a 1-row live page cannot be the source for both the
+        // count AND the panel's full live rows. Pin the ABSENCE of
+        // ``limit: 1`` on LEG A's wiring.
+        // Match the exact snippet from the live leg.
+        expect(componentTs).not.toMatch(/liveness:\s*'processing,pending,paused',\s*\n\s*limit:\s*1/);
+      });
+
+      it('LEG B (recent) still uses listMissions({ limit: 20 })', () => {
+        // LEG B feeds the panel's terminal mission nodes + recentFlat
+        // via the unfiltered ``missions`` page. The list-page limit
+        // must stay at 20 (the brief's panel cap) so the panel
+        // renders consistently.
         expect(componentTs).toContain('listMissions({ limit: 20 })');
       });
 
@@ -1557,7 +1630,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
         pending_count: 0,
         holders: [],
       });
-      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
+      expect(component.lastIntakeError()).toBe('liveMissions: degraded envelope');
 
       // Recovery contract unchanged: the next FULLY clean tick
       // (non-null + non-degraded on EVERY leg including both missions
@@ -1608,18 +1681,18 @@ describe('JobQueueIndicatorComponent Logic', () => {
       // Real RxJS, mirroring ``fetchBadgeSignals()`` 1:1: each additive
       // participant isolates its own error with ``catchError(() => of(null))``
       // so a missions/defer-blocked failure degrades to ``null`` while the
-      // jobs intake still emits. T2 fix: both missions legs (count + list)
-      // isolate independently — a count leg 500 must not kill the list leg
-      // or the jobs intake.
+      // jobs intake still emits. F-5 fix: both missions legs (LEG A live +
+      // LEG B recent) isolate independently — a LEG A 500 must not kill
+      // LEG B or the jobs intake.
       const result = await firstValueFrom(forkJoin({
         active: of([createMockJob({ status: 'processing' })]),
-        missionsCount: throwError(() => new Error('missionsCount 500')).pipe(catchError(() => of(null))),
-        missionsList: throwError(() => new Error('missionsList 500')).pipe(catchError(() => of(null))),
+        liveMissions: throwError(() => new Error('liveMissions 500')).pipe(catchError(() => of(null))),
+        recentMissions: throwError(() => new Error('recentMissions 500')).pipe(catchError(() => of(null))),
         deferBlocked: throwError(() => new Error('defer-blocked 404')).pipe(catchError(() => of(null))),
       }));
       expect(result.active.length).toBe(1); // jobs intake survived all failures
-      expect(result.missionsCount).toBeNull();
-      expect(result.missionsList).toBeNull();
+      expect(result.liveMissions).toBeNull();
+      expect(result.recentMissions).toBeNull();
       expect(result.deferBlocked).toBeNull();
     });
   });
@@ -1716,25 +1789,35 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  // ── T2 mission-tree final gaps (2026-09-07) ──────────────────────────
+  // ── F-5 mission-tree single-source pin (2026-09-08) ──────────────────────
   //
-  // F-1 closed: the badge's live-mission count (82-vs-7 self-
-  // contradiction) was being driven by the unfiltered content page's
-  // ``total`` (which includes terminal missions). The fix splits
-  // the missions leg into TWO independent legs — a filtered
-  // ``missionsCount`` (limit=1, liveness=processing,pending,paused)
-  // and the unfiltered ``missionsList`` (limit=20). Each carries its
-  // own per-participant catchError so a failure on one does not
-  // cascade into the other.
+  // F-5 closed: the badge's live-mission count came from the
+  // filter-aware LEG A (limit=20, total=N live), but the tooltip's
+  // per-liveness breakdown AND the panel's LIVE MISSIONS rows
+  // derived from the unfiltered LEG B (limit=20, top-20 by
+  // last_activity). When the unfiltered page's top-20 happened to be
+  // all-terminal, the badge read "7" while the live section was empty
+  // AND the breakdown said "(processing 0, pending 0, paused 0)" — a
+  // structural contradiction (tester-dataset repro).
+  //
+  // The fix unifies the live consumers on ONE source (LEG A):
+  // ``listMissions({ liveness: 'processing,pending,paused', limit: 20 })``
+  // — the filter-aware page. Every live row the badge counts MUST
+  // appear in the live section AND tally into the breakdown. LEG B
+  // (the unfiltered page) feeds only the panel's RECENT terminal
+  // mission nodes + recentFlat; live rows that appear in LEG B are
+  // filtered out before they reach the panel, so they cannot bleed
+  // into the LIVE MISSIONS section. The two sets are disjoint by
+  // construction: leg A is live-only and filtered leg B is
+  // terminal-only.
 
-  describe('T2: live-mission count comes from the count leg, NOT the content list leg', () => {
-    it('badge shows the count leg total (live=7) even when the list leg total is much larger (total=82)', () => {
-      // F-1 repro: live count = 7 (filter-aware total from
-      // missionsCount leg), list total = 82 (unfiltered page total
-      // including terminal missions). The badge MUST use the count
-      // leg — never the list leg — so the visible number stays
-      // honest.
-      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+  describe('F-5: live consumers (count + live rows + breakdown) all read from LEG A — no contradiction possible', () => {
+    it('badge shows the LEG A total (live=7) even when LEG B total is much larger (total=82)', () => {
+      // F-1 carryover repro: live count = 7 (filter-aware total from
+      // LEG A), LEG B total = 82 (unfiltered page total including
+      // terminal missions). The badge MUST use LEG A — never LEG B —
+      // so the visible number stays honest.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [
           { mission_id: 'live-1', liveness: 'processing' },
           { mission_id: 'live-2', liveness: 'processing' },
@@ -1746,155 +1829,435 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ],
         7
       );
-      // The list leg's payload is much larger — it includes terminal
-      // (completed/failed/cancelled) missions that the count filter
-      // excluded. This is the bug-class payload: 82 rows total.
-      const listPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // The recent leg's payload is much larger — it includes terminal
+      // (completed/failed/cancelled) missions that the live filter
+      // excluded. The first 7 rows happen to be live (BE orders by
+      // last_activity_at desc), which is exactly the F-5 bug-class
+      // scenario where the OLD wiring would have let LEG B's live rows
+      // leak into the panel's live section + the breakdown.
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         Array.from({ length: 82 }, (_, i) => ({
           mission_id: `m-${i}`,
           liveness: i < 7 ? ('processing' as const) : ('completed' as const),
         })),
         82
       );
-      component.applyFetchResult([], [], countPayload, listPayload, null);
-      // Badge shows 7 (count leg), NOT 82 (list leg).
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Badge shows 7 (LEG A), NOT 82 (LEG B).
       expect(component.liveMissionCount()).toBe(7);
       expect(component.missionsSegmentText()).toBe('7');
-      // The list leg's payload feeds the panel — it carries 82 rows.
+      // Breakdown reads from LEG A only — 4 processing, 2 paused, 1
+      // pending. (LEG B's 7 live rows are FILTERED OUT before reaching
+      // the panel's [missions] input AND the breakdown, so LEG B's 7
+      // processing rows never contribute.)
+      const bd = component.liveMissionBreakdown();
+      expect(bd['processing']).toBe(4);
+      expect(bd['paused']).toBe(2);
+      expect(bd['pending']).toBe(1);
+      // Panel's [missions] input = LEG A (7 live) + LEG B filtered to
+      // terminal (75 completed) = 82 rows total. ``buildQueueTree``
+      // will route LEG A's 7 to ``tree.liveMissions`` and the 75
+      // terminal ones to ``tree.recent`` — disjoint by construction.
       expect(component.missionsList().length).toBe(82);
+      // Sanity pin: LEG A's payload is preserved as-is.
+      expect(component.lastLiveMissionsPayload()!.total).toBe(7);
+      expect(component.lastRecentMissionsPayload()!.total).toBe(82);
     });
 
     it('live count is correct when live missions > 20 (count comes from filtered total, NOT the 20-item page)', () => {
-      // 25 live missions. The list leg's ``limit:20`` truncates the
-      // page to 20 rows (so a naïve ``missions.length`` count would
-      // read 20). The count leg's ``total`` is the authoritative
-      // live count.
-      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        Array.from({ length: 25 }, (_, i) => ({
+      // 25 live missions. The backend clamps to ``limit:20`` so LEG A
+      // returns its top 20 rows (with ``total:25``); the badge's
+      // count reads ``total`` so it shows 25, NOT 20 (the page size)
+      // and NOT a misleading 75 from LEG B.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 20 }, (_, i) => ({
           mission_id: `live-${i}`,
           liveness: 'processing' as const,
         })),
         25
       );
-      // The list leg returns its first 20 — ``total`` is the
-      // filter-aware page total the BE returns for the unfiltered
-      // mission list (the bug class would have the FE derive live
-      // count from this number, which would be wrong). To prove the
-      // split, we make the list leg's total 75 (a plausible
-      // unfiltered total) while the count leg says 25.
-      const listPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // The recent leg returns its first 20 — ``total`` is the
+      // unfiltered total (would have falsely inflated the badge under
+      // the OLD wiring). All 20 are processing so LEG B filtered to
+      // terminal = 0.
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         Array.from({ length: 20 }, (_, i) => ({
           mission_id: `m-${i}`,
           liveness: 'processing' as const,
         })),
         75
       );
-      component.applyFetchResult([], [], countPayload, listPayload, null);
-      // Badge shows 25 (count leg), NOT 75 (list leg), NOT 20 (list
-      // page size).
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Badge shows 25 (LEG A's ``total``), NOT 75 (LEG B's total),
+      // NOT 20 (LEG A's page size).
       expect(component.liveMissionCount()).toBe(25);
       expect(component.missionsSegmentText()).toBe('25');
+      // Breakdown covers the fetched 20 of LEG A — the cosmetic S4
+      // ceiling (live > 20): count uses LEG A's ``total`` (=25) so
+      // the badge stays honest; breakdown covers LEG A's fetched 20
+      // rows (the page ceiling). Per the brief, this is acceptable;
+      // only adjust tooltip wording if trivial.
+      const bd = component.liveMissionBreakdown();
+      expect(bd['processing']).toBe(20);
     });
 
-    it('count-leg degraded envelope retains the LAST good live count (no false bare 0/0)', () => {
-      // Seed a healthy count.
+    it('LEG A degraded envelope retains the LAST good live count (no false bare 0/0)', () => {
+      // Seed a healthy live payload.
       const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
       component.applyFetchResult([], [], onePayload, onePayload, null);
       expect(component.liveMissionCount()).toBe(1);
-      // Now the count leg degrades (the list leg is still healthy so
-      // the panel keeps its content).
-      const degradedCount = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // Now LEG A degrades (LEG B is still healthy so the panel
+      // keeps its terminal content).
+      const degradedLive = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
         undefined,
         { degraded: true }
       );
-      const healthyList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      const healthyRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], degradedCount, healthyList, null);
-      // The flag is set (count leg degraded) AND the count signal
+      component.applyFetchResult([], [], degradedLive, healthyRecent, null);
+      // The flag is set (LEG A degraded) AND the count signal
       // retains the last good value.
-      expect(component.lastIntakeError()).toBe('missionsCount: degraded envelope');
+      expect(component.lastIntakeError()).toBe('liveMissions: degraded envelope');
       expect(component.liveMissionCount()).toBe(1);
     });
 
-    it('count-leg catchError failure does NOT kill the content leg (leg independence)', () => {
-      // Healthy content leg first so the panel has rows to retain.
-      const healthyList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+    it('LEG A catchError failure does NOT kill LEG B (leg independence)', () => {
+      // Healthy LEG B first so the panel has rows to retain.
+      // Both legs start with the same 1-row payload so the panel's
+      // composition is well-defined (LEG A = 1 live, LEG B filtered
+      // to terminal = 0 → 1 row total).
+      const healthyRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], healthyList, healthyList, null);
+      component.applyFetchResult([], [], healthyRecent, healthyRecent, null);
       expect(component.missionsList().length).toBe(1);
-      // Now the count leg fails (per-leg catchError fires FIRST —
-      // sets ``lastIntakeError`` — and the forkJoin next-handler
-      // receives ``missionsCount: null``). The list leg is still
-      // healthy so it UPDATES the panel's payload.
-      component.onLegError('missionsCount', new Error('count 500'));
-      const updatedList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // Now LEG A fails (per-leg catchError fires FIRST — sets
+      // ``lastIntakeError`` — and the forkJoin next-handler receives
+      // ``liveMissions: null``). LEG B is still healthy so it UPDATES
+      // the panel's terminal payload (LEG B uses TERMINAL liveness
+      // here so the filter-to-terminal pass lets them reach the
+      // panel's RECENT section — proves LEG B updated independently).
+      component.onLegError('liveMissions', new Error('count 500'));
+      const updatedRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [
-          { mission_id: 'live-1', liveness: 'processing' },
-          { mission_id: 'live-2', liveness: 'paused' },
+          { mission_id: 'done-1', liveness: 'completed' },
+          { mission_id: 'done-2', liveness: 'failed' },
         ],
         2
       );
-      component.applyFetchResult([], [], null, updatedList, null);
-      // The flag remains set from the catchError call — the
-      // count leg's error is recorded.
-      expect(component.lastIntakeError()).toBe('missionsCount: count 500');
-      // The list leg updated — the panel's content reflects the
-      // new, larger payload (2 missions).
-      expect(component.missionsList().length).toBe(2);
+      component.applyFetchResult([], [], null, updatedRecent, null);
+      // The flag remains set from the catchError call — LEG A's
+      // error is recorded.
+      expect(component.lastIntakeError()).toBe('liveMissions: count 500');
+      // LEG B updated — the panel's terminal content reflects the
+      // new, larger payload (2 terminal missions) PLUS LEG A's
+      // retained 1 live row → 3 rows total (LEG A 1 + LEG B
+      // filtered-to-terminal 2).
+      expect(component.missionsList().length).toBe(3);
     });
 
-    it('content-leg degraded envelope retains the LAST good list (panel never flashes empty)', () => {
+    it('LEG B degraded envelope retains the LAST good list (panel never flashes empty)', () => {
       const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
       component.applyFetchResult([], [], onePayload, onePayload, null);
       expect(component.missionsList().length).toBe(1);
-      // Now the list leg degrades while the count leg is still
-      // healthy.
-      const degradedList = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // Now LEG B degrades while LEG A is still healthy.
+      const degradedRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
         undefined,
         { degraded: true }
       );
-      component.applyFetchResult([], [], onePayload, degradedList, null);
-      expect(component.lastIntakeError()).toBe('missionsList: degraded envelope');
+      component.applyFetchResult([], [], onePayload, degradedRecent, null);
+      expect(component.lastIntakeError()).toBe('recentMissions: degraded envelope');
       // The list payload retains the last good value — the panel
       // never flashes empty.
       expect(component.missionsList().length).toBe(1);
     });
 
-    it('content-leg catchError failure does NOT kill the count leg (leg independence)', () => {
-      // Seed a healthy count.
-      const countPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+    it('LEG B catchError failure does NOT kill LEG A (leg independence)', () => {
+      // Seed a healthy live payload.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], countPayload, countPayload, null);
+      component.applyFetchResult([], [], livePayload, livePayload, null);
       expect(component.liveMissionCount()).toBe(1);
-      // Now the list leg fails (per-leg catchError fires FIRST —
-      // sets ``lastIntakeError`` — and the forkJoin next-handler
-      // receives ``missionsList: null``). The count leg is still
-      // healthy so it UPDATES the badge's N.
-      component.onLegError('missionsList', new Error('list 500'));
-      const updatedCount = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      // Now LEG B fails (per-leg catchError fires FIRST — sets
+      // ``lastIntakeError`` — and the forkJoin next-handler receives
+      // ``recentMissions: null``). LEG A is still healthy so it
+      // UPDATES the badge's N.
+      component.onLegError('recentMissions', new Error('list 500'));
+      const updatedLive = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         3
       );
-      component.applyFetchResult([], [], updatedCount, null, null);
-      // The flag remains set from the catchError call — the list
-      // leg's error is recorded.
-      expect(component.lastIntakeError()).toBe('missionsList: list 500');
-      // The count leg updated — the badge's N reflects the new count.
+      component.applyFetchResult([], [], updatedLive, null, null);
+      // The flag remains set from the catchError call — LEG B's
+      // error is recorded.
+      expect(component.lastIntakeError()).toBe('recentMissions: list 500');
+      // LEG A updated — the badge's N reflects the new count.
       expect(component.liveMissionCount()).toBe(3);
+    });
+  });
+
+  // ── F-5 mandatory pins (2026-09-08, mission-tree single-source) ──────
+  //
+  // Three pins prove the F-5 wiring is structurally impossible to
+  // bypass. Each is a separate describe so a regression lands on the
+  // exact failure mode:
+  //
+  //   * single-source pin — live-section rows + tooltip breakdown +
+  //     header count all sourced from LEG A. A revert that lets ANY
+  //     consumer read LEG B (or the old limit:1 shape) flips one of
+  //     these.
+  //   * tester-dataset pin — unfiltered top-20 all-terminal + 7 live
+  //     missions → LIVE MISSIONS shows all 7, tooltip shows the REAL
+  //     split (not the broken "0/0/0"). The exact tester-dataset
+  //     repro that surfaced the bug.
+  //   * structural-disjointness pin — live rows from LEG B are
+  //     filtered out before the panel sees them, so they cannot bleed
+  //     into the LIVE MISSIONS section even when LEG B's top-N are
+  //     live.
+
+  describe('F-5 single-source pin: count + live rows + breakdown all read from LEG A', () => {
+    it('badge count reads from LEG A — header N is total ?? missions.length of the live page', () => {
+      // LEG A = 7 live (total=7), LEG B = 82 rows (75 terminal + 7
+      // live that appear in the top-20). The badge MUST read 7 from
+      // LEG A's total — never from LEG B's rows or total.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 7 }, (_, i) => ({
+          mission_id: `live-${i}`,
+          liveness: 'processing' as MissionLiveness,
+        })),
+        7
+      );
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 82 }, (_, i) => ({
+          mission_id: `m-${i}`,
+          liveness: i < 7 ? ('processing' as const) : ('completed' as const),
+        })),
+        82
+      );
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Single-source assertion #1: badge N = LEG A's total (7), NOT
+      // LEG B's total (82) or LEG B's row count (82).
+      expect(component.liveMissionCount()).toBe(7);
+      expect(component.missionsSegmentText()).toBe('7');
+      // Sanity: LEG A's payload is the one being read for the count.
+      expect(component.lastLiveMissionsPayload()!.total).toBe(7);
+    });
+
+    it('liveMissionBreakdown reads from LEG A — NOT from the panel\'s combined missionsList()', () => {
+      // LEG A = 3 processing + 2 paused (5 total live). LEG B's top
+      // page contains 2 LIVE rows (which are filtered out before the
+      // panel sees them) + 18 terminal rows. The breakdown must
+      // count the LEG A split (3 processing + 2 paused), NOT the
+      // combined total (which would be 5 processing + 2 paused — 7,
+      // a different number).
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'live-1', liveness: 'processing' },
+          { mission_id: 'live-2', liveness: 'processing' },
+          { mission_id: 'live-3', liveness: 'processing' },
+          { mission_id: 'live-4', liveness: 'paused' },
+          { mission_id: 'live-5', liveness: 'paused' },
+        ],
+        5
+      );
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          // 2 LIVE rows at the top of LEG B (would be the F-5 bug
+          // class — they used to leak into the live section).
+          { mission_id: 'leak-1', liveness: 'processing' },
+          { mission_id: 'leak-2', liveness: 'paused' },
+          // 18 terminal rows.
+          ...Array.from({ length: 18 }, (_, i) => ({
+            mission_id: `done-${i}`,
+            liveness: 'completed' as MissionLiveness,
+          })),
+        ],
+        20
+      );
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Single-source assertion #2: breakdown reflects LEG A only
+      // (3 processing + 2 paused = 5). LEG B's 2 live rows do NOT
+      // contribute — even though the panel's combined missionsList
+      // would include them if they were not filtered out.
+      const bd = component.liveMissionBreakdown();
+      expect(bd['processing']).toBe(3);
+      expect(bd['paused']).toBe(2);
+      expect(bd['pending']).toBe(0);
+      expect(bd['processing'] + bd['paused'] + bd['pending']).toBe(5);
+      // Sanity: the LEG A payload is what's being read.
+      expect(component.liveMissionsList().length).toBe(5);
+    });
+
+    it('panel\'s [missions] input is the LEG A + LEG B-filtered composition — disjoint by construction', () => {
+      // LEG A = 5 live rows. LEG B = 5 LIVE + 15 terminal rows.
+      // Panel's [missions] = 5 (LEG A) + 15 (LEG B filtered to
+      // terminal) = 20 rows total. LEG B's 5 LIVE rows MUST NOT
+      // appear in the panel's live count.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 5 }, (_, i) => ({
+          mission_id: `live-${i}`,
+          liveness: 'processing' as MissionLiveness,
+        })),
+        5
+      );
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          ...Array.from({ length: 5 }, (_, i) => ({
+            mission_id: `leak-${i}`,
+            liveness: 'processing' as MissionLiveness,
+          })),
+          ...Array.from({ length: 15 }, (_, i) => ({
+            mission_id: `done-${i}`,
+            liveness: 'completed' as MissionLiveness,
+          })),
+        ],
+        20
+      );
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Panel composition = LEG A (5) + LEG B filtered to terminal
+      // (15) = 20.
+      expect(component.missionsList().length).toBe(20);
+      // None of LEG B's "leak-N" rows reach the panel's combined
+      // input — they were filtered out by the live-only filter on
+      // LEG B's contribution to the panel.
+      const leakIds = component.missionsList()
+        .map((m) => m.mission_id)
+        .filter((id) => id?.startsWith('leak-'));
+      expect(leakIds.length).toBe(0);
+      // All LEG A's "live-N" rows DO reach the panel.
+      const liveIds = component.missionsList()
+        .map((m) => m.mission_id)
+        .filter((id) => id?.startsWith('live-'));
+      expect(liveIds.length).toBe(5);
+    });
+  });
+
+  describe('F-5 tester-dataset pin: 7 live + unfiltered top-20 all-terminal → live section non-empty + correct tooltip', () => {
+    it('live section + breakdown + header count are all consistent when LEG B is all-terminal', () => {
+      // Tester-dataset repro: the unfiltered top-20 (LEG B) is
+      // entirely terminal — this is the exact payload shape that
+      // triggered the bug. LEG A has 7 live with a real mix:
+      // processing 3, pending 2, paused 2.
+      //
+      // Pre-fix behaviour (the bug): badge = 7, tooltip =
+      // "7 (processing 0, pending 0, paused 0)", live section
+      // EMPTY. The breakdown was reading from LEG B's empty-live
+      // rows, contradicting the header count.
+      //
+      // Post-fix behaviour: badge = 7, tooltip =
+      // "7 (processing 3, pending 2, paused 2)", live section
+      // NON-EMPTY (7 rows from LEG A).
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'live-1', liveness: 'processing' },
+          { mission_id: 'live-2', liveness: 'processing' },
+          { mission_id: 'live-3', liveness: 'processing' },
+          { mission_id: 'live-4', liveness: 'pending' },
+          { mission_id: 'live-5', liveness: 'pending' },
+          { mission_id: 'live-6', liveness: 'paused' },
+          { mission_id: 'live-7', liveness: 'paused' },
+        ],
+        7
+      );
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        Array.from({ length: 20 }, (_, i) => ({
+          mission_id: `done-${i}`,
+          liveness: 'completed' as MissionLiveness,
+        })),
+        20
+      );
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Header: badge shows 7 (LEG A total), NOT 20 (LEG B total).
+      expect(component.liveMissionCount()).toBe(7);
+      expect(component.missionsSegmentText()).toBe('7');
+      // Tooltip: real split from LEG A (3 + 2 + 2), NOT the broken
+      // "0 + 0 + 0" the pre-fix code produced.
+      const bd = component.liveMissionBreakdown();
+      expect(bd['processing']).toBe(3);
+      expect(bd['pending']).toBe(2);
+      expect(bd['paused']).toBe(2);
+      const tt = component.tooltipText();
+      expect(tt).toContain('Live missions: 7 (processing 3, pending 2, paused 2)');
+      // Live section: 7 live rows from LEG A, NON-EMPTY.
+      const liveSection = component.missionsList().filter((m) =>
+        m.liveness === 'processing' || m.liveness === 'pending' || m.liveness === 'paused'
+      );
+      expect(liveSection.length).toBe(7);
+      // Panel composition: LEG A (7 live) + LEG B filtered to
+      // terminal (20 completed) = 27 rows total.
+      expect(component.missionsList().length).toBe(27);
+    });
+  });
+
+  describe('F-5 structural-disjointness pin: LEG B live rows are filtered out before the panel sees them', () => {
+    it('even when LEG B is ALL live rows, the panel\'s live section stays sourced from LEG A only', () => {
+      // Adversarial payload: LEG B returns 20 LIVE rows (no
+      // terminal). The F-5 fix must filter them all out so the
+      // panel's live count and breakdown stay sourced from LEG A.
+      // LEG A's total is 7 (3 processing + 2 pending + 2 paused);
+      // LEG B's 20 rows are 10 processing + 5 pending + 5 paused.
+      // Pre-fix: live section would show 27 rows and breakdown
+      // would say 13 processing + 7 pending + 7 paused — wildly
+      // out of sync with the badge's 7. Post-fix: live section =
+      // 7 rows (LEG A only) and breakdown matches LEG A.
+      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          { mission_id: 'a-1', liveness: 'processing' },
+          { mission_id: 'a-2', liveness: 'processing' },
+          { mission_id: 'a-3', liveness: 'processing' },
+          { mission_id: 'a-4', liveness: 'pending' },
+          { mission_id: 'a-5', liveness: 'pending' },
+          { mission_id: 'a-6', liveness: 'paused' },
+          { mission_id: 'a-7', liveness: 'paused' },
+        ],
+        7
+      );
+      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [
+          ...Array.from({ length: 10 }, (_, i) => ({
+            mission_id: `b-${i}`,
+            liveness: 'processing' as MissionLiveness,
+          })),
+          ...Array.from({ length: 5 }, (_, i) => ({
+            mission_id: `b-${10 + i}`,
+            liveness: 'pending' as MissionLiveness,
+          })),
+          ...Array.from({ length: 5 }, (_, i) => ({
+            mission_id: `b-${15 + i}`,
+            liveness: 'paused' as MissionLiveness,
+          })),
+        ],
+        20
+      );
+      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      // Badge: 7 (LEG A total). NOT 27 (LEG A rows + LEG B live).
+      expect(component.liveMissionCount()).toBe(7);
+      // Breakdown: LEG A only. NOT 13 + 7 + 7 = 27.
+      const bd = component.liveMissionBreakdown();
+      expect(bd['processing']).toBe(3);
+      expect(bd['pending']).toBe(2);
+      expect(bd['paused']).toBe(2);
+      // Panel composition: LEG A (7 live) + LEG B filtered to
+      // terminal (0, since LEG B had no terminal) = 7 rows total.
+      // The 20 LEG B LIVE rows are dropped — they never reach the
+      // panel.
+      expect(component.missionsList().length).toBe(7);
+      // All rows in the panel start with "a-" (LEG A), NOT "b-".
+      const panelIds = component.missionsList().map((m) => m.mission_id);
+      expect(panelIds.every((id) => id?.startsWith('a-'))).toBe(true);
     });
   });
 
