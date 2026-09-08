@@ -564,10 +564,13 @@ class TestHumanMessagesModeForChild:
             f"inherited context_key. Got content (first 500 chars): "
             f"{all_content[:500]!r}"
         )
-        # And it must be carried in a project-context message (KV lives there).
+        # The KV renders in the standalone [SYSTEM CONTEXT: Shared Meta KV]
+        # block — D4/D7 retired the project-block placement.
         kinds = [m.additional_kwargs.get("context_kind") for m in result]
-        assert "project" in kinds, (
-            f"Project context message expected. Got kinds: {kinds}"
+        assert "shared_meta_kv" in kinds, (
+            f"Standalone [SYSTEM CONTEXT: Shared Meta KV] message expected "
+            f"(D4/D7: KV no longer embedded in project block). "
+            f"Got kinds: {kinds}"
         )
 
     @pytest.mark.asyncio
