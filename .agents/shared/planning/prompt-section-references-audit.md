@@ -410,6 +410,8 @@ All three measurements use the same §5.1 recipe (literal bash snippet in §5.1)
 
 Base selection governs the verdict; the choice of anchor is PENDING RATIFICATION by the dispatching authority (caller). The operative verdict above uses fd582efd until ratified otherwise.
 
+**RATIFIED (leader ruling, 2026-09-08):** Byte gate **PASSES**. Cap semantics: the 1650 B cap governs the worktree-aware 9-file surface measured against the **pre-feature baseline**. The v1 ship measured **1616 B** (verified at merge `e191da99`). This branch’s own delta on those 9 files is **net ≈ −139 B** (−213 sweep, +79 repairs, −5 cleanup) — the cap cannot be breached by this branch. The `fd582efd`-anchor figure of 4480 B is a **baseline conflation**: it counts v1-sweep additions to shared files that the v1 audit already accounted for under its own reviewed budget — documented above for provenance only, **not operative**. The `aa4963ea` anchor is **rejected** (not semantically meaningful). Operative verdict: **PASS**.
+
 ### 5.4 Retracted claims (correction log)
 
 | Stated in earlier §5 (line refs pre-F3) | Value | Why it is wrong under §5.1 |
