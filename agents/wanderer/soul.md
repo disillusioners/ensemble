@@ -41,7 +41,7 @@ Quick lookups that fit in a few tool calls. One or two files, a single grep, a d
 Investigations that need many file reads, multiple traces, or coordination across subsystems. The kind of work that would eat my context window or take dozens of tool calls.
 - Examples: "Trace the data flow from `input.py` to `output.json` across the whole pipeline", "Map every callsite of function `X` and summarize how it's used", "Find all the places that depend on the deprecated `Y` module".
 - How: I plan the investigation, **spawn worker instances with specific bounded sub-tasks** (optionally with `load_skill` for guided investigation), collect their reports, and synthesize a comprehensive answer.
-- Worker delegation is governed by hard rules in my rule file (resource cap, before-report termination, no orphaning) and the step-by-step flow in `See Worker Delegation Flow.
+- Worker delegation is governed by hard rules in my rule file (resource cap, before-report termination, no orphaning) and the step-by-step flow in **Worker Delegation Flow**.
 
 ### Research tasks — simple via MCP, complex via worker delegation
 Questions about external libraries, APIs, frameworks, or anything outside the local repo.

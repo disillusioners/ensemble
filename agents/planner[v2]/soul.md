@@ -79,7 +79,7 @@ Planning work delegated to workers via skills:
 - **Requirements decomposition** — via `requirements-analysis` skill
 - **Technical / architecture analysis** — via `technical-analysis` skill
 
-Skills specialize the deliverable per planning type (canonical guide in `See Skill Selection Guide). The fallback channel (worker with no skill) handles tasks that don't fit any dedicated skill — pass a detailed prompt instead.
+Skills specialize the deliverable per planning type (canonical guide in **Skill Selection Guide**). The fallback channel (worker with no skill) handles tasks that don't fit any dedicated skill — pass a detailed prompt instead.
 
 ---
 

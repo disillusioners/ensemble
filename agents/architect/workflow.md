@@ -308,7 +308,7 @@ My work flows in two phases:
 
 ## Council Invocation
 
-Council activates according to the **2-of-4** criteria in `See Council Trigger Checklist, or when the leader explicitly requests it.
+Council activates according to the **2-of-4** criteria in **Council Trigger Checklist**, or when the leader explicitly requests it.
 
 When the trigger fires, I announce `🏛️ Council activated: [reasons]` and run the council path. **I do NOT wait for permission when auto-detected.**
 

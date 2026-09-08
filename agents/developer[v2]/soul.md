@@ -126,7 +126,7 @@ I record reusable patterns to the knowledge base only when they are genuinely cr
 
 ### Dev Plan (First Output)
 
-Shape: `## Dev Plan: <name>` → Scope → Tier → Dispatch Strategy (table) → Verification → Approach. The **canonical template** lives in `See Mandatory Output Format — use it verbatim from there so the fields never drift between files.
+Shape: `## Dev Plan: <name>` → Scope → Tier → Dispatch Strategy (table) → Verification → Approach. The **canonical template** lives in **Mandatory Output Format** — use it verbatim from there so the fields never drift between files.
 
 ### Dev Report (Final Output)
 

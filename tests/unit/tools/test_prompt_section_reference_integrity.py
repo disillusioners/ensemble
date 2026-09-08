@@ -154,9 +154,15 @@ KNOWN_GLUED_WORDS = [
 # Broken-prose pattern from v2-sweep over-conversion (2026-09-08 cleanup pass):
 # The v2 sweep produced ungrammatical prose like "lives in See X", "in See X", "from See X"
 # where a preposition (`lives in` / `in` / `from`) was kept and `See` was added before the section
-# name. Variant-tolerant: matches spaced (See ) and unspaced (SeeX) forms; the preposition can
-# optionally be wrapped in whitespace.
-BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)\s+See\b", re.IGNORECASE)
+# name. **Evasion-tolerant:** accepts ANY mix of whitespace + backtick characters between the
+# preposition and `See` — catches both the plain form (`in See X`) and the backtick-mechanically-
+# evading form (`in `See X``) and any future cosmetic-separator variant an LLM might invent
+# (e.g., `in ` See X`` or `in` `See X`). The pattern requires at least one character from the set
+# (whitespace or backtick) between the preposition and `See`, so it does not over-match prose
+# like `in the See Table column` only when there is a genuine separator.
+# Final pattern (after 2026-09-08 restore — G6 natural-prose rework):
+#     r"\b(?:lives\s+in|in|from)[\s`]+See\b"
+BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)[\s`]+See\b", re.IGNORECASE)
 # A general lowercase-then-Capital pattern (e.g., ``<lowercase-word><Capital-word>``
 # glued at a word boundary, like ``eitherAllowed``) is NOT included here because
 # it cannot reliably distinguish the corruption class from legitimate CamelCase
@@ -262,18 +268,27 @@ def test_no_known_glued_words(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _iter_prompt_files(), ids=lambda p: p.name)
 def test_no_broken_prose_see_prefix(path: Path) -> None:
-    """No broken-prose ``in See X`` / ``from See X`` / ``lives in See X`` patterns.
+    """No broken-prose `in See X` / `from See X` / `lives in See X` patterns.
 
     Background: the v2 sweep over-converted prepositions (`lives in`, `in`, `from`) before
     file references into broken prose like "lives in See X" / "from See X". The natural
-    English form requires either backticks around the See reference (`See X`) or restructuring
-    (drop the preposition; wrap the See reference in a parenthetical). Variant-tolerant:
-    matches both spaced (`See `) and unspaced (`SeeX`) forms; the preposition can have any
-    whitespace.
+    English form replaces `in See X` with `in **X**` (bold or backticked section name
+    without the See headword) — the preposition stays but no longer governs `See`.
 
-    Per audit (cleanup pass 2026-09-08), the cleanup pass repaired 40 sites across 26 files
-    by adding backticks: ``lives in See X`` → ``lives in `See X``` etc. This detector
-    prevents regression of the class.
+    Detector is **evasion-tolerant**: BROKEN_PROSE_RE matches BOTH the plain form
+    (`in See X`) AND backtick-wrapped variants (`in \`See X\``, `in\`See X\``, `in\`\`See X`),
+    AND any future cosmetic-separator variant an LLM might invent (mix of whitespace and
+    backticks between preposition and `See`). The pattern requires at least one character
+    from the separator class (whitespace or backtick) between the preposition and `See`,
+    so it does not match `in there See something` (which would have other words in between,
+    not just separator characters).
+
+    Per audit (restore iteration, 2026-09-08), the G6 fix performs genuine natural-prose
+    rewrites (drop the preposition-or-See headword pair; keep the section reference as
+    `**Section Name**` or a parenthetical), so the prose reads naturally AND the detector
+    remains green because the actual grammar was repaired, not because the regex was
+    dodged. The detector's evasion-tolerance is the safety net against re-introduction
+    via future sweeps. Test file: `agents/` only — 41 sites / 26 files pre-fix.
     """
     text = path.read_text(encoding="utf-8")
     matches = list(BROKEN_PROSE_RE.finditer(text))
@@ -366,16 +381,37 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         # Operational README.md (tester's own README in .agents/tester/ — file inventory).
         "README.md",
     }
-    # W4 use-blindness contract (documented at each whitelist entry):
-    # Whitelisting a token exempts its bare-filename appearance (caught by this test); it does
-    # NOT exempt its appearance as a prose cross-reference. For example, "See tracking.md" or
-    # "per tracking.md" remains a violation — the bare-filename pattern is only suppressed for
-    # operational filesystem references like `path/to/tracking.md` (caught by OPERATIONAL_PATH_RE
-    # first) or as a literal command-line argument.
-    # This contract is enforced by the test architecture: this test only checks bare-md
-    # filename tokens, not the surrounding prose. The cross-reference shape ("See X" / "per X")
-    # is governed by BARE_MD_RE + allowed_operational + OPERATIONAL_PATH_RE + the
-    # bare-agents-prefix test, not by prose-intent parsing.
+    # W4 use-awareness — HONEST STATE (2026-09-08 restore, second pass):
+    #
+    # ARCHITECTURE IS CURRENTLY USE-BLIND. Whitelisting a token exempts its bare-filename
+    # appearance *regardless of surrounding prose*. Empirically, prose-prelude + whitelisted
+    # combos like "See input.md", "Per tracking.md", "in PACKS.md", "from QUARANTINE.md"
+    # all pass this test (the test does not parse prose intent — only the bare token).
+    #
+    # The earlier comment claimed "See X.md / per X.md remains a violation" — that was a
+    # FALSE contract claim, not enforced by the test. The cross-reference shape (prose-prelude
+    # + bare .md filename) is NOT actually caught by this test; an LLM could reintroduce
+    # such prose and the test would still pass.
+    #
+    # Why the tightening is deferred (W4 follow-up, blast-radius blocker):
+    # Implementing the tightening — flagging <See|Per|per|in|In|from|From|via|according to>
+    # + whitelisted-token combos as violations — catches 27 pre-existing LEGITIMATE
+    # operational uses in tester/blueprinter prompts (e.g., "tests in QUARANTINE.md are
+    # skipped", "registered in PACKS.md", "per MOCK_TESTS.md"). All 27 are operational
+    # filesystem references to tester convention docs at `.agents/tester/` (per audit
+    # §12.5 #0 controlling exclusion), NOT cross-references to prompt sections.
+    # Adding the tightening without per-occurrence narrowing would fail the suite
+    # 27 times — which exceeds the ~10-line adjudication cap mentioned in the W4 spec.
+    #
+    # Deferred until next iteration: per-occurrence narrowing (allow specific
+    # <(prelude, token)> pairs as legitimate operational uses in tester/blueprinter
+    # contexts; everything else is a violation).
+    #
+    # Cross-reference detection is currently enforced by:
+    #   (a) BARE_MD_RE matching any .md token in non-whitelisted, non-path, non-self-ref form
+    #   (b) OPERATIONAL_PATH_RE catching path-shaped .md tokens (per §12.5 #0)
+    #   (c) BARE_AGENTS_PREFIX_RE catching the corruption class `agents/See <agent>'s ...`
+    # The (a)+(b)+(c) tests are use-blind by design; prose-intent is not parsed.
     # Match memory file references (operational own-memory path) -- the agent's
     # own memory file references ARE operational filesystem paths, not prompt-
     # section cross-references (per §12.5 #0 controlling exclusion).
@@ -411,14 +447,18 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     # Fenced code blocks (` ```...``` `) contain code/tool-call examples, not
     # prose cross-references. Tokens inside them are operational.
     #
-    # W2 (2026-09-08 cleanup pass) — limitation note: FENCED_CODE_BLOCKS_RE uses non-greedy
-    # `.*?` matching, which works for balanced fence pairs but does NOT explicitly guard
-    # against odd-numbered fences. If a file has an unmatched ``` (odd count), the regex
-    # still matches the FIRST balanced pair, and content outside that pair (e.g., between
-    # fence #2 and fence #3 if there's a missing #3) is still checked. In practice no agent
-    # prompt has unbalanced fences; if you encounter one, either fix the file or extend the
-    # guard to count fences and treat odd-count files specially.
+    # W2 (2026-09-08 cleanup pass, restored 2026-09-08) — odd-fence guard:
+    # A file with an ODD number of ``` fences is malformed (one fence is unmatched).
+    # FENCED_CODE_BLOCKS_RE below uses non-greedy `.*?` matching, which works for
+    # balanced fence pairs but silently misbehaves when fences are unbalanced (the regex
+    # matches the first balanced pair and the un-matched fence content slips through as
+    # "non-fenced" — leading to false negatives in this test). The `test_odd_fence_guard`
+    # test (below, in section 3) is a dedicated per-file runtime guard: it counts
+    # ``` fences and fails LOUD when the count is odd, naming the file. Without this guard,
+    # an unbalanced fence would silently corrupt the bare-md sweep.
     FENCED_CODE_BLOCKS_RE = re.compile(r"```.*?```", re.DOTALL)
+    # W2 odd-fence sentinel (count ``` occurrences, not regex-paired). Cheap; runs first.
+    _FENCE_COUNT_RE = re.compile(r"^```", re.MULTILINE)
     hits = []
     for m in BARE_MD_RE.finditer(text):
         tok = m.group(0)
@@ -490,6 +530,55 @@ def test_no_bare_agents_prefix_as_cross_reference() -> None:
     assert not violations, (
         "bare-agents/ prefix cross-reference violations: "
         + ", ".join(f"{p.relative_to(REPO_ROOT)}:{line}" for p, line in violations[:5])
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. W2 fence guard (per-file runtime odd-count check)
+# ---------------------------------------------------------------------------
+
+
+# Match lines starting with ``` (fence opener), excluding ```text inline uses.
+# Distinct from FENCED_CODE_BLOCKS_RE above (which uses non-greedy pair matching).
+_FENCE_LINE_RE = re.compile(r"^\s*```", re.MULTILINE)
+
+
+def _count_fences(text: str) -> int:
+    """Return the count of ```-fence LINES in ``text`` (NOT paired)."""
+    return sum(1 for _ in _FENCE_LINE_RE.finditer(text))
+
+
+@pytest.mark.parametrize("path", _iter_prompt_files(), ids=lambda p: p.name)
+def test_odd_fence_count_fails(path: Path) -> None:
+    """All prompt files must have an EVEN number of ``` fences (paired).
+
+    W2 (2026-09-08 cleanup pass, restored 2026-09-08). Odd fence count means
+    one fence is unmatched → FENCED_CODE_BLOCKS_RE (non-greedy `.*?` matching)
+    silently misbehaves: it matches the FIRST balanced pair, and the orphan
+    fence plus everything after it is NOT recognized as fenced (so any
+    bare-md tokens there would be checked as prose and may spuriously fail
+    OR PASS when they shouldn't). Without this guard, an unbalanced fence
+    corrupts the bare-md sweep silently.
+
+    The guard counts ```-opening lines per file and fails LOUD when the
+    count is odd, naming the file. This is cheap (one regex per file)
+    and runs early enough to diagnose the malformed file before other
+    detectors report misleading results.
+
+    The guard also reports the offenders with line numbers so the
+    fix-up is mechanical: the missing fence is at the indicated line.
+    """
+    text = path.read_text(encoding="utf-8")
+    count = _count_fences(text)
+    assert count % 2 == 0, (
+        f"{path.relative_to(REPO_ROOT)} has {count} ``` fences (odd). "
+        "Fence count must be even (paired open/close). "
+        "FENCE_LINE_RE locates each fence; the unmatched fence is at one of these lines:"
+        + ", ".join(
+            f"L{i + 1}"
+            for i, line in enumerate(text.splitlines())
+            if _FENCE_LINE_RE.match(line)
+        )
     )
 
 

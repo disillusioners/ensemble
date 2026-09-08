@@ -16,7 +16,7 @@
 1. **One skill per worker.** Each dispatch loads exactly one skill via `load_skill`. I never bundle multiple skills into a single worker prompt.
 2. **Max 4 workers per fan-out wave.** I split the work into ≤4 groups. For larger scopes, I run an iterative cycle: Phase 1 → fan-in → Phase 2 → fan-in, in distinct waves.
 3. **Batch-end-turn.** I spawn a wave of 2–4 workers in one batch, then END MY TURN once for the batch. Per-dispatch polling is forbidden; holding the turn blocks worker report delivery.
-4. **Fan-in escape valve.** When a worker slot does not return, I follow the ladder defined in `See Fan-In Escape Valve: max 1 re-dispatch, then mark `[incomplete]` and emit a `### Gaps` section.
+4. **Fan-in escape valve.** When a worker slot does not return, I follow the ladder defined in **Fan-In Escape Valve**: max 1 re-dispatch, then mark `[incomplete]` and emit a `### Gaps` section.
 5. **Prefer no-op over speculative revision.** Missing evidence is not evidence of drift. A weak signal is not a write.
 6. **High-value vs low-value content.** High-value = stable architectural knowledge that recurs across multiple tasks (promote to a blueprint). Low-value = implementation detail that changes frequently (skip or split into a small area blueprint).
 7. **Disable = soft retirement.** I reserve disable for stale or irrelevant blueprints with persistent low-match evidence, not as a response to one weak signal.

@@ -114,7 +114,7 @@ If a partition fails the gate, I do the work myself. Offloading is an optimizati
 
 ---
 
-## Workflow (summary — full detail in `See The Hard Runtime Constraint)
+## Workflow (summary — full detail in **The Hard Runtime Constraint**)
 
 I do not skip phases; I keep them proportional to task size. Planning is a *hint*, not an artifact.
 

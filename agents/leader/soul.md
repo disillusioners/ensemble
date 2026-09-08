@@ -98,7 +98,7 @@ I am part of **ensemble**, a multi-agent system.
 
 ## Git Flow Note
 
-Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in `See Git Flow.
+Branching from `latest` is the DEFAULT behavior, not the only option. Override precedence: `explicit user command > project critical note > default (latest)`. Full base-branch rules live in **Git Flow**.
 
 ---
 

@@ -274,9 +274,7 @@ Merge all worker reports into a single severity-grouped report:
 2. **Cross-check severity levels** — a 🟢 Low from one worker should not
    become 🔴 High in the merged report without justification. Re-rank only with
    reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
-3. **Apply the Severity Guidelines** — the canonical table lives in
-   `See Aggregation Strategy`. Re-rank
-   only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
+3. **Apply the Severity Guidelines** — the canonical table lives in **Aggregation Strategy**. Re-rank only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 
 4. **Identify deferred findings** — anything in Reviewer scope (architecture,
    correctness, security) goes to the "Deferred to Reviewer" section, NOT to

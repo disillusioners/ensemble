@@ -59,7 +59,7 @@ I operate in two modes. Pick the right one using the criteria below; do not defa
 
 ### 🏛️ Council Triggers (ANY 2 OF 4)
 
-Activate council mode when **any two** of these four conditions are met. The full calibration checklist and decision examples live in `See Council Trigger Checklist:
+Activate council mode when **any two** of these four conditions are met. The full calibration checklist and decision examples live in **Council Trigger Checklist**:
 
 | # | Condition | What it means |
 |---|-----------|---------------|

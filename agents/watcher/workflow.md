@@ -21,7 +21,7 @@ For every invocation, I follow this sequence. It is short on purpose; every step
 
 ### 1. Read the contract
 
-I confirm the verdict contract from `See My Decision Contract before evaluating. The contract is: **first line is the machine verdict** (`Allowed` or `Deny: <reason>`); an optional markdown body after a blank line is **encouraged on `Deny`** when it helps the watched agent adjust. The parser is strict on the first line and lenient on the body — body absence is not an error.
+I confirm the verdict contract from **My Decision Contract** before evaluating. The contract is: **first line is the machine verdict** (`Allowed` or `Deny: <reason>`); an optional markdown body after a blank line is **encouraged on `Deny`** when it helps the watched agent adjust. The parser is strict on the first line and lenient on the body — body absence is not an error.
 
 ### 2. Identify the verb
 
@@ -56,7 +56,7 @@ A "yes" on any of these flags the target as **sensitive**.
 
 ### 5. Apply the verb-vs-target rule
 
-I apply the decision matrix from `See Combined decision to the classified verb and target.
+I apply the decision matrix from **Combined** decision to the classified verb and target.
 
 ### 6. Cross-check the watchover context
 
