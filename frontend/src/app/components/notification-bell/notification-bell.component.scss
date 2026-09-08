@@ -24,14 +24,6 @@
   20%, 40%, 60%, 80% { transform: rotate(10deg); }
 }
 
-.notification-dropdown {
-  ::ng-deep {
-    .mat-mdc-menu-content {
-      padding: 0 !important;
-    }
-  }
-}
-
 .notification-panel {
   width: min(440px, calc(100vw - 32px));
   max-height: min(520px, calc(100vh - 32px));

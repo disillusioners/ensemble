@@ -193,12 +193,11 @@
   }
 }
 
-/* Match the notification-bell dropdown sizing so the embedded panel
-   renders flush against the menu surface. */
-.job-queue-dropdown {
-  ::ng-deep {
-    .mat-mdc-menu-content {
-      padding: 0 !important;
-    }
-  }
-}
+/* Dead-rule removal note (fix 2026-09-08, notification-bell): The
+   previous ::ng-deep .mat-mdc-menu-content { padding: 0 !important }
+   block never matched anything — MatMenu copies the host class onto
+   the body-mounted `.mat-mdc-menu-panel` (which lives in the global
+   CDK overlay, not inside this component's view-encapsulation
+   subtree), so `::ng-deep` here was unreachable. The new global rule
+   in src/styles.scss (`.mat-mdc-menu-panel.job-queue-dropdown { ... }`)
+   is the canonical seat for shell-scope styling. */

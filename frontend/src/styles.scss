@@ -94,3 +94,25 @@ app-chat {
   max-width: calc(100vw - 16px);
   overflow-x: hidden;
 }
+
+// Notification-bell dropdown — widen the mat-menu SHELL so it hugs the
+// embedded notification panel instead of h-scrolling it. Same defect
+// class as job-queue (3ee54883): Angular Material 21 ships
+// `.mat-mdc-menu-panel { max-width: 280px; overflow: auto }` globally,
+// while the embedded `.notification-panel` is
+// `width: min(440px, calc(100vw - 32px))` — so the 280px shell capped
+// a 440px child at 1440/768 vw (reproduced: shell scrollWidth 440 vs
+// clientWidth 280 → 160px of X overflow) and 63px at 375 vw. The
+// `notification-dropdown` class is copied by MatMenu onto the
+// `.mat-mdc-menu-panel` element itself, and the CDK overlay mounts at
+// <body> — so this MUST be a global rule: component-scoped ::ng-deep
+// can never match it. Width contract: `calc(100vw - 16px)` ≥ the
+// panel's `min(440px, calc(100vw - 32px))` at every viewport
+// (100vw - 16 > 100vw - 32 always; ≥ 440px for vw ≥ 472 where the
+// 440px clamp engages), so the shell never under-cuts the panel and
+// `overflow: auto` has nothing to scroll. `overflow-x: hidden` is
+// belt-and-braces against sub-pixel rounding scrollbars only.
+.mat-mdc-menu-panel.notification-dropdown {
+  max-width: calc(100vw - 16px);
+  overflow-x: hidden;
+}
