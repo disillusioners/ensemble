@@ -166,6 +166,13 @@ _MSG_COMPLETED: str = MessageStatus.COMPLETED.value
 # ``_create_subshape_a_artifacts`` always overwrites ``content`` with
 # the fetched last-assistant content before transitioning DEFERRED →
 # PENDING, so the sentinel never reaches a delivery lane.
+#
+# DOC-TRUTH (Reviewer W3, 2026-09-08): actually transition happens
+# first; functionally moot via the backfill's blind overwrite —
+# content is real by the time any consumer reads it. The W1
+# claim-filter hardening on ``claim_for_injection`` (requires
+# ``report_message_id IS NOT NULL``) is the structural guarantee:
+# a sentinel row CANNOT reach the INJECTED lane.
 _DEFERRED_MARKER_CONTENT_SENTINEL: str = ""
 
 # IntegrityError classification (incident 2026-09-08, post-mortem on
@@ -743,6 +750,9 @@ class ReportInjectionRepository:
             )
             return None
 
+    # OPS-RUNBOOK (Reviewer W3, 2026-09-08): pre-backfill DEFERRED
+    # rows legitimately carry content='' — do not interpret as missing
+    # report; backfill overwrites.
     def _insert_deferred_marker(
         self,
         *,
@@ -1332,6 +1342,17 @@ class ReportInjectionRepository:
                 sa_update(ReportInjection)
                 .where(ReportInjection.parent_instance_id == parent_instance_id)
                 .where(ReportInjection.state == _PENDING_STATE)
+                # W1 (Reviewer 2026-09-08) claim-filter hardening:
+                # a pre-backfill sentinel row (report_message_id=None,
+                # content="") MUST NOT be claimed by the drain — the
+                # terminal-INJECTED-without-report-text race. The
+                # consumer's falsy guard at graph.py:4436 would skip
+                # the empty content but the DB UPDATE would still
+                # stamp state=INJECTED + delivered_at=now on a row
+                # that was never backfilled. Only post-backfill rows
+                # (recovery path's UPDATE-in-place set both
+                # report_message_id + content) pass this WHERE.
+                .where(ReportInjection.report_message_id.is_not(None))
                 .values(state=_INJECTED_STATE, delivered_at=now_iso)
                 .returning(
                     ReportInjection.content,
