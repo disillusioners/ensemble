@@ -35,8 +35,8 @@ fi
 # --- Branch-drift guard (sibling-pack pattern: rev-parse bracket + exact pin) ---
 ACTUAL_BRANCH="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD)"
 ACTUAL_COMMIT="$(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
-EXPECTED_BRANCH="feature/job-queue-mission-tree"
-EXPECTED_COMMIT="bbcae9a2"
+EXPECTED_BRANCH="fix/job-queue-panel-overflow-anchor"
+EXPECTED_COMMIT="3ee54883"
 echo "=== Test Pack: mission_tree_fe_targeted_test [${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT}] ==="
 if [[ "${ACTUAL_BRANCH}" != "${EXPECTED_BRANCH}" || "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
   echo "RESULT: DRIFT (expected ${EXPECTED_BRANCH} @ ${EXPECTED_COMMIT}, got ${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT})"
