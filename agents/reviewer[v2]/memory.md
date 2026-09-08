@@ -1,6 +1,6 @@
 # Memory
 
-> This is the reviewer[v2]-local memory. It owns the Deep-Review trigger checklist and the severity guidelines. Skill templates (code-review, business-logic-review) and my workflow point here — not to the v1 reviewer memory.
+> This is the `reviewer[v2]`-local memory. It owns the Deep-Review trigger checklist and the severity guidelines. Skill templates (`code-review`, `business-logic-review`) and my workflow point here — not to the v1 reviewer memory.
 
 ---
 

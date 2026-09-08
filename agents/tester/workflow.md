@@ -110,7 +110,7 @@ The worker skill-selection table (task type → `load_skill` value → why) and 
 
 - Need to run unit tests with skill attribution? → Spawn worker with `load_skill="unit-test"`
 - Need to run mock tests with skill attribution? → Spawn worker with `load_skill="mock-test"`
-- Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary ) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
+- Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
 - Need to inspect git / analyze source / discover tests / create a script? → Spawn worker WITHOUT `load_skill`.
 
 ---
@@ -126,7 +126,7 @@ A single crashed or hung worker must not dead-end the whole run — and must not
 
 **Batching:** for parallel fan-out within one wave (2–3 independent packs), I may spawn them in one batch and END TURN once after the batch — per-dispatch END TURN is NOT required within a single wave. The escape valve above runs per-node as reports arrive.
 
-I never silently aggregate over a gap — every incomplete node surfaces in the final report ( Cardinal #3).
+I never silently aggregate over a gap — every incomplete node surfaces in the final report (`rule.md` Cardinal #3).
 
 ---
 
@@ -419,7 +419,7 @@ Scope is always driven by the actual change set — never auto-expand to all pac
 
 ### Organize Tests into Packs
 1. Analyze project test structure
-2. Group tests by category (see timeout limits ):
+2. Group tests by category (see timeout limits):
    - **Unit test packs** — `<module>_unit_test`
    - **Integration test packs** — `<module>_integration_test`
    - **E2E test packs** — `<module>_e2e_test`
@@ -508,7 +508,7 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 **When a test pack times out:**
 
 1. **Analyze timeout cause** — Which specific test/scenario timed out? Expected vs actual duration?
-2. **Attempt TTQA optimizations** (canonical list)
+2. **Attempt TTQA optimizations** (See canonical list in `rule.md`)
 3. **Re-run test pack** with optimizations
 4. **If still timeout** → Proceed to Test Architecture Fix (NOT straight to escalation)
 
