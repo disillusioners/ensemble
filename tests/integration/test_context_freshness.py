@@ -332,10 +332,12 @@ class TestKVFreshness:
             f"Marker missing from second call — KV freshness broken. "
             f"Got content (first 500 chars): {all_content_2[:500]!r}"
         )
-        # And the message is the project-context message (KV lives there).
+        # The KV renders in the standalone [SYSTEM CONTEXT: Shared Meta KV]
+        # block — D4/D7 retired the project-block placement.
         kinds = [m.additional_kwargs.get("context_kind") for m in result2]
-        assert "project" in kinds, (
-            f"Project context message expected (it carries the KV section). "
+        assert "shared_meta_kv" in kinds, (
+            f"Standalone [SYSTEM CONTEXT: Shared Meta KV] message expected "
+            f"(D4/D7: KV no longer embedded in project block). "
             f"Got kinds: {kinds}"
         )
 

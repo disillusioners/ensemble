@@ -82,8 +82,8 @@ from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
-from .services.instance_messaging import InstanceMessagingService
-from .services.instance_messaging import emit_wc_wake_enqueue_boot_log
+from .services.instance_messaging import InstanceMessagingService, emit_wc_wake_enqueue_boot_log
+from .services.context_messages import emit_ambient_kv_fresh_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
 )
@@ -804,6 +804,7 @@ class InstanceManager:
         # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
         # Mirrors the governor-guard wrapper precedent.
         emit_wc_wake_enqueue_boot_log()
+        emit_ambient_kv_fresh_boot_log()
 
         # Report-integrity (b) terminal-waiting guard (wc-wake-report-
         # integrity Wave 2 stage iii, 2026-08-30): one-time INFO log

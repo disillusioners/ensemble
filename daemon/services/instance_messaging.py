@@ -3055,15 +3055,16 @@ class InstanceMessagingService:
                         )
 
                 # ── Shared context metadata injection (Option C) ──────
-                # The shared-context KV block is now part of the
-                # ``[SYSTEM CONTEXT: Related Project]`` HumanMessage
+                # The shared-context KV block is now its own
+                # ``[SYSTEM CONTEXT: Shared Meta KV]`` HumanMessage
                 # built per-turn inside ``agent_node`` by
                 # :func:`daemon.services.context_messages.assemble_context_messages`
-                # → :func:`build_project_context_message` →
-                # :func:`_format_kv_metadata_section`. Prepending the
-                # KV block to the user message body here would
-                # double-inject; the per-turn builder is the only
-                # source of truth.
+                # → :func:`build_shared_meta_kv_message` (decisions.md
+                # D4 / D7 — RATIFIED, extended to all projects). The
+                # block lives next to the ``[SYSTEM CONTEXT: Related
+                # Project]`` host under a stable ``kv:{context_key}``
+                # id so LangGraph's ``add_messages`` reducer supersedes
+                # it in place each turn (per-turn refresh, C3).
                 #
                 # The once-per-instance ``shared_context_injected``
                 # flag (set by the legacy path) is now redundant — the

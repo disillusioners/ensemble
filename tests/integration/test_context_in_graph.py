@@ -570,22 +570,45 @@ class TestContextSlotReadsProjectInjectedFlag:
     @pytest.mark.asyncio
     async def test_orchestrator_skips_persistent_rebuild_when_flag_true(self) -> None:
         """End-to-end: when ``project_already_injected=True`` the
-        orchestrator must NOT call the project-fetch or KV-metadata
-        helpers — proving the persistent rebuild is skipped on
-        subsequent turns.
+        orchestrator still performs the C3 per-turn refresh path
+        — one ``_fetch_project_payload`` call for the D4
+        ``is_default`` composition (review Finding #3 accepted
+        cost; cache/hoist is a deferred follow-up) and one KV
+        partition refresh keyed by the instance_id (tree-root
+        partition = context_key).
 
-        This pins the orchestrator-side honour of the flag. The
-        orchestrator early-returns at the ``if
-        project_already_injected:`` branch in
-        :func:`daemon.services.context_messages.assemble_context_messages`
-        (around line 1187) before any of the persistent-block
-        builders run — so ``_fetch_project_payload`` and
-        ``_fetch_kv_metadata`` are NEVER invoked, meaning
-        ``project_repo.get`` and
-        ``shared_meta_kv_repo.get_all_as_dict`` are NEVER
-        called. If either call fires, the once-per-instance
-        contract regressed and every turn pays the full DB /
-        RAG cost.
+        This pins the orchestrator-side honour of the flag plus
+        the full turn-2+ refresh contract. The orchestrator
+        short-circuits the project-block builders into
+        ``ephemeral`` (empty under the skip path) but the C3
+        refresh path still emits into ``persistent``:
+
+        * ``project_repo.get("proj-1")`` — exactly once
+          (the project-row fetch inside ``_fetch_project_payload``).
+        * ``project_repo.list_critical_notes("proj-1")`` —
+          exactly once (project_block critical-notes fetch).
+        * ``project_repo.get_recent_history("proj-1", limit=10)`` —
+          exactly once (project_block recent-history fetch).
+        * ``shared_repo.get_all_as_dict("inst-onward")`` —
+          exactly once (C3 KV refresh; arg is the instance_id
+          = tree-root partition key, not the project_id).
+
+        Output contract: ``persistent`` carries exactly ONE
+        ``HumanMessage`` — the ``[SYSTEM CONTEXT: Shared Meta KV]``
+        block with ``context_kind="shared_meta_kv"``. ``ephemeral``
+        is empty (project-block rebuild is skipped under the
+        skip path; the refresh payload is folded into the KV
+        block instead).
+
+        Regression signal: if any of the project_repo trio fires
+        with a different arg/kwarg, the C3 is_default composition
+        cost drifted; if any fires zero or more-than-once, the
+        once-per-turn refresh contract regressed; if the KV
+        helper fires with a different partition key, the
+        tree-root KV partitioning regressed; if ``persistent``
+        is not exactly the KV message, the persistent-block
+        composition regressed; if ``ephemeral`` is non-empty,
+        the project-block skip regressed.
         """
         from daemon.services.context_messages import assemble_context_messages
 
@@ -630,12 +653,24 @@ class TestContextSlotReadsProjectInjectedFlag:
             project_already_injected=True,
         )
 
-        # The persistent block was NOT rebuilt — the project-repo
-        # and shared-context KV fetcher were NEVER called.
-        project_repo.get.assert_not_called()
-        project_repo.list_critical_notes.assert_not_called()
-        project_repo.get_recent_history.assert_not_called()
-        shared_repo.get_all_as_dict.assert_not_called()
-        # No persistent HumanMessages of any kind — clean skip.
-        assert persistent == []
+        # Empirical contract (captured from impl, 2026-09-08): the
+        # turn-2+ refresh path performs ONE ``_fetch_project_payload``
+        # call (review Finding #3 accepted cost — is_default composition
+        # for the D4 flag composition). Internally that single call
+        # fans out to the trio of project_repo methods below; pinning
+        # them individually documents the per-method contract. The KV
+        # partition refresh is keyed by ``instance_id`` (the tree-root
+        # partition = context_key), not by ``project_id``.
+        project_repo.get.assert_called_once_with("proj-1")
+        project_repo.list_critical_notes.assert_called_once_with("proj-1")
+        project_repo.get_recent_history.assert_called_once_with("proj-1", limit=10)
+        shared_repo.get_all_as_dict.assert_called_once_with("inst-onward")
+        # C3 contract: the persistent list contains exactly ONE
+        # HumanMessage — the [SYSTEM CONTEXT: Shared Meta KV] block
+        # keyed by the tree-root partition. The ephemeral list
+        # stays empty: the project-block rebuild is skipped under the
+        # ``project_already_injected`` path; only the C3 KV refresh
+        # emits into persistent.
+        assert len(persistent) == 1
+        assert persistent[0].additional_kwargs.get("context_kind") == "shared_meta_kv"
         assert ephemeral == []

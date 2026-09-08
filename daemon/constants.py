@@ -636,3 +636,42 @@ WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED: str = (
 WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED: str = (
     "WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED"
 )
+
+
+# ── kv-ambient-awareness-fix (C0 prereq / C2 binding — B.S.8) ────────────────
+#
+# Kill-switch registry entries for the ambient shared_meta_kv fixes.
+# Binding state per name:
+#
+#   * ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` — BOUND at C2
+#     (fix(D3): standalone KV host + system-default un-suppression).
+#     Shape A binding (pydantic ``ContextMessagesConfig`` field +
+#     ``_resolve_kv_ambient_from_sources`` in ``config.py`` +
+#     resolved-once cache behind ``_resolve_kv_ambient_system_default_enabled``,
+#     mirroring the ``ENSEMBLE_PROACTIVE_COMPACTION`` precedent); the
+#     runtime gate consumes the name via this constant — no literal
+#     env-name fork (B.S.8 registry discipline; the wiring pins live
+#     beside the flag's tests). Default ON; ``=0`` + restart restores
+#     the legacy suppression (decisions.md D8).
+#   * ``ENSEMBLE_AMBIENT_KV_FRESH`` — BOUND at C3
+#     fix(D1): split block + per-turn refresh). Shape B (service-module
+#     cached resolver + boot INFO, mirroring the
+#     ``ENSEMBLE_WC_WAKE_ENQUEUE`` precedent). The literal must not
+#     appear anywhere else in ``daemon/`` until that commit lands.
+#
+# A third historical name, ``ENSEMBLE_CONTEXT_PERSISTENT_KV_TREE_ROOT``,
+# is deliberately NOT reserved: its defect (spawned-child mispartition)
+# is FIXED AT BASE by 80bb61dd and the flag-wrap was adjudicated
+# negative-value (decisions.md D12) — a reserved-unused entry would
+# contradict B.S.8's own rationale.
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED: str = (
+    "ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED"
+)
+
+# RESERVED at C2 — the C3 binding (Shape B, per-turn refresh resolver)
+# lands with fix(D1). Until then this name is bound to nothing: no
+# config field, no resolver, no read site outside this registry block.
+ENSEMBLE_AMBIENT_KV_FRESH: str = "ENSEMBLE_AMBIENT_KV_FRESH"
