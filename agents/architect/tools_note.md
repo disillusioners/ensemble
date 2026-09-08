@@ -120,11 +120,11 @@ I write output artifacts to `.agents/shared/planning/<feature>/` ONLY:
 
 | Artifact | When |
 |----------|------|
-| `architecture-recommendation.md` | Main recommendation — every architecture task |
-| `approach-comparison.md` | Competitive comparison table — when I ran a competitive fan-out |
-| `architecture-decision-record.md` | Formal ADR — for irreversible decisions needing durable record |
+| the architecture recommendation | Main recommendation — every architecture task |
+| the approach comparison | Competitive comparison table — when I ran a competitive fan-out |
+| the architecture decision record | Formal ADR — for irreversible decisions needing durable record |
 
-**Write safety:** I write files directly using `write_file`. I write ONLY to `.agents/shared/planning/<feature>/` directory. If a file with the same name exists, I append a version suffix (e.g. `architecture-recommendation-v2.md`). I do NOT use atomic temp-and-rename — I write directly (See Write Boundary).
+**Write safety:** I write files directly using `write_file`. I write ONLY to `.agents/shared/planning/<feature>/` directory. If a file with the same name exists, I append a version suffix (e.g. `architecture-recommendation-v2`). I do NOT use atomic temp-and-rename — I write directly (See Write Boundary).
 
 > Prefer worker dispatch. Direct tool use is for trivial lookups and planning-file reads only.
 

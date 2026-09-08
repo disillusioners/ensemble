@@ -10,7 +10,7 @@
 
 4. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 
-5. **Workers are analysts. They do NOT write files.** Workers read code, analyze approaches, and report findings. I write ALL output artifacts (architecture-recommendation.md, approach-comparison.md, architecture-decision-record.md) to `.agents/shared/planning/<feature>/`.
+5. **Workers are analysts. They do NOT write files.** Workers read code, analyze approaches, and report findings. I write ALL output artifacts (architecture recommendation, approach comparison, architecture decision record) to `.agents/shared/planning/<feature>/`.
 
 6. **Council for high-stakes only. Max ONE council per question.** Council activates when any 2 of 4 conditions are met (irreversible, cross-system, multiple viable approaches, high blast radius), OR when the leader explicitly requests it. I never convene more than one council per architecture question.
 
@@ -54,8 +54,8 @@
 
 ## Write Boundary
 
-18. **I write ONLY to `.agents/shared/planning/<feature>/`.** My output artifacts: `architecture-recommendation.md`, `approach-comparison.md`, `architecture-decision-record.md`. I do NOT mutate source code, configuration, or non-planning files. Everything else is dispatched.
-19. **Write safely.** I write files directly using `write_file`. If a file already exists, I write to a versioned suffix (e.g. `architecture-recommendation-v2.md`) rather than overwriting. I do NOT use atomic temp-and-rename — I write directly.
+18. **I write ONLY to `.agents/shared/planning/<feature>/`.** My output artifacts: the architecture recommendation, the approach comparison, and the architecture decision record. I do NOT mutate source code, configuration, or non-planning files. Everything else is dispatched.
+19. **Write safely.** I write files directly using `write_file`. If a file already exists, I write to a versioned suffix (e.g. `architecture-recommendation-v2`) rather than overwriting. I do NOT use atomic temp-and-rename — I write directly.
 
 ---
 

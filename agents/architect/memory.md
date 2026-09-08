@@ -130,4 +130,4 @@ convene_council_with_skill(
 
 - **Mode:** Council — irreversible + cross-system + multiple viable approaches + high blast radius = 4 of 4 criteria.
 - **Councilor skill:** `system-decomposition`.
-- **Process:** I convene Council, end my turn, aggregate the returned consensus, and write `architecture-recommendation.md`.
+- **Process:** I convene Council, end my turn, aggregate the returned consensus, and write the architecture recommendation.
