@@ -349,7 +349,7 @@ The 1650-byte cap was set by the **worktree-aware feature** (decisions.md D5; ph
 ### 5.1 Single methodology + base + command
 
 - **Base:** `fd582efd` (the tip of `latest` before this `fix/prompt-pure-section-refs` branch forked; also the base this branch advertises in `decisions.md` D2 and the §1 "restore-source" line).
-- **Target:** `HEAD` (the current branch tip after the G6 + detector commits; rebound to `656988a8` at audit time).
+- **Target:** `HEAD` (the current branch tip after the G6 + detector commits and the residual-fix commits; `fc26efbf` HEAD at time of writing — the previous audit was at `656988a8`).
 - **Measurement command (literal, per agent file):**
   ```bash
   f=$1  # e.g. agents/giter/workflow.md
@@ -380,28 +380,42 @@ Per-agent sub-caps (per `decisions.md` D5 — agent scope; cumulative ≤1650B p
 | `agents/giter/workflow.md` | 0 | ≤572 | PASS |
 | `agents/giter/rule.md` | 67 | ≤82 | PASS |
 | `agents/giter/tools_note.md` | 0 | ≤196 | PASS |
-| `agents/leader/workflow.md` | 997 | ≤175 | **OVER (per-file)** |
+| `agents/leader/workflow.md` | 991 | ≤175 | **OVER (per-file)** |
 | `agents/leader/tools_note.md` | 262 | ≤145 | **OVER (per-file)** |
 | `agents/developer/rule.md` | 0 | ≤95 | PASS |
 | `agents/developer/workflow.md` | 182 | ≤125 | **OVER (per-file)** |
 | `agents/tester/workflow.md` | 2978 | ≤130 | **OVER (per-file)** |
 | `agents/tidier/workflow.md` | 0 | ≤130 | PASS |
-| **TOTAL** | **4486** | **≤1650** | **OVER (cumulative breaches cap by 2836 B / 171%)** |
+| **TOTAL** | **4480** | **≤1650** | **OVER (cumulative breaches cap by 2830 B / 171%)** |
 
 ### 5.3 Verdict
 
-**FAIL — OVER the 1650 B cap** under the §5.1 single methodology. Cumulative `4486 B` exceeds the cap by `2836 B` (171% over).
+**FAIL — OVER the 1650 B cap** under the §5.1 single methodology. Cumulative `4480 B` exceeds the cap by `2830 B` (171% over).
 
 **Honest provenance.** The cap breach is **inherited from the prior repair sweep** (commits `0605571e..65659cd5`, ~10 commits) which introduced substantial additions to `leader/workflow.md`, `leader/tools_note.md`, `developer/workflow.md`, and `tester/workflow.md` that were not part of the worktree-aware feature itself. Cumulative at pre-fix `65659cd5` vs `fd582efd` was already `+3159 B` over the cap (`4916 − 1757 = 3159` if measured as add-line-count). The reconvert pass (`353c94a0..aa4963ea`) was net-byte-removing vs `fd582efd` (per-agent net: `giter −15`, `leader −55`, `developer −27`, `tester −28`, `tidier 0`) — so the OVER state is from the prior sweep, not from this branch.
 
-**This repair pass** (commit `656988a8` G6 + detector honesty, and the F3 audit-doc commit) is **net-byte-neutral on the budget files** as a whole. The G6 rework alone removes `430 B` from `leader/workflow.md` (`1427 → 997` net at HEAD vs `fd582efd`), and the F4 fence-guard test addition is byte-neutral on prompt surfaces. The F3 §5 doc rewrite is byte-neutral on budget files.
+**This repair pass** (commit `656988a8` G6 + detector honesty, and the F3 audit-doc commit) is **net-byte-neutral on the budget files** as a whole. The G6 rework alone removes `436 B` from `leader/workflow.md` (`1427 → 991` net at HEAD vs `fd582efd`), and the F4 fence-guard test addition is byte-neutral on prompt surfaces. The F3 §5 doc rewrite is byte-neutral on budget files.
+
+### 5.3a Base-anchor comparison (verifier ground truth)
+
+The §5.2 measurement depends entirely on which commit is treated as the "base" for the diff. The §5.1 single-methodology recipe (added-bytes minus added-lines, per the 9 budget files) was re-run against three plausible base anchors:
+
+| Base anchor | Cumulative net (B) | vs. 1650 B cap | Verdict |
+|-------------|---------------------|----------------|---------|
+| `fd582efd` (tip-of-latest pre-branch — this branch's advertised base) | **4480** | OVER by 2830 B (171%) | **FAIL** |
+| `6c4bfb7b` (most recent audit-time HEAD before this branch forked) | **4480** | OVER by 2830 B (171%) | **FAIL** |
+| `aa4963ea` (iteration-3 closure — the reconvert-pass tip before G6) | **1105** | UNDER by 545 B | **PASS** |
+
+All three measurements use the same §5.1 recipe (literal bash snippet in §5.1), differing only in the base argument. The `fd582efd` and `6c4bfb7b` rows differ only because of CHANGELOG/audit-doc/feature-test commits that do not touch the 9 budget files — hence the identical 4480 cumulative net (verified). The `aa4963ea` row reflects ONLY the changes from the reconvert series (353c94a0..aa4963ea) + G6 (656988a8) + detector (0d1e3353) + audit-doc fix (6da80411) + the residual-fix commits through HEAD — i.e., this branch's commits minus the prior repair-sweep's pre-existing additions.
+
+Base selection governs the verdict; the choice of anchor is PENDING RATIFICATION by the dispatching authority (caller). The operative verdict above uses fd582efd until ratified otherwise.
 
 ### 5.4 Retracted claims (correction log)
 
 | Stated in earlier §5 (line refs pre-F3) | Value | Why it is wrong under §5.1 |
 |---|---|---|
-| `TOTAL 4916 PASS (under 1650B cap)` (was line 374) | 4916 | **Mathematically impossible** — 4916 > 1650, the verdict "PASS (under 1650B cap)" is self-contradictory. The actual total under §5.1 at HEAD is **4486**, not 4916; the 4916 number matches the state at `aa4963ea` (one commit before this branch's G6 fix), not at HEAD. Even the 4916 value exceeds the cap. |
-| `1616 − 213 + 28 + 51 = 1482 PASS` chain (was line 383) | 1482 | **Unreproducible under any single methodology.** The four terms are taken from FOUR incompatible methodologies/bases; summing them is meaningless. Under §5.1 at HEAD the measurement is **4486**, not 1482; at pre-this-branch (`65659cd5`) it is **2941**. The 1482 sum has no single source. |
+| `TOTAL 4916 PASS (under 1650B cap)` (was line 374) | 4916 | **Mathematically impossible** — 4916 > 1650, the verdict "PASS (under 1650B cap)" is self-contradictory. The actual total under §5.1 at HEAD is **4480**, not 4916; the 4916 number matches the state at `aa4963ea` (one commit before this branch's G6 fix), not at HEAD. Even the 4916 value exceeds the cap. |
+| `1616 − 213 + 28 + 51 = 1482 PASS` chain (was line 383) | 1482 | **Unreproducible under any single methodology.** The four terms are taken from FOUR incompatible methodologies/bases; summing them is meaningless. Under §5.1 at HEAD the measurement is **4480**, not 1482; at pre-this-branch (`65659cd5`) it is **2941**. The 1482 sum has no single source. |
 | `4859/4809 OVER` claims at line 404 | 4809 added | **Correct under §5.1 recipe** (added=4809, removed=4934, net=−125) — but stated verdict "OVER" was the honest state, briefly retracted before being re-introduced by the ground-truth fix. Now consistent with §5.1. |
 | pre-fix 65659cd5 cumulative: added=2667 removed=2843 net=−176 (was line 404) | additive | **Inconsistent** with §5.1 — the §5.1 measurement at `65659cd5..HEAD` (this branch only, audit-table style added-line-count) is `2411`, not `2667`. The 2667 number reflected a different base (likely `192dee4e^..HEAD`). |
 
@@ -409,9 +423,9 @@ Per-agent sub-caps (per `decisions.md` D5 — agent scope; cumulative ≤1650B p
 
 ### 5.5 G6 detection class — pre-existence fact (correction)
 
-The 41 broken-prose sites (e.g. `lives in See X`, `in `See X``) **pre-existed at base `65659cd5`** as plain prose (`See X` without backticks); they did NOT originate from this branch's v2 sweep. The prior audit claimed "this branch's prior repair pass introduced them" — that claim is retracted; verifying with `git show 65659cd5:agents/...` confirms the broken `in See X` and `lives in See X` shapes already existed in the canonical files (e.g. `tester/rule.md:17`, `governor/soul.md:55-71`, `planner[v2]/workflow.md:22-24`, `wanderer/rule.md:16`). The v2 sweep's `b2ccebce/2e02e724/86edd75e` reconvert was responsible only for the `See X` plain reference pattern, not for the `in See X` prepositional-broken class.
+The 44 broken-prose sites (e.g. `lives in See X`, `in `See X``) **pre-existed at base `65659cd5`** as plain prose (`See X` without backticks); they did NOT originate from this branch's v2 sweep. The prior audit claimed "this branch's prior repair pass introduced them" — that claim is retracted; verifying with `git show 65659cd5:agents/...` confirms the broken `in See X` and `lives in See X` shapes already existed in the canonical files (e.g. `tester/rule.md:17`, `governor/soul.md:55-71`, `planner[v2]/workflow.md:22-24`, `wanderer/rule.md:16`). The v2 sweep's `b2ccebce/2e02e724/86edd75e` reconvert was responsible only for the `See X` plain reference pattern, not for the `in See X` prepositional-broken class.
 
-This pass' restore iteration (`656988a8`) performed **genuine natural-prose rewrites of all 41 sites** (drop the `See` headword as the object of the preposition; bold the section name). The detector was simultaneously hardened to evasion-tolerance (`r"\b(?:lives\s+in|in|from)[\s`]+See\b"` — catches both plain and backtick-wrapped forms). Grep-zero acceptance verified at commit `656988a8`.
+This pass' restore iteration (`656988a8`) performed **genuine natural-prose rewrites of all 44 sites** (drop the `See` headword as the object of the preposition; bold the section name). The detector was simultaneously hardened to evasion-tolerance (`r"\b(?:lives\s+in|in|from)[\s`]+See\b"` — catches both plain and backtick-wrapped forms). Grep-zero acceptance verified at commit `656988a8`.
 
 ---
 
