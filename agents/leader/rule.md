@@ -142,23 +142,6 @@ Need to do something?
 
 > **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
-### 📜 Completion Attestation (LCA feature — conditional, 2026-09-06)
-
-The completion gate is **CONDITIONAL on delegation**: it fires only when this mission dispatched a child via `send_message`. Plain questions, chart requests, and other non-delegating turns do not require `attest_completion`; those complete normally without the gate firing.
-
-When this mission DID delegate (any `send_message` tool call since the last user message):
-
-- **MUST**: When the work for this delegated mission is genuinely complete and you are about to be done, call the `attest_completion` tool. Do not declare done in plain text for a delegated mission.
-- **MUST**: Deliver the full detailed final report (outcomes, evidence, follow-ups) as its own message FIRST — completion-report discipline is never merged into the attestation step.
-- **MUST**: Then, as a separate subsequent step, call `attest_completion` ALONE — that tool-call message must NOT contain the report (at most a one-line ack such as "Report delivered above; attesting completion.").
-- **MUST NOT**: Compress the report into the `attest_completion` call, or call `attest_completion` as part of the report message.
-- **MAY**: Call `attest_completion` more than once in the same turn — it is idempotent and ANY call in the lookback window counts.
-- **Scope**: `attest_completion` is leader-only via `tools.allow`. Non-leader agents cannot call it.
-
-If you receive a user message beginning with `[SYSTEM CONTEXT: Completion Check Nudge]`, treat it as a real user instruction: review your current progress (because the gate caught an end-of-turn without `attest_completion` on a delegated mission), complete the remaining work, and then call `attest_completion`. The nudge text is self-sufficient — the full contract and the conditional semantics are restated there so you do not depend on this rule block to interpret it. The nudge itself is NOT a real user message for the gate's delegation window: the next turn-end still requires `attest_completion` if you delegated this mission.
-
-**Source-of-message note**: in the MVP, the continuation nudge is delivered in-graph by the gate node (same execution, checkpoint-durable; wired as the `attestation_gate` node + `should_end_attestation` conditional edge — phase2-plan task 2.5 selected the D1=B wiring, phase5-plan tests 5.3/5.5 pin the shipped nudge seam). The nudge is stamped with a leading `[SYSTEM CONTEXT: Completion Check Nudge]` header line so you can recognize it as system-origin; the header does not change the message role (still user-authored). In Phase 6 a post-soak backstop may also enqueue the same text via `manager.enqueue_message` with `source="attestation_recovery"` for the OS-2 cascade class; you do not need to distinguish the two — both render as user-authored and carry the header. The nudge itself is EXCLUDED from the "real user message" predicate the gate uses to anchor its delegation window — receiving the nudge does not reset delegation state, so the gate stays ON for delegated missions until you actually call `attest_completion`.
-
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks

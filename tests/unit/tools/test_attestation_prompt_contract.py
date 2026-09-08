@@ -1,38 +1,34 @@
 """Prompt-contract greps for the leader completion attestation feature
-(2026-09-06 — conditional gate amendment).
+(2026-09-06 — conditional gate; 2026-09-08 — prompt-contract section
+retracted).
 
-The LCA contract instructs the leader LLM to:
+The LCA feature ships in three runtime layers:
 
-1. Call ``attest_completion`` ONLY when the mission **delegated** —
-   the conditional gate (Phase 6 fastfollow, FR-3 conditionality)
-   fires when a ``send_message`` tool call happened since the last
-   real user message. Plain questions, chart requests, and other
-   non-delegating turns complete normally without the gate firing.
-2. Treat the in-graph continuation nudge (a user message whose body
-   begins with ``[SYSTEM CONTEXT: Completion Check Nudge]``) as a
-   real user instruction. The nudge carries a leading system-context
-   header line so the LLM recognizes it as system-origin (the role
-   is still user-authored; the header is the marker).
+1. ``daemon/tools/attestation.py`` — the ``attest_completion`` tool
+   itself (idempotent, no-op body, returns a confirmation frame).
+2. ``daemon/graph.py`` — the in-graph completion gate that scans the
+   most recent ``N`` AIMessages for an ``attest_completion`` tool_call
+   to decide whether to allow or deny the END transition. The gate is
+   OFF for missions that did NOT delegate (no ``send_message`` tool
+   call since the last real user message) — FR-3 conditionality.
+3. The deny-time continuation nudge (``ATTESTATION_NUDGE_TEXT``) — a
+   user-authored message whose body begins with
+   ``[SYSTEM CONTEXT: Completion Check Nudge]``. The nudge carries
+   the conditional semantics, the two-step contract, and the embedded
+   mermaid diagram; it is the SOLE teaching source on the prompt side
+   (2026-09-08 decision: a standing prompt-contract section is
+   redundant and was removed).
 
-The contract has ONE canonical home:
-
-* ``agents/leader/rule.md`` — the full contract prose under ``## Must``
-  as a ``### Must`` block.
-* ``agents/leader/workflow.md`` — a ONE-LINE POINTER to the rule.md
-  contract (no verbatim restatement). The former full mirror was
-  collapsed in the 2026-09-05 LCA post-approval quality pass: the copy
-  had already drifted (it omitted the Source-of-message note while
-  duplicating the rest), so the one-canonical-home convention now
-  applies without the mirror exception. The pointer MUST name the
-  tool and reference rule.md; it must not restate the contract.
-
-These tests pin (a) that rule.md contains the conditional contract
-text under a ``## Must`` heading, (b) that the unconditional MUST-
-call language is GONE (Phase 6 amendment — the nudge text is now the
-instruction source), and (c) that workflow.md's pointer names the
-tool and the canonical home WITHOUT duplicating the contract prose.
-Drift here is silent — the contract disappears from the leader's
-prompt without any test failure unless the contract text is pinned.
+These tests pin the ABSENCE side of the prompt-contract after the
+2026-09-08 retraction. Specifically: in BOTH ``agents/leader/rule.md``
+and ``agents/leader/workflow.md`` we assert that (a) the LCA section
+headings are gone, (b) the conditional-contract fragments are gone,
+and (c) the old unconditional-contract fragments remain gone. The
+sole survivor in ``agents/leader/`` is the ``attestation`` entry in
+``meta.json`` ``tools.allow`` (tool-inventory mention — KEEP). Drift
+here is silent: the contract disappearing from the leader's prompt
+without any test failure would mean a future contributor silently
+re-introduces a redundant or worse stale prompt section.
 """
 from __future__ import annotations
 
@@ -51,9 +47,10 @@ WORKFLOW_MD = REPO_ROOT / "agents" / "leader" / "workflow.md"
 # longer teach the unconditional MUST; the runtime nudge
 # (``ATTESTATION_NUDGE_TEXT`` in ``daemon/graph.py``) is now the
 # instruction source for delegated missions. If this tuple ever
-# goes empty in rule.md, that means the conditional semantics have
-# been silently retracted — a hard regression because the leader
-# would not know what to do when delegated.
+# appears in rule.md again, that means the unconditional semantics
+# have been silently re-introduced — a hard regression because the
+# leader would over-call ``attest_completion`` on non-delegating
+# turns.
 UNCONDITIONAL_MUST_CONTRACT_FRAGMENTS = (
     # 2026-09-06 retracted — unconditional MUST-call for every turn
     # ("Before declaring yourself done, you MUST call the
@@ -62,13 +59,13 @@ UNCONDITIONAL_MUST_CONTRACT_FRAGMENTS = (
     "Before declaring yourself done, you MUST call the `attest_completion` tool",
 )
 
-# Substring fragments the CONDITIONAL contract MUST contain verbatim.
-# Each is the byte-stable language the leader LLM is expected to see in
-# its prompt for DELEGATED missions; pinning is brittle-but-deliberate
-# (the contract text is the documented gate input for Phase 2's
-# scanner + nudge logic, and silent drift would break the leader's
-# behavior with no test signal otherwise).
-CONTRACT_FRAGMENTS = (
+# Substring fragments the CONDITIONAL contract used to carry verbatim
+# in the leader prompt (Phase 1 contract, collapsed in the 2026-09-08
+# retraction). Each fragment was a byte-stable part of the leader's
+# prompt for DELEGATED missions; pinning ABSENCE here guards against
+# a future contributor silently re-introducing the redundant prompt
+# section. The deny-time nudge is now the sole teaching source.
+CONDITIONAL_CONTRACT_FRAGMENTS = (
     # Conditional semantics (2026-09-06) — the gate is conditional on
     # delegation. The unconditional MUST is replaced with a gate ON
     # ONLY when this mission delegated.
@@ -86,20 +83,25 @@ CONTRACT_FRAGMENTS = (
     "treat it as a real user instruction",
 )
 
-# Anchor fragment for the heading / sub-block structural tests.
-# Searches for the conditional gate explanation as the structural
-# landmark because the unconditional MUST is gone.
-CONTRACT_HEADING_ANCHOR = "CONDITIONAL on delegation"
+# Section-heading fragments that MUST be absent from the leader
+# prompt after the 2026-09-08 retraction. The rule.md heading was
+# level-3 ("###") and the workflow.md heading was level-2 ("##"); both
+# named the LCA feature explicitly.
+LCA_HEADING_FRAGMENTS = (
+    "### 📜 Completion Attestation (LCA feature — conditional, 2026-09-06)",
+    "## Completion Attestation (LCA feature — conditional, 2026-09-06)",
+)
 
 
-# ── rule.md: canonical home under ## Must ────────────────────────────────────
+# ── rule.md: prompt-contract section retracted (2026-09-08) ──────────────
 
 
 class TestRuleMdContract:
-    """The contract's canonical home is ``agents/leader/rule.md`` —
-    a new ``### Must`` block under ``## Must`` (per the project's
-    house style for mandatory leader rules). The contract text is
-    the byte-stable gate input; drift here is silent."""
+    """The LCA prompt-contract section was removed from
+    ``agents/leader/rule.md`` on 2026-09-08. The deny-time nudge is
+    the sole teaching source. These tests pin ABSENCE so a future
+    contributor cannot silently re-introduce the redundant section
+    (or a stale variant of it)."""
 
     @pytest.fixture
     def source(self) -> str:
@@ -108,12 +110,31 @@ class TestRuleMdContract:
     def test_file_exists(self) -> None:
         assert RULE_MD.exists(), f"missing rule.md at {RULE_MD}"
 
-    @pytest.mark.parametrize("fragment", CONTRACT_FRAGMENTS)
-    def test_contract_fragment_present(self, source: str, fragment: str) -> None:
-        assert fragment in source, (
-            f"rule.md is missing contract fragment: {fragment!r}. "
-            f"The leader LLM will not see the contract and may "
-            f"declare done in plain text — silent regression."
+    @pytest.mark.parametrize("fragment", LCA_HEADING_FRAGMENTS)
+    def test_lca_heading_absent(self, source: str, fragment: str) -> None:
+        """The LCA section heading(s) MUST be absent from rule.md.
+        Re-introducing either heading would silently put the contract
+        back in the leader's prompt — bypassing the deny-time nudge
+        as the sole teaching source."""
+        assert fragment not in source, (
+            f"rule.md still carries the retracted LCA heading: "
+            f"{fragment!r}. The 2026-09-08 decision removed this "
+            f"section from the leader prompt; the deny-time nudge is "
+            f"the sole teaching source."
+        )
+
+    @pytest.mark.parametrize("fragment", CONDITIONAL_CONTRACT_FRAGMENTS)
+    def test_contract_fragment_absent(self, source: str, fragment: str) -> None:
+        """The conditional-contract fragments MUST be absent from
+        rule.md. The deny-time nudge carries the conditional
+        semantics, the two-step contract, and the embedded mermaid
+        in-graph; a static prompt-section restatement is redundant
+        and risks drift from the runtime contract source."""
+        assert fragment not in source, (
+            f"rule.md still carries the retracted conditional-contract "
+            f"fragment: {fragment!r}. The 2026-09-08 decision retired "
+            f"the static prompt section; the deny-time nudge is the "
+            f"sole teaching source. Remove the static mention."
         )
 
     @pytest.mark.parametrize("fragment", UNCONDITIONAL_MUST_CONTRACT_FRAGMENTS)
@@ -132,52 +153,18 @@ class TestRuleMdContract:
             f"conditional framing."
         )
 
-    def test_contract_sits_under_must_heading(self, source: str) -> None:
-        """The contract block MUST sit under a ``## Must`` heading
-        (per ``agents/leader/rule.md`` house style). A drift to
-        ``## Workflow`` or ``## Should`` weakens the rule's authority
-        and the leader LLM may treat it as advisory."""
-        must_idx = source.find("## Must")
-        assert must_idx != -1, "rule.md has no ## Must heading"
-        # The contract must appear AFTER the ## Must heading
-        contract_idx = source.find(CONTRACT_HEADING_ANCHOR)
-        assert contract_idx > must_idx, (
-            f"contract must appear under ## Must heading (must@{must_idx}, "
-            f"contract@{contract_idx})"
-        )
 
-    def test_contract_uses_must_subblock_syntax(self, source: str) -> None:
-        """The contract is structured as a ``### Must`` sub-block
-        (or equivalent — but it MUST be a third-level heading, not
-        bare prose), matching the existing rule.md house style
-        (e.g. ``### 🚨 NO REAL WORK — BRAIN ONLY``)."""
-        # Look for a ### heading close to the contract text
-        contract_idx = source.find(CONTRACT_HEADING_ANCHOR)
-        assert contract_idx != -1
-        # Walk backwards from the contract to find the nearest ###
-        prefix = source[:contract_idx]
-        last_h3 = prefix.rfind("\n### ")
-        assert last_h3 != -1, (
-            "contract must live under a ### Must sub-block, not bare prose"
-        )
-        # The ### heading must appear AFTER ## Must (no nested ## higher up)
-        last_h2_in_prefix = prefix.rfind("\n## ")
-        assert last_h2_in_prefix < last_h3, (
-            f"### heading @{last_h3} must come after the most recent ## "
-            f"heading @{last_h2_in_prefix} — a higher-level heading before "
-            f"the ### block would put the contract outside the rule's scope"
-        )
-
-
-# ── workflow.md: one-line pointer to the canonical home ──────────────────────
+# ── workflow.md: pointer collapsed to sole teaching source (2026-09-08) ─────
 
 
 class TestWorkflowMdPointer:
-    """``agents/leader/workflow.md`` carries a ONE-LINE POINTER to the
-    canonical rule.md contract — it must name the tool and the canonical
-    home, and must NOT duplicate the contract prose (the former verbatim
-    mirror drifted: it omitted the Source-of-message note while copying
-    the rest)."""
+    """``agents/leader/workflow.md`` previously carried a one-line
+    pointer to the rule.md contract. On 2026-09-08 that pointer was
+    removed alongside the rule.md section: the deny-time nudge is
+    the sole teaching source, and a static pointer to a non-existent
+    canonical home is stale by definition. These tests pin ABSENCE
+    so a future contributor cannot silently re-introduce the pointer
+    (or a duplicate contract block)."""
 
     @pytest.fixture
     def source(self) -> str:
@@ -186,32 +173,33 @@ class TestWorkflowMdPointer:
     def test_file_exists(self) -> None:
         assert WORKFLOW_MD.exists(), f"missing workflow.md at {WORKFLOW_MD}"
 
-    def test_pointer_names_tool_and_canonical_home(
-        self, source: str
-    ) -> None:
-        """The pointer must name the tool AND point at rule.md —
-        otherwise a workflow-context reader has no route to the
-        contract."""
-        assert "attest_completion" in source, (
-            "workflow.md pointer must name the attest_completion tool"
-        )
-        assert "rule.md" in source, (
-            "workflow.md pointer must name the canonical home (rule.md)"
+    @pytest.mark.parametrize("fragment", LCA_HEADING_FRAGMENTS)
+    def test_lca_heading_absent(self, source: str, fragment: str) -> None:
+        """The LCA section heading(s) MUST be absent from workflow.md.
+        Re-introducing the heading would silently put the (now
+        redundant) contract back in the leader's prompt."""
+        assert fragment not in source, (
+            f"workflow.md still carries the retracted LCA heading: "
+            f"{fragment!r}. The 2026-09-08 decision removed this "
+            f"pointer; the deny-time nudge is the sole teaching source."
         )
 
-    def test_pointer_names_conditional_semantics(self, source: str) -> None:
-        """The pointer MUST identify the conditional semantics
-        (FR-3, 2026-09-06) — a workflow-context reader has to know
-        the gate fires only on delegated missions or they will
-        over-call ``attest_completion``."""
-        assert "CONDITIONAL" in source, (
-            "workflow.md pointer must name the conditional semantics "
-            "(CONDITIONAL on delegation / phase 6 amendment)"
+    @pytest.mark.parametrize("fragment", CONDITIONAL_CONTRACT_FRAGMENTS)
+    def test_contract_fragment_absent(self, source: str, fragment: str) -> None:
+        """The conditional-contract fragments MUST be absent from
+        workflow.md (the former pointer used the conditional
+        semantics language verbatim)."""
+        assert fragment not in source, (
+            f"workflow.md still carries the retracted conditional-contract "
+            f"fragment: {fragment!r}. The 2026-09-08 decision retired "
+            f"the static pointer; the deny-time nudge is the sole "
+            f"teaching source. Remove the static mention."
         )
 
     def test_no_verbatim_contract_duplication(self, source: str) -> None:
-        """The contract prose must live ONLY in rule.md — workflow.md
-        must not restate the nudge text or the MUST/MAY language."""
+        """The contract prose must live ONLY in the runtime nudge
+        (and the tool docstring). workflow.md must not restate the
+        nudge text or the MUST/MAY language."""
         assert "The work is not yet finished" not in source, (
             "workflow.md duplicates the canonical nudge prose — collapse "
             "to the one-line pointer (one-canonical-home convention)"
