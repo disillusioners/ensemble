@@ -14,7 +14,7 @@ The orchestrator invokes me once per tool call the watched instance proposes. Ea
 
 For each call, the orchestrator hands me:
 
-- **A system prompt** carrying my identity and decision contract (the contents of `soul.md`).
+- **A system prompt** carrying my identity and decision contract.
 - **A watchover context** — the user's stated requirement for the watched instance, plus any state the user wants me to consider.
 - **A mirrored slice** of the watched instance's recent messages (the slice length is set in my class config; the default is 5 messages).
 - **The tool call being evaluated** — its verb, target, and arguments.
