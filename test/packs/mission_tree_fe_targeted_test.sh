@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Test Pack: mission_tree_fe_targeted_test — targeted gate for the 4 FE suites
-# touched by instance-tree commits a895cac5 + 2e508abb + 31903c6d on
-# `feature/job-queue-instance-tree`. UNCOMMITTED ad-hoc pack (report-only arc;
+# Test Pack: mission_tree_fe_targeted_test — targeted gate for the 3 FE suites
+# touched by panel-activity commits 85da9614 + bbe8d0c0 on
+# `fix/job-queue-panel-activity-ordering`. UNCOMMITTED ad-hoc pack (report-only arc;
 # giter lands it with the other infra files).
 #
-# Derived suite list (git show --name-only on the 3 gate commits, .spec.ts filter):
-#   src/app/components/job-queue-indicator/job-queue-indicator.component.spec.ts
+# Derived suite list (git show --name-only on the 2 gate commits, .spec.ts filter):
 #   src/app/components/job-queue-panel/job-queue-panel.component.spec.ts
-#   src/app/models/instance-node.model.spec.ts
-#   src/app/models/job.model.spec.ts
-# Expected: ~281 tests per gate brief (brief undercounted the suite set: 4, not
-# 3 — models/instance-node.model.spec.ts is new on this branch). No
-# known-failure baseline for these suites → ANY failure is NEW-suspect.
+#   src/app/services/api.service.spec.ts
+#   src/app/services/instance.service.spec.ts
+# Expected: per-suite counts on this branch differ from the @0fd62cd5 baseline
+# (4 suites: indicator 114 + panel 116 + instance-node 57 + job.model 70 = 357).
+# This branch touches a different surface set (panel + 2 services), so per-suite
+# reconciliation is per-spec, not per-baseline-set. No known-failure baseline
+# for these suites → ANY failure is NEW-suspect.
 #
 # Unit pack — estimated < 1 min. Dual-layer timeout:
 # Layer 2 (script-internal): 150s global deadline across the single jest run —
@@ -37,8 +38,8 @@ fi
 # --- Branch-drift guard (sibling-pack pattern: rev-parse bracket + exact pin) ---
 ACTUAL_BRANCH="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD)"
 ACTUAL_COMMIT="$(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
-EXPECTED_BRANCH="feature/job-queue-instance-tree"
-EXPECTED_COMMIT="0fd62cd5"
+EXPECTED_BRANCH="fix/job-queue-panel-activity-ordering"
+EXPECTED_COMMIT="bbe8d0c0"
 echo "=== Test Pack: mission_tree_fe_targeted_test [${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT}] ==="
 if [[ "${ACTUAL_BRANCH}" != "${EXPECTED_BRANCH}" || "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
   echo "RESULT: DRIFT (expected ${EXPECTED_BRANCH} @ ${EXPECTED_COMMIT}, got ${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT})"
@@ -48,10 +49,9 @@ fi
 cd "$FRONTEND_DIR"
 
 SPECS=(
-  src/app/components/job-queue-indicator/job-queue-indicator.component.spec.ts
   src/app/components/job-queue-panel/job-queue-panel.component.spec.ts
-  src/app/models/instance-node.model.spec.ts
-  src/app/models/job.model.spec.ts
+  src/app/services/api.service.spec.ts
+  src/app/services/instance.service.spec.ts
 )
 
 INTERNAL_LIMIT=150
@@ -65,13 +65,6 @@ if [ "$JEST_EXIT" -eq 124 ]; then
   echo "RESULT: TIMEOUT (jest exceeded ${INTERNAL_LIMIT}s internal limit; last suite in progress shown above)"
   exit 124
 elif [ "$JEST_EXIT" -ne 0 ]; then
-  echo "RESULT: FAIL (jest exit ${JEST_EXIT} — failed tests listed above)"
-  exit 1
-else
-  echo "RESULT: PASS"
-  exit 0
-fi
-EXIT" -ne 0 ]; then
   echo "RESULT: FAIL (jest exit ${JEST_EXIT} — failed tests listed above)"
   exit 1
 else
