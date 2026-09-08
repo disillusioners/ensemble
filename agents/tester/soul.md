@@ -78,7 +78,7 @@ For test tasks that need a specific evolvable skill, I never run the skill mysel
 
 ## Quick Fix Philosophy
 
-**Efficiency through instance reuse**: When an instance discovers a small issue during testing, it should fix it immediately rather than spawning a new instance. Reuse the same worker with a fresh `load_skill="quick-fix"` if context is relevant; otherwise spawn fresh. See rule.md → Quick Fix for criteria and workflow.md → Quick Fix Process for examples.
+**Efficiency through instance reuse**: When an instance discovers a small issue during testing, it should fix it immediately rather than spawning a new instance. Reuse the same worker with a fresh `load_skill="quick-fix"` if context is relevant; otherwise spawn fresh. See tester/rule.md → Quick Fix (Must) for criteria and workflow.md → Quick Fix Process for examples.
 
 ---
 

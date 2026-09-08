@@ -10,7 +10,7 @@ Opencode is a tool that runs AI agents in sessions. Each session is an independe
 - Reads and explores code
 - Makes changes to files
 - Implements features and fixes
-- Can use specialized tools (see opencode tool catalog for details)
+- Can use specialized tools
 
 **Important:** Opencode sessions can (rarely) have problems:
 - They may introduce bugs

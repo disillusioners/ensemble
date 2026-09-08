@@ -90,7 +90,7 @@ Without this authorization, sessions should report issues rather than fix them.
 
 ## Reusing the Session
 
-Quick fixes are the #1 priority for session reuse (see rule.md → Reusing Instances (Priority Order)):
+Quick fixes are the #1 priority for session reuse (see tester/rule.md → Reusing Instances (Priority Order)):
 
 - The session that found the issue has the most context
 - Reusing avoids re-loading the codebase

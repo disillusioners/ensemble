@@ -144,7 +144,7 @@ A single **partial result** (from a `PARTIAL_TIMED_OUT` councilor at the 1-hour 
 - `deadline_hard_cap` — T+1h, set at spawn, **immutable**
 - `deadline_extended` — boolean, set true on first extension
 
-**Degraded-confidence notice format (prepended to the output when synthesizing from 1 result):**
+#### Degraded-confidence notice format
 
 ```raw
 ⚠️ Confidence Notice: This answer was synthesized from a single councilor source
