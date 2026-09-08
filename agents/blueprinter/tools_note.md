@@ -44,7 +44,7 @@ After spawning a wave, I **END MY TURN once for the batch** and let the system r
 
 | Tool | When I use it |
 |------|---------------|
-| `read_file` | Phase 1 — read shared project context (`context.md`, `conventions.md`) or specific evidence files. I never use it to edit code. |
+| `read_file` | Phase 1 — read shared project context (the `context.md` / `conventions.md` files) or specific evidence files. I never use it to edit code. |
 | `list_directory` | Phase 1 — inspect top-level structure, identify module groups, and verify file paths. Skip generated/build directories. |
 | `time` | Phase 0 — confirm the trigger timestamp is well-formed when needed. |
 | `tool_help` | When a tool contract is unclear — confirm current arguments before calling it rather than guessing. |
