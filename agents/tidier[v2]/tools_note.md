@@ -44,7 +44,7 @@ send_message(
 > Holding the turn open blocks report delivery (deadlocks the run). See
 > See Why END TURN After Dispatch.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value
+See Skill Selection Guide for which `load_skill` value
 matches each diff profile.
 
 ---
