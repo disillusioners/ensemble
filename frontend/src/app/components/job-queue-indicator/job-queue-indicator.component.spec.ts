@@ -1057,6 +1057,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
     // template-contract block).
     describe('template binding seam (source-text pin)', () => {
       let templateHtml: string;
+      let componentTs: string;
 
       beforeAll(() => {
         // Resolve relative to this spec file.
@@ -1065,6 +1066,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
         const specDir = __dirname;
         const htmlPath = path.join(specDir, 'job-queue-indicator.component.html');
         templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+        // W4 source-drift pin — the indicator's behavioural
+        // assertions run against the mirror above; an F-1-style
+        // revert of the REAL component (e.g. removing the
+        // ``liveness:'processing,pending,paused'`` + ``limit:1``
+        // count leg, or swapping the closeMenu / navigate order in
+        // ``onFooterClick``) would pass every mirror test. Pin the
+        // real component TS so a revert flips a test.
+        const tsPath = path.join(specDir, 'job-queue-indicator.component.ts');
+        componentTs = fs.readFileSync(tsPath, 'utf-8');
       });
 
       it('binds the panel to the FULL non-terminal set: [activeJobs]="activeJobs()"', () => {
@@ -1082,6 +1092,59 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // the source-text pin proves the TEMPLATE actually wires it
         // up.
         expect(templateHtml).toContain('(footerClick)="onFooterClick()"');
+      });
+    });
+
+    // W4 — source-drift pins on the REAL component TS. Mirror tests
+    // prove behaviour against the same logic; these pins prove the
+    // REAL component still has the wiring the badge depends on.
+    // An F-1-style revert (e.g. dropping the count leg's filter,
+    // swapping closeMenu/navigate order) would slip past mirror
+    // tests but flip at least one of these assertions.
+    describe('component TS source-drift pins', () => {
+      let componentTs: string;
+
+      beforeAll(() => {
+        const path = require('path');
+        const fs = require('fs');
+        const specDir = __dirname;
+        const tsPath = path.join(specDir, 'job-queue-indicator.component.ts');
+        componentTs = fs.readFileSync(tsPath, 'utf-8');
+      });
+
+      it('count leg still uses liveness: \'processing,pending,paused\' (live-only filter)', () => {
+        // The count leg feeds the badge's live-mission count via the
+        // filter-aware ``total``. Removing the liveness filter would
+        // re-introduce the 82-vs-7 self-contradiction where the
+        // unfiltered content leg's ``total`` is mis-routed as the
+        // live count.
+        expect(componentTs).toContain("liveness: 'processing,pending,paused'");
+      });
+
+      it('count leg still uses limit: 1 (cheap probe)', () => {
+        // The count leg is a cheap filter-aware probe — ``limit: 1``
+        // keeps it bounded. Removing it would make every poll pull
+        // the full page just to read the count.
+        expect(componentTs).toContain('limit: 1');
+      });
+
+      it('content leg still uses listMissions({ limit: 20 })', () => {
+        // The content leg feeds the panel's tree via the unfiltered
+        // ``missions`` page. The list-page limit must stay at 20
+        // (the brief's panel cap) so the panel renders consistently.
+        expect(componentTs).toContain('listMissions({ limit: 20 })');
+      });
+
+      it('onFooterClick closes the menu BEFORE navigating to /jobs (order-locked)', () => {
+        // The same flow as ``onJobClick``: drop the surface first,
+        // then mutate route state so the user sees the menu
+        // disappear before the page transition. Swapping the order
+        // would race the menu close with the route change and leave
+        // a flash of the menu over the new page.
+        const closeIdx = componentTs.indexOf('this.menuTrigger?.closeMenu()');
+        const navigateIdx = componentTs.indexOf("this.router.navigate(['/jobs'])");
+        expect(closeIdx).toBeGreaterThan(-1);
+        expect(navigateIdx).toBeGreaterThan(closeIdx);
       });
     });
   });

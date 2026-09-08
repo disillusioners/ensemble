@@ -334,15 +334,22 @@
         </div>
       }
     }
+    </div>
     <!-- T1 footer — "Open full queue →" link to the Jobs page. The
          panel stays DUMB/presentational: it emits ``footerClick`` on
-         activation and the indicator handles navigation + menu close. -->
+         activation and the indicator handles navigation + menu close.
+
+         W2 — footer is a SIBLING of ``.panel-list`` (NOT a child) so
+         arrows typed while the footer button owns DOM focus don't
+         phantom-move the tree indicator through ``onTreeKeydown``.
+         The parent ``.job-queue-panel`` is a flex column, so the
+         list (``flex: 1 1 auto``) and footer (``flex-shrink: 0``)
+         stack exactly as before; SCSS is unchanged. -->
     <div class="panel-footer">
       <button
         type="button"
         class="panel-footer-link"
         (click)="onFooterClick()"
-        (keydown.enter)="onFooterClick()"
         (keydown.space)="$event.preventDefault(); onFooterClick()"
         aria-label="Open full job queue">
         Open full queue
@@ -350,4 +357,3 @@
       </button>
     </div>
   </div>
-</div>

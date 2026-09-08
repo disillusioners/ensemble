@@ -182,6 +182,13 @@ class MockJobQueuePanelComponent {
    * nextVisibleItem traversal can be pinned without DOM. Other
    * keys are no-ops; Enter/Space/Esc are NOT handled here (those
    * stay on the individual rows).
+   *
+   * The real component moves REAL DOM focus via
+   * ``document.getElementById(id)?.focus()``; in the mirror there
+   * is no DOM, so the equivalent write to ``focusedItemId`` is
+   * applied directly (this is what the row's ``(focus)`` handler
+   * would have done after a real focus move — single source of
+   * truth). ArrowLeft on a child row also refocuses the parent.
    */
   onTreeKeydown(event: KeyboardEvent): void {
     const items = this.visibleItems();
@@ -243,6 +250,18 @@ class MockJobQueuePanelComponent {
     if (!isExpanded) return;
     if (tree === 'live') this.toggleLiveMission(missionId);
     else this.toggleRecentMission(missionId);
+    // W1 mirror parity — if we were on a child row, refocus the
+    // parent after collapse (the real component does this via
+    // ``document.getElementById(parentId)?.focus()``; the mirror
+    // writes the signal directly).
+    if (current.kind === 'job') {
+      const parentId = visibleTreeItemId({
+        kind: 'mission',
+        tree,
+        node: { mission: current.mission, jobs: [] },
+      });
+      this._focusedItemId.set(parentId);
+    }
   }
 
   /** T1 mock — footer activation emits ``footerClick``. */
@@ -1018,6 +1037,7 @@ describe('JobQueuePanelComponent Logic', () => {
 
   describe('template binding seams (source-text pin)', () => {
     let templateHtml: string;
+    let componentTs: string;
 
     beforeAll(() => {
       // Resolve relative to this spec file.
@@ -1026,6 +1046,14 @@ describe('JobQueuePanelComponent Logic', () => {
       const specDir = __dirname;
       const htmlPath = path.join(specDir, 'job-queue-panel.component.html');
       templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+      // W4 source-drift pin — mirror tests prove the panel's signal
+      // logic, but a revert of the REAL component's arrow-nav
+      // mechanism (e.g. dropping the ``document.getElementById``
+      // focus call so Enter/Space activate the wrong row) would
+      // pass every mirror test. Pin the real component TS so such a
+      // revert flips a test instead of silently regressing W1.
+      const tsPath = path.join(specDir, 'job-queue-panel.component.ts');
+      componentTs = fs.readFileSync(tsPath, 'utf-8');
     });
 
     it('binds (keydown) on the panel-list to onTreeKeydown — T3 arrow nav', () => {
@@ -1044,6 +1072,44 @@ describe('JobQueuePanelComponent Logic', () => {
 
     it('binds [class.focused] on each tree row — T3 visible focus indicator', () => {
       expect(templateHtml).toContain('[class.focused]="isFocusedItem(');
+    });
+  });
+
+  // W4 — source-drift pins on the REAL component TS. Mirror tests
+  // prove the panel's traversal logic against the same helpers, but
+  // an F-1 revert of ``onTreeKeydown`` (e.g. dropping the real DOM
+  // focus call so Enter/Space activate the wrong row) would slip
+  // past every mirror test. Pin the mechanism itself.
+  describe('component TS source-drift pins', () => {
+    let componentTs: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      const specDir = __dirname;
+      const tsPath = path.join(specDir, 'job-queue-panel.component.ts');
+      componentTs = fs.readFileSync(tsPath, 'utf-8');
+    });
+
+    it('onTreeKeydown moves REAL DOM focus via document.getElementById — W1 mechanism', () => {
+      // The real component must call ``document.getElementById(id)
+      // ?.focus()`` inside ``onTreeKeydown`` so Enter/Space activate
+      // the row the user is looking at, not whatever they last
+      // Tab-targeted. Without this, the arrow keys would move only
+      // the ``focusedItemId`` signal (visual class) while real DOM
+      // focus stayed on the last Tab target — the W1 bug class.
+      expect(componentTs).toContain('document.getElementById');
+    });
+
+    it('onTreeKeydown filter keys include ArrowDown / ArrowUp / ArrowLeft / ArrowRight', () => {
+      // The arrow handler must gate on all four Arrow* keys. Removing
+      // any of them would silently drop an arrow direction from
+      // keyboard nav — the W3 hazard class (phantom indicator
+      // movement that doesn't move real focus).
+      expect(componentTs).toContain("'ArrowDown'");
+      expect(componentTs).toContain("'ArrowUp'");
+      expect(componentTs).toContain("'ArrowLeft'");
+      expect(componentTs).toContain("'ArrowRight'");
     });
   });
 

@@ -299,11 +299,13 @@ export class JobQueuePanelComponent {
   }
 
   /**
-   * T3 — true iff the given ``visibleTreeItemId`` is the row that
-   * currently owns keyboard focus. Drives the ``.focused`` class in
-   * the template so sighted users can see where an arrow-key press
-   * would land. Pure read; the actual ``focus()`` call lives in the
-   * template's ``#row`` ref binding (Angular handles it).
+   * T3 — pure read-side helper. ``true`` iff the given
+   * ``visibleTreeItemId`` matches the row that currently owns
+   * keyboard focus. Drives the ``.focused`` class in the template
+   * so sighted users can see where the next arrow-key press would
+   * land. The actual ``focus()`` call lives in ``onTreeKeydown``
+   * (``document.getElementById(nextId)?.focus()``) and the row's
+   * ``(focus)="onRowFocus(id)"`` binding writes the signal back.
    */
   isFocusedItem(id: string | null | undefined): boolean {
     if (!id) return false;
@@ -312,21 +314,27 @@ export class JobQueuePanelComponent {
 
   /**
    * T3 — handler bound from the template to each row's
-   * ``(focus)``. We let the browser give focus to the row
-   * naturally; the ``focusedItemId`` signal mirrors it so the
-   * ``.focused`` class is in sync with the real DOM focus state.
-   *
-   * Cheaper than re-focusing from the arrow handler — we just
-   * record what the browser already did.
+   * ``(focus)``. The row's ``(focus)`` event is the SINGLE writer
+   * of ``focusedItemId``: arrow keys move real DOM focus via
+   * ``document.getElementById(id)?.focus()`` in ``onTreeKeydown``,
+   * and the resulting focus event lands here. Enter / Space then
+   * activate the DOM-focused row (the right one), not whatever the
+   * user last Tab-targeted.
    */
   onRowFocus(id: string): void {
     this.focusedItemId.set(id);
   }
 
   /**
-   * T3 — arrow-key handler bound to the panel container. Resolves
-   * the focused item's index in ``visibleItems``, calls the pure
-   * ``nextVisibleItem`` helper, and applies the action:
+   * T3 — arrow-key handler bound to the panel-list container. The
+   * arrow keys move REAL DOM focus (via ``document.getElementById``)
+   * and the row's own ``(focus)="onRowFocus(id)"`` binding then
+   * mirrors that focus back into the ``focusedItemId`` signal —
+   * single source of truth so Enter / Space activate the same row
+   * the user is looking at, not whatever they last Tab-targeted.
+   *
+   * Resolves the focused item's index in ``visibleItems``, calls the
+   * pure ``nextVisibleItem`` helper, and applies the action:
    *
    *   * ArrowDown / ArrowUp  → move focus by +1 / -1 in the flat
    *     visible list. Boundary behaviour is CLAMP (not wrap) — the
@@ -341,14 +349,16 @@ export class JobQueuePanelComponent {
    *     keypress doesn't fight other affordances.
    *
    *   * ArrowLeft           → collapse an expanded mission node. On
-   *     a job child, collapse the parent (WAI-ARIA tree pattern).
-   *     On an already-collapsed node this is a no-op.
+   *     a job child, collapse the parent (WAI-ARIA tree pattern)
+   *     AND move focus to the now-exposed parent row so the next
+   *     arrow press behaves naturally. On an already-collapsed node
+   *     this is a no-op.
    *
    * Enter / Space / Esc are NOT handled here — those key bindings
-   * stay on the individual rows so a Tab-focused row's existing
-   * (keydown.enter) / (keydown.space) handlers fire as before. Esc
-   * already closes the mat-menu from the trigger's own binding, so
-   * the panel doesn't need to repeat it.
+   * stay on the individual rows so the DOM-focused row's existing
+   * (keydown.enter) / (keydown.space) handlers fire on the row that
+   * actually owns focus. Esc already closes the mat-menu from the
+   * trigger's own binding, so the panel doesn't need to repeat it.
    */
   onTreeKeydown(event: KeyboardEvent): void {
     const items = this.visibleItems();
@@ -377,7 +387,14 @@ export class JobQueuePanelComponent {
       const delta: -1 | 1 = key === 'ArrowUp' ? -1 : 1;
       const nextIndex = nextVisibleItem(items, currentIndex, delta);
       const nextId = visibleTreeItemId(items[nextIndex]);
+      // W1 fix — move REAL DOM focus so Enter / Space activate the
+      // right row. The row's own (focus) handler then mirrors this
+      // back into focusedItemId (single source of truth). We also
+      // set the signal here so the .focused class applies
+      // synchronously; the re-set from the focus event is idempotent
+      // (Angular signals no-op on equal primitives).
       this.focusedItemId.set(nextId);
+      document.getElementById(nextId)?.focus();
       return;
     }
 
@@ -400,7 +417,10 @@ export class JobQueuePanelComponent {
     }
 
     // ArrowLeft: collapse if expanded; on a child row, collapse the
-    // parent (WAI-ARIA tree pattern — child → parent).
+    // parent (WAI-ARIA tree pattern — child → parent). When the
+    // collapse removes the child from the DOM, also move real focus
+    // to the parent so the next ArrowLeft/Right/Down/Up lands on a
+    // row that still exists.
     if (key === 'ArrowLeft') {
       let missionId: string | null | undefined;
       let tree: 'live' | 'recent';
@@ -419,6 +439,19 @@ export class JobQueuePanelComponent {
       if (!isExpanded) return;
       if (tree === 'live') this.toggleLiveMission(missionId);
       else this.toggleRecentMission(missionId);
+      // W1 — if we were on a child row, the child is now removed
+      // from the DOM and real focus falls to <body>. Refocus the
+      // parent so the next arrow press behaves naturally; the
+      // parent's (focus) handler updates focusedItemId.
+      if (current.kind === 'job') {
+        const parentId = visibleTreeItemId({
+          kind: 'mission',
+          tree,
+          node: { mission: current.mission, jobs: [] },
+        });
+        this.focusedItemId.set(parentId);
+        document.getElementById(parentId)?.focus();
+      }
     }
   }
 
