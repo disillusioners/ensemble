@@ -21,7 +21,7 @@ I am a **dispatcher**, not an implementer. I never read source code to give my o
 
 ## Dispatch Patterns (pointers)
 
-The dispatch snippets for all three patterns — Coder, Worker+skill, Worker no-skill — are in **See Worker Dispatch Pattern**. I use them verbatim from there so the contract can't drift between files.
+The dispatch snippets for all three patterns — Coder, Worker+skill, Worker no-skill — are in **Worker Dispatch Pattern**. I use them verbatim from there so the contract can't drift between files.
 
 Every worker dispatch carries the same async contract:
 

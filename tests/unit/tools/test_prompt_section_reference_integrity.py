@@ -151,18 +151,22 @@ KNOWN_GLUED_WORDS = [
     re.compile(r"\bmatchedload_skill\b"),
 ]
 
-# Broken-prose pattern from v2-sweep over-conversion (2026-09-08 cleanup pass):
+# Broken-prose pattern from v2-sweep over-conversion (2026-09-08 cleanup pass, separator
+# extension + hyphen-compound guard added 2026-09-08 iteration 2):
 # The v2 sweep produced ungrammatical prose like "lives in See X", "in See X", "from See X"
 # where a preposition (`lives in` / `in` / `from`) was kept and `See` was added before the section
-# name. **Evasion-tolerant:** accepts ANY mix of whitespace + backtick characters between the
-# preposition and `See` — catches both the plain form (`in See X`) and the backtick-mechanically-
-# evading form (`in `See X``) and any future cosmetic-separator variant an LLM might invent
-# (e.g., `in ` See X`` or `in` `See X`). The pattern requires at least one character from the set
-# (whitespace or backtick) between the preposition and `See`, so it does not over-match prose
-# like `in the See Table column` only when there is a genuine separator.
-# Final pattern (after 2026-09-08 restore — G6 natural-prose rework):
-#     r"\b(?:lives\s+in|in|from)[\s`]+See\b"
-BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)[\s`]+See\b", re.IGNORECASE)
+# name. **Evasion-tolerant:** accepts ANY mix of whitespace + backtick + asterisk characters between
+# the preposition and `See` — catches the plain form (`in See X`), the backtick-mechanically-evading
+# form (`in `See X``), the bold-wrapped form (`in **See X**`), and any future cosmetic-separator
+# variant an LLM might invent (e.g., `in ` See X`` or `in` `See X`). The pattern requires at
+# least one character from the set (whitespace, backtick, or asterisk) between the preposition
+# and `See`, so it does not over-match prose like `in the See Table column` only when there is
+# a genuine separator. **Hyphen-compound guard:** the trailing negative lookahead `(?![\w-])`
+# ensures `See-layer`, `See_X`, `Seesomething` (no whitespace separator after `See`) do NOT match
+# — only genuine space/boundary-separated `See` headwords trigger the violation.
+# Final pattern (after 2026-09-08 restore — G6 natural-prose rework, separator-class extended to bold + hyphen-compound guard added):
+#     r"\b(?:lives\s+in|in|from)[\s`*]+See\b(?![\w-])"
+BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)[\s`*]+See\b(?![-\w])", re.IGNORECASE)
 # A general lowercase-then-Capital pattern (e.g., ``<lowercase-word><Capital-word>``
 # glued at a word boundary, like ``eitherAllowed``) is NOT included here because
 # it cannot reliably distinguish the corruption class from legitimate CamelCase
@@ -277,18 +281,22 @@ def test_no_broken_prose_see_prefix(path: Path) -> None:
 
     Detector is **evasion-tolerant**: BROKEN_PROSE_RE matches BOTH the plain form
     (`in See X`) AND backtick-wrapped variants (`in \`See X\``, `in\`See X\``, `in\`\`See X`),
-    AND any future cosmetic-separator variant an LLM might invent (mix of whitespace and
-    backticks between preposition and `See`). The pattern requires at least one character
-    from the separator class (whitespace or backtick) between the preposition and `See`,
-    so it does not match `in there See something` (which would have other words in between,
-    not just separator characters).
+    AND bold-wrapped variants (`in **See X**`), AND any future cosmetic-separator variant
+    an LLM might invent (mix of whitespace, backticks, and asterisks between preposition
+    and `See`). The pattern requires at least one character from the separator class
+    (whitespace, backtick, or asterisk) between the preposition and `See`, so it does not
+    match `in there See something` (which would have other words in between, not just
+    separator characters). **Hyphen-compound guard:** the trailing negative lookahead
+    `(?![\w-])` ensures compound words like `See-layer`, `See_X`, `Seesomething` (no
+    whitespace separator after `See`) do NOT match \u2014 only genuine space/boundary-separated
+    `See` headwords trigger the violation.
 
     Per audit (restore iteration, 2026-09-08), the G6 fix performs genuine natural-prose
     rewrites (drop the preposition-or-See headword pair; keep the section reference as
     `**Section Name**` or a parenthetical), so the prose reads naturally AND the detector
     remains green because the actual grammar was repaired, not because the regex was
     dodged. The detector's evasion-tolerance is the safety net against re-introduction
-    via future sweeps. Test file: `agents/` only — 41 sites / 26 files pre-fix.
+    via future sweeps. Test file: `agents/` only — 44 sites / 26 files pre-fix (audited at 65659cd5).
     """
     text = path.read_text(encoding="utf-8")
     matches = list(BROKEN_PROSE_RE.finditer(text))
@@ -452,13 +460,15 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
     # FENCED_CODE_BLOCKS_RE below uses non-greedy `.*?` matching, which works for
     # balanced fence pairs but silently misbehaves when fences are unbalanced (the regex
     # matches the first balanced pair and the un-matched fence content slips through as
-    # "non-fenced" — leading to false negatives in this test). The `test_odd_fence_guard`
-    # test (below, in section 3) is a dedicated per-file runtime guard: it counts
+    # "non-fenced" — leading to false negatives in this test). The `test_odd_fence_count_fails`
+    # test (below, in section 4) is a dedicated per-file runtime guard: it counts
     # ``` fences and fails LOUD when the count is odd, naming the file. Without this guard,
     # an unbalanced fence would silently corrupt the bare-md sweep.
     FENCED_CODE_BLOCKS_RE = re.compile(r"```.*?```", re.DOTALL)
     # W2 odd-fence sentinel (count ``` occurrences, not regex-paired). Cheap; runs first.
-    _FENCE_COUNT_RE = re.compile(r"^```", re.MULTILINE)
+    # Harmonized with _FENCE_LINE_RE (both allow leading whitespace) — same regex form; distinct names retained for
+    # the reader's mental model (counting vs. locating).
+    _FENCE_COUNT_RE = re.compile(r"^\s*```", re.MULTILINE)
     hits = []
     for m in BARE_MD_RE.finditer(text):
         tok = m.group(0)

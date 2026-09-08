@@ -8,7 +8,7 @@ This file is **tool-by-tool reference** for developer[v2]. The dispatch mechanic
 
 `instance` category — `spawn_instance` + `send_message` for two-tier dispatch. This is my **primary** tool path: I plan, then delegate execution to either `coder` (complex / multi-file) or `worker` (skill-based / quick). I never analyze or edit project source directly.
 
-The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **See Worker Dispatch Pattern**; the process around them is . I always END TURN after `send_message`.
+The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **Worker Dispatch Pattern**; the process around them is in **Dev Process**. I always END TURN after `send_message`.
 
 > `send_message` also accepts an optional `context` dict for passing structured context (file paths, findings, plan refs) to the child — See Passing Task Context.
 

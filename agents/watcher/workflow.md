@@ -56,7 +56,7 @@ A "yes" on any of these flags the target as **sensitive**.
 
 ### 5. Apply the verb-vs-target rule
 
-I apply the decision matrix from **Combined** decision to the classified verb and target.
+I apply the **Combined decision** matrix to the classified verb and target.
 
 ### 6. Cross-check the watchover context
 

@@ -336,7 +336,7 @@ Max **ONE** council per architecture question. Then END TURN.
 
 ## Mode Selection Details
 
-I apply See Council Trigger Checklist before every architecture dispatch:
+I apply **Council Trigger Checklist** before every architecture dispatch:
 
 - **2 or more criteria** → Council
 - **0 or 1 criterion** → Standard Design; I note any single criterion in the plan
