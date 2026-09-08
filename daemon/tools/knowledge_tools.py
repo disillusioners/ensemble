@@ -15,7 +15,6 @@ from ._tool_registry import register_tool_category
 from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.persistence import CheckpointerAdapter
 from daemon.rag.config import is_rag_enabled
-from daemon.services.context_injection import get_shared_context
 from daemon.utils import invoke_agent_and_wait
 
 if TYPE_CHECKING:
@@ -704,64 +703,15 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         if pid:
             explorer_message += f"\nProject: {pid}"
 
-        # Derive context_key the same way auto-save does, and pass the dir path
-        context_key = None
-        try:
-            context_key = manager._instance_repository.get_tree_root_id(current_instance_id)
-            if not context_key:
-                context_key = current_instance_id
-        except Exception:
-            context_key = current_instance_id
-
-        logger.info("[Explorer] Context auto-injection: context_key=%s", context_key)
-
-        if context_key:
-            context_dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
-
-            logger.debug("[Explorer] Context dir path: %s", context_dir_path)
-            logger.debug("[Explorer] Context dir exists: %s", context_dir_path.exists())
-
-            # Resolve project metadata once so we can forward project_id,
-            # project_name, and the project's critical notes into the context
-            # injection. The MCP RAG hint surfaces all three so an external
-            # agent can scope tool calls and respect pinned warnings.
-            project_name = None
-            critical_notes: list[dict] = []
-            if pid and hasattr(manager, "_project_repository"):
-                try:
-                    proj = manager._project_repository.get(pid)
-                    if proj is not None:
-                        project_name = getattr(proj, "name", None)
-                except Exception as e:
-                    logger.debug("[Explorer] Failed to resolve project name: %s", e)
-                try:
-                    notes = manager._project_repository.list_critical_notes(pid)
-                    critical_notes = [n.to_dict() for n in notes]
-                except Exception as e:
-                    logger.debug("[Explorer] Failed to load critical notes: %s", e)
-
-            # Auto-inject relevant context files via reusable service
-            # Run on thread pool to avoid blocking the async event loop with sync I/O
-            try:
-                injection = await asyncio.to_thread(
-                    get_shared_context,
-                    context_key,
-                    query,
-                    project_id=pid,
-                    project_name=project_name,
-                    critical_notes=critical_notes or None,
-                )
-                logger.info("[Explorer] get_shared_context returned: %s", type(injection).__name__)
-                if injection:
-                    explorer_message += f"\n\n{injection}"
-                    logger.debug(
-                        "Context auto-injection: matched files for query '%s', injection length: %d",
-                        query[:50], len(injection),
-                    )
-                else:
-                    logger.info("[Explorer] Context auto-injection: no injection (returned None or empty)")
-            except Exception as e:
-                logger.info("[Explorer] Context auto-injection failed (exception): %s", e)
+        # Shared-context injection is now driven by the system
+        # ``assemble_context_messages`` orchestrator, gated on
+        # ``context_injection.heuristic_match_shared_md_files`` in
+        # ``agents/explorer/meta.json`` (canonical opt-in pattern).
+        # The orchestrator matches against the first-turn message
+        # text on the spawned explorer instance, so no manual attach
+        # is needed here. The ``Project:`` line above is retained
+        # as explicit routing metadata / target hint for system-default
+        # projects where system injection is suppressed.
 
         # Determine if the calling agent needs a model override.
         # Explorer's meta.json may declare ``caller_model_overrides``: a map
@@ -999,8 +949,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
 
         # Fire-and-forget: persist experience text to the shared context
         # directory. Runs in a worker thread to avoid blocking the event
-        # loop on sync filesystem I/O — same pattern as explore()'s
-        # get_shared_context call at line ~566.
+        # loop on sync filesystem I/O.
         try:
             asyncio.ensure_future(asyncio.to_thread(
                 _save_experience_result,

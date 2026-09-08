@@ -11,6 +11,9 @@
     "allow": ["rag", "filesystem", "help", "time", "mcp", "context", "shared_meta_kv", "blueprint"],
     "deny": ["rag_insert_text", "rag_insert_texts", "rag_query", "experience", "explore"]
   },
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
   "team_members": [],
   "caller_model_overrides": {
     "coder": null
