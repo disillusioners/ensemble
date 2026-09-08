@@ -849,3 +849,6 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 - `tests/unit/test_attestation_report_judge.py` — `test_constants_pinned` updated to assert `JUDGE_TIMEOUT_S == 25.0` (was 10.0).
 
 **Test-count truth-table discipline (grep-verified 2026-09-07):** the three touched unit files ship **106 tests total** (`pytest --collect-only -q`): `test_attestation_report_judge.py` 34, `test_attestation_judge_resolver.py` 46, `test_attestation_judge_wiring.py` 26. The full attestation matrix (40 files) collects the baseline + these new tests; see the Coder final report for the exact run numbers (any drift here is a doc-truth violation — the matrix run is ground truth).
+---
+
+**2026-09-08 user decision:** Completion Attestation prompt-contract sections removed from `agents/leader/rule.md` + `agents/leader/workflow.md`. The deny-time nudge is the sole teaching source (header + conditional semantics + two-step pattern + embedded mermaid); the LLM judge releases genuine reports. Rationale: a standing prompt section is redundant. Accepted cost: possibly one extra nudge cycle on delegated missions whose report the judge cannot confirm.

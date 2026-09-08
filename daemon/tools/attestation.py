@@ -14,11 +14,13 @@ is OFF for missions that did NOT delegate (no ``send_message`` tool
 call since the last real user message) — those complete normally
 without the gate firing. The gate is ON ONLY for delegated missions;
 ``attest_completion`` is the leader's signal that delegated children
-have all reported and the work is finished. The full prompt contract
-(per-agent instruction) lives in ``agents/leader/rule.md`` under
-"📜 Completion Attestation (LCA feature — conditional, 2026-09-06)";
-the gate's runtime nudge (``ATTESTATION_NUDGE_TEXT`` in
-``daemon/graph.py``) is now self-sufficient and leads with a
+have all reported and the work is finished. Per-agent teaching
+(2026-09-08 decision): the deny-time nudge is the SOLE teaching
+source — its body carries the conditional semantics, the two-step
+contract, and the embedded mermaid, and is self-sufficient. There is
+no standing prompt-contract section in ``agents/leader/rule.md`` or
+``agents/leader/workflow.md``; this module's docstring header is the
+single canonical tool-side reference. The nudge itself leads with a
 ``[SYSTEM CONTEXT: Completion Check Nudge]`` header so the LLM
 recognizes it as system-origin.
 
@@ -156,8 +158,9 @@ The completion gate is CONDITIONAL on delegation (2026-09-06,
 FR-3) — this tool is the attestation signal ONLY for a delegated
 mission (a mission that dispatched a child via ``send_message``
 since the last real user message). For non-delegating turns the
-gate does not fire. The full prompt contract is in
-``agents/leader/rule.md``. The tool is a deterministic no-op aside
+gate does not fire. Per-agent teaching is via the deny-time
+nudge; this module's docstring header is the single canonical
+tool-side reference. The tool is a deterministic no-op aside
 from returning a confirmation frame; the attestation is recorded by
 virtue of the tool call existing in the leader's message stream.
 The Phase 2 in-graph completion gate scans the most recent ``N``
