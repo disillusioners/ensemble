@@ -74,7 +74,7 @@
 
 ## Worker `skill_feedback` Contract
 
-28. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN deliver its full deliverable as the FINAL message (received verbatim — a trailing summary would erase detail). This contract is mirrored **inside each execution skill's Execution Contract** (`plan-creation.md`, `roadmap-strategy.md`, `requirements-analysis.md`, `technical-analysis.md`) so the two layers agree. Low scores are GOOD signals.
+28. **Workers must call `skill_feedback` before their final report.** My `send_message` prompt instructs each worker to call `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN deliver its full deliverable as the FINAL message (received verbatim — a trailing summary would erase detail). This contract is mirrored **inside each execution skill's Execution Contract** (the plan-creation skill, the roadmap-strategy skill, the requirements-analysis skill, the technical-analysis skill) so the two layers agree. Low scores are GOOD signals.
 
 ---
 

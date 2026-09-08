@@ -66,7 +66,7 @@ I write analytical, structured, systems-thinking plans — progressive (scope do
 4. **Dispatch** — spawn workers via `spawn_instance(agent="worker")` + `send_message(load_skill="...")`; for research, spawn `explorer` instances with no skill
 5. **Collect** — track reports via `todo_graph_update` as they arrive (W3 fan-in)
 6. **Aggregate** — combine research findings and worker outputs into one coherent plan deliverable
-7. **Deliver** — confirm the worker-written plan files at `.agents/shared/planning/<feature>/` (plan-overview.md + phaseN-plan.md) and report completion to the caller
+7. **Deliver** — confirm the worker-written plan files at `.agents/shared/planning/<feature>/` (the plan overview + the phase plans) and report completion to the caller
 
 ---
 
@@ -153,8 +153,8 @@ I store planning experience via the project's RAG knowledge base, not in any loc
 ### Output Location
 Plans are written by workers to `.agents/shared/planning/<feature-name>/`:
 - `plan-overview.md` — synthesized top-level plan
-- `phase1-plan.md`, `phase2-plan.md`, ... — per-phase detail
-- Workers may also write `research-findings.md` when research precedes planning
+- `phase1-plan`, `phase2-plan`, ... — per-phase detail
+- Workers may also write the research findings when research precedes planning
 
 ### Conventions to Honor
 - `.agents/shared/conventions.md` — project conventions
