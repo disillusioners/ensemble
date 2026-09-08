@@ -1967,3 +1967,195 @@ class TestExports:
         assert CONTEXT_KIND_PROJECT == "project"
         assert CONTEXT_KIND_SHARED_CONTEXT == "shared_context"
         assert CONTEXT_KIND_SKILLS == "skills"
+
+
+# ─── Explorer-agent flag-on integration ────────────────────────────────────────
+
+
+class TestExplorerFlagOnSharedContextBlock:
+    """Pin the explorer's flag-ON Shared Context block contract.
+
+    Migrated 2026-09: the explorer agent's meta.json opts into
+    ``context_injection.heuristic_match_shared_md_files=true`` so the
+    system ``assemble_context_messages`` orchestrator emits the
+    Shared Context block on the spawned explorer's first turn. These
+    tests verify the meta→behavior thread-through end-to-end:
+
+    * With the explorer's actual meta loaded from
+      ``agents/explorer/meta.json``, the orchestrator emits the
+      ``[SYSTEM CONTEXT: Shared Context]`` block when
+      ``get_shared_context`` returns a non-empty RAG body.
+    * With the flag OFF, no Shared Context block fires — pins the
+      gate's negative path so the explorer's own opt-in is not
+      silently bypassed.
+
+    Modelled on the heuristic-flag fixtures in
+    :class:`TestAssembleContextMessages` above.
+    """
+
+    @staticmethod
+    def _load_explorer_context_injection() -> ContextInjectionConfig:
+        """Load ``context_injection`` from the real ``agents/explorer/meta.json``.
+
+        Pinned against the on-disk meta — the same source of truth
+        the ``AgentRegistry`` reads at daemon boot
+        (``daemon/registry.py:1175``). If meta.json is edited in a
+        way that breaks the ``ContextInjectionConfig`` Pydantic
+        model (e.g. wrong type), this helper raises — the contract
+        pin fires.
+        """
+        import json
+        from pathlib import Path
+
+        meta_path = (
+            Path(__file__).resolve().parents[2]
+            / "agents" / "explorer" / "meta.json"
+        )
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return ContextInjectionConfig.model_validate(meta["context_injection"])
+
+    @staticmethod
+    def _make_manager_for_shared_block() -> tuple[Any, Any]:
+        """Build a manager + repo pair for the Shared Context block test.
+
+        Mirrors the helper from
+        ``TestAssembleContextMessages._make_manager`` but minimal —
+        only the bits the Shared Context builder touches.
+        """
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
+
+        project_repo = MagicMock()
+        project_repo.get.return_value = project
+        project_repo.list_critical_notes.return_value = []
+        project_repo.get_recent_history.return_value = []
+
+        kv_repo = MagicMock()
+        kv_repo.get_all_as_dict.return_value = {}
+
+        skill_service = MagicMock()
+        skill_service.inject_skills = AsyncMock(return_value=(None, []))
+
+        manager = MagicMock()
+        manager._project_repository = project_repo
+        manager._shared_meta_kv_repo = kv_repo
+        manager._skill_injection_service = skill_service
+        # Auto-load skills: empty stack so the auto-load block doesn't fire.
+        manager._skill_repo = None
+        manager._skill_clone_service = None
+
+        return manager, MagicMock(get_tree_root_id=MagicMock(return_value="root-id"))
+
+    def test_explorer_meta_flag_on_produces_shared_context_block(self) -> None:
+        """With the explorer's actual meta, the Shared Context block fires.
+
+        Load ``agents/explorer/meta.json`` and validate its
+        ``context_injection`` section via the Pydantic
+        ``ContextInjectionConfig``. With
+        ``heuristic_match_shared_md_files=True`` and
+        ``get_shared_context`` returning a non-empty RAG body,
+        ``assemble_context_messages`` MUST emit a
+        ``[SYSTEM CONTEXT: Shared Context]`` block.
+        """
+        explorer_ci = self._load_explorer_context_injection()
+        assert explorer_ci.heuristic_match_shared_md_files is True, (
+            f"agents/explorer/meta.json must set "
+            f"context_injection.heuristic_match_shared_md_files=true; "
+            f"got: {explorer_ci}"
+        )
+
+        agent_meta = MagicMock()
+        agent_meta.blueprint_inactive = False
+        agent_meta.context_injection = explorer_ci
+        agent_meta.skill_injection = False
+
+        manager, _ = self._make_manager_for_shared_block()
+
+        rag_body = (
+            "# Shared Context\ncontext_key: root-id\n\n"
+            "## file.md (95% match)\ncontent\n"
+        )
+
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=rag_body,
+        ):
+            persistent, _ = asyncio.run(
+                assemble_context_messages(
+                    instance_id="explorer-child",
+                    user_query=(
+                        "Query (mode=hybrid): what is X?\nProject: proj-1"
+                    ),
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=MagicMock(
+                        get_tree_root_id=MagicMock(return_value="root-id"),
+                    ),
+                    parent_id="caller-tree-root",
+                )
+            )
+
+        kinds = [m.additional_kwargs.get("context_kind") for m in persistent]
+        assert CONTEXT_KIND_SHARED_CONTEXT in kinds, (
+            f"explorer's meta must drive Shared Context block emission "
+            f"via the orchestrator. Got kinds={kinds!r}"
+        )
+        # Pin the actual block content carries the RAG body.
+        shared_msgs = [
+            m for m in persistent
+            if m.additional_kwargs.get("context_kind") == CONTEXT_KIND_SHARED_CONTEXT
+        ]
+        assert any("file.md" in m.content for m in shared_msgs), (
+            f"Shared Context block must carry the matched-file body; "
+            f"got: {[m.content[:80] for m in shared_msgs]!r}"
+        )
+
+    def test_flag_off_suppresses_shared_context_block(self) -> None:
+        """Negative pin: without the flag, no Shared Context block fires.
+
+        Companion to ``test_explorer_meta_flag_on_produces_shared_context_block``.
+        If the explorer's opt-in were silently bypassed (e.g. by a
+        default-flip in the registry), the flag-ON test would still
+        pass — the flag would simply have no effect. To pin that
+        ``assemble_context_messages`` actually honours the flag,
+        build an explicit OFF meta and assert no Shared Context block
+        fires even when ``get_shared_context`` returns content. The
+        two tests together pin the gate.
+        """
+        agent_meta = MagicMock()
+        agent_meta.blueprint_inactive = False
+        agent_meta.context_injection = ContextInjectionConfig(
+            heuristic_match_shared_md_files=False,
+        )
+        agent_meta.skill_injection = False
+
+        manager, _ = self._make_manager_for_shared_block()
+
+        with patch(
+            "daemon.services.context_injection.get_shared_context",
+            return_value=(
+                "# Shared Context\ncontext_key: root-id\n\n"
+                "## file.md (95% match)\ncontent\n"
+            ),
+        ):
+            persistent, _ = asyncio.run(
+                assemble_context_messages(
+                    instance_id="inst-1",
+                    user_query="hi",
+                    project_id="proj-1",
+                    agent_meta=agent_meta,
+                    manager=manager,
+                    instance_repository=MagicMock(
+                        get_tree_root_id=MagicMock(return_value="root-id"),
+                    ),
+                )
+            )
+
+        kinds = [m.additional_kwargs.get("context_kind") for m in persistent]
+        assert CONTEXT_KIND_SHARED_CONTEXT not in kinds, (
+            f"with heuristic_match_shared_md_files=False, the orchestrator "
+            f"must NOT emit the Shared Context block — the explorer opt-in "
+            f"is what drives emission. Got kinds={kinds!r}"
+        )

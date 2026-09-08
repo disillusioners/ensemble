@@ -3651,36 +3651,39 @@ class InstanceMessagingService:
                 if _skill_getter is not None:
                     _cached_skill = _skill_getter(instance_id)
 
-                # Resolve ``project_id`` for the orchestrator.
-                # ``agent_node`` reads it from instance metadata
-                # each turn; mirror the same lookup here so the
-                # persistent block on the first turn matches
-                # what subsequent turns will see in
-                # ``state['messages']``.
+                # Resolve ``project_id`` AND ``parent_id`` from the
+                # permanent ``instances`` row in one fetch — these are
+                # the two columns ``assemble_context_messages`` needs
+                # to build the first-turn persistent block correctly.
+                #
+                # ``parent_id`` is the FIX for the documented
+                # mispartition defect (architect c5ae6d95,
+                # worktree-aware-prompts/architecture-recommendation.md
+                # §6(2); implicated in governor council_manifest
+                # restore). For a freshly-spawned child (e.g. the
+                # explorer agent) the row carries parent_id=caller, so
+                # the orchestrator's ``_resolve_tree_root_id`` walks
+                # the true ancestor chain and reads from the caller's
+                # tree-root partition instead of the child's empty
+                # own-partition. Root instances still pass None here
+                # (parent_id column is None → returns own id; unchanged).
                 _persistent_project_id: str | None = None
+                _persistent_parent_id: str | None = None
                 try:
                     _proj_row = await asyncio.to_thread(
                         self._manager._instance_repository.get, instance_id
                     )
-                    if _proj_row is not None and _proj_row.instance_metadata:
-                        _persistent_project_id = (
-                            _proj_row.instance_metadata.get("project_id")
+                    if _proj_row is not None:
+                        _persistent_parent_id = (
+                            getattr(_proj_row, "parent_id", None) or None
                         )
+                        if _proj_row.instance_metadata:
+                            _persistent_project_id = (
+                                _proj_row.instance_metadata.get("project_id")
+                            )
                 except Exception:  # pragma: no cover - defensive
                     _persistent_project_id = None
-
-                # Resolve ``parent_id`` for tree-root resolution.
-                # ``instance_meta`` may not be in scope here (it
-                # is only assigned inside the ``if not
-                # is_retry:`` block above); fall back to a fresh
-                # ``None`` default so a stale reference cannot
-                # leak through. The orchestrator treats
-                # ``parent_id=None`` as "tree-root instance"
-                # which is the correct default for our hybrid
-                # path — child instances inherit the same
-                # persistent context as their root via the
-                # tree-root resolution inside the orchestrator.
-                _persistent_parent_id: str | None = None
+                    _persistent_parent_id = None
 
                 _persistent_msgs, _ephemeral_msgs = await assemble_context_messages(
                     instance_id=instance_id,

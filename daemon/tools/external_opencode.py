@@ -620,7 +620,12 @@ session and deleting its registry entry before creating the new one.
         full_text = message + COUNCIL_HINT if council else message
 
         # Auto-preload shared context (skipped for control messages which are
-        # dispatch signals, not tasks). Mirrors explore()'s context injection.
+        # dispatch signals, not tasks). Per-turn Shared Context is now
+        # assembled by the system orchestrator (``assemble_context_messages``
+        # in ``daemon/services/context_messages.py``) gated on the agent's
+        # ``context_injection.heuristic_match_shared_md_files`` opt-in
+        # (``daemon/registry.py:119-129``); the explicit preload here is a
+        # backward-compat hint for the OpenCode dispatch path only.
         if message.strip().lower() not in _OPENCODE_CONTROL_MESSAGES:
             injection = await _preload_shared_context(
                 message, related_context_keywords,

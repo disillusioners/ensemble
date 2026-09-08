@@ -23,7 +23,6 @@ from daemon.tools.knowledge_tools import (
     KB_GAP_TOOL_NAME,
     RAG_TOOL_NAMES,
 )
-from daemon.services.context_injection import get_shared_context
 
 
 # =============================================================================
@@ -1005,198 +1004,222 @@ class TestExploreJobEnqueue:
 # =============================================================================
 
 
-class TestExploreAutoInjection:
-    """Tests for explore() context auto-injection via get_shared_context."""
+class TestExploreNoManualInjection:
+    """Tests for explore() with system-driven Shared Context injection.
 
-    @pytest.fixture
-    def mock_manager_for_injection(self, configured_env, mock_manager):
-        """Mock manager with tree_root_id support for injection tests."""
-        # Set up instance metadata with project_id
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
-        mock_instance_meta.project_id = "test-project-123"
-        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+    Migrated 2026-09: the explore tool no longer manually attaches
+    Shared Context (heuristic .md matching) to the dispatched message.
+    Injection is now driven by ``assemble_context_messages`` on the
+    spawned explorer instance's first turn, gated on
+    ``context_injection.heuristic_match_shared_md_files`` in
+    ``agents/explorer/meta.json`` (canonical opt-in pattern). These
+    tests pin the NEW contract:
 
-        # Set up get_tree_root_id to return a valid context key
-        mock_manager._instance_repository.get_tree_root_id = MagicMock(
-            return_value="tree-root-instance-id"
-        )
-
-        return mock_manager
-
-    @pytest.mark.asyncio
-    async def test_explore_injects_context_into_message(
-        self, mock_manager_for_injection
-    ):
-        """When get_shared_context returns injection text, message includes it."""
-        injection_text = "# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here.\n"
-
-        with patch(
-            "daemon.tools.knowledge_tools.asyncio.to_thread",
-            new_callable=AsyncMock,
-            return_value=injection_text,
-        ) as mock_to_thread:
-            with patch(
-                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                new_callable=AsyncMock,
-                return_value=("Explorer result.", "test-child-id"),
-            ) as mock_invoke:
-                tools = create_knowledge_tools(
-                    mock_manager_for_injection, "parent-instance-id"
-                )
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                result = await explore_tool.ainvoke({"query": "What is X?"})
-
-                # Verify asyncio.to_thread was called with get_shared_context
-                mock_to_thread.assert_called_once()
-                call_args = mock_to_thread.call_args
-                assert call_args[0][0] == get_shared_context
-                assert call_args[0][1] == "tree-root-instance-id"
-                assert call_args[0][2] == "What is X?"
-
-                # Verify message sent to invoke_agent_and_wait includes injection
-                mock_invoke.assert_called_once()
-                message = mock_invoke.call_args.kwargs["message"]
-                assert injection_text in message
-                assert "# Shared Context" in message
-                assert "## Pre-loaded Context" in message
-
-                # Verify final result is returned
-                assert result == "Explorer result."
+    * explore() does NOT call ``get_shared_context``.
+    * explore() does NOT append any injection text to the
+      dispatched message.
+    * The dispatched message still carries the query, mode, and
+      ``Project: {pid}`` routing line (dispatch metadata + explicit
+      target hint when system injection is suppressed, e.g.
+      system-default projects).
+    """
 
     @pytest.mark.asyncio
-    async def test_explore_includes_empty_format_when_no_matches(
-        self, mock_manager_for_injection
-    ):
-        """When get_shared_context returns empty format (no matches), message includes it."""
-        empty_format = "# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context\nThere is no context yet."
-
-        with patch(
-            "daemon.tools.knowledge_tools.asyncio.to_thread",
-            new_callable=AsyncMock,
-            return_value=empty_format,
-        ):
-            with patch(
-                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                new_callable=AsyncMock,
-                return_value=("Explorer result.", "test-child-id"),
-            ) as mock_invoke:
-                tools = create_knowledge_tools(
-                    mock_manager_for_injection, "parent-instance-id"
-                )
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                result = await explore_tool.ainvoke({"query": "Test query"})
-
-                # Verify message includes empty format (no matches)
-                mock_invoke.assert_called_once()
-                message = mock_invoke.call_args.kwargs["message"]
-                assert "# Shared Context" in message
-                assert "There is no context yet" in message
-
-                # Verify explore still works
-                assert result == "Explorer result."
-
-    @pytest.mark.asyncio
-    async def test_explore_falls_back_to_current_instance_id_when_tree_root_empty(
+    async def test_explore_does_not_call_get_shared_context(
         self, configured_env, mock_manager
     ):
-        """When get_tree_root_id returns empty, uses current_instance_id as fallback."""
-        # Set up instance metadata
+        """explore() must not call ``get_shared_context`` directly.
+
+        Pin for the migration: the manual attach is gone. Shared
+        Context is now system-driven via
+        ``assemble_context_messages`` on the spawned explorer's
+        first turn. If this assertion fails, the manual attach was
+        re-introduced (or a similar direct call leaked back in).
+        """
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=("Explorer result.", "test-child-id"),
+        ) as mock_invoke:
+            tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is X?"})
+
+            # The dispatched message must carry the query/mode/Project
+            # line but must NOT contain any Shared Context payload
+            # (no "# Shared Context" header, no injection text).
+            mock_invoke.assert_called_once()
+            message = mock_invoke.call_args.kwargs["message"]
+
+            assert "Query (mode=hybrid): What is X?" in message, (
+                f"explore() must dispatch the query with mode prefix; "
+                f"got message={message!r}"
+            )
+            assert "Project: test-project-123" in message, (
+                f"explore() must dispatch the Project: routing line; "
+                f"got message={message!r}"
+            )
+            assert "# Shared Context" not in message, (
+                f"explore() must NOT manually attach Shared Context — "
+                f"injection is now system-driven via the orchestrator. "
+                f"Found injected payload in message={message!r}"
+            )
+            assert "## Pre-loaded Context" not in message, (
+                f"explore() must NOT manually attach Pre-loaded Context "
+                f"matched-file block — injection is system-driven. "
+                f"Found injected payload in message={message!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_explore_message_carries_query_mode_and_project_line(
+        self, configured_env, mock_manager
+    ):
+        """Dispatched message preserves the query / mode / Project: line.
+
+        Pin for the retained metadata: query, mode (default "hybrid"),
+        and ``Project: {pid}`` are still emitted by explore() so the
+        spawned explorer agent can route / hint against them even when
+        system injection is suppressed (e.g. system-default projects).
+        """
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=("Explorer result.", "test-child-id"),
+        ) as mock_invoke:
+            tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({
+                "query": "Test query",
+                "mode": "local",
+            })
+
+            message = mock_invoke.call_args.kwargs["message"]
+            assert "Query (mode=local): Test query" in message, (
+                f"expected query line at default mode; got message={message!r}"
+            )
+            assert "Project: test-project-123" in message, (
+                f"expected Project: routing line; got message={message!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_explore_does_not_call_get_shared_context_even_when_query_matches(
+        self, configured_env, mock_manager
+    ):
+        """Even with a strong query, explore() does not call get_shared_context.
+
+        Migrated behavior pin: no matter how well a query would
+        match against the .md context files, the explore tool does
+        NOT pre-resolve / pre-inject. The first-turn orchestrator
+        performs the matching on the spawned explorer instance.
+        """
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=("Explorer result.", "test-child-id"),
+        ) as mock_invoke:
+            # Pre-migration would have read get_tree_root_id + called
+            # get_shared_context. Verify neither happens.
+            tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({
+                "query": "very specific query that would have matched",
+            })
+
+            # get_tree_root_id is part of the OLD manual attach path;
+            # the new path doesn't call it.
+            mock_manager._instance_repository.get_tree_root_id.assert_not_called()
+
+            # Message still goes out via invoke_agent_and_wait.
+            mock_invoke.assert_called_once()
+            message = mock_invoke.call_args.kwargs["message"]
+            assert "Query (mode=hybrid): very specific query that would have matched" in message
+
+    @pytest.mark.asyncio
+    async def test_explore_dispatches_even_without_project_id(
+        self, configured_env, mock_manager
+    ):
+        """When project_id is unavailable, no ``Project:`` line is emitted.
+
+        Edge case: instance metadata may lack ``project_id`` (e.g.
+        for system-default projects). explore() should still
+        dispatch the query; only the ``Project:`` line is omitted.
+        No injection attempt is made (manual attach is gone).
+        """
+        # Strip project_id from instance metadata
         mock_instance_meta = MagicMock()
-        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
-        mock_instance_meta.project_id = "test-project-123"
+        mock_instance_meta.instance_metadata = {}  # no project_id
+        mock_instance_meta.project_id = None
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
-        # Set up get_tree_root_id to return empty string (falsy)
-        # This causes fallback to current_instance_id which is truthy
-        mock_manager._instance_repository.get_tree_root_id = MagicMock(return_value="")
-
         with patch(
-            "daemon.tools.knowledge_tools.asyncio.to_thread",
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
             new_callable=AsyncMock,
-            return_value="Fallback injection text",
-        ) as mock_to_thread:
-            with patch(
-                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                new_callable=AsyncMock,
-                return_value=("Explorer result.", "test-child-id"),
-            ) as mock_invoke:
-                tools = create_knowledge_tools(mock_manager, "parent-instance-id")
-                explore_tool = next(t for t in tools if t.name == "explore")
+            return_value=("Explorer result.", "test-child-id"),
+        ) as mock_invoke:
+            tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
 
-                result = await explore_tool.ainvoke({"query": "Test"})
+            await explore_tool.ainvoke({"query": "no-project query"})
 
-                # Verify asyncio.to_thread was called with get_shared_context
-                mock_to_thread.assert_called_once()
-                # Verify the fallback context_key (current_instance_id) was used
-                call_args = mock_to_thread.call_args
-                assert call_args[0][0] == get_shared_context
-                assert call_args[0][1] == "parent-instance-id"
-
-                # Verify message includes the injection
-                message = mock_invoke.call_args.kwargs["message"]
-                assert "Fallback injection text" in message
-
-                assert result == "Explorer result."
+            mock_invoke.assert_called_once()
+            message = mock_invoke.call_args.kwargs["message"]
+            assert "Query (mode=hybrid): no-project query" in message
+            # No Project: line when project_id is missing.
+            assert "Project:" not in message
+            # No manual injection either.
+            assert "# Shared Context" not in message
 
     @pytest.mark.asyncio
-    async def test_explore_injection_failure_is_nonblocking(
-        self, mock_manager_for_injection
+    async def test_explore_does_not_invoke_asyncio_to_thread_for_context(
+        self, configured_env, mock_manager
     ):
-        """If get_shared_context raises, explore still works."""
-        async def raise_error(func, *args, **kwargs):
-            raise OSError("Disk error")
+        """explore() does NOT call asyncio.to_thread for Shared Context.
+
+        The OLD path used ``asyncio.to_thread(get_shared_context, ...)``
+        to wrap the sync filesystem I/O. The NEW path does no manual
+        injection, so no thread-pool call for that purpose.
+
+        (Other ``asyncio.to_thread`` callers may exist for unrelated
+        work — this assertion is scoped to the ``get_shared_context``
+        target by name, so it remains precise.)
+        """
+        # Track ALL asyncio.to_thread calls; assert no call passes
+        # get_shared_context as the target function.
+        captured_thread_calls = []
+
+        real_to_thread = asyncio.to_thread
+
+        async def _tracking_to_thread(func, *args, **kwargs):
+            captured_thread_calls.append((func, args, kwargs))
+            return await real_to_thread(func, *args, **kwargs)
 
         with patch(
             "daemon.tools.knowledge_tools.asyncio.to_thread",
-            side_effect=raise_error,
+            side_effect=_tracking_to_thread,
         ):
-            with patch(
-                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                new_callable=AsyncMock,
-                return_value=("Explorer succeeded despite injection failure.", "test-child-id"),
-            ) as mock_invoke:
-                tools = create_knowledge_tools(
-                    mock_manager_for_injection, "parent-instance-id"
-                )
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                # This should NOT raise - failure should be non-blocking
-                result = await explore_tool.ainvoke({"query": "Test query"})
-
-                # Verify explore still completed successfully
-                mock_invoke.assert_called_once()
-                assert "succeeded" in result
-
-    @pytest.mark.asyncio
-    async def test_explore_injection_uses_thread_pool(
-        self, mock_manager_for_injection
-    ):
-        """Verify asyncio.to_thread is used for get_shared_context."""
-        mock_to_thread = AsyncMock(return_value="# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context\nContent.")
-
-        with patch("daemon.tools.knowledge_tools.asyncio.to_thread", mock_to_thread):
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
                 return_value=("Result", "test-child-id"),
             ):
                 tools = create_knowledge_tools(
-                    mock_manager_for_injection, "parent-instance-id"
+                    mock_manager, "parent-instance-id"
                 )
                 explore_tool = next(t for t in tools if t.name == "explore")
 
                 await explore_tool.ainvoke({"query": "Test"})
 
-                # Verify asyncio.to_thread was called
-                mock_to_thread.assert_called_once()
-                # First positional arg should be get_shared_context
-                call_args = mock_to_thread.call_args
-                assert call_args[0][0] == get_shared_context  # The actual function
-                assert call_args[0][1] == "tree-root-instance-id"
-                assert call_args[0][2] == "Test"
+        # No captured call should have targeted get_shared_context.
+        for func, _args, _kwargs in captured_thread_calls:
+            from daemon.services.context_injection import get_shared_context
+            assert func is not get_shared_context, (
+                f"explore() must NOT call asyncio.to_thread(get_shared_context, ...) "
+                f"anymore — Shared Context injection is now system-driven. "
+                f"Captured target function: {func!r}"
+            )
 
 
 class TestKnowledgeToolsConditionalCreation:
