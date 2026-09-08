@@ -345,6 +345,15 @@ def test_phantom_integrityerror_triggers_insert_on_missing(
     The pre-fix code logged "already delivered (racing delivery won)"
     and returned None — the b7ead8a4 false-positive. The fix must
     INSERT the marker.
+
+    The mocked ``IntegrityError`` carries the obligation-triple
+    columns so the subtype classifier
+    (``_is_obligation_triple_unique_violation``) accepts it as the
+    legitimate unique-violation case — production emits the same
+    SQLite-format column-set message. Any OTHER IntegrityError
+    (NOT NULL / FK / non-triple UNIQUE) takes the deterministic
+    re-raise path (covered by the classification unit tests in
+    ``tests/unit/test_ensure_deferred_integrity_error_classification.py``).
     """
     parent, child, msg = _triple()
     real_insert = repo._insert_deferred_marker
@@ -354,11 +363,20 @@ def test_phantom_integrityerror_triggers_insert_on_missing(
         calls["n"] += 1
         if calls["n"] == 1:
             # Simulate the phantom conflict (delete / escalation race)
-            # WITHOUT any row existing.
+            # WITHOUT any row existing. Message carries the obligation-
+            # triple column set so the SQLite-format discriminator
+            # accepts it — same shape production emits on PG/SQLite
+            # ``uq_report_injections_oblig_triple`` partial unique
+            # violation.
             raise IntegrityError(
                 "INSERT INTO report_injections ...",
                 {},
-                Exception("UNIQUE constraint failed (phantom)"),
+                Exception(
+                    "UNIQUE constraint failed: "
+                    "report_injections.parent_instance_id, "
+                    "report_injections.child_instance_id, "
+                    "report_injections.child_message_id (phantom)"
+                ),
             )
         return real_insert(**kwargs)
 

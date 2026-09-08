@@ -236,7 +236,10 @@ class TestVariantBFix1LivePendingMessages:
         assert row.parent_instance_id == "parent-1"
         assert row.child_message_id == "completed-1"
         assert row.report_message_id is None
-        assert row.content is None
+        # Sentinel content (incident 2026-09-08): prod schema has
+        # ``content NOT NULL`` (legacy, predates Phase 1 C4), so the
+        # marker carries an empty-string sentinel rather than None.
+        assert row.content == ""
 
     def test_root_instance_no_marker_no_crash(
         self, engine: Engine

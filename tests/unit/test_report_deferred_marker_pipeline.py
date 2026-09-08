@@ -228,7 +228,10 @@ class TestSite1MarkerDispatchedOnPause:
         assert row.parent_instance_id == "parent-1"
         assert row.child_message_id == "msg-1"
         assert row.report_message_id is None
-        assert row.content is None
+        # Sentinel content (incident 2026-09-08): prod schema has
+        # ``content NOT NULL`` (legacy, predates Phase 1 C4), so the
+        # marker carries an empty-string sentinel rather than None.
+        assert row.content == ""
         assert row.recovery_attempted_at is None
 
     @pytest.mark.asyncio

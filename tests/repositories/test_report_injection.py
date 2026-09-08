@@ -284,7 +284,14 @@ class TestEnsureDeferredWriteOnceGate:
         assert row.state == ReportInjectionState.DEFERRED.value
         assert row.deferred_reason == DEFERRED_REASON_PAUSE_TOCTOU
         assert row.report_message_id is None
-        assert row.content is None
+        # Sentinel content (incident 2026-09-08): prod schema has
+        # ``content NOT NULL`` (legacy, predates Phase 1 C4), so the
+        # marker carries an empty-string sentinel rather than None.
+        # No consumer reads DEFERRED rows' content — see
+        # ``daemon/repositories/report_injection/repository.py``
+        # ``_DEFERRED_MARKER_CONTENT_SENTINEL`` docstring for the
+        # audit checklist.
+        assert row.content == ""
         assert row.recovery_attempted_at is None
 
     def test_ensure_deferred_twice_returns_no_op(
