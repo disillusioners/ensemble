@@ -310,6 +310,10 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         # Operational SMALL-scope single-file plan (planner uses `plan.md` for SMALL-scope work).
         # W4 contract applies: this whitelist entry is for the operational filename use only.
         "plan.md",
+        # Operational approver tracking files (approver uses `{plan-slug}-tracking.md` for each
+        # plan's tracking; the suffix `tracking.md` is operational filesystem reference, not
+        # prompt-section cross-reference). W4 contract applies.
+        "tracking.md",
         # Date-prefixed memory files (own memory references) are operational
         # filesystem paths to dated memory entries (e.g.,
         # 2026-04-23-architecture-report.md); they are NOT cross-references

@@ -153,7 +153,7 @@ I store planning experience via the project's RAG knowledge base, not in any loc
 ### Output Location
 Plans are written by workers to `.agents/shared/planning/<feature-name>/`:
 - `plan-overview.md` — synthesized top-level plan
-- `phase1-plan`, `phase2-plan`, ... — per-phase detail
+- `phase1-plan.md`, `phase2-plan.md`, ... — per-phase detail
 - Workers may also write the research findings when research precedes planning
 
 ### Conventions to Honor
