@@ -150,6 +150,13 @@ KNOWN_GLUED_WORDS = [
     re.compile(r"\bandcore\.md\b"),
     re.compile(r"\bmatchedload_skill\b"),
 ]
+
+# Broken-prose pattern from v2-sweep over-conversion (2026-09-08 cleanup pass):
+# The v2 sweep produced ungrammatical prose like "lives in See X", "in See X", "from See X"
+# where a preposition (`lives in` / `in` / `from`) was kept and `See` was added before the section
+# name. Variant-tolerant: matches spaced (See ) and unspaced (SeeX) forms; the preposition can
+# optionally be wrapped in whitespace.
+BROKEN_PROSE_RE = re.compile(r"\b(?:lives\s+in|in|from)\s+See\b", re.IGNORECASE)
 # A general lowercase-then-Capital pattern (e.g., ``<lowercase-word><Capital-word>``
 # glued at a word boundary, like ``eitherAllowed``) is NOT included here because
 # it cannot reliably distinguish the corruption class from legitimate CamelCase
@@ -245,6 +252,34 @@ def test_no_known_glued_words(path: Path) -> None:
     assert not hits, (
         f"{path.relative_to(REPO_ROOT)} contains {len(hits)} glued-word violation(s): "
         + ", ".join(hits[:5])
+    )
+
+
+# ---------------------------------------------------------------------------
+# Broken-prose detector (added 2026-09-08 cleanup pass)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", _iter_prompt_files(), ids=lambda p: p.name)
+def test_no_broken_prose_see_prefix(path: Path) -> None:
+    """No broken-prose ``in See X`` / ``from See X`` / ``lives in See X`` patterns.
+
+    Background: the v2 sweep over-converted prepositions (`lives in`, `in`, `from`) before
+    file references into broken prose like "lives in See X" / "from See X". The natural
+    English form requires either backticks around the See reference (`See X`) or restructuring
+    (drop the preposition; wrap the See reference in a parenthetical). Variant-tolerant:
+    matches both spaced (`See `) and unspaced (`SeeX`) forms; the preposition can have any
+    whitespace.
+
+    Per audit (cleanup pass 2026-09-08), the cleanup pass repaired 40 sites across 26 files
+    by adding backticks: ``lives in See X`` → ``lives in \`See X\``` etc. This detector
+    prevents regression of the class.
+    """
+    text = path.read_text(encoding="utf-8")
+    matches = list(BROKEN_PROSE_RE.finditer(text))
+    assert not matches, (
+        f"{path.relative_to(REPO_ROOT)} contains {len(matches)} broken-prose violation(s): "
+        + ", ".join(m.group(0) for m in matches[:5])
     )
 
 

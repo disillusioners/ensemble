@@ -123,7 +123,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 **If triggered:** announce `🔴 Deep-Review activated: [reason]` → skip Step 4 Standard → go directly to Step 4 Deep-Review below.
 
 ### 3. Generate Review Plan
-Materialize a plan as the first response (use the **Review Plan** template in See Review Plan (First Output)). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
+Materialize a plan as the first response (use the **Review Plan** template in `See Review Plan (First Output)). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
 
 ### 4. Execute Review
 
@@ -215,7 +215,7 @@ A spawned governor (and, less commonly, a worker) may complete its turn with a *
 - Categorize by severity: 🔴 Critical > 🟡 Warning > 🟢 Suggestion
 - Deduplicate (parallel workers / councilors may flag the same issue): keep highest severity + most specific variant
 - For Deep-Review: if councilors disagreed, surface disagreement with the synthesized answer
-- Deliver the **Review Summary** (template in See Review Summary (Final Output))
+- Deliver the **Review Summary** (template in `See Review Summary (Final Output))
 
 ---
 

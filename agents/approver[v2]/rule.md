@@ -27,7 +27,7 @@
 ### Dispatch & Skill
 12. **One skill per worker.** Each worker loads exactly ONE approval skill via `load_skill`. Skill-evolution attribution depends on this 1:1 mapping.
 13. **Skill must match artifact type.** Plan → `plan-approval`; Decision → `decision-approval`. Never cross. Multi-type → multiple workers, one skill each.
-14. **Workers must call `skill_feedback` before their final report** — as a TOOL CALL ONLY, THEN deliver the full report as the FINAL message (received verbatim). The canonical contract lives in See Dispatch Pattern; the worker dispatch prompt mirrors it inline so the worker receives it verbatim — keep them in sync when editing. Low scores are GOOD signals.
+14. **Workers must call `skill_feedback` before their final report** — as a TOOL CALL ONLY, THEN deliver the full report as the FINAL message (received verbatim). The canonical contract lives in `See Dispatch Pattern; the worker dispatch prompt mirrors it inline so the worker receives it verbatim — keep them in sync when editing. Low scores are GOOD signals.
 
 ### Parallelism & Resource
 15. **Sequential by default — maximum 1 worker at a time per typical approval cycle.** (Resource constraint; fresh-eyes single-pass.) Section-parallel is the exception for large multi-section plans.
@@ -35,7 +35,7 @@
 17. **Deduplicate findings** — successive/parallel workers may flag the same issue. Keep the most specific variant with section/line reference; merge or drop the rest.
 
 ### Iteration Tracking
-18. **Read `active.md` for identity + status** before dispatching (the canonical status rules live in See Iteration Management). Do NOT read the tracking file until after the verdict.
+18. **Read `active.md` for identity + status** before dispatching (the canonical status rules live in `See Iteration Management). Do NOT read the tracking file until after the verdict.
 19. **Max 3 iterations** — after the 3rd rejection, set `Status: ESCALATED` in `active.md` and return `REJECTED` with a "Max iterations reached (3) — escalated to Leader" Note.
 20. **Update tracking on EVERY verdict** — REJECTED appends iteration + IN_PROGRESS; APPROVED appends final + APPROVED; ESCALATED sets final state.
 21. **Do NOT delete the tracking file** — it is historical record.

@@ -659,7 +659,7 @@ User: "Plan and implement a notification system"
 
 ## Completion Attestation (LCA feature — conditional, 2026-09-06)
 
-The completion gate is **CONDITIONAL on delegation**: it fires only when this mission dispatched a child via `send_message`. Plain questions, chart requests, and other non-delegating turns complete normally — no `attest_completion` needed. For delegated missions you MUST call the `attest_completion` tool before declaring yourself done. The full contract (conditional semantics, MUST/MAY rules, the `[SYSTEM CONTEXT: Completion Check Nudge]` header the nudge now carries, and the Source-of-message note) is canonical in See 📜 Completion Attestation (LCA feature — conditional, 2026-09-06) and is intentionally NOT restated here (one-canonical-home convention).
+The completion gate is **CONDITIONAL on delegation**: it fires only when this mission dispatched a child via `send_message`. Plain questions, chart requests, and other non-delegating turns complete normally — no `attest_completion` needed. For delegated missions you MUST call the `attest_completion` tool before declaring yourself done. The full contract (conditional semantics, MUST/MAY rules, the `[SYSTEM CONTEXT: Completion Check Nudge]` header the nudge now carries, and the Source-of-message note) is canonical in `See 📜 Completion Attestation (LCA feature — conditional, 2026-09-06) and is intentionally NOT restated here (one-canonical-home convention).
 
 ---
 

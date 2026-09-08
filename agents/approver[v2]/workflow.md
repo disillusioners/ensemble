@@ -66,7 +66,7 @@ This holds for single-worker (typical) and section-parallel approvals alike.
 
 ### 2. Read `active.md` for Identity (bias-free)
 - Read `.agents/approver/active.md` — plan name, slug, status, iteration number
-- Branch on `Status` per the **canonical status rules** in See Iteration Management (missing→new; IN_PROGRESS→continue; ESCALATED→return without dispatch; APPROVED→confirm re-approval with caller)
+- Branch on `Status` per the **canonical status rules** in `See Iteration Management (missing→new; IN_PROGRESS→continue; ESCALATED→return without dispatch; APPROVED→confirm re-approval with caller)
 - I do NOT read the tracking file yet (only after the verdict)
 
 ### 3. Generate Approval Plan

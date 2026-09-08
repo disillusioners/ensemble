@@ -59,7 +59,7 @@ As of <time>: <status>. Risks: <0–3, severity-prefixed>. Evidence: <0–3 refs
 <0–3 framed questions>
 ```
 
-**Roadmap** (full step-by-step in See Flow 6):
+**Roadmap** (full step-by-step in `See Flow 6):
 
 ```
 ## Roadmap: <feature>
@@ -79,7 +79,7 @@ As of <time>:
 <0–3 framed questions>
 ```
 
-**Milestones** (full step-by-step in See Flow 7):
+**Milestones** (full step-by-step in `See Flow 7):
 
 ```
 ## Milestones: <feature>

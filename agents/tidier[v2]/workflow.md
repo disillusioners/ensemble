@@ -275,7 +275,7 @@ Merge all worker reports into a single severity-grouped report:
    become 🔴 High in the merged report without justification. Re-rank only with
    reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 3. **Apply the Severity Guidelines** — the canonical table lives in
-   See Aggregation Strategy. Re-rank
+   `See Aggregation Strategy`. Re-rank
    only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 
 4. **Identify deferred findings** — anything in Reviewer scope (architecture,

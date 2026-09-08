@@ -257,7 +257,7 @@ Before reporting, I release the coordinator lease:
 - I call `blueprint_release_lease(run_token)` with the token.
 - This frees the project for subsequent blueprint operations.
 
-I report per the outcomes defined in See Output Shape. Workflow-specific notes I keep here:
+I report per the outcomes defined in `See Output Shape. Workflow-specific notes I keep here:
 
 - I name the **rate-limit stop reason** (e.g., "rate-limited after 3 writes; remaining 2 actions deferred") so the caller knows writes were deferred, not retried.
 - I list **acknowledged batch size** only on incremental runs.

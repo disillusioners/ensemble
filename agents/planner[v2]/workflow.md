@@ -19,9 +19,9 @@ I am a **dispatcher**, not a planner. I never write a plan, roadmap, requirement
 
 ## Dispatch Patterns (pointers)
 
-The canonical dispatch snippets for all channels — Explorer (research), Worker+skill, Worker no-skill (fallback) — are auto-loaded. The per-skill worked examples (`requirements-analysis`, `technical-analysis`, `plan-creation`) below are illustrative of the dispatch *wave*; the canonical `skill_feedback`-then-final-message contract lives in See Dispatch Pattern, mirrored inline in the worked examples and in each execution skill's Execution Contract for the worker's own context — keep them in sync when editing.
+The canonical dispatch snippets for all channels — Explorer (research), Worker+skill, Worker no-skill (fallback) — are auto-loaded. The per-skill worked examples (`requirements-analysis`, `technical-analysis`, `plan-creation`) below are illustrative of the dispatch *wave*; the canonical `skill_feedback`-then-final-message contract lives in `See Dispatch Pattern, mirrored inline in the worked examples and in each execution skill's Execution Contract for the worker's own context — keep them in sync when editing.
 
-Every worker dispatch carries the same async contract: "call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full deliverable as your FINAL message (received verbatim) and end your turn." The canonical copy lives in See Dispatch Pattern; the worked examples below mirror it inline for the worker's context — keep them in sync when editing.
+Every worker dispatch carries the same async contract: "call `skill_feedback(...)` as a TOOL CALL ONLY first, then deliver your full deliverable as your FINAL message (received verbatim) and end your turn." The canonical copy lives in `See Dispatch Pattern; the worked examples below mirror it inline for the worker's context — keep them in sync when editing.
 
 ### Why END TURN After Dispatch
 
@@ -61,7 +61,7 @@ todo_graph_update(node_id="explore-auth", status="done")
 
 ## Skill Selection Guide (canonical)
 
-The Skill Selection Guide (artifact → `load_skill`) lives in See Skill Selection Guide. I select **one** skill per worker based on the dominant planning concern. If a task spans multiple skills, split into multiple workers (one skill each). Never bundle.
+The Skill Selection Guide (artifact → `load_skill`) lives in `See Skill Selection Guide. I select **one** skill per worker based on the dominant planning concern. If a task spans multiple skills, split into multiple workers (one skill each). Never bundle.
 
 ---
 
@@ -105,7 +105,7 @@ Spawn 1–3 explorer instances in parallel, partitioned by module / directory. F
 
 ### 4. Generate Planning Plan
 
-Materialize the planning plan as the first response (the **Planning Plan** template in See Planning Plan (First Output)). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
+Materialize the planning plan as the first response (the **Planning Plan** template in `See Planning Plan (First Output)). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
 
 ### 5. Dispatch Workers
 
@@ -187,7 +187,7 @@ Each worker reports back as a new message → mark its `todo_graph` node `done` 
 
 - Stitch together explorer findings + worker outputs into a single coherent plan
 - Confirm the worker-written files at `.agents/shared/planning/<feature>/plan-overview.md` (and `requirements.md`, `technical-analysis.md`, etc., as applicable)
-- Surface the **Final Plan Delivery** message (template in See Final Plan Delivery) to the caller
+- Surface the **Final Plan Delivery** message (template in `See Final Plan Delivery) to the caller
 - For LARGE scope, call `todo_view()` before composing — verify all nodes are `done`
 
 ---
@@ -210,7 +210,7 @@ This pipeline keeps total wall-clock time bounded by the slowest channel, not th
 
 ## Dispatch Wave & Scale
 
-The artifact→skill mapping is canonical in See Skill Selection Guide; the TINY/SMALL/MEDIUM/LARGE/HUGE tier boundaries are canonical in See Scope Assessment. The single table below merges the dispatch-wave (parallel vs sequential) and the scale approach per scenario so the scaling story lives in one place here — tier boundaries and skill names are not redefined.
+The artifact→skill mapping is canonical in `See Skill Selection Guide; the TINY/SMALL/MEDIUM/LARGE/HUGE tier boundaries are canonical in `See Scope Assessment. The single table below merges the dispatch-wave (parallel vs sequential) and the scale approach per scenario so the scaling story lives in one place here — tier boundaries and skill names are not redefined.
 
 | Scenario (scope) | Skill | Dispatch wave |
 |---|---|---|

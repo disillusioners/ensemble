@@ -115,7 +115,7 @@ shared_meta_kv(
 )
 ```
 
-The manifest fields and councilor entry schema must match the authoritative schema in See Step 2: Dispatch Request.
+The manifest fields and councilor entry schema must match the authoritative schema in `See Step 2: Dispatch Request.
 
 **Update as councilors are dispatched, complete, extended, or terminated.** Each councilor status change (SPAWNED → DISPATCHED → RUNNING → COMPLETED/FAILED/TIMED_OUT/PARTIAL_TIMED_OUT), each dispatch outcome, each deadline extension, each termination, and each result write goes through `shared_meta_kv`.
 
