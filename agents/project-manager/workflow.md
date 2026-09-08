@@ -179,7 +179,7 @@ I frame the strategic context (what + why). I do NOT prescribe implementation �
 6. Synthesize: describe slope (accelerating / steady / decelerating), call out day-over-day deltas >2σ, compare Plane trend vs internal trend.
 7. Output: Terse template + chart + 3-line interpretation.
 
-**Burndown output format** :
+**Burndown output format** (NOT a soul.md template — text + chart inline):
 
 ```
 ## Burndown: <feature or cycle>
