@@ -1,8 +1,9 @@
 import { Injectable, inject, signal, WritableSignal, Signal, computed, effect } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
+import { Observable } from 'rxjs';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
-import type { InstanceInfo, InstanceStatus } from '../models';
+import type { InstanceInfo, InstanceListResponse, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 10;
 
@@ -389,5 +390,29 @@ export class InstanceService {
       clearInterval(this.pollingIntervalId);
       this.pollingIntervalId = null;
     }
+  }
+
+  /**
+   * Instances-primary job-queue tree leg (2026-09-08, design V1) —
+   * fetch the ROOT-paginated instance page for the header indicator's
+   * 8s ``forkJoin``: ``GET /api/instances?limit=<limit>``.
+   *
+   * The response is a FLAT list (roots + ALL their descendants — the
+   * BE BFS-loads descendants of each root in the page) with each row
+   * carrying its child ids in ``children``; the FE builds the nested
+   * tree via ``buildInstanceNodes`` (models/instance-node.model.ts).
+   *
+   * Deliberately STATELESS — unlike ``loadInstances`` this does NOT
+   * touch the instance-list page's shared state (no search filter, no
+   * offset advance, no SSE merge): the indicator polls independently
+   * on its own tick and the page keeps its own lifecycle. KB
+   * infrastructure agents are excluded (``exclude_kb=true``), matching
+   * the instance-list page's default — they are not user conversations.
+   *
+   * Failures propagate to the caller's per-leg ``catchError`` (the
+   * indicator retains its last good payload — never flashes empty).
+   */
+  listInstanceTree(limit: number = 10): Observable<InstanceListResponse> {
+    return this.api.listInstances(limit, 0, undefined, true);
   }
 }

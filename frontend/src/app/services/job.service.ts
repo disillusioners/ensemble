@@ -186,9 +186,13 @@ export class JobService {
    * leader's review decision, 2026-09-07). The panel currently
    * pulls its full mission-jobs picture from the existing
    * ``listActiveJobs`` + ``listRecentJobs`` polling — the mission
-   * grouping key (``job.mission_id``) is already on every Job
-   * payload, so ``buildQueueTree`` does the matching client-side
-   * without a per-mission round-trip.
+   * grouping key (coalesced ``job.mission_id ?? job.instance_id``
+   * since the 2026-09-08 live-smoke fix F1; the list wire ships
+   * ``mission_id: null`` for child-bound rows) is already on every
+   * Job payload, so ``buildInstanceTree`` does the matching
+   * client-side without a per-mission round-trip (the
+   * instances-primary tree, ``feature/job-queue-instance-tree``,
+   * 2026-09-08, design V1).
    *
    * Intended future use: LAZY FETCH for an expanded mission node —
    * when a user expands a node with N+ jobs, the panel can call

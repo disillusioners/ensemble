@@ -1,5 +1,6 @@
 import { signal, computed } from '@angular/core';
-import { Job, JobStatus, MissionLiveness, isTerminalStatus, buildQueueTree } from '../../models/job.model';
+import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
+import { buildInstanceNodes, buildInstanceTree, InstanceRow, InstanceNode } from '../../models/instance-node.model';
 import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
@@ -44,28 +45,40 @@ class MockJobQueueIndicatorComponent {
   private readonly allRecentJobs = signal<Job[]>([]);
 
   /**
-   * F-5 mirror (2026-09-08) — TWO raw missions-payload signals.
-   *
-   * ``_liveMissionsPayload`` mirrors the LEG A
+   * F-5 mirror (2026-09-08, updated for the instances-primary tree) —
+   * ``_liveMissionsPayload`` mirrors LEG A
    * (``listMissions({ liveness: 'processing,pending,paused',
-   * limit: 20 })``) response. The single source of truth for the
-   * badge count + panel LIVE MISSIONS rows + tooltip per-liveness
-   * breakdown. Mirrors the real component's ``liveMissionsPayload``.
+   * limit: 20 })``): the single source of truth for the badge count +
+   * tooltip per-liveness breakdown. Mirrors the real component's
+   * ``liveMissionsPayload``.
    *
-   * ``_recentMissionsPayload`` mirrors the LEG B
-   * (``listMissions({ limit: 20 })``) response — the unfiltered
-   * page that feeds the panel's terminal mission nodes + recentFlat
-   * ONLY. Mirrors the real component's ``recentMissionsPayload``.
-   *
-   * The mirror exposes LEG A as ``lastLiveMissionsPayload`` and LEG
-   * B as ``lastRecentMissionsPayload`` (both read-only) so the F-5
-   * pins can assert the per-leg retention semantics independently.
+   * The former LEG B (unfiltered ``listMissions({ limit: 20 })``)
+   * is DROPPED — recent terminal mission nodes are replaced by
+   * terminal roots from the instances page (``_instancesPayload``
+   * below).
    */
   private readonly _liveMissionsPayload = signal<MissionListResponse | null>(null);
   readonly lastLiveMissionsPayload = this._liveMissionsPayload.asReadonly();
 
-  private readonly _recentMissionsPayload = signal<MissionListResponse | null>(null);
-  readonly lastRecentMissionsPayload = this._recentMissionsPayload.asReadonly();
+  /**
+   * Instances-primary tree leg mirror (2026-09-08, design V1) — the
+   * FLAT instance rows from the last successful
+   * ``listInstanceTree(10)`` call. Mirrors the real component's
+   * ``instancesPayload`` signal (retention: ``null`` leg ⇒ untouched).
+   * Read-only exposure ``lastInstancesPayload`` so the F-5-class
+   * pins can assert the tree payload end-to-end.
+   */
+  private readonly _instancesPayload = signal<InstanceRow[]>([]);
+  readonly lastInstancesPayload = this._instancesPayload.asReadonly();
+
+  /**
+   * Derived nested roots — mirrors the real ``instanceRoots``
+   * computed (delegates to the REAL ``buildInstanceNodes`` helper,
+   * as the real component does).
+   */
+  readonly instanceRoots = computed<InstanceNode[]>(() =>
+    buildInstanceNodes(this._instancesPayload())
+  );
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
@@ -204,20 +217,11 @@ class MockJobQueueIndicatorComponent {
   });
 
   /**
-   * F-5 mirror — the panel's ``[missions]`` input. Composed of LEG A
-   * rows + LEG B rows filtered to terminal liveness so the two sets
-   * are disjoint by construction. Mirrors the real component's
-   * ``missionsList``.
+   * Instances-primary tree (2026-09-08, design V1) — the former
+   * ``missionsList`` LEG A + LEG B composition is GONE (leg B
+   * dropped, panel's ``[missions]`` input removed). The panel's tree
+   * input is ``[instances]="instanceRoots()"``.
    */
-  missionsList = computed<MissionSummary[]>(() => {
-    const live = this.liveMissionsList();
-    const recentPayload = this.lastRecentMissionsPayload();
-    const recentOnly = (recentPayload?.missions ?? []).filter(
-      (m) => m.liveness !== null && m.liveness !== 'processing' && m.liveness !== 'pending' && m.liveness !== 'paused'
-    );
-    return [...live, ...recentOnly];
-  });
-
   refreshAgeSeconds = computed(() => {
     if (!this.lastFetchAt()) return 0;
     return Math.max(0, Math.floor((Date.now() - this.lastFetchAt()!) / 1000));
@@ -324,6 +328,35 @@ class MockJobQueueIndicatorComponent {
     this.lastFooterNavigated = ['/jobs'];
   }
 
+  /**
+   * Instances-primary tree mirror (2026-09-08, design V1) —
+   * ``onInstanceClick`` captures: menu close FIRST, then the tab
+   * decision (project tab add via projectNameMap with first-8-chars
+   * fallback, or setActiveTab('all') on a null project — the same
+   * null-project fallback as ``onJobClick``), then the route to
+   * ``/projects/<key>/instances/<instance_id>``.
+   */
+  lastInstanceNavigated: (string | null)[] | null = null;
+
+  onInstanceClick(node: InstanceNode): void {
+    this.menuClosedAfterClick = true;
+    const projectKey = node.instance.project_id || 'all';
+    if (node.instance.project_id) {
+      const name =
+        this.projectNameMap().get(node.instance.project_id) ??
+        node.instance.project_id.slice(0, 8);
+      this.lastTabAction = { kind: 'add', project_id: node.instance.project_id, name };
+    } else {
+      this.lastTabAction = { kind: 'setActive', tabId: 'all' };
+    }
+    this.lastInstanceNavigated = [
+      '/projects',
+      projectKey,
+      'instances',
+      node.instance.instance_id,
+    ];
+  }
+
   // ---------------------------------------------------------------------------
   // Setters — let tests push data into the signals without poking internals.
   // ---------------------------------------------------------------------------
@@ -382,58 +415,80 @@ class MockJobQueueIndicatorComponent {
   }
 
   /**
+   * Build a flat instance-rows page (the ``listInstanceTree`` leg's
+   * emission) from per-row overrides — mirrors the ``GET
+   * /api/instances`` wire shape (flat rows, descendants included).
+   */
+  static buildInstanceRows(
+    overrides: Array<Partial<InstanceRow>>
+  ): InstanceRow[] {
+    return overrides.map((o, i) => ({
+      instance_id: `i-${i}`,
+      agent_id: 'leader',
+      agent_tag: null,
+      status: 'running' as const,
+      parent_id: null,
+      title: null,
+      initiative_message: null,
+      children: [],
+      created_at: '2026-09-08T09:00:00Z',
+      updated_at: '2026-09-08T10:00:00Z',
+      project_id: 'p-1',
+      pinned: false,
+      color_tag: null,
+      icon_tag: null,
+      pinned_at: null,
+      ...o,
+    }));
+  }
+
+  /** Setter mirroring the writable private signal (test drive). */
+  setInstancesPayload(rows: InstanceRow[]): void {
+    this._instancesPayload.set(rows);
+  }
+
+  /**
    * Mirror of the real component's ``applyFetchResults`` — the
    * ``forkJoin`` next-handler body — driven with MOCKED service
    * payloads so tests prove the intake wiring without HTTP.
    *
    * Parity contract with the component (C2/C3/W-jobs-intake
-   * honesty + F-5 mission-leg single-source pin):
+   * honesty + instances-primary tree leg):
    * - ``active`` / ``recent`` may be ``null`` (per-leg catchError
    *   swallowed a failure); on ``null`` we RETAIN the previous list
    *   rather than resetting to ``[]``;
    * - ``liveMissions === null`` (degraded live leg / 404-skew
    *   failure) RETAINS the previous live count + payload — never
-   *   falsely idle; the panel's LIVE MISSIONS rows + tooltip
-   *   breakdown stay sourced from LEG A so the F-5 bug class
-   *   stays closed;
-   * - ``recentMissions === null`` (degraded recent leg / 404-skew
-   *   failure) RETAINS the previous payload — the panel never
-   *   flashes empty;
-   * - F-5 fix: ``liveMissions`` and ``recentMissions`` are
-   *   independent. A degraded envelope on ONE does not touch the
-   *   OTHER's last good payload. Each is reported via ``onLegError``
-   *   with its own leg name so the UI can flag which projection
-   *   degraded.
-   * - C2 fix: a 200-OK ``degraded:true`` envelope on EITHER missions
-   *   leg ALSO retains the previous payload and DOES NOT touch the
-   *   corresponding signal;
+   *   falsely idle; the tooltip breakdown stays sourced from LEG A;
+   * - ``instances === null`` (per-leg failure) RETAINS the previous
+   *   tree payload — the panel never flashes empty;
+   * - ``instances`` non-null ⇒ the payload write lands (mirrors the
+   *   production ``instancesPayload.set(instances)`` write, whose
+   *   exact text is source-pinned — the F-5 lesson class);
+   * - C2 fix: a 200-OK ``degraded:true`` envelope on the missions
+   *   leg retains the previous payload and DOES NOT touch the
+   *   signal;
    * - C3 fix: ``liveMissionCountRaw`` is updated only via the
    *   canonical ``missionCountFromListResponse`` helper, on a
    *   non-degraded LEG A tick;
    * - degraded-200 flag parity: a non-null ``degraded:true`` envelope
-   *   on EITHER missions leg ALSO raises ``lastIntakeError`` via
+   *   on the missions leg ALSO raises ``lastIntakeError`` via
    *   ``onLegError`` (mirroring the component's ``recordLegError``)
    *   and counts as a FAILED leg for BOTH the clear gate and the
    *   ``lastFetchAt`` freeze gate;
    * - ``deferBlocked === null`` hides the warning; a payload is run
    *   through the canonical ``deferBlockIndicator`` helper;
    * - ``lastFetchAt`` advances only when at least one leg succeeded
-   *   (either missions leg: non-degraded).
+   *   (missions leg: non-degraded).
    *
-   * F-5 (2026-09-08, mission-tree single-source pin) — LEG A is
-   * ``liveMissions`` (filter-aware, liveness=processing,pending,paused,
-   * limit=20) and is the SINGLE source of truth for the badge count +
-   * panel LIVE MISSIONS rows + tooltip per-liveness breakdown. LEG B
-   * is ``recentMissions`` (unfiltered, limit=20) and feeds the
-   * panel's RECENT terminal mission nodes + recentFlat ONLY. Closes
-   * the "header ● 7, live section empty" self-contradiction where
-   * the unfiltered page's top-20 happened to be all-terminal.
+   * The former LEG B (``recentMissions``) is DROPPED — its content
+   * leg was replaced by the instances page (design V1).
    */
   applyFetchResult(
     active: Job[] | null,
     recent: Job[] | null,
     liveMissions: MissionListResponse | null,
-    recentMissions: MissionListResponse | null,
+    instances: InstanceRow[] | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     if (active !== null) this._activeJobs.set(active);
@@ -441,35 +496,32 @@ class MockJobQueueIndicatorComponent {
     if (liveMissions !== null && !liveMissions.degraded) {
       const count = missionCountFromListResponse(liveMissions);
       this.liveMissionCountRaw.set(count);
-      // F-5 closure (2026-09-08) — also store LEG A's payload so
-      // ``liveMissionsList`` (panel LIVE MISSIONS rows) and
-      // ``liveMissionBreakdown`` (tooltip per-liveness split) can
-      // read its ``missions`` rows. Mirrors the production write at
-      // job-queue-indicator.component.ts inside ``applyFetchResults``
-      // (the F-5 source-drift pin guards the prod counterpart).
+      // LEG A payload write — tooltip breakdown source. Mirrors the
+      // production write at job-queue-indicator.component.ts inside
+      // ``applyFetchResults`` (the F-5 source-drift pin guards the
+      // prod counterpart).
       this._liveMissionsPayload.set(liveMissions);
     }
-    if (recentMissions !== null && !recentMissions.degraded) {
-      this._recentMissionsPayload.set(recentMissions);
+    // Instances-primary tree leg — the F-5-pinned production write.
+    // ``null`` (per-leg failure) retains the last good tree.
+    if (instances !== null) {
+      this._instancesPayload.set(instances);
     }
     const liveMissionsDegraded = liveMissions !== null && liveMissions.degraded;
-    const recentMissionsDegraded = recentMissions !== null && recentMissions.degraded;
     if (liveMissionsDegraded) this.onLegError('liveMissions', 'degraded envelope');
-    if (recentMissionsDegraded) this.onLegError('recentMissions', 'degraded envelope');
     const anyNull =
       active === null ||
       recent === null ||
       liveMissions === null ||
-      recentMissions === null ||
+      instances === null ||
       deferBlocked === null ||
-      liveMissionsDegraded ||
-      recentMissionsDegraded;
+      liveMissionsDegraded;
     if (!anyNull) this.lastIntakeError.set(null);
     if (
       active !== null ||
       recent !== null ||
       (liveMissions !== null && !liveMissions.degraded) ||
-      (recentMissions !== null && !recentMissions.degraded) ||
+      instances !== null ||
       deferBlocked !== null
     ) {
       this._lastFetchAt.set(Date.now());
@@ -815,37 +867,35 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ],
         2
       );
-      component.applyFetchResult([], [], twoPayload, twoPayload, null);
+      component.applyFetchResult([], [], twoPayload, [], null);
       expect(component.liveMissionCount()).toBe(2);
-      expect(component.missionsList().length).toBe(2);
+      expect(component.liveMissionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
 
       // Now the BE returns a degraded envelope on the count leg —
       // empty rows, null total, degraded:true. The intake MUST NOT
-      // write the count leg's signal. The list leg is still healthy
-      // so the panel's payload retains.
+      // write the count leg's signal. The instances leg is still
+      // healthy so the tree payload retains.
       const degradedPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
         undefined,
         { degraded: true }
       );
-      component.applyFetchResult([], [], degradedPayload, twoPayload, null);
+      component.applyFetchResult([], [], degradedPayload, [], null);
       // Last good data retained across the degraded count tick.
       expect(component.liveMissionCount()).toBe(2);
-      expect(component.missionsList().length).toBe(2);
+      expect(component.liveMissionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
-      // The raw recent-payload signal was NOT overwritten either —
-      // the canonical helper's null branch keeps the missions
-      // projection honest. A subsequent healthy tick re-syncs both.
-      const payload = component.lastRecentMissionsPayload();
-      expect(payload).not.toBeNull();
-      expect(payload!.degraded).toBe(false);
+      // The instances payload (empty page) landed — the tree leg is
+      // independent of the missions leg's degradation. A subsequent
+      // healthy tick re-syncs the count.
+      expect(component.lastInstancesPayload().length).toBe(0);
 
-      // The next healthy tick DOES update both signals.
+      // The next healthy tick DOES update the count.
       const zeroPayload = MockJobQueueIndicatorComponent.buildMissionsPayload([], 0);
-      component.applyFetchResult([], [], zeroPayload, zeroPayload, null);
+      component.applyFetchResult([], [], zeroPayload, [], null);
       expect(component.liveMissionCount()).toBe(0);
-      expect(component.missionsList().length).toBe(0);
+      expect(component.liveMissionsList().length).toBe(0);
       expect(component.displayText()).toBe('0/0');
     });
 
@@ -891,13 +941,14 @@ describe('JobQueueIndicatorComponent Logic', () => {
         undefined,
         { degraded: true }
       );
-      component.applyFetchResult([], [], degradedPayload, twoPayload, null);
+      component.applyFetchResult([], [], degradedPayload, [], null);
       expect(component.lastIntakeError()).toBe('liveMissions: degraded envelope');
       // C2/C3 retention stays EXACTLY as-is across the same tick.
       expect(component.liveMissionCount()).toBe(2);
-      expect(component.missionsList().length).toBe(2);
+      expect(component.liveMissionsList().length).toBe(2);
       expect(component.displayText()).toBe('missions: 2');
-      expect(component.lastRecentMissionsPayload()!.degraded).toBe(false);
+      // The instances leg landed independently (empty page, non-null).
+      expect(component.lastInstancesPayload().length).toBe(0);
     });
 
     it('an all-degraded tick freezes lastFetchAt — degraded counts as a failed leg for the freshness stamp', () => {
@@ -1082,7 +1133,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(runningIds).toEqual(['r1', 'r2']);
     });
 
-    it('a pending/queued job in activeJobs reaches the panel’s QUEUED section via buildQueueTree', () => {
+    it('a pending/queued job in activeJobs reaches the panel’s QUEUED section via buildInstanceTree', () => {
       // End-to-end seam pin: the panel receives activeJobs() and
       // routes unattached non-terminal jobs into ``tree().queued``.
       // A pending/queued job with no mission_id MUST land in
@@ -1090,9 +1141,11 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.setActiveJobs([
         createMockJob({ job_id: 'q-orphan', status: 'pending', mission_id: null }),
       ]);
-      // Mirror the panel's buildQueueTree call so the seam is
-      // verifiable without an Angular TestBed harness.
-      const tree = buildQueueTree(component.activeJobs(), [], []);
+      // Mirror the panel's buildInstanceTree call (instances-primary
+      // tree, design V1) so the seam is verifiable without an
+      // Angular TestBed harness. An empty instances page ⇒ no node
+      // matches ⇒ the job is an orphan ⇒ queued.
+      const tree = buildInstanceTree(component.instanceRoots(), component.activeJobs(), []);
       expect(tree.queued.map((j) => j.job_id)).toEqual(['q-orphan']);
     });
 
@@ -1142,15 +1195,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
         expect(templateHtml).toContain('(footerClick)="onFooterClick()"');
       });
 
-      it('binds [missions]="missionsList()" so the panel sees the LEG A + LEG B composition (no third source)', () => {
-        // F-5 structural pin: the panel's [missions] input must come
-        // from the indicator's ``missionsList()`` (the LEG A + LEG B
-        // composition computed). An F-5 revert that re-binds directly
-        // to a single leg (or to the legacy ``missionsPayload()``
-        // signal) would slip past every behavioural test (the
-        // composition would be the same if only one leg had rows)
-        // but the template's wiring would be wrong.
-        expect(templateHtml).toContain('[missions]="missionsList()"');
+      it('binds [instances]="instanceRoots()" so the panel sees the instances-primary tree (design V1)', () => {
+        // F-5 structural pin, re-anchored: the panel's [instances]
+        // input must come from the indicator's ``instanceRoots()``
+        // computed (nested from the instances leg payload). A revert
+        // that re-binds to a mission leg (or drops the binding) would
+        // slip past every behavioural test but leave the template
+        // wiring wrong.
+        expect(templateHtml).toContain('[instances]="instanceRoots()"');
+        // The dropped LEG B must not resurface as a [missions] input.
+        expect(templateHtml).not.toContain('[missions]=');
+      });
+
+      it('binds (instanceClick)="onInstanceClick($event)" — ROW CLICK = NAVIGATE on instance nodes', () => {
+        // Design V1: instance rows navigate. The panel emits
+        // ``instanceClick``; the indicator closes the menu and routes
+        // to /projects/<key>/instances/<id>.
+        expect(templateHtml).toContain('(instanceClick)="onInstanceClick($event)"');
       });
 
       it('anchors the job-queue menu TOP-RIGHT: xPosition="before" on #jobQueueMenu', () => {
@@ -1249,12 +1310,34 @@ describe('JobQueueIndicatorComponent Logic', () => {
         expect(componentTs).not.toMatch(/liveness:\s*'processing,pending,paused',\s*\n\s*limit:\s*1/);
       });
 
-      it('LEG B (recent) still uses listMissions({ limit: 20 })', () => {
-        // LEG B feeds the panel's terminal mission nodes + recentFlat
-        // via the unfiltered ``missions`` page. The list-page limit
-        // must stay at 20 (the brief's panel cap) so the panel
-        // renders consistently.
-        expect(componentTs).toContain('listMissions({ limit: 20 })');
+      it('LEG B (recent content leg) is GONE — the unfiltered listMissions probe must NOT return', () => {
+        // Instances-primary tree (design V1): the unfiltered LEG B
+        // content page was DROPPED — recent terminal mission nodes
+        // are replaced by terminal roots from the instances page. A
+        // revert that re-adds the probe would re-introduce the
+        // dropped machinery (and the F-5 contradiction surface).
+        // Code-shaped needles (``this.jobService.`` receiver +
+        // ``recentMissionsPayload`` signal) so doc-comment mentions
+        // of the retired leg don't false-positive.
+        expect(componentTs).not.toContain('this.jobService.listMissions({ limit: 20 })');
+        expect(componentTs).not.toContain('recentMissionsPayload');
+      });
+
+      it('instances leg uses InstanceService.listInstanceTree(10) (root-paginated page)', () => {
+        // Design V1 leg: GET /api/instances?limit=10 via the
+        // instances service. Dropping the leg (or shrinking it to a
+        // page-less probe) would starve the panel's tree.
+        expect(componentTs).toContain('this.instanceService.listInstanceTree(10)');
+      });
+
+      it('onInstanceClick closes the menu BEFORE mutating tab state and navigates to the instance', () => {
+        // Same order lock as onJobClick/onFooterClick: the surface
+        // drops first, then route state mutates.
+        const closeIdx = componentTs.indexOf('onInstanceClick(node: InstanceNode): void');
+        const navigateIdx = componentTs.indexOf("'/projects',", closeIdx);
+        expect(closeIdx).toBeGreaterThan(-1);
+        expect(navigateIdx).toBeGreaterThan(closeIdx);
+        expect(componentTs).toContain("this.router.navigate([\n      '/projects',");
       });
 
       it('onFooterClick closes the menu BEFORE navigating to /jobs (order-locked)', () => {
@@ -1281,6 +1364,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // has now slipped past review twice; this pin flips a test on
         // any future mirror-only fix.
         expect(componentTs).toContain('liveMissionsPayload.set(');
+      });
+
+      it('applyFetchResults actually writes the instances payload (F-5 production set-site, design V1)', () => {
+        // THE F-5 LESSON PIN (this class escaped twice before) — pin
+        // the REAL production TS for the instances tree payload
+        // write. The mirror performs the equivalent write (proves
+        // the wiring), but if production drifts back to a
+        // never-written signal, ``instanceRoots()`` derives from an
+        // always-empty array → the panel's LIVE CONVERSATIONS +
+        // RECENT sections stay empty forever while the badge and
+        // every mirror test stay green. The pin names the EXACT
+        // production write text inside ``applyFetchResults`` — any
+        // rename/move/revert flips this test.
+        expect(componentTs).toContain('this.instancesPayload.set(instances);');
+        // And the write must feed the derived tree input the
+        // template binds: instancesPayload → instanceRoots.
+        expect(componentTs).toContain('buildInstanceNodes(this.instancesPayload())');
       });
     });
   });
@@ -1508,6 +1608,63 @@ describe('JobQueueIndicatorComponent Logic', () => {
       ]);
       expect(component.lastNavigated!.length).toBe(3);
       expect(component.lastNavigated!.every((s) => s !== null)).toBe(true);
+    });
+  });
+
+  describe('onInstanceClick (instances-primary tree — ROW CLICK = NAVIGATE)', () => {
+    const mirror = () => MockJobQueueIndicatorComponent;
+
+    function mkNode(over: Partial<InstanceRow>): InstanceNode {
+      const row: InstanceRow = {
+        instance_id: 'i-1',
+        agent_id: 'leader',
+        agent_tag: null,
+        status: 'running',
+        parent_id: null,
+        title: null,
+        initiative_message: null,
+        children: [],
+        created_at: '2026-09-08T09:00:00Z',
+        updated_at: '2026-09-08T10:00:00Z',
+        project_id: 'p-1',
+        pinned: false,
+        color_tag: null,
+        icon_tag: null,
+        pinned_at: null,
+        ...over,
+      };
+      return { instance: row, children: [], attachedJobs: [] };
+    }
+
+    it('should close the menu before deciding tab/navigation', () => {
+      component.menuClosedAfterClick = false;
+      component.onInstanceClick(mkNode({}));
+      expect(component.menuClosedAfterClick).toBe(true);
+    });
+
+    it('should open the project tab (resolved from projectNameMap) and navigate to the instance', () => {
+      component.setProjectNameMap(new Map([['p-1', 'My Project']]));
+      component.onInstanceClick(mkNode({ instance_id: 'i-abc', project_id: 'p-1' }));
+      expect(component.lastTabAction).toEqual({ kind: 'add', project_id: 'p-1', name: 'My Project' });
+      expect(component.lastInstanceNavigated).toEqual(['/projects', 'p-1', 'instances', 'i-abc']);
+    });
+
+    it('should fall back to first-8-chars of project_id when the name is missing from projectNameMap', () => {
+      component.onInstanceClick(mkNode({ instance_id: 'i-abc', project_id: 'p123456789' }));
+      expect(component.lastTabAction).toEqual({ kind: 'add', project_id: 'p123456789', name: 'p1234567' });
+      expect(component.lastInstanceNavigated).toEqual(['/projects', 'p123456789', 'instances', 'i-abc']);
+    });
+
+    it('should setActiveTab("all") when project_id is null — the same null-project fallback as onJobClick', () => {
+      component.onInstanceClick(mkNode({ instance_id: 'i-abc', project_id: null }));
+      expect(component.lastTabAction).toEqual({ kind: 'setActive', tabId: 'all' });
+      expect(component.lastInstanceNavigated).toEqual(['/projects', 'all', 'instances', 'i-abc']);
+    });
+
+    it('works identically for a CHILD instance node (nav target is the child id)', () => {
+      const child = mkNode({ instance_id: 'i-kid', parent_id: 'i-root' });
+      component.onInstanceClick(child);
+      expect(component.lastInstanceNavigated).toEqual(['/projects', 'p-1', 'instances', 'i-kid']);
     });
   });
 
@@ -1830,56 +1987,72 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  describe('missionsList signal — feeds the panel', () => {
-    it('exposes the latest successful missions payload', () => {
+  describe('liveMissionsList + instancesPayload — feed the tooltip and the panel tree', () => {
+    it('liveMissionsList exposes the latest successful LEG A rows (tooltip breakdown source)', () => {
       const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
         { mission_id: 'm-1', liveness: 'processing' },
         { mission_id: 'm-2', liveness: 'paused' },
       ]);
-      component.applyFetchResult([], [], payload, payload, null);
-      expect(component.missionsList().length).toBe(2);
-      expect(component.missionsList().map((m) => m.mission_id).sort()).toEqual(['m-1', 'm-2']);
+      component.applyFetchResult([], [], payload, [], null);
+      expect(component.liveMissionsList().length).toBe(2);
+      expect(component.liveMissionsList().map((m) => m.mission_id).sort()).toEqual(['m-1', 'm-2']);
     });
 
-    it('retains the last known missions across a degraded poll', () => {
+    it('liveMissionsList retains the last known rows across a degraded poll', () => {
       const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
         { mission_id: 'm-1', liveness: 'processing' },
       ]);
-      component.applyFetchResult([], [], payload, payload, null);
+      component.applyFetchResult([], [], payload, [], null);
       component.applyFetchResult([], [], null, null, null);
-      expect(component.missionsList().length).toBe(1);
-      expect(component.missionsList()[0].mission_id).toBe('m-1');
+      expect(component.liveMissionsList().length).toBe(1);
+      expect(component.liveMissionsList()[0].mission_id).toBe('m-1');
+    });
+
+    it('instancesPayload exposes the latest successful instances page (panel tree source)', () => {
+      const rows = MockJobQueueIndicatorComponent.buildInstanceRows([
+        { instance_id: 'i-1' },
+        { instance_id: 'i-2', status: 'completed' as const },
+      ]);
+      const payload = MockJobQueueIndicatorComponent.buildMissionsPayload([
+        { mission_id: 'm-1', liveness: 'processing' },
+      ]);
+      component.applyFetchResult([], [], payload, rows, null);
+      expect(component.lastInstancesPayload().length).toBe(2);
+      expect(component.instanceRoots().length).toBe(2);
     });
   });
 
-  // ── F-5 mission-tree single-source pin (2026-09-08) ──────────────────────
+  // ── F-5 mission-tree single-source pin — historical (2026-09-08) ──────────
   //
-  // F-5 closed: the badge's live-mission count came from the
-  // filter-aware LEG A (limit=20, total=N live), but the tooltip's
-  // per-liveness breakdown AND the panel's LIVE MISSIONS rows
-  // derived from the unfiltered LEG B (limit=20, top-20 by
-  // last_activity). When the unfiltered page's top-20 happened to be
-  // all-terminal, the badge read "7" while the live section was empty
-  // AND the breakdown said "(processing 0, pending 0, paused 0)" — a
-  // structural contradiction (tester-dataset repro).
+  // F-5 (closed): the badge's live-mission count came from the
+  // filter-aware LEG A (``limit: 20``, total = N live), but the
+  // tooltip's per-liveness breakdown AND the panel's LIVE MISSIONS
+  // rows derived from the unfiltered LEG B (``limit: 20``, top-20 by
+  // ``last_activity``). When the unfiltered page's top-20 happened to
+  // be all-terminal, the badge read "7" while the live section was
+  // empty AND the breakdown said "(processing 0, pending 0, paused 0)"
+  // — a structural contradiction (tester-dataset repro).
   //
-  // The fix unifies the live consumers on ONE source (LEG A):
-  // ``listMissions({ liveness: 'processing,pending,paused', limit: 20 })``
-  // — the filter-aware page. Every live row the badge counts MUST
-  // appear in the live section AND tally into the breakdown. LEG B
-  // (the unfiltered page) feeds only the panel's RECENT terminal
-  // mission nodes + recentFlat; live rows that appear in LEG B are
-  // filtered out before they reach the panel, so they cannot bleed
-  // into the LIVE MISSIONS section. The two sets are disjoint by
-  // construction: leg A is live-only and filtered leg B is
-  // terminal-only.
+  // The fix unified the live consumers on ONE source (LEG A) so every
+  // live row the badge counts MUST appear in the live section AND
+  // tally into the breakdown.
+  //
+  // Historical note: the LEG B content page was DROPPED entirely in
+  // commit a895cac5 when the panel migrated to the instances-primary
+  // tree (``feature/job-queue-instance-tree``, design V1). Recent
+  // terminal mission nodes were replaced by terminal roots of the
+  // instances page; the unfiltered LEG B poll is no longer wired.
+  // LEG A is the sole mission feed that remains (badge + tooltip).
+  // The instances leg (``/api/instances?limit=10``) now feeds the
+  // panel tree.
 
-  describe('F-5: live consumers (count + live rows + breakdown) all read from LEG A — no contradiction possible', () => {
-    it('badge shows the LEG A total (live=7) even when LEG B total is much larger (total=82)', () => {
-      // F-1 carryover repro: live count = 7 (filter-aware total from
-      // LEG A), LEG B total = 82 (unfiltered page total including
-      // terminal missions). The badge MUST use LEG A — never LEG B —
-      // so the visible number stays honest.
+  describe('F-5 legacy: badge + tooltip still read from LEG A; the panel tree reads the instances leg', () => {
+    it('badge shows the LEG A total (live=7) even when the instances page carries many terminal roots', () => {
+      // Former F-1/F-5 carryover, re-anchored on the new leg pair:
+      // live count = 7 (filter-aware total from LEG A); the
+      // instances leg returns a page of 82 rows (mostly terminal
+      // conversations). The badge MUST use LEG A — never the
+      // instances page — so the visible number stays honest.
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [
           { mission_id: 'live-1', liveness: 'processing' },
@@ -1892,46 +2065,35 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ],
         7
       );
-      // The recent leg's payload is much larger — it includes terminal
-      // (completed/failed/cancelled) missions that the live filter
-      // excluded. The first 7 rows happen to be live (BE orders by
-      // last_activity_at desc), which is exactly the F-5 bug-class
-      // scenario where the OLD wiring would have let LEG B's live rows
-      // leak into the panel's live section + the breakdown.
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      const instanceRows = MockJobQueueIndicatorComponent.buildInstanceRows(
         Array.from({ length: 82 }, (_, i) => ({
-          mission_id: `m-${i}`,
-          liveness: i < 7 ? ('processing' as const) : ('completed' as const),
-        })),
-        82
+          instance_id: `i-${i}`,
+          status: (i < 7 ? 'running' : 'completed') as InstanceRow['status'],
+        }))
       );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
-      // Badge shows 7 (LEG A), NOT 82 (LEG B).
+      component.applyFetchResult([], [], livePayload, instanceRows, null);
+      // Badge shows 7 (LEG A), NOT 82 (instances page size).
       expect(component.liveMissionCount()).toBe(7);
       expect(component.missionsSegmentText()).toBe('7');
       // Breakdown reads from LEG A only — 4 processing, 2 paused, 1
-      // pending. (LEG B's 7 live rows are FILTERED OUT before reaching
-      // the panel's [missions] input AND the breakdown, so LEG B's 7
-      // processing rows never contribute.)
+      // pending. The instances page never contributes to the
+      // tooltip's per-liveness split.
       const bd = component.liveMissionBreakdown();
       expect(bd['processing']).toBe(4);
       expect(bd['paused']).toBe(2);
       expect(bd['pending']).toBe(1);
-      // Panel's [missions] input = LEG A (7 live) + LEG B filtered to
-      // terminal (75 completed) = 82 rows total. ``buildQueueTree``
-      // will route LEG A's 7 to ``tree.liveMissions`` and the 75
-      // terminal ones to ``tree.recent`` — disjoint by construction.
-      expect(component.missionsList().length).toBe(82);
+      // Panel tree input = the nested instance roots (82 flat rows →
+      // 82 roots — none nested in this fixture).
+      expect(component.instanceRoots().length).toBe(82);
       // Sanity pin: LEG A's payload is preserved as-is.
       expect(component.lastLiveMissionsPayload()!.total).toBe(7);
-      expect(component.lastRecentMissionsPayload()!.total).toBe(82);
+      expect(component.lastInstancesPayload().length).toBe(82);
     });
 
     it('live count is correct when live missions > 20 (count comes from filtered total, NOT the 20-item page)', () => {
       // 25 live missions. The backend clamps to ``limit:20`` so LEG A
       // returns its top 20 rows (with ``total:25``); the badge's
-      // count reads ``total`` so it shows 25, NOT 20 (the page size)
-      // and NOT a misleading 75 from LEG B.
+      // count reads ``total`` so it shows 25, NOT 20 (the page size).
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         Array.from({ length: 20 }, (_, i) => ({
           mission_id: `live-${i}`,
@@ -1939,27 +2101,14 @@ describe('JobQueueIndicatorComponent Logic', () => {
         })),
         25
       );
-      // The recent leg returns its first 20 — ``total`` is the
-      // unfiltered total (would have falsely inflated the badge under
-      // the OLD wiring). All 20 are processing so LEG B filtered to
-      // terminal = 0.
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        Array.from({ length: 20 }, (_, i) => ({
-          mission_id: `m-${i}`,
-          liveness: 'processing' as const,
-        })),
-        75
-      );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
-      // Badge shows 25 (LEG A's ``total``), NOT 75 (LEG B's total),
-      // NOT 20 (LEG A's page size).
+      component.applyFetchResult([], [], livePayload, [], null);
+      // Badge shows 25 (LEG A's ``total``), NOT 20 (LEG A's page size).
       expect(component.liveMissionCount()).toBe(25);
       expect(component.missionsSegmentText()).toBe('25');
       // Breakdown covers the fetched 20 of LEG A — the cosmetic S4
       // ceiling (live > 20): count uses LEG A's ``total`` (=25) so
       // the badge stays honest; breakdown covers LEG A's fetched 20
-      // rows (the page ceiling). Per the brief, this is acceptable;
-      // only adjust tooltip wording if trivial.
+      // rows (the page ceiling).
       const bd = component.liveMissionBreakdown();
       expect(bd['processing']).toBe(20);
     });
@@ -1970,132 +2119,112 @@ describe('JobQueueIndicatorComponent Logic', () => {
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], onePayload, onePayload, null);
+      component.applyFetchResult([], [], onePayload, [], null);
       expect(component.liveMissionCount()).toBe(1);
-      // Now LEG A degrades (LEG B is still healthy so the panel
-      // keeps its terminal content).
+      // Now LEG A degrades (the instances leg is still healthy so
+      // the panel keeps its tree).
       const degradedLive = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [],
         undefined,
         { degraded: true }
       );
-      const healthyRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [{ mission_id: 'live-1', liveness: 'processing' }],
-        1
-      );
-      component.applyFetchResult([], [], degradedLive, healthyRecent, null);
+      component.applyFetchResult([], [], degradedLive, [], null);
       // The flag is set (LEG A degraded) AND the count signal
       // retains the last good value.
       expect(component.lastIntakeError()).toBe('liveMissions: degraded envelope');
       expect(component.liveMissionCount()).toBe(1);
     });
 
-    it('LEG A catchError failure does NOT kill LEG B (leg independence)', () => {
-      // Healthy LEG B first so the panel has rows to retain.
-      // Both legs start with the same 1-row payload so the panel's
-      // composition is well-defined (LEG A = 1 live, LEG B filtered
-      // to terminal = 0 → 1 row total).
-      const healthyRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
+    it('LEG A catchError failure does NOT kill the instances leg (leg independence)', () => {
+      // Seed a healthy state (1 live mission + 1 root).
+      const healthy = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], healthyRecent, healthyRecent, null);
-      expect(component.missionsList().length).toBe(1);
+      component.applyFetchResult([], [], healthy, MockJobQueueIndicatorComponent.buildInstanceRows([{ instance_id: 'i-a' }]), null);
+      expect(component.instanceRoots().length).toBe(1);
       // Now LEG A fails (per-leg catchError fires FIRST — sets
       // ``lastIntakeError`` — and the forkJoin next-handler receives
-      // ``liveMissions: null``). LEG B is still healthy so it UPDATES
-      // the panel's terminal payload (LEG B uses TERMINAL liveness
-      // here so the filter-to-terminal pass lets them reach the
-      // panel's RECENT section — proves LEG B updated independently).
+      // ``liveMissions: null``). The instances leg is still healthy
+      // so it UPDATES the tree payload independently.
       component.onLegError('liveMissions', new Error('count 500'));
-      const updatedRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [
-          { mission_id: 'done-1', liveness: 'completed' },
-          { mission_id: 'done-2', liveness: 'failed' },
-        ],
-        2
-      );
-      component.applyFetchResult([], [], null, updatedRecent, null);
+      const updatedRows = MockJobQueueIndicatorComponent.buildInstanceRows([
+        { instance_id: 'i-a' },
+        { instance_id: 'i-b', status: 'completed' as const },
+      ]);
+      component.applyFetchResult([], [], null, updatedRows, null);
       // The flag remains set from the catchError call — LEG A's
       // error is recorded.
       expect(component.lastIntakeError()).toBe('liveMissions: count 500');
-      // LEG B updated — the panel's terminal content reflects the
-      // new, larger payload (2 terminal missions) PLUS LEG A's
-      // retained 1 live row → 3 rows total (LEG A 1 + LEG B
-      // filtered-to-terminal 2).
-      expect(component.missionsList().length).toBe(3);
+      // The instances leg updated — the tree reflects the new page
+      // (2 roots) while the badge retains its last good count (1).
+      expect(component.instanceRoots().length).toBe(2);
+      expect(component.liveMissionCount()).toBe(1);
     });
 
-    it('LEG B degraded envelope retains the LAST good list (panel never flashes empty)', () => {
+    it('instances leg failure retains the LAST good tree (panel never flashes empty)', () => {
       const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], onePayload, onePayload, null);
-      expect(component.missionsList().length).toBe(1);
-      // Now LEG B degrades while LEG A is still healthy.
-      const degradedRecent = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [],
-        undefined,
-        { degraded: true }
-      );
-      component.applyFetchResult([], [], onePayload, degradedRecent, null);
-      expect(component.lastIntakeError()).toBe('recentMissions: degraded envelope');
-      // The list payload retains the last good value — the panel
+      const seeded = MockJobQueueIndicatorComponent.buildInstanceRows([{ instance_id: 'i-a' }]);
+      component.applyFetchResult([], [], onePayload, seeded, null);
+      expect(component.instanceRoots().length).toBe(1);
+      // Now the instances leg fails — the per-leg catchError fires
+      // first (recorded), then the next-handler receives ``null`` —
+      // while LEG A is still healthy.
+      component.onLegError('instances', new Error('tree 500'));
+      component.applyFetchResult([], [], onePayload, null, null);
+      expect(component.lastIntakeError()).toBe('instances: tree 500');
+      // The tree payload retains the last good value — the panel
       // never flashes empty.
-      expect(component.missionsList().length).toBe(1);
+      expect(component.instanceRoots().length).toBe(1);
     });
 
-    it('LEG B catchError failure does NOT kill LEG A (leg independence)', () => {
+    it('instances catchError failure does NOT kill LEG A (leg independence)', () => {
       // Seed a healthy live payload.
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         1
       );
-      component.applyFetchResult([], [], livePayload, livePayload, null);
+      component.applyFetchResult([], [], livePayload, [], null);
       expect(component.liveMissionCount()).toBe(1);
-      // Now LEG B fails (per-leg catchError fires FIRST — sets
-      // ``lastIntakeError`` — and the forkJoin next-handler receives
-      // ``recentMissions: null``). LEG A is still healthy so it
+      // Now the instances leg fails; LEG A is still healthy so it
       // UPDATES the badge's N.
-      component.onLegError('recentMissions', new Error('list 500'));
+      component.onLegError('instances', new Error('list 500'));
       const updatedLive = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [{ mission_id: 'live-1', liveness: 'processing' }],
         3
       );
       component.applyFetchResult([], [], updatedLive, null, null);
-      // The flag remains set from the catchError call — LEG B's
-      // error is recorded.
-      expect(component.lastIntakeError()).toBe('recentMissions: list 500');
+      // The flag remains set from the catchError call — the
+      // instances leg's error is recorded.
+      expect(component.lastIntakeError()).toBe('instances: list 500');
       // LEG A updated — the badge's N reflects the new count.
       expect(component.liveMissionCount()).toBe(3);
     });
   });
 
-  // ── F-5 mandatory pins (2026-09-08, mission-tree single-source) ──────
+  // ── F-5 legacy pins re-anchored on the instances-primary tree ────────
   //
-  // Three pins prove the F-5 wiring is structurally impossible to
-  // bypass. Each is a separate describe so a regression lands on the
-  // exact failure mode:
+  // The original three pins proved the LEG A/LEG B split was
+  // structurally sound. LEG B is GONE (replaced by the instances
+  // page); the pins survive re-anchored on the new invariant set:
   //
-  //   * single-source pin — live-section rows + tooltip breakdown +
-  //     header count all sourced from LEG A. A revert that lets ANY
-  //     consumer read LEG B (or the old limit:1 shape) flips one of
-  //     these.
-  //   * tester-dataset pin — unfiltered top-20 all-terminal + 7 live
-  //     missions → LIVE MISSIONS shows all 7, tooltip shows the REAL
-  //     split (not the broken "0/0/0"). The exact tester-dataset
-  //     repro that surfaced the bug.
-  //   * structural-disjointness pin — live rows from LEG B are
-  //     filtered out before the panel sees them, so they cannot bleed
-  //     into the LIVE MISSIONS section even when LEG B's top-N are
-  //     live.
+  //   * single-source pin — badge count + tooltip breakdown remain
+  //     LEG-A-only; the instances page feeds ONLY the tree.
+  //   * tester-dataset pin — the legacy tester dataset (7 live
+  //     missions, all-terminal unfiltered page) still produces a
+  //     consistent badge + tooltip, and the tree payload is set.
+  //   * retention pin — an instances-leg failure retains the last
+  //     good tree and never fabricates an empty one (the F-5
+  //     "false idle" class, tree edition).
 
-  describe('F-5 single-source pin: count + live rows + breakdown all read from LEG A', () => {
+  describe('F-5 single-source pin: badge + breakdown read LEG A; the tree reads the instances leg', () => {
     it('badge count reads from LEG A — header N is total ?? missions.length of the live page', () => {
-      // LEG A = 7 live (total=7), LEG B = 82 rows (75 terminal + 7
-      // live that appear in the top-20). The badge MUST read 7 from
-      // LEG A's total — never from LEG B's rows or total.
+      // LEG A = 7 live (total=7); the instances page = 82 roots.
+      // The badge MUST read 7 from LEG A's total — never from the
+      // instances page's size.
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         Array.from({ length: 7 }, (_, i) => ({
           mission_id: `live-${i}`,
@@ -2103,29 +2232,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
         })),
         7
       );
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        Array.from({ length: 82 }, (_, i) => ({
-          mission_id: `m-${i}`,
-          liveness: i < 7 ? ('processing' as const) : ('completed' as const),
-        })),
-        82
+      const instanceRows = MockJobQueueIndicatorComponent.buildInstanceRows(
+        Array.from({ length: 82 }, (_, i) => ({ instance_id: `i-${i}` }))
       );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      component.applyFetchResult([], [], livePayload, instanceRows, null);
       // Single-source assertion #1: badge N = LEG A's total (7), NOT
-      // LEG B's total (82) or LEG B's row count (82).
+      // the instances page size (82).
       expect(component.liveMissionCount()).toBe(7);
       expect(component.missionsSegmentText()).toBe('7');
       // Sanity: LEG A's payload is the one being read for the count.
       expect(component.lastLiveMissionsPayload()!.total).toBe(7);
     });
 
-    it('liveMissionBreakdown reads from LEG A — NOT from the panel\'s combined missionsList()', () => {
-      // LEG A = 3 processing + 2 paused (5 total live). LEG B's top
-      // page contains 2 LIVE rows (which are filtered out before the
-      // panel sees them) + 18 terminal rows. The breakdown must
-      // count the LEG A split (3 processing + 2 paused), NOT the
-      // combined total (which would be 5 processing + 2 paused — 7,
-      // a different number).
+    it('liveMissionBreakdown reads from LEG A — the instances page never contributes', () => {
+      // LEG A = 3 processing + 2 paused (5 total live). The
+      // instances page carries 20 terminal roots that would add
+      // nothing to the breakdown anyway — the point is the
+      // breakdown counts LEG A and nothing else.
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [
           { mission_id: 'live-1', liveness: 'processing' },
@@ -2136,25 +2259,15 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ],
         5
       );
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [
-          // 2 LIVE rows at the top of LEG B (would be the F-5 bug
-          // class — they used to leak into the live section).
-          { mission_id: 'leak-1', liveness: 'processing' },
-          { mission_id: 'leak-2', liveness: 'paused' },
-          // 18 terminal rows.
-          ...Array.from({ length: 18 }, (_, i) => ({
-            mission_id: `done-${i}`,
-            liveness: 'completed' as MissionLiveness,
-          })),
-        ],
-        20
+      const instanceRows = MockJobQueueIndicatorComponent.buildInstanceRows(
+        Array.from({ length: 20 }, (_, i) => ({
+          instance_id: `done-${i}`,
+          status: 'completed' as const,
+        }))
       );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
+      component.applyFetchResult([], [], livePayload, instanceRows, null);
       // Single-source assertion #2: breakdown reflects LEG A only
-      // (3 processing + 2 paused = 5). LEG B's 2 live rows do NOT
-      // contribute — even though the panel's combined missionsList
-      // would include them if they were not filtered out.
+      // (3 processing + 2 paused = 5).
       const bd = component.liveMissionBreakdown();
       expect(bd['processing']).toBe(3);
       expect(bd['paused']).toBe(2);
@@ -2164,65 +2277,29 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.liveMissionsList().length).toBe(5);
     });
 
-    it('panel\'s [missions] input is the LEG A + LEG B-filtered composition — disjoint by construction', () => {
-      // LEG A = 5 live rows. LEG B = 5 LIVE + 15 terminal rows.
-      // Panel's [missions] = 5 (LEG A) + 15 (LEG B filtered to
-      // terminal) = 20 rows total. LEG B's 5 LIVE rows MUST NOT
-      // appear in the panel's live count.
-      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        Array.from({ length: 5 }, (_, i) => ({
-          mission_id: `live-${i}`,
-          liveness: 'processing' as MissionLiveness,
-        })),
-        5
-      );
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [
-          ...Array.from({ length: 5 }, (_, i) => ({
-            mission_id: `leak-${i}`,
-            liveness: 'processing' as MissionLiveness,
-          })),
-          ...Array.from({ length: 15 }, (_, i) => ({
-            mission_id: `done-${i}`,
-            liveness: 'completed' as MissionLiveness,
-          })),
-        ],
-        20
-      );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
-      // Panel composition = LEG A (5) + LEG B filtered to terminal
-      // (15) = 20.
-      expect(component.missionsList().length).toBe(20);
-      // None of LEG B's "leak-N" rows reach the panel's combined
-      // input — they were filtered out by the live-only filter on
-      // LEG B's contribution to the panel.
-      const leakIds = component.missionsList()
-        .map((m) => m.mission_id)
-        .filter((id) => id?.startsWith('leak-'));
-      expect(leakIds.length).toBe(0);
-      // All LEG A's "live-N" rows DO reach the panel.
-      const liveIds = component.missionsList()
-        .map((m) => m.mission_id)
-        .filter((id) => id?.startsWith('live-'));
-      expect(liveIds.length).toBe(5);
+    it('the panel tree input comes from the instances leg — end-to-end payload→roots write', () => {
+      // F-5 lesson class: the payload signal must be WRITTEN by the
+      // intake so the derived roots actually change. A flat page
+      // with a parent and its child nests into ONE root with one
+      // child.
+      const instanceRows = MockJobQueueIndicatorComponent.buildInstanceRows([
+        { instance_id: 'root-1', children: ['kid-1'] },
+        { instance_id: 'kid-1', parent_id: 'root-1' },
+        { instance_id: 'solo' },
+      ]);
+      component.applyFetchResult([], [], null, instanceRows, null);
+      expect(component.lastInstancesPayload().length).toBe(3);
+      expect(component.instanceRoots().length).toBe(2); // root-1 (nested kid-1) + solo
+      expect(component.instanceRoots()[0].children[0].instance.instance_id).toBe('kid-1');
     });
   });
 
-  describe('F-5 tester-dataset pin: 7 live + unfiltered top-20 all-terminal → live section non-empty + correct tooltip', () => {
-    it('live section + breakdown + header count are all consistent when LEG B is all-terminal', () => {
-      // Tester-dataset repro: the unfiltered top-20 (LEG B) is
-      // entirely terminal — this is the exact payload shape that
-      // triggered the bug. LEG A has 7 live with a real mix:
-      // processing 3, pending 2, paused 2.
-      //
-      // Pre-fix behaviour (the bug): badge = 7, tooltip =
-      // "7 (processing 0, pending 0, paused 0)", live section
-      // EMPTY. The breakdown was reading from LEG B's empty-live
-      // rows, contradicting the header count.
-      //
-      // Post-fix behaviour: badge = 7, tooltip =
-      // "7 (processing 3, pending 2, paused 2)", live section
-      // NON-EMPTY (7 rows from LEG A).
+  describe('F-5 tester-dataset pin: 7 live + all-terminal instances page → consistent badge, tooltip, tree', () => {
+    it('badge + breakdown + tooltip stay consistent and the instances payload lands', () => {
+      // Tester-dataset repro, re-anchored: LEG A has 7 live with a
+      // real mix (processing 3, pending 2, paused 2); the instances
+      // page is entirely terminal conversations (the shape that
+      // used to trigger the F-5 self-contradiction through LEG B).
       const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
         [
           { mission_id: 'live-1', liveness: 'processing' },
@@ -2235,92 +2312,63 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ],
         7
       );
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+      const instanceRows = MockJobQueueIndicatorComponent.buildInstanceRows(
         Array.from({ length: 20 }, (_, i) => ({
-          mission_id: `done-${i}`,
-          liveness: 'completed' as MissionLiveness,
-        })),
-        20
+          instance_id: `done-${i}`,
+          status: 'completed' as const,
+        }))
       );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
-      // Header: badge shows 7 (LEG A total), NOT 20 (LEG B total).
+      component.applyFetchResult([], [], livePayload, instanceRows, null);
+      // Header: badge shows 7 (LEG A total), NOT 20 (page size).
       expect(component.liveMissionCount()).toBe(7);
       expect(component.missionsSegmentText()).toBe('7');
-      // Tooltip: real split from LEG A (3 + 2 + 2), NOT the broken
-      // "0 + 0 + 0" the pre-fix code produced.
+      // Tooltip: real split from LEG A (3 + 2 + 2).
       const bd = component.liveMissionBreakdown();
       expect(bd['processing']).toBe(3);
       expect(bd['pending']).toBe(2);
       expect(bd['paused']).toBe(2);
       const tt = component.tooltipText();
       expect(tt).toContain('Live missions: 7 (processing 3, pending 2, paused 2)');
-      // Live section: 7 live rows from LEG A, NON-EMPTY.
-      const liveSection = component.missionsList().filter((m) =>
-        m.liveness === 'processing' || m.liveness === 'pending' || m.liveness === 'paused'
-      );
-      expect(liveSection.length).toBe(7);
-      // Panel composition: LEG A (7 live) + LEG B filtered to
-      // terminal (20 completed) = 27 rows total.
-      expect(component.missionsList().length).toBe(27);
+      // Tree: the instances payload landed (20 terminal roots — the
+      // RECENT section's source).
+      expect(component.lastInstancesPayload().length).toBe(20);
+      expect(component.instanceRoots().length).toBe(20);
     });
   });
 
-  describe('F-5 structural-disjointness pin: LEG B live rows are filtered out before the panel sees them', () => {
-    it('even when LEG B is ALL live rows, the panel\'s live section stays sourced from LEG A only', () => {
-      // Adversarial payload: LEG B returns 20 LIVE rows (no
-      // terminal). The F-5 fix must filter them all out so the
-      // panel's live count and breakdown stay sourced from LEG A.
-      // LEG A's total is 7 (3 processing + 2 pending + 2 paused);
-      // LEG B's 20 rows are 10 processing + 5 pending + 5 paused.
-      // Pre-fix: live section would show 27 rows and breakdown
-      // would say 13 processing + 7 pending + 7 paused — wildly
-      // out of sync with the badge's 7. Post-fix: live section =
-      // 7 rows (LEG A only) and breakdown matches LEG A.
-      const livePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [
-          { mission_id: 'a-1', liveness: 'processing' },
-          { mission_id: 'a-2', liveness: 'processing' },
-          { mission_id: 'a-3', liveness: 'processing' },
-          { mission_id: 'a-4', liveness: 'pending' },
-          { mission_id: 'a-5', liveness: 'pending' },
-          { mission_id: 'a-6', liveness: 'paused' },
-          { mission_id: 'a-7', liveness: 'paused' },
-        ],
-        7
+  describe('instances-leg retention pin: a failed leg never fabricates an empty tree', () => {
+    it('a null instances leg leaves the previous payload untouched while other legs keep flowing', () => {
+      // Seed a good tree (2 roots, one nested).
+      const seeded = MockJobQueueIndicatorComponent.buildInstanceRows([
+        { instance_id: 'root', children: ['kid'] },
+        { instance_id: 'kid', parent_id: 'root' },
+      ]);
+      const onePayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
+        [{ mission_id: 'live-1', liveness: 'processing' }],
+        1
       );
-      const recentPayload = MockJobQueueIndicatorComponent.buildMissionsPayload(
-        [
-          ...Array.from({ length: 10 }, (_, i) => ({
-            mission_id: `b-${i}`,
-            liveness: 'processing' as MissionLiveness,
-          })),
-          ...Array.from({ length: 5 }, (_, i) => ({
-            mission_id: `b-${10 + i}`,
-            liveness: 'pending' as MissionLiveness,
-          })),
-          ...Array.from({ length: 5 }, (_, i) => ({
-            mission_id: `b-${15 + i}`,
-            liveness: 'paused' as MissionLiveness,
-          })),
-        ],
-        20
+      component.applyFetchResult([], [], onePayload, seeded, null);
+      expect(component.instanceRoots().length).toBe(1);
+      expect(component.instanceRoots()[0].children.length).toBe(1);
+      // Next tick: the instances leg FAILS — the per-leg catchError
+      // fires first (recorded like the real component's
+      // ``recordLegError``) — and the forkJoin next-handler receives
+      // ``instances: null``. The tree payload MUST retain the last
+      // good value.
+      component.onLegError('instances', new Error('instances 500'));
+      component.applyFetchResult(
+        [createMockJob({ status: 'processing' })],
+        [createMockJob({ status: 'completed' })],
+        onePayload,
+        null,
+        null
       );
-      component.applyFetchResult([], [], livePayload, recentPayload, null);
-      // Badge: 7 (LEG A total). NOT 27 (LEG A rows + LEG B live).
-      expect(component.liveMissionCount()).toBe(7);
-      // Breakdown: LEG A only. NOT 13 + 7 + 7 = 27.
-      const bd = component.liveMissionBreakdown();
-      expect(bd['processing']).toBe(3);
-      expect(bd['pending']).toBe(2);
-      expect(bd['paused']).toBe(2);
-      // Panel composition: LEG A (7 live) + LEG B filtered to
-      // terminal (0, since LEG B had no terminal) = 7 rows total.
-      // The 20 LEG B LIVE rows are dropped — they never reach the
-      // panel.
-      expect(component.missionsList().length).toBe(7);
-      // All rows in the panel start with "a-" (LEG A), NOT "b-".
-      const panelIds = component.missionsList().map((m) => m.mission_id);
-      expect(panelIds.every((id) => id?.startsWith('a-'))).toBe(true);
+      expect(component.lastIntakeError()).toBe('instances: instances 500');
+      expect(component.instanceRoots().length).toBe(1);
+      expect(component.instanceRoots()[0].children[0].instance.instance_id).toBe('kid');
+      // The healthy jobs legs still updated.
+      expect(component.activeJobs().length).toBe(1);
+      expect(component.recentJobs().length).toBe(1);
     });
   });
 

@@ -114,8 +114,9 @@
         [recentJobs]="recentJobs()"
         [projectNameMap]="projectNameMap()"
         [liveMissionCount]="liveMissionCount()"
-        [missions]="missionsList()"
+        [instances]="instanceRoots()"
         (jobClick)="onJobClick($event)"
+        (instanceClick)="onInstanceClick($event)"
         (footerClick)="onFooterClick()">
       </app-job-queue-panel>
     </ng-template>

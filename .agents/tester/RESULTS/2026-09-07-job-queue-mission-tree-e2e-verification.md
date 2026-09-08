@@ -251,3 +251,54 @@ Live-stack verification (own daemon on `ensemble_dev`, 7 live missions confirmed
 | 3 Regression sanity | ✅ | Esc closes; pill segmented `0/8 │ 7`; **0 pageerrors**; console = 12 known-bucket lines only (Plane CSP + code-server iframe) |
 
 Bracket: `mission_tree_fe_targeted` **PASS 305/305** (3/3 suites; +5 growth; both touched suites individually green — indicator 104, panel 99, job.model 102). Honest gaps: defer-icon state forced via route-intercept (real AMBER production defer not exercised — geometry identical); degraded multi-cycle not re-tested this round (covered in F-5 round).
+
+---
+
+## Worktree Round — instances-primary tree @ `feature/job-queue-instance-tree` `31903c6d` (2026-09-08) — **6/6 acceptance behaviors PASS; 2 defects found (F1 🟠, F2 🟠) → merge-readiness: FIX-FIRST recommended**
+
+Worktree: `agents-ensemble-wt-instance-tree` (main checkout untouched). Scope: 3 commits (`a895cac5` → `2e508abb` → `31903c6d`) all **frontend-only** (24/24 paths); tsc exit 0. Stack: daemon booted FROM the worktree on fresh disposable PG `ensemble_wt_it` (env-hard-overridden; boot log verified; **zero ensemble_prod connections**; checkpointer config inside scratch DATA_DIR corrected to the same disposable DB); FE from worktree `frontend/`; zero LLM calls (job processor idle throughout); deterministic direct-SQL seeding (7 SMOKE-IT-DISPOSABLE instances: 5 roots incl. 1 terminal + 2 children; 5 receipts: 1 root-bound active, 2 child-bound active, 2 terminal).
+
+**Empty-state (fresh empty DB): ✅ PASS** — honest idle pill, "Queue is currently idle", LIVE CONVERSATIONS absent-by-design with clear empty message, no fake data/spinner/error, 0 pageerrors.
+
+| # | Acceptance | Verdict | Evidence |
+|---|---|---|---|
+| 1 | Root-conversation tree | ✅ PASS **with defect F1** | DOM: ROOT-A(L1)→CHILD-A1/A2(L2)→receipt `job-ar` attached under ROOT-A; ROOT-B→CHILD-B1; ROOT-C; terminal ROOT-D→Recent collapsed. Nesting proven (aria-level + 24px indent). **BUT child-bound receipts (job-a1/b1) land in Queued/flat, NOT under their child nodes — F1** |
+| 2 | Navigate-to-instance | ⚠️ PARTIAL | root-click → `/projects/all/instances/<root>` + menu closed ✓; child-click → own URL + closed ✓; **Enter navigates but menu STAYS OPEN (reproduced 2×) — F2**; chevron = real `<button>` with aria-expanded, toggles without navigating ✓ |
+| 3 | First-2 auto-expand | ✅ PASS | fresh reload: ROOT-A ✓, ROOT-B ✓ expanded; ROOT-C collapsed; terminal ROOT-D collapsed — exactly the rule |
+| 4 | Intent survives | ✅ PASS | manual expand C + collapse A → unchanged after 22s and ~32s (≥2 poll cycles); NEW live ROOT-E seeded mid-test → appeared at top and auto-expanded (became untouched top-2), **C stayed expanded, A stayed collapsed — no clobber** |
+| 5 | Never-hide | ✅ PASS | 5/5 receipts visible: ar under ROOT-A (Live), d1 under ROOT-D (Recent), a1+b1 Queued, a2 flat Recent — zero invisible |
+| 6 | No regressions | ✅ PASS | 1440×900 no h-scroll (doc Δ=0; panel 552==552 internal); anchoring delta **0px**, fully on-screen, leftward+downward; degraded legs honest (tree retained 8 nodes/3 receipts + stale markers; jobs segment retained "3/3"; both recovered); 0 pageerrors |
+
+**Bracket**: `mission_tree_fe_targeted` (worktree) **PASS 351/351** — 4/4 touched suites (indicator 114, panel 115, **instance-node.model 52 NEW**, job.model 70 after extraction; grep-count-verified exact). Brief's "~281 / 3 suites" undercounted both. Pack pins/spec-list re-rolled under tester authorization (worktree-local, uncommitted).
+
+### Defects (report-only; NOT fixed)
+
+- **F1 🟠 important — child-bound receipts never attach (FE/BE contract split).** `JobQueueService.list_work(root_only=True)` (the `GET /api/jobs` list default) drops child-bound JobItems from work-record enrichment → scalar wire `mission_id` ships `null` on LIST (only `mission_ref` carries it; single-job GET resolves fine). FE tree builder attaches via scalar `mission_id` only (`instance-node.model.ts:365`) → child-bound receipts visible (never-hide holds) but MIS-PLACED in Queued/flat. The `root_only=True` docstring claim ("did not exclude child-instance jobs") is born-false. FE specs pass because mocks populate `mission_id` directly — same test-blindness class as the spec-mirror lesson (LESSONS/2026-09-08). Fix direction: enrich child-bound items in the list path (or FE attaches via `mission_ref` fallback).
+- **F2 🟠 minor — keyboard nav doesn't close the panel.** Click-close rides MatMenu overlay click-away; the shared `onInstanceClick` handler's `closeMenu()` apparently doesn't fire on the Enter path → panel stays open after keyboard navigation.
+
+**Merge-readiness: ⚠️ FIX-FIRST recommended** — every acceptance behavior is demonstrated and the regression surface is clean, but F1 breaks the acceptance-1 letter for child-bound receipts (hierarchies >1 level) and F2 breaks acceptance-2's "Enter does the same" clause. Both look small (F2 trivially rides the same handler; F1 is a one-sided contract fix). Alternatively merge with both tracked as follow-ups — leader's call.
+
+Artifacts: `/tmp/it-wt/` (screenshots: empty-state, tree structure, never-hide census, final-with-ROOT-E; dev/fe logs; seed inventory + wire dumps). Gaps: QUEUED section exercised via F1-orphaned `active` receipts (a genuinely admissible queued job would execute → LLM cost); ROOT-E rule assignment is observed-consistent, code path not isolated; disposable DB `ensemble_wt_it` left as scratch (`DROP DATABASE` reclaims).
+
+---
+
+## F1/F2 Re-Verify @ `0fd62cd5` (2026-09-08, worktree) — **VERDICT: BOTH FIXED — ALL PASS → merge proceeds**
+
+Single fix commit `0fd62cd5` ("child-bound receipts attach via instance_id fallback; Enter closes menu"), frontend-only (7/7 paths); tsc exit 0. Same seed inventory re-seeded into fresh `ensemble_wt_it`; zero LLM calls.
+
+**F1 — child-bound receipts attach: ✅ FIXED.** Wire shape unchanged (child-bound: `mission_id=null, instance_id=<child-uuid>` — the documented F1 input) but placement now correct: job-a1 under CHILD_A1, job-b1 under CHILD_B1 (verified by parsed `instanceId` on each job row `id="inst:live|inst:<uuid>|job:<jobid>"`); terminal child-bound a2 attaches under CHILD_A2 (not recentFlat); root-bound ar under ROOT_A; terminal d1 under ROOT_D in RECENT. Mixed page correct; **never-hide 5/5** (titles via `metadata.instance_name` fallback chain).
+
+**F2 — Enter closes menu: ✅ FIXED.** Child-row Enter and root-row Enter: navigate + panel detached by 1s, stays closed at 3s and 8s (the pre-fix re-open pattern would show persistent attach — absent across all polls). Row-click unchanged (navigate + closed). Chevron regression-holds (toggles, navCount=0, panel stays open by design). Esc closes.
+
+**Sanity**: 0 pageerrors; no unknown console errors; no horizontal scroll (1440==1440); right-edge anchoring delta **0px** (panel right 1221.875 == button right 1221.875).
+
+**Bracket**: `mission_tree_fe_targeted` **PASS 357/357** (4-suite union superset; fix-touched panel 116 (+1), instance-node 57 (+5) individually green; brief's ~287 was the 3-suite variant). Zero failures @ `0fd62cd5`.
+
+**Gaps (honest, non-blocking)**: (a) seed had equal `updated_at` across roots → auto-expand tiebreak (pinned desc → updated_at desc → instance_id ASC) picked idle roots C/E over populated A/B — by-design ordering, seed artifact; initial view may show unexpanded populated roots on homogeneous-activity datasets. (b) Root-attached jobs render at the same visual indent as child nodes (identification via instanceId is correct; purely visual). (c) Producer-side observation during seeding: M3 per-kind predicate drops settled rows with `terminal_reason IS NULL` — not pursued this round; flagged for the backlog.
+
+**Merge-readiness: ✅ READY.** Both prior defects closed at `0fd62cd5`; all acceptance items 1-6 now pass strictly (incl. acceptance-2's Enter clause); regression surface clean.
+
+### Landing artifacts riding the merge (confirmed dirty in worktree, zero extras)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (this file — worktree + re-verify appends)
+2. `.agents/tester/PACKS.md` (pack rows)
+3. `test/packs/mission_tree_fe_targeted_test.sh` (pins @ `0fd62cd5`, 4-suite list)
