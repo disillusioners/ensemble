@@ -138,7 +138,7 @@ Library research is a six-step discipline. The order matters: pin the version fi
 
 **When to use:** when the question is about a version upgrade or a breaking change.
 
-- Find the **official migration guide** (usually a `MIGRATION.md`, a `/migration` URL, or a section in the changelog).
+- Find the **official migration guide** (usually a `MIGRATION` document, a `/migration` URL, or a section in the changelog).
 - For each breaking change, record:
   - **What changed** (API removed, signature changed, default flipped)
   - **Why it changed** (the maintainer's stated reason — helps judge scope)
