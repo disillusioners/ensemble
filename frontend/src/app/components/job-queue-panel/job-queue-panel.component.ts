@@ -608,11 +608,16 @@ export class JobQueuePanelComponent {
     return date.toLocaleDateString();
   }
 
-  /** Material icon name for a terminal job status. */
+  /** Material icon name for a job status. */
   getStatusIcon(status: JobStatus): string {
     switch (status) {
       case 'completed':
         return 'check_circle';
+      case 'settled':
+        // Receipt-style glyph — a settled mirror row IS a delivery receipt,
+        // not a completed mission. `receipt_long` (Material Icons codepoint
+        // ef6e) is visually distinct from completed's check_circle.
+        return 'receipt_long';
       case 'failed':
         return 'error';
       case 'cancelled':

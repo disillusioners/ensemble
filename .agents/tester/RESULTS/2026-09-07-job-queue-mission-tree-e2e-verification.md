@@ -302,3 +302,32 @@ Single fix commit `0fd62cd5` ("child-bound receipts attach via instance_id fallb
 1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (this file — worktree + re-verify appends)
 2. `.agents/tester/PACKS.md` (pack rows)
 3. `test/packs/mission_tree_fe_targeted_test.sh` (pins @ `0fd62cd5`, 4-suite list)
+
+---
+
+## Worktree Round — panel activity-ordering @ `fix/job-queue-panel-activity-ordering` `bbe8d0c0` (2026-09-09) — **VERDICT: in-scope items 6/6 PASS (1 sub-item BLOCKED out-of-scope) → merge proceeds**
+
+Worktree `agents-ensemble-wt-panel-activity` (main checkout + other worktrees untouched). 2 commits: `85da9614` (BE: instances `order=activity` — 4 daemon files + 2 NEW BE suites + repaired test_api/test_hide_kb) + `bbe8d0c0` (FE: panel activity ordering + settled glyph — 3 src + 3 spec files). tsc exit 0. Stack: worktree daemon on fresh disposable `ensemble_wt_pa` (boot log + `pg_stat_activity` verified; `ensemble_prod` untouched — 6274 prod instances intact); FE from worktree; zero LLM calls; prod-trap seed via direct SQL (`SMOKE-PA-DISPOSABLE-*`: 12 pinned terminal roots (old updated_at) + 1 fresh unpinned completed root w/ child + 2 settled receipts; later +1 live root, +1 failed receipt).
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| Empty-DB idle | ✅ | honest "No jobs / Queue is currently idle", 0 tree nodes, 0 spinners, 0 pageerrors |
+| 1 Panel tree leg | ✅ | captured URL `/api/instances?limit=10&offset=0&exclude_kb=true&order=activity`; fresh unpinned root IS on the fetched page AND renders as TREE in Recent (chevron; child @aria-level 2; 2 settled receipts @level 3) — NOT a flat orphan. 8/12 pins visible, 4 evicted = acceptable per activity-ordering contract |
+| 2 Live-first tier | ✅ | live root (running, unpinned) renders FIRST in LIVE CONVERSATIONS despite 12 pins; fresh root correctly in Recent |
+| 3a settled glyph | ✅ | both settled rows `receipt_long` (teal) |
+| 3b failed glyph | ⚠️ **BLOCKED (out-of-scope)** | failed receipt exists in DB and is returned by `GET /api/jobs?status=failed` alone, but the panel's combo `status=completed,settled,failed,cancelled,dead_letter` drops it (repro: `settled,failed` → 2 rows vs `failed` → 3). **Pre-existing backend combo-filter behavior** — `85da9614` touches only `/api/instances`; FE `getStatusIcon('failed')→'error'` mapping is unit-pinned in the panel spec. Filed as backlog (see Gaps) |
+| 4 Sidebar untouched | ✅ | sidebar leg `/api/instances?limit=100&offset=0&exclude_kb=true` — NO `order=activity` (panel-only) |
+| 5 422 probe | ✅ | `order=bogus` → **422** (pattern `^(pinned\|activity)$`); `order=activity` → 200 |
+| 6 Regressions | ✅ | no h-scroll (1440==1440), panel 560px, anchoring delta **0px**, degraded honest (last-good tree retained + `.degraded` + stale aria-label, recovers on next poll), 0 pageerrors, console known-bucket only |
+
+**Brackets**: BE ad-hoc pack `instances_activity_unit_test` — 82 collected: NEW order-api 8/8 + NEW order-repository 10/10 + repaired hide_kb 17/17 + test_api 45/47 where the 2 failures are **exactly the known Mock-await baseline nodes (verbatim signatures, confirmed unchanged, attributed out-of-scope)** → **0 new regressions**. FE `mission_tree_fe_targeted` (re-pinned + spec list aligned to this branch's 3 touched suites) — **PASS 192/192** (panel 118 (+2), api.service 21, instance.service 53).
+
+**Gaps / backlog findings**: (a) `/api/jobs` multi-status combo containing `settled` appears to drop `failed` rows (settled branch adds `job_type='message'` clause; OR-interaction suspect) — pre-existing, out-of-scope for this fix, needs its own investigation; (b) producer-side M3 predicate drops settled rows with `terminal_reason IS NULL` (carried over from prior round). Artifacts: `/tmp/pa-wt/` (4 phase scripts, idempotent seeds, screenshots, panel-page/tree-dump/requests JSON). Disposable DB `ensemble_wt_pa` left as scratch (DROP reclaims).
+
+**Merge-readiness: ✅ READY** — the user's prod-trap scenario is fixed (fresh unpinned root renders as a tree on the activity-ordered page), live-first semantics hold, sidebar contract intact, validation + regressions clean; the single BLOCKED sub-item is a glyph observation blocked by an unrelated pre-existing jobs-filter behavior whose FE mapping is unit-pinned.
+
+### Landing artifacts for giter (worktree dirty set, zero extras)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (this append)
+2. `.agents/tester/PACKS.md` (2 rows: instances_activity_unit_test NEW, mission_tree_fe_targeted updated)
+3. `test/packs/instances_activity_unit_test.sh` (NEW, executable)
+4. `test/packs/mission_tree_fe_targeted_test.sh` (re-pinned @ bbe8d0c0, 3-suite list)

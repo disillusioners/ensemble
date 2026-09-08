@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer", "kb-writer", "blueprinter"])
 
+# Terminal instance statuses — the conversation has ENDED. Fixed tuple (not a
+# set) so the rendered ``IN (...)`` bind order is deterministic. Mirrors
+# ``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`` and the FE contract
+# ``isTerminalInstanceStatus`` (frontend/src/app/models/instance-node.model.ts)
+# whose ``isLiveInstanceStatus`` is the exact complement — the ``activity``
+# root ordering floats live (non-terminal) roots above terminal ones.
+TERMINAL_INSTANCE_STATUSES: tuple[str, ...] = (
+    "completed",
+    "error",
+    "terminated",
+    "failed",
+)
+
 # Safety limit for tree traversal — prevents infinite loops from circular references
 _MAX_TRAVERSAL_DEPTH = 256
 
@@ -692,6 +705,7 @@ class SQLModelInstanceRepository:
         exclude_kb: bool = True,
         include_descendants: bool = False,
         search: str | None = None,
+        order: str = "pinned",
     ) -> tuple[list[Instance], int]:
         """List instances with optional root-based pagination and full tree loading.
 
@@ -753,6 +767,18 @@ class SQLModelInstanceRepository:
                 ``instance_metadata.initiative_message``, ``agent_name``,
                 and ``agent_id``. ``%`` and ``_`` in the search term are treated
                 as literals.
+            order: Root-page ordering (root-based pagination ONLY — the flat
+                path and all descendant loading ignore it). ``"pinned"``
+                (default) preserves the historical pinned-first ordering
+                byte-for-byte: pinned tier DESC, ``pinned_at`` DESC
+                (NULLs last), ``created_at`` DESC, ``instance_id`` ASC.
+                ``"activity"`` floats live (non-terminal) roots above
+                terminal ones — pins can never push a live conversation off
+                the page — then recency: ``updated_at`` DESC (NULLs last),
+                ``created_at`` DESC (NULLs last), ``instance_id`` ASC.
+                Timestamps are ISO-8601 strings (lexicographic == chronological);
+                explicit ``NULLS LAST`` keeps SQLite and PostgreSQL (which
+                disagree on default DESC NULL placement) deterministic.
 
         Returns:
             Tuple of (flat list of instances, total count). In
@@ -828,7 +854,16 @@ class SQLModelInstanceRepository:
                 count_stmt = count_stmt.where(search_cond)
             total = db_session.exec(count_stmt).one()
 
-            # 2. Paginate root instances (ORDER BY created_at DESC).
+            # 2. Paginate root instances. Ordering is selected by ``order``:
+            #    ``"pinned"`` (default — historical, byte-compatible) floats
+            #    pinned roots to the top; ``"activity"`` floats live roots to
+            #    the top then orders by recency. The outerjoin below feeds the
+            #    pinned tier in both modes; ``InstanceUiPrefs.instance_id`` is
+            #    the table's primary key, so the LEFT JOIN is row-preserving
+            #    and does not affect the result set or the query count.
+            # NOTE: only pinned=True floats to the top. An explicit pinned=False and a
+            # never-pinned (NULL) row are treated equivalently as "unpinned" (both map to
+            # tier 0 via the CASE), then tiebreak on created_at DESC then instance_id.
             root_stmt = select(Instance).where(
                 (Instance.parent_id.is_(None)) | (Instance.parent_id == "")
             )
@@ -841,15 +876,28 @@ class SQLModelInstanceRepository:
             if search_cond is not None:
                 root_stmt = root_stmt.where(search_cond)
 
-            # NOTE: only pinned=True floats to the top. An explicit pinned=False and a
-            # never-pinned (NULL) row are treated equivalently as "unpinned" (both map to
-            # tier 0 via the CASE), then tiebreak on created_at DESC then instance_id.
-            root_stmt = (
-                root_stmt.outerjoin(
-                    InstanceUiPrefs,
-                    col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
+            root_stmt = root_stmt.outerjoin(
+                InstanceUiPrefs,
+                col(Instance.instance_id) == col(InstanceUiPrefs.instance_id),
+            )
+            if order == "activity":
+                # Live-first: terminal roots sort to the back tier (CASE 1 ASC
+                # puts live=0 before terminal=1) so a pinned-but-dead root can
+                # never evict a live conversation from the page. Then recency:
+                # updated_at DESC aligns the panel with the jobs poll (roots
+                # whose receipts just settled are on-page and get their trees).
+                # NULL timestamps sink within each tier (see docstring).
+                root_stmt = root_stmt.order_by(
+                    case(
+                        (col(Instance.status).in_(TERMINAL_INSTANCE_STATUSES), literal(1)),
+                        else_=literal(0),
+                    ).asc(),
+                    col(Instance.updated_at).desc().nulls_last(),
+                    col(Instance.created_at).desc().nulls_last(),
+                    col(Instance.instance_id).asc(),  # stable final tiebreaker
                 )
-                .order_by(
+            else:
+                root_stmt = root_stmt.order_by(
                     case(
                         (col(InstanceUiPrefs.pinned).is_(True), literal(1)),
                         else_=literal(0),
@@ -858,9 +906,7 @@ class SQLModelInstanceRepository:
                     col(Instance.created_at).desc(),
                     col(Instance.instance_id).asc(),  # stable final tiebreaker
                 )
-                .offset(offset)
-                .limit(limit)
-            )
+            root_stmt = root_stmt.offset(offset).limit(limit)
             roots = list(db_session.exec(root_stmt))
 
             if not roots:
