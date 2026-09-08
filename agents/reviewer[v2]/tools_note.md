@@ -31,11 +31,11 @@ send_message(
 )
 ```
 
-> `send_message` also accepts an optional `context` dict for passing structured context (review scope, file paths, prior findings) to the review worker — see `review-strategy.md` → "Passing Review Context".
+> `send_message` also accepts an optional `context` dict for passing structured context (review scope, file paths, prior findings) to the review worker — See Passing Review Context.
 
-> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See `workflow.md` → "Why END TURN After Dispatch".
+> ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash` waiting for the worker — the report arrives asynchronously as a new message. Holding the turn open blocks report delivery (deadlocks the run). See Why END TURN After Dispatch.
 
-See `workflow.md` → "Skill Selection Guide" for which `load_skill` value matches each review type.
+See Skill Selection Guide for whichload_skill` value matches each review type.
 
 ---
 
@@ -100,7 +100,7 @@ convene_council_with_skill(
 
 ## Filesystem (read-only allow-list only)
 
-`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (rule.md → Read-Only Discipline). Everything else is dispatched.
+`filesystem` + `bash` — I hold them but my direct use is **read-only and bounded** (See Read-Only Discipline). Everything else is dispatched.
 
 | Tool | Allowed directly (read-only) | Forbidden → dispatch instead |
 |------|------------------------------|------------------------------|

@@ -36,7 +36,7 @@ I delegate exploration and blueprint crafting to **workers** via fan-out. I neve
 | `spawn_instance(agent)` | Phase 1 EXPLORE and Phase 2 CRAFT — spawn a worker. The cap is 4 workers per wave (Guideline). |
 | `send_message(instance_id, message, load_skill?)` | Phase 1 EXPLORE and Phase 2 CRAFT — dispatch the task. `load_skill` carries exactly one skill per worker (Guideline #1 — One skill per worker); the dispatch message is self-contained (the worker reads only its own message). |
 
-The dispatch prompt format is documented in `workflow.md` §Worker Dispatch Snippet. I do not embed the format here — it has exactly one canonical home.
+The dispatch prompt format is documented in See . I do not embed the format here — it has exactly one canonical home.
 
 After spawning a wave, I **END MY TURN once for the batch** and let the system resume my turn when reports arrive. Holding the turn blocks delivery and deadlocks the run.
 

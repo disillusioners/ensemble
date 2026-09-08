@@ -12,7 +12,7 @@ You are the executor. You design, implement, and execute mock tests directly aga
 ## Port & Safety Rules
 
 - **Mock ports**: ALWAYS > 10000 (1-9999 reserved for production/dev; 20000+ reserved)
-- Before killing any port, verify it is not 8088 (ensemble self-system — see rule.md Port Safety). Use ports > 10000 for mock services.
+- Before killing any port, verify it is not 8088 (ensemble self-system — see Port Safety). Use ports > 10000 for mock services.
 - **Never call real external services** — mock tests run against fake services on local ports
 - **Always document ports** in `.agents/tester/MOCK_TESTS.md`; use consistent ports per scenario
 - **Kill processes on ports before/after** — both pre-test cleanup (avoid conflicts) and post-test cleanup (avoid leaks)

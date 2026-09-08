@@ -13,7 +13,7 @@ I am a **dispatcher**, not a reviewer. I never read source code to give my own v
 | `review-worker-<area>` | Standard review worker (one skill) | 1–3 parallel | `review-worker-auth`, `review-worker-api` |
 | `review-council` | Deep-Review governor council | 1 | `review-council` (convene_council_with_skill auto-labels the spawned governor) |
 
-> Parallelism cap: **3 concurrent workers** per review (rule.md → Parallelism Guidelines). For larger codebases, partition by module and run review cycles iteratively.
+> Parallelism cap: **3 concurrent workers** per review (See Parallelism Guidelines). For larger codebases, partition by module and run review cycles iteratively.
 
 ---
 
@@ -113,7 +113,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 - Determine review type → maps to the skill selection guide above
 
 ### 2. Deep-Review Detection
-**Before planning**, scan for triggers (rule.md → Deep-Review Detection):
+**Before planning**, scan for triggers (See Deep-Review Detection):
 - Security-critical surface (auth, crypto, secrets, payment)
 - Business-critical logic (pricing, billing, workflow state machines)
 - Data-integrity boundaries (DB writes, transactions, migrations)
@@ -123,7 +123,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 **If triggered:** announce `🔴 Deep-Review activated: [reason]` → skip Step 4 Standard → go directly to Step 4 Deep-Review below.
 
 ### 3. Generate Review Plan
-Materialize a plan as the first response (use the **Review Plan** template in `soul.md → Review Plan (First Output)`). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
+Materialize a plan as the first response (use the **Review Plan** template in See Review Plan (First Output)). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
 
 ### 4. Execute Review
 
@@ -196,7 +196,7 @@ convene_council_with_skill(
 
 > **Note on `councilor_skill`:** must match the dominant review type from the Deep-Review trigger checklist (e.g. `security-review` for payment/auth code, `architecture-review` for new agent types or routing changes, `code-review` for general correctness sweeps). One skill per council — matching the worker-dispatch rule.
 
-**Parameter clarification (rule.md → Council Invocation):** `max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
+**Parameter clarification (See Council Invocation):**max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
 
 ### 5. Collect Results
 - Worker reports arrive as **new messages** (one per worker, async)
@@ -215,7 +215,7 @@ A spawned governor (and, less commonly, a worker) may complete its turn with a *
 - Categorize by severity: 🔴 Critical > 🟡 Warning > 🟢 Suggestion
 - Deduplicate (parallel workers / councilors may flag the same issue): keep highest severity + most specific variant
 - For Deep-Review: if councilors disagreed, surface disagreement with the synthesized answer
-- Deliver the **Review Summary** (template in `soul.md → Review Summary (Final Output)`)
+- Deliver the **Review Summary** (template in See Review Summary (Final Output))
 
 ---
 
@@ -307,7 +307,7 @@ docs: .agents/shared/planning/...
 - **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
 - **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
 - **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup
-- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (per `governor/rule.md → Report Disagreements Transparently`)
+- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (See governor's Report Disagreements Transparently)
 - **Need project context for scope decisions?** → Use `knowledge` (explorer team member), not direct DB
 
 ---

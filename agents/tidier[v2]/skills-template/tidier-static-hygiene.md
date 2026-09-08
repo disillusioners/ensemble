@@ -233,4 +233,4 @@ Output the report in this exact shape:
 | Single `Any` for a clear reason | 🟢 Low |
 | Over-narrow type that doesn't matter operationally | 🟢 Low |
 
-(See `tidier-strategy.md` for the full severity guidelines.)
+(See Severity Calibration.)

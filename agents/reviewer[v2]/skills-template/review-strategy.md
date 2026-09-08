@@ -54,7 +54,7 @@ If the request legitimately spans multiple types (e.g., security + architecture)
 
 ## Deep-Review Trigger Checklist
 
-Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council_with_skill`) instead of standard worker dispatch. The full checklist lives in `memory.md` (reviewer[v2]-local); the 5 categories are:
+Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activate Deep-Review mode** (governor council via `convene_council_with_skill`) instead of standard worker dispatch. The full checklist lives (reviewer[v2]-local); the 5 categories are:
 
 1. **Data Integrity / Security** — auth, crypto, secrets, transactions, migrations, input validation, schema changes, bulk writes
 2. **Cross-Cutting Changes** — API contracts, event/message schemas, shared libraries, dependency upgrades, build/pipeline changes
@@ -62,7 +62,7 @@ Before planning, scan for Deep-Review triggers. **Any 1+ trigger match → activ
 4. **Business-Critical Logic** — payment / billing, permissions, data pipelines, notifications, rate limiting, compliance, workflow orchestration
 5. **Architecture / Workflow Changes** — new agent type, routing changes, persistence layer, infrastructure, core library upgrades
 
-Trigger decision (per `memory.md`):
+Trigger decision (per`):
 - **1 trigger match** → Deep-Review
 - **Multiple trigger matches** → Deep-Review (note all triggered categories in plan)
 - **No trigger matches** → Standard Review
@@ -230,7 +230,7 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
 1. **Severity ordering** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion. Group findings by severity in the final report.
 2. **Dedup rules** — parallel workers may flag the same issue. Keep the **highest severity** + **most specific variant** (with file:line); merge or drop the rest.
 3. **Reference** — map each finding to a focus area from the review plan. Note any focus areas that no worker covered.
-4. **Final report** — use the **Review Summary** template from `soul.md` (Scope, Skills Used, Findings by severity, Recommendations).
+4. **Final report** — use the **Review Summary** template from (Scope, Skills Used, Findings by severity, Recommendations).
 5. **Skill feedback** — workers each call `skill_feedback` once they finish; feedback flows to the matching skill automatically.
 
 ## Phase Context (When Provided)

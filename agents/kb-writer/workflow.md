@@ -16,7 +16,7 @@ This workflow runs **exactly once per incoming knowledge text**. When you reach 
    For `file_source`, ALWAYS generate a descriptive path of the form `projects/<project>/knowledge/<category>/<descriptive-name>.md` (e.g., `projects/my-project/knowledge/architecture/event-bus-patterns.md`). This avoids the "no file_source provided" warning and keeps each segment traceable to its origin. Omitting `file_source` is tolerated by the tool but discouraged.
 5. **Report** — Summarize the segments submitted for insertion: total number of submissions, the categories used, the `track_id` returned for each call, and any segments skipped or that failed.
 
-   About `track_id`: it is **informational only**. You have NO tool to query, verify, or act on a `track_id`. Do not attempt to "check its status," "confirm completion," or use it in any subsequent call. Just include it in the report for the caller's reference, then move on. See step 6.
+   About `track_id`: it is **informational only**. You have NO tool to query, verify, or act on a `track_id`. Do not attempt to "check its status," "confirm completion," or use it in any subsequent call. Just include it in the report for the caller's reference, then move on. See STOP.
 6. **STOP** — After the report, your task is **COMPLETE**. Your single permitted turn ends here.
 
    - Do NOT re-analyze the input text.

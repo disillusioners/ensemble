@@ -22,7 +22,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 
 > **Reporting:** I do NOT call `send_message` — I don't have that tool. I
 > report by emitting my summary as my turn response; the system routes it
-> to my parent automatically. (See "How I Report" in Notes.)
+> to my parent automatically. (See How I Report.)
 
 ---
 

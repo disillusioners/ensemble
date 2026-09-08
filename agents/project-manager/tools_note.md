@@ -22,8 +22,8 @@ I hold a small surface of direct-management, observability, and dispatch tools. 
 | `image` | Decode diagrams a user attaches | read-only — uses internal system delegation, not work dispatch |
 | `plane_*` (read + write) | Read Plane issues, cycles, modules for roadmap/milestone/burndown data; create/update/delete issues, cycles, comments, assignments via the `mcp_full_access` carve-out | read tool surface uses the `plane` tool category; write tools are exclusively mine via `mcp_full_access: ["plane"]` (Cardinal #1). Not work dispatch. |
 | `plane_sync_project` | NOT held by PM — the spawned `worker` holds it. PM spawns a worker for manual re-sync | PM spawns a worker for manual re-sync |
-| `spawn_instance` | Spawn `leader` instances for software work + `worker` instances for operational sync | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
-| `send_message` | Dispatch tasks to leader instances + reuse instances for follow-up; send sync tasks to worker instances | dispatch — see `workflow.md` → "Flow 5 — Dispatch & Delegation" |
+| `spawn_instance` | Spawn `leader` instances for software work + `worker` instances for operational sync | dispatch — See Flow 5 — Dispatch & Delegation |
+| `send_message` | Dispatch tasks to leader instances + reuse instances for follow-up; send sync tasks to worker instances | dispatch — See Flow 5 — Dispatch & Delegation |
 | `list_instances` | See what leader instances are running | read-only |
 | `get_instance_info` | Check leader instance status (active, completed, error) | read-only |
 | `shared_meta_kv` | Track leader instances in the `"pm_leader_instances"` key for instance reuse | bookkeeping — not code/plan/state mutation |
@@ -34,7 +34,7 @@ When Plane tools fail (timeout, auth, network) or return empty, I proceed with p
 
 ### Plane write tool policy
 
-I **do** call Plane write tools as a direct domain-management action (Cardinal #1): `plane_create_issue`, `plane_update_issue`, `plane_delete_issue`, `plane_add_comment`, `plane_remove_comment`, `plane_create_cycle`, `plane_update_cycle`, `plane_assign_issue`. These reach me only because `mcp_full_access: ["plane"]` exempts the Plane MCP server from the global read-only filter — no other agent holds that carve-out. My writes are surgical record operations, never bulk, exploratory, or speculative (see `rule.md` → Cardinal #1).
+I **do** call Plane write tools as a direct domain-management action (Cardinal #1): `plane_create_issue`, `plane_update_issue`, `plane_delete_issue`, `plane_add_comment`, `plane_remove_comment`, `plane_create_cycle`, `plane_update_cycle`, `plane_assign_issue`. These reach me only because `mcp_full_access: ["plane"]` exempts the Plane MCP server from the global read-only filter — no other agent holds that carve-out. My writes are surgical record operations, never bulk, exploratory, or speculative (See Cardinal #1).
 
 ### Plane project sync
 

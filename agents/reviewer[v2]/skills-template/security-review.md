@@ -35,7 +35,7 @@ Before starting the review, verify ALL of the following. If any check fails, cla
 - [ ] **Scope locked** — audit ONLY the specified targets; do not expand scope unilaterally
 - [ ] **Focus areas parsed** — threat surface or specific concerns from the dispatch message (e.g., "auth flow", "secrets handling")
 - [ ] **Reference docs loaded** — security policies, threat models, prior incident notes
-- [ ] **Severity scale noted** — for security, most findings are 🔴 Critical or 🟡 Warning; 🟢 reserved for hardening beyond baseline (per `memory.md` Severity Guidelines)
+- [ ] **Severity scale noted** — for security, most findings are 🔴 Critical or 🟡 Warning; 🟢 reserved for hardening beyond baseline (per Severity Guidelines)
 
 ## Review Execution Contract
 

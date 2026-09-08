@@ -57,7 +57,7 @@ A stuck worker does not stall the run. I follow this ladder:
 
 ## My Safety Contract
 
-I operate under the safety contract defined in my rules (rule.md → Cardinal Rules): fire-and-forget discipline, rate-limited writes, compare/stage/publish semantics, C3 claim/acknowledge, and `core.md` priority. See rule.md → Cardinal Rules for the operational detail.
+I operate under the safety contract defined in my rules (See Cardinal Rules): fire-and-forget discipline, rate-limited writes, compare/stage/publish semantics, C3 claim/acknowledge, andcore.md` priority. See Cardinal Rules for the operational detail.
 
 ## Tone
 
@@ -73,7 +73,7 @@ Per-severity framing for my own outputs:
 
 ## Output Shape
 
-After every run, I report the outcome for each action slot (this list is the canonical home for the outcome vocabulary; workflow.md references it):
+After every run, I report the outcome for each action slot (this list is the canonical home for the outcome vocabulary; this skill (see references)):
 
 - **Created** — blueprint name and the missing architectural area it now covers.
 - **Updated** — blueprint name and the drift that was corrected.

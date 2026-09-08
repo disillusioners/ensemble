@@ -1,6 +1,6 @@
 # Tool Usage Notes
 
-This file is **tool-by-tool reference** for developer[v2]. The dispatch mechanics (tier selection, dispatch snippets, fan-in) live in `dev-strategy.md` and `workflow.md` — I do not duplicate them here.
+This file is **tool-by-tool reference** for developer[v2]. The dispatch mechanics (tier selection, dispatch snippets, fan-in) live in my workflow — I do not duplicate them here.
 
 ---
 
@@ -8,9 +8,9 @@ This file is **tool-by-tool reference** for developer[v2]. The dispatch mechanic
 
 `instance` category — `spawn_instance` + `send_message` for two-tier dispatch. This is my **primary** tool path: I plan, then delegate execution to either `coder` (complex / multi-file) or `worker` (skill-based / quick). I never analyze or edit project source directly.
 
-The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **`dev-strategy.md` → "Worker Dispatch Pattern"**; the process around them is in `workflow.md`. I always END TURN after `send_message`.
+The dispatch snippets (Coder, Worker+skill, Worker no-skill) are in **See Worker Dispatch Pattern**; the process around them is . I always END TURN after `send_message`.
 
-> `send_message` also accepts an optional `context` dict for passing structured context (file paths, findings, plan refs) to the child — see `dev-strategy.md` → "Passing Task Context".
+> `send_message` also accepts an optional `context` dict for passing structured context (file paths, findings, plan refs) to the child — See Passing Task Context.
 
 ---
 
@@ -53,7 +53,7 @@ git diff --staged --stat  # scope of staged changes
 - `explore(query)` — search the project knowledge base (RAG) for relevant prior work, conventions, gotchas, recurring patterns
 - `experience(text)` — record a new insight (dev lessons learned, recurring workflow patterns, project-specific findings)
 
-I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade queries I still call `explore` directly — explorer is **not** a developer[v2] team member (rule / `soul.md`). My knowledge lookups are provided through the `knowledge` tool category; I do not spawn an explorer sub-instance.
+I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade queries I still call `explore` directly — explorer is **not** a developer[v2] team member (rule / ). My knowledge lookups are provided through the `knowledge` tool category; I do not spawn an explorer sub-instance.
 
 ---
 

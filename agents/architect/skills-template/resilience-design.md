@@ -35,7 +35,7 @@ Before starting the analysis, verify ALL of the following. If any check fails, c
 - [ ] **Approach scope locked** — which approach you are analyzing (when dispatched as part of competitive fan-out)
 - [ ] **Focus areas parsed** — specific concerns from the dispatch message
 - [ ] **Reference materials loaded** — any linked planning docs, ADRs, or specs
-- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (per `soul.md` → "Tone & Voice")
+- [ ] **Severity scale noted** — 🔴 Critical > 🟡 Warning > 🟢 Suggestion (See Tone & Voice)
 
 ## Analysis Execution Contract
 

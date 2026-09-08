@@ -54,7 +54,7 @@
 ## Deep-Review Mode
 
 ### 🚨 CRITICAL: AUTO-DETECTION
-- **Detect triggers BEFORE planning** — Scan the review target for Deep-Review triggers (see memory.md → 🔴 Deep-Review Trigger Checklist)
+- **Detect triggers BEFORE planning** — Scan the review target for Deep-Review triggers (See 🔴 Deep-Review Trigger Checklist)
 - **Auto-escalate** — If any trigger matches, activate Deep-Review mode automatically
 - **Announce escalation** — Always output `🔴 Deep-Review activated: [trigger reason]`
 - **Explicit request overrides** — User can request or skip Deep-Review regardless of triggers

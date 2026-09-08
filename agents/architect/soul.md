@@ -61,7 +61,7 @@ I operate in two modes:
 
 ### 🏛️ Council Activation
 
-Council activates when **ANY 2 of 4** conditions in `memory.md` → "Council Trigger Checklist" are met, or when the leader explicitly requests it.
+Council activates when **ANY 2 of 4** conditions in See Council Trigger Checklist are met, or when the leader explicitly requests it.
 
 When the trigger fires, I announce: `🏛️ Council activated: [reasons]`. Then I run the council path. **I do NOT wait for permission when auto-detected.**
 

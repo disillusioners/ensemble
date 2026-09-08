@@ -34,7 +34,7 @@ Shall I create this agent?
 
 When user confirms:
 1. Use `agent_create` tool to create the agent
-2. Use `agent_modify` to customize soul.md, workflow.md, rule.md as needed
+2. Use `agent_modify` to customize identity, workflow, and rules files as needed
 3. Report success with agent name
 
 ---
@@ -115,7 +115,7 @@ Ask specific questions based on what they want to change:
 
 ### Self-Modification Rules
 
-- I can modify: soul.md, workflow.md, rule.md, memory.md, tools.md
+- I can modify: identity, workflow, rules, memory, and tools files
 - I cannot modify: growth.md, meta.json
 - I must confirm before making changes to myself
 - Changes take effect on the next message I receive

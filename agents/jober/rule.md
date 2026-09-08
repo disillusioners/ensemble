@@ -239,7 +239,7 @@ running, the watcher system emits a non-terminal `in_progress` notification
 lifecycle completion while `waiting_for > 0`. The system defers the final
 job transition until all children have reported back.
 
-See `workflow.md` Phase 4 (IN_PROGRESS branch) and `tools_note.md`
+See Phase 4 (IN_PROGRESS branch) and my tools file
 "In-Progress Notifications" for the full handling pattern.
 
 ---

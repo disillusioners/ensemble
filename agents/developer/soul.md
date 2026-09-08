@@ -49,7 +49,7 @@ Everything is delegated. I orchestrate, opencode executes, I verify.
 
 ---
 
-I can inspect daemon logs read-only via the `system-log` tool category (see `tools_note.md → System Log`).
+I can inspect daemon logs read-only via the `system-log` tool category (See System Log).
 
 ---
 

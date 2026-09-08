@@ -65,7 +65,7 @@ Skill needed: unit-test
   )
 ```
 
-> `send_message` also accepts an optional `context` dict for passing structured context (test paths, prior failures, conventions) to the worker — see `test-strategy.md` → "Passing Test Context".
+> `send_message` also accepts an optional `context` dict for passing structured context (test paths, prior failures, conventions) to the worker — See Passing Test Context.
 
 ### Dispatch Pattern (infrastructure task, no skill)
 
@@ -79,7 +79,7 @@ Task: Inspect git diff to derive the change set
   )
 ```
 (No `load_skill` — the worker uses its default bash/filesystem tools for this generic task.)
-Worktree conventions: see giter/workflow.md -> Worktree Mode. Never launch dev.sh inside a worktree (hits prod defaults).
+Worktree conventions: See giter's Worktree Mode. Never launch dev.sh inside a worktree (hits prod defaults).
 
 **How to use:**
 1. `spawn_instance(agent="worker")` to create the worker
@@ -87,11 +87,11 @@ Worktree conventions: see giter/workflow.md -> Worktree Mode. Never launch dev.s
 3. The worker loads the named skill automatically (if provided) and executes the task.
 4. **After `send_message`, END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a new message. Holding your turn open blocks report delivery and deadlocks the run. Collect each worker's report as it arrives and aggregate once all expected reports are in.
 
-> This is the ONLY place the END TURN contract is stated in full. `rule.md` Cardinal #2 carries the invariant; this paragraph carries the *why*. It is not duplicated elsewhere in this directory.
+> This is the ONLY place the END TURN contract is stated in full.  Cardinal #2 carries the invariant; this paragraph carries the *why*. It is not duplicated elsewhere in this directory.
 
 ### Skill Selection (canonical reference)
 
-The worker skill-selection table (task type → `load_skill` value → why) and the dispatch rules live canonically in the auto-loaded **`test-strategy.md` → "Worker Skill Selection (Dispatcher Contract)"**. I do not maintain a parallel copy here — refer there for the single source of truth. The "When to Load a Skill" matrix below covers the orthogonal WITH-vs-WITHOUT choice.
+The worker skill-selection table (task type → `load_skill` value → why) and the dispatch rules live canonically in the auto-loaded **See Worker Skill Selection (Dispatcher Contract)**. I do not maintain a parallel copy here — refer there for the single source of truth. The "When to Load a Skill" matrix below covers the orthogonal WITH-vs-WITHOUT choice.
 
 ### When to Load a Skill (worker-only)
 
@@ -110,7 +110,7 @@ The worker skill-selection table (task type → `load_skill` value → why) and 
 
 - Need to run unit tests with skill attribution? → Spawn worker with `load_skill="unit-test"`
 - Need to run mock tests with skill attribution? → Spawn worker with `load_skill="mock-test"`
-- Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary in rule.md) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
+- Need skill-specific test execution for evolution data? → Always use worker dispatch with `load_skill`. Worker calls `skill_feedback(skill_id, applied, usefulness, note, improvement_note)` after each task for clean 1:1 attribution (see Dispatch Model glossary ) — workers MUST report `usefulness` (1-10) and `improvement_note` (specific, actionable); low usefulness triggers evolution.
 - Need to inspect git / analyze source / discover tests / create a script? → Spawn worker WITHOUT `load_skill`.
 
 ---
@@ -126,7 +126,7 @@ A single crashed or hung worker must not dead-end the whole run — and must not
 
 **Batching:** for parallel fan-out within one wave (2–3 independent packs), I may spawn them in one batch and END TURN once after the batch — per-dispatch END TURN is NOT required within a single wave. The escape valve above runs per-node as reports arrive.
 
-I never silently aggregate over a gap — every incomplete node surfaces in the final report (`rule.md` Cardinal #3).
+I never silently aggregate over a gap — every incomplete node surfaces in the final report ( Cardinal #3).
 
 ---
 
@@ -419,7 +419,7 @@ Scope is always driven by the actual change set — never auto-expand to all pac
 
 ### Organize Tests into Packs
 1. Analyze project test structure
-2. Group tests by category (see timeout limits in rule.md):
+2. Group tests by category (see timeout limits ):
    - **Unit test packs** — `<module>_unit_test`
    - **Integration test packs** — `<module>_integration_test`
    - **E2E test packs** — `<module>_e2e_test`
@@ -508,7 +508,7 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 **When a test pack times out:**
 
 1. **Analyze timeout cause** — Which specific test/scenario timed out? Expected vs actual duration?
-2. **Attempt TTQA optimizations** (canonical list in rule.md)
+2. **Attempt TTQA optimizations** (canonical list)
 3. **Re-run test pack** with optimizations
 4. **If still timeout** → Proceed to Test Architecture Fix (NOT straight to escalation)
 

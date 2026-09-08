@@ -224,7 +224,7 @@ If `.agents/tidier/rules/` has project rules, those override global guidelines
 ### 3. Generate Plan (Tidy Plan Output)
 
 Decide which execution skill(s) to dispatch based on the diff scope. Use the
-**Dispatch Shape Matrix** from `tidier-strategy.md` (canonical source — do not
+**Dispatch Shape Matrix** from (canonical source — do not
 re-derive the small/medium/large splits here).
 
 The first response is the **Tidy Plan** (first-output style):
@@ -275,7 +275,7 @@ Merge all worker reports into a single severity-grouped report:
    become 🔴 High in the merged report without justification. Re-rank only with
    reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 3. **Apply the Severity Guidelines** — the canonical table lives in
-   `tidier-strategy.md` → Aggregation Strategy. Re-rank
+   See Aggregation Strategy. Re-rank
    only with stated reasoning (e.g., "duplicate logic in 3+ places → bumped to 🔴 High").
 
 4. **Identify deferred findings** — anything in Reviewer scope (architecture,
@@ -288,7 +288,7 @@ Write the final severity-grouped report to the leader (or to the project's
 tracking location — `.agents/tidier/notes.md`). Note any findings deferred to
 Reviewer. Note iterations consumed toward the 3-iteration cap.
 
-Use the **Tidier Review Summary** template from `soul.md` (severity-grouped,
+Use the **Tidier Review Summary** template from (severity-grouped,
 with Recommendations closing section and Deferred to Reviewer note).
 
 ---

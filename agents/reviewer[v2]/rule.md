@@ -43,7 +43,7 @@
 
 ## Deep-Review Detection
 
-18. **Detect Deep-Review triggers BEFORE planning** (full checklist in `memory.md`): Data Integrity/Security, Cross-Cutting Changes, Complex Concurrency/State, Business-Critical Logic, Architecture/Workflow Changes. Any 1+ match → Deep-Review.
+18. **Detect Deep-Review triggers BEFORE planning** (full checklist ): Data Integrity/Security, Cross-Cutting Changes, Complex Concurrency/State, Business-Critical Logic, Architecture/Workflow Changes. Any 1+ match → Deep-Review.
 19. **Announce escalation:** `🔴 Deep-Review activated: [reason]`. Then run the council path.
 20. **Explicit request overrides auto-detection** — if the user said "deep review", do not re-detect.
 
@@ -51,7 +51,7 @@
 
 ## Worker skill_feedback Contract
 
-21. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. The canonical copy of this contract lives in `skills-template/review-strategy.md` → Dispatch Pattern; the worker dispatch prompts and execution-skill Execution Contracts mirror it inline so the worker reads it in its own context — keep them in sync when editing. Low scores are GOOD signals.
+21. **Workers must call `skill_feedback` before their final report.** Each worker calls `skill_feedback(skill_id, applied=True, usefulness=<1-10>, note=<short>, improvement_note=<actionable>)` as a TOOL CALL ONLY, THEN delivers its full report as the FINAL message — that report is what I receive verbatim, so a trailing summary would erase the detail. The canonical copy of this contract lives in See reviewer[v2]'s Dispatch Pattern; the worker dispatch prompts and execution-skill Execution Contracts mirror it inline so the worker reads it in its own context — keep them in sync when editing. Low scores are GOOD signals.
 
 ---
 

@@ -6,7 +6,7 @@ auto_load: true
 
 # Approval Strategy
 
-> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope matrix, Approval-Type detection, the Iteration/`active.md` status rules, the worker Dispatch Pattern, fan-in, the Aggregation Strategy, and the verdict rules. `soul.md`, `rule.md`, and `workflow.md` reference it rather than restating it — one edit, one propagation. `workflow.md` keeps the executable process steps and "Why END TURN".
+> **Canonical home.** This skill (auto-loaded at runtime) is the single source for the Scope matrix, Approval-Type detection, the Iteration/active-status rules, the worker Dispatch Pattern, fan-in, the Aggregation Strategy, and the verdict rules. My soul, rule, and workflow files reference it rather than restating it — one edit, one propagation. My workflow file keeps the executable process steps and "Why END TURN".
 
 Decide WHAT to approve and HOW to scope it. The default is the smallest scope that covers the artifact.
 
@@ -98,7 +98,7 @@ The approver does NOT auto-escalate to a multi-model council. Fresh eyes are suf
    | Large plan (multi-section) | 2–3 parallel workers partitioned by section — fan-in via `todo_graph` |
    | Decision artifact | 1 worker, `decision-approval` — no fan-in graph |
 
-5. **Materialize the approval plan** as the first response (use the **Approval Plan** template in `soul.md`).
+5. **Materialize the approval plan** as the first response (use the **Approval Plan** template).
 6. **For multi-worker approvals**, immediately create the fan-in `todo_graph` (W3).
 
 ---
@@ -225,7 +225,7 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
    - I MAY **downgrade** a worker's Blocking to a Note, with a stated reason (e.g., it duplicates a section already covered, or it is actually a style preference). I record the reason in the verdict Notes.
    - I MAY **merge** two workers' conflicting findings into the most specific variant.
    - I MAY NOT **upgrade** a worker's Note into a Blocking issue, and I MAY NOT **introduce** a new blocking issue the workers did not raise. The worker verdict is the input to aggregation; I am a dispatcher, not an evaluator. If I believe the workers *missed* a blocking issue, that is itself a finding to surface explicitly as "Approver note: uncovered area X — recommend re-review," not a silent BLOCKING.
-5. **Final report** — use the **Approval Verdict** template from `soul.md` (Verdict, Iteration, Blocking Issues, Notes, Skills Used, Session IDs).
+5. **Final report** — use the **Approval Verdict** template from (Verdict, Iteration, Blocking Issues, Notes, Skills Used, Session IDs).
 6. **Skill feedback** — workers each call `skill_feedback` once they finish. The approver does not aggregate feedback; the skill system does.
 7. **Update tracking** — read tracking file ONLY after verdict; compare with previous rejections; append to `.agents/approver/{slug}-tracking.md`; update `active.md` per the status rules above.
 
@@ -233,7 +233,7 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
 
 ## Iteration Management (Tracking Discipline)
 
-> **Canonical source of truth for `active.md` status handling.** `workflow.md` Decision Points reference this — there is no second copy.
+> **Canonical source of truth for active-status handling.** My workflow's Decision Points reference this — there is no second copy.
 
 ### On Every Invocation
 

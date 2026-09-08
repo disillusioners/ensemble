@@ -505,7 +505,7 @@ Otherwise, always spawn new.
 ---
 
 ## Auto-Commit on Successful Review
-> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (giter/workflow.md -> Worktree Mode).
+> Backstop: no wt_path in context AND >=1 fresh wt.claim.* row -> read shared KV first (See giter's Worktree Mode).
 
 When review session confirms code is good (no issues, no improvements needed):
 
@@ -571,7 +571,7 @@ When a code change causes a regression, use the system-log tools in this order:
 2. Use `ens_system_log_read` with paging (`offset`/`limit`) to inspect context around matching lines.
 3. After the fix is applied, re-run the same `ens_system_log_search` query to validate that the regression is resolved.
 
-See `tools_note.md → System Log` for the available read-only system-log operations.
+See System Log for the available read-only system-log operations.
 
 ### Decision Flow
 
