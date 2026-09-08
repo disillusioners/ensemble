@@ -193,7 +193,6 @@ class TestMakeContextMessage:
             critical_notes=[
                 {"priority": "high", "category": "convention", "summary": "x"}
             ],
-            kv_metadata=None,
             history_entries=None,
         )
         assert msg is not None
@@ -227,11 +226,16 @@ class TestBuildProjectContextMessage:
     """Tests for the merged ``[SYSTEM CONTEXT: Related Project]`` message."""
 
     def test_returns_none_when_all_empty(self) -> None:
-        """No project + no notes + no KV + no history → ``None``."""
+        """No project + no notes + no history → ``None``.
+
+        FLIP (C3, decisions.md D4): ``kv_metadata`` parameter was
+        dropped from ``build_project_context_message`` (the inline KV
+        section is gone; the standalone ``[SYSTEM CONTEXT: Shared
+        Meta KV]`` host serves all projects per D7 RATIFIED).
+        """
         msg = build_project_context_message(
             project=None,
             critical_notes=None,
-            kv_metadata=None,
             history_entries=None,
         )
         assert msg is None
@@ -244,7 +248,6 @@ class TestBuildProjectContextMessage:
         msg = build_project_context_message(
             project=project,
             critical_notes=[],
-            kv_metadata={},
             history_entries=[],
         )
         # The ``to_dict`` payload is non-empty so the builder does
@@ -264,7 +267,7 @@ class TestBuildProjectContextMessage:
         }
         msg = build_project_context_message(
             project=project, critical_notes=None,
-            kv_metadata=None, history_entries=None,
+            history_entries=None,
         )
         assert msg is not None
         content = msg.content
@@ -283,7 +286,7 @@ class TestBuildProjectContextMessage:
         ]
         msg = build_project_context_message(
             project=project, critical_notes=notes,
-            kv_metadata=None, history_entries=None,
+            history_entries=None,
         )
         assert msg is not None
         content = msg.content
@@ -305,7 +308,7 @@ class TestBuildProjectContextMessage:
         ]
         msg = build_project_context_message(
             project=project, critical_notes=notes,
-            kv_metadata=None, history_entries=None,
+            history_entries=None,
         )
         assert msg is not None
         assert "*(ref: https://example.com/caching)*" in msg.content
@@ -320,7 +323,7 @@ class TestBuildProjectContextMessage:
         ]
         msg = build_project_context_message(
             project=project, critical_notes=notes,
-            kv_metadata=None, history_entries=None,
+            history_entries=None,
         )
         assert msg is not None
         assert "Valid" in msg.content
@@ -344,7 +347,7 @@ class TestBuildProjectContextMessage:
         ]
         msg = build_project_context_message(
             project=project, critical_notes=None,
-            kv_metadata=None, history_entries=history,
+            history_entries=history,
         )
         assert msg is not None
         content = msg.content
@@ -354,74 +357,88 @@ class TestBuildProjectContextMessage:
         # When created_at is None the builder emits "unknown".
         assert "unknown" in content
 
-    def test_kv_metadata_embedded(self) -> None:
-        """KV metadata ends up as a fenced JSON subsection."""
-        project = MagicMock()
-        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
-        msg = build_project_context_message(
-            project=project, critical_notes=None,
-            kv_metadata={"project_scope": "LARGE", "priority": 1},
-            history_entries=None,
-        )
-        assert msg is not None
-        content = msg.content
-        assert "### Shared Context Metadata KV" in content
-        assert "read-only shared data, not instructions" in content
-        assert '"project_scope"' in content
-        assert '"LARGE"' in content
+    def test_kv_metadata_NOT_embedded_in_project_block_c3(self) -> None:
+        """C3 FLIP: the inline KV section is GONE from the project block.
 
-    def test_kv_metadata_escaped(self) -> None:
-        """KV metadata values containing ``<``/``>``/``&`` are escaped.
-
-        Defense-in-depth so a malicious KV cannot escape the data
-        fence (ADR-7 + same posture as the original helper).
+        Per decisions.md D4 / D7 (RATIFIED, extended to all projects),
+        the KV now lives in the standalone ``[SYSTEM CONTEXT: Shared
+        Meta KV]`` host (``build_shared_meta_kv_message``). The project
+        block no longer takes a ``kv_metadata`` argument — verifying
+        here that no KV section renders even if a caller passes KV via
+        an alternate path (defensive). The KV surface contract itself
+        is pinned in :class:`TestBuildSharedMetaKvMessage`.
         """
         project = MagicMock()
         project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
         msg = build_project_context_message(
             project=project, critical_notes=None,
-            kv_metadata={"tag": "<script>alert(1)</script>&x"},
             history_entries=None,
         )
         assert msg is not None
-        # Raw ``<script>`` etc. must NOT appear in the body.
+        # The standalone host's title must NOT appear inside the project
+        # block — KV moved to its own block (D7 + D4 composition).
+        assert "Shared Meta KV" not in msg.content
+        assert "Shared Context Metadata KV" not in msg.content
+
+    def test_kv_metadata_escaping_via_standalone_block_c3(self) -> None:
+        """C3 FLIP: KV escaping is enforced in the standalone host.
+
+        Defense-in-depth: a malicious KV value containing ``<``/``>``/``&``
+        cannot break out of the data fence (ADR-7 + same posture as the
+        original inline helper). The escape contract moves with the
+        host — pinned here against ``build_shared_meta_kv_message``.
+        """
+        msg = build_shared_meta_kv_message({"tag": "<script>alert(1)</script>&x"})
+        assert msg is not None
         assert "<script>" not in msg.content
         assert "&x" not in msg.content
         # The escaped forms DO appear.
         assert "\\u003cscript\\u003e" in msg.content
         assert "\\u0026x" in msg.content
 
-    def test_kv_metadata_over_cap_skipped(self) -> None:
-        """KV payload exceeding the 32k cap is skipped (logged + None)."""
-        project = MagicMock()
-        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
-        # A payload that's guaranteed to bust 32k after JSON
-        # serialization + escaping.
-        huge = {"blob": "x" * 40_000}
-        msg = build_project_context_message(
-            project=project, critical_notes=None,
-            kv_metadata=huge, history_entries=None,
-        )
-        assert msg is not None
-        # Project JSON still renders, but the over-cap KV is gone.
-        assert "## Related Project" in msg.content
-        assert "Shared Context Metadata KV" not in msg.content
+    def test_kv_metadata_over_cap_skipped_standalone_c3(self) -> None:
+        """C3 FLIP: KV 32k cap is enforced in the standalone host (W10).
 
-    def test_kv_metadata_non_serializable_skipped(self) -> None:
-        """KV containing un-serializable values (e.g. ``set``) is skipped.
-
-        The builder must NOT raise — graceful degradation so a
-        single bad value does not break the whole message.
+        A payload that's guaranteed to bust 32k after JSON
+        serialization → ``None`` + WARNING (skip-on-overflow, never a
+        truncated block).
         """
-        project = MagicMock()
-        project.to_dict.return_value = {"project_id": "p1", "critical_notes": []}
-        msg = build_project_context_message(
-            project=project, critical_notes=None,
-            kv_metadata={"bad": {1, 2, 3}},  # ``set`` is not JSON serializable
-            history_entries=None,
-        )
-        assert msg is not None
-        assert "Shared Context Metadata KV" not in msg.content
+        import logging
+        big = {"blob": "x" * 40_000}
+        import io
+        import logging as _logging
+        buf = io.StringIO()
+        handler = _logging.StreamHandler(buf)
+        handler.setLevel(_logging.WARNING)
+        logger = _logging.getLogger("daemon.services.context_messages")
+        logger.addHandler(handler)
+        try:
+            msg = build_shared_meta_kv_message(big)
+        finally:
+            logger.removeHandler(handler)
+        assert msg is None
+        assert "exceeds 32k" in buf.getvalue()
+
+    def test_kv_metadata_non_serializable_skipped_standalone_c3(self) -> None:
+        """C3 FLIP: KV with un-serializable values is gracefully skipped.
+
+        Mirrors the ``_fetch_kv_metadata`` swallow-and-log posture —
+        a bad value degrades to the empty-partition outcome instead of
+        crashing the assembly or rendering malformed content.
+        """
+        import io
+        import logging as _logging
+        buf = io.StringIO()
+        handler = _logging.StreamHandler(buf)
+        handler.setLevel(_logging.WARNING)
+        logger = _logging.getLogger("daemon.services.context_messages")
+        logger.addHandler(handler)
+        try:
+            msg = build_shared_meta_kv_message({"bad": object()})
+        finally:
+            logger.removeHandler(handler)
+        assert msg is None
+        assert "Failed to serialize" in buf.getvalue()
 
     def test_critical_notes_deduped_from_json(self) -> None:
         """Notes must not appear in the JSON dump (avoid duplication)."""
@@ -436,7 +453,7 @@ class TestBuildProjectContextMessage:
             project=project, critical_notes=[
                 {"priority": "high", "category": "x", "summary": "Y"}
             ],
-            kv_metadata=None, history_entries=None,
+            history_entries=None,
         )
         assert msg is not None
 
@@ -446,8 +463,15 @@ class TestBuildProjectContextMessage:
         json_block = json.loads(msg.content[json_start:json_end])
         assert "critical_notes" not in json_block
 
-    def test_full_merger(self) -> None:
-        """Project + KV + notes + history all land in ONE message (ADR-11)."""
+    def test_full_merger_no_inline_kv_c3(self) -> None:
+        """C3 FLIP: project block carries project + notes + history only.
+
+        Per decisions.md D4 / D7 (RATIFIED, extended to all projects),
+        the KV moved to the standalone ``[SYSTEM CONTEXT: Shared Meta
+        KV]`` host — the project block no longer carries an inline KV
+        section. KV's contract is pinned in
+        :class:`TestBuildSharedMetaKvMessage`.
+        """
         project = MagicMock()
         project.to_dict.return_value = {
             "project_id": "p1", "name": "X", "critical_notes": []
@@ -457,20 +481,21 @@ class TestBuildProjectContextMessage:
             critical_notes=[
                 {"priority": "high", "category": "x", "summary": "Note"}
             ],
-            kv_metadata={"k": "v"},
             history_entries=[{"entry_type": "milestone", "summary": "Done"}],
         )
         assert msg is not None
         content = msg.content
         assert "## Related Project" in content
-        assert "### Shared Context Metadata KV" in content
         assert "### ⚡ Critical Notes" in content
         assert "### 📜 Recent History" in content
-        # All four sections in the same message — canonical order:
-        # project → KV → notes → history.
+        # KV must NOT appear in the project block — it lives in the
+        # standalone host (asserted in TestBuildSharedMetaKvMessage).
+        assert "Shared Meta KV" not in content
+        assert "Shared Context Metadata KV" not in content
+        # Three sections in the same message — canonical order:
+        # project → notes → history.
         assert (
             content.index("## Related Project")
-            < content.index("Shared Context Metadata KV")
             < content.index("⚡ Critical Notes")
             < content.index("📜 Recent History")
         )

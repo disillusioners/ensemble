@@ -653,7 +653,7 @@ WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED: str = (
 #     env-name fork (B.S.8 registry discipline; the wiring pins live
 #     beside the flag's tests). Default ON; ``=0`` + restart restores
 #     the legacy suppression (decisions.md D8).
-#   * ``ENSEMBLE_AMBIENT_KV_FRESH`` — RESERVED (binding lands at C3,
+#   * ``ENSEMBLE_AMBIENT_KV_FRESH`` — BOUND at C3
 #     fix(D1): split block + per-turn refresh). Shape B (service-module
 #     cached resolver + boot INFO, mirroring the
 #     ``ENSEMBLE_WC_WAKE_ENQUEUE`` precedent). The literal must not

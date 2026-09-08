@@ -434,49 +434,87 @@ class TestChildFirstTurnKVPartition:
             f"addition to the tree-root one."
         )
 
-        project_msg = project_blocks[0]
+        # ── Assertion 2: a ``shared_meta_kv`` block carries the ──────
+        # SENTINEL (C3 layout flip).
+        # ──────────────────────────────────────────────────────────────────
+        # Per decisions.md D4 (composition table) + D7 (standalone host
+        # RATIFIED, extended to all projects), the KV moved out of the
+        # ``[SYSTEM CONTEXT: Related Project]`` block into its own
+        # ``[SYSTEM CONTEXT: Shared Meta KV]`` host. The contract under
+        # pin (child first-turn reads from the tree-root partition) is
+        # UNCHANGED — only the LAYOUT flipped. We observe the sentinel
+        # on the standalone host.
+        from daemon.services.context_messages import (
+            CONTEXT_KIND_SHARED_META_KV,
+        )
 
-        # ── Assertion 2: the project block carries the SENTINEL ────
-        # The sentinel value is json.dumps'd under the
-        # ``## Shared Context Metadata KV`` subsection by
-        # ``_format_kv_metadata_section`` (see context_messages.py).
-        # ``json.dumps(..., indent=2)`` pretty-prints multi-line, so
-        # we assert on the key value strings (which serialize
-        # unambiguously) rather than the full dict shape — any
-        # substring match against the sentinel's distinctive
+        kv_blocks = [
+            m
+            for m in persistent_msgs
+            if (getattr(m, "additional_kwargs", None) or {}).get(
+                "context_kind"
+            )
+            == CONTEXT_KIND_SHARED_META_KV
+        ]
+        assert len(kv_blocks) == 1, (
+            f"expected exactly ONE standalone KV host (no "
+            f"own-partition duplicate); got {len(kv_blocks)}."
+        )
+        kv_msg = kv_blocks[0]
+
+        # The sentinel value is json.dumps'd under the standalone host.
+        # ``json.dumps(..., sort_keys=True, indent=2)`` pretty-prints
+        # multi-line, so we assert on the key value strings (which
+        # serialize unambiguously) rather than the full dict shape —
+        # any substring match against the sentinel's distinctive
         # values proves the tree-root partition was read.
         serialized_content = (
-            project_msg.content
-            if isinstance(project_msg.content, str)
-            else str(project_msg.content)
+            kv_msg.content
+            if isinstance(kv_msg.content, str)
+            else str(kv_msg.content)
         )
         # The "chair" value is unique to the sentinel and
         # json.dumps'd verbatim — proves the actual KV payload
         # (not a coincidental substring) landed in the rendered
         # block.
         assert '"chair": "alpha"' in serialized_content, (
-            f"project block must carry the sentinel KV payload "
+            f"shared_meta_kv block must carry the sentinel KV payload "
             f"(rendered from the tree-root partition) — the child's "
             f"first-turn persistent context was built from the "
             f"wrong partition (child's own empty). "
             f"Got content (truncated): {serialized_content[:500]!r}"
         )
         assert SENTINEL_KEY in serialized_content, (
-            f"project block must reference the sentinel meta_key "
-            f"{SENTINEL_KEY!r}; got content (truncated): "
+            f"shared_meta_kv block must reference the sentinel "
+            f"meta_key {SENTINEL_KEY!r}; got content (truncated): "
             f"{serialized_content[:500]!r}"
         )
         # The full list of council members round-trips through the
-        # subsection (a stronger proof than the single "chair"
+        # standalone host (a stronger proof than the single "chair"
         # value: any partial truncation of the KV payload would
         # drop one of the three members).
         for member in ("alpha", "beta", "gamma"):
             assert f'"{member}"' in serialized_content, (
                 f"sentinel member {member!r} missing from the "
-                f"rendered project block — partition read returned "
+                f"rendered KV host — partition read returned "
                 f"partial / wrong content. Got content (truncated): "
                 f"{serialized_content[:500]!r}"
             )
+
+        # The block's id is the C0 stable id ``kv:{context_key}``
+        # (the FULL resolved tree-root partition key — D3 canonical
+        # table; the struck ``split(':')[-1]`` extraction is a
+        # WRONG-ID hazard). For this chain TREE_ROOT_ID is the
+        # parent's instance_id (no parent_id on the parent).
+        from daemon.services.context_messages import _stable_id_for
+
+        assert kv_msg.id == _stable_id_for(
+            "shared_meta_kv", context_key=TREE_ROOT_ID
+        ), (
+            f"shared_meta_kv block id must be kv:{TREE_ROOT_ID} "
+            f"(the FULL resolved tree-root partition key — D3); "
+            f"got {kv_msg.id!r}"
+        )
 
         # ── Observation for OQ2 (system-default edge case) ────────
         # The system-default project is per-project, NOT

@@ -619,12 +619,22 @@ The §Shared prerequisite (deterministic-id variant of `_make_context_message`) 
 ```
 git fetch origin
 git checkout latest
-git log --oneline -5  # confirm c2142c69 is present
-grep -n "ENSEMBLE_INJECTED_NOTES_ABSORB\|injected_notes_absorb" daemon/compaction.py daemon/config.py
-# All anchors in this plan must be re-verified at latest
+git log --oneline -10  # confirm the D13 7-commit drift set is present
+# (d348ad4e, 80bb61dd, d6e30d9d, 7a899517, e321bdb3, f965345a, 53baef57
+#  — see decisions.md D13 addendum for the explicit list and file-set
+#   disjoint proof)
+grep -n "ENSEMBLE_INJECTED_NOTES_ABSORB\|injected_notes_absorb" daemon/services/context_messages.py daemon/services/instance_messaging.py daemon/graph.py
+# All anchors in this plan must be re-verified at latest. The
+# compaction.py / config.py list the frozen draft carried is the
+# SUPERSEDED 3-commit injected-notes list (bb4e3e89/4e1e6698/c2142c69)
+# — see decisions.md D13 addendum; the 7-commit drift set hit exactly
+# the three seam files (context_messages.py / instance_messaging.py /
+# graph.py) and never compaction.py/config.py, and the injected-notes
+# arc hit exactly compaction.py/config.py and never the seam files —
+# the two file sets are disjoint; ``c2142c69`` is NOT on the drift set.
 ```
 
-All file:line references in this plan are anchored at worktree `2750c815`. The injected-notes-absorb arc touches `daemon/compaction.py` and `daemon/config.py` — neither is in the direct fix path for D1, but any shared code (e.g., `constants.py` if the registry is extended, or `manager.py` if the boot log wiring changes) must be checked.
+All file:line references in this plan are anchored at worktree `2750c815`. The D13 drift set is the seven commits named in the addendum; the frozen draft's compaction.py/config.py grep list is REPLACED by the three seam files (decisions.md D13 addendum — worker-verified at C0 kickoff, worktree `agents-ensemble-wt-kvfix` @ `aaa93a1d`, base `9eebf3ff`).
 
 ### What This Plan Does NOT Touch (D2/D3 territory)
 

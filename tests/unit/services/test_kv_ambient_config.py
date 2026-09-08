@@ -374,24 +374,41 @@ class TestRegistryBindingState:
             "literal env string (single-homed registry discipline)"
         )
 
-    def test_c3_refresh_name_stays_reserved_unused(self) -> None:
-        """``ENSEMBLE_AMBIENT_KV_FRESH`` binds at C3 (Shape B). Until
-        then the literal must appear ONLY in daemon/constants.py — no
-        config field, no resolver, no read site."""
-        needle = "ENSEMBLE_AMBIENT_KV_FRESH"
-        hits: list[Path] = []
-        for path in sorted(DAEMON_DIR.rglob("*.py")):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:  # pragma: no cover — unreadable file
-                continue
-            if needle in text:
-                hits.append(path)
-        assert hits == [DAEMON_DIR / "constants.py"], (
-            "the C3 refresh name is RESERVED-UNUSED at C2 — it must be "
-            f"declared ONLY in daemon/constants.py; found {hits}"
+    def test_c3_refresh_name_now_bound(self) -> None:
+        """C3 BINDING: the refresh name is now wired (Shape B resolver +
+        boot log) — the literal appears in context_messages.py
+        (Shape B resolver + boot log) AND in manager.py (boot-log
+        wire-up). The registry entry stays in daemon/constants.py."""
+        from daemon.services import context_messages as cm
+        import daemon.manager as manager_module
+
+        # The resolver + reset + boot-log trio must exist on
+        # context_messages (Shape B — same shape as
+        # ENSEMBLE_WC_WAKE_ENQUEUE).
+        for attr in (
+            "_resolve_ambient_kv_fresh",
+            "_reset_ambient_kv_fresh_for_tests",
+            "emit_ambient_kv_fresh_boot_log",
+        ):
+            assert hasattr(cm, attr), (
+                f"Shape B resolver trio missing on context_messages: "
+                f"{attr}"
+            )
+        # The boot-log emit must be wired in manager.py alongside the
+        # other Shape B wrappers (wc-wake, governor-guard).
+        src = Path(manager_module.__file__).read_text(encoding="utf-8")
+        assert "emit_ambient_kv_fresh_boot_log()" in src, (
+            "manager.py must wire emit_ambient_kv_fresh_boot_log() — "
+            "the lazy first-call emit makes quiet-daemon boot-log "
+            "grep false-fail (S13)"
         )
+        # C3 uses Shape B (service-module resolver), NOT a pydantic
+        # Config field — there must be no ``ambient_kv_fresh`` field
+        # on the config section (D5 / D8 ratification: D1 is a
+        # service-module behavioral pivot, no YAML surface).
         cfg = Config()
         assert not hasattr(cfg.context_messages, "ambient_kv_fresh"), (
-            "no C3 field may exist before the C3 binding lands"
+            "C3 is Shape B — there must be no ambient_kv_fresh field "
+            "on the pydantic Config (the resolver is service-module "
+            "side, decisions.md D5)"
         )
