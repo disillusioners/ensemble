@@ -709,9 +709,15 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str,
         # ``agents/explorer/meta.json`` (canonical opt-in pattern).
         # The orchestrator matches against the first-turn message
         # text on the spawned explorer instance, so no manual attach
-        # is needed here. The ``Project:`` line above is retained
-        # as explicit routing metadata / target hint for system-default
-        # projects where system injection is suppressed.
+        # is needed here. The ``Project:`` line above is RETAINED
+        # for two reasons:
+        # (a) matcher input — the system Shared Context matcher
+        #     consumes the full first-turn message text, and the
+        #     ``Project: {pid}`` tokens are part of that corpus
+        #     (so the matcher may surface project-scoped notes
+        #     when the slug corpus overlaps);
+        # (b) explicit RAG routing hint — the explorer agent uses
+        #     it to scope RAG / project-bound tool calls.
 
         # Determine if the calling agent needs a model override.
         # Explorer's meta.json may declare ``caller_model_overrides``: a map
