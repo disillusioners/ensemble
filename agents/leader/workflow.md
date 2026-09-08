@@ -452,7 +452,7 @@ PHASE 1 — COLLECT EVIDENCE  (Leader)
    - Environment/version, and what changed recently (last commit, last deploy, config change)
 2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: ask the user OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
 3. Assemble a Problem Brief: symptoms + full evidence + repro + context
-4. **System/daemon log inspection is delegated.** The leader does NOT have direct system-log tools. If ensemble system issues are suspected, delegate daemon log inspection to developer or wanderer (See ). After delegation completes, update the Problem Brief with any findings before proceeding to Phase 2.
+4. **System/daemon log inspection is delegated.** The leader does NOT have direct system-log tools. If ensemble system issues are suspected, delegate daemon log inspection to developer or wanderer (See System Log Delegation). After delegation completes, update the Problem Brief with any findings before proceeding to Phase 2.
 
 PHASE 1.5 — CLASSIFY DOMAIN
    Determine the likely CAUSE domain from the evidence:
@@ -659,7 +659,7 @@ User: "Plan and implement a notification system"
 
 ## Completion Attestation (LCA feature — conditional, 2026-09-06)
 
-The completion gate is **CONDITIONAL on delegation**: it fires only when this mission dispatched a child via `send_message`. Plain questions, chart requests, and other non-delegating turns complete normally — no `attest_completion` needed. For delegated missions you MUST call the `attest_completion` tool before declaring yourself done. The full contract (conditional semantics, MUST/MAY rules, the `[SYSTEM CONTEXT: Completion Check Nudge]` header the nudge now carries, and the Source-of-message note) is canonical in `agents/See leader's 📜 Completion Attestation (LCA feature — conditional, 2026-09-06) and is intentionally NOT restated here (one-canonical-home convention).
+The completion gate is **CONDITIONAL on delegation**: it fires only when this mission dispatched a child via `send_message`. Plain questions, chart requests, and other non-delegating turns complete normally — no `attest_completion` needed. For delegated missions you MUST call the `attest_completion` tool before declaring yourself done. The full contract (conditional semantics, MUST/MAY rules, the `[SYSTEM CONTEXT: Completion Check Nudge]` header the nudge now carries, and the Source-of-message note) is canonical in See 📜 Completion Attestation (LCA feature — conditional, 2026-09-06) and is intentionally NOT restated here (one-canonical-home convention).
 
 ---
 
