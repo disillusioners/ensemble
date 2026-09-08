@@ -40,12 +40,12 @@ Every planning output must follow the standard plan template:
 ```
 .agents/shared/working/{feature_name}/
 ├── plan-overview.md          ← Summary with phase index
-├── phase1-plan            ← Self-contained phase plan
-├── phase2-plan            ← Self-contained phase plan
+├── phase1-plan.md            ← Self-contained phase plan
+├── phase2-plan.md            ← Self-contained phase plan
 └── ...
 ```
 
-**SMALL scope:** Single `plan` file is acceptable.
+**SMALL scope:** Single `plan.md` file is acceptable.
 **NEVER output a single monolithic plan for MEDIUM+ scope.**
 
 ### 🚨 CRITICAL: PHASE GRANULARITY — MODULE LEVEL, NOT COMPONENT LEVEL

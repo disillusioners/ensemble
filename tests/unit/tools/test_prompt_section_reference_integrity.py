@@ -307,6 +307,9 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         # W4 contract: whitelisting the versioned form does NOT unban a use of it as a prose
         # cross-reference (e.g., "See architecture-recommendation-v2.md" remains a violation).
         "architecture-recommendation-v2.md",
+        # Operational SMALL-scope single-file plan (planner uses `plan.md` for SMALL-scope work).
+        # W4 contract applies: this whitelist entry is for the operational filename use only.
+        "plan.md",
         # Date-prefixed memory files (own memory references) are operational
         # filesystem paths to dated memory entries (e.g.,
         # 2026-04-23-architecture-report.md); they are NOT cross-references
