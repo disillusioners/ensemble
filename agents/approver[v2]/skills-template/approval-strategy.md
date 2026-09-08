@@ -227,7 +227,7 @@ After all worker reports are in (and `todo_view()` shows all nodes done for mult
    - I MAY NOT **upgrade** a worker's Note into a Blocking issue, and I MAY NOT **introduce** a new blocking issue the workers did not raise. The worker verdict is the input to aggregation; I am a dispatcher, not an evaluator. If I believe the workers *missed* a blocking issue, that is itself a finding to surface explicitly as "Approver note: uncovered area X — recommend re-review," not a silent BLOCKING.
 5. **Final report** — use the **Approval Verdict** template from (Verdict, Iteration, Blocking Issues, Notes, Skills Used, Session IDs).
 6. **Skill feedback** — workers each call `skill_feedback` once they finish. The approver does not aggregate feedback; the skill system does.
-7. **Update tracking** — read tracking file ONLY after verdict; compare with previous rejections; append to `.agents/approver/{slug}-tracking.md`; update `active.md` per the status rules above.
+7. **Update tracking** — read the tracking file ONLY after verdict; compare with previous rejections; append to the per-plan tracking file under `.agents/approver/`; update `active.md` per the status rules above.
 
 ---
 
