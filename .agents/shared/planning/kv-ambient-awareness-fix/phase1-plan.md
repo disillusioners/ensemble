@@ -20,12 +20,13 @@ Fix DEFECT 1 (KV snapshot cadence) so that the `[SYSTEM CONTEXT: Related Project
   1. **Stable project block** — project JSON, critical notes, history entries. Emitted once on turn 1 under stable id `project:{instance_id}`. Never rebuilt.
   2. **Live KV block** — the `kv_metadata` section. Emitted every turn under stable id `kv:{instance_id}` (stable across turns so `add_messages` replaces in place).
 - Add a deterministic-id path to `_make_context_message` (precedent: `build_auto_load_skills_message` / `get_auto_load_skill_message_id` at `context_messages.py:683-693`).
-- Gate the `is_retry` short-circuit (`if not is_retry:`) to ALWAYS emit the KV block on retries — retries intentionally replay; KV staleness on a retry turn is acceptable and expected.
-- Kill-switch `ENSEMBLE_AMBIENT_KV_FRESH` (Shape B; default ON; `=0` disables → restores once-per-instance legacy behavior). Registered in `constants.py:594-624`.
+- ~~Gate the `is_retry` short-circuit (`if not is_retry:`) to ALWAYS emit the KV block on retries~~ — **ERRATUM (W4/D15, 2026-09-08 revision): the frozen draft's opposite claim here was a contradiction. RATIFIED: `is_retry=True` turns NEVER refresh** — retries skip all of `assemble_context_messages` via the gate at instance_messaging.py:3637 (re-anchored; D13); a retry turn replays the checkpointed KV block, and the next non-retry turn refreshes it. Consistent with the seam table below and the test inventory.
+- Kill-switch `ENSEMBLE_AMBIENT_KV_FRESH` (Shape B; default ON; `=0` disables → **cadence-only reversion (W3): the KV block still EXISTS — emitted on turn 1 exactly as with the flag ON — and is simply never refreshed on turns 2+; OFF does NOT remove the turn-1 block**). Registered in `constants.py:594-624`.
 - New regression test reproducing the defect symptom: KV stays stale across inject / report / revive seams.
 - New flag-ON real-service test wiring the kill-switch through the real `SharedMetaKVRepository`.
+- **Turn-1-surface OFF pin (W3):** new test asserting that with the flag OFF, turn 1 STILL emits the KV block (the block's existence is not gated — only the refresh cadence is).
 - Existing test pin audit: enumerate assertions that encode the once-per-instance contract and document their new expected outcomes.
-- Re-anchor at `latest` before implementation (3 commits: `bb4e3e89` / `4e1e6698` / `c2142c69` on the injected-notes-absorb arc land after `2750c815`).
+- Re-anchor at `latest` before implementation (drift set: **7 commits, `2750c815..9eebf3ff`** — `d348ad4e`, `80bb61dd`, `d6e30d9d`, `7a899517`, `e321bdb3`, `f965345a`, `53baef57`; supersedes the stale 3-commit injected-notes list this draft carried; see decisions.md D13).
 
 ### Out of Scope
 - DEFECT 2 (mispartition `_persistent_parent_id=None`) — Phase 2.
@@ -55,7 +56,7 @@ if project_already_injected:
 ```
 The `project_already_injected` boolean is the `project_injected` flag persisted in `instance_metadata` (DB row, survives restarts). Once True it never flips back. The entire project block (including KV section) is short-circuited on every subsequent turn.
 
-**The `is_retry` gate** (`instance_messaging.py:3574`):
+**The `is_retry` gate** (`instance_messaging.py:3637`; re-anchored from the draft's `:3574` per D13):
 ```python
 if not is_retry:
     ...  # assemble_context_messages called here
@@ -67,10 +68,10 @@ Retries intentionally bypass the assembly — fine. The defect is that non-retry
 | Seam | Call site | `is_retry`? | Reaches assembly? | Fix needed? |
 |------|-----------|-------------|-------------------|-------------|
 | agent_node (graph slot) | graph.py:648-684 | per dispatch | Yes — every turn | Yes |
-| Message inject (HTTP / tool) | instance_messaging.py:3573-3657 | False (first) | Yes — turn 1 only | Yes |
+| Message inject (HTTP / tool) | instance_messaging.py:3637-3760 (re-anchored; D13) | False (first) | Yes — turn 1 only | Yes |
 | Child-report delivery | child_reports.py:466/3735 → _process_message_with_tracking | False | Yes — turn 1 only | Yes |
 | Job-event context | manager.py:6790-6846 → normal message | False | Yes — turn 1 only | Yes |
-| is_retry resume | instance_messaging.py:3574 | True | **No** | No (by design) |
+| is_retry resume | instance_messaging.py:3637 | True | **No** | No (by design — D15 ratifies skip-on-retry) |
 | Terminal revive | instance_messaging.py:1875-1945 | False | **No** (flag still True) | No (next non-retry turn fixes) |
 | Pause / resume | instance_lifecycle.py:2799/3085 | True on resume | **No** | No (by design) |
 
@@ -92,10 +93,11 @@ The two seams that short-circuit are the same contract — `project_injected` fl
 | `context_messages.py:1319-1360` | KV fetch inside the full-build path; skipped by short-circuit |
 | `context_messages.py:1273-1279` | Comment documenting the stable-id / add_messages supersede pattern for auto-load |
 | `instance_messaging.py:2865-2890` | `project_injected` flag capture (read once, cached) |
-| `instance_messaging.py:2988-2992` | `project_injected` flag stamp after first turn |
-| `instance_messaging.py:3574` | `if not is_retry:` gate — retries skip all of `assemble_context_messages` |
+| `instance_messaging.py:2907-2949` | `project_injected` flag capture (read once, cached) — re-anchored per D13 |
+| `instance_messaging.py:3050-3056` | `project_injected` flag stamp after first turn — re-anchored per D13 |
+| `instance_messaging.py:3637` | `if not is_retry:` gate — retries skip all of `assemble_context_messages` — re-anchored per D13 |
 | `graph.py:665-684` | `_is_project_already_injected` — re-reads flag per turn (already fresh per turn) |
-| `persistence.py:943` | API synthetic-context stable id format: `synthetic-context-{context_kind}-{instance_id}-{idx}` |
+| `persistence.py:949` | API synthetic-context stable id format: `synthetic-context-{context_kind}-{instance_id}-{idx}` (enumerate region `:937-949`; re-anchored per D13) |
 | `compaction.py:1085-1090` | `DEFAULT_CONTEXT_LIMIT = 700000` — bound for per-turn cost analysis |
 | `constants.py:594-624` | Kill-switch name registry |
 | `tests/unit/test_context_messages.py:1634-1671` | `test_auto_load_skipped_when_project_already_injected` — pin to verify unchanged |
@@ -151,7 +153,9 @@ def _make_context_message(
 | Stable project block | `project:{instance_id}` | constants.py |
 | Live KV block | `kv:{instance_id}` | constants.py |
 
-Precedents: `auto_load:{instance_id}:{agent_id}` (context_messages.py:683-693), `synthetic-context-{context_kind}-{instance_id}-{idx}` (persistence.py:943).
+Precedents: `auto_load:{instance_id}:{agent_id}` (context_messages.py:683-693), `synthetic-context-{context_kind}-{instance_id}-{idx}` (persistence.py:949; D13).
+
+> **S16 (out of scope, documented):** extending the C0 id-mint to ALL block types (project / auto-load / synthetic) so every context block gains supersede semantics is explicitly OUT OF SCOPE for this initiative — C0 mints ids only for the project + KV blocks. Recorded as a **prod-P3 pin note**: post-deploy priority-3 follow-up ("extend stable-id mint to remaining block kinds"), to be planned separately if the block-growth symptom ever shows on auto-load/skills blocks.
 
 ### Supersede Semantics
 
@@ -219,7 +223,10 @@ async def _build_kv_context_message(
         kind=CONTEXT_KIND_PROJECT,   # same kind as project block; id differentiates
         title="Related Project",
         content=section,
-        id_=f"kv:{context_key.split(':')[-1]}",  # extract instance_id from context_key
+        id_=f"kv:{context_key}",  # CANONICAL (D3): the full context_key IS the tree-root partition key.
+        # ERRATUM (S19/D3, 2026-09-08 revision): the frozen draft carried
+        # `kv:{context_key.split(':')[-1]}` ("extract instance_id from context_key") —
+        # a WRONG-ID HAZARD; stricken. Supersede granularity must match data granularity.
     )
 ```
 
@@ -277,7 +284,7 @@ Rationale: KV freshness is a routing/behavioral pivot (not an enforcement policy
 ### Polarity: Default ON
 
 `ENSEMBLE_AMBIENT_KV_FRESH=1` (or unset / blank / truthy) → per-turn KV refresh ENABLED (the fix behavior).  
-`ENSEMBLE_AMBIENT_KV_FRESH=0` (or `false` / `no` / `off`) → KV refresh DISABLED → once-per-instance legacy behavior (the defect, but safe fallback).
+`ENSEMBLE_AMBIENT_KV_FRESH=0` (or `false` / `no` / `off`) → KV refresh DISABLED → **cadence-only reversion (W3, canonical wording — identical at phase1-plan.md:24, :362, :414-423, and decisions.md D6): the KV block still EXISTS — it is emitted on turn 1 exactly as with the flag ON — and is simply NEVER REFRESHED on turns 2+.** OFF does not remove the turn-1 block and does not produce stale-but-refreshing behavior; it freezes the turn-1 snapshot.
 
 **Precedent rationale**: D1 adds a **per-turn DB read**. Two precedent classes exist:
 1. **Behavior-bug fixes default ON** (proactive compaction, defer-autopromote, governor recursion guard): `=0` disables the bug-fix and restores the old behavior. Operators who want the old behavior set `=0` — they accept staleness.
@@ -334,19 +341,19 @@ def emit_ambient_kv_fresh_boot_log() -> None:
     enabled = _resolve_ambient_kv_fresh()
     logger.info(
         "Ambient KV freshness %s (env %s=%s); restart required to flip. "
-        "Default ON — set =0 to restore once-per-instance legacy (stable KV).",
-        "ENABLED (per-turn fresh)" if enabled else "DISABLED (legacy once-per-instance)",
+        "Default ON — set =0 to revert to legacy cadence (turn-1 block kept, never refreshed).",
+        "ENABLED (per-turn fresh)" if enabled else "DISABLED (cadence-only legacy: turn-1 snapshot, no refresh)",
         _ENSEMBLE_AMBIENT_KV_FRESH_ENV,
         os.environ.get(_ENSEMBLE_AMBIENT_KV_FRESH_ENV, "<unset>"),
     )
 ```
 
 ### Wire-Up
-- Boot log: `emit_ambient_kv_fresh_boot_log()` wired in `manager.py` alongside `emit_wc_wake_enqueue_boot_log()` and `emit_defer_autopromote_boot_log()` (mirrors the Shape B pattern at `manager.py:797-806`).
-- Registry: add `"ENSEMBLE_AMBIENT_KV_FRESH"` to `constants.py:594-624` reserved names.
+- Boot log: `emit_ambient_kv_fresh_boot_log()` wired in `manager.py` alongside `emit_wc_wake_enqueue_boot_log()` and `emit_defer_autopromote_boot_log()` (mirrors the Shape B pattern at `manager.py:797-806`). **Emit-AT-BOOT requirement (S13):** the boot INFO must be wired from `manager.py` boot, NOT lazily on the first `_resolve_ambient_kv_fresh()` call — a lazy emit makes quiet-daemon boot-log grep false-fail (no traffic since restart → line never printed → operator misreads the flag as OFF). Verification greppability is a design requirement.
+- Registry: add `"ENSEMBLE_AMBIENT_KV_FRESH"` to `constants.py:594-624` reserved names. (Post-D12, C0 pre-reserves only the TWO surviving names; see decisions.md D5/D12.)
 
 ### Restart-to-Flip
-`ENSEMBLE_AMBIENT_KV_FRESH=0` + daemon restart → once-per-instance KV (defect restored, safe fallback). `ENSEMBLE_AMBIENT_KV_FRESH=1` (or unset) + restart → per-turn KV (fix active).
+`ENSEMBLE_AMBIENT_KV_FRESH=0` + daemon restart → legacy cadence (W3: turn-1 block kept, never refreshed). `ENSEMBLE_AMBIENT_KV_FRESH=1` (or unset) + restart → per-turn KV refresh (fix active).
 
 ---
 
@@ -359,12 +366,23 @@ def emit_ambient_kv_fresh_boot_log() -> None:
 | `test_kv_freshness_on_turn2_short_circuit` | Regression (new) | **New** | KV block appears in `assemble_context_messages` output when `project_already_injected=True`; content is fresh |
 | `test_kv_stable_id_supersedes` | Regression (new) | **New** | Two calls with same `instance_id` return same message id; `add_messages` supersedes |
 | `test_kv_block_absent_on_is_retry` | Regression (new) | **New** | KV block NOT emitted when `is_retry=True` (kill-switch OFF path) |
-| `test_kv_freshness_killswitch_off` | Regression (new) | **New** | When kill-switch OFF, `assemble_context_messages` returns NO kv block on turn 2+ (legacy behavior) |
+| `test_kv_freshness_killswitch_off` | Regression (new) | **New** | When kill-switch OFF, the turn-2+ refresh emission is absent — the turn-1 block REMAINS (cadence-only reversion, W3) |
+| `test_kv_block_present_on_turn1_when_flag_off` | Turn-1-surface OFF pin (new, **W3**) | **New** | With kill-switch OFF, turn 1 STILL emits the KV block — OFF gates the cadence, not the block's existence |
 | `test_ambient_kv_fresh_flag_on_real_service` | Flag-ON (new) | **New** | Real `SharedMetaKVRepository` + `InstanceManager` path; verify `get_all_as_dict` called each turn |
 | `test_ambient_kv_fresh_identical_when_off` | Flag-OFF identical (new) | **New** | With kill-switch OFF, output matches baseline (no kv block in short-circuit path) |
 | `test_auto_load_skipped_when_project_already_injected` | Existing pin | **Existing** | Auto-load block NOT in turn 2+ output. **Stays green** — fix doesn't touch auto-load |
 | `test_project_already_injected_skips_matcher` | Existing pin | **Existing** | Blueprint matcher NOT called on turn 2+. **Stays green** — fix doesn't touch blueprint |
 | `test_context_slot_resolves_fresh_flags` | Existing pin | **Existing** | Graph slot re-reads `project_already_injected` each turn. **Stays green** — flag-read unchanged |
+
+### Seam Coverage (W5 — decision: documented subsumption mapping)
+
+Chosen over a parametrized seam test matrix (inject/report/retry/revive × ON/OFF) — the seams share ONE assembly call site, so a cross-product matrix would re-test the same code path through four doors:
+
+- **Subsumption**: every non-retry seam (agent_node dispatch, message inject at `instance_messaging.py:3637-3760`, child-report delivery via `_process_message_with_tracking`, job-event context) reaches `assemble_context_messages` through the same `if not is_retry:` gate (:3637) and the same `project_already_injected` short-circuit — so `test_kv_freshness_on_turn2_short_circuit` + `test_kv_stable_id_supersedes` SUBSUME refresh coverage for the inject/report/revive seams collectively (the seam table :65-77 documents which seams reach assembly; terminal revive relies on the next non-retry turn per that table).
+- **Retry/resume skip**: `test_kv_block_absent_on_is_retry` covers the `is_retry=True` + pause/resume skip for all such seams (same gate).
+- **Flag-OFF cadence**: `test_kv_freshness_killswitch_off` + `test_kv_block_present_on_turn1_when_flag_off` cover the OFF state for all seams (flag evaluated at the single builder call site).
+
+If a future seam is added that bypasses the `:3637` gate, the CI grep gate on the gate's call site (R3-style) fails — the mapping is then re-derived.
 
 ### New Regression Tests (Pre-Fix Worktree Proof Required)
 
@@ -412,14 +430,26 @@ class TestKVFreshnessCadence:
         ...
 
     async def test_kv_block_absent_when_flag_off(self, ...):
-        """Kill-switch OFF → no kv block on turn 2+ (legacy behavior)."""
+        """Kill-switch OFF → cadence-only reversion (W3): no kv REFRESH emission
+        on turn 2+; the turn-1 block remains in the checkpoint."""
         # Setup: ENSEMBLE_AMBIENT_KV_FRESH=0
         _reset_ambient_kv_fresh_for_tests()
         msgs = await assemble_context_messages(..., project_already_injected=True)
         kv_msgs = [m for m in msgs if m.id.startswith("kv:")]
-        assert len(kv_msgs) == 0
+        assert len(kv_msgs) == 0  # turn-2+ call: no refresh emission
         # At 2750c815: PASSES (no kv block at all — but for the wrong reason)
-        # After fix with flag=0: PASSES (kv block explicitly absent)
+        # After fix with flag=0: PASSES (kv block explicitly unrefreshed)
+        ...
+
+    async def test_kv_block_present_on_turn1_when_flag_off(self, ...):
+        """Turn-1-surface OFF pin (W3): with the kill-switch OFF, turn 1 STILL
+        emits the KV block. OFF is a cadence-only reversion — it gates the
+        refresh, not the block's existence."""
+        # Setup: ENSEMBLE_AMBIENT_KV_FRESH=0
+        _reset_ambient_kv_fresh_for_tests()
+        msgs1 = await assemble_context_messages(..., project_already_injected=False)
+        kv_msgs1 = [m for m in msgs1 if m.id.startswith("kv:")]
+        assert len(kv_msgs1) == 1  # turn-1 block present even with flag OFF
         ...
 ```
 
@@ -488,7 +518,7 @@ with engine.connect() as conn:
 
 ### Pre-Deployment: Re-Anchor at Latest
 
-**Mandatory**: before branching for implementation, `git fetch origin && git checkout latest` in a new worktree. The injected-notes-absorb arc (`bb4e3e89` / `4e1e6698` / `c2142c69`) lands on `latest` after `2750c815` and touches `daemon/compaction.py` and `daemon/config.py` — re-anchor all anchors in these files. Key files to re-grep after checkout:
+**Mandatory**: before branching for implementation, `git fetch origin && git checkout latest` in a new worktree. The implicated-file drift since `2750c815` is **7 commits** (`2750c815..9eebf3ff` — supersedes this draft's 3-commit injected-notes list; see decisions.md **D13**): `d348ad4e`, `80bb61dd`, `d6e30d9d`, `7a899517`, `e321bdb3`, `f965345a`, `53baef57`. Re-anchor all anchors in the implicated files. Key files to re-grep after checkout:
 - `daemon/compaction.py`: `ENSEMBLE_INJECTED_NOTES_ABSORB` resolver, `_injected_note_absorbed_ids` caller
 - `daemon/config.py`: `resolve_injected_notes_absorb()` boot validation call
 - `daemon/services/context_messages.py`: full re-grep of all anchors listed in Root Cause table above
@@ -540,10 +570,10 @@ echo "ENSEMBLE_AMBIENT_KV_FRESH=0" >> $INSTALL_DIR/.env
 | 2 | **Concurrency**: if two concurrent turns (from two message deliveries to the same instance) race `get_all_as_dict` vs a KV write, the worst case is one turn sees slightly stale data for one turn. | Low | Low | This is acceptable for ambient data (best-effort freshness). Production systems rarely have true concurrent turns for the same instance. |
 | 3 | **The `_resolve_ambient_kv_fresh()` resolver is new**: if the env variable name collides with a future flag, the registry discipline in `constants.py:594-624` prevents silent override. | Low | Low | Register `"ENSEMBLE_AMBIENT_KV_FRESH"` in constants before shipping. |
 | 4 | **Split block changes the API GET /messages output**: API re-runs assembly live (`persistence.py:914`). The API path calls `assemble_context_messages` and will now emit BOTH blocks. Frontend receives two `[SYSTEM CONTEXT: Related Project]` messages. | Medium | Medium | The API path (`persistence.py:914`) goes through the same `assemble_context_messages`. Both blocks will appear in GET /messages. The frontend may need to handle two blocks instead of one. Mitigation: document the new layout; coordinate with frontend team. Check `frontend/src/...` for context-message rendering before shipping. |
-| 5 | **Re-anchor miss**: if the injected-notes-absorb arc (`bb4e3e89`/etc.) touches `context_messages.py` itself, anchors in this plan are stale. | Medium | Low | Mandatory re-anchor step before implementation. |
+| 5 | **Re-anchor miss**: if newer commits (7-commit drift set, `2750c815..9eebf3ff` — D13) touch `context_messages.py` itself, anchors in this plan are stale. | Medium | Low | Mandatory re-anchor step before implementation. |
 | 6 | **SharedMetaKVRepository raises**: `_fetch_kv_metadata` catches exceptions and returns `None` (existing behavior). The kv block will not be emitted if the repo raises — acceptable degradation (safe fallback). | Low | Low | Existing exception handling at `context_messages.py:984-991` is unchanged. |
 | 7 | **Skills block grows unbounded** even without this fix; the fix adds a constant 1-entry overhead. | Low | Low | No change to skills behavior; compaction continues to trigger at 80%/95%. |
-| 8 | **Kill-switch OFF produces zero kv block on turn 2+**: operators who set `ENSEMBLE_AMBIENT_KV_FRESH=0` lose ambient KV entirely on turn 2+ (no kv block in context). This is the intended OFF behavior, but it may surprise operators who expected staleness vs absence. | Low | Low | Document the OFF semantics clearly in boot log and `.env.example`. |
+| 8 | **Kill-switch OFF freezes the KV block at its turn-1 snapshot**: operators who set `ENSEMBLE_AMBIENT_KV_FRESH=0` get the turn-1 block and NO refresh on turns 2+ (cadence-only reversion, W3 — the block's existence is unchanged, only the refresh cadence). Documented in boot log and `.env.example` so nobody expects per-turn freshness while OFF. | Low | Low | W3 wording is canonical across phase1-plan.md:24/:280/:362/:414-423 and decisions.md D6; turn-1-surface OFF pin (`test_kv_block_present_on_turn1_when_flag_off`) prevents accidental suppression regressions. |
 
 ---
 
@@ -554,7 +584,7 @@ echo "ENSEMBLE_AMBIENT_KV_FRESH=0" >> $INSTALL_DIR/.env
 | 1 | KV block appears in context on turn 2+ | New regression test `test_kv_freshness_on_turn2_short_circuit` | PASS |
 | 2 | KV block uses stable id `kv:{instance_id}` | New regression test `test_kv_stable_id_supersedes` | PASS; `kv_msg.id == prior_kv_msg.id` |
 | 3 | KV block is absent on `is_retry` turns | New regression test `test_kv_block_absent_on_is_retry` | PASS |
-| 4 | Kill-switch OFF produces zero kv block on turn 2+ | New regression test `test_kv_block_absent_when_flag_off` | PASS |
+| 4 | Kill-switch OFF = cadence-only reversion (no refresh emission on turn 2+; turn-1 block retained) | New regression tests `test_kv_block_absent_when_flag_off` + `test_kv_block_present_on_turn1_when_flag_off` (W3) | PASS |
 | 5 | Existing auto-load pin stays green | `pytest tests/unit/test_context_messages.py::TestAutoLoadBlock::test_auto_load_skipped_when_project_already_injected` | PASS |
 | 6 | Existing blueprint pin stays green | `pytest tests/unit/test_blueprint_injection.py::TestBlueprintInjection::test_project_already_injected_skips_matcher` | PASS |
 | 7 | shared_meta_kv tool tests stay green | `pytest tests/unit/test_shared_meta_kv_tool.py` | PASS (all) |

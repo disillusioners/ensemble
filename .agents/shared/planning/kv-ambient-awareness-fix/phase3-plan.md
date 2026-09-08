@@ -142,6 +142,18 @@ def build_shared_meta_kv_message(
     if not kv_metadata:
         return None
     payload = json.dumps(kv_metadata, sort_keys=True, indent=2)
+    # W10 (2026-09-08 revision): bound the serialized payload. The standalone
+    # host must carry the SAME value-size discipline as the rest of the KV
+    # surface: cap the serialized body at 32k; on overflow log a WARNING and
+    # SKIP the block (skip-on-overflow — same observable outcome as an empty
+    # partition, never a truncated/garbage block).
+    if len(payload) > 32 * 1024:
+        logger.warning(
+            "[ContextMessages] shared_meta_kv payload exceeds 32k "
+            "(%d bytes); skipping ambient KV block this turn",
+            len(payload),
+        )
+        return None
     body = escape_for_context_block(payload)
     msg = _make_context_message(
         kind=CONTEXT_KIND_SHARED_META_KV,
@@ -152,6 +164,8 @@ def build_shared_meta_kv_message(
         msg.id = stable_id  # phase1 deterministic-id contract
     return msg
 ```
+
+> **W10 companion note — freshness bounded by compaction cadence for compacted spans:** when a conversation has been compacted, injected blocks inside the compacted span were absorbed/re-emitted verbatim (injected blocks are non-selectable compaction material — blueprint compaction notes). For such spans the ambient KV block's refresh is bounded by the compaction cadence, not by this builder: the per-turn refresh (C3) supersedes the block only on turns where assembly re-emits it. Acknowledged as an inherent bound of the absorb design, not a defect of this fix.
 
 The exact `stable_id` minting helper is provided by phase1's Shared prerequisite; defect 3 does not redefine it. If phase1 lands a `_make_stable_id(kind, tree_root_id, instance_id)` helper, defect 3 calls it; if phase1 lands per-kind `id=` directly inside `_make_context_message` (the simpler scheme), defect 3 benefits without code change.
 
@@ -258,7 +272,7 @@ logger.info(
 )
 ```
 
-Operators verify the live state via boot log grep — same pattern as the `Creating PostgreSQL engine` boot marker for prod-truth verification.
+Operators verify the live state via boot log grep — same pattern as the `Creating PostgreSQL engine` boot marker for prod-truth verification. **Emit-AT-BOOT requirement (S13, 2026-09-08 revision):** this line is emitted at config-resolution time (boot), and must STAY there — a lazy first-call emit would make quiet-daemon boot-log grep false-fail (no traffic since restart → line never printed → operator misreads the flag as OFF). Reviewer gate: the C2 diff must not move the INFO line into a lazily-called resolver path.
 
 ### Restart-to-flip
 
@@ -338,16 +352,21 @@ def test_kv_ambient_skipped_when_partition_empty(self):
     assert manager._shared_meta_kv_repo.get_all_as_dict.call_count == 1
 ```
 
-### 3. NEW — `test_kv_ambient_real_service_flag_on_through_assembler`
+### 3. NEW — `test_kv_ambient_real_service_flag_on_through_assembler` (W6: REAL service, REAL repo, file-backed SQLite)
 
-`tests/unit/test_context_messages.py` (new test). No patching of `_resolve_*_enabled`; instead, set the actual pydantic field via the real `ContextMessagesConfig(**{"kv_ambient_system_default_enabled": True})` and pass through. Mirrors `tests/test_injection_api.py:372-411` real-router + `_reset` precedent.
+`tests/integration/` (new test). **No MagicMock manager and no patched `_resolve_*_enabled`** — the flag-ON path must be exercised through the REAL service stack:
+
+- Real `Config`/pydantic field (`kv_ambient_system_default_enabled: True`) passed through the real resolver.
+- Real `InstanceManager` + **real `SharedMetaKVRepository`** on file-backed SQLite (`tmp_path` + NullPool + WAL + busy_timeout — the §6 recipe below, NOT StaticPool, NOT MagicMock).
+- Seed the tree-root partition with a real `repo.set(...)`, run the assembler's default-project branch, and assert the `Shared Meta KV` block renders with the seeded row and the correct tree-root `context_key`.
+
+Mirrors `tests/test_injection_api.py:372-411` real-router precedent and `tests/integration/test_job_driven_enqueue_work_id_facade.py:76-95` for the DB recipe.
 
 ```python
-def test_kv_ambient_real_service_flag_on_through_assembler(self):
-    # Use the real resolver; override at the pydantic layer via direct construction
-    # OR mock os.environ + reload (per p2:514-541 paired-shape pattern).
-    # ... assemble_context_messages with real Config, real manager ...
-    assert ...  # full end-to-end flag-ON path
+def test_kv_ambient_real_service_flag_on_through_assembler(self, tmp_path):
+    # Real ContextMessagesConfig field = True (no test-side patching of the resolver)
+    # Real manager + real SharedMetaKVRepository on file-backed SQLite (W6)
+    # ... assemble through the real default-project branch; assert block + content ...
 ```
 
 ### 4. PINS THAT MUST STAY GREEN (scope-guide path unchanged)
@@ -375,6 +394,32 @@ def test_kv_block_position_after_scope_guide(self):
     assert scope_idx < kv_idx, "scope guide must precede KV block in persistent block"
 ```
 
+### 5b. NEW — W7 cross-flag composition tests (named cells of the D4 2×2)
+
+Two NEW cross-flag independence tests — flipping either flag alone must produce exactly its D4 table row, not a blend (see decisions.md D4 cell-pin table):
+
+```python
+def test_composition_c2_off_c3_on(self):
+    """D4 cell OFF×ON: host flag =0, refresh flag ON → NO KV block on any turn.
+    The refresh flag alone must NOT re-add a suppressed block."""
+    # ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=0, ENSEMBLE_AMBIENT_KV_FRESH=1
+    # default-project tree, non-empty partition
+    # assert: no shared_meta_kv kind on turn 1 AND on turn 2+
+
+def test_composition_c2_on_c3_off(self):
+    """D4 cell ON×OFF: host flag ON, refresh flag =0 → KV block emitted on
+    turn 1, NEVER refreshed on turns 2+ (cadence-only reversion, W3)."""
+    # ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED=1, ENSEMBLE_AMBIENT_KV_FRESH=0
+    # default-project tree, non-empty partition
+    # assert: shared_meta_kv present on turn 1; absent from turn-2+ refresh emissions
+```
+
+(The diagonal cells already have their per-phase tests: ON×ON = test 1a + phase1 refresh suite; OFF×OFF = test 1b + `test_kv_block_absent_when_flag_off` + `test_kv_block_present_on_turn1_when_flag_off`.)
+
+### 5c. NEW — W9 synthetic-id enumerate-order pin
+
+Pin for `persistence.py:937-949` (id mint at `:949`): for a fixed context-message list, each synthetic `message_id` suffix `{idx}` MUST equal the message's position in the `GET /messages` array (enumeration order = array order; no re-sort between enumerate and return). The FE merge layer keys on these ids — order drift breaks merge integrity.
+
 ### 6. NO-REGRESSION — worktree-aware prompt pins
 
 `tests/unit/test_shared_meta_kv_tool.py` (:84, :109, :133, :161, :194, :216) — must stay green; tree-root reads in the tool surface are unchanged. Defect 3 modifies the ambient block, not the tool's tree-root resolution.
@@ -383,9 +428,9 @@ def test_kv_block_position_after_scope_guide(self):
 
 `.agents/shared/planning/worktree-aware-prompts/verification-summary.md:24-34` — prompt byte-identity fences guarded regions; no agent prompt file modified.
 
-### 7. DB recipe (no DB changes here)
+### 7. DB recipe (W6 — updated)
 
-Defect 3 makes no DB writes; the new test `test_kv_ambient_*` uses an in-memory MagicMock for `manager._shared_meta_kv_repo` (precedent: existing `test_kv_metadata_not_fetched_for_system_default`). No file-backed SQLite / NullPool recipe needed.
+Test 3 (flag-ON through real service) writes to the `shared_meta_kv` surface and therefore uses the file-backed SQLite recipe: `tmp_path` + NullPool + `PRAGMA journal_mode=WAL` + `busy_timeout=10000` with a **real `SharedMetaKVRepository`** — same discipline as phase2's C1′ partition pin and phase1's flag-ON test. The original draft's MagicMock-manager waiver is DROPPED (W6): mocked KV repos mask the fetch/render contract this phase exists to prove. Tests 1a/1b/2 (unit-level gate/pin tests that only count `get_all_as_dict` calls) may keep the lightweight in-memory mock — they do not exercise writes.
 
 ### 8. Bug-exercising proof (Worktree-Based Regression Proof)
 
@@ -418,7 +463,7 @@ If any anchor shifted, this plan is to be updated to match new line numbers BEFO
 5. Add config field + resolver + wire-up in daemon/config.py.
 6. Add `ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED` registry entry at daemon/constants.py:594-624.
 7. Add boot log line at config resolution time.
-8. Flip tests 1a/1b/2/3/5; verify 4 (scope-guide pins) and 6 (worktree-aware pins) stay green.
+8. Flip tests 1a/1b/2/3/5/5b/5c; verify 4 (scope-guide pins) and 6 (worktree-aware pins) stay green.
 9. Run full `tests/unit/test_context_messages.py` + `tests/test_injection_api.py` + `tests/unit/test_shared_meta_kv_tool.py`.
 10. Run full repo test suite.
 
@@ -491,24 +536,24 @@ If ambient KV breaks a default-project prompt after deploy:
 ### You (defect 3) are AFTER defect 2 and BEFORE defect 1
 
 ```
-phase1-plan.md (stable-id scheme)     ← Shared prerequisite, must land FIRST
+phase1-plan.md §Shared prerequisite (stable-id = C0) ← Shared prerequisite, must land FIRST
        │
        ▼
-phase2-plan.md (defect 2 mispartition) ← Must land BEFORE defect 3
+phase2-plan.md (defect 2 mispartition = C1′ verify-and-pin) ← FIXED AT BASE (80bb61dd);
+       │                                                       C1′ pins the contract BEFORE defect 3 (S12)
+       ▼
+phase3-plan.md (defect 3, THIS PLAN = C2)   ← YOU
        │
        ▼
-phase3-plan.md (defect 3, THIS PLAN)   ← YOU
-       │
-       ▼
-phase4-plan.md (defect 1 cadence)      ← Refreshing a suppressed block is moot
+phase1-plan.md body (defect 1 cadence = C3) ← Refreshing a suppressed block is moot
                                           until you un-suppress it
 ```
 
 ### What you depend on
 
 - **phase1 stable-id scheme**: provides the `_make_stable_id` helper (or equivalent per-kind id contract) that defect 3's `build_shared_meta_kv_message` consumes via its `stable_id` parameter. Without phase1, defect 3 cannot emit the new block — re-emissions would APPEND rather than replace, growing the persistent block unboundedly, and id-less messages would be dropped by MessageTapSlot / fall through to the moving-timestamp fallback at persistence.py:527-528.
-- **phase2 mispartition fix**: establishes the correct tree-root key resolution at `assemble_context_messages`. Defect 3's gate calls `_fetch_kv_metadata(context_key, manager)` with the same `context_key`; if phase2 hasn't corrected the mispartition, defect 3 would fetch KV under the wrong partition and emit an empty block (which then trips the empty-partition skip — silent regression to current behavior). Hard ordering: phase2 must land first.
-- **No other plan** in this initiative precedes defect 3. Defect 3 is the third of four fixes; it does not depend on phase1's injection-site changes (those are defect 1's domain).
+- **phase2 mispartition fix — FIXED AT BASE (80bb61dd), verified + pinned by C1′ (D12)**: establishes the correct tree-root key resolution at `assemble_context_messages`. Defect 3's gate calls `_fetch_kv_metadata(context_key, manager)` with the same `context_key`; the C1′ verify gate (tests-only: real-service partition pin + exception-ladder + messaging/tool consistency pins) is what makes it safe for defect 3 to bind against that key — a wrong-partition binding would fail C1′'s pins loudly instead of silently emitting an empty block. Hard ordering per S12: C0 → C1′ → C2 (this phase) → C3.
+- **No other plan** in this initiative precedes defect 3. Defect 3 is the third of four steps; it does not depend on phase1's injection-site changes (those are defect 1's domain).
 
 ### What you unblock
 
