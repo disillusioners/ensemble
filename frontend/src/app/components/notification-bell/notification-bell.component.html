@@ -15,7 +15,18 @@
     </mat-icon>
   </button>
 
-  <mat-menu #notificationMenu="matMenu" class="notification-dropdown">
+  <!-- W-top-right anchoring: `before` connects the OVERLAY's right
+       (end) edge to the trigger's right edge (menu.mjs `_setPosition`:
+       xPosition 'before' → originX/overlayX 'end'), so the panel opens
+       leftward+downward from the button near the right viewport edge.
+       Material's default 'after' connects the overlay's LEFT edge to
+       the trigger — with the bell at header-right, the panel's right
+       edge can spill past the viewport when the auto-flip fallback
+       doesn't engage (e.g. very-narrow triggers). Pin 'before'
+       explicitly to remove the dependency on the auto-flip fallback
+       and prevent regressions if the bell's row layout changes.
+       yPosition stays the default 'below'. -->
+  <mat-menu #notificationMenu="matMenu" class="notification-dropdown" xPosition="before">
     <ng-template matMenuContent>
       <div class="notification-panel" (click)="$event.stopPropagation()">
         <div class="notification-header">
