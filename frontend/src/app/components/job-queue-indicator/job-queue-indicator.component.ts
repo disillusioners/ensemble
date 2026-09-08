@@ -699,6 +699,18 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       // filtered above. A healthy tick with ``total = 0`` returns 0
       // and IS recorded (legitimate update, not a degraded gap).
       this.liveMissionCountRaw.set(count);
+      // F-5 closure (2026-09-08) — ALSO store LEG A's payload so
+      // ``liveMissionsList`` (panel LIVE MISSIONS rows) and
+      // ``liveMissionBreakdown`` (tooltip per-liveness split) can
+      // read its ``missions`` rows. The count-only write left both
+      // consumers reading an always-empty signal — the panel's LIVE
+      // section stayed empty even though the badge reported live
+      // missions. Same non-null + non-degraded gating as the count,
+      // same retention-on-degraded semantics (degraded envelope →
+      // keep previous payload). W4 source-drift pin asserted by the
+      // spec's ``applyFetchResults actually writes the LEG A payload``
+      // test — don't drop this line without flipping that pin.
+      this.liveMissionsPayload.set(liveMissions);
     }
     if (recentMissions !== null && !recentMissions.degraded) {
       this.recentMissionsPayload.set(recentMissions);

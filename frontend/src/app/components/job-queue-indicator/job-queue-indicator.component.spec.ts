@@ -441,9 +441,12 @@ class MockJobQueueIndicatorComponent {
     if (liveMissions !== null && !liveMissions.degraded) {
       const count = missionCountFromListResponse(liveMissions);
       this.liveMissionCountRaw.set(count);
-      // F-5: also store the LEG A payload so ``liveMissionBreakdown``
-      // and ``liveMissionsList`` can read its ``missions`` rows
-      // (the count-only write leaves the breakdown at 0).
+      // F-5 closure (2026-09-08) — also store LEG A's payload so
+      // ``liveMissionsList`` (panel LIVE MISSIONS rows) and
+      // ``liveMissionBreakdown`` (tooltip per-liveness split) can
+      // read its ``missions`` rows. Mirrors the production write at
+      // job-queue-indicator.component.ts inside ``applyFetchResults``
+      // (the F-5 source-drift pin guards the prod counterpart).
       this._liveMissionsPayload.set(liveMissions);
     }
     if (recentMissions !== null && !recentMissions.degraded) {
@@ -1218,6 +1221,20 @@ describe('JobQueueIndicatorComponent Logic', () => {
         const navigateIdx = componentTs.indexOf("this.router.navigate(['/jobs'])");
         expect(closeIdx).toBeGreaterThan(-1);
         expect(navigateIdx).toBeGreaterThan(closeIdx);
+      });
+
+      it('applyFetchResults actually writes the LEG A payload (F-5 production write-site)', () => {
+        // F-5 closure (2026-09-08) — pin the REAL production TS for
+        // the LEG A payload write. The mirror above performs this
+        // write too (proves the wiring is correct), but if production
+        // ever drifts back to a count-only write both ``liveMissionsList``
+        // (panel LIVE MISSIONS rows) and ``liveMissionBreakdown``
+        // (tooltip per-liveness split) read an always-empty
+        // ``liveMissionsPayload`` → the panel's LIVE section stays
+        // empty while the badge reports live missions. The bug class
+        // has now slipped past review twice; this pin flips a test on
+        // any future mirror-only fix.
+        expect(componentTs).toContain('liveMissionsPayload.set(');
       });
     });
   });
