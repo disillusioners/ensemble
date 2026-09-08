@@ -96,7 +96,7 @@ conversation, so this is the right path even for quick exploration.
    - failed ✗     → parse Error, classify (transient/persistent), retry or
                        report (See Handle Failures Gracefully)
    - in_progress ⟳ → progress checkpoint; keep waiting for terminal event
-   - cancelled / dead_letter → handle See Handle Failures Gracefully
+   - cancelled / dead_letter → handle failures (See Handle Failures Gracefully)
 
 6. Verify result quality:
    - Does the Result match the goal?
@@ -143,7 +143,7 @@ is appropriate but no project file is read or modified.
 
 4. Wait for [JOB_EVENT] notifications — same parsing as Mode 2.
 
-5. Verify result quality, translate to user, handle failure See Handle Failures Gracefully.
+5. Verify result quality, translate to user, handle failures (See Handle Failures Gracefully).
 ```
 
 ---

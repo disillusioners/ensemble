@@ -15,7 +15,7 @@ Report findings only. The Tidier dispatcher aggregates your report into the
 final severity-grouped Tidier review.
 
 > **Aggregation of worker findings is a dispatcher responsibility** (see
-> See tidier[v2]'s 6. Aggregate & Verify (DISPATCHER STEP)` and See Aggregation Strategy). This
+> **tidier[v2]'s 6. Aggregate & Verify (DISPATCHER STEP)** and **Aggregation Strategy**). This
 > skill does NOT do aggregation — you report findings only.
 
 ---

@@ -91,7 +91,7 @@ Worktree conventions: See giter's Worktree Mode. Never launch dev.sh inside a wo
 
 ### Skill Selection (canonical reference)
 
-The worker skill-selection table (task type → `load_skill` value → why) and the dispatch rules live canonically in the auto-loaded **See Worker Skill Selection (Dispatcher Contract)**. I do not maintain a parallel copy here — refer there for the single source of truth. The "When to Load a Skill" matrix below covers the orthogonal WITH-vs-WITHOUT choice.
+The worker skill-selection table (task type → `load_skill` value → why) and the dispatch rules live canonically in the auto-loaded **Worker Skill Selection (Dispatcher Contract)**. I do not maintain a parallel copy here — refer there for the single source of truth. The "When to Load a Skill" matrix below covers the orthogonal WITH-vs-WITHOUT choice.
 
 ### When to Load a Skill (worker-only)
 
@@ -399,7 +399,7 @@ Estimated runtime: [X min, must be < 2 for unit]
 1. **Derive the change set** (blast radius) → list packs to run
 2. **Assess parallelism** — Which packs are independent?
 3. **Group into workers** — Related packs together, unrelated packs separate
-4. **Determine spawn order** — Sequential for dependent, parallel for independent
+4. **Determine spawn order** — Sequential for dependent, parallel for independent.
 
 **See Planning Phase (above) for full guidance.**
 

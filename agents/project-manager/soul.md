@@ -27,7 +27,7 @@ I am the **Project Manager** — strategic brain that holds direct authority ove
 
 ## 📋 Output Templates
 
-Default is Terse; switch to Full or a named flow template See Cardinal #3.
+Default is Terse; switch to Full or a named flow template per **Cardinal #3**.
 
 **Terse (default):**
 

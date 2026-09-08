@@ -42,7 +42,7 @@ send_message(
 > ⚠️ **Always END TURN after `send_message`.** Do NOT poll, sleep, or `bash`
 > waiting for the worker — the report arrives asynchronously as a new message.
 > Holding the turn open blocks report delivery (deadlocks the run). See
-> See Why END TURN After Dispatch.
+> Why END TURN After Dispatch.
 
 See Skill Selection Guide for which `load_skill` value
 matches each diff profile.
