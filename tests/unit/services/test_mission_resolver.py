@@ -1433,3 +1433,294 @@ def _task_repo_fixture(engine: Engine) -> TaskRepository:
 
 
 
+
+
+# ─── Mission tree panel: title + initiative_preview ────────────────────────
+
+
+def _seed_instance_with_metadata(
+    engine: Engine,
+    *,
+    instance_id: str,
+    metadata: dict,
+    status: str = InstanceStatus.RUNNING.value,
+) -> str:
+    """Insert an ``Instance`` row carrying ``instance_metadata``.
+
+    Mirrors the module's ``_seed_instance`` shape but takes the
+    metadata dict directly — the mission tree panel fields
+    (``title`` / ``initiative_message``) live inside the JSON
+    ``metadata`` column and are surfaced via ``Instance.title`` /
+    ``Instance.initiative_message`` properties.
+    """
+    now = datetime.now(timezone.utc)
+    iso_now = now.isoformat()
+    with Session(engine) as s:
+        inst = Instance(
+            instance_id=instance_id,
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
+            agent_name="developer",
+            project_id="test-project",
+            status=status,
+            created_at=iso_now,
+            updated_at=iso_now,
+            last_activity_at=now,
+            paused_at=None,
+            instance_metadata=metadata,
+        )
+        s.add(inst)
+        s.commit()
+    return instance_id
+
+
+class TestTitleAndInitiativePreview:
+    """Mission tree panel fields propagate onto ``MissionRecord``.
+
+    ``feature/job-queue-mission-tree`` (2026-09-07): ``title`` and
+    ``initiative_preview`` are sourced from ``instance_metadata`` via
+    the ``Instance.title`` / ``Instance.initiative_message``
+    properties. Contract:
+
+    * **Propagation** — populated metadata keys surface on the
+      record (detail path ``resolve()`` AND list path
+      ``resolve_page()``).
+    * **Honest nulls** — absent keys / whitespace-only previews are
+      ``None``; no server-side fallback labels are fabricated.
+    * **Shaping** — the preview is whitespace-collapsed and
+      hard-truncated at ``INITIATIVE_PREVIEW_MAX_CHARS`` (140) by a
+      plain slice.
+    * **Degraded shape** — the all-None degraded record carries
+      ``None`` for both (never fabricated values).
+    """
+
+    def test_constant_is_140(self) -> None:
+        """The preview bound pins at 140 (the FE truncation affordance
+        must agree with the server slice)."""
+        assert mr_mod.INITIATIVE_PREVIEW_MAX_CHARS == 140
+
+    def test_detail_title_propagates(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """``resolve()`` (detail path) surfaces ``metadata['title']``."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="title-detail",
+            metadata={"title": "Fix the login bug", "initiative_message": "x"},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.mission_id == iid
+        assert record.title == "Fix the login bug"
+
+    def test_detail_initiative_preview_collapses_whitespace(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """Multi-space / newline runs collapse to single spaces."""
+        raw = "Line one.\n\n  Line   two.\t\tLine three."
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="preview-collapse",
+            metadata={"initiative_message": raw},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.initiative_preview == (
+            "Line one. Line two. Line three."
+        )
+
+    def test_detail_initiative_preview_truncated_at_140(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """A long initiative is hard-truncated to exactly 140 chars of
+        the collapsed text — plain slice, no ellipsis suffix."""
+        raw = "word " * 100  # 500 chars → collapses to 499 (trailing strip)
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="preview-truncate",
+            metadata={"initiative_message": raw},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        collapsed = " ".join(raw.split())
+        assert record.initiative_preview == collapsed[:140]
+        assert len(record.initiative_preview) == 140
+        assert not record.initiative_preview.endswith("…")
+
+    def test_initiative_at_bound_passes_through_unchanged(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """A collapsed message of exactly 140 chars is NOT altered."""
+        raw = "x" * 140
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="preview-bound",
+            metadata={"initiative_message": raw},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.initiative_preview == raw
+
+    def test_honest_nulls_when_metadata_absent(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """No metadata (or metadata without the keys) ⇒ both fields
+        are ``None`` — never fabricated labels."""
+        bare = _seed_instance(
+            engine, instance_id="no-metadata-at-all"
+        )
+        empty_meta = _seed_instance_with_metadata(
+            engine, instance_id="empty-metadata", metadata={}
+        )
+        other_keys = _seed_instance_with_metadata(
+            engine,
+            instance_id="other-keys",
+            metadata={"unrelated": "value"},
+        )
+        for iid in (bare, empty_meta, other_keys):
+            record = resolver.resolve(iid)
+            assert record is not None
+            assert record.title is None, iid
+            assert record.initiative_preview is None, iid
+
+    def test_whitespace_only_initiative_yields_none(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """A whitespace-only initiative collapses to empty ⇒ honest
+        ``None`` (nothing to preview), not an empty string."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="ws-only",
+            metadata={"initiative_message": "   \n\t  "},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.initiative_preview is None
+
+    def test_list_page_carries_fields(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """``resolve_page()`` (list path) propagates both fields per
+        row — populated where metadata exists, honest ``None`` where
+        it does not, within the SAME page."""
+        rich = _seed_instance_with_metadata(
+            engine,
+            instance_id="list-rich",
+            metadata={
+                "title": "Rich mission",
+                "initiative_message": "Do the thing",
+            },
+        )
+        bare = _seed_instance(engine, instance_id="list-bare")
+
+        page = resolver.resolve_page(limit=10)
+        by_id = {m.mission_id: m for m in page.missions}
+        assert by_id[rich].title == "Rich mission"
+        assert by_id[rich].initiative_preview == "Do the thing"
+        assert by_id[bare].title is None
+        assert by_id[bare].initiative_preview is None
+
+    def test_degraded_record_has_null_fields(self) -> None:
+        """The degraded all-None record shape carries ``None`` for both
+        new fields (never fabricated values on degradation)."""
+        record = mr_mod._unknown_mission_record()
+        assert record.title is None
+        assert record.initiative_preview is None
+
+
+class TestW2NonStringCoercion:
+    """W-2 (second-pass review fold, 2026-09-07): untyped metadata
+    values degrade to honest ``None``.
+
+    The ``instance_metadata`` JSON column is UNTYPED — a legacy row
+    may hold an int / dict / list (or empty / whitespace-only
+    strings) under ``title`` / ``initiative_message``. The resolver
+    must degrade BOTH fields to ``None`` for every such value: no
+    500, no leak of a raw non-string onto the wire, and NO
+    stringification (``str(123) → "123"`` is a fabricated label).
+    """
+
+    @pytest.mark.parametrize("bad_title", ["", "   \n\t  ", 123, {"k": "v"}])
+    def test_bad_title_values_yield_none(
+        self,
+        engine: Engine,
+        resolver: MissionResolver,
+        bad_title,
+    ) -> None:
+        """Stored ``""`` / whitespace-only / int / dict under
+        ``title`` ⇒ ``record.title is None``."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id=f"title-bad-{uuid.uuid4().hex[:6]}",
+            metadata={"title": bad_title},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.title is None, f"bad title {bad_title!r} leaked"
+
+    @pytest.mark.parametrize(
+        "bad_msg", ["", "   \n\t  ", 123, {"k": "v"}]
+    )
+    def test_bad_initiative_values_yield_none(
+        self,
+        engine: Engine,
+        resolver: MissionResolver,
+        bad_msg,
+    ) -> None:
+        """Stored ``""`` / whitespace-only / int / dict under
+        ``initiative_message`` ⇒ ``record.initiative_preview is
+        None`` (``_initiative_preview`` non-string guard + honest
+        empty collapse)."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id=f"msg-bad-{uuid.uuid4().hex[:6]}",
+            metadata={"initiative_message": bad_msg},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.initiative_preview is None, (
+            f"bad initiative_message {bad_msg!r} leaked"
+        )
+
+    def test_bad_values_never_stringified(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """No ``"123"`` stringification: an int metadata value must
+        not reappear as the STRING ``"123"`` on either field."""
+        iid = _seed_instance_with_metadata(
+            engine,
+            instance_id="no-stringify",
+            metadata={"title": 123, "initiative_message": 456},
+        )
+        record = resolver.resolve(iid)
+        assert record is not None
+        assert record.title != "123"
+        assert record.title is None
+        assert record.initiative_preview != "456"
+        assert record.initiative_preview is None
+
+    def test_list_page_degrades_bad_values_to_none(
+        self, engine: Engine, resolver: MissionResolver
+    ) -> None:
+        """The LIST path (``resolve_page``) applies the same coercion
+        per row — a page mixing good and bad metadata rows surfaces
+        honest nulls on the bad ones without affecting the good."""
+        bad = _seed_instance_with_metadata(
+            engine,
+            instance_id="list-bad",
+            metadata={"title": 7, "initiative_message": {"a": 1}},
+        )
+        good = _seed_instance_with_metadata(
+            engine,
+            instance_id="list-good",
+            metadata={
+                "title": "Good title",
+                "initiative_message": "Good initiative",
+            },
+        )
+        page = resolver.resolve_page(limit=10)
+        by_id = {m.mission_id: m for m in page.missions}
+        assert by_id[bad].title is None
+        assert by_id[bad].initiative_preview is None
+        assert by_id[good].title == "Good title"
+        assert by_id[good].initiative_preview == "Good initiative"

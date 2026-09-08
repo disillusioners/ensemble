@@ -188,6 +188,54 @@ def _instance_statuses_for_liveness(
 # ``mission_terminal_reason``); the remaining identity /
 # liveness fields support M2 tool payload composition.
 
+# ── Initiative preview bound ──────────────────────────────────────────────
+# ``initiative_preview`` hard bound (mission tree panel, 2026-09-07,
+# ``feature/job-queue-mission-tree``): the preview is the first 140
+# characters of ``Instance.initiative_message`` AFTER whitespace
+# collapse — a plain slice, no ellipsis, no fabricated suffix (the FE
+# owns any visual truncation affordance). ``~140`` in the feature
+# brief; the constant is the exact pin so tests and FE can agree.
+INITIATIVE_PREVIEW_MAX_CHARS: int = 140
+
+
+def _initiative_preview(raw: str | None) -> str | None:
+    """Whitespace-collapse + truncate an initiative message for preview.
+
+    Pure string shaping — no DB access, no fabrication. ``None`` in →
+    ``None`` out (honest null). A message that collapses to empty
+    (whitespace-only input) also yields ``None`` — there is nothing
+    honest to preview. A collapsed message at or under
+    :data:`INITIATIVE_PREVIEW_MAX_CHARS` passes through unchanged;
+    longer ones are hard-truncated by a plain slice.
+
+    W-2 (second-pass review fold, 2026-09-07): a NON-STRING input
+    (the metadata JSON column is untyped — int / dict / list values
+    are possible) also yields ``None`` — honest null, never a crash
+    and never a fabricated stringification.
+
+    Args:
+        raw: The ``Instance.initiative_message`` value (may be
+            ``None`` or any JSON-decoded value).
+
+    Returns:
+        The preview string (≤ :data:`INITIATIVE_PREVIEW_MAX_CHARS`
+        chars), or ``None`` when there is nothing to preview.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        # W-2 (second-pass review fold, 2026-09-07): the metadata
+        # JSON column carries UNTYPED values — a legacy row may hold
+        # an int / dict / list under ``initiative_message``. Honest
+        # None, never a crash and never a fabricated stringification
+        # (no ``str(123) → "123"``).
+        return None
+    collapsed = " ".join(raw.split())
+    if not collapsed:
+        return None
+    return collapsed[:INITIATIVE_PREVIEW_MAX_CHARS]
+
+
 @dataclass
 class MissionRecord:
     """Pure projection of an Instance onto the mission read-model.
@@ -239,6 +287,16 @@ class MissionRecord:
         last_activity_at: ISO-8601 pass-through of the instance's
             ``last_activity_at`` column. ``None`` when null on the
             instance, or when degraded.
+        title: Mission display title — ``instance_metadata['title']``
+            via the ``Instance.title`` property. Honest null: ``None``
+            when the key is absent or the lookup degraded; the FE owns
+            fallback rendering (no server-side label fabrication).
+        initiative_preview: First
+            :data:`INITIATIVE_PREVIEW_MAX_CHARS` chars of
+            ``instance_metadata['initiative_message']``
+            (``Instance.initiative_message`` property),
+            whitespace-collapsed. Honest null: ``None`` when absent,
+            whitespace-only, or degraded.
     """
 
     mission_id: str | None
@@ -250,6 +308,16 @@ class MissionRecord:
     linked_jobs: list[str] = field(default_factory=list)
     started_at: str | None = None
     last_activity_at: str | None = None
+    # Mission tree panel (2026-09-07, ``feature/job-queue-mission-tree``):
+    # display-source fields read off ``instance_metadata`` via the
+    # ``Instance.title`` / ``Instance.initiative_message`` properties.
+    # Both are HONEST NULLS — ``None`` when the metadata key is absent
+    # or the lookup degraded; the FE owns fallback rendering. The
+    # preview is whitespace-collapsed and hard-truncated at
+    # :data:`INITIATIVE_PREVIEW_MAX_CHARS` (plain slice — no ellipsis,
+    # no fabricated suffix).
+    title: str | None = None
+    initiative_preview: str | None = None
 
 
 @dataclass
@@ -793,6 +861,26 @@ class MissionResolver:
                 if instance.last_activity_at is not None
                 else None
             ),
+            # Mission tree panel fields — pure reads off the already-
+            # loaded row's ``instance_metadata`` (the ``title`` /
+            # ``initiative_message`` properties). ZERO extra queries:
+            # the JSON column rides the existing Instance SELECT, so
+            # the 3-SELECT page bound (and the 2-SELECT detail bound)
+            # is untouched.
+            #
+            # W-2 (second-pass review fold, 2026-09-07): ``title`` is
+            # COERCED, not forwarded raw — the metadata JSON column is
+            # untyped, so a stray non-string (or whitespace-only)
+            # value degrades to the honest ``None`` instead of leaking
+            # an int/dict onto the wire or stringifying it.
+            title=(
+                instance.title.strip()
+                if isinstance(instance.title, str) and instance.title.strip()
+                else None
+            ),
+            initiative_preview=_initiative_preview(
+                instance.initiative_message
+            ),
         )
 
     def _batch_jobitem_lookup(
@@ -910,6 +998,8 @@ def _unknown_mission_record() -> MissionRecord:
         linked_jobs=[],
         started_at=None,
         last_activity_at=None,
+        title=None,
+        initiative_preview=None,
     )
 
 
@@ -1024,6 +1114,7 @@ __all__ = [
     "MissionRecord",
     "MissionPage",
     "MISSION_LIVENESS_FILTER_VALUES",
+    "INITIATIVE_PREVIEW_MAX_CHARS",
     "mission_projection_to_dict",
     "mission_ref_to_dict",
 ]

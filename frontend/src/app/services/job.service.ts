@@ -2,7 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable, tap, catchError, of, map } from 'rxjs';
 import { Job, JobCreate, JobFilters, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
-import { MissionListResponse, missionCountFromListResponse } from '../models/mission.model';
+import { MissionListResponse } from '../models/mission.model';
 import { DeferBlockedStatus } from '../models/defer-blocked.model';
 
 interface JobListResponse {
@@ -145,29 +145,71 @@ export class JobService {
   }
 
   /**
-   * Live-mission count from the authoritative missions projection —
-   * ``GET /api/missions?liveness=processing,pending,paused``.
+   * Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+   * — fetch the missions projection used by both the badge's segmented
+   * pill and the panel's tree.
    *
-   * This is the badge's N (missions-aware display + panel live count);
-   * it REPLACES deriving live missions from recent job receipts, which
-   * went stale whenever the settled-token never reached the badge
-   * intake (badge read bare 0/0 while a leader mission was visibly
-   * working — /api/missions is correct and authoritative).
+   * ``GET /api/missions`` with optional ``liveness`` filter and
+   * ``limit`` (BE clamps to ``[1, MAX_PAGE_LIMIT]``, default
+   * ``DEFAULT_PAGE_LIMIT`` = 10; the badge calls with limit=20 to
+   * show a richer breakdown — the response's filter-aware ``total``
+   * is the badge's count leg, and the segmented pill's tooltip needs
+   * the per-liveness breakdown, so the full page is pulled here.
    *
-   * ``limit=1`` keeps the payload bounded (one row); the count comes
-   * from the response's filter-aware ``total``. Returns ``null`` when
-   * the count leg degraded (per the §8.4 honesty contract, "count
-   * unavailable" is NOT zero) — callers retain their last known count.
-   * Errors propagate so the caller's per-participant error handler
-   * decides (the badge degrades to its previous value).
+   * Returns the full ``MissionSummary[]`` + ``total`` from the
+   * envelope. ``null`` total ⇒ count leg degraded (NOT 0); the badge
+   * falls back to ``missions.length`` defensively.
+   *
+   * Errors propagate so the badge's per-participant ``catchError``
+   * in the forkJoin degrades to ``null`` without killing the jobs
+   * intake on the same tick.
    */
-  listLiveMissionCount(): Observable<number | null> {
+  listMissions(params?: { liveness?: string; limit?: number }): Observable<MissionListResponse> {
+    let httpParams = new HttpParams();
+    if (params?.liveness) httpParams = httpParams.set('liveness', params.liveness);
+    if (params?.limit !== undefined) httpParams = httpParams.set('limit', params.limit.toString());
+    return this.http.get<MissionListResponse>('/api/missions', { params: httpParams });
+  }
+
+  /**
+   * Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+   * — fetch the jobs attached to a given mission.
+   *
+   * ``GET /api/jobs?mission_id=<id>&include_deleted=false`` (BE
+   * landed this filter in 327fdc1a). Returns the raw ``Job[]`` array
+   * (mapped from the response envelope so callers get rows, not the
+   * wrapper). ``include_deleted=false`` keeps the panel view clean —
+   * soft-deleted jobs are filtered out, matching the rest of the
+   * panel's surface.
+   *
+   * Status: deliberately UNWIRED on the FE today (kept per the
+   * leader's review decision, 2026-09-07). The panel currently
+   * pulls its full mission-jobs picture from the existing
+   * ``listActiveJobs`` + ``listRecentJobs`` polling — the mission
+   * grouping key (``job.mission_id``) is already on every Job
+   * payload, so ``buildQueueTree`` does the matching client-side
+   * without a per-mission round-trip.
+   *
+   * Intended future use: LAZY FETCH for an expanded mission node —
+   * when a user expands a node with N+ jobs, the panel can call
+   * ``listJobsByMission(node.mission.mission_id)`` to stream the
+   * full row list rather than paginating the global active/recent
+   * windows. That work is NOT scheduled for this fix; the method is
+   * here so the future consumer doesn't have to re-add it (and so
+   * this comment stops people reading the unwired surface as
+   * accidental dead code). Its spec stays.
+   *
+   * Errors propagate so a future per-mission fetch can route through
+   * the same per-participant ``catchError`` isolation the badge
+   * already uses.
+   */
+  listJobsByMission(missionId: string): Observable<Job[]> {
     const params = new HttpParams()
-      .set('liveness', 'processing,pending,paused')
-      .set('limit', '1');
-    return this.http
-      .get<MissionListResponse>('/api/missions', { params })
-      .pipe(map((response) => missionCountFromListResponse(response)));
+      .set('mission_id', missionId)
+      .set('include_deleted', 'false');
+    return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
+      map((response) => response.jobs),
+    );
   }
 
   /**

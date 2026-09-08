@@ -1,5 +1,19 @@
 import { signal, computed } from '@angular/core';
-import { getStatusColor as modelGetStatusColor, Job, JobStatus, missionLivenessChip } from '../../models/job.model';
+import {
+  getStatusColor as modelGetStatusColor,
+  Job,
+  JobStatus,
+  MissionSummary,
+  MissionLiveness,
+  missionLivenessChip,
+  buildQueueTree,
+  shouldAutoExpand,
+  missionDisplayTitle,
+  visibleTreeItems,
+  nextVisibleItem,
+  visibleTreeItemId,
+  VisibleTreeItem,
+} from '../../models/job.model';
 import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-test-helpers';
 
 /**
@@ -21,26 +35,68 @@ import { createMockJob, createMockLiveMissionReceipt } from '../../testing/job-t
  * in lockstep.
  */
 class MockJobQueuePanelComponent {
-  private readonly _runningJobs = signal<Job[]>([]);
+  private readonly _activeJobs = signal<Job[]>([]);
   private readonly _recentJobs = signal<Job[]>([]);
   private readonly _projectNameMap = signal<Map<string | null, string>>(new Map());
-  private readonly _liveMissionCount = signal<number>(0);
+  private readonly _liveMissionCount = signal<number | null>(null);
+  private readonly _missions = signal<MissionSummary[]>([]);
 
   readonly MAX_RECENT = 10;
 
-  runningJobs = this._runningJobs.asReadonly();
+  activeJobs = this._activeJobs.asReadonly();
   recentJobs = this._recentJobs.asReadonly();
   projectNameMap = this._projectNameMap.asReadonly();
   liveMissionCount = this._liveMissionCount.asReadonly();
+  missions = this._missions.asReadonly();
 
   /** Mock output — mirrors the real component's `output<Job>()`. */
   readonly jobClick = { emit: jest.fn() };
 
+  /**
+   * T1 mock output — mirrors the real component's ``output<void>()``
+   * for the panel footer's "Open full queue →" activation. The
+   * indicator handles it (navigate + close menu); the panel stays
+   * DUMB/presentational, exactly like ``jobClick`` does for rows.
+   */
+  readonly footerClick = { emit: jest.fn() };
+
+  /**
+   * T3 mock — ``visibleTreeItems`` mirror: the flattened list of
+   * items the arrow-key handler can land on. Built from the panel's
+   * tree + expansion sets so the spec can pin the helper output
+   * without an Angular harness.
+   */
+  readonly visibleItems = computed(() =>
+    visibleTreeItems(this.tree(), this._expandedLiveMissions(), this._expandedRecentMissions())
+  );
+
+  /**
+   * T3 mock — ``focusedItemId`` signal mirror (the row that owns
+   * keyboard focus inside the trees). Drives the ``.focused`` class
+   * in the template; tests drive it directly to exercise the
+   * traversal logic.
+   */
+  private readonly _focusedItemId = signal<string | null>(null);
+  readonly focusedItemId = this._focusedItemId.asReadonly();
+
+  /** Tree derivation — mirrors the real component's ``tree`` computed. */
+  readonly tree = computed(() =>
+    buildQueueTree(this._activeJobs(), this._recentJobs(), this._missions())
+  );
+
+  /** Auto-expand decision — mirrors the real component. */
+  readonly shouldAutoExpandLive = computed(() =>
+    shouldAutoExpand(this.tree().liveMissions)
+  );
+
   recentCapped = computed(() => this._recentJobs().slice(0, this.MAX_RECENT));
   isEmpty = computed(
-    () => this._runningJobs().length === 0 && this.recentCapped().length === 0,
+    () =>
+      this._activeJobs().length === 0 &&
+      this.recentCapped().length === 0 &&
+      (this._liveMissionCount() ?? 0) === 0,
   );
-  runningCount = computed(() => this._runningJobs().length);
+  activeCount = computed(() => this._activeJobs().length);
 
   /**
    * Fix C (§8.2) mirror — mission-liveness chip for a row, or null
@@ -51,8 +107,166 @@ class MockJobQueuePanelComponent {
     return missionLivenessChip(job);
   }
 
-  setLiveMissionCount(n: number): void {
+  setLiveMissionCount(n: number | null): void {
     this._liveMissionCount.set(n);
+  }
+
+  setMissions(m: MissionSummary[]): void {
+    this._missions.set(m);
+  }
+
+  /**
+   * Expansion-state survival mirror — keys the expansion set on
+   * ``mission_id`` (NOT array index) so a poll refresh that
+   * re-orders the live missions does NOT collapse the user's
+   * expanded state. Mirrors the real component's
+   * ``expandedLiveMissions`` signal + ``toggleLiveMission`` /
+   * ``isLiveExpanded`` methods.
+   */
+  private readonly _expandedLiveMissions = signal<Set<string>>(new Set());
+
+  toggleLiveMission(missionId: string): void {
+    this._expandedLiveMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+
+  isLiveExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this._expandedLiveMissions().has(missionId);
+  }
+
+  /** Read-only view of the expansion set — used by the survival test
+   *  to assert the user's expanded state survived a poll refresh. */
+  readonly expandedLiveMissions = this._expandedLiveMissions.asReadonly();
+
+  /**
+   * T3 mock — per-mission-id expansion state for RECENT mission
+   * nodes. Same survival guarantee as the live expansion set.
+   */
+  private readonly _expandedRecentMissions = signal<Set<string>>(new Set());
+  toggleRecentMission(missionId: string): void {
+    this._expandedRecentMissions.update((s) => {
+      const next = new Set(s);
+      if (next.has(missionId)) next.delete(missionId);
+      else next.add(missionId);
+      return next;
+    });
+  }
+  isRecentExpanded(missionId: string | null | undefined): boolean {
+    if (!missionId) return false;
+    return this._expandedRecentMissions().has(missionId);
+  }
+
+  /**
+   * T3 mock — true iff the given ``visibleTreeItemId`` is the row
+   * that currently owns keyboard focus. Mirrors the real
+   * component's ``isFocusedItem`` read-side.
+   */
+  isFocusedItem(id: string | null | undefined): boolean {
+    if (!id) return false;
+    return this._focusedItemId() === id;
+  }
+
+  /** T3 mock — drives the focused item (mirrors ``onRowFocus``). */
+  onRowFocus(id: string): void {
+    this._focusedItemId.set(id);
+  }
+
+  /**
+   * T3 mock — arrow-key handler. Mirrors the real component's
+   * ``onTreeKeydown`` 1:1 so the key→action map and the
+   * nextVisibleItem traversal can be pinned without DOM. Other
+   * keys are no-ops; Enter/Space/Esc are NOT handled here (those
+   * stay on the individual rows).
+   *
+   * The real component moves REAL DOM focus via
+   * ``document.getElementById(id)?.focus()``; in the mirror there
+   * is no DOM, so the equivalent write to ``focusedItemId`` is
+   * applied directly (this is what the row's ``(focus)`` handler
+   * would have done after a real focus move — single source of
+   * truth). ArrowLeft on a child row also refocuses the parent.
+   */
+  onTreeKeydown(event: KeyboardEvent): void {
+    const items = this.visibleItems();
+    if (items.length === 0) return;
+    const key = event.key;
+    if (
+      key !== 'ArrowDown' &&
+      key !== 'ArrowUp' &&
+      key !== 'ArrowRight' &&
+      key !== 'ArrowLeft'
+    ) {
+      return;
+    }
+    // Prevent the page from scrolling on ArrowDown/Up inside the
+    // menu and stop the event from bubbling — mirrors the real
+    // component bit-for-bit.
+    event.preventDefault();
+    event.stopPropagation();
+    const currentId = this._focusedItemId();
+    const currentIndex = currentId
+      ? items.findIndex((it) => visibleTreeItemId(it) === currentId)
+      : -1;
+
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const delta: -1 | 1 = key === 'ArrowUp' ? -1 : 1;
+      const nextIndex = nextVisibleItem(items, currentIndex, delta);
+      this._focusedItemId.set(visibleTreeItemId(items[nextIndex]));
+      return;
+    }
+
+    if (currentIndex < 0) return;
+    const current = items[currentIndex];
+    if (key === 'ArrowRight') {
+      if (current.kind !== 'mission') return;
+      const id = current.node.mission.mission_id;
+      if (!id) return;
+      if (current.tree === 'live') {
+        if (!this.isLiveExpanded(id)) this.toggleLiveMission(id);
+      } else {
+        if (!this.isRecentExpanded(id)) this.toggleRecentMission(id);
+      }
+      return;
+    }
+    // ArrowLeft
+    let missionId: string | null | undefined;
+    let tree: 'live' | 'recent';
+    if (current.kind === 'mission') {
+      missionId = current.node.mission.mission_id;
+      tree = current.tree;
+    } else {
+      missionId = current.mission.mission_id;
+      tree = current.tree;
+    }
+    if (!missionId) return;
+    const isExpanded =
+      tree === 'live'
+        ? this.isLiveExpanded(missionId)
+        : this.isRecentExpanded(missionId);
+    if (!isExpanded) return;
+    if (tree === 'live') this.toggleLiveMission(missionId);
+    else this.toggleRecentMission(missionId);
+    // W1 mirror parity — if we were on a child row, refocus the
+    // parent after collapse (the real component does this via
+    // ``document.getElementById(parentId)?.focus()``; the mirror
+    // writes the signal directly).
+    if (current.kind === 'job') {
+      const parentId = visibleTreeItemId({
+        kind: 'mission',
+        tree,
+        node: { mission: current.mission, jobs: [] },
+      });
+      this._focusedItemId.set(parentId);
+    }
+  }
+
+  /** T1 mock — footer activation emits ``footerClick``. */
+  onFooterClick(): void {
+    this.footerClick.emit();
   }
 
   /**
@@ -102,6 +316,13 @@ class MockJobQueuePanelComponent {
     return date.toLocaleDateString();
   }
 
+  /**
+   * Mission title — mirrors the real component's ``missionTitle`` helper.
+   */
+  missionTitle(m: MissionSummary): string {
+    return missionDisplayTitle(m, (d) => this.timeAgo(d));
+  }
+
   getStatusIcon(status: JobStatus): string {
     switch (status) {
       case 'completed':
@@ -126,8 +347,8 @@ class MockJobQueuePanelComponent {
   }
 
   /** Test helpers — mirror the writable inputs of the real component. */
-  setRunningJobs(jobs: Job[]): void {
-    this._runningJobs.set(jobs);
+  setActiveJobs(jobs: Job[]): void {
+    this._activeJobs.set(jobs);
   }
 
   setRecentJobs(jobs: Job[]): void {
@@ -153,7 +374,7 @@ describe('JobQueuePanelComponent Logic', () => {
 
     it('should default to empty state and 0 running', () => {
       expect(component.isEmpty()).toBe(true);
-      expect(component.runningCount()).toBe(0);
+      expect(component.activeCount()).toBe(0);
       expect(component.recentCapped().length).toBe(0);
     });
   });
@@ -307,34 +528,34 @@ describe('JobQueuePanelComponent Logic', () => {
 
   describe('isEmpty', () => {
     it('should be true when both running and recent are empty', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([]);
       expect(component.isEmpty()).toBe(true);
     });
 
-    it('should be false when runningJobs has items', () => {
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+    it('should be false when activeJobs has items', () => {
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should be false when recentJobs has items', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should be false when both lists have items', () => {
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       component.setRecentJobs([createMockJob({ status: 'completed' })]);
       expect(component.isEmpty()).toBe(false);
     });
 
     it('should react to signal updates', () => {
       expect(component.isEmpty()).toBe(true);
-      component.setRunningJobs([createMockJob({ status: 'processing' })]);
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
       expect(component.isEmpty()).toBe(false);
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       expect(component.isEmpty()).toBe(true);
     });
   });
@@ -387,23 +608,23 @@ describe('JobQueuePanelComponent Logic', () => {
     });
   });
 
-  describe('runningCount', () => {
-    it('should reflect the number of running jobs', () => {
-      component.setRunningJobs([
+  describe('activeCount', () => {
+    it('should reflect the number of active jobs (running + pending + paused)', () => {
+      component.setActiveJobs([
         createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'processing' }),
-        createMockJob({ status: 'processing' }),
+        createMockJob({ status: 'pending' }),
+        createMockJob({ status: 'pending' }),
       ]);
-      expect(component.runningCount()).toBe(3);
+      expect(component.activeCount()).toBe(3);
     });
 
     it('should not count recent jobs', () => {
-      component.setRunningJobs([]);
+      component.setActiveJobs([]);
       component.setRecentJobs([
         createMockJob({ status: 'completed' }),
         createMockJob({ status: 'failed' }),
       ]);
-      expect(component.runningCount()).toBe(0);
+      expect(component.activeCount()).toBe(0);
     });
   });
 
@@ -448,7 +669,7 @@ describe('JobQueuePanelComponent Logic', () => {
 
   describe('integration — priority chain with mixed data', () => {
     it('should resolve different titles for a mixed list', () => {
-      component.setRunningJobs([
+      component.setActiveJobs([
         createMockJob({
           job_id: 'job-1',
           instance_id: 'inst-A',
@@ -471,7 +692,7 @@ describe('JobQueuePanelComponent Logic', () => {
           status: 'processing',
         }),
       ]);
-      const titles = component.runningJobs().map((j) => component.resolveTitle(j));
+      const titles = component.activeJobs().map((j) => component.resolveTitle(j));
       expect(titles).toEqual([
         'From Metadata A',
         'developer',
@@ -514,15 +735,19 @@ describe('JobQueuePanelComponent Logic', () => {
   // ── Fix C (§8.2) — panel mission awareness ───────────────────────────
 
   describe('Fix C liveMissionCount + missionChip', () => {
-    it('should default liveMissionCount to 0', () => {
-      expect(component.liveMissionCount()).toBe(0);
+    it('should default liveMissionCount to null (pre-data state)', () => {
+      // C3 fix: the panel input is now ``number | null``. Initial
+      // state is ``null`` — "count unavailable", NOT 0. A healthy
+      // tick with zero live missions is a separate signal (0).
+      expect(component.liveMissionCount()).toBeNull();
     });
 
     it('should accept a live-mission count from the parent (drives header pill + empty state)', () => {
       component.setLiveMissionCount(2);
       expect(component.liveMissionCount()).toBe(2);
       // The template branches on this: >0 → header pill + "Queue is
-      // idle · N live missions" empty-state subtitle; 0 → neither.
+      // idle · N live missions" empty-state subtitle; 0 or null →
+      // neither (the subtitle reads "Queue is currently idle").
     });
 
     it('missionChip: terminal receipt + live mission returns a live chip (core case)', () => {
@@ -536,6 +761,675 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(component.missionChip(createMockJob({ job_type: 'task', mission_liveness: null }))).toBeNull();
       expect(component.missionChip(createMockJob({ job_type: 'message', mission_liveness: null }))).toBeNull();
       expect(component.missionChip(createMockJob())).toBeNull();
+    });
+  });
+
+  // ── Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``) ─
+
+  describe('missionTitle', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('prefers server-authoritative title', () => {
+      expect(component.missionTitle(mkMission({ title: 'Refactor auth' }))).toBe('Refactor auth');
+    });
+
+    it('falls back to "agent · timeAgo" when no title', () => {
+      const t = component.missionTitle(mkMission());
+      expect(t).toMatch(/leader · /);
+    });
+  });
+
+  describe('tree derivation — liveMissions / queued / recent / recentFlat', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('groups active jobs under their live mission', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'a', mission_id: 'm-1', status: 'processing' }),
+        createMockJob({ job_id: 'b', mission_id: 'm-1', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-1', liveness: 'processing' })]);
+      const t = component.tree();
+      expect(t.liveMissions).toHaveLength(1);
+      expect(t.liveMissions[0].jobs.map((j) => j.job_id).sort()).toEqual(['a', 'b']);
+      expect(t.queued).toEqual([]);
+    });
+
+    it('routes unattached non-terminal jobs to queued (NEVER hide)', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'attached', mission_id: 'm-1', status: 'processing' }),
+        createMockJob({ job_id: 'orphan', mission_id: null, status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-1' })]);
+      const t = component.tree();
+      expect(t.liveMissions[0].jobs).toHaveLength(1);
+      expect(t.queued).toHaveLength(1);
+      expect(t.queued[0].job_id).toBe('orphan');
+    });
+
+    it('routes terminal jobs to recentFlat when no mission matches', () => {
+      component.setRecentJobs([
+        createMockJob({ job_id: 'matched', mission_id: 'm-done', status: 'completed' }),
+        createMockJob({ job_id: 'loose', mission_id: null, status: 'failed' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'm-done', liveness: 'completed' })]);
+      const t = component.tree();
+      expect(t.recent).toHaveLength(1);
+      expect(t.recent[0].jobs[0].job_id).toBe('matched');
+      expect(t.recentFlat.map((j) => j.job_id)).toEqual(['loose']);
+    });
+
+    it('NEVER hides a job — every input row ends up in exactly one bucket', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'live-matched', mission_id: 'm-live', status: 'processing' }),
+        createMockJob({ job_id: 'live-unattached', mission_id: null, status: 'processing' }),
+      ]);
+      component.setRecentJobs([
+        createMockJob({ job_id: 'recent-matched', mission_id: 'm-done', status: 'completed' }),
+        createMockJob({ job_id: 'recent-unattached', mission_id: null, status: 'failed' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'm-live', liveness: 'processing' }),
+        mkMission({ mission_id: 'm-done', liveness: 'completed' }),
+      ]);
+      const t = component.tree();
+      const all = [
+        ...t.liveMissions.flatMap((n) => n.jobs),
+        ...t.queued,
+        ...t.recent.flatMap((n) => n.jobs),
+        ...t.recentFlat,
+      ].map((j) => j.job_id).sort();
+      expect(all).toEqual(['live-matched', 'live-unattached', 'recent-matched', 'recent-unattached']);
+    });
+
+    it('handles empty missions input without throwing — falls back to legacy flat layout', () => {
+      component.setActiveJobs([createMockJob({ status: 'processing' })]);
+      component.setRecentJobs([createMockJob({ status: 'completed' })]);
+      // missions = [] (default), tree still produces queued + recentFlat
+      const t = component.tree();
+      expect(t.liveMissions).toEqual([]);
+      expect(t.queued).toHaveLength(1);
+      expect(t.recent).toEqual([]);
+      expect(t.recentFlat).toHaveLength(1);
+    });
+  });
+
+  describe('shouldAutoExpandLive', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: null,
+        last_activity_at: null,
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('returns true iff exactly one live mission exists', () => {
+      component.setMissions([mkMission({ mission_id: 'm-1' })]);
+      expect(component.shouldAutoExpandLive()).toBe(true);
+    });
+
+    it('returns false for zero or 2+ live missions', () => {
+      component.setMissions([]);
+      expect(component.shouldAutoExpandLive()).toBe(false);
+      component.setMissions([
+        mkMission({ mission_id: 'm-1' }),
+        mkMission({ mission_id: 'm-2' }),
+      ]);
+      expect(component.shouldAutoExpandLive()).toBe(false);
+    });
+  });
+
+  describe('expansion-state survival across poll refresh (test pin 4)', () => {
+    // Headline guarantee — ZERO coverage before this fix: a user's
+    // manual expansion must SURVIVE a poll refresh that re-orders
+    // the live missions. The expansion set is keyed on ``mission_id``
+    // (NOT array index), so a refresh that re-sorts or inserts a new
+    // mission earlier in the list doesn't collapse the user's toggle.
+
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('a user-expanded mission stays expanded after a poll refresh that re-orders it', () => {
+      // Initial poll: two live missions in order [m-a, m-b].
+      component.setMissions([
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+        mkMission({ mission_id: 'm-b', last_activity_at: '2026-09-07T09:00:00Z' }),
+      ]);
+      // User expands m-a (index 0 in the tree).
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+
+      // Next poll: m-b has newer activity and is re-ordered to index 0.
+      component.setMissions([
+        mkMission({ mission_id: 'm-b', last_activity_at: '2026-09-07T11:00:00Z' }),
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+      ]);
+      // The tree now lists m-b first, but m-a is still expanded.
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+      expect(component.isLiveExpanded('m-b')).toBe(false);
+    });
+
+    it('a user-expanded mission stays expanded after a poll refresh that inserts a new live mission before it', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'm-a' }),
+      ]);
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+
+      // Next poll: a new mission m-c arrives at the head of the list.
+      component.setMissions([
+        mkMission({ mission_id: 'm-c', last_activity_at: '2026-09-07T11:00:00Z' }),
+        mkMission({ mission_id: 'm-a', last_activity_at: '2026-09-07T10:00:00Z' }),
+      ]);
+      expect(component.isLiveExpanded('m-a')).toBe(true);
+      expect(component.isLiveExpanded('m-c')).toBe(false);
+    });
+
+    it('toggling a mission off collapses it; the rest of the set is preserved', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'm-a' }),
+        mkMission({ mission_id: 'm-b' }),
+      ]);
+      component.toggleLiveMission('m-a');
+      component.toggleLiveMission('m-b');
+      expect(component.expandedLiveMissions().size).toBe(2);
+
+      component.toggleLiveMission('m-a');
+      expect(component.isLiveExpanded('m-a')).toBe(false);
+      expect(component.isLiveExpanded('m-b')).toBe(true);
+      expect(component.expandedLiveMissions().size).toBe(1);
+
+      // Poll refresh with changed ordering — only m-b is expanded.
+      component.setMissions([
+        mkMission({ mission_id: 'm-b' }),
+        mkMission({ mission_id: 'm-a' }),
+      ]);
+      expect(component.isLiveExpanded('m-a')).toBe(false);
+      expect(component.isLiveExpanded('m-b')).toBe(true);
+    });
+  });
+
+  describe('missions input drives panel rendering', () => {
+    it('default empty missions yields no liveMissions tree', () => {
+      expect(component.missions()).toEqual([]);
+      expect(component.tree().liveMissions).toEqual([]);
+    });
+
+    it('setMissions replaces the live list verbatim', () => {
+      component.setMissions([
+        {
+          mission_id: 'm-1',
+          agent_id: 'leader',
+          parent_mission_id: null,
+          liveness: 'processing',
+          terminal_reason: null,
+          epoch: 1,
+          linked_jobs: [],
+          started_at: null,
+          last_activity_at: null,
+          title: null,
+          initiative_preview: null,
+        },
+      ]);
+      expect(component.missions().length).toBe(1);
+    });
+  });
+
+  // ── Template binding seams (source-text pin) ────────────────────────
+  //
+  // Mirror tests prove the component METHODS exist. These source-text
+  // pins prove the TEMPLATE actually wires the bindings up — without
+  // them, a typo in the HTML would compile green and silently drop
+  // the user's footer click / arrow-key navigation. Same pattern as
+  // the indicator's panel-binding seam.
+
+  describe('template binding seams (source-text pin)', () => {
+    let templateHtml: string;
+    let componentTs: string;
+
+    beforeAll(() => {
+      // Resolve relative to this spec file.
+      const path = require('path');
+      const fs = require('fs');
+      const specDir = __dirname;
+      const htmlPath = path.join(specDir, 'job-queue-panel.component.html');
+      templateHtml = fs.readFileSync(htmlPath, 'utf-8');
+      // W4 source-drift pin — mirror tests prove the panel's signal
+      // logic, but a revert of the REAL component's arrow-nav
+      // mechanism (e.g. dropping the ``document.getElementById``
+      // focus call so Enter/Space activate the wrong row) would
+      // pass every mirror test. Pin the real component TS so such a
+      // revert flips a test instead of silently regressing W1.
+      const tsPath = path.join(specDir, 'job-queue-panel.component.ts');
+      componentTs = fs.readFileSync(tsPath, 'utf-8');
+    });
+
+    it('binds (keydown) on the panel-list to onTreeKeydown — T3 arrow nav', () => {
+      expect(templateHtml).toContain('(keydown)="onTreeKeydown($event)"');
+    });
+
+    it('binds (click) on the footer to onFooterClick — T1 footer link', () => {
+      expect(templateHtml).toContain('(click)="onFooterClick()"');
+    });
+
+    it('binds (focus) on the live mission row — T3 focused-state mirroring', () => {
+      // Each tree row needs the (focus) handler so the
+      // ``focusedItemId`` signal mirrors the browser's actual focus.
+      expect(templateHtml).toContain('(focus)="onRowFocus(');
+    });
+
+    it('binds [class.focused] on each tree row — T3 visible focus indicator', () => {
+      expect(templateHtml).toContain('[class.focused]="isFocusedItem(');
+    });
+  });
+
+  // W4 — source-drift pins on the REAL component TS. Mirror tests
+  // prove the panel's traversal logic against the same helpers, but
+  // an F-1 revert of ``onTreeKeydown`` (e.g. dropping the real DOM
+  // focus call so Enter/Space activate the wrong row) would slip
+  // past every mirror test. Pin the mechanism itself.
+  describe('component TS source-drift pins', () => {
+    let componentTs: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      const specDir = __dirname;
+      const tsPath = path.join(specDir, 'job-queue-panel.component.ts');
+      componentTs = fs.readFileSync(tsPath, 'utf-8');
+    });
+
+    it('onTreeKeydown moves REAL DOM focus via document.getElementById — W1 mechanism', () => {
+      // The real component must call ``document.getElementById(id)
+      // ?.focus()`` inside ``onTreeKeydown`` so Enter/Space activate
+      // the row the user is looking at, not whatever they last
+      // Tab-targeted. Without this, the arrow keys would move only
+      // the ``focusedItemId`` signal (visual class) while real DOM
+      // focus stayed on the last Tab target — the W1 bug class.
+      expect(componentTs).toContain('document.getElementById');
+    });
+
+    it('onTreeKeydown filter keys include ArrowDown / ArrowUp / ArrowLeft / ArrowRight', () => {
+      // The arrow handler must gate on all four Arrow* keys. Removing
+      // any of them would silently drop an arrow direction from
+      // keyboard nav — the W3 hazard class (phantom indicator
+      // movement that doesn't move real focus).
+      expect(componentTs).toContain("'ArrowDown'");
+      expect(componentTs).toContain("'ArrowUp'");
+      expect(componentTs).toContain("'ArrowLeft'");
+      expect(componentTs).toContain("'ArrowRight'");
+    });
+  });
+
+  // ── T1 panel footer — "Open full queue →" link ──────────────────────
+  //
+  // Acceptance item dropped from the approved design (2026-09-07,
+  // mission-tree final gaps). The panel stays DUMB/presentational
+  // and emits ``footerClick``; the indicator handles the navigation
+  // + menu close (mirror-level, see job-queue-indicator.spec.ts).
+
+  describe('T1: footer activation emits footerClick (panel stays DUMB)', () => {
+    beforeEach(() => {
+      (component.footerClick.emit as jest.Mock).mockClear();
+    });
+
+    it('exposes footerClick.emit as a function', () => {
+      expect(typeof component.footerClick.emit).toBe('function');
+    });
+
+    it('emits exactly one footerClick on a single onFooterClick', () => {
+      component.onFooterClick();
+      expect(component.footerClick.emit).toHaveBeenCalledTimes(1);
+      expect(component.footerClick.emit).toHaveBeenCalledWith();
+    });
+
+    it('emits on every successive onFooterClick call', () => {
+      component.onFooterClick();
+      component.onFooterClick();
+      expect(component.footerClick.emit).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT mutate the jobClick surface (separate output channel)', () => {
+      // The footer is its own output — accidentally piping through
+      // ``jobClick.emit(job)`` would surface a bogus navigation to
+      // the indicator. Keep the two channels cleanly separated.
+      (component.jobClick.emit as jest.Mock).mockClear();
+      component.onFooterClick();
+      expect(component.jobClick.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── T3 arrow-key tree navigation ─────────────────────────────────────
+  //
+  // Pure traversal logic lives in ``models/job.model.ts``;
+  // ``nextVisibleItem`` + ``visibleTreeItems`` + ``visibleTreeItemId``
+  // are imported and exercised directly. The arrow-key handler
+  // (``onTreeKeydown``) is mirrored 1:1 so the key→action map can be
+  // pinned without DOM.
+
+  describe('T3: visibleTreeItems — flatten the trees in display order', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    it('returns only mission nodes when nothing is expanded', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'paused' }),
+        mkMission({ mission_id: 'rec-a', liveness: 'completed' }),
+      ]);
+      const items = component.visibleItems();
+      expect(items.length).toBe(3);
+      expect(items.map((it) => it.kind)).toEqual(['mission', 'mission', 'mission']);
+      expect(items.every((it) => it.kind === 'mission')).toBe(true);
+    });
+
+    it('includes child jobs only when the parent mission is expanded', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'live-a', status: 'processing' }),
+        createMockJob({ job_id: 'j-2', mission_id: 'live-a', status: 'pending' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'paused' }),
+      ]);
+      // Collapsed: only mission nodes.
+      let items = component.visibleItems();
+      expect(items.length).toBe(2);
+      // Expand live-a → its two child jobs appear AFTER the parent
+      // in the flat list.
+      component.toggleLiveMission('live-a');
+      items = component.visibleItems();
+      expect(items.length).toBe(4);
+      expect(items.map((it) => it.kind)).toEqual(['mission', 'job', 'job', 'mission']);
+      expect(items.map((it) =>
+        it.kind === 'mission' ? it.node.mission.mission_id : it.job.job_id
+      )).toEqual(['live-a', 'j-1', 'j-2', 'live-b']);
+    });
+
+    it('skips children of COLLAPSED nodes — they are invisible to arrow nav', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'live-a', status: 'processing' }),
+        createMockJob({ job_id: 'j-2', mission_id: 'live-b', status: 'processing' }),
+      ]);
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'live-b', liveness: 'processing' }),
+      ]);
+      // Expand ONLY live-a — live-b stays collapsed. live-b's
+      // child j-2 must NOT appear in the visible list.
+      component.toggleLiveMission('live-a');
+      const items = component.visibleItems();
+      expect(items.length).toBe(3); // live-a, j-1, live-b
+      expect(items.map((it) =>
+        it.kind === 'mission' ? it.node.mission.mission_id : it.job.job_id
+      )).toEqual(['live-a', 'j-1', 'live-b']);
+    });
+
+    it('emits LIVE tree items before RECENT tree items', () => {
+      component.setMissions([
+        mkMission({ mission_id: 'live-a', liveness: 'processing' }),
+        mkMission({ mission_id: 'rec-a', liveness: 'completed' }),
+      ]);
+      const items = component.visibleItems();
+      expect(items[0].tree).toBe('live');
+      expect(items[1].tree).toBe('recent');
+    });
+  });
+
+  describe('T3: nextVisibleItem — clamped boundary behaviour', () => {
+    function makeItems(): VisibleTreeItem[] {
+      return [
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'a' } as MissionSummary, jobs: [] } },
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'b' } as MissionSummary, jobs: [] } },
+        { kind: 'mission', tree: 'live', node: { mission: { mission_id: 'c' } as MissionSummary, jobs: [] } },
+      ];
+    }
+
+    it('ArrowDown from index 0 → 1, 1 → 2', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, 1)).toBe(1);
+      expect(nextVisibleItem(items, 1, 1)).toBe(2);
+    });
+
+    it('ArrowDown clamps at the LAST item (no wrap)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 2, 1)).toBe(2);
+    });
+
+    it('ArrowUp clamps at the FIRST item (no wrap)', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, 0, -1)).toBe(0);
+    });
+
+    it('ArrowDown from -1 (no current focus) lands on the FIRST item', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, 1)).toBe(0);
+    });
+
+    it('ArrowUp from -1 (no current focus) lands on the LAST item', () => {
+      const items = makeItems();
+      expect(nextVisibleItem(items, -1, -1)).toBe(2);
+    });
+
+    it('returns -1 for an empty list regardless of direction', () => {
+      expect(nextVisibleItem([], 0, 1)).toBe(-1);
+      expect(nextVisibleItem([], -1, -1)).toBe(-1);
+    });
+
+    it('out-of-range currentIndex (-5 or 99) is treated as no-focus (lands at edge in direction of travel)', () => {
+      // ``-5`` is below range, ``99`` is above range — both are
+      // collapsed to the "no focus" branch. Down from any
+      // out-of-range lands at the first item; Up lands at the last.
+      const items = makeItems();
+      expect(nextVisibleItem(items, -5, 1)).toBe(0);
+      expect(nextVisibleItem(items, -5, -1)).toBe(2);
+      expect(nextVisibleItem(items, 99, 1)).toBe(0);
+      expect(nextVisibleItem(items, 99, -1)).toBe(2);
+    });
+  });
+
+  describe('T3: onTreeKeydown — key→action map', () => {
+    function mkMission(over: Partial<MissionSummary> = {}): MissionSummary {
+      return {
+        mission_id: 'm-1',
+        agent_id: 'leader',
+        parent_mission_id: null,
+        liveness: 'processing',
+        terminal_reason: null,
+        epoch: 1,
+        linked_jobs: [],
+        started_at: '2026-09-07T10:00:00Z',
+        last_activity_at: '2026-09-07T10:30:00Z',
+        title: null,
+        initiative_preview: null,
+        ...over,
+      };
+    }
+
+    function makeKeyboardEvent(key: string): KeyboardEvent {
+      // Minimal KeyboardEvent stub — the handler only reads ``key``
+      // and calls ``preventDefault`` + ``stopPropagation``. Both
+      // methods exist on the real KeyboardEvent so a plain object
+      // with those methods is sufficient for the spec.
+      return { key, preventDefault: jest.fn(), stopPropagation: jest.fn() } as unknown as KeyboardEvent;
+    }
+
+    it('ArrowDown advances focus to the next visible item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+      component.onTreeKeydown(makeKeyboardEvent('ArrowDown'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:b');
+    });
+
+    it('ArrowUp moves focus to the previous visible item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[1]));
+      expect(component.focusedItemId()).toBe('tree:live|mission:b');
+      component.onTreeKeydown(makeKeyboardEvent('ArrowUp'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+    });
+
+    it('ArrowDown with no current focus (-1) lands on the first item', () => {
+      component.setMissions([mkMission({ mission_id: 'a' }), mkMission({ mission_id: 'b' })]);
+      component.onTreeKeydown(makeKeyboardEvent('ArrowDown'));
+      expect(component.focusedItemId()).toBe('tree:live|mission:a');
+    });
+
+    it('ArrowRight expands a collapsed live mission node', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowRight is a no-op on an already-expanded mission (no toggle-fight)', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      // Still expanded (not collapsed by an extra ArrowRight).
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowRight on a JOB CHILD row is a no-op (children have no children of their own)', () => {
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'a', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      const childItem = component.visibleItems().find((it) => it.kind === 'job');
+      expect(childItem).toBeDefined();
+      component.onRowFocus(visibleTreeItemId(childItem!));
+      // ArrowRight on a job child does nothing.
+      component.onTreeKeydown(makeKeyboardEvent('ArrowRight'));
+      // The mission is still expanded (no state change).
+      expect(component.isLiveExpanded('a')).toBe(true);
+    });
+
+    it('ArrowLeft collapses an expanded mission node', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('ArrowLeft on a JOB CHILD collapses the parent mission', () => {
+      // WAI-ARIA tree pattern: ← on a child collapses the parent so
+      // keyboard focus returns to a navigable level.
+      component.setActiveJobs([
+        createMockJob({ job_id: 'j-1', mission_id: 'a', status: 'processing' }),
+      ]);
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      component.toggleLiveMission('a');
+      expect(component.isLiveExpanded('a')).toBe(true);
+      const childItem = component.visibleItems().find((it) => it.kind === 'job');
+      expect(childItem).toBeDefined();
+      component.onRowFocus(visibleTreeItemId(childItem!));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('ArrowLeft on an already-collapsed node is a no-op', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      component.onRowFocus(visibleTreeItemId(component.visibleItems()[0]));
+      component.onTreeKeydown(makeKeyboardEvent('ArrowLeft'));
+      expect(component.isLiveExpanded('a')).toBe(false);
+    });
+
+    it('Enter, Space, Escape, and other keys are NOT handled by the panel arrow handler', () => {
+      // Enter/Space stay on the individual rows; Esc already closes
+      // the mat-menu. The panel-level handler must NOT swallow them.
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      const beforeId = component.focusedItemId();
+      const event = makeKeyboardEvent('Enter');
+      component.onTreeKeydown(event);
+      // No state change — focus id stays the same, no expansion.
+      expect(component.focusedItemId()).toBe(beforeId);
+      expect(component.isLiveExpanded('a')).toBe(false);
+      // preventDefault / stopPropagation were NOT called for an
+      // unrelated key (the function returns before reaching them).
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+
+    it('prevents the default page scroll on ArrowDown/ArrowUp inside the panel', () => {
+      component.setMissions([mkMission({ mission_id: 'a' })]);
+      const event = makeKeyboardEvent('ArrowDown');
+      component.onTreeKeydown(event);
+      // The handler calls preventDefault so the page doesn't scroll
+      // while the user is navigating the menu.
+      expect(event.preventDefault).toHaveBeenCalled();
     });
   });
 });

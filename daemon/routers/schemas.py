@@ -1364,6 +1364,39 @@ class MissionResponse(BaseModel):
         default=None,
         description="ISO-8601 pass-through of Instance.last_activity_at; null when unset or degraded",
     )
+    # Mission tree panel (2026-09-07, ``feature/job-queue-mission-tree``)
+    # — display-source fields. HONEST NULLS ONLY: ``null`` means the
+    # instance_metadata key is absent (or the lookup degraded); the
+    # server NEVER fabricates a fallback label — the FE owns fallback
+    # rendering.
+    title: str | None = Field(
+        default=None,
+        # S-3 (second-pass review fold, 2026-09-07): sane display bound
+        # on the wire surface. NOTE — schemas.py has NO pre-existing
+        # max_length convention to match (this is the first constrained
+        # string field in this module); 500 is the reviewer-suggested
+        # bound. Response-side validation: a stored title longer than
+        # 500 chars fails response validation (500) rather than
+        # silently shipping an over-long wire payload.
+        max_length=500,
+        description=(
+            "Mission display title (instance_metadata['title']); null "
+            "when unset, non-string, or whitespace-only — no "
+            "server-side fallback label is fabricated. Bounded at 500 "
+            "chars on the wire (max_length)."
+        ),
+    )
+    initiative_preview: str | None = Field(
+        default=None,
+        description=(
+            "First 140 chars of instance_metadata['initiative_message'] "
+            "(INITIATIVE_PREVIEW_MAX_CHARS=140): the raw message is "
+            "WHITESPACE-COLLAPSED first, THEN truncated to 140 chars "
+            "by a plain slice (no ellipsis); null when unset, "
+            "non-string, or whitespace-collapsed-to-empty — no "
+            "server-side fallback label is fabricated"
+        ),
+    )
 
 
 class MissionListResponse(BaseModel):

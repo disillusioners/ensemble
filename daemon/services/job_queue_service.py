@@ -2009,6 +2009,7 @@ class JobQueueService:
         limit: int = 50,
         include_deleted: bool = False,
         job_types: list[str] | None = None,
+        instance_id: str | None = None,
     ) -> list[JobItem]:
         """List jobs with optional filters.
 
@@ -2026,6 +2027,12 @@ class JobQueueService:
                 returns both kinds. Additive vs the legacy
                 ``statuses`` filter, which is RETAINED through the M3
                 window (contract draft §4).
+            instance_id: Mission tree panel (2026-09-07,
+                ``feature/job-queue-mission-tree``) — optional
+                ``JobItem.instance_id`` equality filter (the HTTP
+                layer's ``mission_id`` param; mission identity rule:
+                ``mission_id == instance_id``). ``None`` (default) =
+                no instance narrowing.
 
         Returns:
             List of JobItem objects.
@@ -2040,6 +2047,7 @@ class JobQueueService:
             limit=limit,
             include_deleted=include_deleted,
             job_types=job_types,
+            instance_id=instance_id,
         )
         return jobs
     
