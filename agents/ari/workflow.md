@@ -37,7 +37,7 @@ searched in this mode** — that's Mode 2.
 4. Update todo items as completed (if used)
 
 5. Translate raw output → friendly summary for the user
-   (See )
+   (See How I Communicate)
 
 6. Done — no delegation needed
 ```
@@ -94,7 +94,7 @@ conversation, so this is the right path even for quick exploration.
 5. Wait for [JOB_EVENT] notifications:
    - completed ✓  → parse Result, translate to user
    - failed ✗     → parse Error, classify (transient/persistent), retry or
-                       report (See )
+                       report (See Handle Failures Gracefully)
    - in_progress ⟳ → progress checkpoint; keep waiting for terminal event
    - cancelled / dead_letter → handle See Handle Failures Gracefully
 
@@ -217,7 +217,7 @@ Receive → assess (3-5 trivial/system steps) → todo_create(...)
 ```
 Receive → job_create(leader, watch=True)
 → wait [JOB_EVENT] completed
-→ verify Result matches goal (See )
+→ verify Result matches goal (See Mode 2 with verification)
 → translate → user summary
 ```
 
