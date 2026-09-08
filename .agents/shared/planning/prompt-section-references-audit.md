@@ -600,3 +600,157 @@ Tester verdict: NOT-VERIFIED narrowly, only Task 1a (audit completeness).
 
 - `agents/tidier[v2]/skills-template/tidier-robustness.md` ends without `\n` on HEAD —
   pre-existing (verified on commit 6c4bfb7b), not introduced by iteration 3. Out of scope.
+
+---
+
+## 12. Convention v2 supersession (2026-09-08)
+
+### 12.1 Background
+
+Yesterday's sweep (commit `e191da99` + iteration residue `e48dad70` + review iteration
+`88294d71` + tester-closure iteration `cd798915`) converted bare file refs to the
+intermediate `file.md → Section` form across 33 files (per §3.1 inventory). The audit
+log at §3.2 documented ~52 explicit conversions plus borderline dispositions.
+
+That form was sanctioned-then-superseded within 24 hours. Live v0.12.2 deployment surfaced
+the intermediate form itself as the defect: **file paths are noise an agent cannot navigate**
+— the section name plus the owning agent is the navig unit. Path tokens like `rule.md`,
+`workflow.md`, `giter/workflow.md`, `tester/rule.md → Section` defeat the section-name-as-
+navigable-unit design intent because the agent still has to parse a path token to know
+where to look. Live observation: in the leader prompt, the file+section arrow form appeared
+inline next to the actual section content, and the agent's response pattern showed it
+processing the path before the section name (extra latency, occasional mis-resolution
+to a same-name section in another agent).
+
+This iteration replaces the intermediate form with **convention v2**: pure section
+references. The two allowed forms are:
+
+- **Same-agent** (target section lives in the same agent's assembled prompt):
+  `See <Section Name>`
+- **Cross-agent** (target section lives in another agent's prompt):
+  `See <agent>'s <Section Name>` — e.g. `See giter's Worktree Mode`
+
+All filename/path tokens in prompt text are now forbidden — both bare file forms
+(`rule.md`, `workflow.md`, `giter/workflow.md`) and the intermediate arrow form
+(`file.md → Section`, `file.md §Section`, `file.md "Section"`). Operators verify closure
+by grepping `\.md|workflow\.md|rule\.md|soul\.md|tools_note\.md|memory\.md|<agent>/<file>.md`
+across `agents/**` (excluding builder-prompt/growth files and tool-API parameter
+examples) and resolving to zero in-scope hits.
+
+### 12.2 The v2 rule (guide §3 rewrite)
+
+`docs/agent-prompt-writing-guide.md §3 Cross-reference hygiene` was rewritten. The
+new rule:
+
+| Form | Pattern | Example |
+|------|---------|---------|
+| Same-agent | `See <Section Name>` | `See Quick Fix (Must)` |
+| Cross-agent | `See <agent>'s <Section Name>` | `See giter's Worktree Mode` |
+
+**Forbidden in prompt text:** ANY filename or path token. Both bare file forms
+(`rule.md`, `workflow.md`, `soul.md`, `tools_note.md`, `memory.md`, `*.md`) AND the
+intermediate `file.md → Section` arrow form are now forbidden.
+
+Disambiguators stay where two sections share a title within the same agent
+(`See Quick Fix (Must)` vs `See Quick Fix (Must Not)`). Cross-agent refs that need
+disambiguation add the agent's full versioned id (`See reviewer[v2]'s ...`).
+Auto-loaded strategy skills (`dev-strategy.md`, `planning-strategy.md`,
+`approval-strategy.md`, `review-strategy.md`, `test-strategy.md`,
+`tidier-strategy.md`, `tidier-static-hygiene.md`) assemble their full content into
+the owning agent's prompt surface, so referencing a heading by name alone resolves
+without a path token (the agent has the file).
+
+The §3 subsection rules that still hold are preserved unchanged: quoted-section
+form (with `→` or `§`), positional-fragility guidance (`Cardinal #3` over `§9`), and
+descriptor patterns (`(canonical — File Hygiene owns them)`).
+
+### 12.3 Conversion counts
+
+This branch (`fix/prompt-pure-section-refs`) supersedes yesterday's intermediate
+form across 97 in-scope prompt-surface files:
+
+| Source form | Count (approx.) | Target form |
+|-------------|-----------------|--------------|
+| `rule.md` (bare) | 71 | same-agent section refs + (Cardinal/Step/etc.) positional refs |
+| `workflow.md` (bare) | 71 | same-agent section refs |
+| `soul.md` (bare) | 60 | same-agent section refs |
+| `tools_note.md` (bare) | 11 | same-agent section refs |
+| `memory.md` (bare) | 22 | same-agent section refs |
+| `dev-strategy.md` (bare) | 15 | same-agent section refs (auto-loaded) |
+| `planning-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
+| `approval-strategy.md` (bare) | 11 | same-agent section refs (auto-loaded) |
+| `review-strategy.md` (bare) | 3 | same-agent section refs (auto-loaded) |
+| `test-strategy.md` (bare) | 3 | same-agent section refs (auto-loaded) |
+| `tidier-strategy.md` (bare) | 10 | same-agent section refs (auto-loaded) |
+| `tidier-static-hygiene.md` (bare) | 2 | same-agent section refs (auto-loaded) |
+| `<agent>/<file>.md → Section` (cross-arrow, yesterday's form) | ~12 | `See <agent>'s <Section Name>` |
+| `file.md §Section` (compliant in v1, forbidden in v2) | ~5 | `See <Section Name>` |
+| `file.md "Section"` (quoted, §3 sanctioned) | ~10 | `See <Section Name>` |
+| `(canonical in \`file.md\`)` (heading parenthetical) | ~5 | `(canonical)` |
+| `lives in \`file.md\` (auto-loaded)` | ~5 | `are auto-loaded` / `is auto-loaded` |
+| `(from file.md)` / `(the contents of file.md)` provenance | ~3 | dropped parenthetical |
+| **Total path-token refs converted** | **~290 (per initial inventory; §2.1)** | |
+
+Auto-loaded strategy skills (§3.1 acknowledged they are fully assembled into the owning
+agent's prompt) dropped their `file.md →` prefix and retained only the section name.
+Cross-agent pointers (e.g. `giter/workflow.md -> Worktree Mode`) became `See giter's
+Worktree Mode`. Same-agent pointers (e.g. `rule.md → Cardinal Rules`) became
+`See Cardinal Rules`.
+
+### 12.4 Before/after examples (8 conversions spanning same-agent, cross-agent, auto-loaded skill, and disambiguation)
+
+| # | Before (v1 form) | After (v2 form) |
+|---|------------------|-----------------|
+| 1 | `See \`rule.md\` → Resource Constraint (STRICT)` | `See Resource Constraint (STRICT)` |
+| 2 | `(giter/workflow.md -> Worktree Mode)` | `See giter's Worktree Mode` |
+| 3 | `(see Plan Improvement Tracking in \`workflow.md\`)` | `See Plan Improvement Tracking` |
+| 4 | `lives in \`planning-strategy.md\` (auto-loaded)` | `is auto-loaded` |
+| 5 | `(canonical in \`approval-strategy.md\`)` heading parenthetical | `(canonical)` |
+| 6 | `(per \`governor/rule.md → Report Disagreements Transparently\`)` (cross-agent) | `See governor's Report Disagreements Transparently` |
+| 7 | `See workflow.md → Skill Selection (canonical reference)` (skill-name disambiguation) | `See Skill Selection (canonical reference)` |
+| 8 | `Cardinal rules 1–7 (from \`rule.md\`)` (provenance) | `Cardinal rules 1–7` |
+
+### 12.5 Closure proof (variant-tolerant re-grep, zero in-scope hits)
+
+Per the v2 rule's closure requirement (`grep resolves to zero hits` over in-scope
+prompt surfaces), the final variant-tolerant sweep returned **zero in-scope prompt-file
+hits** for the canonical pattern set: `\.md` (prompt-file tokens), `<agent>/<file>.md`
+(cross-agent paths), `file.md → Section` (arrow form), `file.md §Section` (§-form),
+`file.md "Section"` (quoted form), `see <file>.md`-style prose.
+
+**Survivors (out-of-scope per task instructions; report-only, not converted):**
+
+1. **`agents/watcher/builder-prompt.md` (3 hits)** — builder-prompt file is NOT assembled
+   into an agent prompt (per task scope note). Out of scope; would not changed.
+2. **`agents/<agent>/growth.md` files** — growth files are NOT assembled into prompts.
+   Out of scope.
+3. **`agents/_mother/tools_note.md:50`** — `agent_read(agent_name="developer", file="soul.md")`
+   is a tool API parameter example. The literal `soul.md` is required as the tool's
+   `file` parameter value; this is operational (matches audit Reason Summary #3 — `.agents/...`
+   paths are operational). Not converted.
+4. **`agents/reviewer/memory.md:117`, `agents/approver/memory.md:38`** —
+   `.agents/<agent>/memory.md` paths are operational workspace references (the agent
+   reads/writes its own memory at this path in the actual project). Operational.
+   Not converted.
+5. **`agents/tidier[v2]/skill-set.yaml:28`** — YAML file (not `.md`), not in scope
+   per loader.
+6. **`agents/_inner_soul/`, `agents/_baby_template/`** — internal scaffolding agents,
+   not in `meta.json` agent registry. Out of scope.
+7. **`agents/_prompt_system/knowledge.md`, `project-experience.md`, `critical-notes.md`**
+   — system-level hooks loaded into all agents' prompts but are not agent-prompt files.
+   Report-only.
+
+### 12.6 Sanctioned-then-superseded (within 24h)
+
+Yesterday's `file.md → Section` form was sanctioned at §3 of the writing guide and
+deployed to v0.12.2 production. Within 24 hours, live observation surfaced it as a
+defect-class instance: the file path token added parser overhead without navigable value
+(the agent still has to resolve the file to a section, which is what the section name
+already accomplishes). The fix was to drop the file token entirely and rely on the
+section name plus the owning agent as the navig unit.
+
+This is the first documented case of a v1 prompt convention being superseded within 24
+hours of production deployment. Lesson for future audits: variant-tolerant grep
+coverage at sweep time should include not just the v1 form but any **future** form
+the agent might produce (here: `file.md → Section` should have been checked for
+navigable-unit redundancy, not just for parser correctness).
