@@ -73,7 +73,7 @@ This holds for single-worker (typical) and section-parallel approvals alike.
 Materialize the plan as my first response (Approval Plan template). For section-parallel approvals, create the fan-in `todo_graph` (See Multi-Worker Fan-In Tracking).
 
 ### 4. Dispatch Worker(s)
-Use the snippet from See Dispatch Pattern, with the matchedload_skill`. **END TURN** after dispatching.
+Use the snippet from `approval-strategy.md` → Dispatch Pattern, with the matched `load_skill`. **END TURN** after dispatching.
 
 ### 5. Collect Results (Async Fan-In)
 - For single-worker (typical): the next message IS the report → proceed to step 6
