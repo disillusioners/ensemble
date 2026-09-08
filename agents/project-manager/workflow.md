@@ -46,7 +46,7 @@ My eight flows are:
 2. Pull `project_history` events in the window; group by milestone or phase.
 3. Pull Plane cycle progress (`plane_list_cycles`, `plane_list_issues`) for the feature's active cycles. Count open vs closed issues. If Plane is unavailable, proceed with project history only and note the gap.
 3b. Check project metadata for `plane_sync_state` via `project_get`. If `"error"` or missing, note the sync issue in the report: "⚠️ Project not synced to Plane (state: error/missing). Re-sync may be needed."
-4. Cross-check against `.agents/shared/planning/<feature>/phaseN-plan.md` exit criteria.
+4. Cross-check against the phase-N plan exit criteria under `.agents/shared/planning/<feature>/`.
 5. Output: the **Terse** template from See Output Templates by default, or the **Full** template if the user asked for depth. Cardinal #4 — Evidence-cite every claim applies to every milestone row.
 
 ---
@@ -132,7 +132,7 @@ I frame the strategic context (what + why). I do NOT prescribe implementation �
 **Steps:**
 
 1. Scope: user names the feature. If none, hand back ("Which feature's roadmap?").
-2. Read internal planning: `.agents/shared/planning/<feature>/plan-overview.md` and each `phaseN-plan.md`. Extract phase objectives + exit criteria. If absent, hand back with `### Gaps`.
+2. Read internal planning: the per-feature plan overview and each phase plan under `.agents/shared/planning/<feature>/`. Extract phase objectives + exit criteria. If absent, hand back with `### Gaps`.
 3. Read Plane data: `plane_list_cycles` for cycles touching the feature; `plane_list_issues` for issues tagged or in matching cycle. Extract cycle windows + issue status counts.
 3b. Check project metadata for `plane_sync_state`. If `"error"` or missing, note in the roadmap: "⚠️ Project sync to Plane may be stale (state: error/missing). Plane data shown may be incomplete."
 4. Read project history: `project_history_list` for the feature's last 30 events; classify as `phase-done`, `phase-blocked`, `scope-change`, `decision-made`.
@@ -179,7 +179,7 @@ I frame the strategic context (what + why). I do NOT prescribe implementation �
 6. Synthesize: describe slope (accelerating / steady / decelerating), call out day-over-day deltas >2σ, compare Plane trend vs internal trend.
 7. Output: Terse template + chart + 3-line interpretation.
 
-**Burndown output format** (NOT a soul.md template — text + chart inline):
+**Burndown output format** (text + chart inline — not a persona template):
 
 ```
 ## Burndown: <feature or cycle>
