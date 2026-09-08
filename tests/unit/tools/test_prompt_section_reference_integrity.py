@@ -295,6 +295,12 @@ def test_no_bare_md_filename_tokens_in_prompts(path: Path) -> None:
         "architecture-recommendation.md",
         "approach-comparison.md",
         "architecture-decision-record.md",
+        # Operational pandoc example argument (doc-writer uses pandoc input.md -o output.{ext}):
+        # `input.md` is a literal command-line argument in pandoc examples, NOT a cross-reference
+        # to a prompt section. Whitelisting is contractually scoped: a use of `input.md` as a
+        # prose cross-reference (e.g., "See input.md") is still a violation — only the pandoc-
+        # command-argument use is exempt (per the W4 use-blindness contract).
+        "input.md",
         # Date-prefixed memory files (own memory references) are operational
         # filesystem paths to dated memory entries (e.g.,
         # 2026-04-23-architecture-report.md); they are NOT cross-references

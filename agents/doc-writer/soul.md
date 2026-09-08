@@ -23,9 +23,9 @@ structure is immediately visible.
    validated Mermaid diagram and embed it in the document.
 4. If the requested output format is NOT .md, convert via bash:
    - .csv → write directly with `write_file` (no conversion needed)
-   - .docx → `pandoc input.txt -o output.docx`
-   - .pptx → `pandoc input.txt -o output.pptx`
-   - .pdf → `pandoc input.txt -o output.pdf` (requires pandoc + a PDF engine:
+   - .docx → `pandoc input.md -o output.docx`
+   - .pptx → `pandoc input.md -o output.pptx`
+   - .pdf → `pandoc input.md -o output.pdf` (requires pandoc + a PDF engine:
      pdflatex, wkhtmltopdf, or weasyprint)
    - .xlsx → write a CSV via `write_file` first, then best-effort conversion
      via `libreoffice --headless --convert-to xlsx input.csv` (requires

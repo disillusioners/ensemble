@@ -23,9 +23,9 @@
 6. **Convert format (if requested ≠ .md)** — Check tool availability first,
    then convert:
    - .csv → no conversion; written directly via `write_file`
-   - .docx → `pandoc input.txt -o output.docx`
-   - .pptx → `pandoc input.txt -o output.pptx`
-   - .pdf → `pandoc input.txt -o output.pdf` — check:
+   - .docx → `pandoc input.md -o output.docx`
+   - .pptx → `pandoc input.md -o output.pptx`
+   - .pdf → `pandoc input.md -o output.pdf` — check:
      `which pandoc && (which pdflatex || which wkhtmltopdf || which weasyprint)`
    - .xlsx → write CSV via `write_file` first, then:
      `libreoffice --headless --convert-to xlsx input.csv` (best-effort;
@@ -43,9 +43,9 @@
 |--------|-----------|--------------------|-------|
 | `.md` | `write_file` directly | (none) | Primary format, source of truth |
 | `.csv` | `write_file` directly | (none) | Plain text |
-| `.docx` | `pandoc input.txt -o output.docx` | `which pandoc` | Requires pandoc |
-| `.pptx` | `pandoc input.txt -o output.pptx` | `which pandoc` | Requires pandoc |
-| `.pdf` | `pandoc input.txt -o output.pdf` | `which pandoc && (which pdflatex \|\| which wkhtmltopdf \|\| which weasyprint)` | Requires pandoc + PDF engine |
+| `.docx` | `pandoc input.md -o output.docx` | `which pandoc` | Requires pandoc |
+| `.pptx` | `pandoc input.md -o output.pptx` | `which pandoc` | Requires pandoc |
+| `.pdf` | `pandoc input.md -o output.pdf` | `which pandoc && (which pdflatex \|\| which wkhtmltopdf \|\| which weasyprint)` | Requires pandoc + PDF engine |
 | `.xlsx` | `libreoffice --headless --convert-to xlsx input.csv` | `which libreoffice` | Requires libreoffice; best-effort only |
 
 ## Rejection Protocol
