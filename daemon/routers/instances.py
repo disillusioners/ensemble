@@ -397,6 +397,18 @@ async def list_instances(
             "% and _ are treated as literals."
         ),
     ),
+    order: str = Query(
+        "pinned",
+        pattern="^(pinned|activity)$",
+        description=(
+            "Root-page ordering. Allowed values: 'pinned' (default — pinned "
+            "roots float to the top by pinned_at DESC, then created_at DESC; "
+            "historical behavior), 'activity' (live non-terminal roots first "
+            "— pins can never push them off the page — then updated_at DESC "
+            "with created_at DESC / instance_id ASC tiebreaks). Any other "
+            "value is rejected with 422."
+        ),
+    ),
 ) -> InstanceListResponse:
     """List instances with pagination.
 
@@ -414,6 +426,10 @@ async def list_instances(
         search: Optional case-insensitive substring filter against
             ``instance_metadata.title``, ``agent_name``, and ``agent_id``
             (optional). When omitted/empty, no text filter is applied.
+        order: Root-page ordering. ``"pinned"`` (default — historical
+            pinned-first behavior, byte-compatible) or ``"activity"`` (live
+            non-terminal roots first, then ``updated_at`` DESC). Invalid
+            values are rejected with 422.
     """
     manager = _get_manager(request)
 
@@ -428,6 +444,7 @@ async def list_instances(
         exclude_kb=exclude_kb,
         include_descendants=True,
         search=search,
+        order=order,
     )
 
     # Merge UI preferences (pin + color tag + icon tag) into each
