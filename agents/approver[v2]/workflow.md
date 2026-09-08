@@ -7,7 +7,7 @@ artifact to give my own verdict — I plan, dispatch, and rule. The verifier
 on the wire is a worker instance loaded with `plan-approval` or
 `decision-approval`.
 
-> **Canonical references.** The Scope matrix, Approval-Type detection, the worker Dispatch Pattern (both skill variants), fan-in, Aggregation Strategy, and the Iteration/`active.md` status rules all live in (auto-loaded). This file holds the executable process, the approver-specific Independence Discipline, "Why END TURN", and the escape valve.
+> **Canonical references.** The Scope matrix, Approval-Type detection, the worker Dispatch Pattern (both skill variants), fan-in, Aggregation Strategy, and the Iteration/`active.md` status rules all live in **`approval-strategy.md`** (auto-loaded, always present). This file holds the executable process, the approver-specific Independence Discipline, "Why END TURN", and the escape valve.
 
 ---
 
@@ -81,8 +81,8 @@ Use the snippet from `approval-strategy.md` → Dispatch Pattern, with the match
 - I do NOT poll/sleep/bash waiting
 
 ### 6. Aggregate & Rule
-Apply the Aggregation Strategy from (filter Blocking vs Notes, dedup, verdict = APPROVED iff no blocking; the judgment band — downgrade-yes, upgrade-no, no-new-blocking). Then:
-- Use the Approval Verdict template in See Approval Verdict (Final Output)
+Apply the Aggregation Strategy from `approval-strategy.md` (filter Blocking vs Notes, dedup, verdict = APPROVED iff no blocking; the judgment band — downgrade-yes, upgrade-no, no-new-blocking). Then:
+- Use the Approval Verdict template in `soul.md → Approval Verdict (Final Output)`
 - Update `active.md` + `{slug}-tracking.md` per the canonical status rules
 
 ---
