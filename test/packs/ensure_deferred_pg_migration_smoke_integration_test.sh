@@ -14,7 +14,7 @@
 # go repository-level, mirroring
 # test/packs/ensure_deferred_pg_smoke_integration_test.sh.
 #
-# THREE LEGS (per-leg [PASS]/[FAIL]/[BLOCKER] evidence printed):
+# FIVE LEGS (per-leg [PASS]/[FAIL]/[BLOCKER] evidence printed):
 #   LEG M0 — migration-chain schema verification (gate premise):
 #     build via the FULL MigrationRunner on a fresh PG database, then
 #     read information_schema.columns for ``report_injections.content``
@@ -35,6 +35,20 @@
 #     reason=RESUME_ROUTER), manager re-enter fired once with
 #     source="sweep_no_row_backstop"; pass 2 finds NO candidates (no
 #     flap); the recovered row's ``content`` is the sentinel ``""``.
+#   LEG M1L — legacy prod NOT NULL simulation (the caller's DONE
+#     criterion): on the SAME disposable DB, simulate the REAL legacy
+#     prod shape — defensive WHERE-guard
+#     (``UPDATE report_injections SET content='' WHERE content IS
+#     NULL``) then ``ALTER TABLE report_injections ALTER COLUMN content
+#     SET NOT NULL`` — and verify the sweep self-heals against the REAL
+#     constraint: seed a FRESH zero-row incident pair (parent
+#     WAITING_CHILDREN + child COMPLETED + AGENT message +
+#     CANCELLED/unenqueued watcher), run the REAL
+#     ``_run_no_row_backstop_lane`` → the sentinel ``''`` INSERT
+#     satisfies NOT NULL, the row transitions DEFERRED → PENDING,
+#     recovered=1 in ONE pass, pass 2 finds no candidates (anti-flap).
+#     The constraint is DROPPED in a finally-block afterwards so
+#     M2a/M2b keep the migration-built nullable semantics.
 #   LEG M2 — classification on migration-built schema (the
 #     deterministic-re-raise path):
 #     LEG M2a — REAL UniqueViolation race (load-bearing): two REAL
@@ -96,7 +110,7 @@
 # Dual-layer timeout (per test-pack skill):
 #   - Layer 1 (command-level): caller wraps with `timeout 300`
 #   - Layer 2 (script-internal): `timeout 280s` on the verifier
-#     (covers psql provisioning + the 3-leg Python verifier; LEG M2a's
+#     (covers psql provisioning + the 5-leg Python verifier; LEG M2a's
 #     race resolves in <1s on local PG — the cap is hang insurance).
 #
 # Exit codes (per test-pack skill):
@@ -111,7 +125,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "=== Test Pack: ensure_deferred_pg_migration_smoke_integration_test ==="
 echo "HEAD: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
-echo "(PG migration smoke: content-NOT-NULL sentinel + classification on real PG, 3 legs)"
+echo "(PG migration smoke: content-NOT-NULL sentinel + classification on real PG, 5 legs)"
 
 cd "$PROJECT_DIR"
 
@@ -180,12 +194,12 @@ PGPASSWORD="$PG_TEST_PASSWORD" psql -h "$PG_TEST_HOST" -p "$PG_TEST_PORT" -U "$P
 PGPASSWORD="$PG_TEST_PASSWORD" psql -h "$PG_TEST_HOST" -p "$PG_TEST_PORT" -U "$PG_TEST_USER" -d "$PG_TEST_ADMIN_DB" \
   -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$TARGET_DB\"" >/dev/null
 
-# ── Write the 3-leg verifier to a tmp file (keeps the heredoc readable) ─
+# ── Write the 5-leg verifier to a tmp file (keeps the heredoc readable) ─
 VERIFIER="$(mktemp -t sentinel_pg_verify.XXXXXX.py)"
 trap 'rm -f "$VERIFIER"; cleanup' EXIT INT TERM
 
 cat >"$VERIFIER" <<PYEOF
-"""3-leg repository-level PG verifier: content-NOT-NULL sentinel +
+"""5-leg repository-level PG verifier: content-NOT-NULL sentinel +
 classification (commit ef1432ca, branch feature/fix-report-injection-content-notnull).
 
 LEG M0  migration-chain schema verification (information_schema.columns on
@@ -193,6 +207,11 @@ LEG M0  migration-chain schema verification (information_schema.columns on
 LEG M1  sweep self-heal end-to-end on the migration-built schema (real
         ReportDeliveryRecoveryService Lane 2, real INSERT → DEFERRED → PENDING,
         anti-flap on pass 2, sentinel '' content on the recovered row)
+LEG M1L legacy prod NOT NULL simulation on the SAME DB (WHERE-guard +
+        ALTER COLUMN content SET NOT NULL → REAL ``_run_no_row_backstop_lane``
+        self-heal against the REAL constraint: sentinel '' INSERT satisfies
+        NOT NULL, DEFERRED → PENDING, recovered=1 one pass, pass-2 anti-flap;
+        constraint dropped in a finally-block afterwards)
 LEG M2a REAL 2-session UniqueViolation race → exactly ONE DEFERRED row wins
         (load-bearing)
 LEG M2b deterministic NotNullViolation → IMMEDIATE re-raise, single INSERT
@@ -639,6 +658,209 @@ def leg_m1() -> None:
     )
 
 
+def leg_m1l() -> None:
+    """LEG M1L — legacy prod NOT NULL simulation on the SAME disposable DB.
+
+    The migration-built schema has ``content`` NULLABLE (LEG M0); the
+    legacy prod schema has ``content NOT NULL`` (predates the migration
+    system — NOTHING in the migration chain sets it). This leg closes
+    the gap by SIMULATING prod on real PG: defensive WHERE-guard
+    (``UPDATE report_injections SET content='' WHERE content IS NULL``)
+    then ``ALTER TABLE report_injections ALTER COLUMN content SET NOT
+    NULL``, then seed a FRESH zero-row incident pair and run the REAL
+    ``_run_no_row_backstop_lane``. DONE criterion: the sweep self-heals
+    against the REAL constraint — the sentinel ``''`` INSERT satisfies
+    NOT NULL, the row lands DEFERRED → PENDING, recovered=1 in ONE
+    pass, pass 2 finds no candidates (anti-flap). The constraint is
+    DROPPED in a finally-block so M2a/M2b keep the migration-built
+    nullable semantics.
+    """
+    print("[LEG M1L] legacy prod NOT NULL simulation: sweep self-heal against the REAL constraint")
+    _clear_tables()
+
+    # WHERE-guard (defensive) + the prod-shape ALTER. On the clean
+    # post-_clear_tables() table the UPDATE is a no-op, but the guard
+    # keeps the leg robust to any NULL contents.
+    with ENGINE.begin() as conn:
+        guarded = conn.execute(
+            text("UPDATE report_injections SET content = '' WHERE content IS NULL")
+        ).rowcount
+        conn.execute(
+            text("ALTER TABLE report_injections ALTER COLUMN content SET NOT NULL")
+        )
+        row = conn.execute(
+            text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "  AND table_name = 'report_injections' "
+                "  AND column_name = 'content'"
+            )
+        ).first()
+    nullable_after = row[0] if row else None
+    _check(
+        "M1L",
+        nullable_after == "NO",
+        f"ALTER SET NOT NULL applied (WHERE-guard updated {guarded} NULL "
+        f"row(s)); information_schema is_nullable={nullable_after!r} — "
+        f"the REAL legacy prod shape now on the disposable DB",
+    )
+
+    leader_id = f"leader-{uuid.uuid4().hex[:8]}"
+    child_id = f"giter-{uuid.uuid4().hex[:8]}"
+    msg_id = f"msg-{uuid.uuid4().hex[:8]}"
+    task_id = f"task-{uuid.uuid4().hex[:8]}"
+    _seed_incident_shape(leader_id, child_id, msg_id, task_id)
+
+    with Session(ENGINE) as session:
+        seeded = session.exec(sm_select(ReportInjection)).all()
+    _check(
+        "M1L",
+        len(seeded) == 0,
+        f"fresh zero-row incident pair seeded under the NOT NULL schema "
+        f"(report_injections rows: {len(seeded)}), parent WAITING_CHILDREN "
+        f"+ child COMPLETED + COMPLETED message + CANCELLED/unenqueued watcher",
+    )
+
+    ri_repo = ReportInjectionRepository(engine=ENGINE)
+    task_repo = MagicMock()
+    task_repo.has_instance_busy = MagicMock(side_effect=lambda _iid: False)
+    manager = MagicMock()
+    manager.engine = ENGINE
+    manager._handle_recover_deferred_report = MagicMock()
+
+    service = ReportDeliveryRecoveryService(
+        task_repo=task_repo,
+        report_injection_repo=ri_repo,
+        queue_repo=MagicMock(),
+        instance_repo=MagicMock(),
+        manager_ref=manager,
+        interval_seconds=300,
+        age_bound_minutes=10,
+        batch_cap=100,
+        recovery_retry_minutes=1,
+        enabled=True,
+        lane_orphan=False,
+    )
+
+    FLAP_COLLECTOR.messages.clear()
+
+    try:
+        # ── Sweep pass 1 (the recovery under the REAL NOT NULL) ──
+        lane1 = service._run_no_row_backstop_lane()
+        _check(
+            "M1L",
+            lane1.recovered == 1 and lane1.errors == 0,
+            f"pass 1 healed the stuck pair in ONE pass against the REAL "
+            f"NOT NULL constraint (recovered={lane1.recovered}, "
+            f"errors={lane1.errors}, already_recovered={lane1.already_recovered})",
+        )
+
+        with Session(ENGINE) as session:
+            healed = list(session.exec(sm_select(ReportInjection)).all())
+        if not healed:
+            _check(
+                "M1L",
+                False,
+                "no report row landed after pass 1 — a NOT NULL trip on "
+                "the INSERT would mean the sentinel is NOT the bridge "
+                "(gate-premise violation against the REAL legacy shape)",
+            )
+        else:
+            recovered_row = healed[0]
+            ok_row = (
+                len(healed) == 1
+                and recovered_row.parent_instance_id == leader_id
+                and recovered_row.child_instance_id == child_id
+                and recovered_row.child_message_id == msg_id
+                and recovered_row.state == ReportInjectionState.PENDING.value
+                and recovered_row.recovery_attempted_at is not None
+                and recovered_row.deferred_reason == DEFERRED_REASON_RESUME_ROUTER
+            )
+            _check(
+                "M1L",
+                ok_row,
+                f"sentinel row INSERTed and transitioned under NOT NULL: "
+                f"state={recovered_row.state}, "
+                f"recovery_attempted_at set={bool(recovered_row.recovery_attempted_at)}, "
+                f"reason={recovered_row.deferred_reason!r} "
+                f"(INSERT → DEFERRED → PENDING → reconcile)",
+            )
+            _check(
+                "M1L",
+                recovered_row.content is not None and recovered_row.content == "",
+                f"the sentinel '' INSERT satisfied the NOT NULL constraint "
+                f"(content={recovered_row.content!r}) — the DONE criterion: "
+                f"self-heal works against the REAL legacy prod shape",
+            )
+
+            call_count_1 = manager._handle_recover_deferred_report.call_count
+            kwargs = (
+                manager._handle_recover_deferred_report.call_args.kwargs
+                if call_count_1 == 1
+                else {}
+            )
+            _check(
+                "M1L",
+                (
+                    call_count_1 == 1
+                    and kwargs.get("source") == "sweep_no_row_backstop"
+                    and kwargs.get("child_instance_id") == child_id
+                    and kwargs.get("child_message_id") == msg_id
+                ),
+                f"parent wake re-enter fired exactly once via the manager seam "
+                f"(call_count={call_count_1}, source={kwargs.get('source')!r})",
+            )
+
+            # ── Sweep pass 2 under NOT NULL — NO flap ──
+            candidates2 = ri_repo.find_completed_children_without_delivery(
+                parent_not_terminal=True,
+                limit=100,
+            )
+            lane2 = service._run_no_row_backstop_lane()
+            with Session(ENGINE) as session:
+                rows_after = list(session.exec(sm_select(ReportInjection)).all())
+            call_count_2 = manager._handle_recover_deferred_report.call_count
+            _check(
+                "M1L",
+                (
+                    candidates2 == []
+                    and lane2.recovered == 0
+                    and lane2.already_recovered == 0
+                    and lane2.errors == 0
+                    and call_count_2 == 1
+                    and len(rows_after) == 1
+                ),
+                f"pass 2 under NOT NULL: no candidates (anti-flap), "
+                f"recovered={lane2.recovered}, "
+                f"already_recovered={lane2.already_recovered}, "
+                f"errors={lane2.errors}, re-enter still {call_count_2}, "
+                f"rows still {len(rows_after)}",
+            )
+    finally:
+        # Restore the migration-built nullable schema so M2a/M2b keep
+        # their designed semantics even if a M1L assertion failed.
+        with ENGINE.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE report_injections ALTER COLUMN content DROP NOT NULL")
+            )
+            row2 = conn.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "  AND table_name = 'report_injections' "
+                    "  AND column_name = 'content'"
+                )
+            ).first()
+    nullable_restored = row2[0] if row2 else None
+    _check(
+        "M1L",
+        nullable_restored == "YES",
+        f"constraint dropped after the leg — schema restored to the "
+        f"migration-built nullable shape for M2a/M2b "
+        f"(is_nullable={nullable_restored!r})",
+    )
+
+
 def leg_m2a() -> None:
     """LEG M2a — REAL 2-session UniqueViolation race (load-bearing).
 
@@ -880,6 +1102,7 @@ def leg_m2b() -> None:
 def main() -> int:
     leg_m0()
     leg_m1()
+    leg_m1l()
     leg_m2a()
     leg_m2b()
 
@@ -891,7 +1114,7 @@ def main() -> int:
         return 1
     print(
         "[PASS] PG migration smoke: content-NOT-NULL sentinel + "
-        "classification verified on real PostgreSQL (4/4 legs)."
+        "classification verified on real PostgreSQL (5/5 legs)."
     )
     return 0
 
@@ -901,7 +1124,7 @@ if __name__ == "__main__":
 PYEOF
 
 # ── Run the verifier (Layer 2 timeout — full budget for psql + Python) ───
-echo "[run] Executing 4-leg verifier against $TARGET_URL"
+echo "[run] Executing 5-leg verifier against $TARGET_URL"
 set +e
 timeout 280s .venv/bin/python "$VERIFIER" "$TARGET_URL" 2>&1
 EXIT_CODE=$?
