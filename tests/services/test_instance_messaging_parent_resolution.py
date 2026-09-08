@@ -320,3 +320,259 @@ class TestMessagingParentResolutionBugExercising:
             f"_resolve_tree_root_id must walk to the caller's tree root. "
             f"Got: {resolved_with_fix!r}"
         )
+
+
+class TestParentResolutionExceptionLadder:
+    """Pin the exception-ladder parity for DEFECT 2 (D12).
+
+    The fix (``80bb61dd``) threads ``_proj_row.parent_id`` into
+    ``assemble_context_messages(parent_id=...)``. The D12 adjudication
+    CONFIRMED that every fallback lands on a value AT LEAST AS
+    CORRECT as the pre-fix own-partition fallback:
+
+    * **Shape 1** — ``_proj_row`` fetch returns ``None`` (transient
+      race / missing instance): the messaging path's defensive
+      ``try/except`` sets BOTH ``_persistent_project_id`` and
+      ``_persistent_parent_id`` to ``None``
+      (``daemon/services/instance_messaging.py:3684-3686``); the
+      orchestrator then short-circuits to ``instance_id`` via the
+      ``parent_id is None`` branch — identical to pre-fix.
+    * **Shape 2** — ``get_tree_root_id(parent_id)`` raises
+      (DB error during ancestor walk): ``_resolve_tree_root_id``
+      returns ``parent_id`` via the ``except Exception`` ladder
+      (``daemon/services/context_messages.py:954-959``). The fix's
+      ``parent_id`` arg is the canonical input — when the repo
+      walk fails, the ladder falls back to the caller's
+      ``parent_id``, which is at least as correct as the pre-fix
+      own-partition fallback.
+    * **Shape 3** — ``get_tree_root_id(parent_id)`` returns
+      ``None`` (orphan chain, parent deleted):
+      ``_resolve_tree_root_id`` returns ``parent_id``
+      (``daemon/services/context_messages.py:961``). Same
+      parity as Shape 2.
+
+    This test pins the three shapes end-to-end through the REAL
+    messaging service path, confirming both the messaging-path
+    thread-through AND the resolver's defensive fallback agree on
+    the right ``context_key`` for each shape.
+
+    Implementation: same ``_make_manager`` / ``_make_service`` /
+    graph-capture harness as the three landed tests; the
+    ``instance_repository`` mock is shaped per case (returns ``None``
+    for Shape 1, raises for Shape 2, returns ``None`` for Shape 3).
+    The orchestrator kwargs are captured via the patched
+    ``assemble_context_messages``; ``_resolve_tree_root_id`` is
+    called directly with the captured ``parent_id`` to observe the
+    resolver's ladder output. The net assertion: the resolver's
+    return value is a partition key AT LEAST AS CORRECT as the
+    pre-fix own-partition fallback (``child_instance_id``).
+    """
+
+    async def test_parent_resolution_exception_ladder(self):
+        """End-to-end exception-ladder parity per D12.
+
+        Walks Shape 1 (no row), Shape 2 (repo raises), and Shape 3
+        (repo returns None) in a single test — each shape asserts
+        the messaging path threads a ``parent_id`` value into the
+        orchestrator that, when fed to ``_resolve_tree_root_id``,
+        yields a partition key at least as correct as the pre-fix
+        own-partition fallback.
+        """
+        from daemon.services.context_messages import _resolve_tree_root_id
+
+        # ── Shape 1: ``_proj_row`` returns ``None`` ─────────────
+        # Messaging path's ``try/except`` sets BOTH
+        # ``_persistent_parent_id`` and ``_persistent_project_id``
+        # to ``None`` (landed block at instance_messaging.py:3684-3686).
+        # The orchestrator receives ``parent_id=None`` and the
+        # resolver short-circuits to ``instance_id``.
+        captured_s1: dict = {}
+        manager_s1 = _make_manager(parent_id="placeholder-ignored")
+        # Force ``_proj_row is None`` (transient race shape).
+        manager_s1._instance_repository.get = MagicMock(return_value=None)
+        graph = _make_capturing_graph()
+
+        async def _capture_s1(*args, **kwargs):
+            captured_s1["kwargs"] = kwargs
+            return ([], [])
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(
+                    context_injection_mode="human_messages"
+                )
+            )
+            mock_get_registry.return_value = registry
+            svc = _make_service(manager_s1)
+            manager_s1.get_instance.return_value = graph
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(side_effect=_capture_s1),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="inst-1",
+                    message="hello",
+                    message_id="msg-s1",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        assert captured_s1, "Shape 1: orchestrator was never called"
+        assert captured_s1["kwargs"].get("parent_id") is None, (
+            f"Shape 1 (_proj_row=None): the defensive try/except "
+            f"must set ``_persistent_parent_id`` to None "
+            f"(landed :3684-3686). Got parent_id="
+            f"{captured_s1['kwargs'].get('parent_id')!r} — the "
+            f"defensive fallback regressed."
+        )
+
+        # ── Shape 2: ``get_tree_root_id(parent_id)`` raises ─────
+        # ``_resolve_tree_root_id`` catches the exception and
+        # returns ``parent_id`` (the caller's id) — better than the
+        # pre-fix own-partition fallback.
+        captured_s2: dict = {}
+        # Real parent_id on the row (the fix's thread-through).
+        manager_s2 = _make_manager(parent_id="caller-tree-root")
+        # But the repo's ``get_tree_root_id`` raises — simulate a
+        # transient DB error during the ancestor walk.
+        manager_s2._instance_repository.get_tree_root_id = MagicMock(
+            side_effect=RuntimeError("simulated DB error")
+        )
+        graph = _make_capturing_graph()
+
+        async def _capture_s2(*args, **kwargs):
+            captured_s2["kwargs"] = kwargs
+            return ([], [])
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(
+                    context_injection_mode="human_messages"
+                )
+            )
+            mock_get_registry.return_value = registry
+            svc = _make_service(manager_s2)
+            manager_s2.get_instance.return_value = graph
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(side_effect=_capture_s2),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="child-instance-id",
+                    message="hello",
+                    message_id="msg-s2",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        assert captured_s2, "Shape 2: orchestrator was never called"
+        # The fix threads the row's parent_id; the orchestrator's
+        # resolver catches the exception and returns parent_id.
+        threaded_parent_id = captured_s2["kwargs"].get("parent_id")
+        assert threaded_parent_id == "caller-tree-root", (
+            f"Shape 2: messaging path must thread the row's "
+            f"parent_id into the orchestrator even when the "
+            f"subsequent ancestor walk will raise. Got "
+            f"parent_id={threaded_parent_id!r} — the thread-through "
+            f"regressed."
+        )
+        # Now exercise the resolver's exception ladder with the
+        # captured parent_id; assert the resolved partition key is
+        # AT LEAST AS CORRECT as the pre-fix own-partition
+        # fallback (which would have been ``child-instance-id``).
+        repo_raising = MagicMock(
+            get_tree_root_id=MagicMock(
+                side_effect=RuntimeError("simulated DB error")
+            )
+        )
+        resolved_s2 = _resolve_tree_root_id(
+            instance_id="child-instance-id",
+            parent_id=threaded_parent_id,
+            instance_repository=repo_raising,
+        )
+        assert resolved_s2 == "caller-tree-root", (
+            f"Shape 2 (get_tree_root_id raises): resolver must fall "
+            f"back to ``parent_id`` (better than the pre-fix own-"
+            f"partition fallback of child-instance-id). "
+            f"Got: {resolved_s2!r}"
+        )
+        # Parity check vs. pre-fix: the pre-fix hardcoded
+        # ``parent_id=None`` → resolver returns ``instance_id`` =
+        # ``child-instance-id`` (own empty partition). The post-fix
+        # ladder yields ``caller-tree-root`` — strictly more
+        # correct (caller's populated partition > child's empty
+        # own-partition).
+        assert resolved_s2 != "child-instance-id", (
+            f"Shape 2 ladder regressed to the pre-fix own-partition "
+            f"fallback: {resolved_s2!r}"
+        )
+
+        # ── Shape 3: ``get_tree_root_id(parent_id)`` returns None ─
+        # Orphan chain (parent deleted). ``_resolve_tree_root_id``
+        # returns ``parent_id`` (the orphan's recorded parent) —
+        # better than the pre-fix own-partition fallback.
+        captured_s3: dict = {}
+        manager_s3 = _make_manager(parent_id="orphan-parent-id")
+        manager_s3._instance_repository.get_tree_root_id = MagicMock(
+            return_value=None
+        )
+        graph = _make_capturing_graph()
+
+        async def _capture_s3(*args, **kwargs):
+            captured_s3["kwargs"] = kwargs
+            return ([], [])
+
+        with patch("daemon.registry.get_registry") as mock_get_registry:
+            registry = MagicMock()
+            registry.get_version = MagicMock(return_value=None)
+            registry.get_resolved = MagicMock(
+                return_value=SimpleNamespace(
+                    context_injection_mode="human_messages"
+                )
+            )
+            mock_get_registry.return_value = registry
+            svc = _make_service(manager_s3)
+            manager_s3.get_instance.return_value = graph
+            with patch(
+                "daemon.services.context_messages.assemble_context_messages",
+                new=AsyncMock(side_effect=_capture_s3),
+            ):
+                await svc._process_message_with_tracking(
+                    instance_id="orphan-child-id",
+                    message="hello",
+                    message_id="msg-s3",
+                    is_retry=False,
+                    message_source="agent:leader",
+                )
+
+        assert captured_s3, "Shape 3: orchestrator was never called"
+        threaded_parent_id_s3 = captured_s3["kwargs"].get("parent_id")
+        assert threaded_parent_id_s3 == "orphan-parent-id", (
+            f"Shape 3: messaging path must thread the orphan's "
+            f"parent_id even when the walk will return None. Got "
+            f"parent_id={threaded_parent_id_s3!r}"
+        )
+        repo_orphan = MagicMock(
+            get_tree_root_id=MagicMock(return_value=None)
+        )
+        resolved_s3 = _resolve_tree_root_id(
+            instance_id="orphan-child-id",
+            parent_id=threaded_parent_id_s3,
+            instance_repository=repo_orphan,
+        )
+        assert resolved_s3 == "orphan-parent-id", (
+            f"Shape 3 (get_tree_root_id returns None): resolver "
+            f"must fall back to ``parent_id`` (orphan chain). "
+            f"Got: {resolved_s3!r}"
+        )
+        # Parity: post-fix returns the orphan's parent (which is
+        # at least as correct as the pre-fix own-partition
+        # fallback of ``orphan-child-id``).
+        assert resolved_s3 != "orphan-child-id", (
+            f"Shape 3 ladder regressed to the pre-fix own-partition "
+            f"fallback: {resolved_s3!r}"
+        )
