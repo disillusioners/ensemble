@@ -532,12 +532,14 @@ class TestFormatInjection:
 ```
 
 #### New Integration Test Class: `TestExploreAutoInjection`
+> NOTE (2026-09-08): class renamed to `TestExploreNoManualInjection` (commit d348ad4e) — grep the new name.
 ```python
 # These tests go in tests/unit/tools/test_knowledge_tools.py
 # They verify that explore() correctly calls get_shared_context()
 
 from daemon.services.context_injection import get_shared_context
 
+# NOTE (2026-09-08): renamed to TestExploreNoManualInjection in commit d348ad4e.
 class TestExploreAutoInjection:
     @pytest.mark.asyncio
     async def test_explore_injects_context_into_message(self, configured_env, mock_manager, tmp_path):
