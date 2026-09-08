@@ -231,3 +231,23 @@ Bracket: `mission_tree_fe_targeted` **PASS 300/300** (3/3 suites; +1 net-new ind
 ### Final infra list for giter (re-confirmed at bbcae9a2 — 6 entries, all uncommitted, markers + exec-bits verified, zero porcelain extras)
 
 1. `.agents/tester/PACKS.md` (M) · 2. `RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (??) · 3. `LESSONS/2026-09-07-latest-baseline-hygiene-e202e277.md` (??) · 4. `LESSONS/2026-09-08-fe-spec-mirror-fix-blindness.md` (??) · 5. `test/packs/mission_tree_unit_test.sh` (??, 0755) · 6. `test/packs/mission_tree_fe_targeted_test.sh` (??, 0755; pin now reads `bbcae9a2` — both re-rolls tester-authorized, noted for reviewers)
+
+---
+
+## Live Spot-Check — panel overflow + anchoring @ `fix/job-queue-panel-overflow-anchor` `3ee54883` (2026-09-08) — **VERDICT: ALL PASS → merge proceeds**
+
+Scope: `3ee54883` FE-only (5/5 paths — panel SCSS, indicator HTML+spec, panel spec, global `styles.scss`); exactly the 2 expected specs touched; tsc exit 0. NOTE: working tree was CLEAN at round start — the previous rounds' 6 tester-infra entries were landed (committed) upstream alongside the v0.12.2 bump; the only dirt after this round is the authorized 2-line pack-pin re-roll + PACKS.md row (for giter).
+
+Live-stack verification (own daemon on `ensemble_dev`, 7 live missions confirmed via API; screenshots + raw measurements in `/tmp/spot-overflow/`):
+
+| Check | Verdict | Numbers |
+|---|---|---|
+| 1a Desktop 1440×900 no h-scroll | ✅ | doc/body scrollWidth==clientWidth (Δ=0); panel + list scrollWidth==clientWidth==558 (vertical only) |
+| 1b Narrow 375×812 + 400×900 | ✅ | Δ=0 at both; panel clamps exactly (`min(560, 100vw−32px)`): 343px @375, 368px @400 |
+| 1c Row truncation | ✅ | 31 rows ×3 viewports: 0 overflow, 0 missing CSS clamp (ellipsis on `.job-name`, line-clamp-2 on `.mission-title`), 0 sibling-text overlaps |
+| 2d Top-right anchoring (desktop) | ✅ | `panel.right − btn.right = 0` (exact); leftward −451.4px; downward +48px; all edges in viewport |
+| 2e Defer-icon case | ✅ | forced `pending_count=3` via route-intercept (live API had 0); icon renders, btn.right shifts 18px left, panel follows with delta **0**; still on-screen |
+| 2f Narrow anchoring | ✅ | fully on-screen via clamp at both widths |
+| 3 Regression sanity | ✅ | Esc closes; pill segmented `0/8 │ 7`; **0 pageerrors**; console = 12 known-bucket lines only (Plane CSP + code-server iframe) |
+
+Bracket: `mission_tree_fe_targeted` **PASS 305/305** (3/3 suites; +5 growth; both touched suites individually green — indicator 104, panel 99, job.model 102). Honest gaps: defer-icon state forced via route-intercept (real AMBER production defer not exercised — geometry identical); degraded multi-cycle not re-tested this round (covered in F-5 round).

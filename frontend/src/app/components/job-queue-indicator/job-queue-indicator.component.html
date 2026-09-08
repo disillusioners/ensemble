@@ -98,7 +98,16 @@
     </ng-template>
   </mat-menu>
 
-  <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown">
+  <!-- W-top-right anchoring: `before` connects the OVERLAY's right
+       (end) edge to the trigger's right edge (menu.mjs `_setPosition`:
+       xPosition 'before' → originX/overlayX 'end'), so the 560px
+       panel opens leftward+downward from the button near the right
+       viewport edge. The default 'after' anchored the panel's LEFT
+       edge at the button and spilled its content past the right edge
+       (reproduced 2026-09-08: menu rect.right 1304 but panel
+       rect.right 1584 at 1440vw). yPosition stays the default
+       'below'. -->
+  <mat-menu #jobQueueMenu="matMenu" class="job-queue-dropdown" xPosition="before">
     <ng-template matMenuContent>
       <app-job-queue-panel
         [activeJobs]="activeJobs()"

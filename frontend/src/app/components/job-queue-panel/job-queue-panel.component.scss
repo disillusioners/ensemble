@@ -63,6 +63,11 @@
   min-height: 0;
   max-height: 540px;
   overflow-y: auto;
+  /* The vertical scroller must never sprout a horizontal one: with
+     overflow-y non-visible, overflow-x computes to auto, so any
+     over-wide row child would render as an X scrollbar. Rows truncate
+     instead (ellipsis/clamp below); anything pathological clips. */
+  overflow-x: hidden;
 
   &::-webkit-scrollbar {
     width: 6px;
@@ -221,6 +226,10 @@
     font-size: 11px;
     color: #94a3b8;
     margin-top: 3px;
+    /* Free text (agent id · N jobs · time-ago) — the only row text
+       WITHOUT ellipsis/clamp. Let pathological unbreakable tokens
+       (long agent ids) wrap instead of spilling past the row. */
+    overflow-wrap: anywhere;
   }
 }
 
