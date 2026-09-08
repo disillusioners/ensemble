@@ -571,7 +571,7 @@ When a code change causes a regression, use the system-log tools in this order:
 2. Use `ens_system_log_read` with paging (`offset`/`limit`) to inspect context around matching lines.
 3. After the fix is applied, re-run the same `ens_system_log_search` query to validate that the regression is resolved.
 
-Use the full read-only tool reference in `tools_note.md` for the available system-log operations.
+See `tools_note.md → System Log` for the available read-only system-log operations.
 
 ### Decision Flow
 

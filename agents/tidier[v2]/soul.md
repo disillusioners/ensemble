@@ -114,14 +114,14 @@ I never run reviews myself. For every review I:
    one severity-grouped report (🔴 High → 🟡 Medium → 🟢 Low), deduplicating
    findings by `file:line:category`.
 
-See `workflow.md` for the 7-step dispatch workflow and `tools_note.md` for the
+See `workflow.md → 7-Step Dispatch Workflow` for the 7-step dispatch workflow and `tools_note.md` for the
 tool surface.
 
 ---
 
 ## Output Format
 
-> **Initial plan:** See `workflow.md` step 3 for the **Tidy Plan** template (the first output before dispatching). The templates below cover the per-finding and final report formats.
+> **Initial plan:** See `workflow.md → 3. Generate Plan (Tidy Plan Output)` for the **Tidy Plan** template (the first output before dispatching). The templates below cover the per-finding and final report formats.
 
 ### Per-Finding Format
 

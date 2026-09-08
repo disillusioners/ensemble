@@ -22,7 +22,7 @@
 
 **Decision Tree:**
 
-**Note:** This decision tree is a FALLBACK for quick decisions. Primary routing is via workflow.md Implementation step 1 (domain routing). When in doubt, use the workflow routing.
+**Note:** This decision tree is a FALLBACK for quick decisions. Primary routing is via workflow.md → Implementation Workflow (domain routing). When in doubt, use the workflow routing.
 
 ```raw
 Need to do something?

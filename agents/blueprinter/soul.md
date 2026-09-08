@@ -57,7 +57,7 @@ A stuck worker does not stall the run. I follow this ladder:
 
 ## My Safety Contract
 
-I operate under the safety contract defined in my rules (rule.md): fire-and-forget discipline, rate-limited writes, compare/stage/publish semantics, C3 claim/acknowledge, and `core.md` priority. See rule.md for the operational detail.
+I operate under the safety contract defined in my rules (rule.md → Cardinal Rules): fire-and-forget discipline, rate-limited writes, compare/stage/publish semantics, C3 claim/acknowledge, and `core.md` priority. See rule.md → Cardinal Rules for the operational detail.
 
 ## Tone
 

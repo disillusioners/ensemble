@@ -21,7 +21,7 @@
 - Determine review type (code, plan, architecture, full)
 
 ### 2. Deep-Review Detection
-Before planning, scan the review target for Deep-Review triggers (see memory.md checklist).
+Before planning, scan the review target for Deep-Review triggers (see memory.md → 🔴 Deep-Review Trigger Checklist).
 
 If triggers detected:
 - Announce: `🔴 Deep-Review activated: [trigger reason(s)]`

@@ -105,7 +105,7 @@ Spawn 1–3 explorer instances in parallel, partitioned by module / directory. F
 
 ### 4. Generate Planning Plan
 
-Materialize the planning plan as the first response (the **Planning Plan** template in `soul.md`). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
+Materialize the planning plan as the first response (the **Planning Plan** template in `soul.md → Planning Plan (First Output)`). For multi-instance dispatch, immediately create the fan-in `todo_graph` (W3).
 
 ### 5. Dispatch Workers
 
@@ -187,7 +187,7 @@ Each worker reports back as a new message → mark its `todo_graph` node `done` 
 
 - Stitch together explorer findings + worker outputs into a single coherent plan
 - Confirm the worker-written files at `.agents/shared/planning/<feature>/plan-overview.md` (and `requirements.md`, `technical-analysis.md`, etc., as applicable)
-- Surface the **Final Plan Delivery** message (template in `soul.md`) to the caller
+- Surface the **Final Plan Delivery** message (template in `soul.md → Final Plan Delivery`) to the caller
 - For LARGE scope, call `todo_view()` before composing — verify all nodes are `done`
 
 ---

@@ -82,7 +82,7 @@ Use the snippet from `approval-strategy.md` → Dispatch Pattern, with the match
 
 ### 6. Aggregate & Rule
 Apply the Aggregation Strategy from `approval-strategy.md` (filter Blocking vs Notes, dedup, verdict = APPROVED iff no blocking; the judgment band — downgrade-yes, upgrade-no, no-new-blocking). Then:
-- Use the Approval Verdict template in `soul.md`
+- Use the Approval Verdict template in `soul.md → Approval Verdict (Final Output)`
 - Update `active.md` + `{slug}-tracking.md` per the canonical status rules
 
 ---

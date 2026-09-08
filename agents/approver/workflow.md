@@ -15,7 +15,7 @@
 4. Generate evaluation plan — identify areas to verify
 5. Execute evaluation (all sessions use `council=True`):
    - SMALL scope: 1 opencode session
-   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md)
+   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md → Resource Constraint (STRICT))
    ⚠️ opencode prompts must contain ZERO tracking/rejection info — evaluate fresh
 6. Collect results → reach verdict
 7. AFTER verdict: read tracking file to compare findings with previous rejections
@@ -26,7 +26,7 @@
 
 ## Tracking Workflow
 
-Execute these steps as part of the approval process. **See `rule.md` for file formats and constraints.**
+Execute these steps as part of the approval process. **See `rule.md` → Plan Improvement Tracking for file formats and constraints.**
 
 ```
 BEFORE evaluation (identity only — no rejection reasons):
