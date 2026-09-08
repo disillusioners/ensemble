@@ -68,3 +68,29 @@ app-chat {
   display: flex;
   flex-direction: column;
 }
+
+// Job-queue dropdown — widen the mat-menu SHELL so it hugs the embedded
+// job-queue panel instead of h-scrolling it. Root cause (reproduced via
+// Playwright 2026-09-08): Angular Material 21 ships the global rule
+// `.mat-mdc-menu-panel { min-width: 112px; max-width: 280px; overflow:
+// auto }` (ViewEncapsulation.None in @angular/material/fesm2022/menu.mjs),
+// while the embedded `.job-queue-panel` is `width: min(560px, calc(100vw
+// - 32px))` — so the 280px shell capped a 560px child and its
+// `overflow: auto` surfaced as a horizontal scrollbar (measured:
+// shell scrollWidth 560 vs clientWidth 280 → 280px of X overflow at
+// 768–1440vw; 63px at 375vw). The `job-queue-dropdown` class is copied
+// by MatMenu onto the `.mat-mdc-menu-panel` element itself (host
+// `class` input → `_classList` → `[class]` binding in the menu-panel
+// template), and the CDK overlay mounts at <body> — so this MUST be a
+// global rule: component-scoped ::ng-deep can never match it (the
+// overlay subtree carries no component scoping attribute).
+// Width contract: `calc(100vw - 16px)` ≥ the panel's
+// `min(560px, calc(100vw - 32px))` at every viewport (100vw - 16 >
+// 100vw - 32 always; ≥ 560px for vw ≥ 576 where the 560px clamp
+// engages), so the shell never under-cuts the panel and `overflow:
+// auto` has nothing to scroll. `overflow-x: hidden` is belt-and-braces
+// against sub-pixel rounding scrollbars only.
+.mat-mdc-menu-panel.job-queue-dropdown {
+  max-width: calc(100vw - 16px);
+  overflow-x: hidden;
+}

@@ -1075,6 +1075,50 @@ describe('JobQueuePanelComponent Logic', () => {
     });
   });
 
+  // W-zero-h-scroll — source-drift pins on the panel SCSS (fix
+  // 2026-09-08). The user-reported horizontal scroll lived on the
+  // mat-menu SHELL (Material caps .mat-mdc-menu-panel at max-width
+  // 280px, pinned in the indicator spec / styles.scss pin), but these
+  // panel-side rules are the second half of the contract: rows must
+  // TRUNCATE (ellipsis / clamp / wrap) so the shell can stay
+  // scrollbar-free at every viewport down to ~360px. A revert that
+  // re-opens an X-overflow channel (list sprouting an X scrollbar, or
+  // mission-meta spilling unbreakable tokens past the row) would
+  // re-create the defect class from the inside; these pins flip
+  // loudly if the rules are dropped.
+  describe('panel SCSS truncation contract (source-text pin)', () => {
+    let panelScss: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      const scssPath = path.join(__dirname, 'job-queue-panel.component.scss');
+      panelScss = fs.readFileSync(scssPath, 'utf-8');
+    });
+
+    it('panel-list forbids a horizontal scrollbar: overflow-x: hidden', () => {
+      // The vertical scroller's computed overflow-x is auto; without
+      // an explicit hidden, ANY over-wide row child renders as an X
+      // scrollbar instead of clipping.
+      const block = panelScss.match(/\.panel-list\s*\{[^}]*\}/)?.[0] ?? '';
+      expect(block).toContain('overflow-x: hidden');
+    });
+
+    it('mission-meta wraps pathological tokens instead of spilling: overflow-wrap: anywhere', () => {
+      // mission-meta is the only row text without ellipsis/clamp.
+      // With wrapping, a long agent id breaks instead of pushing ink
+      // past the row edge.
+      const block = panelScss.match(/\.mission-meta\s*\{[^}]*\}/)?.[0] ?? '';
+      expect(block).toContain('overflow-wrap: anywhere');
+    });
+
+    it('job-name still truncates with ellipsis (title truncation contract)', () => {
+      const block = panelScss.match(/\.job-name\s*\{[^}]*\}/)?.[0] ?? '';
+      expect(block).toContain('white-space: nowrap');
+      expect(block).toContain('text-overflow: ellipsis');
+    });
+  });
+
   // W4 — source-drift pins on the REAL component TS. Mirror tests
   // prove the panel's traversal logic against the same helpers, but
   // an F-1 revert of ``onTreeKeydown`` (e.g. dropping the real DOM

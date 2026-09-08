@@ -1152,6 +1152,52 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // but the template's wiring would be wrong.
         expect(templateHtml).toContain('[missions]="missionsList()"');
       });
+
+      it('anchors the job-queue menu TOP-RIGHT: xPosition="before" on #jobQueueMenu', () => {
+        // W-top-right anchoring pin (fix 2026-09-08). The button sits
+        // near the right viewport edge; Material's default
+        // ``xPosition='after'`` connects the overlay's LEFT (start)
+        // edge to the trigger, so the 560px panel extended rightward
+        // off-screen (reproduced: menu rect.right 1304 but panel
+        // rect.right 1584 at 1440vw). ``before`` → originX/overlayX
+        // 'end' in menu.mjs _setPosition → the panel's RIGHT edge
+        // aligns with the button's right edge and opens leftward+down
+        // (yPosition stays the default 'below'). Assert against the
+        // #jobQueueMenu tag specifically so the defer-holder menu
+        // (which legitimately keeps the default) can't satisfy this.
+        const menuTag = templateHtml.match(/<mat-menu[^>]*#jobQueueMenu[^>]*>/)?.[0] ?? '';
+        expect(menuTag).toContain('#jobQueueMenu');
+        expect(menuTag).toContain('xPosition="before"');
+        expect(menuTag).not.toContain('xPosition="after"');
+      });
+    });
+
+    // W-top-right + W-zero-h-scroll — the dropdown SHELL contract in
+    // the GLOBAL stylesheet. Angular Material 21 ships
+    // `.mat-mdc-menu-panel { max-width: 280px; overflow: auto }` as a
+    // global rule (ViewEncapsulation.None), and MatMenu copies the
+    // host `class="job-queue-dropdown"` ONTO the .mat-mdc-menu-panel
+    // element (host class → _classList → [class] binding). The CDK
+    // overlay mounts at <body>, so component ::ng-deep can never
+    // reach it — the widening rule lives in src/styles.scss. This pin
+    // reads the REAL stylesheet: dropping or renaming the rule
+    // re-creates the user-reported horizontal scroll (shell 280px vs
+    // 560px panel) with every behavioural test still green.
+    describe('job-queue dropdown shell sizing (styles.scss global pin)', () => {
+      let stylesScss: string;
+
+      beforeAll(() => {
+        const path = require('path');
+        const fs = require('fs');
+        const stylesPath = path.join(__dirname, '..', '..', '..', 'styles.scss');
+        stylesScss = fs.readFileSync(stylesPath, 'utf-8');
+      });
+
+      it('widens the mat-menu SHELL for .job-queue-dropdown (Material default cap is max-width: 280px)', () => {
+        const rule = stylesScss.match(/\.mat-mdc-menu-panel\.job-queue-dropdown\s*\{[^}]*\}/)?.[0] ?? '';
+        expect(rule).toContain('max-width: calc(100vw - 16px)');
+        expect(rule).toContain('overflow-x: hidden');
+      });
     });
 
     // W4 — source-drift pins on the REAL component TS. Mirror tests
