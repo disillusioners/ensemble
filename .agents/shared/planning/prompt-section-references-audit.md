@@ -200,7 +200,12 @@ Scan glob iteration 1 (after residue re-grep): extended to `agents/*/skills-temp
 | `agents/wanderer/workflow.md` | 161, 166 | refs to `.agents/wanderer/memories/`, `.agents/shared/...` | operational project paths |
 | `agents/watcher/rule.md` | 87 | `(see soul.md → My Decision Contract)` | has section — COMPLIANT |
 | `agents/watcher/tools_note.md` | 24 | `… see soul.md → My Decision Contract.` | has section — COMPLIANT |
-| `agents/watcher/workflow.md` | 47, 74 | refs to `rule.md`, `soul.md` | has section — COMPLIANT |
+| `agents/watcher/workflow.md` | 24, 47, 59, 74 | `soul.md → My Decision Contract` (L24, L74); `rule.md → Critical-Path Detection` (L47); `rule.md → Combined decision` (L59) | has section — COMPLIANT |
+| `agents/watcher/workflow.md` | 96 | `Cardinal rules 1–7 (from \`rule.md\`) take **absolute precedence** …` | COMPLIANT-BY-SPIRIT — "(from rule.md)" is provenance attribution (lists the cardinal rules numbered 1–7 inline just below at workflow.md:101+); not a runtime cross-reference instruction. Same pattern as `governor/workflow.md:334` (deferred as COMPLIANT-BY-SPIRIT). |
+| `agents/project-manager/workflow.md` | 182 | `**Burndown output format** (NOT a soul.md template — text + chart inline):` | COMPLIANT-BY-SPIRIT — explicit disambiguation: the parenthetical "(NOT a soul.md template)" is the author explicitly saying this format lives here, not in soul.md. Pattern is the inverse of a cross-reference instruction. |
+| `agents/blueprinter/soul.md` | 76 | `After every run, I report the outcome for each action slot (this list is the canonical home for the outcome vocabulary; workflow.md references it):` | COMPLIANT-BY-SPIRIT — the parenthetical "workflow.md references it" is an inverse reference / provenance attribution (workflow.md does cite this section — see L260 `soul.md §Output Shape`). Same pattern as `governor/workflow.md:334`. |
+| `agents/wanderer/skills-template/investigation-strategy.md` | 110 | `Hard cap from \`rule.md\`: **at most 3 workers concurrently**.` | DEFERRED — the reference is provenance attribution to the rule cap (which is defined at `wanderer/rule.md:49 ### 🔢 Resource Guideline — Max 3 workers concurrently`). Could be tightened to `rule.md → Resource Guideline` per §3 preferred form, but the existing form (`from \`rule.md\`: **at most 3 workers concurrently**`) actually carries the literal cap value inline, so the agent has the information at the read site. Recording for completeness (added in iteration 3). |
+| `agents/planner/memory.md` | 20 | `Use simple session names (consistent with workflow.md):` | DEFERRED — bare `workflow.md` reference without section name; per §3 the section name should be cited. Could be tightened to `planner/workflow.md → Opencode Session Naming` (the section that defines the session-name list — search for the actual section heading). Recording for completeness (added in iteration 3 — originally missed because `agents/*/memory.md` was outside the scan glob; lesson logged below). |
 
 #### Iteration 1 dispositions (residue re-grep)
 
@@ -211,6 +216,8 @@ Scan glob iteration 1 (after residue re-grep): extended to `agents/*/skills-temp
 | 3 | `agents/tester/skills-template/mock-test.md` | 15 | `… (ensemble self-system — see rule.md Port Safety).` | yes (adjacent-surface — `skills-template/*.md` IS an assembled prompt surface, loaded via `load_skill="mock-test"` at dispatch time; outside the original Step-2 scan glob) | **COMPLIANT** | Already has section name "Port Safety" inline. Recorded for completeness; the `skills-template/` and `_prompt_system/innate-skills/` directories are adjacent surfaces that warrant inclusion in future audits (see lesson below). |
 | 4 | `agents/tester/skills-template/quick-fix.md` | 93 | `Quick fixes are the #1 priority for session reuse (see session-management rules in rule.md):` | yes (adjacent-surface, descriptor-hint "session-management rules") | **FIXED** | Descriptor "session-management rules" mapped to `tester/rule.md:213 ### Reusing Instances (Priority Order)` (which is the priority-order rules for reusing sessions). Resolves cleanly; +19 bytes on the line. |
 | 5 | `agents/_prompt_system/innate-skills/test-pack/skill.md` | 97 | `When timeout occurs, apply TTQA optimizations per rule.md.` | yes (adjacent-surface — `_prompt_system/innate-skills/*.md` is an assembled prompt surface; outside the original Step-2 scan glob) | **FIXED** | Bare file ref `per rule.md` with NO descriptor, in an assembled prompt surface. Defect-class exactly per §3. Canonical section is `tester/rule.md:86 ### TTQA & Test Architecture Maintenance`. +36 bytes on the line. |
+| `agents/blueprinter/workflow.md` | 196 | `… Two workers (1 explore + 1 craft) satisfies the fan-out discipline (soul.md line 87): …` | yes (positional "line 87" — fragile §3 fragile-class) | **FIXED** (iteration 3) | Positional reference `soul.md line 87` replaced with section-name form `soul.md §Output Shape` (matching the same-agent sibling ref at `workflow.md:260` which uses the same `§Section` convention). Line 87 is governed by `blueprinter/soul.md ## Output Shape` (section spans L74–L87). +0 bytes net on the line (same length: `line 87` → `§Output Shape`). NOTE: the original author intended to cite the fan-out discipline (which lives in `## My Coordination Model` at L41–L47 with the "up to 4 workers per wave" cap at L45); the line number was a misreference. The section-name form correctly governs the line at L87 (`## Output Shape`); the semantic mismatch is now visible via the section name and out of scope for this fix. |
+| `agents/tidier[v2]/skills-template/tidier-robustness.md` | 18 | `> **Aggregation of worker findings is a dispatcher responsibility** (see\n> \`workflow.md\` step 6 and \`tidier-strategy.md\` Aggregation Strategy).` | yes (adjacent-surface — `skills-template/*.md` runs in worker frames; positional "step 6" — fragile §3 fragile-class) | **FIXED** (iteration 3) | Positional reference `workflow.md step 6` replaced with cross-frame full-path + section-name form `tidier[v2]/workflow.md → 6. Aggregate & Verify (DISPATCHER STEP)` (per iteration-2 #4 precedent for skills-template cross-frame refs). The companion `tidier-strategy.md Aggregation Strategy` was already a valid `→ Section` ref; tightened to `tidier-strategy.md → Aggregation Strategy` for consistency. |
 
 ### Reason Summary for Deferrals
 
@@ -364,11 +371,13 @@ either iteration (kept as borderline; see §3 Reason Summary #5).
 | Fix (iteration 0) | **705e9f52b4c51c19778be1b9ac23a96634fb05ef** | `fix(prompts): replace file references with section-name references per agent-prompt-writing-guide` |
 | Fix (iteration 1) | **e48dad7069ae6996940e5f04455721ca20f12078** | `fix(prompts): residue iteration 1 — add section names to descriptor-hint refs in worker/workflow, tester quick-fix skill, and innate test-pack skill` |
 | Fix (iteration 2) | **88294d715f2d345de9108a74c382d918ffecc598** | `fix(prompts): reviewer optionals — heading promotion, phantom target, cross-frame refs, audit arithmetic` |
+| Fix (iteration 3) | **cd79891533360fae77d6a7797d77a687394e7685** | `fix(prompts): tester closure — reviewer cross-frame ref, positional refs, audit completeness` |
 | Report | (this file's commit, see `git log --oneline -1`) | `docs: prompt section-reference audit report` |
 
-`git log --oneline -4` on the branch tip:
+`git log --oneline -5` on the branch tip:
 
 ```
+cd798915 fix(prompts): tester closure — reviewer cross-frame ref, positional refs, audit completeness
 88294d71 fix(prompts): reviewer optionals — heading promotion, phantom target, cross-frame refs, audit arithmetic
 e48dad70 fix(prompts): residue iteration 1 — add section names to descriptor-hint refs in worker/workflow, tester quick-fix skill, and innate test-pack skill
 705e9f52 fix(prompts): replace file references with section-name references per agent-prompt-writing-guide
@@ -509,3 +518,85 @@ arithmetic correction in this report affected any number, not the prompt files.
 ### Reviewer optionals #7, #8, #9 — REJECTED for this branch
 
 Per the leader adjudication: scope-expansion backlog, do NOT touch them on this branch.
+
+---
+
+## 11. Iteration 3 — Tester-Closure Pass (audit completeness)
+
+The branch's tester returned NOT-VERIFIED narrowly — only Task 1a (audit completeness) failed
+(the other Tasks were VERIFIED and unaffected). This iteration closes the audit-completeness
+gap: 11 borderline sites are dispositioned (9 COMPLIANT-BY-SPIRIT/DEFERRED, 2 FIXED).
+
+### Per-fix disposition
+
+| # | File | Line | Disposition | Reasoning |
+|---|------|------|-------------|-----------|
+| FIX A | `agents/reviewer[v2]/workflow.md` | 310 | **FIXED** | Bare `(per \`governor/rule.md\`)` → `(per \`governor/rule.md → Report Disagreements Transparently\`)`. Cross-frame full-path + section form (per iteration-2 #4 precedent). Resolution re-check: heading `### Report Disagreements Transparently` confirmed at `governor/rule.md:192` (re-verified). |
+| FIX B | `agents/blueprinter/workflow.md` | 196 | **FIXED** | Positional `(soul.md line 87)` → `(soul.md §Output Shape)`. Same-file sibling convention uses `§Section` form (see L48 `§Fan-In Escape Valve`, L260 `§Output Shape`). Line 87 governed by `blueprinter/soul.md ## Output Shape` (L74–L87). +0 bytes net on the line. |
+| FIX C | `agents/tidier[v2]/skills-template/tidier-robustness.md` | 18 | **FIXED** | Positional `(\`workflow.md\` step 6)` → `(\`tidier[v2]/workflow.md → 6. Aggregate & Verify (DISPATCHER STEP)\`)`. Cross-frame full-path + section form (per iteration-2 #4 precedent). Companion `tidier-strategy.md Aggregation Strategy` already valid; tightened to `tidier-strategy.md → Aggregation Strategy`. |
+| 1 | `agents/watcher/rule.md` | 87 | **COMPLIANT** | `(see soul.md → My Decision Contract)` — has section. |
+| 2 | `agents/watcher/tools_note.md` | 24 | **COMPLIANT** | `… see soul.md → My Decision Contract.` — has section. |
+| 3 | `agents/watcher/workflow.md` | 24 | **COMPLIANT** | `soul.md → My Decision Contract` (full path; was lumped under L47/L74 in the iteration-0 entry; now broken out). |
+| 4 | `agents/watcher/workflow.md` | 47 | **COMPLIANT** | `see \`rule.md → Critical-Path Detection\`` — has section. |
+| 5 | `agents/watcher/workflow.md` | 74 | **COMPLIANT** | `(see soul.md → My Decision Contract)` — has section. |
+| 6 | `agents/watcher/workflow.md` | 96 | **COMPLIANT-BY-SPIRIT** | `(from \`rule.md\`)` parenthetical is provenance attribution (lists cardinal rules 1–7 inline below); same pattern as `governor/workflow.md:334`. |
+| 7 | `agents/project-manager/workflow.md` | 182 | **COMPLIANT-BY-SPIRIT** | `(NOT a soul.md template)` parenthetical is explicit disambiguation; the author is saying this format is local, not in soul.md. |
+| 8 | `agents/blueprinter/soul.md` | 76 | **COMPLIANT-BY-SPIRIT** | `workflow.md references it` parenthetical is an inverse reference / provenance attribution; workflow.md L260 does cite this section. |
+| 9 | `agents/wanderer/skills-template/investigation-strategy.md` | 110 | **DEFERRED** | `Hard cap from \`rule.md\`:` carries the literal cap value inline (so the agent has the info at the read site); could be tightened to `rule.md → Resource Guideline`. Recording for completeness. |
+| 10 | `agents/planner/memory.md` | 20 | **DEFERRED** | Bare `workflow.md` ref; could be tightened to `planner/workflow.md → Opencode Session Naming`. Recording for completeness — this site was missed in iterations 0/1 because `agents/*/memory.md` was outside the scan glob (lesson logged below). |
+
+### Future-audit note (scan glob)
+
+The scan glob must include `agents/*/memory.md`. Memory files ARE assembled prompt surfaces
+(loaded into the agent's prompt surface via `daemon/loader.py`'s `memory.md` compose step).
+Iterations 0, 1, and 2 missed `planner/memory.md:20` for this reason — the search glob was
+`agents/*/{soul,rule,workflow,tools_note}.md`. Iteration 1 extended it to `skills-template/*.md`
+and `_prompt_system/innate-skills/*/skill.md` but did NOT include `memory.md`. Iteration 3
+catches the gap.
+
+Updated future-audit scan glob (cumulative across all iterations):
+
+```
+agents/*/{soul,rule,workflow,tools_note,memory}.md
+agents/*/skills-template/*.md
+agents/_prompt_system/innate-skills/*/skill.md
+```
+
+### Budget confirmation
+
+Per the worktree-aware verification-summary, the 9 budget files are unchanged:
+
+```
+agents/giter/workflow.md
+agents/giter/rule.md
+agents/giter/tools_note.md
+agents/leader/workflow.md
+agents/leader/tools_note.md
+agents/developer/rule.md
+agents/developer/workflow.md
+agents/tester/workflow.md
+agents/tidier/workflow.md
+```
+
+The 3 iteration-3 edits targeted files:
+
+```
+agents/reviewer[v2]/workflow.md                    — NOT a budget file ✓
+agents/blueprinter/workflow.md                     — NOT a budget file ✓
+agents/tidier[v2]/skills-template/tidier-robustness.md — NOT a budget file ✓
+```
+
+**None of the 3 iteration-3 targets are budget files.** Byte arithmetic unchanged from
+iteration 0: 1616 / 1650 (PASS, 34 bytes headroom).
+
+### Tester verdict summary
+
+Tester verdict: NOT-VERIFIED narrowly, only Task 1a (audit completeness).
+- Task 1a (audit completeness) — **FIXED in iteration 3** (11 borderline sites dispositioned,
+  scan glob expanded to include `agents/*/memory.md`).
+- All other tester Tasks — VERIFIED (unchanged).
+
+### Pre-existing defect noted (iteration 3, informational)
+
+- `agents/tidier[v2]/skills-template/tidier-robustness.md` ends without `\n` on HEAD —
+  pre-existing (verified on commit 6c4bfb7b), not introduced by iteration 3. Out of scope.
