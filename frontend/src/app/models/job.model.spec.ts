@@ -761,11 +761,12 @@ describe('Job Model', () => {
     });
   });
 
-  // ── Instances-primary tree (2026-09-08, design V1) ──────────────────────
-  // The mission-tree panel model layer (missionDisplayTitle /
-  // buildQueueTree / shouldAutoExpand / visibleTreeItems /
-  // nextVisibleItem / visibleTreeItemId) was REPLACED by the
-  // instances-primary tree — its helpers + specs live in
-  // ``instance-node.model.spec.ts`` (models/instance-node.model.ts).
+  // ── Historical: instances-primary tree replaces mission-tree panel (2026-09-08, design V1) ──
+  // The mission-tree panel model layer (``missionDisplayTitle`` /
+  // ``buildQueueTree`` / ``shouldAutoExpand`` / ``visibleTreeItems`` /
+  // ``nextVisibleItem`` / ``visibleTreeItemId``) was REPLACED by the
+  // instances-primary tree in commit a895cac5. Those helpers +
+  // specs were deleted; their successors live in
+  // ``instance-node.model.spec.ts`` (``models/instance-node.model.ts``).
 
 });

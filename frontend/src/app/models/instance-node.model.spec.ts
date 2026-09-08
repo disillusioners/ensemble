@@ -242,12 +242,16 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       expect(roots[0].attachedJobs).toEqual([]); // annotation lands on clones only
     });
 
-    describe('Recent cap — MAX_RECENT_INSTANCE_ROWS total rows (partial fit + overflow)', () => {
+    describe('Recent cap — structured band ≤ MAX_RECENT_INSTANCE_ROWS + every-job-surfaces (overflow → recentFlat)', () => {
       it('cap constant stays in the shared 10-row cap class', () => {
         expect(MAX_RECENT_INSTANCE_ROWS).toBe(10);
       });
 
-      it('a node with more jobs than fit keeps a PARTIAL fit; the rest overflow to recentFlat', () => {
+      it('structured band ≤ MAX: a flat terminal root with more jobs than fit keeps a PARTIAL fit; the rest overflow to recentFlat', () => {
+        // No intermediate child-instance headers → headerCost = 1.
+        // 12 jobs on a childless root: header (1) + 9 jobs fit =
+        // structured band = 10; the remaining 3 overflow to recentFlat
+        // (every-job-surfaces — NEVER-hide).
         const roots = buildInstanceNodes([mkRow({ instance_id: 'big', status: 'completed' })]);
         const jobs = Array.from({ length: 12 }, (_, k) =>
           createMockJob({ job_id: `j-${k}`, mission_id: 'big', status: 'completed' })
@@ -258,7 +262,7 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
         expect(tree.recentFlat.length).toBe(3); // 3 overflow — never hidden
       });
 
-      it('a node past the cap spills ALL its jobs to overflow', () => {
+      it('structured band ≤ MAX: a node past the cap spills ALL its jobs to overflow', () => {
         const roots = buildInstanceNodes([
           mkRow({ instance_id: 'a', status: 'failed', updated_at: '2026-09-08T08:00:00Z' }),
           mkRow({ instance_id: 'b', status: 'completed', updated_at: '2026-09-08T07:00:00Z' }),
@@ -296,6 +300,53 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
         const tree = buildInstanceTree(roots, [], []);
         expect(tree.recentRoots.length).toBe(1);
         expect(tree.recentRoots[0].attachedJobs).toEqual([]);
+      });
+
+      it('structured band ≤ MAX: intermediate CHILD-instance headers consume capacity (NOT just root headers)', () => {
+        // Recent root with 2 intermediate child-instance headers +
+        // 6 attached receipts → headerCost = 1 (root) + 2 (kids) = 3.
+        // Capacity = 10 - 0 - 3 = 7 → fitCount = min(6, 7) = 6.
+        // Structured band = 3 + 6 = 9 (≤ MAX, no overflow).
+        // No orphan flat, so total rendered rows = 9 (within MAX).
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', status: 'completed', children: ['kid-1', 'kid-2'] }),
+          mkRow({ instance_id: 'kid-1', parent_id: 'root', status: 'failed' }),
+          mkRow({ instance_id: 'kid-2', parent_id: 'root', status: 'completed' }),
+        ]);
+        const jobs = Array.from({ length: 6 }, (_, k) =>
+          createMockJob({ job_id: `j-${k}`, mission_id: 'root', status: 'completed' })
+        );
+        const tree = buildInstanceTree(roots, [], jobs);
+        expect(tree.recentRoots.length).toBe(1);
+        // Structured band: root (1) + 2 intermediate headers (2) + 6 in-band jobs = 9.
+        expect(1 + 2 + tree.recentRoots[0].attachedJobs.length).toBe(9);
+        expect(tree.recentRoots[0].attachedJobs.length).toBe(6);
+        expect(tree.recentFlat.length).toBe(0); // 6 fit inside capacity
+      });
+
+      it('structured band ≤ MAX + every-job-surfaces: deep subtree (root + 2 kids + 9 jobs) overflows the cap to recentFlat', () => {
+        // headerCost = 1 + 2 = 3. Capacity = 10 - 0 - 3 = 7.
+        // 9 jobs → fitCount = min(9, 7) = 7; remaining 2 overflow.
+        // Structured band = 3 + 7 = 10 (exactly MAX). Total rendered
+        // = 10 (in-band) + 2 (overflow) = 12 > MAX by design — never
+        // hidden.
+        const roots = buildInstanceNodes([
+          mkRow({ instance_id: 'root', status: 'completed', children: ['kid-1', 'kid-2'] }),
+          mkRow({ instance_id: 'kid-1', parent_id: 'root', status: 'failed' }),
+          mkRow({ instance_id: 'kid-2', parent_id: 'root', status: 'completed' }),
+        ]);
+        const jobs = Array.from({ length: 9 }, (_, k) =>
+          createMockJob({ job_id: `j-${k}`, mission_id: 'root', status: 'completed' })
+        );
+        const tree = buildInstanceTree(roots, [], jobs);
+        // Structured band exactly MAX.
+        expect(1 + 2 + tree.recentRoots[0].attachedJobs.length).toBe(10);
+        // Every job surfaces — 2 overflow into recentFlat.
+        expect(tree.recentFlat.length).toBe(2);
+        // Total rendered = 12 > MAX — never hidden.
+        const totalRendered =
+          1 + 2 + tree.recentRoots[0].attachedJobs.length + tree.recentFlat.length;
+        expect(totalRendered).toBe(12);
       });
     });
   });

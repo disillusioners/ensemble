@@ -713,9 +713,10 @@ describe('JobQueuePanelComponent Logic', () => {
       expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual(['i-root']);
     });
 
-    it('recent cap ≤10 total rows: partial fit keeps fitting jobs, overflow spills to recentFlat', () => {
-      // Terminal root with 12 attached jobs → header (1) + 9 jobs fit;
-      // the remaining 3 overflow into recentFlat (NEVER-hide).
+    it('structured band ≤ MAX + every-job-surfaces: partial fit keeps fitting jobs, overflow spills to recentFlat', () => {
+      // Terminal root with 12 attached jobs → header (1) + 9 jobs fit
+      // = structured band 10; the remaining 3 overflow into recentFlat
+      // (NEVER-hide — total rendered = 12 > MAX by design).
       component.setInstances([mkInstance({ instance_id: 'i-big', status: 'completed' })]);
       const jobs = Array.from({ length: 12 }, (_, k) =>
         createMockJob({ job_id: `j-${k}`, mission_id: 'i-big', status: 'completed' })
@@ -724,12 +725,14 @@ describe('JobQueuePanelComponent Logic', () => {
       const tree = component.tree();
       expect(tree.recentRoots.length).toBe(1);
       const visible = tree.recentRoots[0].attachedJobs.length;
-      expect(1 + visible).toBeLessThanOrEqual(10);
-      expect(1 + visible + tree.recentFlat.length).toBe(13); // header + visible + overflow
-      expect(1 + visible).toBe(10); // exactly the cap
+      // Structured band = header + visible jobs = 10 (exactly MAX).
+      expect(1 + visible).toBe(10);
+      // Total rendered = header + visible + overflow = 13 — exceeds
+      // MAX by design (every-job-surfaces, NEVER-hide).
+      expect(1 + visible + tree.recentFlat.length).toBe(13);
     });
 
-    it('orphan flat rows fill the remaining capacity after node rows', () => {
+    it('structured band ≤ MAX: orphan flat rows fill remaining capacity, then overflow appends after', () => {
       component.setInstances([
         mkInstance({ instance_id: 'i-1', status: 'completed' }),
         mkInstance({ instance_id: 'i-2', status: 'failed' }),
@@ -742,12 +745,13 @@ describe('JobQueuePanelComponent Logic', () => {
       );
       component.setRecentJobs([...flatJobs, ...nodeJobs]);
       const tree = component.tree();
-      // 2 headers + 1 node job + 7 flat = the 10-row visible band;
-      // the remaining 5 flat jobs overflow (visible + overflow = 12).
+      // Structured band: i-1 (1 header + jn-1) + i-2 (1 header) + 7
+      // in-band flat = 10 (≤ MAX). The remaining 5 flat jobs overflow
+      // — total rendered = 15 = 12 jobs + 3 header rows + 0 missing.
       const nodeVisible = tree.recentRoots.reduce((s, n) => s + 1 + n.attachedJobs.length, 0);
       expect(nodeVisible).toBe(3); // i-1 header+jn-1, i-2 header
       expect(tree.recentFlat.length).toBe(12); // 7 in-band + 5 overflow
-      expect(nodeVisible + tree.recentFlat.length).toBe(15); // 12 jobs + 2 headers + ... nothing lost
+      expect(nodeVisible + tree.recentFlat.length).toBe(15); // nothing lost
     });
 
     it('sorts liveRoots pinned-first then activity desc (instance-list pattern)', () => {

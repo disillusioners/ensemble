@@ -184,9 +184,13 @@ export class JobQueuePanelComponent {
   );
 
   /**
-   * Total Recent rows shown to the user (instance headers + their
-   * visible jobs + flat rows) — mirrors ``buildInstanceTree``'s
-   * internal cap so the section ties to the visible content.
+   * Total Recent rows shown to the user — instance headers (at ALL
+   * depths when the user has expanded the root) + their subtree jobs +
+   * flat rows. Mirrors ``buildInstanceTree``'s internal structured-
+   * band + never-hide contract: the in-band row count is bounded by
+   * MAX_RECENT_INSTANCE_ROWS, but the panel renders overflow jobs
+   * unconditionally (NEVER-hide) — total rendered rows may therefore
+   * EXCEED MAX by design.
    */
   readonly recentRowCount = computed(() => {
     const t = this.tree();

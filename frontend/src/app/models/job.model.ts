@@ -415,10 +415,12 @@ export interface DLQListResponse {
  * Every nullable field mirrors the BE degraded-lookup contract
  * (§8.2: 200 with None-fields, never 500).
  *
- * The MISSION-TREE PANEL (MissionNode / buildQueueTree /
- * shouldAutoExpand / VisibleTreeItem family) was REPLACED by the
- * instances-primary tree (2026-09-08, user-locked design V1) — the
- * panel now groups by INSTANCE; see
+ * Historical (2026-09-08): the mission-tree panel model layer
+ * (``MissionNode`` / ``buildQueueTree`` / ``shouldAutoExpand`` /
+ * ``visibleTreeItems`` / ``nextVisibleItem`` / ``visibleTreeItemId``)
+ * was REPLACED by the instances-primary tree
+ * (``feature/job-queue-instance-tree``, design V1). The mission tree's
+ * helpers + specs were deleted; their successors live in
  * ``models/instance-node.model.ts``. ``MissionSummary`` survives
  * solely as the badge's LEG A wire type.
  */

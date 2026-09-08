@@ -200,9 +200,22 @@ export function buildInstanceNodes(rows: ReadonlyArray<InstanceRow>): InstanceNo
 // Tree builder
 // ─────────────────────────────────────────────────────────────────────────
 
-/** Defensive cap for the Recent section — the same 10-row cap class the
- *  legacy mission tree used (``MAX_RECENT_JOBS``). Counts NODE headers +
- *  their attached jobs + flat rows together. */
+/**
+ * Defensive cap for the Recent section — the same 10-row cap class the
+ * legacy mission tree used (``MAX_RECENT_JOBS``). The Recent band is
+ * CAPPED, not HARD-LIMITED: two invariants are enforced together:
+ *
+ *   (a) STRUCTURED BAND ≤ MAX_RECENT_INSTANCE_ROWS — the in-band row
+ *       count is headers-at-all-depths + fitting subtree jobs + flat
+ *       rows. A node's header cost includes ITSELF plus every
+ *       intermediate child-instance header that renders when the user
+ *       expands the recent root (per ``visibleInstanceTreeItems``'s
+ *       walk).
+ *   (b) EVERY JOB SURFACES — partial-fit keeps the fitting jobs and
+ *       overflows the remainder into ``recentFlat`` (NEVER-hide). Total
+ *       rendered rows may therefore EXCEED MAX by design under
+ *       never-hide; the cap is a visible-band hint, not a hard gate.
+ */
 export const MAX_RECENT_INSTANCE_ROWS = 10;
 
 /** Output of ``buildInstanceTree`` — the four buckets the panel renders. */
@@ -341,11 +354,14 @@ export function buildInstanceTree(
     else recentCandidates.push(root);
   }
 
-  // 5) Cap Recent at MAX_RECENT_INSTANCE_ROWS TOTAL rows (node headers
-  //    + subtree jobs + flat rows). A node reserves 1 row for its
-  //    header; its subtree jobs fill the remaining capacity in display
-  //    order; jobs that don't fit OVERFLOW into recentFlat (NEVER-hide
-  //    — the cap is a visible-band hint, not a hard gate).
+  // 5) Cap Recent at MAX_RECENT_INSTANCE_ROWS — STRUCTURED BAND
+  //    contract. A node's header cost = 1 (its own header) + every
+  //    INTERMEDIATE child-instance header in its subtree (any depth)
+  //    — those render when the user expands the recent root per
+  //    visibleInstanceTreeItems' walk. Subtree jobs fill the remaining
+  //    capacity in display order; jobs that don't fit OVERFLOW into
+  //    recentFlat (NEVER-hide — total rendered rows may exceed MAX by
+  //    design; the cap is a structured-band hint, not a hard gate).
   const recentRoots: InstanceNode[] = [];
   const overflowFlat: Job[] = [];
   let rowCount = 0;
@@ -356,7 +372,7 @@ export function buildInstanceTree(
       overflowFlat.push(...subtreeJobs);
       continue;
     }
-    const headerCost = 1;
+    const headerCost = 1 + countSubtreeIntermediateHeaders(node);
     const capacity = Math.max(0, MAX_RECENT_INSTANCE_ROWS - rowCount - headerCost);
     const fitCount = Math.min(subtreeJobs.length, capacity);
     const visibleJobs = subtreeJobs.slice(0, fitCount);
@@ -371,8 +387,10 @@ export function buildInstanceTree(
   }
 
   // 6) Fill remaining capacity from the orphan flat list, then append
-  //    everything that overflowed AFTER the capped rows (visible band
-  //    hint semantics — same as the legacy builder).
+  //    everything that overflowed AFTER the capped rows. Same
+  //    structured-band + never-hide contract as step 5 — the cap
+  //    applies to the in-band row count; overflow jobs surface
+  //    unconditionally.
   const recentFlat: Job[] = [];
   for (const job of orphanRecentFlat) {
     if (rowCount >= MAX_RECENT_INSTANCE_ROWS) {
@@ -412,6 +430,22 @@ function collectSubtreeJobs(node: InstanceNode, out: Job[]): Job[] {
   }
   out.push(...node.attachedJobs);
   return out;
+}
+
+/**
+ * Count of INTERMEDIATE child-instance headers in a node's subtree
+ * (any depth) — every descendant instance that renders its header
+ * when the user expands the root (per ``visibleInstanceTreeItems``'
+ * walk). The root itself is NOT counted (the caller adds 1). Used by
+ * step 5 of ``buildInstanceTree`` to compute the structured-band
+ * header cost.
+ */
+function countSubtreeIntermediateHeaders(node: InstanceNode): number {
+  let count = 0;
+  for (const child of node.children) {
+    count += 1 + countSubtreeIntermediateHeaders(child);
+  }
+  return count;
 }
 
 /** All receipt jobs attached anywhere in a node's subtree (display order). */

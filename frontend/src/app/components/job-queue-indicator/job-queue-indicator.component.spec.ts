@@ -2022,27 +2022,29 @@ describe('JobQueueIndicatorComponent Logic', () => {
     });
   });
 
-  // ── F-5 mission-tree single-source pin (2026-09-08) ──────────────────────
+  // ── F-5 mission-tree single-source pin — historical (2026-09-08) ──────────
   //
-  // F-5 closed: the badge's live-mission count came from the
-  // filter-aware LEG A (limit=20, total=N live), but the tooltip's
-  // per-liveness breakdown AND the panel's LIVE MISSIONS rows
-  // derived from the unfiltered LEG B (limit=20, top-20 by
-  // last_activity). When the unfiltered page's top-20 happened to be
-  // all-terminal, the badge read "7" while the live section was empty
-  // AND the breakdown said "(processing 0, pending 0, paused 0)" — a
-  // structural contradiction (tester-dataset repro).
+  // F-5 (closed): the badge's live-mission count came from the
+  // filter-aware LEG A (``limit: 20``, total = N live), but the
+  // tooltip's per-liveness breakdown AND the panel's LIVE MISSIONS
+  // rows derived from the unfiltered LEG B (``limit: 20``, top-20 by
+  // ``last_activity``). When the unfiltered page's top-20 happened to
+  // be all-terminal, the badge read "7" while the live section was
+  // empty AND the breakdown said "(processing 0, pending 0, paused 0)"
+  // — a structural contradiction (tester-dataset repro).
   //
-  // The fix unifies the live consumers on ONE source (LEG A):
-  // ``listMissions({ liveness: 'processing,pending,paused', limit: 20 })``
-  // — the filter-aware page. Every live row the badge counts MUST
-  // appear in the live section AND tally into the breakdown. LEG B
-  // (the unfiltered page) feeds only the panel's RECENT terminal
-  // mission nodes + recentFlat; live rows that appear in LEG B are
-  // filtered out before they reach the panel, so they cannot bleed
-  // into the LIVE MISSIONS section. The two sets are disjoint by
-  // construction: leg A is live-only and filtered leg B is
-  // terminal-only.
+  // The fix unified the live consumers on ONE source (LEG A) so every
+  // live row the badge counts MUST appear in the live section AND
+  // tally into the breakdown.
+  //
+  // Historical note: the LEG B content page was DROPPED entirely in
+  // commit a895cac5 when the panel migrated to the instances-primary
+  // tree (``feature/job-queue-instance-tree``, design V1). Recent
+  // terminal mission nodes were replaced by terminal roots of the
+  // instances page; the unfiltered LEG B poll is no longer wired.
+  // LEG A is the sole mission feed that remains (badge + tooltip).
+  // The instances leg (``/api/instances?limit=10``) now feeds the
+  // panel tree.
 
   describe('F-5 legacy: badge + tooltip still read from LEG A; the panel tree reads the instances leg', () => {
     it('badge shows the LEG A total (live=7) even when the instances page carries many terminal roots', () => {
