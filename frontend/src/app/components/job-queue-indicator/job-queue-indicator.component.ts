@@ -19,10 +19,12 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { JobService } from '../../services/job.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { Job, JobStatus, MissionLiveness, isTerminalStatus, isLiveMissionLiveness } from '../../models/job.model';
+import { InstanceService } from '../../services/instance.service';
+import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
 import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
+import { InstanceNode, InstanceRow, buildInstanceNodes } from '../../models/instance-node.model';
 import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, DeferBlockAction, deferBlockIndicator, deferBlockAction } from '../../models/defer-blocked.model';
-import { forkJoin, catchError, of } from 'rxjs';
+import { forkJoin, catchError, of, map } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
 /**
@@ -43,33 +45,28 @@ import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.compo
  *     ``Recent`` section of the embedded panel
  *   - ``JobService.listMissions({ liveness: 'processing,pending,paused',
  *     limit: 20 })``  — leg A (live): the live-only missions page that
- *     feeds the badge count, the LIVE MISSIONS panel rows, AND the
- *     tooltip's per-liveness breakdown. Single source of truth for all
- *     three live consumers — the F-5 contradiction class becomes
- *     structurally impossible (every live row the badge counts MUST
- *     appear in the live section AND tally into the breakdown).
- *   - ``JobService.listMissions({ limit: 20 })``  — leg B (recent): the
- *     unfiltered missions page that feeds the panel's RECENT terminal
- *     mission nodes + recentFlat ONLY. Live rows that appear in leg B
- *     are filtered out before they reach the panel, so they cannot
- *     bleed into the live section.
+ *     feeds the badge count AND the tooltip's per-liveness breakdown.
+ *   - ``InstanceService.listInstanceTree(10)``    — instances leg: the
+ *     ROOT-paginated instance page (ALL descendants of each root in
+ *     the page included) that drives the panel's instances-primary
+ *     tree (2026-09-08, user-locked design V1 — users think in
+ *     INSTANCES/conversations, not missions; ROOT instances on top →
+ *     child instances beneath → job receipts at leaves). The former
+ *     LEG B (unfiltered ``listMissions({ limit: 20 })`` content page
+ *     feeding RECENT mission nodes) is DROPPED — recent terminal
+ *     mission nodes are replaced by terminal roots from the instances
+ *     page.
  *   - ``JobService.listDeferBlocked()``           — defer-gate warning
  *     payload for the severity icon beside the badge
  *
- * The former ``JobService.listLiveMissionCount(limit=1)`` round-trip
- * is REPLACED — the segmented pill needs the per-liveness breakdown
- * for its tooltip AND the panel's live rows, so a single
- * ``listMissions({ liveness: 'processing,pending,paused', limit: 20 })``
- * call serves all three live consumers.
- *
- * All four fire together via ``forkJoin`` on the same 8s tick so the
- * snapshot stays internally consistent. The two additive participants
- * (missions + deferBlocked) carry their own ``catchError`` so a
- * failure (404/503 during BE rollout skew, 500, network) degrades
- * THAT participant to ``null`` without failing the whole ``forkJoin``
- * — the jobs intake keeps flowing. ``null`` missions ⇒ the last known
- * data is RETAINED (never a bare 0/0). ``null`` deferBlocked ⇒ the
- * warning icon hides.
+ * All five fire together via ``forkJoin`` on the same 8s tick so the
+ * snapshot stays internally consistent. Every participant carries its
+ * own ``catchError`` so a failure (404/503 during BE rollout skew,
+ * 500, network) degrades THAT participant to ``null`` without failing
+ * the whole ``forkJoin`` — the jobs intake keeps flowing. ``null``
+ * missions ⇒ the last known data is RETAINED (never a bare 0/0).
+ * ``null`` instances ⇒ the last known tree is RETAINED (never flashes
+ * empty). ``null`` deferBlocked ⇒ the warning icon hides.
  *
  * Project names are resolved once on init via
  * ``ProjectService.listProjects()`` and cached in ``projectNameMap``
@@ -98,6 +95,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private readonly jobService = inject(JobService);
   private readonly projectService = inject(ProjectService);
   private readonly tabStateService = inject(TabStateService);
+  private readonly instanceService = inject(InstanceService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
   private readonly snackBar = inject(MatSnackBar);
@@ -195,20 +193,35 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private readonly liveMissionsPayload = signal<MissionListResponse | null>(null);
 
   /**
-   * F-5 fix (2026-09-08) — LEG B (recent) missions payload. Last
-   * successful ``listMissions({ limit: 20 })`` response — the
-   * unfiltered page that feeds ONLY the panel's RECENT terminal
-   * mission nodes + ``recentFlat``. Live rows that appear in this
-   * page are FILTERED OUT before the panel sees them, so they can
-   * never bleed into the LIVE MISSIONS section.
+   * Instances-primary tree leg (2026-09-08, design V1) — the FLAT
+   * instance rows from the last successful
+   * ``InstanceService.listInstanceTree(10)`` call (roots + all their
+   * descendants, root-paginated). THE production payload signal for
+   * the panel's instances tree:
    *
-   * The retention / degraded-flag / ``lastFetchAt`` semantics here
-   * are independent of leg A: a degraded envelope on one leg does not
-   * touch the other's last good payload, and each is reported via
-   * ``recordLegError`` with its own leg name so the UI can flag
-   * which projection degraded.
+   *   instancesPayload (flat wire rows)
+   *     → ``instanceRoots`` computed (nested via buildInstanceNodes)
+   *     → panel input ``[instances]`` (template)
+   *     → panel ``tree`` computed (buildInstanceTree).
+   *
+   * ``[]`` initial (pre-data). On a degraded/null tick the signal is
+   * LEFT UNTOUCHED — the last good tree is retained, the panel never
+   * flashes empty. The F-5 lesson class (a payload signal that is
+   * never written in production while mirrors write it fine) is
+   * pinned by the spec's production set-site source pin — do not
+   * drop the ``instancesPayload.set(instances)`` write inside
+   * ``applyFetchResults`` without flipping that pin.
    */
-  private readonly recentMissionsPayload = signal<MissionListResponse | null>(null);
+  private readonly instancesPayload = signal<InstanceRow[]>([]);
+
+  /**
+   * Derived: nested root nodes from the flat wire rows (the
+   * instance-list Map pattern — parent-child via ``parent_id``,
+   * paginated-away ancestors degrade to roots so nothing hides).
+   */
+  readonly instanceRoots = computed<InstanceNode[]>(() =>
+    buildInstanceNodes(this.instancesPayload())
+  );
 
   /**
    * Distinct live missions, from the missions projection this
@@ -257,10 +270,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /**
    * F-5 fix (2026-09-08) — LEG A's mission rows. The live-only list
    * (filter-aware via the backend's ``liveness`` param) feeds the
-   * panel's LIVE MISSIONS rows AND the tooltip's per-liveness
-   * breakdown. Reading from LEG A (not the panel's combined input)
-   * is what closes the F-5 contradiction — the breakdown always
-   * counts exactly what the badge counts.
+   * tooltip's per-liveness breakdown (and, since the instances-primary
+   * redesign, nothing else — the panel's LIVE MISSIONS section is
+   * replaced by instance roots). Reading from LEG A keeps the
+   * breakdown's contract "counts what the badge counts" — the
+   * badge counts LEG A.
    */
   readonly liveMissionsList = computed<MissionSummary[]>(() => {
     return this.liveMissionsPayload()?.missions ?? [];
@@ -271,10 +285,9 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * segmented pill's tooltip ``Live missions: N (processing a,
    * pending b, paused c)`` line.
    *
-   * F-5 fix: derives from ``liveMissionsList`` (LEG A) ONLY. A leg-B
-   * unfiltered row that happens to be live is NOT counted here, even
-   * though it reaches the panel — the breakdown's contract is
-   * "counts what the badge counts" and the badge counts LEG A.
+   * F-5 fix: derives from ``liveMissionsList`` (LEG A) ONLY — the
+   * breakdown's contract is "counts what the badge counts" and the
+   * badge counts LEG A.
    */
   readonly liveMissionBreakdown = computed(() => {
     const list = this.liveMissionsList();
@@ -290,34 +303,14 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * F-5 fix (2026-09-08) — panel's ``[missions]`` input. Composed of
-   * TWO disjoint sets so ``buildQueueTree``'s liveness partition can
-   * never route a leg-B row into the live section:
-   *
-   *   1. LEG A rows — every row has ``liveness`` in
-   *      ``{processing, pending, paused}`` (BE filter applied), so
-   *      ``buildQueueTree`` routes them all to ``tree.liveMissions``.
-   *   2. LEG B rows, FILTERED to terminal liveness
-   *      (``{completed, failed, cancelled}``) — live rows that
-   *      appear in leg B's page are dropped here so they can never
-   *      reach ``tree.liveMissions``. The remainder is routed to
-   *      ``tree.recent`` (terminal mission nodes) or ``recentFlat``.
-   *
-   * No overlap is possible by construction: leg A is live-only and
-   * the leg-B filter is terminal-only. The two sets are disjoint
-   * even when the BE returns overlapping rows in the two responses.
+   * Instances-primary tree (2026-09-08, design V1) — the former
+   * ``missionsList`` LEG A + LEG B composition is GONE: the panel no
+   * longer renders mission nodes (its ``[missions]`` input is
+   * dropped). LEG A survives solely as the badge count +
+   * tooltip-breakdown source (``liveMissionsPayload`` /
+   * ``liveMissionBreakdown`` below). The panel's tree input is
+   * ``[instances]="instanceRoots()"``.
    */
-  readonly missionsList = computed<MissionSummary[]>(() => {
-    const live = this.liveMissionsList();
-    const recentPayload = this.recentMissionsPayload();
-    const recentOnly = (recentPayload?.missions ?? []).filter(
-      (m) =>
-        m.liveness !== null &&
-        !isLiveMissionLiveness(m.liveness as MissionLiveness)
-    );
-    return [...live, ...recentOnly];
-  });
-
   /**
    * Defer-gate warning affordance, derived via the pure
    * ``deferBlockIndicator`` model helper. ``null`` = no render (zero
@@ -492,49 +485,36 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    *
    * Set ONLY when a leg's per-participant catchError swallowed a
    * failure — the forkJoin outer error handler is a safety net for
-   * operator-thrown values that escaped the per-leg isolation.
-   *
-   * F-5 (2026-09-08, mission-tree single-source pin) — the missions
-   * leg is split into two parallel legs: ``liveMissions`` (filtered,
-   * ``liveness:processing,pending,paused`` + ``limit:20``) and
-   * ``recentMissions`` (unfiltered, ``limit:20``). Each carries its
-   * own per-participant catchError so a failure in one does NOT
-   * cascade into the other. Both legs feed ``recordLegError`` with
-   * their respective leg name (``liveMissions`` / ``recentMissions``)
-   * so the degraded flag honestly reflects which leg tripped — the
-   * original contract's "any per-leg failure raises the flag" still
-   * holds.
+   * operator-thrown values that escaped the per-leg isolation. Every
+   * leg (``active`` / ``recent`` / ``liveMissions`` / ``instances`` /
+   * ``deferBlocked``) feeds ``recordLegError`` with its own leg name
+   * so the degraded flag honestly reflects which leg tripped.
    */
   readonly lastIntakeError = signal<string | null>(null);
 
   /**
    * Fetch every header badge signal in ONE parallel ``forkJoin`` on
    * the same 8s tick — the name says "badge signals" because this is
-   * THREE families, not just jobs (the pre-round-1 ``fetchJobs``
-   * name understated it):
+   * FOUR families, not just jobs:
    *
    * - jobs intake — active + recent (``X/Y`` + the Recent section);
    * - ``liveMissions`` — LEG A (live)
    *   (``GET /api/missions?liveness=processing,pending,paused&limit=20``).
    *   The response's filter-aware ``total`` is the badge's live-mission
    *   count — authoritative when present. LEG A's ``missions`` array
-   *   ALSO feeds the panel's LIVE MISSIONS rows AND the tooltip's
-   *   per-liveness breakdown (single source of truth for all three
-   *   live consumers — the F-5 contradiction class becomes
-   *   structurally impossible: every row the badge counts MUST
-   *   appear in the live section AND tally into the breakdown).
-   *   ``limit:20`` (was ``limit:1`` under T2) keeps the live rows
-   *   rich enough that the breakdown covers the visible 20 — for
-   *   ``live > 20`` the breakdown covers the fetched 20 while the
+   *   ALSO feeds the tooltip's per-liveness breakdown (single source
+   *   of truth for both live consumers). ``limit:20`` keeps the live
+   *   rows rich enough that the breakdown covers the visible 20 —
+   *   for ``live > 20`` the breakdown covers the fetched 20 while the
    *   count uses ``total`` (acceptable; see S4-class note).
-   * - ``recentMissions`` — LEG B (recent)
-   *   (``GET /api/missions?limit=20`` — unfiltered page; the panel's
-   *   ``tree().recent`` + ``tree().recentFlat`` derive from this AFTER
-   *   the indicator strips any live rows that happen to appear in
-   *   leg B). The split (F-5 fix) closes the "header ● 7, live
-   *   section empty" self-contradiction: the live consumers all read
-   *   from LEG A (the filter-aware leg), never from LEG B's
-   *   unfiltered page.
+   * - ``instances`` — instances-primary tree leg (2026-09-08, design
+   *   V1): ``GET /api/instances?limit=10`` (root-paginated; ALL
+   *   descendants of each root in the page included). Feeds the
+   *   panel's LIVE CONVERSATIONS + RECENT instance roots via
+   *   ``instancesPayload`` → ``instanceRoots`` → ``[instances]``.
+   *   The former LEG B (unfiltered ``listMissions({ limit: 20 })``
+   *   content page) is DROPPED — recent terminal mission nodes are
+   *   replaced by terminal roots from the instances page.
    * - ``deferBlocked`` — defer-gate warning payload
    *   (``GET /api/queues/defer-blocked``).
    *
@@ -544,8 +524,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * the healthy legs keep flowing.
    *
    * ``null`` liveMissions ⇒ the last known count is RETAINED (never
-   * falsely idle); ``null`` recentMissions ⇒ the last known recent
-   * list is RETAINED (the panel never flashes empty); ``null``
+   * falsely idle); ``null`` instances ⇒ the last known tree is
+   * RETAINED (the panel never flashes empty); ``null``
    * deferBlocked ⇒ the warning icon hides; ``null`` active/recent
    * ⇒ the last known job list is RETAINED (W-jobs-intake honesty —
    * a reset to ``[]`` plus a stale ``refreshed Ns ago`` would
@@ -569,13 +549,13 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       ),
       // F-5 fix — LEG A (live). Filter ``processing,pending,paused``
       // matches the canonical live value space; ``limit:20`` keeps
-      // the panel rich enough to show a meaningful live section
-      // while ``total`` survives the >20 ceiling for the badge
-      // count. The response's ``total`` is filter-aware: when BE
-      // honors the filter, ``total`` is the live count; when BE
-      // can't honour the filter (degraded envelope), the envelope
-      // returns ``degraded:true`` + ``total=null`` and the helper
-      // returns ``null`` (count unavailable, retain last).
+      // the breakdown meaningful while ``total`` survives the >20
+      // ceiling for the badge count. The response's ``total`` is
+      // filter-aware: when BE honors the filter, ``total`` is the
+      // live count; when BE can't honour the filter (degraded
+      // envelope), the envelope returns ``degraded:true`` +
+      // ``total=null`` and the helper returns ``null`` (count
+      // unavailable, retain last).
       liveMissions: this.jobService.listMissions({
         liveness: 'processing,pending,paused',
         limit: 20,
@@ -585,14 +565,16 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
           return of(null);
         })
       ),
-      // F-5 fix — LEG B (recent). Unfiltered, limit 20. Feeds the
-      // panel's terminal mission nodes + recentFlat AFTER the
-      // indicator filters out any live rows so they can never bleed
-      // into the LIVE MISSIONS section. Per-liveness retention +
-      // degraded-flag semantics unchanged from T2.
-      recentMissions: this.jobService.listMissions({ limit: 20 }).pipe(
+      // Instances-primary tree leg (2026-09-08, design V1).
+      // Root-paginated page — the FE nests the flat rows via
+      // ``buildInstanceNodes``. The leg emits the ROW ARRAY (the
+      // response envelope carries nothing else we need); retention
+      // semantics identical to the other legs: ``null`` (per-leg
+      // catchError) retains the last good payload.
+      instances: this.instanceService.listInstanceTree(10).pipe(
+        map((response) => response.instances),
         catchError((err) => {
-          this.recordLegError('recentMissions', err);
+          this.recordLegError('instances', err);
           return of(null);
         })
       ),
@@ -605,8 +587,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: ({ active, recent, liveMissions, recentMissions, deferBlocked }) =>
-          this.applyFetchResults(active, recent, liveMissions, recentMissions, deferBlocked),
+        next: ({ active, recent, liveMissions, instances, deferBlocked }) =>
+          this.applyFetchResults(active, recent, liveMissions, instances, deferBlocked),
         // Safety net only — per-leg catchError above means this
         // path is unreachable for routine HTTP failures. It still
         // exists for synchronous throws from operator pipes that
@@ -636,28 +618,26 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * its own method so the logic-mirror spec can replicate it 1:1
    * with mocked service payloads.
    *
-   * F-5 fix (2026-09-08, mission-tree single-source pin) — the
-   * missions leg is split into two independent legs:
+   * Instances-primary tree (2026-09-08, design V1) — the missions
+   * content leg is GONE (LEG B dropped); the leg set is now:
    *   * ``liveMissions`` — LEG A (live). Updates ``liveMissionCountRaw``
    *     via the canonical ``missionCountFromListResponse`` helper on
    *     a non-degraded tick; ``null`` on a degraded envelope (retain
-   *     last good count, never falsely idle). The same payload's
-   *     ``missions`` array also drives the panel's LIVE MISSIONS rows
-   *     AND the tooltip's per-liveness breakdown — single source of
-   *     truth for all three live consumers.
-   *   * ``recentMissions`` — LEG B (recent). The unfiltered content
-   *     page. Updates ``recentMissionsPayload`` on a non-degraded tick
-   *     so the panel's RECENT terminal mission nodes + recentFlat
-   *     derive from this AFTER the live-only rows are stripped
-   *     (the panel's input composition lives in the ``missionsList``
-   *     computed).
+   *     last good count, never falsely idle). The payload also drives
+   *     the tooltip's per-liveness breakdown via ``liveMissionsPayload``.
+   *   * ``instances`` — the root-paginated instance page (flat rows,
+   *     descendants included). NON-NULL ⇒ THE PRODUCTION WRITE
+   *     ``this.instancesPayload.set(instances)`` — the single write
+   *     site feeding ``instanceRoots`` → the panel's ``[instances]``
+   *     input (F-5 lesson class: this exact production write is
+   *     source-pinned by the spec; a mirror-only write would leave
+   *     the tree permanently empty). ``null`` ⇒ the signal is left
+   *     untouched — the last good tree is retained, the panel never
+   *     flashes empty.
    *
-   * Each leg is treated independently for retention / degraded-flag
-   * / lastFetchAt-freeze purposes: a degraded envelope on one does
-   * NOT clobber the other's last good payload, and vice versa.
-   * Either leg's per-participant catchError or degraded-200 envelope
-   * raises ``lastIntakeError`` so the UI honestly reports the
-   * degradation.
+   * Each leg is treated independently for retention / lastFetchAt
+   * purposes: a degraded envelope or per-leg failure on one does NOT
+   * clobber the others' last good payloads.
    *
    * Other legs unchanged:
    * - jobs (active + recent) — ``null`` means the per-leg
@@ -677,7 +657,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     active: Job[] | null,
     recent: Job[] | null,
     liveMissions: MissionListResponse | null,
-    recentMissions: MissionListResponse | null,
+    instances: InstanceRow[] | null,
     deferBlocked: DeferBlockedStatus | null
   ): void {
     if (active !== null) {
@@ -686,61 +666,41 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     if (recent !== null) {
       this.allRecentJobs.set(recent);
     }
-    // F-5 fix — LEG A drives ``liveMissionCountRaw``; LEG B drives
-    // ``recentMissionsPayload``. Each is independently gated on
-    // non-null + non-degraded so a degraded LEG A envelope cannot
-    // clobber LEG B (and vice versa). The ``missionsList`` computed
-    // composes the panel's input from BOTH signals; live rows
-    // come from LEG A only, terminal rows come from LEG B filtered
-    // to terminal liveness — disjoint by construction.
+    // LEG A drives ``liveMissionCountRaw`` + ``liveMissionsPayload``
+    // (tooltip breakdown source). Gated on non-null + non-degraded so
+    // a degraded envelope retains the previous payload.
     if (liveMissions !== null && !liveMissions.degraded) {
       const count = missionCountFromListResponse(liveMissions);
       // ``count === null`` only when the envelope is degraded — already
       // filtered above. A healthy tick with ``total = 0`` returns 0
       // and IS recorded (legitimate update, not a degraded gap).
       this.liveMissionCountRaw.set(count);
-      // F-5 closure (2026-09-08) — ALSO store LEG A's payload so
-      // ``liveMissionsList`` (panel LIVE MISSIONS rows) and
-      // ``liveMissionBreakdown`` (tooltip per-liveness split) can
-      // read its ``missions`` rows. The count-only write left both
-      // consumers reading an always-empty signal — the panel's LIVE
-      // section stayed empty even though the badge reported live
-      // missions. Same non-null + non-degraded gating as the count,
-      // same retention-on-degraded semantics (degraded envelope →
-      // keep previous payload). W4 source-drift pin asserted by the
-      // spec's ``applyFetchResults actually writes the LEG A payload``
-      // test — don't drop this line without flipping that pin.
       this.liveMissionsPayload.set(liveMissions);
     }
-    if (recentMissions !== null && !recentMissions.degraded) {
-      this.recentMissionsPayload.set(recentMissions);
+    // Instances-primary tree leg — the F-5-pinned PRODUCTION write
+    // site. ``null`` (per-leg failure) retains the last good tree.
+    if (instances !== null) {
+      this.instancesPayload.set(instances);
     }
     // 200-OK ``degraded:true`` envelopes never route through the
-    // per-leg ``catchError`` (HTTP succeeded), so flag each here —
+    // per-leg ``catchError`` (HTTP succeeded), so flag them here —
     // same channel as the catchError paths — to flip the degraded
-    // modifier + aria state honestly. Each leg is reported
-    // independently so the UI can tell the operator which projection
-    // degraded (the live count leg vs the recent content leg).
+    // modifier + aria state honestly.
     const liveMissionsDegraded = liveMissions !== null && liveMissions.degraded;
-    const recentMissionsDegraded = recentMissions !== null && recentMissions.degraded;
     if (liveMissionsDegraded) {
       this.recordLegError('liveMissions', 'degraded envelope');
     }
-    if (recentMissionsDegraded) {
-      this.recordLegError('recentMissions', 'degraded envelope');
-    }
     // Clear the per-leg error flag only when ALL legs returned a
-    // non-null payload (missions legs: non-degraded) — a partial-
+    // non-null payload (missions leg: non-degraded) — a partial-
     // failure or degraded tick keeps the flag set so the UI
     // continues to surface the degradation.
     const anyNull =
       active === null ||
       recent === null ||
       liveMissions === null ||
-      recentMissions === null ||
+      instances === null ||
       deferBlocked === null ||
-      liveMissionsDegraded ||
-      recentMissionsDegraded;
+      liveMissionsDegraded;
     if (!anyNull) {
       this.lastIntakeError.set(null);
     }
@@ -751,7 +711,7 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       active !== null ||
       recent !== null ||
       (liveMissions !== null && !liveMissions.degraded) ||
-      (recentMissions !== null && !recentMissions.degraded) ||
+      instances !== null ||
       deferBlocked !== null
     ) {
       this.lastFetchAt.set(Date.now());
@@ -866,6 +826,41 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       ? ['/projects', projectKey, 'instances', job.instance_id]
       : ['/projects', projectKey, 'instances'];
     this.router.navigate(navigateTo);
+  }
+
+  /**
+   * Instances-primary tree (2026-09-08, design V1) — handle an
+   * INSTANCE node click from the embedded panel (root OR child).
+   * Mirrors ``onJobClick``'s flow exactly:
+   *
+   *   1. Close the dropdown BEFORE mutating tab/route state.
+   *   2. Open the project tab (resolved via ``projectNameMap`` with a
+   *      first-8-chars fallback) — or switch to the ``all`` tab when
+   *      the instance carries no project (the same null-project
+   *      fallback ``onJobClick`` uses).
+   *   3. Navigate to ``/projects/<key>/instances/<instance_id>`` —
+   *      instance nodes ALWAYS have an id, so unlike ``onJobClick``
+   *      there is no id-less list variant.
+   */
+  onInstanceClick(node: InstanceNode): void {
+    this.menuTrigger?.closeMenu();
+
+    const projectKey = node.instance.project_id || 'all';
+    if (node.instance.project_id) {
+      const name =
+        this.projectNameMap().get(node.instance.project_id) ??
+        node.instance.project_id.slice(0, 8);
+      this.tabStateService.addTab({ project_id: node.instance.project_id, name });
+    } else {
+      this.tabStateService.setActiveTab('all');
+    }
+
+    this.router.navigate([
+      '/projects',
+      projectKey,
+      'instances',
+      node.instance.instance_id,
+    ]);
   }
 
   /**

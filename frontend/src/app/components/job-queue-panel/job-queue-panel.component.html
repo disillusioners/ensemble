@@ -24,106 +24,112 @@
         }
       </div>
     } @else {
-      <!-- LIVE MISSIONS section — collapsed mission nodes by default,
-           auto-expanded when exactly one live mission. Keyboard /
-           aria roles follow WAI-ARIA tree pattern. -->
-      @if (tree().liveMissions.length > 0) {
-        <div class="section section-live-missions">
-          <div class="section-title">Live missions</div>
-          <ul class="tree" role="tree" aria-label="Live missions">
-            @for (node of tree().liveMissions; track node.mission.mission_id) {
-              <li
-                class="tree-node mission-node"
-                role="treeitem"
-                [class.focused]="isFocusedItem('tree:live|mission:' + (node.mission.mission_id ?? ''))"
-                [attr.aria-expanded]="isLiveExpanded(node.mission.mission_id)">
-                <div
-                  class="mission-row"
-                  [id]="'tree:live|mission:' + (node.mission.mission_id ?? '')"
-                  (click)="onLiveMissionClick(node.mission.mission_id)"
-                  (keydown.enter)="onLiveMissionClick(node.mission.mission_id)"
-                  (keydown.space)="$event.preventDefault(); onLiveMissionClick(node.mission.mission_id)"
-                  (focus)="onRowFocus('tree:live|mission:' + (node.mission.mission_id ?? ''))"
-                  tabindex="0">
-                  <mat-icon class="mission-chevron" aria-hidden="true">
-                    {{ liveChevron(node.mission.mission_id) }}
-                  </mat-icon>
-                  <span
-                    class="mission-liveness-badge"
-                    [style.color]="livenessColor(node.mission.liveness)"
-                    [matTooltip]="'Mission: ' + livenessLabel(node.mission.liveness)">
-                    <mat-icon class="mission-liveness-icon" aria-hidden="true">
-                      {{ livenessIcon(node.mission.liveness) }}
-                    </mat-icon>
-                    {{ livenessLabel(node.mission.liveness) }}
-                  </span>
-                  <div class="mission-content">
-                    <div class="mission-title" [matTooltip]="missionTitle(node.mission)">
-                      {{ missionTitle(node.mission) }}
-                    </div>
-                    <div class="mission-meta">
-                      {{ missionMeta(node.mission, node.jobs.length) }}
+      <!-- LIVE CONVERSATIONS section — instances-primary tree (design
+           V1): ROOT instances on top, child instances beneath, receipt
+           jobs at leaves. The panel renders FROM the flattened
+           visibleItems() list (per-section view), so keyboard order ==
+           DOM order by construction. ROW CLICK = NAVIGATE (emits
+           instanceClick); the chevron is the ONLY expand toggle (its
+           handler stops propagation). -->
+      @if (liveItems().length > 0) {
+        <div class="section section-live-instances">
+          <div class="section-title">Live conversations</div>
+          <ul class="tree" role="tree" aria-label="Live conversations">
+            @for (item of liveItems(); track itemId(item)) {
+              @if (item.kind === 'instance') {
+                <li
+                  class="tree-node instance-node"
+                  role="treeitem"
+                  [attr.aria-level]="item.depth + 1"
+                  [class.focused]="isFocusedItem(itemId(item))"
+                  [attr.aria-expanded]="isExpanded(item.node.instance.instance_id)">
+                  <div
+                    class="instance-row"
+                    [id]="itemId(item)"
+                    [style.padding-left.px]="indentPx(item.depth)"
+                    (click)="onInstanceRowClick(item.node)"
+                    (keydown.enter)="onInstanceRowClick(item.node)"
+                    (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
+                    (focus)="onRowFocus(itemId(item))"
+                    tabindex="0">
+                    <span
+                      class="instance-chevron"
+                      role="button"
+                      [attr.aria-label]="'Toggle expansion for ' + instanceTitle(item.node.instance)"
+                      (click)="onChevronClick($event, item.node.instance.instance_id)"
+                      (keydown.enter)="onChevronClick($event, item.node.instance.instance_id)">
+                      <mat-icon aria-hidden="true">{{ chevron(item.node.instance.instance_id) }}</mat-icon>
+                    </span>
+                    <span
+                      class="instance-status"
+                      [style.color]="instanceStatusColor(item.node.instance.status)"
+                      [matTooltip]="'Instance: ' + item.node.instance.status">
+                      <mat-icon aria-hidden="true">{{ instanceStatusIcon(item.node.instance.status) }}</mat-icon>
+                      {{ item.node.instance.status }}
+                    </span>
+                    <div class="instance-content">
+                      <div class="instance-title" [matTooltip]="instanceTitle(item.node.instance)">
+                        {{ instanceTitle(item.node.instance) }}
+                      </div>
+                      <div class="instance-meta">
+                        {{ instanceMeta(item.node) }}
+                      </div>
                     </div>
                   </div>
-                </div>
-                @if (isLiveExpanded(node.mission.mission_id)) {
-                  <ul class="job-children" role="group">
-                    @for (job of node.jobs; track job.job_id) {
-                      <li class="tree-job-row">
-                        <div
-                          class="job-row"
-                          [class.running]="job.status === 'processing' || job.status === 'paused'"
-                          [class.focused]="isFocusedItem('tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
-                          [id]="'tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id"
-                          (click)="onRowClick(job)"
-                          (keydown.enter)="onRowClick(job)"
-                          (keydown.space)="$event.preventDefault(); onRowClick(job)"
-                          (focus)="onRowFocus('tree:live|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
-                          role="button"
-                          tabindex="0"
-                          [matTooltip]="job.instance_id">
-                          <!-- Running rows surface a spinner instead of
-                               the legacy info icon so an active job
-                               reads as actively working (W-spinner
-                               decision: RESTORE the running-row
-                               spinner affordance). The .job-spinner
-                               wrapper class scopes the SCSS so the
-                               legacy dimensions don't fight the
-                               mat-icon sizing. -->
-                          <div
-                            class="job-icon"
-                            [class.job-spinner]="job.status === 'processing'"
-                            [style.color]="getStatusColor(job.status)">
-                            @if (job.status === 'processing') {
-                              <mat-spinner
-                                diameter="18"
-                                strokeWidth="2"
-                                color="primary"></mat-spinner>
-                            } @else {
-                              <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
-                            }
-                          </div>
-                          <div class="job-content">
-                            <div class="job-title">
-                              <span class="job-name">{{ resolveTitle(job) }}</span>
-                              <span class="project-badge" [matTooltip]="job.project_id">
-                                {{ projectLabel(job) }}
-                              </span>
-                            </div>
-                            <div class="job-meta">
-                              <span class="agent-badge">{{ job.agent_id }}</span>
-                              <span class="status-text">{{ job.status | uppercase }}</span>
-                              <span class="time-text">
-                                {{ timeAgo(job.started_at || job.created_at) }}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </li>
-                    }
-                  </ul>
-                }
-              </li>
+                </li>
+              } @else {
+                <li class="tree-job-row">
+                  <div
+                    class="job-row"
+                    [class.running]="item.job.status === 'processing' || item.job.status === 'paused'"
+                    [class.focused]="isFocusedItem(itemId(item))"
+                    [id]="itemId(item)"
+                    [style.padding-left.px]="indentPx(item.depth)"
+                    (click)="onRowClick(item.job)"
+                    (keydown.enter)="onRowClick(item.job)"
+                    (keydown.space)="$event.preventDefault(); onRowClick(item.job)"
+                    (focus)="onRowFocus(itemId(item))"
+                    role="button"
+                    tabindex="0"
+                    [matTooltip]="item.job.instance_id">
+                    <div
+                      class="job-icon"
+                      [class.job-spinner]="item.job.status === 'processing'"
+                      [style.color]="getStatusColor(item.job.status)">
+                      @if (item.job.status === 'processing') {
+                        <mat-spinner
+                          diameter="18"
+                          strokeWidth="2"
+                          color="primary"></mat-spinner>
+                      } @else {
+                        <mat-icon>{{ getStatusIcon(item.job.status) }}</mat-icon>
+                      }
+                    </div>
+                    <div class="job-content">
+                      <div class="job-title">
+                        <span class="job-name">{{ resolveTitle(item.job) }}</span>
+                        <span class="project-badge" [matTooltip]="item.job.project_id">
+                          {{ projectLabel(item.job) }}
+                        </span>
+                      </div>
+                      <div class="job-meta">
+                        <span class="agent-badge">{{ item.job.agent_id }}</span>
+                        <span class="status-text">{{ item.job.status | uppercase }}</span>
+                        @if (missionChip(item.job); as chip) {
+                          <app-mission-liveness-chip
+                            [chip]="chip"
+                            (click)="$event.stopPropagation()"
+                            (keydown.enter)="$event.stopPropagation()"
+                            (keydown.space)="$event.stopPropagation()" />
+                        }
+                        <span class="time-text">
+                          {{ timeAgo(item.job.started_at || item.job.created_at) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              }
             }
           </ul>
         </div>
@@ -131,7 +137,8 @@
 
       <!-- QUEUED section — non-terminal unattached jobs. NEVER-hide rule
            guarantees any non-terminal job whose mission_id doesn't
-           resolve to a listed mission node lands here. -->
+           resolve to an instance node lands here. Reached via Tab
+           (outside any role="tree"). -->
       @if (tree().queued.length > 0) {
         <div class="section">
           <div class="section-title">Queued</div>
@@ -177,106 +184,110 @@
         </div>
       }
 
-      <!-- RECENT section — terminal mission nodes + flat rows. Receipt
-           rows keep the mission chip (Fix C). -->
-      @if (tree().recent.length > 0 || tree().recentFlat.length > 0) {
+      <!-- RECENT section — terminal instance roots (collapsed by
+           default, expandable via chevron) + orphan terminal jobs as
+           flat rows. Receipt rows keep the mission chip (Fix C). -->
+      @if (recentItems().length > 0 || tree().recentFlat.length > 0) {
         <div class="section">
           <div class="section-title">Recent</div>
-          <ul class="tree tree-recent" role="tree" aria-label="Recent missions">
-            @for (node of tree().recent; track node.mission.mission_id) {
-              <li
-                class="tree-node mission-node mission-recent"
-                role="treeitem"
-                [class.focused]="isFocusedItem('tree:recent|mission:' + (node.mission.mission_id ?? ''))"
-                [attr.aria-expanded]="isRecentExpanded(node.mission.mission_id)">
-                <div
-                  class="mission-row"
-                  [id]="'tree:recent|mission:' + (node.mission.mission_id ?? '')"
-                  (click)="onRecentMissionClick(node.mission.mission_id)"
-                  (keydown.enter)="onRecentMissionClick(node.mission.mission_id)"
-                  (keydown.space)="$event.preventDefault(); onRecentMissionClick(node.mission.mission_id)"
-                  (focus)="onRowFocus('tree:recent|mission:' + (node.mission.mission_id ?? ''))"
-                  tabindex="0">
-                  <mat-icon class="mission-chevron" aria-hidden="true">
-                    {{ recentChevron(node.mission.mission_id) }}
-                  </mat-icon>
-                  <span
-                    class="mission-liveness-badge"
-                    [style.color]="livenessColor(node.mission.liveness)">
-                    <mat-icon class="mission-liveness-icon" aria-hidden="true">
-                      {{ livenessIcon(node.mission.liveness) }}
-                    </mat-icon>
-                    {{ livenessLabel(node.mission.liveness) }}
-                  </span>
-                  <div class="mission-content">
-                    <div class="mission-title">
-                      {{ missionTitle(node.mission) }}
-                    </div>
-                    <div class="mission-meta">
-                      {{ missionMeta(node.mission, node.jobs.length) }}
+          <ul class="tree tree-recent" role="tree" aria-label="Recent conversations">
+            @for (item of recentItems(); track itemId(item)) {
+              @if (item.kind === 'instance') {
+                <li
+                  class="tree-node instance-node instance-recent"
+                  role="treeitem"
+                  [attr.aria-level]="item.depth + 1"
+                  [class.focused]="isFocusedItem(itemId(item))"
+                  [attr.aria-expanded]="isExpanded(item.node.instance.instance_id)">
+                  <div
+                    class="instance-row"
+                    [id]="itemId(item)"
+                    [style.padding-left.px]="indentPx(item.depth)"
+                    (click)="onInstanceRowClick(item.node)"
+                    (keydown.enter)="onInstanceRowClick(item.node)"
+                    (keydown.space)="$event.preventDefault(); onInstanceRowClick(item.node)"
+                    (focus)="onRowFocus(itemId(item))"
+                    tabindex="0">
+                    <span
+                      class="instance-chevron"
+                      role="button"
+                      [attr.aria-label]="'Toggle expansion for ' + instanceTitle(item.node.instance)"
+                      (click)="onChevronClick($event, item.node.instance.instance_id)"
+                      (keydown.enter)="onChevronClick($event, item.node.instance.instance_id)">
+                      <mat-icon aria-hidden="true">{{ chevron(item.node.instance.instance_id) }}</mat-icon>
+                    </span>
+                    <span
+                      class="instance-status"
+                      [style.color]="instanceStatusColor(item.node.instance.status)">
+                      <mat-icon aria-hidden="true">{{ instanceStatusIcon(item.node.instance.status) }}</mat-icon>
+                      {{ item.node.instance.status }}
+                    </span>
+                    <div class="instance-content">
+                      <div class="instance-title" [matTooltip]="instanceTitle(item.node.instance)">
+                        {{ instanceTitle(item.node.instance) }}
+                      </div>
+                      <div class="instance-meta">
+                        {{ instanceMeta(item.node) }}
+                      </div>
                     </div>
                   </div>
-                </div>
-                @if (isRecentExpanded(node.mission.mission_id)) {
-                  <ul class="job-children" role="group">
-                    @for (job of node.jobs; track job.job_id) {
-                      <li class="tree-job-row">
-                        <div
-                          class="job-row recent"
-                          [class.status-completed]="job.status === 'completed'"
-                          [class.status-failed]="job.status === 'failed'"
-                          [class.status-cancelled]="job.status === 'cancelled'"
-                          [class.status-dead_letter]="job.status === 'dead_letter'"
-                          [class.focused]="isFocusedItem('tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
-                          [id]="'tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id"
-                          (click)="onRowClick(job)"
-                          (keydown.enter)="onRowClick(job)"
-                          (keydown.space)="$event.preventDefault(); onRowClick(job)"
-                          (focus)="onRowFocus('tree:recent|mission:' + (node.mission.mission_id ?? '') + '|job:' + job.job_id)"
-                          role="button"
-                          tabindex="0"
-                          [matTooltip]="job.instance_id">
-                          <div
-                            class="job-icon"
-                            [class.job-spinner]="job.status === 'processing'"
-                            [style.color]="getStatusColor(job.status)">
-                            @if (job.status === 'processing') {
-                              <mat-spinner
-                                diameter="18"
-                                strokeWidth="2"
-                                color="primary"></mat-spinner>
-                            } @else {
-                              <mat-icon>{{ getStatusIcon(job.status) }}</mat-icon>
-                            }
-                          </div>
-                          <div class="job-content">
-                            <div class="job-title">
-                              <span class="job-name">{{ resolveTitle(job) }}</span>
-                              <span class="project-badge" [matTooltip]="job.project_id">
-                                {{ projectLabel(job) }}
-                              </span>
-                            </div>
-                            <div class="job-meta">
-                              <span class="agent-badge">{{ job.agent_id }}</span>
-                              <span class="status-text">{{ job.status }}</span>
-                              @if (missionChip(job); as chip) {
-                                <app-mission-liveness-chip
-                                  [chip]="chip"
-                                  (click)="$event.stopPropagation()"
-                                  (keydown.enter)="$event.stopPropagation()"
-                                  (keydown.space)="$event.stopPropagation()" />
-                              }
-                              <span class="time-text">
-                                {{ timeAgo(job.completed_at || job.created_at) }}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </li>
-                    }
-                  </ul>
-                }
-              </li>
+                </li>
+              } @else {
+                <li class="tree-job-row">
+                  <div
+                    class="job-row recent"
+                    [class.status-completed]="item.job.status === 'completed'"
+                    [class.status-failed]="item.job.status === 'failed'"
+                    [class.status-cancelled]="item.job.status === 'cancelled'"
+                    [class.status-dead_letter]="item.job.status === 'dead_letter'"
+                    [class.focused]="isFocusedItem(itemId(item))"
+                    [id]="itemId(item)"
+                    [style.padding-left.px]="indentPx(item.depth)"
+                    (click)="onRowClick(item.job)"
+                    (keydown.enter)="onRowClick(item.job)"
+                    (keydown.space)="$event.preventDefault(); onRowClick(item.job)"
+                    (focus)="onRowFocus(itemId(item))"
+                    role="button"
+                    tabindex="0"
+                    [matTooltip]="item.job.instance_id">
+                    <div
+                      class="job-icon"
+                      [class.job-spinner]="item.job.status === 'processing'"
+                      [style.color]="getStatusColor(item.job.status)">
+                      @if (item.job.status === 'processing') {
+                        <mat-spinner
+                          diameter="18"
+                          strokeWidth="2"
+                          color="primary"></mat-spinner>
+                      } @else {
+                        <mat-icon>{{ getStatusIcon(item.job.status) }}</mat-icon>
+                      }
+                    </div>
+                    <div class="job-content">
+                      <div class="job-title">
+                        <span class="job-name">{{ resolveTitle(item.job) }}</span>
+                        <span class="project-badge" [matTooltip]="item.job.project_id">
+                          {{ projectLabel(item.job) }}
+                        </span>
+                      </div>
+                      <div class="job-meta">
+                        <span class="agent-badge">{{ item.job.agent_id }}</span>
+                        <span class="status-text">{{ item.job.status }}</span>
+                        @if (missionChip(item.job); as chip) {
+                          <app-mission-liveness-chip
+                            [chip]="chip"
+                            (click)="$event.stopPropagation()"
+                            (keydown.enter)="$event.stopPropagation()"
+                            (keydown.space)="$event.stopPropagation()" />
+                        }
+                        <span class="time-text">
+                          {{ timeAgo(item.job.completed_at || item.job.created_at) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              }
             }
             @for (job of tree().recentFlat; track job.job_id) {
               <li class="tree-job-row">
@@ -341,10 +352,7 @@
 
          W2 — footer is a SIBLING of ``.panel-list`` (NOT a child) so
          arrows typed while the footer button owns DOM focus don't
-         phantom-move the tree indicator through ``onTreeKeydown``.
-         The parent ``.job-queue-panel`` is a flex column, so the
-         list (``flex: 1 1 auto``) and footer (``flex-shrink: 0``)
-         stack exactly as before; SCSS is unchanged. -->
+         phantom-move the tree indicator through ``onTreeKeydown``. -->
     <div class="panel-footer">
       <button
         type="button"
