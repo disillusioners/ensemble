@@ -13,7 +13,7 @@ interface MockInstanceListResponse {
 
 // Mock ApiService
 class MockApiService {
-  listInstances(limit: number, offset: number, projectId?: string, excludeKb?: boolean): Observable<MockInstanceListResponse> {
+  listInstances(limit: number, offset: number, projectId?: string, excludeKb?: boolean, search?: string, order?: string): Observable<MockInstanceListResponse> {
     return of({
       instances: [],
       total: 0,
@@ -88,6 +88,13 @@ class TestableInstanceService {
 
     // Prepend local-only instances and sort to maintain newest-first order
     return sortByCreatedAtDesc([...localById.values(), ...result]);
+  }
+
+  /** Mirror of the real ``InstanceService.listInstanceTree`` — the
+   *  job-queue panel's tree fetch. MUST pass ``order='activity'`` so
+   *  live roots are never pushed off the page by pinned roots. */
+  listInstanceTree(limit: number = 10): Observable<MockInstanceListResponse> {
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity');
   }
 
   async loadInstances(projectId?: string, append = false): Promise<void> {
@@ -768,6 +775,31 @@ describe('InstanceService', () => {
 
       service.toggleKb();
       expect(service.showKb()).toBe(true);
+    });
+  });
+
+  describe('listInstanceTree (job-queue panel tree fetch)', () => {
+    it('should pass order=activity to the API (SPEC PIN)', () => {
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTree();
+
+      // limit=10 (default page), offset=0, no project filter, exclude_kb=true,
+      // and the activity ordering — live roots must never be pushed off the
+      // page by pinned roots.
+      expect(mockApi.listInstances).toHaveBeenCalledWith(10, 0, undefined, true, undefined, 'activity');
+    });
+
+    it('should forward a custom limit while keeping order=activity', () => {
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTree(25);
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(25, 0, undefined, true, undefined, 'activity');
     });
   });
 

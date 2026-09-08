@@ -348,6 +348,11 @@ class MockJobQueuePanelComponent {
     switch (status) {
       case 'completed':
         return 'check_circle';
+      case 'settled':
+        // Receipt-style glyph — a settled mirror row IS a delivery receipt,
+        // not a completed mission. `receipt_long` (Material Icons codepoint
+        // ef6e) is visually distinct from completed's check_circle.
+        return 'receipt_long';
       case 'failed':
         return 'error';
       case 'cancelled':
@@ -613,6 +618,19 @@ describe('JobQueuePanelComponent Logic', () => {
     it('should map dead_letter to inventory_2 and purple', () => {
       expect(component.getStatusIcon('dead_letter')).toBe('inventory_2');
       expect(component.getStatusColor('dead_letter')).toBe('#7C3AED');
+    });
+
+    it('should map settled to receipt_long — SPEC PIN (receipt glyph)', () => {
+      // A settled mirror row IS a delivery receipt — it previously fell to
+      // the default info glyph (user-visible defect). `receipt_long`
+      // (Material Icons codepoint ef6e) marks it receipt-style.
+      expect(component.getStatusIcon('settled')).toBe('receipt_long');
+    });
+
+    it('settled receipt_long must be visually distinct from completed check_circle', () => {
+      expect(component.getStatusIcon('settled')).not.toBe(component.getStatusIcon('completed'));
+      expect(component.getStatusIcon('settled')).not.toBe('info');
+      expect(component.getStatusIcon('completed')).toBe('check_circle');
     });
 
     it('should fall back to info/grey for non-terminal statuses', () => {

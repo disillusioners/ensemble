@@ -169,7 +169,7 @@ export class ApiService {
     return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, body);
   }
 
-  listInstances(limit: number = 100, offset: number = 0, projectId?: string, excludeKb: boolean = true, search?: string): Observable<InstanceListResponse> {
+  listInstances(limit: number = 100, offset: number = 0, projectId?: string, excludeKb: boolean = true, search?: string, order?: string): Observable<InstanceListResponse> {
     let params = new HttpParams()
       .set('limit', limit.toString())
       .set('offset', offset.toString())
@@ -179,6 +179,11 @@ export class ApiService {
     }
     if (search && search.trim().length > 0) {
       params = params.set('search', search.trim());
+    }
+    if (order) {
+      // 'pinned' (BE default) | 'activity' (live-first, recency) — see
+      // GET /api/instances. Omitted → server default (pinned).
+      params = params.set('order', order);
     }
     return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, { params });
   }

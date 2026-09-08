@@ -413,6 +413,10 @@ export class InstanceService {
    * indicator retains its last good payload — never flashes empty).
    */
   listInstanceTree(limit: number = 10): Observable<InstanceListResponse> {
-    return this.api.listInstances(limit, 0, undefined, true);
+    // order=activity: live (non-terminal) roots first, then updated_at DESC —
+    // the job-queue panel must show fresh live conversations even when 20+
+    // pinned roots would otherwise permanently own the pinned-first page
+    // (their receipts would orphan to flat rows). limit + exclude_kb kept.
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity');
   }
 }
