@@ -575,11 +575,15 @@ class TestBuildSharedMetaKvMessage:
         assert "\\u0026" in msg.content
 
     def test_w10_cap_over_32k_skips_with_warning(self, caplog) -> None:
-        """W10 skip-on-overflow: payload > 32k → ``None`` + WARNING.
+        """W10 skip-on-overflow: escaped body > 32k → ``None`` + WARNING.
 
         The standalone host carries the same value-size discipline as
         the inline KV section — on overflow the block is SKIPPED, never
         truncated (a truncated JSON block would be worse than none).
+        W2 revision: the cap binds the ESCAPED body (escape expands
+        ``&``/``<``/``>`` up to 6× — a pre-escape raw cap let
+        escape-dense payloads balloon ~6× past the bound), so the
+        WARNING names the escaped body.
         """
         import logging
 
@@ -593,7 +597,7 @@ class TestBuildSharedMetaKvMessage:
             "entirely (skip-on-overflow), never emit a truncated block"
         )
         assert any(
-            "shared_meta_kv payload exceeds 32k" in rec.message
+            "shared_meta_kv escaped body exceeds 32k" in rec.message
             for rec in caplog.records
         ), "the W10 overflow must log a WARNING naming the cap"
 

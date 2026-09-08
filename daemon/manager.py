@@ -82,7 +82,7 @@ from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
-from .services.instance_messaging import InstanceMessagingService
+from .services.instance_messaging import InstanceMessagingService, emit_wc_wake_enqueue_boot_log
 from .services.context_messages import emit_ambient_kv_fresh_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,

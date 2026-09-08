@@ -49,6 +49,7 @@ Run only this file::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -59,11 +60,43 @@ from langchain_core.messages import HumanMessage
 
 from daemon.services.context_messages import (
     CONTEXT_KIND_SHARED_META_KV,
+    _make_context_message,
     _stable_id_for,
 )
 
 
 # ─── Helpers (mirrors the C2 pin's fixture style) ─────────────────────────────
+
+
+def _real_add_messages():
+    """Import the REAL langgraph ``add_messages``, bypassing the stub.
+
+    ``tests/conftest.py`` injects a mock ``langgraph.graph`` module
+    into ``sys.modules`` before any test import (keeps unit tests
+    light). The D14 pin must exercise the REAL reducer, so this
+    helper snapshots every stubbed ``langgraph*`` entry, imports the
+    real module, and restores ``sys.modules`` exactly — the returned
+    function object stays valid after its module is de-referenced.
+    """
+    import importlib
+    import sys
+
+    def _langgraph_keys():
+        return [
+            k for k in sys.modules
+            if k == "langgraph" or k.startswith("langgraph.")
+        ]
+
+    snapshot = {k: sys.modules[k] for k in _langgraph_keys()}
+    for k in snapshot:
+        del sys.modules[k]
+    try:
+        module = importlib.import_module("langgraph.graph.message")
+        return module.add_messages
+    finally:
+        for k in _langgraph_keys():
+            del sys.modules[k]
+        sys.modules.update(snapshot)
 
 
 def _make_manager(*, kv: dict[str, Any] | None = None) -> tuple[Any, Any, Any]:
@@ -668,62 +701,101 @@ class TestLegacyInstanceNoDoubleProjectBlock:
     """
 
     def test_at_most_one_project_block_and_one_kv_block(self, monkeypatch) -> None:
-        """Two C3 assemblies + structural cap on the rendered output.
+        """REAL coexistence pin through the actual ``add_messages`` reducer.
 
-        The D14 pin observes the OUTPUT of the C3 assembler: at most
-        one ``project`` kind block + at most one ``shared_meta_kv``
-        kind block per assembly, regardless of how many times the
-        caller invokes the assembler. With stable ids the cap holds
-        because the reducer collapses by id (the post-checkpoint
-        supersede is the production-side guarantee).
+        The prior revision of this pin was trivially true — it counted
+        kinds on a single assembly's output, never exercising the
+        reducer, and could not fail. This revision reduces a REAL
+        checkpoint transition through ``langgraph``'s ``add_messages``:
+
+        * ``existing`` = [legacy uuid4-id project block (kind
+          ``project``), stable-id ``kv:{context_key}`` block] — the
+          pre-C3 legacy checkpoint shape.
+        * ``fresh`` = [stable-id ``kv:{context_key}`` block with NEW
+          content] — the C3 per-turn refresh emission.
+
+        Asserts after the reduce (D14 — at-most-one-per-kind WHILE
+        legacy entries coexist):
+
+        * exactly ONE project block surfaces — the legacy uuid4 entry
+          SURVIVES (stable-id supersede cannot replace it) and the
+          reduce does not duplicate it;
+        * exactly ONE kv block surfaces and it carries the FRESH
+          content (stable-id supersede collapsed the two entries in
+          place).
         """
         from daemon.services.context_messages import (
-            assemble_context_messages,
+            CONTEXT_KIND_PROJECT,
+            build_shared_meta_kv_message,
         )
 
-        monkeypatch.delenv("ENSEMBLE_AMBIENT_KV_FRESH", raising=False)
-        monkeypatch.setattr(
-            "daemon.services.context_messages._resolve_ambient_kv_fresh",
-            lambda: True,
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "daemon.services.context_messages._resolve_kv_ambient_system_default_enabled",
-            lambda: True,
-            raising=False,
-        )
-        manager, instance_repo, agent_meta = _make_manager(
-            kv={"topic": "auth"}
+        add_messages = _real_add_messages()
+        # Guard against silent stub re-entry — this pin is meaningless
+        # against a MagicMock reducer.
+        assert "MagicMock" not in type(add_messages).__name__, (
+            "the D14 pin requires the REAL langgraph add_messages "
+            "reducer, not the conftest stub"
         )
 
-        for _ in range(3):
-            result = _flatten(*_run(assemble_context_messages(
-                instance_id="inst-c3",
-                user_query="hi",
-                project_id="proj-1",
-                agent_meta=agent_meta,
-                manager=manager,
-                instance_repository=instance_repo,
-                project_already_injected=True,
-            )))
-            # At most one of each kind per assembly.
-            kv_count = sum(
-                1 for m in result
-                if m.additional_kwargs.get("context_kind") == CONTEXT_KIND_SHARED_META_KV
-            )
-            assert kv_count <= 1, (
-                f"C3 assembler must emit AT MOST one shared_meta_kv "
-                f"block per assembly (D14 — stable id supersedes; "
-                f"got {kv_count})"
-            )
-            proj_count = sum(
-                1 for m in result
-                if m.additional_kwargs.get("context_kind") == "project"
-            )
-            assert proj_count <= 1, (
-                f"project block cap (D14): at most one project block "
-                f"per assembly; got {proj_count}"
-            )
+        context_key = "inst-c3"
+        kv_stable_id = _stable_id_for(
+            "shared_meta_kv", context_key=context_key
+        )
+
+        # Existing checkpoint: legacy uuid4-id project block + current
+        # KV snapshot (stable id).
+        legacy_project = _make_context_message(
+            kind=CONTEXT_KIND_PROJECT,
+            title="Related Project",
+            content=json.dumps({"name": "proj-1"}, sort_keys=True),
+            # id_=None → _make_context_message mints a fresh uuid4 —
+            # exactly the legacy pre-C0 shape.
+        )
+        existing_kv = build_shared_meta_kv_message(
+            {"topic": "stale"},
+            stable_id=kv_stable_id,
+        )
+        assert existing_kv is not None
+        existing = [legacy_project, existing_kv]
+
+        # Fresh per-turn emission: same stable id, NEW content.
+        fresh_kv = build_shared_meta_kv_message(
+            {"topic": "fresh"},
+            stable_id=kv_stable_id,
+        )
+        assert fresh_kv is not None
+        assert fresh_kv.id == kv_stable_id
+
+        reduced = add_messages(existing, [fresh_kv])
+
+        def _kind(msg: Any) -> str | None:
+            return msg.additional_kwargs.get("context_kind")
+
+        project_blocks = [m for m in reduced if _kind(m) == CONTEXT_KIND_PROJECT]
+        assert len(project_blocks) == 1, (
+            f"D14 coexistence: exactly ONE project block must surface "
+            f"after the reduce (legacy uuid4 entry survives, no "
+            f"duplicate); got {len(project_blocks)}"
+        )
+        assert project_blocks[0].id == legacy_project.id, (
+            "the surviving project block must BE the legacy uuid4 "
+            "entry (stable-id supersede cannot replace it — it must "
+            "not be dropped either)"
+        )
+
+        kv_blocks = [
+            m for m in reduced if _kind(m) == CONTEXT_KIND_SHARED_META_KV
+        ]
+        assert len(kv_blocks) == 1, (
+            f"D14 stable-id supersede: exactly ONE kv block must "
+            f"surface after the reduce (the two entries collapse in "
+            f"place); got {len(kv_blocks)}"
+        )
+        assert "fresh" in kv_blocks[0].content, (
+            "the surviving kv block must carry the FRESH content — "
+            "the per-turn refresh must win the supersede"
+        )
+        assert kv_blocks[0].id == kv_stable_id
 
 
 # ─── W10 inheritance (32k cap survives the turn-2+ refresh path) ─────────────
@@ -778,7 +850,192 @@ class TestW10InheritanceOnRefresh:
         )
 
 
-# ─── Boot-log emit-at-boot (manager wire-up) ───────────────────────────────────
+# ─── W4 — Shape B fail-loud env vocabulary (direct env parsing) ───────────────
+
+
+class TestAmbientKVFreshEnvVocabulary:
+    """Direct env-parsing vocabulary pin for ``ENSEMBLE_AMBIENT_KV_FRESH``.
+
+    W4 (council-recommended Shape A alignment): the Shape B resolver
+    FAILS LOUD on an unrecognized NON-EMPTY value — a typo during an
+    incident must not silently keep per-turn refresh ON. Vocabulary
+    mirrors ``config._PROACTIVE_FALSE_BOOLS`` / ``_PROACTIVE_TRUE_BOOLS``
+    exactly: ``0/false/no/off`` → False; ``1/true/yes/on`` → True;
+    unset / empty / whitespace-only → True (empty-string-safe so a
+    bare ``KEY=`` line does NOT crash boot).
+
+    These tests exercise the REAL env parse (``monkeypatch.setenv`` +
+    ``_reset_ambient_kv_fresh_for_tests()``) — the prior flag tests
+    only monkeypatched the resolver itself, so the vocabulary had
+    zero direct coverage.
+    """
+
+    FALSE_VOCAB = ["0", "false", "no", "off"]
+    TRUE_VOCAB = ["1", "true", "yes", "on"]
+    # Case-insensitivity is part of the Shape A vocabulary contract.
+    FALSE_VOCAB_MIXED = ["FALSE", "Off", "NO"]
+    TRUE_VOCAB_MIXED = ["TRUE", "On", "Yes"]
+    GARBAGE = ["maybe", "enabled", "2", "disabled", "0 0"]
+
+    @pytest.fixture(autouse=True)
+    def _fresh_resolver(self, monkeypatch):
+        """Start every case with a cold resolver cache + clean env."""
+        from daemon.services.context_messages import (
+            _reset_ambient_kv_fresh_for_tests,
+        )
+
+        monkeypatch.delenv("ENSEMBLE_AMBIENT_KV_FRESH", raising=False)
+        _reset_ambient_kv_fresh_for_tests()
+        monkeypatch.setattr(
+            "daemon.services.context_messages._AMBIENT_KV_FRESH",
+            None,
+        )
+        yield
+        _reset_ambient_kv_fresh_for_tests()
+
+    def _resolve(self) -> bool:
+        from daemon.services.context_messages import (
+            _resolve_ambient_kv_fresh,
+        )
+
+        return _resolve_ambient_kv_fresh()
+
+    @pytest.mark.parametrize("value", FALSE_VOCAB + FALSE_VOCAB_MIXED)
+    def test_false_vocabulary_parses_to_false(self, monkeypatch, value) -> None:
+        """Each falsy spelling (incl. mixed case) kills the flag."""
+        monkeypatch.setenv("ENSEMBLE_AMBIENT_KV_FRESH", value)
+        assert self._resolve() is False, (
+            f"ENSEMBLE_AMBIENT_KV_FRESH={value!r} must resolve to "
+            f"False (kill-switch vocabulary)"
+        )
+
+    @pytest.mark.parametrize("value", TRUE_VOCAB + TRUE_VOCAB_MIXED)
+    def test_true_vocabulary_parses_to_true(self, monkeypatch, value) -> None:
+        """Each truthy spelling (incl. mixed case) enables the flag."""
+        monkeypatch.setenv("ENSEMBLE_AMBIENT_KV_FRESH", value)
+        assert self._resolve() is True
+
+    def test_unset_defaults_to_true(self) -> None:
+        """Unset env → documented ON default."""
+        assert self._resolve() is True
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_string_stays_on(self, monkeypatch, value) -> None:
+        """Empty / whitespace-only (bare ``KEY=``) stays ON — safe."""
+        monkeypatch.setenv("ENSEMBLE_AMBIENT_KV_FRESH", value)
+        assert self._resolve() is True, (
+            "empty-string-safe contract: a bare KEY= line must NOT "
+            "crash boot nor disable the flag"
+        )
+
+    @pytest.mark.parametrize("value", GARBAGE)
+    def test_garbage_value_raises_value_error(self, monkeypatch, value) -> None:
+        """Unrecognized non-empty value → fail-loud ValueError.
+
+        The error names the flag AND the valid vocabulary (W4
+        council-recommended Shape A alignment).
+        """
+        self._assert_garbage_raises(monkeypatch, value)
+
+    def _assert_garbage_raises(self, monkeypatch, value) -> None:
+        monkeypatch.setenv("ENSEMBLE_AMBIENT_KV_FRESH", value)
+        with pytest.raises(ValueError) as excinfo:
+            self._resolve()
+        message = str(excinfo.value)
+        assert "ENSEMBLE_AMBIENT_KV_FRESH" in message, (
+            "the ValueError must name the flag"
+        )
+        assert "0/false/no/off" in message and "1/true/yes/on" in message, (
+            "the ValueError must carry the valid vocabulary"
+        )
+
+    def test_garbage_typo_raises(self, monkeypatch) -> None:
+        self._assert_garbage_raises(monkeypatch, "enabled")
+
+    def test_garbage_falsy_typo_raises(self, monkeypatch) -> None:
+        self._assert_garbage_raises(monkeypatch, "disabled")
+
+    def test_garbage_off_with_space_inside_raises(self, monkeypatch) -> None:
+        # Internal whitespace is NOT stripping-normalized into a valid
+        # spelling — "0 0" is garbage.
+        self._assert_garbage_raises(monkeypatch, "0 0")
+
+    def test_raise_leaves_cache_uncached_for_boot_fail(self, monkeypatch) -> None:
+        """A raise leaves the resolver UNCACHED (boot fails every time).
+
+        Mirrors Shape A: the error surfaces at boot via the
+        manager-wired emit path — no poisoned True cache.
+        """
+        monkeypatch.setenv("ENSEMBLE_AMBIENT_KV_FRESH", "typo")
+        with pytest.raises(ValueError):
+            self._resolve()
+        from daemon.services import context_messages as cm
+
+        assert cm._AMBIENT_KV_FRESH is None, (
+            "a failed parse must NOT cache a value — the next call "
+            "(boot emit retry, per-turn gate) re-raises"
+        )
+
+
+# ─── W2 — post-escape 32k cap (escape-dense payloads) ─────────────────────────
+
+
+class TestW2PostEscapeCap:
+    """The 32k cap binds the ESCAPED body, not the raw payload.
+
+    W2: ``escape_for_context_block`` expands ``&``/``<``/``>`` up to
+    6× (1 char → ``\\uXXXX``). A cap applied PRE-escape let a
+    32k-raw payload dense in escapable glyphs render at ~197k chars.
+    The cap now sits AFTER the escape — same skip-on-overflow
+    outcome (WARNING + skip, never a truncated output).
+    """
+
+    def test_escape_dense_payload_skipped(
+        self, caplog, monkeypatch
+    ) -> None:
+        """RAW json < 32k but ESCAPED body > 32k → skipped."""
+        from daemon.services.context_messages import (
+            build_shared_meta_kv_message,
+        )
+
+        # ~1k pairs of "&<>" → raw ~4k (well under 32k), escaped
+        # ~24k chars of \\uXXXX per 4 raw chars → >32k after escape.
+        dense = "&<>" * 3_500  # raw 10_500 chars; escaped 63_000 chars
+        kv = {"dense": dense}
+        raw_json = json.dumps(kv, sort_keys=True, indent=2)
+        assert len(raw_json) < 32 * 1024, "test premise: raw under cap"
+        from daemon.services.context_messages import escape_for_context_block
+
+        assert len(escape_for_context_block(raw_json)) > 32 * 1024, (
+            "test premise: escaped body over cap"
+        )
+
+        monkeypatch.delenv("ENSEMBLE_AMBIENT_KV_FRESH", raising=False)
+        with caplog.at_level(logging.WARNING, logger="daemon.services.context_messages"):
+            msg = build_shared_meta_kv_message(kv)
+
+        assert msg is None, (
+            "an escape-dense payload (raw < 32k, escaped > 32k) must "
+            "be SKIPPED — the cap binds the ESCAPED body"
+        )
+        assert any("exceeds 32k" in r.message for r in caplog.records), (
+            "overflow must WARNING (skip-on-overflow, never truncate)"
+        )
+
+    def test_just_under_escaped_cap_still_renders(self) -> None:
+        """An escaped body just under 32k still renders."""
+        from daemon.services.context_messages import (
+            build_shared_meta_kv_message,
+        )
+
+        # Escape-inert content sized to land safely under the cap
+        # after the (no-op) escape.
+        kv = {"big": "x" * 30_000}
+        msg = build_shared_meta_kv_message(kv)
+        assert msg is not None, (
+            "an escaped body under the cap must still render"
+        )
+        assert "x" * 100 in msg.content
 
 
 class TestBootLogEmitAtBoot:
@@ -792,35 +1049,99 @@ class TestBootLogEmitAtBoot:
     ``emit_governor_recursion_guard_boot_log``).
     """
 
-    def test_manager_wires_boot_log_emit(self) -> None:
-        """``manager.py`` calls ``emit_ambient_kv_fresh_boot_log()``.
+    def test_manager_boot_emits_both_boot_log_lines(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """EXECUTION-level boot pin (replaces the structural source-grep).
 
-        This is the structural pin: a grep against the file finds
-        the wire-up. A lazy first-call emit (no manager wire-up)
-        fails here.
+        Constructs a REAL ``InstanceManager`` (the
+        ``tests/integration/test_boot_report_recovery.py`` harness
+        recipe: real ``load_config(config.yaml)`` with the DB path
+        overridden to a file-backed SQLite ``tmp_path``; the migration
+        runner no-op'ed — the pre-existing SQLite DROP CONSTRAINT
+        incompatibility is unrelated to boot-log wiring) and asserts
+        that BOTH one-time boot-log lines actually emit DURING
+        ``__init__``:
+
+        * ``"Ambient KV freshness"`` (Shape B — this branch's C3)
+        * ``"WC-wake enqueue routing resolved"`` (the sibling the C3
+          amend accidentally REPLACED in the import block)
+
+        This is the test class that would have caught the critical
+        NameError boot crash: the old grep pin only proved the SOURCE
+        TEXT contained the call — the C3 amend swapped the import away
+        and every daemon boot died with ``NameError`` while the suite
+        stayed green (no test constructed the manager). Construction
+        here executes the actual ``daemon/manager.py`` emit site.
         """
-        try:
-            import daemon.manager as manager_module
-        except ImportError:
-            pytest.skip("daemon.manager not importable in this worktree")
-        src = Path(manager_module.__file__).read_text(encoding="utf-8")
-        assert "emit_ambient_kv_fresh_boot_log()" in src, (
-            "manager.py must wire emit_ambient_kv_fresh_boot_log() at "
-            "boot — a lazy first-call emit makes quiet-daemon "
-            "boot-log grep false-fail (S13 reviewer gate)"
+        import daemon.services.context_messages as cm
+        import daemon.services.instance_messaging as im
+        from daemon.migrations.runner import MigrationRunner
+
+        # Reset BOTH one-time emit guards so THIS test's construction
+        # (not a prior test's manager in the same process) is what
+        # emits. monkeypatch restores both after the test.
+        monkeypatch.setattr(cm, "_AMBIENT_KV_FRESH_BOOT_LOG_EMITTED", False)
+        monkeypatch.setattr(im, "_WC_WAKE_ENQUEUE_ENABLED", None)
+        monkeypatch.setattr(im, "_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED", False)
+
+        project_root = Path(__file__).resolve().parents[3]
+        config_path = project_root / "config.yaml"
+        if not config_path.exists():
+            pytest.skip("config.yaml not found at project root")
+
+        from daemon.config import load_config
+
+        config = load_config(str(config_path))
+        # File-backed SQLite in tmp_path (the boot_report_recovery
+        # recipe) — the manager builds its own engine from db_path.
+        config.persistence.db_path = str(tmp_path / "instances.db")
+
+        # Bypass the migration runner (pre-existing SQLite DROP
+        # CONSTRAINT incompatibility — unrelated to the boot wiring).
+        monkeypatch.setattr(
+            MigrationRunner,
+            "run_pending_migrations",
+            lambda self: [],
         )
 
-    def test_emit_function_is_idempotent(self, caplog) -> None:
+        from daemon.manager import InstanceManager
+
+        with caplog.at_level(logging.INFO):
+            manager = InstanceManager(config)
+
+        messages = [r.message for r in caplog.records]
+        assert manager is not None
+        assert any("Ambient KV freshness" in m for m in messages), (
+            "InstanceManager construction must emit the Ambient KV "
+            "freshness boot line (manager.py → "
+            "emit_ambient_kv_fresh_boot_log)"
+        )
+        assert any(
+            "WC-wake enqueue routing resolved" in m for m in messages
+        ), (
+            "InstanceManager construction must emit the WC-wake boot "
+            "line (manager.py → emit_wc_wake_enqueue_boot_log) — the "
+            "C3 amend replaced this import and every daemon boot "
+            "NameError'd (the regression this execution pin exists "
+            "for)"
+        )
+
+    def test_emit_function_is_idempotent(self, monkeypatch, caplog) -> None:
         """The boot-log emit function is idempotent across calls.
 
         Calling ``emit_ambient_kv_fresh_boot_log()`` twice emits
         exactly ONE boot INFO line (mirrors the Shape B precedent —
-        ``emit_wc_wake_enqueue_boot_log``, etc.).
+        ``emit_wc_wake_enqueue_boot_log``, etc.). The one-time guard
+        is reset FIRST so this pin is deterministic regardless of
+        whether an earlier test in the same process already emitted
+        (e.g. the kv_ambient_config boot-log pin).
         """
         import daemon.services.context_messages as cm
         emit = getattr(cm, "emit_ambient_kv_fresh_boot_log", None)
         if emit is None:
             pytest.skip("C3 symbol not present in this worktree")
+        monkeypatch.setattr(cm, "_AMBIENT_KV_FRESH_BOOT_LOG_EMITTED", False)
         with caplog.at_level(logging.INFO, logger="daemon.services.context_messages"):
             emit()
             emit()  # second call must be a no-op

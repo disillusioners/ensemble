@@ -202,7 +202,25 @@ def _stable_id_for(
 
 
 def _resolve_ambient_kv_fresh() -> bool:
-    """Resolve per-turn ambient KV freshness (cached for process lifetime)."""
+    """Resolve per-turn ambient KV freshness (cached for process lifetime).
+
+    W4 fail-loud contract (council-recommended alignment with Shape A
+    ``config._parse_proactive_str``): an unrecognized NON-EMPTY env
+    value raises :class:`ValueError` naming the flag and the valid
+    vocabulary — an operator typo during an incident must not
+    silently keep per-turn refresh ON. The error surfaces at boot via
+    the manager-wired :func:`emit_ambient_kv_fresh_boot_log` call
+    (``daemon/manager.py``), mirroring Shape A's boot-fail semantics.
+
+    Accepted vocabulary (case-insensitive, whitespace-stripped —
+    identical to Shape A's ``_PROACTIVE_FALSE_BOOLS`` /
+    ``_PROACTIVE_TRUE_BOOLS``):
+
+    * ``0`` / ``false`` / ``no`` / ``off`` → ``False`` (kill-switch)
+    * ``1`` / ``true`` / ``yes`` / ``on`` → ``True``
+    * unset / empty / whitespace-only → ``True`` (documented default;
+      empty-string-safe so a bare ``KEY=`` line does NOT crash boot)
+    """
     global _AMBIENT_KV_FRESH
     if _AMBIENT_KV_FRESH is not None:
         return _AMBIENT_KV_FRESH
@@ -216,8 +234,12 @@ def _resolve_ambient_kv_fresh() -> bool:
         elif value in {"1", "true", "yes", "on"}:
             _AMBIENT_KV_FRESH = True
         else:
-            logger.warning("Invalid %s value %r; defaulting enabled", _constants.ENSEMBLE_AMBIENT_KV_FRESH, raw)
-            _AMBIENT_KV_FRESH = True
+            raise ValueError(
+                f"Invalid {_constants.ENSEMBLE_AMBIENT_KV_FRESH} value "
+                f"{raw!r} — expected one of 0/false/no/off (disable) "
+                f"or 1/true/yes/on (enable); unset/empty defaults to "
+                f"enable"
+            )
     return _AMBIENT_KV_FRESH
 
 
@@ -663,23 +685,22 @@ def build_shared_meta_kv_message(
         )
         return None
 
-    # W10 cap (2026-09-08 revision): bound the serialized payload. The
-    # standalone host carries the SAME value-size discipline as the
-    # rest of the KV surface — on overflow log a WARNING and SKIP the
-    # block this turn (skip-on-overflow, never a truncated output).
-    if len(payload) > 32 * 1024:
+    # W10 cap (2026-09-08 revision, W2 post-escape fix): bound the
+    # ESCAPED body. The cap used to sit on the RAW payload BEFORE
+    # ``escape_for_context_block`` — but the escape expands ``&``/``<``/``>``
+    # up to 6× (1 char → ``\\uXXXX``), so a 32k-raw payload dense in
+    # escapable glyphs could render at ~197k chars. The cap now sits
+    # AFTER the escape: on overflow log a WARNING and SKIP the block
+    # this turn (same skip-on-overflow outcome, never a truncated
+    # output).
+    body = escape_for_context_block(payload)
+    if len(body) > 32 * 1024:
         logger.warning(
-            "[ContextMessages] shared_meta_kv payload exceeds 32k "
+            "[ContextMessages] shared_meta_kv escaped body exceeds 32k "
             "(%d bytes); skipping ambient KV block this turn",
-            len(payload),
+            len(body),
         )
         return None
-
-    # Same character escaping as ``escape_for_context_block``
-    # (defense-in-depth so an attacker-controlled KV value cannot
-    # escape the block) — the module's standard escape helper, shared
-    # with ``build_project_context_message``'s KV section.
-    body = escape_for_context_block(payload)
 
     return _make_context_message(
         kind=CONTEXT_KIND_SHARED_META_KV,
