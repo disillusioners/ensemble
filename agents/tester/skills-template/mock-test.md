@@ -104,14 +104,14 @@ Run the script directly, capture all output, report PASS/FAIL with details (on F
 1. Capture execution results directly
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` Last Run section (status, date, result)
-4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)
+4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., a mock-test findings report)
 5. Update `.agents/tester/README.md` if procedures changed
 
 ### Phase 5: Validate ensure.md (after mock tests pass)
 
 1. If mock tests pass, proceed to ensure.md validation
 2. Follow the ensure-validation skill workflow
-3. Document results in `.agents/tester/RESULTS/[date]-ensure-validation.md`
+3. Document results in the dated ensure-validation report under `.agents/tester/RESULTS/`
 
 ## Scenario Design Tips
 

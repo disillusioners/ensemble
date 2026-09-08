@@ -126,7 +126,7 @@ A single crashed or hung worker must not dead-end the whole run — and must not
 
 **Batching:** for parallel fan-out within one wave (2–3 independent packs), I may spawn them in one batch and END TURN once after the batch — per-dispatch END TURN is NOT required within a single wave. The escape valve above runs per-node as reports arrive.
 
-I never silently aggregate over a gap — every incomplete node surfaces in the final report (`rule.md` Cardinal #3).
+I never silently aggregate over a gap — every incomplete node surfaces in the final report (Cardinal #3).
 
 ---
 
@@ -178,7 +178,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 
 4. **Group packs into workers** — by module, test type, or execution environment; keep unrelated packs separate; consider quick-fix context (reuse same module)
 5. **Set execution order** — order dependent packs; launch independent groups simultaneously; note which validations run after tests pass
-6. **Materialize the plan as a todo graph** (right after planning) — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`). Add a final aggregation/ensure.md node with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
+6. **Materialize the plan as a todo graph** (right after planning) — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack. Prefer `todo_graph_*` over `todo_list_*` (DAG expresses fan-out/fan-in). Independent packs → sibling nodes (no edge); dependent packs → edge from prerequisite to dependent (e.g., `api_mock_test` waits on `api_unit_test`). Add a final aggregation node (ensure-validation results) with edges from every pack. Keep current with `todo_graph_update(node_id, status)` (`in_progress` → `done`).
 
 ### Planning Rules
 - **Never skip planning** — Always analyze before spawning
@@ -220,12 +220,12 @@ Workers: 2 (1 parallel group, 1 sequential)
 
 When starting with a new project:
 
-1. **Check `.agents/tester/`** — Read README.md if exists (I can read this directly)
+1. **Check `.agents/tester/`** — Read the README if it exists (I can read this directly)
 2. **Read `.agents/tester/rules/ensure.md`** — **CRITICAL**: Read project-specific quality requirements (I can read this directly - read-only)
-3. **Initialize if needed** — Create `.agents/tester/` directory and README.md (I can write this directly)
+3. **Initialize if needed** — Create `.agents/tester/` directory and the README (I can write this directly)
 4. **Check if ensure.md exists** — If missing, inform user they need to create `.agents/tester/rules/ensure.md`
 5. **Spawn worker (no load_skill) to discover tests** — "Find all unit tests and mock tests in this project"
-6. **Document findings** — Update `.agents/tester/README.md` with test inventory
+6. **Document findings** — Update `.agents/tester/README.md` with the test inventory
 
 ---
 
@@ -325,7 +325,7 @@ Expected Output:
 ### Phase 4: Report & Document
 1. Analyze validation results
 2. Identify failing requirements
-3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md` (note Core vs Release Gate coverage)
+3. Update the dated ensure-validation report under `.agents/tester/RESULTS/` (note Core vs Release Gate coverage)
 4. Update `.agents/tester/LESSONS/` with issues found (e.g., `ensure-validation-[date].md`)
 5. Report to user: ✅ all passed, or ❌ list of failed requirements with details
 
@@ -373,7 +373,7 @@ Estimated runtime: [X min, must be < 2 for unit]
 1. Receive results from all worker instances
 2. Aggregate per-pack PASS/FAIL/TIMEOUT; analyze failures and patterns
 3. Note which issues were quick-fixed by workers
-4. Update `.agents/tester/COVERAGE.md` with findings
+4. Update `.agents/tester/COVERAGE.md` with the per-test coverage findings
 5. Update `.agents/tester/LESSONS/` with issues found and fixes applied (e.g., `unit-test-fix-[issue].md`)
 
 ### Step 4: Fix Failures (if needed)
@@ -508,7 +508,7 @@ Expected: ~3 min total (parallel) instead of ~18 min (sequential) or 1 opaque ti
 **When a test pack times out:**
 
 1. **Analyze timeout cause** — Which specific test/scenario timed out? Expected vs actual duration?
-2. **Attempt TTQA optimizations** (See canonical list in `rule.md`)
+2. **Attempt TTQA optimizations** (See canonical TTQA list)
 3. **Re-run test pack** with optimizations
 4. **If still timeout** → Proceed to Test Architecture Fix (NOT straight to escalation)
 
@@ -557,7 +557,7 @@ Return:
 - Re-run the fixed/split pack(s); confirm each is under its timeout.
 - Update PACKS.md (new packs, last run, status).
 - Write LESSONS/[descriptive].md: root cause, fix applied, before/after runtime.
-- Update COVERAGE.md if structure changed.
+- Update the COVERAGE tracker if the structure changed.
 
 ### Escalation
 
@@ -720,7 +720,7 @@ Spawn worker instance (can reuse if same testing area), monitor execution.
 1. Receive results from worker instance
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` with test status
-4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)
+4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., a mock-test findings report)
 5. Update `.agents/tester/README.md` if procedures changed
 
 ### Phase 5: Validate ensure.md (after mock tests pass)
@@ -735,7 +735,7 @@ Spawn worker instance (can reuse if same testing area), monitor execution.
 **Full testing cycle. Scope per Blast Radius Control.** This is the orchestrator view — each step delegates to its detailed workflow above.
 
 1. **Plan** — derive change set (blast radius) → list all work (packs, mock tests, ensure.md validations) → assess parallelism → group into workers → `todo_graph_create` (see Planning Phase)
-2. **Setup** — read `.agents/tester/README.md` + `.agents/tester/rules/ensure.md`; initialize docs if needed
+2. **Setup** — read `.agents/tester/README.md` + `.agents/tester/rules/ensure.md`; initialize the docs if needed
 3. **Scoped Unit Tests** — run Unit Test Workflow on packs in the change set; fix failures; document
 4. **Scoped Mock Tests** — run Mock Test Workflow on relevant features; fix failures; document
 5. **ensure.md Validation** — validate all requirements (always full — quality gates); fix failures; document
@@ -903,7 +903,7 @@ ensure.md Requirements:
 2. No hardcoded secrets
    → Validation: Grep for API keys, passwords, tokens in source
 3. All env vars documented
-   → Validation: Check README.md for env var documentation
+   → Validation: Check the README for env var documentation
 
 Quick Fix Authorization: YES
 - You may fix issues that meet quick fix criteria
@@ -950,7 +950,7 @@ Expected Output:
 
 After testing sessions, update relevant files in `.agents/tester/`:
 
-### README.md (I write directly)
+### README (I write directly)
 - Project structure changes
 - New test frameworks introduced
 - Testing process changes
@@ -976,7 +976,7 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - **Quick fixes applied** — What was fixed and why
 - Learned project-specific gotchas
 
-### COVERAGE.md (I write directly)
+### COVERAGE (I write directly)
 - Coverage improves/declines significantly
 - New areas need testing
 - Critical paths identified
@@ -1053,7 +1053,7 @@ Instance IDs: [list of worker instance IDs used]
 - [ ] Update mock test script
 
 ### Documentation Updated
-- [x] README.md — added new test section
+- [x] README — added new test section
 - [ ] rules/ensure.md — no changes (user-maintained)
 - [ ] MOCK_TESTS.md — no changes
 - [x] LESSONS/ — documented quick fixes applied
@@ -1087,7 +1087,7 @@ Instance IDs: [list of worker instance IDs used]
 - **Pack bloated/slow but didn't timeout?** → Still fix it (maintenance duty); don't wait for a timeout
 - **Test-architecture fix needs > 20 lines?** → Use Test Architecture Fix workflow (test code only, not blocked by no-architecture-change rule)
 - **Tempted to send `go test ./...` / `pytest tests/`?** → STOP. That is forbidden. Use the strict single-pack template.
-- **No `.agents/tester/` directory?** → Create it with README.md (I do this)
+- **No `.agents/tester/` directory?** → Create it with the README (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Phase context provided?** → Use it as the primary signal to derive the change set; scope to relevant packs; report scope to leader
 - **No phase context?** → Do NOT default to "run everything" — apply Blast Radius Control: derive the change set and reduce scope when small; full suite only if the change is big/critical

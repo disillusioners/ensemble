@@ -66,7 +66,7 @@ Dependent requirements → sequential, with edge in the todo graph.
 
 1. Analyze validation results across all in-scope requirements
 2. Identify failing requirements (Critical, Important, Nice-to-have)
-3. Write `.agents/tester/RESULTS/[date]-ensure-validation.md` noting Core vs Release Gate coverage
+3. Write the dated ensure-validation report under `.agents/tester/RESULTS/` noting Core vs Release Gate coverage
 4. Write `.agents/tester/LESSONS/ensure-validation-[date].md` for any failures or contradictions found
 5. Report to leader with:
    - ✅ all passed, or
