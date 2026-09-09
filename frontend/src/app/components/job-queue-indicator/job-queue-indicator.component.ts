@@ -195,9 +195,11 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /**
    * Instances-primary tree leg (2026-09-08, design V1) — the FLAT
    * instance rows from the last successful
-   * ``InstanceService.listInstanceTree(10)`` call (roots + all their
-   * descendants, root-paginated). THE production payload signal for
-   * the panel's instances tree:
+   * ``InstanceService.listInstanceTree(10)`` call (a flat paginated
+   * slice of roots + children mixed, ≤limit rows, no BFS — see
+   * ``listInstanceTree`` docblock for the include_descendants=false
+   * rationale). THE production payload signal for the panel's
+   * instances tree:
    *
    *   instancesPayload (flat wire rows)
    *     → ``instanceRoots`` computed (nested via buildInstanceNodes)
@@ -508,9 +510,10 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    *   for ``live > 20`` the breakdown covers the fetched 20 while the
    *   count uses ``total`` (acceptable; see S4-class note).
    * - ``instances`` — instances-primary tree leg (2026-09-08, design
-   *   V1): ``GET /api/instances?limit=10`` (root-paginated; ALL
-   *   descendants of each root in the page included). Feeds the
-   *   panel's LIVE CONVERSATIONS + RECENT instance roots via
+   *   V1): ``GET /api/instances?limit=10&include_descendants=false``
+   *   (flat paginated slice, no BFS — roots + children mixed in the
+   *   same page; see ``listInstanceTree`` docblock for rationale).
+   *   Feeds the panel's LIVE CONVERSATIONS + RECENT instance roots via
    *   ``instancesPayload`` → ``instanceRoots`` → ``[instances]``.
    *   The former LEG B (unfiltered ``listMissions({ limit: 20 })``
    *   content page) is DROPPED — recent terminal mission nodes are
@@ -625,8 +628,8 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    *     a non-degraded tick; ``null`` on a degraded envelope (retain
    *     last good count, never falsely idle). The payload also drives
    *     the tooltip's per-liveness breakdown via ``liveMissionsPayload``.
-   *   * ``instances`` — the root-paginated instance page (flat rows,
-   *     descendants included). NON-NULL ⇒ THE PRODUCTION WRITE
+   *   * ``instances`` — the flat paginated instance page (no BFS;
+   *   include_descendants=false). NON-NULL ⇒ THE PRODUCTION WRITE
    *     ``this.instancesPayload.set(instances)`` — the single write
    *     site feeding ``instanceRoots`` → the panel's ``[instances]``
    *     input (F-5 lesson class: this exact production write is

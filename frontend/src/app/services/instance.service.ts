@@ -421,10 +421,15 @@ export class InstanceService {
     // include_descendants=false (poll-spam fix): the badge/header polls every
     // 8s; with include_descendants=true, the route BFS-loads the full subtree
     // of every root in the page (~510 WARN/hr on prod-scale trees when the
-    // descendant cap fires). The badge only needs root-level counts + status;
-    // the panel's nested tree-builder still gets its descendants via the
-    // dedicated tree API (which keeps ``include_descendants=true``). The 60s
-    // sidebar poll is UNCHANGED — it feeds the tree UI and keeps descendants.
+    // descendant cap fires). The badge only needs root-level counts + status.
+    // With include_descendants=false the response is a FLAT paginated slice
+    // (roots + children mixed, ≤limit rows, no BFS); ``buildInstanceNodes``
+    // (frontend/src/app/models/instance-node.model.ts) promotes out-of-page
+    // children to top-level nodes, so the panel tree is degraded-but-sane:
+    // a child nests under its parent only when that parent lands in the same
+    // page. There is NO dedicated tree API — this badge poll is the SOLE
+    // source of the panel's instance tree. The 60s sidebar poll is UNCHANGED
+    // — it feeds the tree UI and keeps descendants.
     return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', false);
   }
 }
