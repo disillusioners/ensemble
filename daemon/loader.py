@@ -48,19 +48,47 @@ def _ensure_tool_metadata_populated() -> None:
     from .tools.access_memory import create_access_memory_tool
     from .tools.help import create_help_tool
     from .tools.project import create_project_tools
-    
+    # W1 FIX-NOW item 5: the maintenancer-relevant category modules were
+    # absent from this warm list, so cold-boot
+    # load_tools_doc_for_agent("maintenancer") returned EMPTY for its
+    # categories (system-log, ens-db, knowledge, system_upgrade, db) and
+    # the no-TTL PromptCache could pin the empty result. Additive only:
+    # factories tolerate None manager / empty ids at construction time
+    # (metadata scanning never invokes the closures).
+    from .tools.system_log_tools import create_system_log_tools
+    from .tools.ens_db_tools import create_ens_db_tools
+    from .tools.knowledge_tools import create_knowledge_tools
+    from .tools.upgrade_tools import create_upgrade_tools
+    from .tools.db_tools import create_db_tools
+
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
     inner_soul = create_inner_soul_tool(None, "", "")
     access_memory = create_access_memory_tool("")
     project_tools = create_project_tools(None, "", "")
-    
+
     # Create help tool with empty tool list first. version_tag is intentionally
     # omitted here — this is a metadata-scanning stub (agent_id=""), so tool
     # filtering never executes. The production path is in create_instance_tools()
     # which forwards the instance's bound version_tag.
     help_tool = create_help_tool([], "")
-    
+
+    # Maintenancer-category metadata-scan stubs (same pattern as above):
+    # the factories only build closures — manager / repository /
+    # pool_manager are dereferenced at CALL time, never at construction.
+    system_log_tools = create_system_log_tools(None, "")
+    ens_db_tools = create_ens_db_tools(None, "")
+    knowledge_tools = create_knowledge_tools(None, "")
+    upgrade_tools = create_upgrade_tools(None, "")
+    # create_db_tools reads manager.credential_manager at construction
+    # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
+    # None is sufficient — the credential manager is only invoked inside
+    # the db_conn_* closures at call time.
+    _db_meta_stub = type(
+        "_MetaScanManagerStub", (), {"credential_manager": None}
+    )()
+    db_tools = create_db_tools(_db_meta_stub, "", None, None)
+
     # Scan all discovered tools
     all_tools = [
         bash,
@@ -68,11 +96,21 @@ def _ensure_tool_metadata_populated() -> None:
         time,
         inner_soul, access_memory, help_tool,
     ]
-    
+
     # Add project tools if any
     if project_tools:
         all_tools.extend(project_tools)
-    
+
+    # W1 FIX-NOW item 5: flatten the maintenancer-category factory
+    # lists (each create_*_tools returns a list of closures — appending
+    # the list object itself would stringify it during the scan).
+    for factory_tools in (
+        system_log_tools, ens_db_tools, knowledge_tools,
+        upgrade_tools, db_tools,
+    ):
+        if factory_tools:
+            all_tools.extend(factory_tools)
+
     scan_tools_for_full_docs(all_tools)
 
 

@@ -93,11 +93,20 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_system_upgrade(self) -> None:
-        """R-SR16: the opt-in-only set is exactly {system_upgrade} today —
-        adding a category here is a deliberate trust decision, and this pin
-        makes silent additions visible."""
-        assert PRIVILEGED_TOOL_CATEGORIES == frozenset({UPGRADE_CATEGORY})
+    def test_privileged_categories_is_exactly_three(self) -> None:
+        """R-SR16: the opt-in-only set is exactly three entries —
+        ``system_upgrade``, ``system-log``, ``ens-db`` — after the
+        W1-P2 privilege promotion (detail-plan §4.4, architect §4.4).
+        Adding a category here is a deliberate trust decision, and
+        this pin makes silent additions visible (D18 — same-PR pin
+        updates). The ``ens-db`` category is the maintenancer's direct
+        ``ensemble_prod`` path; ``system-log`` is the daemon's own log
+        forensics surface (worker is the designated break-glass)."""
+        assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
+            "system_upgrade",
+            "system-log",
+            "ens-db",
+        })
 
     def test_checklist_comment_block_present_in_module(self) -> None:
         """The T2 checklist is encoded as the module's comment block — the

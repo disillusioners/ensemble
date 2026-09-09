@@ -1,0 +1,37 @@
+agent_id: maintenancer
+skills:
+  - name: kb-curator
+    version: "1.0.0"
+    auto_load: true
+    category: workflow
+    description: "KB INDEX awareness + filesystem reads + first-turn RAG mirror"
+  - name: log-forensics
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Time-bracket log forensics + redaction-aware reads"
+  - name: job-mission-repair
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Diagnose + repair job/task/mission state via the controlled writer"
+  - name: ens-db-repair
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Guarded execution — idempotent DO$$-only repair + audit + dry-run"
+  - name: restart-upgrade-ops
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Pause-first quiesce + dry-run upgrade prep; live arms via 3-factor gate only"
+  - name: bug-advisory
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Read-only consultation — analyze, diagnose, recommend fix sketch"
+  - name: health-check
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "MaintenanceJob registry + StaleTaskRecovery sweep; read-only diagnostic"

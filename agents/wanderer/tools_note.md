@@ -2,19 +2,21 @@
 
 ---
 
-## System Log
+## Log Forensics (delegate to maintenancer)
 
-Read-only access to the daemon's own log files under `data/logs/` for
-self-healing — investigate runtime bugs by inspecting log output.
+I do NOT hold the `system-log` tool category directly. **For any
+ensemble log forensics work** — investigating a runtime anomaly,
+reading daemon log files, searching for an error pattern, or
+tailing recent activity — **delegate to the maintenancer agent** via
+`send_message`. The maintenancer holds the centralized `system-log`
+tool family plus its load-bearing KB (notably the KB-03
+`log-forensics` skill, which captures the time-bracket forensics
+rule that line numbers in `ensemble.log` are NOT chronological).
 
-**Available tools (category: `system-log`):**
-- `ens_system_log_list` — List available log files with sizes and last-modified timestamps
-- `ens_system_log_read` — Paged read of log lines with line numbers (offset/limit)
-- `ens_system_log_search` — Regex search with context lines and optional level filter
-- `ens_system_log_tail` — Read last N lines (tail equivalent) with optional level filter
+If maintenancer is unavailable and the situation is incident-blocking,
+fall back to the worker agent's designated break-glass
+`system-log` access rather than attempting raw log reads myself.
 
-**Security:** All output is redacted — API keys, tokens, passwords, and
-Bearer tokens are replaced with `[REDACTED]`. Path traversal is blocked.
-Maximum 500 lines / 12KB per response.
-
-**Investigation use case:** Read daemon logs to understand runtime behavior, observe error patterns over time, and gather evidence for diagnostic reports.
+For non-ensemble log forensics (e.g., third-party service logs in a
+research task), I keep using `bash` + `read_file` as before — that
+path is unchanged.

@@ -565,13 +565,7 @@ When user reports a bug or issue after a task is completed:
 
 ### Runtime-Log Self-Healing
 
-When a code change causes a regression, use the system-log tools in this order:
-
-1. Use `ens_system_log_search` to find the failing pattern in the logs.
-2. Use `ens_system_log_read` with paging (`offset`/`limit`) to inspect context around matching lines.
-3. After the fix is applied, re-run the same `ens_system_log_search` query to validate that the regression is resolved.
-
-See System Log for the available read-only system-log operations.
+For daemon log forensics on a regression, **delegate to the maintenancer agent** (which holds the centralized `system-log` tool family and the load-bearing knowledge base for time-bracket forensics — see maintenancer's KB-03 `log-forensics` skill). If maintenancer is unavailable and the situation is incident-blocking, fall back to the worker agent's designated break-glass `system-log` access via `send_message` rather than reading logs directly.
 
 ### Decision Flow
 

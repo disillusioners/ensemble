@@ -80,22 +80,20 @@ I reserve direct `explore` calls for simple, narrow lookups. For synthesis-grade
 
 ---
 
-## System Log
+## Log Forensics (delegate to maintenancer)
 
-Read-only access to the daemon's own log files under `data/logs/` for
-self-healing — investigate runtime bugs by inspecting log output.
+I do NOT hold the `system-log` tool category directly. **For any
+ensemble log forensics work** — investigating a runtime regression,
+reading daemon log files, searching for an error pattern, or
+tailing recent activity — **delegate to the maintenancer agent** via
+`send_message`. The maintenancer holds the centralized `system-log`
+tool family plus its load-bearing KB (notably the KB-03
+`log-forensics` skill, which captures the time-bracket forensics
+rule that line numbers in `ensemble.log` are NOT chronological).
 
-**Available tools (category: `system-log`):**
-- `ens_system_log_list` — List available log files with sizes and last-modified timestamps
-- `ens_system_log_read` — Paged read of log lines with line numbers (offset/limit)
-- `ens_system_log_search` — Regex search with context lines and optional level filter
-- `ens_system_log_tail` — Read last N lines (tail equivalent) with optional level filter
-
-**Security:** All output is redacted — API keys, tokens, passwords, and
-Bearer tokens are replaced with `[REDACTED]`. Path traversal is blocked.
-Maximum 500 lines / 12KB per response.
-
-**Self-healing workflow:** When a code change causes a regression, use `ens_system_log_search` to find the failing pattern, then `ens_system_log_read` with paging to get context. Validate fix success by re-running the same search.
+If maintenancer is unavailable and the situation is incident-blocking,
+fall back to the worker agent's designated break-glass
+`system-log` access rather than attempting raw log reads myself.
 
 ---
 
@@ -108,5 +106,3 @@ Read-only quick lookups: `filesystem` + `bash` — bounded to the allow-list abo
 `knowledge` gives me `explore` / `experience` directly (project knowledge base).
 
 `proc`, `time`, `self`, `help`, `image`, `mcp`, `context`, `shared_meta_kv` are available for completeness; I reach for them only when an explicit dispatch need calls for them, never by default.
-
-`system-log` gives me read-only access to daemon logs under `data/logs/` for self-healing (see above).
