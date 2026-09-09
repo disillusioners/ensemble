@@ -919,8 +919,11 @@ async def delete_project(
         instance_ids = []
         if manager and hasattr(manager, '_instance_repository') and manager._instance_repository:
             try:
-                # Get all instances for this project from DB (before deletion!)
-                instances, _ = manager._instance_repository.list(
+                # Get all instances for this project from DB (before deletion!).
+                # Flat pagination — ``truncated`` is always False here; the
+                # ``limit=10000`` ceiling exceeds any realistic project
+                # instance count and the path doesn't load descendants.
+                instances, _, _ = manager._instance_repository.list(
                     project_id=project_id,
                     limit=10000,  # Get all
                     offset=0,

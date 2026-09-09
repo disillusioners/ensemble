@@ -410,7 +410,8 @@ class TestCheckpointCleanupJobOrphans:
         instance_repo.list = MagicMock(
             return_value=(
                 [MagicMock(instance_id="thread-1"), MagicMock(instance_id="thread-2")],
-                2,
+            2,
+            False,
             )
         )
 
@@ -440,7 +441,8 @@ class TestCheckpointCleanupJobOrphans:
                     MagicMock(instance_id="thread-1"),
                     MagicMock(instance_id="thread-2"),
                 ],
-                2,
+            2,
+            False,
             )
         )
 
@@ -484,9 +486,10 @@ class TestCheckpointCleanupJobExpired:
                             updated_at=old_time,
                         )
                     ],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         # TOCTOU guard: re-fetch shows the instance is still terminal
@@ -533,9 +536,10 @@ class TestCheckpointCleanupJobExpired:
                             updated_at=recent_time,
                         )
                     ],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
@@ -596,10 +600,11 @@ class TestCheckpointCleanupJobHistoryCap:
                         MagicMock(instance_id="recent-4", updated_at=recent_time_4),
                         MagicMock(instance_id="recent-5", updated_at=recent_time_5),
                     ],
-                    10,
+                10,
+                False,
                 )
             # Other terminal statuses return empty (simulating no instances in those states)
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         # TOCTOU guard: re-fetch shows the instance is still terminal
@@ -642,9 +647,10 @@ class TestCheckpointCleanupJobHistoryCap:
                         MagicMock(instance_id=f"inst-{i}", updated_at=recent_time)
                         for i in range(5)
                     ],
-                    5,
+                5,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
@@ -682,9 +688,10 @@ class TestCheckpointCleanupJobBackwardCompatibility:
             if status in TERMINAL_STATUSES:
                 return (
                     [MagicMock(instance_id=f"expired-{status}", updated_at=old_time)],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         # TOCTOU guard: re-fetch shows the instance is still terminal
@@ -712,7 +719,7 @@ class TestCheckpointCleanupJobBackwardCompatibility:
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
         )
@@ -1081,7 +1088,7 @@ class TestCheckpointCleanupJobErrorIsolation:
         expired_instance = MagicMock()
         expired_instance.instance_id = "expired-instance-123"
         expired_instance.updated_at = "2020-01-01T00:00:00"
-        instance_repo.list = MagicMock(return_value=([expired_instance], 1))
+        instance_repo.list = MagicMock(return_value=([expired_instance], 1, False))
         # TOCTOU guard: re-fetch shows the instance is still terminal
         instance_repo.get = MagicMock(
             return_value=MagicMock(status="terminated")
@@ -1115,7 +1122,7 @@ class TestCheckpointCleanupJobExecute:
         checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         # instance_repo returns empty list for all status queries
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1150,7 +1157,7 @@ class TestMaintenanceServiceIntegration:
         # Create mocks
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         cleanup_job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1310,9 +1317,10 @@ class TestCheckpointCleanupJobPinnedProtection:
             if status in TERMINAL_STATUSES:
                 return (
                     [MagicMock(instance_id=terminal_id, updated_at=old_time)],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
@@ -1453,9 +1461,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="pinned-A", updated_at=old_time),
                         MagicMock(instance_id="unpinned-B", updated_at=old_time),
                     ],
-                    2,
+                2,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         # TOCTOU guard: instance still terminal.
@@ -1529,9 +1538,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="inst-4", updated_at=old_4),
                         MagicMock(instance_id="inst-5", updated_at=old_5),
                     ],
-                    5,
+                5,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1598,9 +1608,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="child-A1", updated_at=old_time),
                         MagicMock(instance_id="inst-X", updated_at=old_time),
                     ],
-                    2,
+                2,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1665,9 +1676,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="root-A", updated_at=old_time),
                         MagicMock(instance_id="inst-Y", updated_at=old_time),
                     ],
-                    5,
+                5,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1720,9 +1732,10 @@ class TestCheckpointCleanupJobPinnedProtection:
             if status in TERMINAL_STATUSES:
                 return (
                     [MagicMock(instance_id="pinned-A", updated_at=old_time)],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1771,9 +1784,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="inst-3", updated_at=old_3),
                         MagicMock(instance_id="inst-4", updated_at=old_4),
                     ],
-                    4,
+                4,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1830,9 +1844,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="inst-4", updated_at=old_4),
                         MagicMock(instance_id="inst-5", updated_at=old_5),
                     ],
-                    5,
+                5,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.get = MagicMock(
@@ -1912,9 +1927,10 @@ class TestCheckpointCleanupJobPinnedProtection:
             if status in TERMINAL_STATUSES:
                 return (
                     [MagicMock(instance_id="would-delete", updated_at=old_time)],
-                    1,
+                1,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.delete = MagicMock(
@@ -1970,9 +1986,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="inst-3", updated_at=old_3),
                         MagicMock(instance_id="inst-4", updated_at=old_4),
                     ],
-                    4,
+                4,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
         instance_repo.delete = MagicMock(
@@ -2016,7 +2033,7 @@ class TestCheckpointCleanupJobPinnedProtection:
         )
         # No expired terminals — listing is never reached because
         # protection lookup fails first.
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
 
@@ -2045,7 +2062,7 @@ class TestCheckpointCleanupJobPinnedProtection:
             side_effect=RuntimeError("prefs db unreachable")
         )
         # Listing is never reached — protection lookup fails first.
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = self._make_job(config, checkpointer, instance_repo, ui_prefs_repo)
 
@@ -2101,9 +2118,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="pinned-4", updated_at=old_4),
                         MagicMock(instance_id="pinned-5", updated_at=old_5),
                     ],
-                    5,
+                5,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
@@ -2161,9 +2179,10 @@ class TestCheckpointCleanupJobPinnedProtection:
                         MagicMock(instance_id="pinned-B", updated_at=old_time),
                         MagicMock(instance_id="pinned-C", updated_at=old_time),
                     ],
-                    3,
+                3,
+                False,
                 )
-            return ([], 0)
+            return ([], 0, False)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
@@ -2230,7 +2249,7 @@ class TestCheckpointCleanupJobPinnedProtection:
             }.get(iid)
 
         instance_repo.get = MagicMock(side_effect=get_side_effect)
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
         )
@@ -2277,7 +2296,7 @@ class TestCheckpointCleanupJobPinnedProtection:
 
         ui_prefs_repo.get_pinned_instance_ids = MagicMock(return_value=set())
         instance_repo.get = MagicMock(return_value=None)
-        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.list = MagicMock(return_value=([], 0, False))
 
         job = self._make_job(
             config, checkpointer, instance_repo, ui_prefs_repo, on_instance_deleted

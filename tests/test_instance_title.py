@@ -97,7 +97,7 @@ class TestUpdateInstanceTitle:
         assert result is None
         
         # List should be empty
-        instances, total = repo.list()
+        instances, total, _ = repo.list()
         assert total == 0
 
 
@@ -161,7 +161,7 @@ class TestListAllInstancesWithTitle:
         # instance-2 has no title
         
         # List all instances
-        instances, total = repo.list()
+        instances, total, _ = repo.list()
         
         assert total == 2
         
@@ -184,7 +184,7 @@ class TestListAllInstancesWithTitle:
         repo.update_title("test-instance", "Metadata Test")
         
         # List instances
-        instances, total = repo.list()
+        instances, total, _ = repo.list()
         
         assert total == 1
         instance = instances[0]

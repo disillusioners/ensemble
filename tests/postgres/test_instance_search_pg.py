@@ -153,12 +153,12 @@ class TestSearchByTitleJsonb:
     """
 
     def test_search_matches_title_substring_on_jsonb(self, seeded_repo):
-        instances, total = seeded_repo.list(search="alpha")
+        instances, total, _ = seeded_repo.list(search="alpha")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
     def test_search_no_match_returns_empty(self, seeded_repo):
-        instances, total = seeded_repo.list(search="nothing-matches-this")
+        instances, total, _ = seeded_repo.list(search="nothing-matches-this")
         assert total == 0
         assert instances == []
 
@@ -166,7 +166,7 @@ class TestSearchByTitleJsonb:
         """``metadata->>'title'`` returns the stored string on PG."""
         _make(repo, "only", agent_id="dev", agent_dir="agents/coder",
               metadata={"title": "Unique-Title-Marker"})
-        instances, total = repo.list(search="unique-title-marker")
+        instances, total, _ = repo.list(search="unique-title-marker")
         assert total == 1
         assert _ids(instances) == ["only"]
 
@@ -180,7 +180,7 @@ class TestSearchByTitleJsonb:
         # agent_id and agent_name — assert the row is still found via
         # those columns and that no extra row sneaks in via a stray
         # NULL→'' coercion.
-        instances, total = repo.list(search="nope")
+        instances, total, _ = repo.list(search="nope")
         assert total == 1
         assert _ids(instances) == ["no-title"]
 
@@ -193,7 +193,7 @@ class TestSearchByTitleJsonb:
         """
         _make(repo, "int-title", agent_id="dev", agent_dir="agents/coder",
               metadata={"title": 42})
-        instances, total = repo.list(search="42")
+        instances, total, _ = repo.list(search="42")
         assert total == 1
         assert _ids(instances) == ["int-title"]
 
@@ -205,7 +205,7 @@ class TestSearchByTitleJsonb:
         """
         _make(repo, "rich", agent_id="dev", agent_dir="agents/coder",
               metadata={"title": "Findable", "extra": "ignored", "n": 7})
-        instances, total = repo.list(search="findable")
+        instances, total, _ = repo.list(search="findable")
         assert total == 1
         assert _ids(instances) == ["rich"]
 
@@ -220,14 +220,14 @@ class TestSearchByAgentName:
     the same as the SQLite path but exercises PG's ILIKE collation."""
 
     def test_search_matches_agent_name(self, seeded_repo):
-        instances, total = seeded_repo.list(search="reviewer")
+        instances, total, _ = seeded_repo.list(search="reviewer")
         assert total == 1
         assert _ids(instances) == ["gamma"]
 
     def test_search_matches_agent_name_case_insensitive(self, seeded_repo):
         # agent_name stored as "Coder"; lowercase query matches via ILIKE.
         # "developer" agent_id does NOT contain "coder", so delta is excluded.
-        instances, total = seeded_repo.list(search="coder")
+        instances, total, _ = seeded_repo.list(search="coder")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
@@ -236,12 +236,12 @@ class TestSearchByAgentId:
     """``agent_id`` is a plain text column on PG."""
 
     def test_search_matches_agent_id(self, seeded_repo):
-        instances, total = seeded_repo.list(search="fixer")
+        instances, total, _ = seeded_repo.list(search="fixer")
         assert total == 1
         assert _ids(instances) == ["beta"]
 
     def test_search_matches_agent_id_case_insensitive(self, seeded_repo):
-        instances, total = seeded_repo.list(search="DEVELOPER")
+        instances, total, _ = seeded_repo.list(search="DEVELOPER")
         # alpha + delta both have agent_id="developer"
         assert total == 2
         assert _ids(instances) == ["alpha", "delta"]
@@ -258,12 +258,12 @@ class TestCaseInsensitivity:
     question is whether the CAST preserves the string semantics."""
 
     def test_title_match_uppercase_query(self, seeded_repo):
-        instances, total = seeded_repo.list(search="ALPHA")
+        instances, total, _ = seeded_repo.list(search="ALPHA")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
     def test_title_match_mixed_case_query(self, seeded_repo):
-        instances, total = seeded_repo.list(search="RuN")
+        instances, total, _ = seeded_repo.list(search="RuN")
         # alpha + beta both have title containing "Run"
         assert total == 2
         assert _ids(instances) == ["alpha", "beta"]
@@ -285,7 +285,7 @@ class TestSpecialCharEscaping:
               metadata={"title": "50% off sale"})
         _make(repo, "fuzzy", agent_id="x", agent_dir="agents/y",
               metadata={"title": "50xyz off sale"})
-        instances, total = repo.list(search="50%")
+        instances, total, _ = repo.list(search="50%")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -295,7 +295,7 @@ class TestSpecialCharEscaping:
               metadata={"title": "value a_b here"})
         _make(repo, "fuzzy", agent_id="x", agent_dir="agents/y",
               metadata={"title": "value axb here"})
-        instances, total = repo.list(search="a_b")
+        instances, total, _ = repo.list(search="a_b")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -305,7 +305,7 @@ class TestSpecialCharEscaping:
               metadata={"title": r"path\to\file"})
         _make(repo, "other", agent_id="x", agent_dir="agents/y",
               metadata={"title": r"pathXtoXfile"})
-        instances, total = repo.list(search=r"\to")
+        instances, total, _ = repo.list(search=r"\to")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -319,11 +319,11 @@ class TestEmptySearch:
     """``None`` and empty string must NOT add a WHERE clause."""
 
     def test_none_search_returns_all(self, seeded_repo):
-        instances, total = seeded_repo.list(search=None)
+        instances, total, _ = seeded_repo.list(search=None)
         assert total == 4
 
     def test_empty_string_search_returns_all(self, seeded_repo):
-        instances, total = seeded_repo.list(search="")
+        instances, total, _ = seeded_repo.list(search="")
         assert total == 4
 
 
@@ -340,7 +340,7 @@ class TestSearchCombinedWithProjectId:
               metadata={"title": "Alpha Run"}, project_id="proj-1")
         _make(repo, "p2-alpha", agent_id="dev", agent_dir="agents/coder",
               metadata={"title": "Alpha Run"}, project_id="proj-2")
-        instances, total = repo.list(search="alpha", project_id="proj-1")
+        instances, total, _ = repo.list(search="alpha", project_id="proj-1")
         assert total == 1
         assert _ids(instances) == ["p1-alpha"]
 
@@ -359,7 +359,7 @@ class TestSearchCombinedWithExcludeKb:
         _make(repo, "u1", agent_id="developer", agent_dir="agents/coder",
               metadata={"title": "Alpha Run"})
 
-        instances, total = repo.list(search="alpha", exclude_kb=True)
+        instances, total, _ = repo.list(search="alpha", exclude_kb=True)
         assert total == 1
         assert _ids(instances) == ["u1"]
 
@@ -375,7 +375,7 @@ class TestSearchCombinedWithExcludeKb:
         # Sanity: KB_AGENT_IDS is in sync with the comment in the SQLite test.
         assert "experiencer" in KB_AGENT_IDS
 
-        instances, total = repo.list(search="alpha", exclude_kb=False)
+        instances, total, _ = repo.list(search="alpha", exclude_kb=False)
         assert total == 2
         assert _ids(instances) == ["k1", "u1"]
 
@@ -399,16 +399,16 @@ class TestSearchWithPagination:
               metadata={"title": "Other 2"})
 
         # Page 1
-        page1, total = repo.list(search="hit", limit=2, offset=0)
+        page1, total, _ = repo.list(search="hit", limit=2, offset=0)
         assert total == 5
         assert len(page1) == 2
 
         # Page 2
-        page2, _ = repo.list(search="hit", limit=2, offset=2)
+        page2, _, _ = repo.list(search="hit", limit=2, offset=2)
         assert len(page2) == 2
 
         # Page 3 (only 1 remaining)
-        page3, _ = repo.list(search="hit", limit=2, offset=4)
+        page3, _, _ = repo.list(search="hit", limit=2, offset=4)
         assert len(page3) == 1
 
         # All page results are distinct and from the matching set.
@@ -443,7 +443,7 @@ class TestSearchWithIncludeDescendants:
               parent_id="root", project_id="proj-x",
               metadata={"title": "Child Miss"})
 
-        instances, total = repo.list(
+        instances, total, _ = repo.list(
             search="hit", include_descendants=True, project_id="proj-x"
         )
         # Root count is 1 (only "root" matches the search); descendants

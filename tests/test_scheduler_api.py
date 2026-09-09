@@ -32,7 +32,7 @@ async def mock_manager():
     # Manager.send_message is deleted (C1-D7) and nothing in this file
     # referenced it.
     manager.terminate_instance = Mock(return_value=True)
-    manager.list_instances = Mock(return_value=([], 0))
+    manager.list_instances = Mock(return_value=([], 0, False))
     manager.get_instance_info = Mock()
     manager.enqueue_message = AsyncMock()
     manager.get_messages = AsyncMock(return_value=[])

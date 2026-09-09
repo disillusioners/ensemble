@@ -411,12 +411,97 @@ export class InstanceService {
    *
    * Failures propagate to the caller's per-leg ``catchError`` (the
    * indicator retains its last good payload — never flashes empty).
+   *
+   * TWO ACCESS PATTERNS exist (see the component's panel-open hook):
+   *
+   *   - ``listInstanceTree`` (this method) — the CHEAP 8s poll. Calls
+   *     the BE with ``include_descendants=false`` so the route does
+   *     NOT BFS-walk every root's subtree on every tick (the
+   *     descendant-cap WARN storm that motivated the poll-spam fix).
+   *     The response is a FLAT paginated slice (≤limit rows, roots +
+   *     children mixed, no BFS); ``buildInstanceNodes`` promotes
+   *     out-of-page children to top-level nodes — the panel tree is
+   *     degraded-but-sane while the panel is closed.
+   *
+   *   - ``listInstanceTreeFull`` (sibling method) — the LAZY
+   *     panel-open fetch. Calls the BE with ``include_descendants=true``
+   *     so the route re-engages the descendant BFS and returns the
+   *     FULL nested subtree for the roots on the page. Used ONLY when
+   *     the user opens the job-queue panel — one fetch per open
+   *     action, debounce-guarded. The BE now rate-limits the
+   *     descendant-cap WARN (once/10min) so the panel-open path
+   *     can re-engage BFS without flooding the log.
+   *
+   * Both paths share the same wire shape (``GET /api/instances``) so
+   * the FE builder path is unchanged — only the BE flag differs.
+   * The 60s sidebar poll in ``loadInstances`` is UNCHANGED — it keeps
+   * the historical ``include_descendants=true`` default and feeds the
+   * tree UI directly.
    */
   listInstanceTree(limit: number = 10): Observable<InstanceListResponse> {
     // order=activity: live (non-terminal) roots first, then updated_at DESC —
     // the job-queue panel must show fresh live conversations even when 20+
     // pinned roots would otherwise permanently own the pinned-first page
     // (their receipts would orphan to flat rows). limit + exclude_kb kept.
-    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity');
+    //
+    // include_descendants=false (poll-spam fix): the badge/header polls every
+    // 8s; with include_descendants=true, the route BFS-loads the full subtree
+    // of every root in the page (~510 WARN/hr on prod-scale trees when the
+    // descendant cap fires). The badge only needs root-level counts + status.
+    // With include_descendants=false the response is a FLAT paginated slice
+    // (roots + children mixed, ≤limit rows, no BFS); ``buildInstanceNodes``
+    // (frontend/src/app/models/instance-node.model.ts) promotes out-of-page
+    // children to top-level nodes, so the panel tree is degraded-but-sane
+    // while the panel is closed: a child nests under its parent only when
+    // that parent lands in the same page. The panel-open path uses the
+    // sibling ``listInstanceTreeFull`` (include_descendants=true) so the
+    // tree renders nested exactly as the pre-fix behavior. The 60s sidebar
+    // poll is UNCHANGED — it feeds the tree UI and keeps descendants.
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', false);
+  }
+
+  /**
+   * Lazy full-tree fetch — fires ONCE on panel-open from the
+   * job-queue indicator (see
+   * ``JobQueueIndicatorComponent.onPanelOpen``). Same wire as
+   * ``listInstanceTree`` but ``include_descendants=true`` so the
+   * panel renders the FULL nested subtree (roots + every descendant
+   * of those roots) exactly as the pre-poll-spam-fix behavior.
+   *
+   * The badge's 8s poll keeps ``listInstanceTree`` (the cheap flat
+   * variant) so the per-tick BFS never re-fires on prod-scale trees.
+   * On panel-close the component reverts the public
+   * ``[instances]`` input to the poll data (or whatever it was
+   * before open) — see the component's design note.
+   *
+   * Limit is the SAME default as ``listInstanceTree`` (10 roots) so
+   * the panel-open fetch is byte-equivalent in scope to a poll tick
+   * except for the descendant BFS re-engaging. KB infrastructure
+   * agents are still excluded (``exclude_kb=true``). ``order='activity'``
+   * matches the poll path so live roots still lead the page.
+   *
+   * Failures surface in the caller's subscribe ``error`` callback
+   * (the open-fetch is its own ``listInstanceTreeFull``
+   * subscription, NOT a ``forkJoin`` participant — there is no
+   * per-leg ``catchError`` on this path). The component's
+   * ``onPanelOpen`` error handler is intentionally side-effect
+   * free on the payload signals: the open-state payload is NOT
+   * written, and ``instanceRoots`` falls back to the cheap poll
+   * data when the open-state payload is empty (first open /
+   * failed refetch with no prior good tree) or RETAIN the LAST
+   * GOOD open-state tree otherwise (stale-keep across the
+   * close/reopen boundary; see
+   * ``JobQueueIndicatorComponent.onPanelClose`` and the
+   * ``instanceRoots`` non-empty-preference swap) — the panel
+   * never flashes empty.
+   */
+  listInstanceTreeFull(limit: number = 10): Observable<InstanceListResponse> {
+    // include_descendants=true: the route re-engages the per-root
+    // descendant BFS so the panel renders roots + ALL descendants
+    // (the pre-fix behavior). The BE now rate-limits the
+    // descendant-cap WARN to once/10min (caller is gated by the
+    // panel-open debounce, so the WARN rate is bounded by user
+    // open-action frequency, not by the 8s tick).
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', true);
   }
 }

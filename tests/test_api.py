@@ -45,7 +45,7 @@ async def mock_manager():
             "created_at": "2024-01-01T00:00:00",
             "updated_at": "2024-01-01T00:00:00"
         }
-    ], 1))
+    ], 1, False))
     manager.get_instance_info = Mock(return_value={
         "instance_id": "test-instance-id",
         "agent_id": "developer",
@@ -422,7 +422,7 @@ async def test_list_instances_filter_by_project_id(client, mock_manager):
             "created_at": "2024-01-01T00:00:00",
             "updated_at": "2024-01-01T00:00:00"
         }
-    ], 1)
+    ], 1, False)
     
     response = await client.get("/instances?project_id=test-project-123")
     
@@ -441,7 +441,7 @@ async def test_list_instances_filter_by_project_id(client, mock_manager):
 @pytest.mark.asyncio
 async def test_list_instances_filter_by_nonexistent_project_id(client, mock_manager):
     """Test GET /instances?project_id=nonexistent returns empty list."""
-    mock_manager.list_instances.return_value = ([], 0)
+    mock_manager.list_instances.return_value = ([], 0, False)
     
     response = await client.get("/instances?project_id=nonexistent")
     
@@ -471,7 +471,7 @@ async def test_list_instances_project_id_with_status_filter(client, mock_manager
             "created_at": "2024-01-01T00:00:00",
             "updated_at": "2024-01-01T00:00:00"
         }
-    ], 1)
+    ], 1, False)
     
     # Note: The status filter is part of the query string but project_id is what we test here
     response = await client.get("/instances?project_id=test-project&status=running")

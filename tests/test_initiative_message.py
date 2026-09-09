@@ -431,7 +431,7 @@ class TestSearchByInitiativeMessage:
             repo, "beta", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "write unit tests"},
         )
-        instances, total = repo.list(search="staging")
+        instances, total, _ = repo.list(search="staging")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
@@ -440,7 +440,7 @@ class TestSearchByInitiativeMessage:
             repo, "alpha", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "deploy the staging server"},
         )
-        instances, total = repo.list(search="production-deploy")
+        instances, total, _ = repo.list(search="production-deploy")
         assert total == 0
         assert instances == []
 
@@ -451,7 +451,7 @@ class TestSearchByInitiativeMessage:
             metadata={"initiative_message": "deploy the staging server"},
         )
         # uppercase query → lowercase data match
-        instances, total = repo.list(search="STAGING")
+        instances, total, _ = repo.list(search="STAGING")
         assert total == 1
         assert _ids(instances) == ["lower"]
 
@@ -462,7 +462,7 @@ class TestSearchByInitiativeMessage:
             repo, "upper", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "DEPLOY THE STAGING SERVER"},
         )
-        instances, total = repo.list(search="staging")
+        instances, total, _ = repo.list(search="staging")
         assert total == 1
         assert _ids(instances) == ["upper"]
 
@@ -472,7 +472,7 @@ class TestSearchByInitiativeMessage:
         # "nope" doesn't appear in any initiative_message (none exists) but
         # matches agent_id "nope" + agent_name "Nope" — confirms the field is
         # additive and not silently matching absent keys.
-        instances, total = repo.list(search="nope")
+        instances, total, _ = repo.list(search="nope")
         assert total == 1
         assert _ids(instances) == ["no-msg"]
 
@@ -490,7 +490,7 @@ class TestSearchByInitiativeMessage:
             repo, "miss", agent_id="dev", agent_dir="agents/coder",
             metadata={"title": "Add login button", "initiative_message": "styling"},
         )
-        instances, total = repo.list(search="refactor")
+        instances, total, _ = repo.list(search="refactor")
         assert total == 2
         assert _ids(instances) == ["via-init", "via-title"]
 
@@ -505,7 +505,7 @@ class TestSearchByInitiativeMessage:
             repo, "by-init", agent_id="fixer", agent_dir="agents/fixer",
             metadata={"initiative_message": "refactor authentication"},
         )
-        instances, total = repo.list(search="refactor")
+        instances, total, _ = repo.list(search="refactor")
         # 'refactor' is NOT in 'Coder' agent_name or 'developer' agent_id
         # → only "by-init" matches via initiative_message.
         assert total == 1
@@ -521,7 +521,7 @@ class TestSearchByInitiativeMessage:
             repo, "by-init", agent_id="fixer", agent_dir="agents/fixer",
             metadata={"initiative_message": "developer notes here"},
         )
-        instances, total = repo.list(search="developer")
+        instances, total, _ = repo.list(search="developer")
         # 'developer' matches agent_id on "by-id" AND initiative_message on
         # "by-init" — both come back via OR.
         assert total == 2
@@ -547,7 +547,7 @@ class TestInitiativeMessageEscaping:
             repo, "fuzzy", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "50xyz off sale"},
         )
-        instances, total = repo.list(search="50%")
+        instances, total, _ = repo.list(search="50%")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -561,7 +561,7 @@ class TestInitiativeMessageEscaping:
             repo, "fuzzy", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "value axb here"},
         )
-        instances, total = repo.list(search="a_b")
+        instances, total, _ = repo.list(search="a_b")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -575,7 +575,7 @@ class TestInitiativeMessageEscaping:
             repo, "other", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": r"pathXtoXfile"},
         )
-        instances, total = repo.list(search=r"\to")
+        instances, total, _ = repo.list(search=r"\to")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -591,7 +591,7 @@ class TestInitiativeMessageEscaping:
         )
         # Searching for "title" must match only the title field, the stored
         # ``%`` in initiative_message must NOT make every other LIKE hit.
-        instances, total = repo.list(search="title")
+        instances, total, _ = repo.list(search="title")
         assert total == 1
         assert _ids(instances) == ["with-percent"]
 
@@ -805,7 +805,7 @@ class TestEdgeCases:
             metadata={"initiative_message": "unicorn-pineapple-12345"},
         )
         _make(repo, "miss", agent_id="dev", agent_dir="agents/coder")
-        instances, total = repo.list(search="unicorn-pineapple-12345")
+        instances, total, _ = repo.list(search="unicorn-pineapple-12345")
         assert total == 1
         assert _ids(instances) == ["hit"]
 
@@ -813,7 +813,7 @@ class TestEdgeCases:
         """Search for a term that appears in NO initiative_message returns 0
         even when other rows have similar titles/agent_ids."""
         _make(repo, "x", agent_id="dev", agent_dir="agents/coder")
-        instances, total = repo.list(search="definitely-not-anywhere")
+        instances, total, _ = repo.list(search="definitely-not-anywhere")
         assert total == 0
         assert instances == []
 
@@ -824,6 +824,6 @@ class TestEdgeCases:
             metadata={"initiative_message": "hello"},
         )
         _make(repo, "no-msg", agent_id="fixer", agent_dir="agents/fixer")
-        instances, total = repo.list(search="")
+        instances, total, _ = repo.list(search="")
         assert total == 2
         assert _ids(instances) == ["no-msg", "with-msg"]

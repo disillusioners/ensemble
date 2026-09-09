@@ -165,7 +165,7 @@ class TestPinnedFirstOrdering:
         # Pin the OLDEST-but-one instance.
         _set_pref(engine, "older-pinned", pinned=True, pinned_at=_iso(2026, 7, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
 
         ids = [i.instance_id for i in instances]
         assert total == 3, f"expected total=3, got {total}; ids={ids}"
@@ -193,7 +193,7 @@ class TestPinnedFirstOrdering:
         _set_pref(engine, "p-old", pinned=True, pinned_at=_iso(2026, 7, 2))
         _set_pref(engine, "p-new", pinned=True, pinned_at=_iso(2026, 7, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 4
@@ -235,7 +235,7 @@ class TestPaginationCorrectness:
         _set_pref(engine, "inst-1", pinned=True, pinned_at=_iso(2026, 6, 30))
 
         # Page 1: limit=2, offset=0 → the two pinned instances.
-        page1, total = repo.list(limit=2, offset=0, exclude_kb=False)
+        page1, total, _ = repo.list(limit=2, offset=0, exclude_kb=False)
         ids_p1 = [i.instance_id for i in page1]
         assert total == 6, f"expected total=6, got {total}"
         assert set(ids_p1) == {"inst-0", "inst-1"}, (
@@ -244,14 +244,14 @@ class TestPaginationCorrectness:
         )
 
         # Page 2: limit=2, offset=2 → unpinned, newest first (inst-5, inst-4).
-        page2, _ = repo.list(limit=2, offset=2, exclude_kb=False)
+        page2, _, _ = repo.list(limit=2, offset=2, exclude_kb=False)
         ids_p2 = [i.instance_id for i in page2]
         assert "inst-0" not in ids_p2 and "inst-1" not in ids_p2, (
             f"Pinned instances leaked onto page 2: {ids_p2}"
         )
 
         # Page 3: limit=2, offset=4 → remaining unpinned.
-        page3, _ = repo.list(limit=2, offset=4, exclude_kb=False)
+        page3, _, _ = repo.list(limit=2, offset=4, exclude_kb=False)
         ids_p3 = [i.instance_id for i in page3]
         assert "inst-0" not in ids_p3 and "inst-1" not in ids_p3, (
             f"Pinned instances leaked onto page 3: {ids_p3}"
@@ -288,7 +288,7 @@ class TestPaginationCorrectness:
         for i in range(5, 10):
             _set_pref(engine, f"inst-{i:02d}", pinned=False, pinned_at=None)
 
-        page1, total = repo.list(limit=5, offset=0, exclude_kb=False)
+        page1, total, _ = repo.list(limit=5, offset=0, exclude_kb=False)
         ids_p1 = [i.instance_id for i in page1]
         assert total == 12, f"expected total=12, got {total}"
         # [pinned inst-00, inst-01] then newest unpinned by created_at DESC:
@@ -300,12 +300,12 @@ class TestPaginationCorrectness:
         )
 
         # Pinned must NOT leak onto later pages.
-        page2, _ = repo.list(limit=5, offset=5, exclude_kb=False)
+        page2, _, _ = repo.list(limit=5, offset=5, exclude_kb=False)
         ids_p2 = [i.instance_id for i in page2]
         assert "inst-00" not in ids_p2 and "inst-01" not in ids_p2, (
             f"Pinned instances leaked onto page 2: {ids_p2}"
         )
-        page3, _ = repo.list(limit=5, offset=10, exclude_kb=False)
+        page3, _, _ = repo.list(limit=5, offset=10, exclude_kb=False)
         ids_p3 = [i.instance_id for i in page3]
         assert "inst-00" not in ids_p3 and "inst-01" not in ids_p3, (
             f"Pinned instances leaked onto page 3: {ids_p3}"
@@ -344,7 +344,7 @@ class TestNoPrefsRowNullHandling:
         # Another no-prefs instance — oldest of all.
         _make_instance(repo, "no-prefs-old", created_at=_iso(2025, 12, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 3
@@ -377,7 +377,7 @@ class TestNoPrefsRowNullHandling:
         # No prefs row at all, NEWER created_at.
         _make_instance(repo, "no-prefs", created_at=_iso(2026, 2, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 2
@@ -418,7 +418,7 @@ class TestMultiplePinnedOrdering:
         _set_pref(engine, "pin-mid", pinned=True, pinned_at=_iso(2026, 6, 15))
         _set_pref(engine, "pin-late", pinned=True, pinned_at=_iso(2026, 7, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 3
@@ -443,7 +443,7 @@ class TestMultiplePinnedOrdering:
         _set_pref(engine, "a-created-early", pinned=True, pinned_at=_iso(2026, 7, 5))
         _set_pref(engine, "b-created-late", pinned=True, pinned_at=_iso(2026, 7, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 2
@@ -494,7 +494,7 @@ class TestMixedTrueFalseNullBugFix:
         # Instance 3: no prefs row (pinned=NULL), NEWEST created_at.
         _make_instance(repo, "is-null", created_at=_iso(2026, 3, 1))
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 3
@@ -542,7 +542,7 @@ class TestFalseNullTiebreakerSameCreatedAt:
 
         _make_instance(repo, "id-after", created_at=same_created)
 
-        instances, total = repo.list(exclude_kb=False)
+        instances, total, _ = repo.list(exclude_kb=False)
         ids = [i.instance_id for i in instances]
 
         assert total == 2

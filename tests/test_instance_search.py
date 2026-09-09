@@ -97,19 +97,19 @@ class TestSearchByTitle:
     """Title matches against ``instance_metadata.title``."""
 
     def test_search_matches_title_substring(self, seeded_repo):
-        instances, total = seeded_repo.list(search="alpha")
+        instances, total, _ = seeded_repo.list(search="alpha")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
     def test_search_no_match_returns_empty(self, seeded_repo):
-        instances, total = seeded_repo.list(search="nothing-matches-this")
+        instances, total, _ = seeded_repo.list(search="nothing-matches-this")
         assert total == 0
         assert instances == []
 
     def test_search_matches_title_with_title_set_to_none(self, repo):
         # title key absent in metadata => no title match, only name/id match
         _make(repo, "x", agent_id="nope", agent_dir="agents/nope")
-        instances, total = repo.list(search="nope")
+        instances, total, _ = repo.list(search="nope")
         # 'nope' matches both agent_id "nope" and agent_name "Nope"
         assert total == 1
 
@@ -118,13 +118,13 @@ class TestSearchByAgentName:
     """agent_name is auto-derived from agent_dir (Title Case)."""
 
     def test_search_matches_agent_name(self, seeded_repo):
-        instances, total = seeded_repo.list(search="reviewer")
+        instances, total, _ = seeded_repo.list(search="reviewer")
         assert total == 1
         assert _ids(instances) == ["gamma"]
 
     def test_search_matches_agent_name_case_insensitive(self, seeded_repo):
         # agent_name stored as "Coder"; lowercase query matches via ILIKE
-        instances, total = seeded_repo.list(search="coder")
+        instances, total, _ = seeded_repo.list(search="coder")
         # "coder" matches alpha (agent_name=Coder) only — note "developer"
         # agent_id does NOT contain "coder" as substring, so delta doesn't match.
         assert total == 1
@@ -135,12 +135,12 @@ class TestSearchByAgentId:
     """agent_id is the literal string column."""
 
     def test_search_matches_agent_id(self, seeded_repo):
-        instances, total = seeded_repo.list(search="fixer")
+        instances, total, _ = seeded_repo.list(search="fixer")
         assert total == 1
         assert _ids(instances) == ["beta"]
 
     def test_search_matches_agent_id_case_insensitive(self, seeded_repo):
-        instances, total = seeded_repo.list(search="DEVELOPER")
+        instances, total, _ = seeded_repo.list(search="DEVELOPER")
         # alpha + delta both have agent_id="developer"
         assert total == 2
         assert _ids(instances) == ["alpha", "delta"]
@@ -150,12 +150,12 @@ class TestCaseInsensitivity:
     """ILIKE must be case-insensitive on both field types."""
 
     def test_title_match_uppercase_query(self, seeded_repo):
-        instances, total = seeded_repo.list(search="ALPHA")
+        instances, total, _ = seeded_repo.list(search="ALPHA")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
     def test_title_match_mixed_case_query(self, seeded_repo):
-        instances, total = seeded_repo.list(search="RuN")
+        instances, total, _ = seeded_repo.list(search="RuN")
         # alpha + beta both have title containing "Run"
         assert total == 2
         assert _ids(instances) == ["alpha", "beta"]
@@ -173,7 +173,7 @@ class TestSpecialCharEscaping:
               metadata={"title": "50% off sale"})
         _make(repo, "fuzzy", agent_id="x", agent_dir="agents/y",
               metadata={"title": "50xyz off sale"})
-        instances, total = repo.list(search="50%")
+        instances, total, _ = repo.list(search="50%")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -183,7 +183,7 @@ class TestSpecialCharEscaping:
               metadata={"title": "value a_b here"})
         _make(repo, "fuzzy", agent_id="x", agent_dir="agents/y",
               metadata={"title": "value axb here"})
-        instances, total = repo.list(search="a_b")
+        instances, total, _ = repo.list(search="a_b")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -193,7 +193,7 @@ class TestSpecialCharEscaping:
               metadata={"title": r"path\to\file"})
         _make(repo, "other", agent_id="x", agent_dir="agents/y",
               metadata={"title": r"pathXtoXfile"})
-        instances, total = repo.list(search=r"\to")
+        instances, total, _ = repo.list(search=r"\to")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -205,18 +205,18 @@ class TestEmptySearch:
     """``None`` and empty string must NOT filter anything."""
 
     def test_none_search_returns_all(self, seeded_repo):
-        instances, total = seeded_repo.list(search=None)
+        instances, total, _ = seeded_repo.list(search=None)
         assert total == 4
 
     def test_empty_string_search_returns_all(self, seeded_repo):
-        instances, total = seeded_repo.list(search="")
+        instances, total, _ = seeded_repo.list(search="")
         assert total == 4
 
     def test_whitespace_only_search_treated_as_truthy(self, seeded_repo):
         """Whitespace is truthy and gets wrapped in ``% %`` — matches any
         title/name/id containing a space (alpha + beta titles contain spaces).
         """
-        instances, total = seeded_repo.list(search=" ")
+        instances, total, _ = seeded_repo.list(search=" ")
         # alpha + beta titles both contain " " (e.g. "Alpha Run").
         assert total == 2
         assert _ids(instances) == ["alpha", "beta"]
@@ -233,7 +233,7 @@ class TestSearchCombinedWithProjectId:
               metadata={"title": "Alpha Run"}, project_id="proj-1")
         _make(repo, "p2-alpha", agent_id="dev", agent_dir="agents/coder",
               metadata={"title": "Alpha Run"}, project_id="proj-2")
-        instances, total = repo.list(search="alpha", project_id="proj-1")
+        instances, total, _ = repo.list(search="alpha", project_id="proj-1")
         assert total == 1
         assert _ids(instances) == ["p1-alpha"]
 
@@ -251,7 +251,7 @@ class TestSearchCombinedWithExcludeKb:
         _make(repo, "u1", agent_id="developer", agent_dir="agents/coder",
               metadata={"title": "Alpha Run"})
 
-        instances, total = repo.list(search="alpha", exclude_kb=True)
+        instances, total, _ = repo.list(search="alpha", exclude_kb=True)
         assert total == 1
         assert _ids(instances) == ["u1"]
 
@@ -270,16 +270,16 @@ class TestSearchWithPagination:
               metadata={"title": "Other 2"})
 
         # Page 1
-        page1, total = repo.list(search="hit", limit=2, offset=0)
+        page1, total, _ = repo.list(search="hit", limit=2, offset=0)
         assert total == 5
         assert len(page1) == 2
 
         # Page 2
-        page2, _ = repo.list(search="hit", limit=2, offset=2)
+        page2, _, _ = repo.list(search="hit", limit=2, offset=2)
         assert len(page2) == 2
 
         # Page 3 (only 1 remaining)
-        page3, _ = repo.list(search="hit", limit=2, offset=4)
+        page3, _, _ = repo.list(search="hit", limit=2, offset=4)
         assert len(page3) == 1
 
         # All page results are distinct and from the matching set.
@@ -304,7 +304,7 @@ class TestSearchWithIncludeDescendants:
               parent_id="root", project_id="proj-x",
               metadata={"title": "Child Miss"})
 
-        instances, total = repo.list(
+        instances, total, _ = repo.list(
             search="hit", include_descendants=True, project_id="proj-x"
         )
         # root count + descendants matching "hit"
@@ -320,7 +320,7 @@ class TestSearchWithIncludeDescendants:
               agent_dir="agents/fixer", parent_id="alpha",
               metadata={"title": "Alpha Child"})
 
-        instances, total = seeded_repo.list(
+        instances, total, _ = seeded_repo.list(
             search="", include_descendants=True
         )
         # No filter: 4 roots + 1 child = 5 instances.

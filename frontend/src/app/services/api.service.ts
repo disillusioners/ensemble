@@ -169,11 +169,24 @@ export class ApiService {
     return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, body);
   }
 
-  listInstances(limit: number = 100, offset: number = 0, projectId?: string, excludeKb: boolean = true, search?: string, order?: string): Observable<InstanceListResponse> {
+  listInstances(
+    limit: number = 100,
+    offset: number = 0,
+    projectId?: string,
+    excludeKb: boolean = true,
+    search?: string,
+    order?: string,
+    includeDescendants: boolean = true,
+  ): Observable<InstanceListResponse> {
     let params = new HttpParams()
       .set('limit', limit.toString())
       .set('offset', offset.toString())
-      .set('exclude_kb', excludeKb.toString());
+      .set('exclude_kb', excludeKb.toString())
+      // Back-compat default true: every existing caller keeps today's
+      // root-paginated + descendant-loading behavior. The badge/header poll
+      // passes false to skip the per-request BFS (and the descendant-cap
+      // WARNING storm that fires on prod-scale trees when the cap is hit).
+      .set('include_descendants', includeDescendants.toString());
     if (projectId) {
       params = params.set('project_id', projectId);
     }

@@ -116,7 +116,7 @@ def mock_instance_repository():
     # Default return values for common methods
     mock_repo.create.return_value = MagicMock(instance_id="test-instance")
     mock_repo.get.return_value = None
-    mock_repo.list.return_value = ([], 0)
+    mock_repo.list.return_value = ([], 0, False)
     return mock_repo
 
 
@@ -522,9 +522,9 @@ class TestListInstances:
             mock_instance2.instance_metadata = {}
             mock_instance2.to_dict.return_value = {"instance_id": "instance-2", "agent_dir": "/path/2", "status": "idle"}
             
-            mock_instance_repository.list.return_value = ([mock_instance1, mock_instance2], 2)
+            mock_instance_repository.list.return_value = ([mock_instance1, mock_instance2], 2, False)
             
-            instances, total = manager.list_instances()
+            instances, total, _ = manager.list_instances()
             
             assert len(instances) == 2
             assert instances[0]["instance_id"] == "instance-1"

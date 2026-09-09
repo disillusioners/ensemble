@@ -388,6 +388,18 @@ async def list_instances(
     offset: int = 0,
     project_id: str | None = Query(None, description="Filter instances by project ID"),
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
+    include_descendants: bool = Query(
+        True,
+        description=(
+            "When True (default — back-compat for every existing consumer), "
+            "paginate by root and BFS-load all descendants of each root in "
+            "the current page. When False, return a flat paginated list of "
+            "matching rows only — cheap, no descendant BFS, no descendant-cap "
+            "warnings. The FE's 8s badge poll passes ``include_descendants=false`` "
+            "for a cheap flat poll; the FE panel-open lazy refetch and the 60s "
+            "sidebar poll pass ``true`` to load the full tree."
+        ),
+    ),
     search: str | None = Query(
         None,
         description=(
@@ -412,9 +424,11 @@ async def list_instances(
 ) -> InstanceListResponse:
     """List instances with pagination.
 
-    Pagination is root-based: only root instances (parent_id IS NULL or empty)
-    are counted and paginated. ALL descendants of each root in the current page
-    are loaded via BFS and included in the flat result list.
+    Pagination is root-based when ``include_descendants=true`` (default): only
+    root instances (parent_id IS NULL or empty) are counted and paginated,
+    and ALL descendants of each root in the current page are loaded via BFS
+    and included in the flat result list. With ``include_descendants=false``
+    the response is a flat paginated list of all matching rows.
 
     Args:
         request: FastAPI request object.
@@ -423,6 +437,10 @@ async def list_instances(
         project_id: Filter instances by project ID (optional).
         exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
             Applies to both root counting and descendant loading.
+        include_descendants: Back-compat default True. When True, paginate by
+            root and BFS-load all descendants of each root in the current
+            page. When False, return flat paginated rows only (no descendant
+            loading, no truncation warnings).
         search: Optional case-insensitive substring filter against
             ``instance_metadata.title``, ``agent_name``, and ``agent_id``
             (optional). When omitted/empty, no text filter is applied.
@@ -437,12 +455,12 @@ async def list_instances(
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
 
-    instances_data, total = manager.list_instances(
+    instances_data, total, truncated = manager.list_instances(
         limit=limit,
         offset=offset,
         project_id=project_id,
         exclude_kb=exclude_kb,
-        include_descendants=True,
+        include_descendants=include_descendants,
         search=search,
         order=order,
     )
@@ -489,13 +507,14 @@ async def list_instances(
         ))
     
     has_more = (offset + limit) < total
-    
+
     return InstanceListResponse(
         instances=instances,
         total=total,
         limit=limit,
         offset=offset,
-        has_more=has_more
+        has_more=has_more,
+        truncated=truncated,
     )
 
 

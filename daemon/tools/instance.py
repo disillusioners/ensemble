@@ -4133,7 +4133,10 @@ Returns:
     @tool
     def list_instances() -> list[dict]:
         """List all active instances. Use tool_help("list_instances") for details."""
-        instances, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT)
+        # ``truncated`` is only meaningful with ``include_descendants=true``;
+        # this tool uses the default (false), so the third tuple slot is a
+        # throwaway.
+        instances, _, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT)
         return instances
 
     list_instances._full_doc_ = f"""List the {DEFAULT_PAGE_LIMIT} most recent active instances.

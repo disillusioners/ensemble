@@ -136,6 +136,17 @@ class InstanceListResponse(BaseModel):
     limit: int = Field(..., description="Maximum number of instances returned")
     offset: int = Field(..., description="Number of instances skipped")
     has_more: bool = Field(..., description="Whether more instances are available")
+    truncated: bool = Field(
+        False,
+        description=(
+            "True iff ``include_descendants=true`` AND the descendant cap "
+            "(``MAX_DESCENDANTS_PER_PAGE``) fired during BFS — some descendants "
+            "of the selected roots are missing from this response. Always "
+            "False on flat-paginated requests (``include_descendants=false``) "
+            "and on empty pages. Frontend UI for this flag is intentionally "
+            "deferred; surfaced for diagnostics + future ops visibility only."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -153,7 +164,8 @@ class InstanceListResponse(BaseModel):
                 "total": 150,
                 "limit": 100,
                 "offset": 0,
-                "has_more": True
+                "has_more": True,
+                "truncated": False
             }
         }
     )
