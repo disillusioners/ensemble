@@ -1,6 +1,6 @@
 """Prompt-contract greps for the leader completion attestation feature
 (2026-09-06 — conditional gate; 2026-09-08 — prompt-contract section
-retracted).
+retracted, suppression rule added, tool description condensed).
 
 The LCA feature ships in three runtime layers:
 
@@ -19,16 +19,22 @@ The LCA feature ships in three runtime layers:
    (2026-09-08 decision: a standing prompt-contract section is
    redundant and was removed).
 
-These tests pin the ABSENCE side of the prompt-contract after the
-2026-09-08 retraction. Specifically: in BOTH ``agents/leader/rule.md``
-and ``agents/leader/workflow.md`` we assert that (a) the LCA section
-headings are gone, (b) the conditional-contract fragments are gone,
-and (c) the old unconditional-contract fragments remain gone. The
-sole survivor in ``agents/leader/`` is the ``attestation`` entry in
-``meta.json`` ``tools.allow`` (tool-inventory mention — KEEP). Drift
-here is silent: the contract disappearing from the leader's prompt
-without any test failure would mean a future contributor silently
-re-introduces a redundant or worse stale prompt section.
+These tests pin (a) the ABSENCE side of the standing prompt-contract
+section after the 2026-09-08 retraction: in BOTH
+``agents/leader/rule.md`` and ``agents/leader/workflow.md`` we assert
+that the LCA section headings, the conditional-contract fragments,
+and the old unconditional-contract fragments are all gone. The sole
+survivor in ``agents/leader/`` is the ``attestation`` entry in
+``meta.json`` ``tools.allow`` (tool-inventory mention — KEEP).
+
+These tests ALSO pin the PRESENCE side of the 2026-09-08 follow-up
+amendment: rule.md MUST carry a small suppression rule ("do not
+call ``attest_completion`` unless the system nudges you"), and
+``daemon/tools/attestation.py`` MUST carry the concise conditional
+tool description (CONDITIONAL framing + when-not-to-call + ack-note
+fragments). Drift here is silent: the suppression rule could silently
+vanish, or the tool description could bloat back to the old verbose
+shape, with no test failure unless the rules are pinned.
 """
 from __future__ import annotations
 
@@ -41,6 +47,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RULE_MD = REPO_ROOT / "agents" / "leader" / "rule.md"
 WORKFLOW_MD = REPO_ROOT / "agents" / "leader" / "workflow.md"
+ATTESTATION_PY = REPO_ROOT / "daemon" / "tools" / "attestation.py"
 
 # Pin: the unconditional MUST-call contract is GONE in rule.md
 # (Phase 6 fastfollow 2026-09-06, FR-3 conditionality). The prompts no
@@ -90,6 +97,50 @@ CONDITIONAL_CONTRACT_FRAGMENTS = (
 LCA_HEADING_FRAGMENTS = (
     "### 📜 Completion Attestation (LCA feature — conditional, 2026-09-06)",
     "## Completion Attestation (LCA feature — conditional, 2026-09-06)",
+)
+
+# Suppression-rule fragments (2026-09-08 follow-up amendment): the
+# leader prompt MUST carry a small suppression rule that prevents the
+# leader from calling ``attest_completion`` on its own initiative.
+# LLMs see the tool in their toolset and tend to call it
+# spontaneously even on non-delegated missions — the suppression rule
+# is the prompt-side guard, paired with the concise conditional tool
+# description (DOCSTRING_FRAGMENTS below) which communicates the
+# conditional framing to the LLM at tool-listing time. Pinning
+# PRESENCE here guards against the rule silently vanishing.
+SUPPRESSION_RULE_FRAGMENTS = (
+    # The rule's heading (a `### ❌` subsection under `## Must Not`).
+    "Spontaneous `attest_completion`",
+    # The negative instruction — DO NOT call unless the system nudges.
+    "DO NOT call `attest_completion` unless the system nudges you",
+    # The non-delegation carve-out — quick answers, charts, follow-ups,
+    # and any mission that did not dispatch children never need it.
+    "did not delegate via `send_message`",
+    # The "just complete normally" tail (closes the suppression).
+    "just complete normally",
+)
+
+# Concise-conditional docstring fragments (2026-09-08 follow-up
+# amendment): ``daemon/tools/attestation.py`` MUST carry the concise
+# conditional tool description — CONDITIONAL framing, when-not-to-call
+# guidance, and the ack-note example. The docstring is shown to the
+# LLM at tool-listing time and is the second half of the suppression
+# defense (the suppression rule is the first half). Pinning PRESENCE
+# here guards against the description silently bloating back to the
+# old verbose shape (which conditioned the LLM to call the tool on
+# every turn) or losing its conditional framing.
+DOCSTRING_FRAGMENTS = (
+    # Conditional framing — must lead with this so the LLM knows the
+    # tool is conditional on its' situation.
+    "CONDITIONAL",
+    # When-not-to-call — explicit carve-out for plain answers, charts,
+    # quick follow-ups, non-delegating missions.
+    "DO NOT call for plain answers",
+    # When the gate or judge has already released — explicit ack that
+    # the nudge is the trigger, not self-motivation.
+    "the gate or judge has already released",
+    # Ack-note example — verbatim, so the LLM sees a concrete phrasing.
+    "Report delivered above; attesting completion.",
 )
 
 
@@ -153,6 +204,21 @@ class TestRuleMdContract:
             f"conditional framing."
         )
 
+    @pytest.mark.parametrize("fragment", SUPPRESSION_RULE_FRAGMENTS)
+    def test_suppression_rule_present(self, source: str, fragment: str) -> None:
+        """The 2026-09-08 suppression rule MUST be present in rule.md.
+        LLMs see ``attest_completion`` in their toolset and tend to
+        call it spontaneously even on non-delegated missions; the
+        rule is the prompt-side guard. Removing it would silently
+        let spontaneous over-calls return."""
+        assert fragment in source, (
+            f"rule.md is missing the suppression-rule fragment: "
+            f"{fragment!r}. The 2026-09-08 amendment added a small "
+            f"rule that prevents the leader from calling "
+            f"``attest_completion`` unless the system nudges it. "
+            f"Restore the rule."
+        )
+
 
 # ── workflow.md: pointer collapsed to sole teaching source (2026-09-08) ─────
 
@@ -207,4 +273,49 @@ class TestWorkflowMdPointer:
         assert "treat it as a real user instruction" not in source, (
             "workflow.md duplicates the canonical nudge rule — collapse "
             "to the one-line pointer"
+        )
+
+
+# ── attestation.py: concise conditional tool description (2026-09-08) ───────
+
+
+class TestAttestationToolDocstring:
+    """``daemon/tools/attestation.py`` carries the tool description
+    the LLM sees at tool-listing time. The 2026-09-08 amendment
+    condensed this description to be CONCISE and CONDITIONAL —
+    leading with the conditional framing, an explicit when-not-to-call
+    block, and the ack-note example — so the LLM does not infer an
+    unconditional MUST-call obligation from the description alone.
+
+    These tests pin PRESENCE so a future contributor cannot silently
+    bloat the description back to the old verbose shape (which
+    conditioned the LLM to call the tool on every turn) or strip the
+    conditional framing. The module header docstring + the tool's own
+    docstring + ``_full_doc_`` are all part of the same source file,
+    so a single parametrized presence check covers all three surfaces.
+    """
+
+    @pytest.fixture
+    def source(self) -> str:
+        return ATTESTATION_PY.read_text(encoding="utf-8")
+
+    def test_file_exists(self) -> None:
+        assert ATTESTATION_PY.exists(), (
+            f"missing attestation.py at {ATTESTATION_PY}"
+        )
+
+    @pytest.mark.parametrize("fragment", DOCSTRING_FRAGMENTS)
+    def test_docstring_fragment_present(self, source: str, fragment: str) -> None:
+        """Each fragment of the concise conditional tool description
+        MUST be present somewhere in ``daemon/tools/attestation.py``.
+        The fragments collectively pin: the CONDITIONAL framing, the
+        when-not-to-call guidance, the nudge-as-trigger framing, and
+        the ack-note example."""
+        assert fragment in source, (
+            f"attestation.py is missing the concise-conditional "
+            f"docstring fragment: {fragment!r}. The 2026-09-08 "
+            f"amendment condensed the tool description to communicate "
+            f"the conditional framing at tool-listing time; restoring "
+            f"the verbose shape or stripping the conditional framing "
+            f"would let LLMs over-call the tool on non-delegated turns."
         )

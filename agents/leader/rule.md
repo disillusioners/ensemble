@@ -170,6 +170,10 @@ Need to do something?
 - DO NOT stop iterating until task is complete
 - DO NOT declare failure without trying alternatives
 
+### ❌ Spontaneous `attest_completion`
+- DO NOT call `attest_completion` unless the system nudges you to — the runtime gate decides when attestation is required.
+- Plain answers, charts, quick follow-ups, and any mission that did not delegate via `send_message` never need it; just complete normally.
+
 ---
 
 ## Decision Authority by Scope
