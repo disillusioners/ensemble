@@ -21,6 +21,8 @@ from daemon.repositories.instance.repository import (
     MAX_DESCENDANTS_PER_PAGE,
     SQLModelInstanceRepository,
     _MAX_TRAVERSAL_DEPTH,
+    _descendant_cap_warn_last_emit,
+    _DESCENDANT_CAP_WARN_WINDOW_SECONDS,
 )
 
 
@@ -74,7 +76,7 @@ class TestListIncludeDescendantsBFS:
         _make_instance(repo, "child-b1", parent_id="root-b")
         _make_instance(repo, "child-b2", parent_id="root-b")
 
-        instances, total = repo.list(include_descendants=True)
+        instances, total, _ = repo.list(include_descendants=True)
 
         assert total == 2
         assert len(instances) == 6
@@ -92,7 +94,7 @@ class TestListIncludeDescendantsBFS:
         _make_instance(repo, "grandchild", parent_id="child")
         _make_instance(repo, "great-grandchild", parent_id="grandchild")
 
-        instances, total = repo.list(include_descendants=True)
+        instances, total, _ = repo.list(include_descendants=True)
 
         assert total == 1
         assert len(instances) == 4
@@ -109,7 +111,7 @@ class TestListIncludeDescendantsBFS:
         # Nested KB child (under regular child) should also be excluded
         _make_instance(repo, "nested-kb", parent_id="regular-child", agent_id="kb-importer")
 
-        instances, total = repo.list(include_descendants=True, exclude_kb=True)
+        instances, total, _ = repo.list(include_descendants=True, exclude_kb=True)
 
         # Only root counts as a root; KB children are excluded at all levels.
         assert total == 1
@@ -129,7 +131,7 @@ class TestListIncludeDescendantsBFS:
         _make_instance(repo, "child-1b", parent_id="root-1")
 
         # Page 1: limit=1, offset=0 → root-1 (newer) + 2 children
-        instances_p1, total_p1 = repo.list(
+        instances_p1, total_p1, _ = repo.list(
             limit=1, offset=0, include_descendants=True
         )
         assert total_p1 == 2
@@ -139,7 +141,7 @@ class TestListIncludeDescendantsBFS:
         }
 
         # Page 2: limit=1, offset=1 → root-2 (older) + 1 child
-        instances_p2, total_p2 = repo.list(
+        instances_p2, total_p2, _ = repo.list(
             limit=1, offset=1, include_descendants=True
         )
         assert total_p2 == 2
@@ -150,7 +152,7 @@ class TestListIncludeDescendantsBFS:
 
     def test_empty_database_no_instances(self, repo):
         """Completely empty database → returns ([], 0)."""
-        instances, total = repo.list(include_descendants=True)
+        instances, total, _ = repo.list(include_descendants=True)
         assert instances == []
         assert total == 0
 
@@ -170,7 +172,7 @@ class TestListIncludeDescendantsBFS:
         _make_instance(repo, "orphan-2", parent_id="ghost-parent-b")
         _make_instance(repo, "orphan-3", parent_id="ghost-parent-c")
 
-        instances, total = repo.list(include_descendants=True)
+        instances, total, _ = repo.list(include_descendants=True)
         assert instances == []
         assert total == 0
 
@@ -182,7 +184,7 @@ class TestListIncludeDescendantsBFS:
             repo, "child-other-project", parent_id="root-p1", project_id="proj-2"
         )
 
-        instances, total = repo.list(
+        instances, total, _ = repo.list(
             include_descendants=True, project_id="proj-1"
         )
         assert total == 1
@@ -215,7 +217,7 @@ class TestListIncludeDescendantsDedup:
         # (re-save via update to set parent_id=root after creation)
         repo.update("grandchild", parent_id="root")
 
-        instances, total = repo.list(include_descendants=True)
+        instances, total, _ = repo.list(include_descendants=True)
 
         # root + child + grandchild; no duplicates of root.
         assert total == 1
@@ -242,7 +244,7 @@ class TestListIncludeDescendantsDepthLimit:
             _make_instance(repo, f"node-{i}", parent_id=f"node-{i - 1}")
 
         with caplog.at_level(logging.WARNING, logger="daemon.repositories.instance.repository"):
-            instances, total = repo.list(include_descendants=True, limit=100)
+            instances, total, _ = repo.list(include_descendants=True, limit=100)
 
         # Root was counted, and at least _MAX_TRAVERSAL_DEPTH descendants were
         # traversed. We should have seen the warning.
@@ -277,7 +279,7 @@ class TestExcludeKBTraversesThroughKBParents:
             repo, "non_kb_grandchild", parent_id="kb_child", agent_id="developer"
         )
 
-        instances, total = repo.list(include_descendants=True, exclude_kb=True)
+        instances, total, _ = repo.list(include_descendants=True, exclude_kb=True)
 
         assert total == 1
         returned_ids = {i.instance_id for i in instances}
@@ -293,7 +295,7 @@ class TestExcludeKBTraversesThroughKBParents:
             repo, "non_kb_grandchild", parent_id="kb_child", agent_id="developer"
         )
 
-        instances, total = repo.list(include_descendants=True, exclude_kb=False)
+        instances, total, _ = repo.list(include_descendants=True, exclude_kb=False)
 
         assert total == 1
         returned_ids = {i.instance_id for i in instances}
@@ -330,7 +332,7 @@ class TestDescendantCap:
         with caplog.at_level(
             logging.WARNING, logger="daemon.repositories.instance.repository"
         ):
-            instances, total = repo.list(include_descendants=True)
+            instances, total, _ = repo.list(include_descendants=True)
 
         assert total == 1
         assert len(instances) == 3
@@ -367,7 +369,7 @@ class TestListFlatPaginationUnchanged:
         _make_instance(repo, "child-2", parent_id="root-2")
 
         # Default include_descendants=False: flat list, total counts all matching.
-        instances, total = repo.list()
+        instances, total, _ = repo.list()
 
         assert total == 4
         assert len(instances) == 4
@@ -380,11 +382,291 @@ class TestListFlatPaginationUnchanged:
             _make_instance(repo, f"inst-{i}")
 
         # limit=2, offset=0
-        instances, total = repo.list(limit=2, offset=0)
+        instances, total, _ = repo.list(limit=2, offset=0)
         assert total == 5
         assert len(instances) == 2
 
         # limit=2, offset=4 → 1 instance
-        instances, total = repo.list(limit=2, offset=4)
+        instances, total, _ = repo.list(limit=2, offset=4)
         assert total == 5
         assert len(instances) == 1
+
+
+# =============================================================================
+# POLL-SPAM FIX TESTS (2026-09-09)
+# =============================================================================
+
+
+class TestIncludeDescendantsParam:
+    """The new ``include_descendants`` query param (default True for
+    back-compat) routes through the repository.
+    """
+
+    def test_default_true_walks_descendants(self, repo):
+        """Omitting ``include_descendants`` keeps the historical behavior:
+        root-based pagination + BFS descendant loading. Back-compat
+        contract for every existing consumer that doesn't pass the kwarg.
+        """
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="root")
+
+        instances, total, truncated = repo.list()  # default include_descendants=False
+
+        # Wait — the REPOSITORY default is False (the route layer overrides
+        # to True for back-compat). This test pins the REPO default, which
+        # is the layer below the route. The route adds ``True`` for the
+        # existing ``GET /api/instances`` callers.
+        # Flat pagination: 3 rows total.
+        assert total == 3
+        assert len(instances) == 3
+        assert truncated is False
+
+    def test_explicit_true_walks_descendants(self, repo):
+        """``include_descendants=True`` runs root-based pagination +
+        BFS descendant loading."""
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="root")
+
+        instances, total, truncated = repo.list(include_descendants=True)
+
+        # Root-based pagination: total reflects roots only.
+        assert total == 1
+        assert len(instances) == 3  # root + 2 children
+        returned_ids = {i.instance_id for i in instances}
+        assert returned_ids == {"root", "child-1", "child-2"}
+        # No cap hit (3 < 1000).
+        assert truncated is False
+
+    def test_explicit_false_skips_descendant_bfs(self, repo):
+        """``include_descendants=False`` skips the descendant BFS entirely.
+        Returns a flat paginated list of all matching instances. No
+        descendant-cap WARNING — even with many descendants present.
+        """
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="root")
+        _make_instance(repo, "grandchild", parent_id="child-1")
+
+        instances, total, truncated = repo.list(include_descendants=False)
+
+        # Flat pagination: 4 rows total.
+        assert total == 4
+        assert len(instances) == 4
+        assert truncated is False
+        # Returned rows are exactly what was inserted (no BFS expansion).
+        returned_ids = {i.instance_id for i in instances}
+        assert returned_ids == {"root", "child-1", "child-2", "grandchild"}
+
+
+class TestDescendantCapTruncationFlag:
+    """The ``truncated`` boolean on the 3-tuple return.
+
+    Surfaces True iff the descendant cap fired during BFS. False on flat
+    pagination (no BFS) and on cap-unaffected BFS.
+    """
+
+    def test_truncated_false_on_no_cap(self, repo, monkeypatch):
+        """A small tree (cap not reached) returns ``truncated=False``."""
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+
+        instances, total, truncated = repo.list(include_descendants=True)
+
+        # 2 rows total, cap=3, no truncation.
+        assert len(instances) == 2
+        assert truncated is False
+
+    def test_truncated_true_on_cap(self, repo, monkeypatch):
+        """A tree that exceeds the cap returns ``truncated=True``."""
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        # Chain shape (each BFS batch adds exactly one row).
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="child-1")
+        _make_instance(repo, "child-3", parent_id="child-2")
+        _make_instance(repo, "child-4", parent_id="child-3")
+
+        instances, total, truncated = repo.list(include_descendants=True)
+
+        # Cap fires at 3 rows.
+        assert len(instances) == 3
+        assert truncated is True
+
+    def test_truncated_false_on_flat_pagination_even_with_many_rows(
+        self, repo, monkeypatch
+    ):
+        """Flat pagination (``include_descendants=False``) NEVER sets
+        ``truncated=True`` — there's no BFS, so the cap can't fire.
+        """
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        # Many rows, would trigger cap if BFS ran.
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="root")
+        _make_instance(repo, "child-3", parent_id="root")
+        _make_instance(repo, "child-4", parent_id="root")
+
+        instances, total, truncated = repo.list(include_descendants=False)
+
+        # All 5 rows returned flat.
+        assert len(instances) == 5
+        assert total == 5
+        # truncated is False because the flat path never BFSes.
+        assert truncated is False
+
+
+class TestDescendantCapWarningRateLimit:
+    """The descendant-cap WARNING is rate-limited to
+    ``_DESCENDANT_CAP_WARN_WINDOW_SECONDS`` per offset.
+
+    The 8s badge poll on prod-scale trees fires the cap on every tick
+    (~510 WARN/hr without rate-limiting). The fix: first occurrence per
+    window stays WARNING; repeats within the window are logged at DEBUG.
+    Tests use module-level state reset + injected clock for determinism —
+    never sleep the window.
+    """
+
+    def test_first_occurrence_is_warning(self, repo, monkeypatch, caplog):
+        """First descendant-cap hit in a window emits WARNING."""
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        # Reset module-level state so this test is deterministic.
+        _descendant_cap_warn_last_emit.clear()
+
+        # Chain shape → cap fires.
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="child-1")
+        _make_instance(repo, "child-3", parent_id="child-2")
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.repositories.instance.repository"
+        ):
+            repo.list(include_descendants=True)
+
+        warning_texts = [
+            rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING
+        ]
+        debug_texts = [
+            rec.getMessage() for rec in caplog.records if rec.levelno == logging.DEBUG
+        ]
+        assert any("Descendant limit" in t for t in warning_texts), (
+            f"Expected WARNING on first cap hit, got: warning={warning_texts} debug={debug_texts}"
+        )
+
+    def test_repeat_within_window_is_debug(self, repo, monkeypatch, caplog):
+        """Second cap hit within the window emits DEBUG, not WARNING.
+
+        Uses an injected monotonic clock so the test never sleeps.
+        """
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        # Reset state and inject a monotonic clock.
+        _descendant_cap_warn_last_emit.clear()
+        fake_now = [1000.0]
+
+        def fake_monotonic():
+            return fake_now[0]
+
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.time.monotonic",
+            fake_monotonic,
+        )
+
+        # Chain shape → cap fires.
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="child-1")
+        _make_instance(repo, "child-3", parent_id="child-2")
+
+        # First call: t=1000 → WARNING emitted, state[0]=1000
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.repositories.instance.repository"
+        ):
+            repo.list(include_descendants=True)
+        warning_count_1 = sum(
+            1 for rec in caplog.records if rec.levelno == logging.WARNING
+            and "Descendant limit" in rec.getMessage()
+        )
+        assert warning_count_1 == 1, "First cap hit must emit WARNING"
+
+        # Advance clock within the window (1s later).
+        caplog.clear()
+        fake_now[0] = 1001.0
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.repositories.instance.repository"
+        ):
+            repo.list(include_descendants=True)
+        warning_count_2 = sum(
+            1 for rec in caplog.records if rec.levelno == logging.WARNING
+            and "Descendant limit" in rec.getMessage()
+        )
+        debug_count_2 = sum(
+            1 for rec in caplog.records if rec.levelno == logging.DEBUG
+            and "Descendant limit" in rec.getMessage()
+        )
+        # Second call within window: DEBUG, not WARNING.
+        assert warning_count_2 == 0, "Second cap hit within window must NOT emit WARNING"
+        assert debug_count_2 == 1, "Second cap hit within window must emit DEBUG"
+
+    def test_repeat_after_window_is_warning_again(
+        self, repo, monkeypatch, caplog
+    ):
+        """Cap hit after the window has elapsed emits WARNING again.
+
+        Uses injected clock to advance past the window without sleeping.
+        """
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+        _descendant_cap_warn_last_emit.clear()
+        fake_now = [1000.0]
+
+        def fake_monotonic():
+            return fake_now[0]
+
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.time.monotonic",
+            fake_monotonic,
+        )
+
+        # Chain shape → cap fires.
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="child-1")
+        _make_instance(repo, "child-3", parent_id="child-2")
+
+        # First call: WARNING.
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.repositories.instance.repository"
+        ):
+            repo.list(include_descendants=True)
+
+        # Advance clock past the window.
+        caplog.clear()
+        fake_now[0] = 1000.0 + _DESCENDANT_CAP_WARN_WINDOW_SECONDS + 1
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.repositories.instance.repository"
+        ):
+            repo.list(include_descendants=True)
+
+        warning_count = sum(
+            1 for rec in caplog.records if rec.levelno == logging.WARNING
+            and "Descendant limit" in rec.getMessage()
+        )
+        assert warning_count == 1, (
+            "Cap hit after window elapsed must emit WARNING again"
+        )
