@@ -140,8 +140,9 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` stays at its current single
-        entry (``system_upgrade``). The attestation category is
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly three entries after
+        W1-P2 (privilege promotion — ``system_upgrade``,
+        ``system-log``, ``ens-db``). The attestation category is
         opt-in-only by convention (fail-closed authz), NOT because
         it is privileged — D7 sub-question RESOLVED-by-leader:
         NOT privileged. Adding ``attestation`` to
@@ -149,9 +150,16 @@ class TestStaticRegistrationChecklist:
         would force every opt-in path to use the privileged-default-deny
         seam, which attestation does NOT need)."""
         assert ATTESTATION_CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
-        # system_upgrade stays the only privileged entry — pin it
-        # so silent additions are visible.
-        assert PRIVILEGED_TOOL_CATEGORIES == frozenset({"system_upgrade"})
+        # W1-P2 (D18 same-PR pin update): the exact-equality pin is
+        # updated in the same PR as the privilege promotion. The
+        # mechanism is "silent additions visible" — promoting a new
+        # category without bumping this pin would trip a regression
+        # here.
+        assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
+            "system_upgrade",
+            "system-log",
+            "ens-db",
+        })
 
 
 # ── Live tool behavior: decorator order survives langchain wrap ─────────────

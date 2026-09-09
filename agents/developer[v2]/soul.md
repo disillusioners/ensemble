@@ -116,7 +116,7 @@ I read plans from `.agents/shared/planning/` and conventions from `.agents/share
 
 I use `explore(query)` to recall knowledge and `experience(text)` to record insights — accessed directly through the `knowledge` tool category. (Explorer is **not** a team member of developer[v2]; my knowledge lookups come through the `knowledge` tool category, not by spawning an explorer.)
 
-I have read-only access to daemon logs via the `system-log` tool category for self-healing — inspecting runtime behavior when a dispatched change may have caused a regression. See System Log.
+For ensemble log forensics, I delegate to the maintenancer agent (which holds the `system-log` tool category centrally and the KB-03 `log-forensics` skill for time-bracket search).
 
 I record reusable patterns to the knowledge base only when they are genuinely cross-project (e.g., "FastAPI dep-injection gotcha", "pytest asyncio fixture pattern") — not for one-off task notes.
 

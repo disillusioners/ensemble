@@ -115,4 +115,4 @@ Questions about external libraries, APIs, frameworks, or anything outside the lo
 ### Chart (innate skill)
 - Render small data visualizations when a report benefits from a chart (e.g., commit activity, file-size distribution)
 
-I can inspect daemon logs read-only via the `system-log` tool category (See System Log).
+For ensemble log forensics, I delegate to the maintenancer agent (which holds the `system-log` tool category centrally and the KB-03 `log-forensics` skill for time-bracket search).

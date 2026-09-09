@@ -212,6 +212,7 @@ from .system import create_system_tools
 from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
+from .ens_db_tools import create_ens_db_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from ._tool_registry import (
@@ -4455,6 +4456,21 @@ Returns:
         manager, current_instance_id, agent_id
     )
     tools.extend(attestation_tool_list)
+
+    # ── ens-db tools (W1-P2, task 2.2) — direct ensemble_prod access ──
+    # Privileged category (R-SR16, architect §4.1). Tools reach ONLY
+    # the daemon's own DB on the shared engine (read path) or the
+    # dedicated 2+3 repair pool (writer). Three gates on the repair
+    # writer: kill-switch (default ON), input validation (idempotent
+    # DO$$-only, refuse *.sql, refuse self-surgery), and confirm
+    # nonce (single-use, 5-min TTL, action-bound). Decorator-only
+    # registration is SILENTLY INVISIBLE — the extend below is the
+    # third step of the three-step registration seam (decorator +
+    # registry entry + construction — all three required).
+    ens_db_tool_list = create_ens_db_tools(
+        manager, current_instance_id, agent_id
+    )
+    tools.extend(ens_db_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
