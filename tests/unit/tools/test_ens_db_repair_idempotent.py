@@ -234,10 +234,22 @@ class TestIdempotentInsertOnConflict:
         if not is_pg:
             pytest.skip("PG-only UPSERT semantics pin")
 
-        # Seed.
+        # Seed (idempotent — re-runs against a persistent PG must not
+        # fail on the second pass when ``upsert_t`` already exists
+        # and row id=1 has already been inserted).
         with engine.begin() as conn:
-            conn.execute(text("CREATE TABLE upsert_t (id INTEGER PRIMARY KEY, n INTEGER)"))
-            conn.execute(text("INSERT INTO upsert_t (id, n) VALUES (1, 100)"))
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS upsert_t ("
+                    "id INTEGER PRIMARY KEY, n INTEGER)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO upsert_t (id, n) VALUES (1, 100) "
+                    "ON CONFLICT (id) DO NOTHING"
+                )
+            )
 
         sql = (
             "INSERT INTO upsert_t (id, n) VALUES (1, 100) "

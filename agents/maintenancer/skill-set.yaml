@@ -1,15 +1,37 @@
-# Maintenancer skill manifest (P1 placeholder — populated by P4 task 4.3)
-#
-# Format (per existing v2 manifests):
-#   agent_id: <id>
-#   skills:
-#     - name: <skill-name>
-#       version: "<semver>"
-#       auto_load: <true|false>
-#       category: <category>
-#       description: "<one-line description>"
-#
-# P4 task 4.3 will populate the seven skill entries for repair, audit, log
-# forensics, knowledge curation, escalation, and the two custom tools.
 agent_id: maintenancer
-skills: []
+skills:
+  - name: kb-curator
+    version: "1.0.0"
+    auto_load: true
+    category: workflow
+    description: "KB INDEX awareness + filesystem reads + first-turn RAG mirror"
+  - name: log-forensics
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Time-bracket log forensics + redaction-aware reads"
+  - name: job-mission-repair
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Diagnose + repair job/task/mission state via the controlled writer"
+  - name: ens-db-repair
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Guarded execution — idempotent DO$$-only repair + audit + dry-run"
+  - name: restart-upgrade-ops
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Pause-first quiesce + dry-run upgrade prep; live arms via 3-factor gate only"
+  - name: bug-advisory
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "Read-only consultation — analyze, diagnose, recommend fix sketch"
+  - name: health-check
+    version: "1.0.0"
+    auto_load: false
+    category: maintenance
+    description: "MaintenanceJob registry + StaleTaskRecovery sweep; read-only diagnostic"
