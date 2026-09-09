@@ -417,6 +417,14 @@ export class InstanceService {
     // the job-queue panel must show fresh live conversations even when 20+
     // pinned roots would otherwise permanently own the pinned-first page
     // (their receipts would orphan to flat rows). limit + exclude_kb kept.
-    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity');
+    //
+    // include_descendants=false (poll-spam fix): the badge/header polls every
+    // 8s; with include_descendants=true, the route BFS-loads the full subtree
+    // of every root in the page (~510 WARN/hr on prod-scale trees when the
+    // descendant cap fires). The badge only needs root-level counts + status;
+    // the panel's nested tree-builder still gets its descendants via the
+    // dedicated tree API (which keeps ``include_descendants=true``). The 60s
+    // sidebar poll is UNCHANGED — it feeds the tree UI and keeps descendants.
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', false);
   }
 }
