@@ -12,11 +12,14 @@ Fixture list:
 * DDL idempotent with DO$$ wrapper (PG only).
 
 The DDL idempotent case runs on BOTH engines (architect §7.5). The
-PG-only cases skip on SQLite.
+PG-only cases skip on SQLite. When ``ENSEMBLE_TEST_PG_URL`` points at
+a disposable PG instance, the whole suite (including the PG-only
+pins) runs against it; otherwise SQLite is the default engine.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -30,8 +33,7 @@ from sqlmodel import SQLModel
 from daemon.tools.ens_db_tools import create_ens_db_tools
 
 
-@pytest.fixture
-def engine(tmp_path: Path) -> Engine:
+def _sqlite_engine(tmp_path: Path) -> Engine:
     """File-backed SQLite engine at tmp_path + NullPool + WAL + busy_timeout."""
     db_path = tmp_path / "ens_db_idem.db"
     eng = create_engine(
@@ -47,6 +49,36 @@ def engine(tmp_path: Path) -> Engine:
         cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
+    return eng
+
+
+def _maybe_pg_engine() -> Engine | None:
+    """Return a PG engine if ``ENSEMBLE_TEST_PG_URL`` is set; None otherwise.
+
+    Mirrors ``test_ens_db_tools_select_only._maybe_pg_engine`` — env-
+    resolved URL, never hardcoded (R13: no prod contact).
+    """
+    url = os.environ.get("ENSEMBLE_TEST_PG_URL")
+    if not url:
+        return None
+    return create_engine(url, poolclass=NullPool)
+
+
+@pytest.fixture
+def engine(tmp_path: Path) -> Engine:
+    """PG engine when ``ENSEMBLE_TEST_PG_URL`` is set; file-backed SQLite
+    (tmp_path + NullPool + WAL + busy_timeout) otherwise.
+
+    CRITICAL DIFFERENCE vs select_only: that suite SKIPS its PG param
+    when the env is unset; this suite must run SQLite BY DEFAULT (the
+    idempotency pins are engine-portable), and run them on PG when the
+    env points at a disposable instance.
+    """
+    pg = _maybe_pg_engine()
+    eng = pg if pg is not None else _sqlite_engine(tmp_path)
+    # Creates ``repair_log`` (ens_db_tools imports RepairLog → present in
+    # SQLModel.metadata) on BOTH engines — the commit-path audit write is
+    # fail-closed and needs the table to exist.
     SQLModel.metadata.create_all(eng)
     return eng
 
@@ -55,6 +87,29 @@ def _manager_with(engine: Engine) -> MagicMock:
     mgr = MagicMock()
     mgr.engine = engine
     return mgr
+
+
+def _table_count(engine: Engine, name: str) -> int:
+    """Count tables named ``name`` via the backend's catalog.
+
+    Dual-engine (architect §7.5): ``information_schema.tables`` on PG,
+    ``sqlite_master`` on SQLite — the DDL pin must verify for real on
+    whichever engine the fixture handed it, not shim on SQLite-only
+    catalog SQL.
+    """
+    is_pg = engine.url.get_backend_name().startswith("postgres")
+    if is_pg:
+        stmt = text(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_name = :name"
+        )
+    else:
+        stmt = text(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name = :name"
+        )
+    with engine.connect() as conn:
+        return conn.execute(stmt, {"name": name}).scalar()
 
 
 async def _run_repair_twice(
@@ -125,10 +180,7 @@ class TestIdempotentAcrossBeginCommit:
         await _run_repair_twice(engine, sql, target)
 
         # Net state: exactly one table, no extra rows.
-        with engine.connect() as conn:
-            count = conn.execute(text(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='idemp_t'"
-            )).scalar()
+        count = _table_count(engine, "idemp_t")
         assert count == 1, f"Expected exactly one table; got {count}"
 
     @pytest.mark.asyncio

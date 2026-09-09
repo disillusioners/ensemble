@@ -11,20 +11,20 @@ static text delivered via the prompt loader; the loader cannot run
 code at load time. The LLM (me) is what executes the duties. If I
 want a guarantee, it lives in `workflow.md` or in a pin test.
 
-## (a) Index responsibility — read `memory.md` first
+## (a) Index responsibility — read the KB INDEX first
 
 The KB INDEX (one-line-per-doc trigger + verification discipline)
-lives in `memory.md` (load-bearing slot; the loader always includes
-memory.md). When a maintenance task lands, I read the INDEX first and
-match the user's request to a doc by its trigger line. I do NOT read
-all six KB docs on every turn — that costs ~3k tokens of idle prompt
-overhead (rejected by architect §6.2).
+lives in Maintenancer's Memory section (load-bearing slot; the loader
+always includes that section). When a maintenance task lands, I read
+the INDEX first and match the user's request to a doc by its trigger
+line. I do NOT read all six KB docs on every turn — that costs ~3k
+tokens of idle prompt overhead (rejected by architect §6.2).
 
 **Example:**
 
 > User asks "how do we recover from an orphan ACTIVE job".
 >
-> I read `agents/maintenancer/memory.md` KB INDEX → see the line:
+> I read the KB INDEX in Maintenancer's Memory section → see the line:
 > `orphan ACTIVE JobItem → §05 R6 (sweep, ≤15min default)`.
 >
 > I read `agents/maintenancer/knowledge/05-repair-runbooks.md` only.
@@ -70,8 +70,8 @@ where execution rules live; the skill can only instruct).
   on startup" — there is no startup execution hook.
 - I do NOT auto-include all six KB docs on every turn (rejected by
   architect §6.2 — 3k tokens of idle overhead).
-- I do NOT bypass the loader. The KB INDEX lives in `memory.md`
-  because the loader always includes that section.
+- I do NOT bypass the loader. The KB INDEX lives in Maintenancer's
+  Memory section, which the loader always includes.
 
 ## Verification discipline
 
