@@ -155,7 +155,7 @@ class TestSearchByInitiativeMessageJsonb:
             repo, "beta", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "write unit tests"},
         )
-        instances, total = repo.list(search="staging")
+        instances, total, _ = repo.list(search="staging")
         assert total == 1
         assert _ids(instances) == ["alpha"]
 
@@ -164,7 +164,7 @@ class TestSearchByInitiativeMessageJsonb:
             repo, "alpha", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "deploy the staging server"},
         )
-        instances, total = repo.list(search="definitely-not-here")
+        instances, total, _ = repo.list(search="definitely-not-here")
         assert total == 0
         assert instances == []
 
@@ -174,7 +174,7 @@ class TestSearchByInitiativeMessageJsonb:
             repo, "lower", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "DEPLOY THE STAGING SERVER"},
         )
-        instances, total = repo.list(search="deploy")
+        instances, total, _ = repo.list(search="deploy")
         assert total == 1
         assert _ids(instances) == ["lower"]
 
@@ -183,7 +183,7 @@ class TestSearchByInitiativeMessageJsonb:
             repo, "upper", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": "deploy the staging server"},
         )
-        instances, total = repo.list(search="DEPLOY")
+        instances, total, _ = repo.list(search="DEPLOY")
         assert total == 1
         assert _ids(instances) == ["upper"]
 
@@ -191,7 +191,7 @@ class TestSearchByInitiativeMessageJsonb:
         """``metadata->>'initiative_message'`` returns NULL on PG for missing
         keys; ILIKE on NULL yields no match — other fields still searchable."""
         _make(repo, "no-init", agent_id="nope", agent_dir="agents/nope")
-        instances, total = repo.list(search="nope")
+        instances, total, _ = repo.list(search="nope")
         assert total == 1
         assert _ids(instances) == ["no-init"]
 
@@ -204,7 +204,7 @@ class TestSearchByInitiativeMessageJsonb:
             repo, "int-init", agent_id="dev", agent_dir="agents/coder",
             metadata={"initiative_message": 42},
         )
-        instances, total = repo.list(search="42")
+        instances, total, _ = repo.list(search="42")
         assert total == 1
         assert _ids(instances) == ["int-init"]
 
@@ -225,7 +225,7 @@ class TestSearchByInitiativeMessageJsonb:
         # agent_name for "via-name" is "Coder" — "refactor" doesn't appear in
         # agent_name or agent_id for any row, so we expect the first two via
         # initiative_message / title only.
-        instances, total = repo.list(search="refactor")
+        instances, total, _ = repo.list(search="refactor")
         assert total == 2
         assert _ids(instances) == ["via-init", "via-title"]
 
@@ -243,7 +243,7 @@ class TestInitiativeMessageEscapingOnPostgres:
             repo, "fuzzy", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "50xyz off sale"},
         )
-        instances, total = repo.list(search="50%")
+        instances, total, _ = repo.list(search="50%")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -257,7 +257,7 @@ class TestInitiativeMessageEscapingOnPostgres:
             repo, "fuzzy", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "value axb here"},
         )
-        instances, total = repo.list(search="a_b")
+        instances, total, _ = repo.list(search="a_b")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -271,7 +271,7 @@ class TestInitiativeMessageEscapingOnPostgres:
             repo, "other", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": r"pathXtoXfile"},
         )
-        instances, total = repo.list(search=r"\to")
+        instances, total, _ = repo.list(search=r"\to")
         assert total == 1
         assert _ids(instances) == ["literal"]
 
@@ -293,7 +293,7 @@ class TestEmptySearchOnPostgres:
             repo, "b", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "second"},
         )
-        instances, total = repo.list(search=None)
+        instances, total, _ = repo.list(search=None)
         assert total == 2
         assert _ids(instances) == ["a", "b"]
 
@@ -306,5 +306,5 @@ class TestEmptySearchOnPostgres:
             repo, "b", agent_id="x", agent_dir="agents/y",
             metadata={"initiative_message": "second"},
         )
-        instances, total = repo.list(search="")
+        instances, total, _ = repo.list(search="")
         assert total == 2

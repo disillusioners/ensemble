@@ -151,7 +151,7 @@ class TestPinnedDefaultByteCompat:
     def test_default_no_kwarg_exact_order(self, seeded):
         """BYTE-COMPAT PIN (repo layer): no kwarg → pinned tier first
         (pinned_at DESC), then unpinned by created_at DESC."""
-        instances, total = seeded.list(include_descendants=True)
+        instances, total, _ = seeded.list(include_descendants=True)
         assert total == 5
         assert _root_ids(instances) == [
             "pin-new", "pin-old",              # pinned tier: pinned_at DESC
@@ -160,8 +160,8 @@ class TestPinnedDefaultByteCompat:
 
     def test_explicit_pinned_identical_to_default(self, seeded):
         """``order="pinned"`` MUST equal the no-kwarg default exactly."""
-        default_instances, default_total = seeded.list(include_descendants=True)
-        pinned_instances, pinned_total = seeded.list(
+        default_instances, default_total, _ = seeded.list(include_descendants=True)
+        pinned_instances, pinned_total, _ = seeded.list(
             include_descendants=True, order="pinned"
         )
         assert pinned_total == default_total
@@ -171,7 +171,7 @@ class TestPinnedDefaultByteCompat:
         """The historical contract: a pinned root outranks ANY unpinned root
         regardless of recency — 'free-new' (newest created_at) stays below
         the pinned tier."""
-        instances, _ = seeded.list(include_descendants=True)
+        instances, _, _ = seeded.list(include_descendants=True)
         ids = _root_ids(instances)
         assert ids.index("pin-old") < ids.index("free-new")
 
@@ -179,8 +179,8 @@ class TestPinnedDefaultByteCompat:
         """The flat path (``include_descendants=False``) keeps the historical
         pinned-first ordering regardless of ``order`` — internal callers
         (cache cleanup, fuzzy match, tools) are untouched by this change."""
-        flat_default, total_default = seeded.list(include_descendants=False)
-        flat_activity, total_activity = seeded.list(
+        flat_default, total_default, _ = seeded.list(include_descendants=False)
+        flat_activity, total_activity, _ = seeded.list(
             include_descendants=False, order="activity"
         )
         assert total_default == total_activity
@@ -219,7 +219,7 @@ class TestActivityOrdering:
     def test_unpinned_fresh_live_above_older_pinned_terminal(self, seeded):
         """The motivating case: the unpinned fresh live root must rank ABOVE
         the pinned older terminal root in activity ordering."""
-        instances, total = seeded.list(include_descendants=True, order="activity")
+        instances, total, _ = seeded.list(include_descendants=True, order="activity")
         assert total == 3
         assert _root_ids(instances) == ["fresh-live", "older-live", "pin-stale"]
 
@@ -227,7 +227,7 @@ class TestActivityOrdering:
         """Contrast pin on the SAME fixture: default ordering still puts the
         pinned root first (proves the fixture really distinguishes the two
         orderings — guards against a vacuous activity test)."""
-        instances, _ = seeded.list(include_descendants=True)
+        instances, _, _ = seeded.list(include_descendants=True)
         assert _root_ids(instances)[0] == "pin-stale"
 
 
@@ -274,7 +274,7 @@ class TestActivityLiveAboveAllTerminal:
         ui.upsert("live-waiting-children", pinned=True)
         ui.upsert("term-completed", pinned=True)
 
-        instances, total = repo.list(include_descendants=True, order="activity")
+        instances, total, _ = repo.list(include_descendants=True, order="activity")
         assert total == 10
         assert _root_ids(instances) == [
             # Live tier: updated_at DESC — pins on live-queued/-waiting-children
@@ -301,7 +301,7 @@ class TestActivityLiveAboveAllTerminal:
             _root("old-born-recently-active", status="idle", created_at=T0, updated_at=T5),
             _root("new-born-stale", status="idle", created_at=T4, updated_at=T1),
         )
-        instances, _ = repo.list(include_descendants=True, order="activity")
+        instances, _, _ = repo.list(include_descendants=True, order="activity")
         assert _root_ids(instances) == ["old-born-recently-active", "new-born-stale"]
 
     def test_equal_timestamps_tiebreak_instance_id_asc(self, repo):
@@ -312,5 +312,5 @@ class TestActivityLiveAboveAllTerminal:
             _root("aaa", status="idle", created_at=T3, updated_at=T3),
             _root("mmm", status="idle", created_at=T3, updated_at=T3),
         )
-        instances, _ = repo.list(include_descendants=True, order="activity")
+        instances, _, _ = repo.list(include_descendants=True, order="activity")
         assert _root_ids(instances) == ["aaa", "mmm", "zzz"]

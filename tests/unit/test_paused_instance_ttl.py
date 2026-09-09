@@ -229,7 +229,7 @@ class TestCleanupCachedInstances:
         # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
         expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
         mock_instance = self._make_cached_instance(instance_id, expired_time, status="paused")
-        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1, False)
         
         # Mock _release_cached_instance to track calls
         released_instances = []
@@ -266,7 +266,7 @@ class TestCleanupCachedInstances:
         # Create cached instance that was updated only 10 minutes ago
         recent_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 600)).isoformat()
         mock_instance = self._make_cached_instance(instance_id, recent_time)
-        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1, False)
         
         # Verify the instance would NOT be considered expired
         cached_at = datetime.fromisoformat(mock_instance.updated_at)
@@ -300,7 +300,7 @@ class TestCleanupCachedInstances:
         # Create cached instance that was updated only 10 minutes ago
         recent_time = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
         mock_instance = self._make_cached_instance(instance_id, recent_time)
-        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1, False)
         
         # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
         mock_manager._shutting_down = False
@@ -326,7 +326,7 @@ class TestCleanupCachedInstances:
         # Create cached instance that was updated 5 hours ago
         expired_time = (datetime.utcnow() - timedelta(hours=5)).isoformat()
         mock_instance = self._make_cached_instance(instance_id, expired_time)
-        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1, False)
         
         # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
         mock_manager._shutting_down = False
@@ -358,7 +358,8 @@ class TestCleanupCachedInstances:
         
         mock_manager._instance_repository.list.return_value = (
             [valid_instance, none_instance, empty_instance, invalid_instance],
-            4
+            4,
+            False,
         )
         
         # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
@@ -402,7 +403,7 @@ class TestCleanupCachedInstances:
         recent_instance = self._make_cached_instance("recent", recent_time)
         
         mock_manager._instance_repository.list.return_value = (
-            [instance1, instance2, recent_instance], 3
+            [instance1, instance2, recent_instance], 3, False
         )
         
         # Mock _release_cached_instance to actually remove from memory
@@ -447,7 +448,7 @@ class TestCleanupCachedInstances:
         # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
         expired_time = (datetime.utcnow() - timedelta(hours=25)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
         mock_instance = self._make_cached_instance(instance_id, expired_time, status=status)
-        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1, False)
         
         # Mock _release_cached_instance to actually delete from mock_manager.instances
         def release_instance(instance_id_to_release):
@@ -471,7 +472,7 @@ class TestCleanupCachedInstances:
         """Verify cleanup handles empty instances list gracefully."""
         from daemon.manager import InstanceManager
         
-        mock_manager._instance_repository.list.return_value = ([], 0)
+        mock_manager._instance_repository.list.return_value = ([], 0, False)
         
         # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
         mock_manager._shutting_down = False

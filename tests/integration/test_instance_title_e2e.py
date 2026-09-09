@@ -246,7 +246,7 @@ async def test_instance_title_generation_e2e(
         assert len(final_meta["title"]) > 0, "Title should not be empty"
 
         # 3. Check that title appears in list_instances()
-        instances_list, total = manager._instance_repository.list()
+        instances_list, total, _ = manager._instance_repository.list()
         logger.info(f"[TEST] Total instances: {total}")
 
         # Convert to dict format for compatibility with existing test logic
