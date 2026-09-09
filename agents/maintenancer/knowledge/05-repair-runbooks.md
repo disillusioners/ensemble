@@ -2,26 +2,26 @@
 
 last-verified-against: v0.12.4
 
-Runbooks that mutate prod go through pause-first first (§04 (iv)).
+Runbooks go through pause-first (§04 (iv)).
 
 ## R1 — Pause-first quiesce
-**T:** feature/repair needs quiescent instance.
-**S:** `pause_instance_cascade(<iid>)` → wait (≤30s) → `status==PAUSED` → mutate → `resume_instance_cascade(<iid>)`.
+**T:** repair needs quiescent instance.
+**S:** `pause_instance_cascade(<iid>)` → wait ≤30s → `status==PAUSED` → mutate → `resume_instance_cascade(<iid>)`.
 **V:** `status=RUNNING`; no `FAILED`. **A:** `daemon/services/instance_lifecycle.py`.
 
 ## R2 — Idempotent DROP NOT NULL
-**T:** column NOT NULL → NULL on prod PG.
-**S:** Run `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE ... AND is_nullable='NO') THEN ALTER TABLE <t> ALTER COLUMN <c> DROP NOT NULL; END IF; END $$`; commit; re-run.
+**T:** NOT NULL → NULL on prod PG.
+**S:** `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE ... AND is_nullable='NO') THEN ALTER TABLE <t> ALTER COLUMN <c> DROP NOT NULL; END IF; END $$`; commit; re-run.
 **V:** `\d <table>` nullable; second pass no-op. **A:** `daemon/manager.py:4996-5015` (§04 (iii)).
 
 ## R3 — CHECKPOINT-aware migration
-**T:** adding columns to a table an in-flight task writes into.
+**T:** adding columns to a table a task writes into.
 **S:** Pause-first (§R1); `ALTER TABLE ... ADD COLUMN IF NOT EXISTS <col> <type>`; resume.
 **V:** `\d <table>` lists new column; instance `RUNNING` without `IntegrityError`.
 
 ## R4 — MaintenanceJob registry
 **T:** periodic sweep / health check.
-**S:** `MaintenanceJob(name, min_interval_hours, execute_fn)` (`daemon/services/maintenance.py:68`); register via `MaintenanceService.register(...)` (`:119+`); checks every 15 min.
+**S:** `MaintenanceJob(name, min_interval_hours, execute_fn)` (`daemon/services/maintenance.py:68`); register via `MaintenanceService.register(...)` (`:119+`); 15m cadence.
 **V:** `register(...)` returns row; `last_run` updated.
 
 ## R5 — StaleTaskRecovery
@@ -31,7 +31,7 @@ Runbooks that mutate prod go through pause-first first (§04 (iv)).
 
 ## R6 — Orphan ACTIVE JobItem sweep
 **T:** orphan ACTIVE JobItems past `min_orphan_age`.
-**S:** `_periodic_drift_reconcile_loop` (`daemon/api.py:1186-1272`) calls `reconcile_drift_states`. Eligible: `admission_state='active'` AND `created_at < now - min_orphan_age` AND no Task rows AND alive. Default `min_orphan_age=900s` (`daemon/config.py:1214`). Pattern-f1 guard.
+**S:** `_periodic_drift_reconcile_loop` (`daemon/api.py:1186-1272`) calls `reconcile_drift_states`. Eligible: `admission_state='active'`, `created_at < now - min_orphan_age`, no Task rows, alive. Default `min_orphan_age=900s` (`daemon/config.py:1214`). f1 guard.
 **V:** no orphan ACTIVE rows survive.
 
 ## R7 — DLQ replay (DEAD → QUEUED)

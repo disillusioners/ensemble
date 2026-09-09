@@ -203,13 +203,10 @@ def test_required_trap_string_in_doc(string: str, doc_id: str) -> None:
 # Per decision D11, each KB doc stays under ~2k chars (20% tolerance
 # => ≤2400), AND the combined total across all six docs stays ≤12000.
 # This locks the ratified choice structurally (project convention:
-# drift-guard tests pin decisions). The combined cap was relaxed from
-# 12000 → 14000 in the W1-P3 fix iteration because doc04 (10 traps),
-# doc05 (7 runbooks), and doc06 (8 runbooks) each need a structural
-# minimum near 2000 chars; the per-doc ≤2400 cap is enforceable on its
-# own. Adjust both together when bumping the KB.
+# drift-guard tests pin decisions). Adjust both together when bumping
+# the KB.
 MAX_KB_DOC_CHARS = 2400
-MAX_KB_COMBINED_CHARS = 14000
+MAX_KB_COMBINED_CHARS = 12000
 
 
 @pytest.mark.parametrize(
@@ -232,10 +229,8 @@ def test_kb_doc_size_within_d11_budget(doc_id: str, path: Path) -> None:
 
 def test_kb_combined_size_within_d11_budget() -> None:
     """D11: the six KB docs combined stay under ``MAX_KB_COMBINED_CHARS``
-    (≤14000, with slack above the 12000 aspirational target so that
-    the per-doc ≤2400 cap on doc04/05/06 — each with 7–10 mandatory
-    sections — remains enforceable). Failure message names the worst
-    offender and lists every doc + current size.
+    (≤12000). Failure message names the worst offender and lists every
+    doc + current size.
     """
     sizes: list[tuple[Path, int]] = []
     for _doc_id, path in KB_DOCS:
