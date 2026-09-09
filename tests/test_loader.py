@@ -963,6 +963,113 @@ class TestLoadToolsDocForAgent:
         assert len(available_lines) > 0
 
 
+class TestMaintenancerToolsDocColdBoot:
+    """W1 FIX-NOW item 5b regression: cold-boot
+    ``load_tools_doc_for_agent("maintenancer")`` must return NON-EMPTY
+    docs covering ALL its allowed categories.
+
+    The maintenancer-relevant category modules (system-log, ens-db,
+    knowledge, system_upgrade, db) were absent from loader's
+    ``_ensure_tool_metadata_populated`` warm list, so a cold boot
+    produced EMPTY docs for every maintenancer category — and the
+    no-TTL PromptCache could pin that empty result permanently. These
+    tests exercise the COLD path (``clear_registry()`` empties
+    ``_tool_metadata`` / ``_full_docs`` so the warm-list scan is
+    forced) against the REAL ``agents/maintenancer/meta.json`` via a
+    freshly discovered registry — fixture pattern:
+    ``test_devops_agent.py::test_devops_tools_doc_loads``.
+    """
+
+    @pytest.fixture()
+    def cold_registry(self, monkeypatch):
+        """Freshly discovered real registry wired into the global slot
+        + emptied tool-doc store (guarantees the cold warm-list scan)."""
+        import daemon.registry
+        from daemon.registry import AgentRegistry
+        from daemon.loader import _ensure_tool_metadata_populated
+        from daemon.tools._tool_registry import (
+            _full_docs,
+            _tool_metadata,
+            clear_registry,
+        )
+        from pathlib import Path
+
+        agents_dir = Path(daemon.__file__).parent.parent / "agents"
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        # monkeypatch auto-restores the module-level registry slot on
+        # teardown so neighbouring tests do not see this leaked registry.
+        monkeypatch.setattr(daemon.registry, "_registry", registry)
+
+        # Snapshot the current tool-registration state: clear_registry()
+        # mutates these dicts in-place, and monkeypatch only restores
+        # attribute REASSIGNMENT — restore explicitly after the yield.
+        saved_metadata = dict(_tool_metadata)
+        saved_full_docs = dict(_full_docs)
+
+        # COLD: empty the doc store so the warm-list scan must run.
+        clear_registry()
+
+        yield
+
+        _tool_metadata.clear()
+        _tool_metadata.update(saved_metadata)
+        _full_docs.clear()
+        _full_docs.update(saved_full_docs)
+
+    def test_cold_boot_docs_cover_all_allowed_categories(self, cold_registry):
+        """Non-empty docs, every allowed category section present with
+        at least one of its tools listed."""
+        docs = load_tools_doc_for_agent("maintenancer")
+
+        # Non-empty — the pinned defect was an EMPTY doc string.
+        assert isinstance(docs, str)
+        assert len(docs) > 0, (
+            "cold-boot load_tools_doc_for_agent('maintenancer') returned "
+            "EMPTY docs — _ensure_tool_metadata_populated's warm list is "
+            "missing a maintenancer category module (W1 FIX-NOW item 5 "
+            "regression)"
+        )
+
+        # Every allowed category must appear with its real CATEGORY_NAME
+        # section header AND at least one of its tools listed.
+        expected_sections = {
+            "System Log": "ens_system_log_list",     # system-log
+            "Ensemble DB": "ens_db_repair_execute",  # ens-db
+            "Knowledge": "explore",                  # knowledge
+            "System Upgrade": "system_upgrade",      # system_upgrade
+            "Database": "db_conn_list",              # db
+        }
+        for section_name, tool_name in expected_sections.items():
+            assert section_name in docs, (
+                f"cold-boot maintenancer docs missing {section_name!r} "
+                f"category section; docs={docs!r}"
+            )
+            assert tool_name in docs, (
+                f"cold-boot maintenancer docs missing tool {tool_name!r} "
+                f"under {section_name!r}; docs={docs!r}"
+            )
+
+    def test_cold_scan_registers_every_maintenancer_category(self, cold_registry):
+        """Anti-warm-cache guard: the doc store starts EMPTY (fixture)
+        and the loader call itself must register every maintenancer
+        category — only the warm-list scan can do that (the ens_db_*
+        factories are imported nowhere else in the cold path).
+        Keys are CATEGORY_NAME display names (get_tool_categories maps
+        each raw key through its module's CATEGORY_NAME)."""
+        from daemon.tools._tool_registry import get_tool_categories
+
+        assert load_tools_doc_for_agent("maintenancer") != ""
+        categories = get_tool_categories()
+        for category_name in (
+            "System Log", "Ensemble DB", "Knowledge", "System Upgrade", "Database",
+        ):
+            assert category_name in categories, (
+                f"cold scan did not register category {category_name!r}; "
+                f"registered={sorted(categories)}"
+            )
+
+
 # =============================================================================
 # Tests for load_shared_knowledge and shared_knowledge parameter
 # =============================================================================

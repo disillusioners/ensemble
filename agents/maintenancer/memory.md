@@ -7,7 +7,7 @@ I consult the relevant KB doc before any non-trivial action. The index below tel
 - 01-architecture-overview — trigger: any architecture, manager/graph/loader, or daemon-runtime question; verify-against: v0.12.4
 - 02-jobs-missions-admission-state — trigger: any job, mission, admission-state, or queue question; verify-against: v0.12.4
 - 03-log-forensics — trigger: log forensics, line-number trap, time-bracket search, race forensics; verify-against: v0.12.4
-- 04-known-traps — trigger: traps (reliquary DB, migration runner, gate fall-throughs); verify-against: v0.12.4
+- 04-known-traps — trigger: traps (stale SQLite relic (data/instances.db), migration runner, gate fall-throughs); verify-against: v0.12.4
 - 05-repair-runbooks — trigger: pause-first, idempotent repair rows, audit stamps, rollback shape; verify-against: v0.12.4
 - 06-restart-upgrade-runbook — trigger: 3-factor gate, atomic flip, journal sweep, live-rung promotion; verify-against: v0.12.4
 

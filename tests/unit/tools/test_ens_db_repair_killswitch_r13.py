@@ -119,6 +119,16 @@ class TestRepairKillSwitchFlagOffByteIdentical:
         assert KILL_SWITCH_ENV in out_a
         assert "kill-switch OFF" in out_a
         assert "No-op response" in out_a
+        # Exact-string pin (repo convention): relative equality alone
+        # stays green if the no-op message is ever reworded — both
+        # outputs change together. Pin the LITERAL so any drift in the
+        # no-op wording (or the KILL_SWITCH_ENV value it embeds) fails
+        # loudly here.
+        assert out_a == (
+            "ens_db_repair_execute: kill-switch OFF "
+            "(env ENSEMBLE_REPAIR_ENABLED=0). No-op response per "
+            "kill-switch flag-OFF byte-identical contract."
+        ), f"kill-switch OFF no-op literal drifted: {out_a!r}"
 
     @pytest.mark.parametrize(
         "bad_sql",

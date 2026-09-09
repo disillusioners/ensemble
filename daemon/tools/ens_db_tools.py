@@ -829,7 +829,7 @@ def create_ens_db_tools(
         def _run_repair() -> str:
             with Session(repair_engine) as session:
                 try:
-                    # DML pre-image: shadow ``SELECT ... FOR UPDATE``.
+                    # DML pre-image: shadow plain SELECT (rows NOT locked).
                     pre_snapshot = None
                     if sql_class == "DML" and not dry_run:
                         pre_snapshot = _capture_pre_image_sqlite_safe(
@@ -1093,24 +1093,44 @@ def _jsonable(v: Any) -> Any:
 def _capture_pre_image_sqlite_safe(
     session: Any, sql: str, engine: Engine
 ) -> list[dict[str, Any]] | None:
-    """Best-effort pre-image via ``RETURNING *`` capture for DML.
+    """Best-effort forensic pre-image capture for DML — NOT a guarantee.
 
-    Strategy: attempt to extract the target table + WHERE clause from
-    the DML; run a shadow ``SELECT ... FOR UPDATE`` on the same
-    connection in the same tx to capture the rows that will be
-    modified. Returns ``None`` if the parse fails — the audit row is
-    still written (``before_snapshot=None``) and partial application
-    recovery relies on the post-image + ``sql_text``.
+    Strategy: extract the target table + WHERE clause from the DML
+    head and run a shadow ``SELECT * FROM <table> [WHERE ...]
+    LIMIT n`` (plain SELECT — rows are NOT locked) on the same
+    connection in the same tx to capture the rows that are about to
+    be modified.
 
-    SQLite-safe: uses parameterized queries only; never string-formats
-    user input into raw SQL.
+    Actual guarantees (empirically pinned by the W1 integration
+    review):
+
+    * ``UPDATE <table> ...`` — table captured from the DML verb
+      itself (``UPDATE <table>``), so a plain UPDATE with no FROM
+      still snapshots correctly.
+    * ``UPDATE ... FROM <other> ...`` (PG) — the UPDATE target is
+      captured, NOT the FROM-clause/subquery table (a first-FROM
+      regex gets this wrong; this parse pins the verb's own table).
+    * ``DELETE FROM <table> ...`` — table captured from the verb.
+    * Statements whose leading verb the regex does not recognize
+      (INSERT, DDL, MERGE, ...) — parse yields no table,
+      returns ``None``: no snapshot is taken; the tx
+      itself is still atomic and the audit row is written with
+      ``before_snapshot=None`` (partial-application recovery relies
+      on the post-image + ``sql_text``).
+
+    Interpolation honesty: the shadow SELECT is BUILT via f-string —
+    ``SELECT * FROM {target_table} WHERE {where_clause} LIMIT n`` —
+    where ``target_table`` / ``where_clause`` are regex-extracted
+    fragments of the submitted SQL (an internally-derived WHERE
+    clause, not an external parameter). This is NOT a parameterized
+    query. Full rework (parameterized capture) is scheduled for P4.
     """
     # Naive parse — sufficient for the common cases the agent is
     # expected to run (UPDATE … WHERE k=v; DELETE … WHERE k=v).
     sql_upper = sql.upper().lstrip()
     target_table: str | None = None
     where_clause: str | None = None
-    m = re.search(r"\bFROM\s+([a-zA-Z_][a-zA-Z0-9_\"]*)", sql_upper)
+    m = re.search(r"\b(?:UPDATE|DELETE\s+FROM)\s+([a-zA-Z_][a-zA-Z0-9_\"]*)", sql_upper)
     if m:
         target_table = m.group(1).strip('"')
     m = re.search(r"\bWHERE\b(.*?)(?:;|$)", sql, re.IGNORECASE | re.DOTALL)

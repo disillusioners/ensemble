@@ -1,11 +1,10 @@
 """Maintenancer tool resolution (W1-P2, task 2.10f — CRITICAL).
 
-Asserts the resolved tool set for the (future) maintenancer agent
-matches the spec's allow/deny contract. The maintenancer meta.json
-is authored in P1 (unmerged at the time of this PR) — per the
-spec's directive, we mock/stub the meta inline with the exact
-allow/deny P1 will land. After P1 merges, the real
-``agents/maintenancer/meta.json`` replaces the inline fixture.
+Asserts the resolved tool set for the maintenancer agent matches the
+spec's allow/deny contract. The REAL ``agents/maintenancer/meta.json``
+(authored in P1, merge 8eeee457) is loaded directly — the P2-era
+inline stub worked around P1 being unmerged and is retired (W1
+integration review FIX-NOW item 4).
 
 Pin contract:
 
@@ -86,25 +85,61 @@ def _make_categories() -> dict[str, set[str]]:
     }
 
 
-# ── Maintenancer meta (P1-spec — mocked/stubbed per spec directive) ────────
+# ── Maintenancer meta (REAL — loaded from agents/maintenancer/meta.json) ───
 
 
-# Per spec task 1.2 (D5 + D19 + D20):
+def _maintenancer_allow_deny() -> tuple[list[str], list[str]]:
+    """Load the REAL maintenancer meta's ``tools.allow`` / ``tools.deny``.
+
+    The P2 PR stubbed this meta inline because P1 (which authors
+    ``agents/maintenancer/meta.json``) was unmerged at the time. P1
+    has merged — the real file is the contract under test now. A
+    missing file fails LOUDLY (at collection) rather than silently
+    testing a stub.
+    """
+    meta_path = REPO_ROOT / "agents" / "maintenancer" / "meta.json"
+    assert meta_path.exists(), (
+        "agents/maintenancer/meta.json must exist (P1 merged, 8eeee457); "
+        "this test pins the REAL meta, not an inline stub"
+    )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    tools = meta.get("tools", {})
+    return tools.get("allow", []), tools.get("deny", [])
+
+
+# Per spec task 1.2 (D5 + D19 + D20) — now loaded from the real meta:
 #   tools.allow:  ["system-log", "ens-db", "knowledge", "system_upgrade", "db"]
 #   tools.deny:   ["git_commit", "edit_file", "write_file", "system_restart"]
-MAINTAINER_META_ALLOW = [
-    "system-log",
-    "ens-db",
-    "knowledge",
-    "system_upgrade",
-    "db",
-]
-MAINTAINER_META_DENY = [
-    "git_commit",
-    "edit_file",
-    "write_file",
-    "system_restart",
-]
+MAINTAINER_META_ALLOW, MAINTAINER_META_DENY = _maintenancer_allow_deny()
+
+
+class TestRealMaintenancerMetaShape:
+    """Pin the real meta's grant/deny SHAPE (not just resolution
+    outcomes) — a meta.json edit that changes what maintenancer is
+    granted or denied must fail here first."""
+
+    def test_real_meta_allow_is_exact_category_set(self) -> None:
+        """tools.allow = exactly the 5 categories: the privileged pair
+        (system-log, ens-db), system_upgrade, knowledge, and db
+        (D19 — external user-registered connections only)."""
+        assert MAINTAINER_META_ALLOW == [
+            "system-log",
+            "ens-db",
+            "knowledge",
+            "system_upgrade",
+            "db",
+        ]
+
+    def test_real_meta_denies_system_restart_per_d20(self) -> None:
+        """tools.deny strips system_restart (D20) — the deny-list is
+        the only resolution-level mechanism that survives
+        system_upgrade category expansion (upgrade_tools.py:1435)."""
+        assert MAINTAINER_META_DENY == [
+            "git_commit",
+            "edit_file",
+            "write_file",
+            "system_restart",
+        ]
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
