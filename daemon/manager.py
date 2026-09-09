@@ -73,6 +73,11 @@ from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
 from .repositories.shared_meta_kv.models import SharedMetaKV
+# ``ens-db`` repair_log audit table (W1-P2, task 2.1) — registered with
+# ``SQLModel.metadata`` so it is created by ``SQLModel.metadata.create_all``
+# at startup on BOTH engines (SQLite + PG) without a hand-written
+# migration (adjudication A4: ``runner.py:486-491`` is SQLite-only).
+from .repositories.ens_db.models import RepairLog
 from sqlmodel import Session, select
 from sqlalchemy import text, select, update as sa_update
 from .tools import create_instance_tools

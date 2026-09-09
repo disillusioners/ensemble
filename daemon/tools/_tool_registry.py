@@ -80,6 +80,17 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # (daemon/tools/attestation.py). Single no-arg idempotent tool; the
     # attestation is the tool-call's presence in the message stream.
     "attest_completion",
+    # ens-db tools (W1-P2, task 2.4) — created by create_ens_db_tools()
+    # factory (daemon/tools/ens_db_tools.py). Privileged category —
+    # ``ens_db_*`` tools reach the daemon's own ``ensemble_prod`` DB on
+    # the SHARED engine (read path) or a dedicated 2+3 pool (repair
+    # writer). Direct DB access is gated by ``PRIVILEGED_TOOL_CATEGORIES``
+    # so it is opt-in only via an explicit ``tools.allow`` entry naming
+    # ``ens-db`` (architect §4.1 — R-SR16).
+    "ens_db_postgres_select",
+    "ens_db_inspect",
+    "ens_db_repair_execute",
+    "ens_db_pool_status",
 })
 
 
@@ -102,9 +113,18 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # category or one of its tools. Enforced structurally in
 # ``daemon.tools.instance`` (the ``resolve_tool_filter`` empty-allow branch
 # and the default-allow paths of ``_apply_tool_filter``) — no deny rules
-# needed. Today: ``system_upgrade`` (restart/upgrade authority).
+# needed. The set is exactly three entries after W1-P2 (privilege
+# promotion — detail-plan §4.4, architect §4.4): ``system_upgrade``
+# (restart/upgrade authority), ``system-log`` (daemon log forensics —
+# designated break-glass for the ``worker`` agent), ``ens-db`` (direct
+# ``ensemble_prod`` read + guarded repair writer — maintenancer only).
+# Silent additions are caught by the exact-equality pin tests
+# ``tests/unit/tools/test_upgrade_registration.py:100`` and
+# ``tests/unit/tools/test_attestation_registration.py:154``.
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
+    "system-log",
+    "ens-db",
 })
 
 
@@ -492,6 +512,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "council": "daemon.tools.instance",  # Phase 2: spawn_councilor + clear_councilor_errors
     "blueprint": "daemon.tools.blueprint",
     "system-log": "daemon.tools.system_log_tools",
+    "ens-db": "daemon.tools.ens_db_tools",  # W1-P2, task 2.3
     "plane": "daemon.tools.plane_tools",
     "plane_sync": "daemon.tools.plane_sync",
     "system_upgrade": "daemon.tools.upgrade_tools",
@@ -567,6 +588,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "dlq_list",
     "dlq_replay",
     "edit_file",
+    "ens_db_inspect",
+    "ens_db_pool_status",
+    "ens_db_postgres_select",
+    "ens_db_repair_execute",
     "ens_system_log_list",
     "ens_system_log_read",
     "ens_system_log_search",

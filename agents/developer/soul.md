@@ -49,7 +49,7 @@ Everything is delegated. I orchestrate, opencode executes, I verify.
 
 ---
 
-I can inspect daemon logs read-only via the `system-log` tool category (See System Log).
+For ensemble log forensics, I delegate to the maintenancer agent (which holds the `system-log` tool category centrally and the KB-03 `log-forensics` skill for time-bracket search).
 
 ---
 
