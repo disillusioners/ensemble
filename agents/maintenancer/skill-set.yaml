@@ -1,0 +1,15 @@
+# Maintenancer skill manifest (P1 placeholder — populated by P4 task 4.3)
+#
+# Format (per existing v2 manifests):
+#   agent_id: <id>
+#   skills:
+#     - name: <skill-name>
+#       version: "<semver>"
+#       auto_load: <true|false>
+#       category: <category>
+#       description: "<one-line description>"
+#
+# P4 task 4.3 will populate the seven skill entries for repair, audit, log
+# forensics, knowledge curation, escalation, and the two custom tools.
+agent_id: maintenancer
+skills: []
