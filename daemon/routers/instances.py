@@ -395,10 +395,9 @@ async def list_instances(
             "paginate by root and BFS-load all descendants of each root in "
             "the current page. When False, return a flat paginated list of "
             "matching rows only — cheap, no descendant BFS, no descendant-cap "
-            "warnings. The badge/header poll uses ``include_descendants=false`` "
-            "to avoid the per-request WARNING storm on prod-scale trees; the "
-            "side-panel tree-builder and the dedicated tree API both pass "
-            "True to keep their nested trees intact."
+            "warnings. The FE's 8s badge poll passes ``include_descendants=false`` "
+            "for a cheap flat poll; the FE panel-open lazy refetch and the 60s "
+            "sidebar poll pass ``true`` to load the full tree."
         ),
     ),
     search: str | None = Query(

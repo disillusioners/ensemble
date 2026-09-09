@@ -1012,6 +1012,8 @@ class SQLModelInstanceRepository:
                             MAX_DESCENDANTS_PER_PAGE,
                             offset,
                         )
+                        if len(_descendant_cap_warn_last_emit) > 256:
+                            _descendant_cap_warn_last_emit.clear()
                         _descendant_cap_warn_last_emit[offset] = now
                     else:
                         logger.debug(

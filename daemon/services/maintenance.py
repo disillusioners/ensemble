@@ -1051,9 +1051,8 @@ class CheckpointCleanupJob:
         limit = 100
 
         while True:
-            # Flat pagination — ``truncated`` is always False here; throwaway
-            # third tuple slot keeps the unpacking consistent with the 3-tuple
-            # repository contract (see list_with_truncation).
+            # Flat pagination — ``SQLModelInstanceRepository.list`` returns the
+            # 3-tuple ``(instances, total, truncated)``; this call discards ``truncated``.
             instances, total, _ = self._instance_repo.list(limit=limit, offset=offset)
             for inst in instances:
                 instance_ids.add(inst.instance_id)
@@ -1174,8 +1173,8 @@ class CheckpointCleanupJob:
             limit = 100
 
             while True:
-                # Flat pagination — ``truncated`` is always False here;
-                # throwaway third tuple slot (see list_with_truncation).
+                # Flat pagination — ``SQLModelInstanceRepository.list`` returns the
+                # 3-tuple ``(instances, total, truncated)``; this call discards ``truncated``.
                 instances, total, _ = self._instance_repo.list(
                     status=status, limit=limit, offset=offset
                 )
@@ -1207,8 +1206,8 @@ class CheckpointCleanupJob:
             limit = 100
 
             while True:
-                # Flat pagination — ``truncated`` is always False here;
-                # throwaway third tuple slot (see list_with_truncation).
+                # Flat pagination — ``SQLModelInstanceRepository.list`` returns the
+                # 3-tuple ``(instances, total, truncated)``; this call discards ``truncated``.
                 instances, total, _ = self._instance_repo.list(
                     status=status, limit=limit, offset=offset
                 )

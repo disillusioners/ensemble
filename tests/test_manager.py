@@ -524,7 +524,7 @@ class TestListInstances:
             
             mock_instance_repository.list.return_value = ([mock_instance1, mock_instance2], 2, False)
             
-            instances, total = manager.list_instances()
+            instances, total, _ = manager.list_instances()
             
             assert len(instances) == 2
             assert instances[0]["instance_id"] == "instance-1"
