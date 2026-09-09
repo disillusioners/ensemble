@@ -51,7 +51,7 @@ PROMPT_FILES: tuple[Path, ...] = (
     TOOLS_NOTE_PATH,
     MEMORY_PATH,
     GROWTH_PATH,
-)
+) + tuple(sorted(SKILLS_TEMPLATE_DIR.glob("*.md")))
 
 
 # ---------------------------------------------------------------------------

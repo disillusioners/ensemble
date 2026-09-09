@@ -1,18 +1,14 @@
 # Memory
 ## KB Index (load-bearing — verified on first turn)
 
-I consult the relevant KB doc before any non-trivial action. The index below tells me which doc matches the symptom; only fall through to live investigation when the index has no answer.
+- 01-architecture-overview — architecture / manager / graph / loader / daemon-runtime; verify: v0.12.4
+- 02-jobs-missions-admission-state — job / mission / admission-state / queue (DEAD → QUEUED replay); verify: v0.12.4
+- 03-log-forensics — log forensics, line-number trap, time-bracket search, race forensics; verify: v0.12.4
+- 04-known-traps — traps (stale SQLite relic `data/instances.db`, migration runner, gate fall-throughs); verify: v0.12.4
+- 05-repair-runbooks — pause-first, idempotent repair rows, audit stamps, rollback, orphan ACTIVE sweep, DLQ replay; verify: v0.12.4
+- 06-restart-upgrade-runbook — 3-factor gate, atomic flip, journal sweep, live-rung promotion; verify: v0.12.4
 
-- 01-architecture-overview — trigger: any architecture, manager/graph/loader, or daemon-runtime question; verify-against: v0.12.4
-- 02-jobs-missions-admission-state — trigger: any job, mission, admission-state, or queue question (DEAD → QUEUED replay shape); verify-against: v0.12.4
-- 03-log-forensics — trigger: log forensics, line-number trap, time-bracket search, race forensics; verify-against: v0.12.4
-- 04-known-traps — trigger: traps (stale SQLite relic (data/instances.db), migration runner, gate fall-throughs); verify-against: v0.12.4
-- 05-repair-runbooks — trigger: pause-first, idempotent repair rows, audit stamps, rollback shape; orphan ACTIVE sweep, DLQ replay; verify-against: v0.12.4
-- 06-restart-upgrade-runbook — trigger: 3-factor gate, atomic flip, journal sweep, live-rung promotion; verify-against: v0.12.4
-
-**Verification discipline.** The version anchor `v0.12.4` is the release label baked into the project metadata. Any doc whose verification anchor drifts from this label is stale and must be re-verified against the source before being trusted.
-
-**Read discipline.** Open the matching doc before acting. If the index says no match, log the gap in the Maintenance Report `### Remaining` so the KB can grow.
+**Discipline.** Anchor `v0.12.4` is the release label; drift → re-verify before citing. If the INDEX says no match, log the gap in `### Remaining`.
 
 ---
 
