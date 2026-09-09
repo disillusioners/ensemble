@@ -1330,6 +1330,38 @@ describe('JobQueueIndicatorComponent Logic', () => {
         expect(componentTs).toContain('this.instanceService.listInstanceTree(10)');
       });
 
+      it('instances leg opts OUT of descendant loading (POLL-SPAM FIX)', () => {
+        // The badge polls every 8s; with include_descendants=true (the
+        // historical default), the BE BFS-loads the full subtree of every
+        // root in the page — prod (~6,324 instances) blows past
+        // MAX_DESCENDANTS_PER_PAGE=1000 on every tick (~510 WARN/hr).
+        //
+        // The fix has TWO halves:
+        //   (1) The component calls ``InstanceService.listInstanceTree(10)``
+        //       (already pinned above) — the SERVICE owns the wire contract.
+        //   (2) The service must pass ``include_descendants=false`` to the
+        //       API call (pinned in ``instance.service.spec.ts``).
+        //
+        // This test pins the COMPONENT half: the badge MUST use the
+        // listInstanceTree path (which carries the include_descendants
+        // contract). If a future refactor routes the badge through a
+        // different API call (e.g. a dedicated tree endpoint), the service
+        // contract disappears and the badge must be re-pinned to whatever
+        // the new path is.
+        //
+        // Specifically: the badge's instances leg calls
+        // ``this.instanceService.listInstanceTree(10)`` (the SERVICE path
+        // that owns include_descendants). It MUST NOT call
+        // ``api.listInstances(...)`` directly — that's a tree-builder
+        // concern, not a badge concern.
+        expect(componentTs).toContain('this.instanceService.listInstanceTree(10)');
+        // Anti-pin: the component must NOT bypass the service and call
+        // ``api.listInstances(...)`` directly. The whole point of the
+        // service wrapper is to centralize the include_descendants
+        // contract.
+        expect(componentTs).not.toMatch(/this\.api\.listInstances\(/);
+      });
+
       it('onInstanceClick closes the menu BEFORE mutating tab state and navigates to the instance', () => {
         // Same order lock as onJobClick/onFooterClick: the surface
         // drops first, then route state mutates.
