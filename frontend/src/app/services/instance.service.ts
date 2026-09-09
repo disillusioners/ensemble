@@ -480,9 +480,20 @@ export class InstanceService {
    * agents are still excluded (``exclude_kb=true``). ``order='activity'``
    * matches the poll path so live roots still lead the page.
    *
-   * Failures propagate to the caller's per-leg ``catchError`` (the
-   * component retains its last good open-state tree — the panel never
-   * flashes empty if the open fetch hiccups).
+   * Failures surface in the caller's subscribe ``error`` callback
+   * (the open-fetch is its own ``listInstanceTreeFull``
+   * subscription, NOT a ``forkJoin`` participant — there is no
+   * per-leg ``catchError`` on this path). The component's
+   * ``onPanelOpen`` error handler is intentionally side-effect
+   * free on the payload signals: the open-state payload is NOT
+   * written, and ``instanceRoots`` falls back to the cheap poll
+   * data when the open-state payload is empty (first open /
+   * failed refetch with no prior good tree) or RETAIN the LAST
+   * GOOD open-state tree otherwise (stale-keep across the
+   * close/reopen boundary; see
+   * ``JobQueueIndicatorComponent.onPanelClose`` and the
+   * ``instanceRoots`` non-empty-preference swap) — the panel
+   * never flashes empty.
    */
   listInstanceTreeFull(limit: number = 10): Observable<InstanceListResponse> {
     // include_descendants=true: the route re-engages the per-root

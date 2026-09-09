@@ -65,9 +65,15 @@ import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.compo
  *     (``include_descendants=true``) and returns the FULL nested
  *     subtree for the page's roots — the pre-fix behavior. The
  *     ``[instances]`` panel input swaps to this source while the
- *     menu is open and reverts to the poll data on close; the 8s
+ *     menu is open AND the open-state payload is non-empty, else
+ *     falls back to the poll data (first-open / failed-refetch
+ *     fallback; see ``instanceRoots`` non-empty-preference
+ *     contract); ``onPanelClose`` STALE-KEEPS the payload so a
+ *     reopen renders the LAST GOOD open-state tree immediately
+ *     (no empty flash) and survives a failed refetch. The 8s
  *     poll never clobbers the open-state tree (separate-path
- *     contract; see ``onPanelOpen`` / ``onPanelClose`` docblocks).
+ *     contract; see ``onPanelOpen`` / ``onPanelClose``
+ *     docblocks).
  *   - ``JobService.listDeferBlocked()``           — defer-gate warning
  *     payload for the severity icon beside the badge
  *
@@ -247,14 +253,26 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * descendant rows would silently disappear under the same
    * degraded-but-sane buildInstanceNodes rules. Splitting the
    * signals lets ``instanceRoots`` swap atomically: while the
-   * panel is OPEN, the public computed reads from HERE; on close
-   * it reverts to ``instancesPayload`` (the cheap poll data —
-   * see onPanelClose for the design decision).
+   * panel is OPEN, the public computed reads from HERE when this
+   * signal is non-empty, else falls back to ``instancesPayload``
+   * (the cheap poll data — see ``instanceRoots`` for the
+   * non-empty-preference fallback contract and ``onPanelClose``
+   * for the stale-keep design).
    *
-   * ``[]`` initial (pre-open). Failure path (per-leg catchError
-   * swallowed a network/BSE error) leaves the last good open-state
-   * payload in place — the open tree never flashes empty during a
-   * panel-open fetch hiccup. The OPEN state's
+   * ``[]`` initial (pre-open). STALE-KEEP ON CLOSE (2026-09-09
+   * patch): ``onPanelClose`` no longer resets this signal to
+   * ``[]`` — the value is retained across a close/reopen cycle so
+   * a subsequent open renders immediately from the LAST GOOD
+   * open-state tree (no empty flash), and a FAILED refetch on
+   * reopen does not flatten the tree (the swap falls back to
+   * ``instancesPayload`` only when this signal is empty — a
+   * previously-good open-state tree therefore survives a failed
+   * refetch). The fetch's ``error`` handler (subscribe callback,
+   * NOT a per-leg ``catchError``) intentionally does NOT write
+   * here either: a transient open-fetch hiccup is silent and the
+   * ``instanceRoots`` swap picks the right fallback automatically
+   * (poll data on first-open / failed-refetch-no-prior-tree;
+   * stale tree otherwise). The OPEN state's
    * ``buildInstanceNodes`` output is the pre-fix nested tree
    * exactly.
    */
@@ -288,25 +306,34 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   /**
    * Derived: nested root nodes fed to the panel's ``[instances]``
    * input. SWAPS between the poll data and the panel-open full
-   * data based on ``panelOpen``:
+   * data based on ``panelOpen`` AND the open-state payload's
+   * non-emptiness (the non-empty-preference fallback, 2026-09-09
+   * patch — see ``onPanelClose`` / ``onPanelOpen`` docblocks):
    *
-   *   panel closed → ``buildInstanceNodes(instancesPayload())``
+   *   panel closed  → ``buildInstanceNodes(instancesPayload())``
    *     (cheap flat poll — degraded-but-sane nesting)
-   *   panel open  → ``buildInstanceNodes(panelOpenInstancesPayload())``
+   *   panel open + ``panelOpenInstancesPayload()`` non-empty
+   *                → ``buildInstanceNodes(panelOpenInstancesPayload())``
    *     (full-tree lazy fetch — pre-fix nested behavior)
+   *   panel open + ``panelOpenInstancesPayload()`` empty
+   *                → ``buildInstanceNodes(instancesPayload())``
+   *     (fallback to the cheap poll data while the open fetch is
+   *     still in flight, OR after a failed refetch with no prior
+   *     good tree — the panel never flashes empty)
    *
    * The swap is atomic (one computed, one source per state) so
    * there is no race window where the two signals blend. Jobs +
    * missions signals keep updating on the 8s tick regardless of
    * the panel state — only the instances leg is gated.
+   *
+   * Pure signal read (no side effects in the getter).
    */
-  readonly instanceRoots = computed<InstanceNode[]>(() =>
-    buildInstanceNodes(
-      this.panelOpen()
-        ? this.panelOpenInstancesPayload()
-        : this.instancesPayload()
-    )
-  );
+  readonly instanceRoots = computed<InstanceNode[]>(() => {
+    const openPayload = this.panelOpenInstancesPayload();
+    const source =
+      this.panelOpen() && openPayload.length > 0 ? openPayload : this.instancesPayload();
+    return buildInstanceNodes(source);
+  });
 
   /**
    * Distinct live missions, from the missions projection this
@@ -882,47 +909,73 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
         error: (err) => {
           this.panelOpenFetchInFlight.set(false);
           console.warn('[JobQueueIndicator] panel-open full-tree fetch degraded:', err);
-          // No leg-error state recorded: this is not a poll leg,
-          // and a transient open-fetch failure is silent (the panel
-          // still shows the closed-panel data while open, which is
-          // degraded-but-sane — see the swap contract).
+          // Subscribe ``error`` callback — NOT a per-leg
+          // ``catchError`` (this open-fetch is its own
+          // ``listInstanceTreeFull`` subscription, not a
+          // ``forkJoin`` participant). Intentionally side-effect
+          // free on the payload signals: the open-state payload is
+          // NOT written, and ``instanceRoots`` falls back to the
+          // cheap poll data when the open-state payload is empty
+          // (first open / failed refetch with no prior good tree)
+          // or retains the LAST GOOD open-state tree otherwise
+          // (stale-keep across the close/reopen boundary; see
+          // ``panelOpenInstancesPayload`` docblock for the full
+          // contract). The panel never flashes empty.
         }
       });
   }
 
   /**
-   * Panel-close hook (2026-09-09 follow-up) — wired to
-   * ``(menuClosed)="onPanelClose()"`` on the mat-menu trigger.
-   * DESIGN DECISION — REVERT-TO-POLL-DATA (not stale-keep):
+   * Panel-close hook (2026-09-09 follow-up, hardened 2026-09-09
+   * patch) — wired to ``(menuClosed)="onPanelClose()"`` on the
+   * mat-menu trigger. DESIGN DECISION — STALE-KEEP (not clear,
+   * NOT revert):
    *
-   *   The simpler choice. On close, ``panelOpen`` flips false and
-   *   ``instanceRoots`` immediately re-reads from
-   *   ``instancesPayload`` (the cheap poll data). Rationale:
-   *     - The poll itself runs every 8s, so the closed-panel source
-   *       is fresh enough to render within one poll window — no
-   *       semantic difference vs the stale-keep alternative for a
-   *       user who re-opens the panel moments later (a re-open
-   *       fires a fresh ``listInstanceTreeFull`` anyway).
-   *     - No additional signal to track. Stale-keeping would
-   *       require a separate ``panelOpenInstancesPayloadStale``
-   *       copy or an explicit "is the open data still fresh"
-   *       timestamp; the revert path needs neither.
-   *     - The open-state data is dropped on close by design — the
-   *       next open builds a fresh full-tree fetch from the
-   *       current DB state, which is the right thing for a UI
-   *       surface the user has to consciously re-invoke.
+   *   On close, ``panelOpen`` flips false and the open-state
+   *   payload is RETAINED in ``panelOpenInstancesPayload``
+   *   untouched. The swap in ``instanceRoots`` immediately
+   *   re-reads from ``instancesPayload`` (the cheap poll data)
+   *   while the panel is closed — so the user sees the cheap
+   *   poll tree on close, not the open-state tree. Rationale for
+   *   stale-keep:
+   *     - NON-EMPTY-PREFERENCE FALLBACK. ``instanceRoots``
+   *       already prefers ``panelOpenInstancesPayload`` over
+   *       ``instancesPayload`` while the panel is open AND the
+   *       open-state payload is non-empty. A previous-good open
+   *       tree therefore SURVIVES the next close/reopen cycle
+   *       for free (no empty flash on reopen — even before the
+   *       new ``listInstanceTreeFull`` resolves).
+   *     - FAILED REFETCH ON REOPEN IS SURVIVED. If the user
+   *       reopens and the refetch errors (subscribe ``error``
+   *       callback), the open-state payload is intentionally
+   *       untouched. A first-open / failed-refetch-no-prior-tree
+   *       state falls back to the cheap poll data; a
+   *       previously-good open tree stays on screen.
+   *     - Cheap poll data (``instancesPayload``) survives
+   *       untouched and stays current on the 8s tick regardless
+   *       of panel state — the panel-rendering source for the
+   *       closed panel is always fresh within one poll window.
+   *     - No additional signal needed. The non-empty-preference
+   *       swap already encodes "empty open-state payload ⇒ use
+   *       the cheap poll data" without a separate
+   *       "is the open data still fresh" timestamp.
    *
-   *   ``panelOpenInstancesPayload`` is reset to ``[]`` so a
-   *   future open does not show pre-close data during the fetch
-   *   window — the user sees the cheap poll tree (the closed-panel
-   *   shape) for the ~tens of ms before the open fetch resolves.
+   *   The cheap poll data is the closed-panel source of record
+   *   (the swap reads ``instancesPayload`` when ``!panelOpen()``);
+   *   the open-state payload is ONLY consulted when the panel is
+   *   open AND the payload is non-empty. See
+   *   ``instanceRoots`` / ``panelOpenInstancesPayload`` for the
+   *   full contract.
    */
   onPanelClose(): void {
     this.panelOpen.set(false);
-    // Drop the open-state payload so the next open starts clean.
-    // Cheap poll data (``instancesPayload``) survives untouched —
-    // it stays current on the 8s tick regardless of panel state.
-    this.panelOpenInstancesPayload.set([]);
+    // STALE-KEEP: do NOT clear ``panelOpenInstancesPayload``.
+    // The non-empty-preference swap in ``instanceRoots`` makes
+    // the payload inert while ``!panelOpen()``; retaining it lets
+    // a subsequent reopen render the LAST GOOD open-state tree
+    // immediately (no empty window) and survive a failed
+    // refetch. The cheap poll data (``instancesPayload``) stays
+    // current on the 8s tick regardless of panel state.
   }
 
   /**

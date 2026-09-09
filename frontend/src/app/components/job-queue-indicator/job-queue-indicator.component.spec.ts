@@ -115,21 +115,28 @@ class MockJobQueueIndicatorComponent {
   /**
    * Derived nested roots — mirrors the real ``instanceRoots``
    * computed (delegates to the REAL ``buildInstanceNodes`` helper,
-   * as the real component does). SWAPS based on ``panelOpen``:
+   * as the real component does). SWAPS based on ``panelOpen``
+   * AND the open-state payload's non-emptiness (the
+   * non-empty-preference fallback, 2026-09-09 patch — mirrors
+   * the production ``instanceRoots`` exactly):
    *
-   *   panel closed → ``buildInstanceNodes(_instancesPayload())``
-   *   panel open  → ``buildInstanceNodes(_panelOpenInstancesPayload())``
+   *   panel closed  → ``buildInstanceNodes(_instancesPayload())``
+   *   panel open + ``_panelOpenInstancesPayload()`` non-empty
+   *                → ``buildInstanceNodes(_panelOpenInstancesPayload())``
+   *   panel open + ``_panelOpenInstancesPayload()`` empty
+   *                → ``buildInstanceNodes(_instancesPayload())``
    *
    * The swap is atomic (one computed, one source per state) so
    * there is no race window where the two signals blend.
    */
-  readonly instanceRoots = computed<InstanceNode[]>(() =>
-    buildInstanceNodes(
-      this.panelOpen()
-        ? this._panelOpenInstancesPayload()
-        : this._instancesPayload()
-    )
-  );
+  readonly instanceRoots = computed<InstanceNode[]>(() => {
+    const openPayload = this._panelOpenInstancesPayload();
+    const source =
+      this.panelOpen() && openPayload.length > 0
+        ? openPayload
+        : this._instancesPayload();
+    return buildInstanceNodes(source);
+  });
 
   /** Cached project_id → project name. */
   private readonly projectNameMap = signal<Map<string | null, string>>(new Map());
@@ -530,15 +537,42 @@ class MockJobQueueIndicatorComponent {
   }
 
   /**
+   * Mirror of the production subscribe ``error`` callback on the
+   * ``listInstanceTreeFull`` subscription. The production
+   * callback clears the in-flight flag and logs a warning — it
+   * intentionally does NOT write to either payload signal (the
+   * non-empty-preference swap in ``instanceRoots`` picks the
+   * right fallback automatically: cheap poll data on first-open
+   * / failed-refetch-no-prior-tree, stale tree otherwise). The
+   * mirror exposes the same contract so error-path tests can
+   * drive the post-error state directly without instantiating
+   * Angular's DI / RxJS scheduler.
+   */
+  onPanelOpenFetchError(): void {
+    this.panelOpenFetchInFlight.set(false);
+    // No payload writes — mirrors production.
+  }
+
+  /**
    * Mirror of the real component's ``onPanelClose``. DESIGN
-   * DECISION — REVERT-TO-POLL-DATA: clears the panel-open flag
-   * AND drops the open-state payload so the next open starts
-   * clean. The closed-panel source (``_instancesPayload``) is
+   * DECISION — STALE-KEEP (2026-09-09 patch): flips the
+   * panel-open flag to ``false`` AND retains the open-state
+   * payload (``_panelOpenInstancesPayload`` is NOT cleared on
+   * close). The closed-panel source (``_instancesPayload``) is
    * untouched — it stays current on the 8s poll regardless.
+   * Rationale mirrors the production docblock: the
+   * non-empty-preference swap in ``instanceRoots`` already
+   * prefers ``_instancesPayload`` when ``!panelOpen()``, so the
+   * payload is inert while closed. Retaining it lets a
+   * subsequent reopen render the LAST GOOD open-state tree
+   * immediately (no empty flash) and survive a failed refetch
+   * (the swap falls back to the cheap poll data only when the
+   * open-state payload is empty).
    */
   onPanelClose(): void {
     this.panelOpen.set(false);
-    this._panelOpenInstancesPayload.set([]);
+    // STALE-KEEP: do NOT clear ``_panelOpenInstancesPayload``.
+    // Mirrors the production ``onPanelClose`` exactly.
   }
 
   /**
@@ -1453,6 +1487,17 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // ``api.listInstances(...)`` directly. The whole point of the
         // service wrapper is to centralize the include_descendants
         // contract.
+        //
+        // NOTE (2026-09-09 patch): this regex scans the WHOLE
+        // component file (``componentTs`` is the full TS read), so
+        // the same ``not.toMatch`` covers BOTH the POLL leg
+        // (``fetchBadgeSignals`` → ``listInstanceTree``) AND the
+        // OPEN-fetch leg (``onPanelOpen`` → ``listInstanceTreeFull``).
+        // The OPEN-specific pin that used to live at the old
+        // ``panel-open lazy full-tree refetch`` describe block
+        // (~:2620) was a literal duplicate of this regex and was
+        // removed; the per-call pin above (``listInstanceTreeFull``)
+        // is the OPEN-path-specific evidence instead.
         expect(componentTs).not.toMatch(/this\.api\.listInstances\(/);
       });
 
@@ -2587,32 +2632,18 @@ describe('JobQueueIndicatorComponent Logic', () => {
     it('routes the open-fetch through InstanceService.listInstanceTreeFull(10)', () => {
       // Anti-bypass pin: the open-fetch MUST go through the
       // service wrapper (``listInstanceTreeFull``), NEVER through
-      // ``api.listInstances`` directly. The sibling pin at
-      // :1362 already covers the POLL path — this is the mirror
-      // for the OPEN path. A future refactor that bypasses the
-      // service wrapper would lose the include_descendants
-      // contract (the BE would receive whatever default the API
-      // service carries).
+      // ``api.listInstances`` directly. The sibling anti-pin at
+      // :1456 (the global ``this.api.listInstances(`` regex,
+      // which covers the whole component file) is the broader
+      // guard — this pin adds the OPEN-path-specific evidence:
+      // a future refactor that bypasses the service wrapper
+      // would lose the include_descendants contract (the BE
+      // would receive whatever default the API service carries).
       // The call is split across lines in the production source
       // (chain-style subscribe), so the regex tolerates any
       // amount of whitespace between ``listInstanceTreeFull`` and
       // its ``(10)`` arg.
       expect(componentTs).toMatch(/listInstanceTreeFull\(\s*10\s*\)/);
-    });
-
-    it('anti-bypass: the component does NOT call this.api.listInstances(...) directly for the open-fetch', () => {
-      // The anti-pin at :1362 already covers the POLL path; the
-      // sibling anti-pin for the OPEN path. The whole point of
-      // the service wrapper is to centralize the
-      // include_descendants contract (true for the open-fetch,
-      // false for the poll).
-      // The pin matches ``this.api.listInstances(`` ANYWHERE — a
-      // future refactor that bypasses the service wrapper would
-      // flip this test (the polling leg's
-      // ``this.instanceService.listInstanceTree`` call is the
-      // SAFE path; it does NOT contain ``this.api.listInstances``
-      // verbatim).
-      expect(componentTs).not.toMatch(/this\.api\.listInstances\(/);
     });
 
     it('component defines a listInstanceTreeFull method on the service (or its declaration is referenced)', () => {
@@ -2735,7 +2766,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(component.lastInstancesPayload().map((r) => r.instance_id)).toEqual(['poll-2']);
     });
 
-    it('onPanelClose reverts instanceRoots to the poll data (design decision: revert, not stale-keep)', () => {
+    it('onPanelClose retains the open-state payload (STALE-KEEP, 2026-09-09 patch) while instanceRoots reverts to poll data', () => {
       // Open + inject lazy data.
       component.setInstancesPayload(
         MockJobQueueIndicatorComponent.buildInstanceRows([
@@ -2757,14 +2788,63 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onPanelClose();
 
       // The swap reverts to the poll data IMMEDIATELY (no
-      // debounce, no transition state). And the open-state
-      // payload is dropped so a subsequent re-open starts
-      // clean.
+      // debounce, no transition state) because ``!panelOpen()``
+      // takes the closed-panel branch.
       expect(component.panelOpen()).toBe(false);
       expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
         'poll-1',
       ]);
-      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+      // STALE-KEEP: the open-state payload is RETAINED across
+      // close so a subsequent reopen renders immediately from the
+      // LAST GOOD open-state tree (no empty flash) and survives a
+      // failed refetch (see ``error path'' describe block).
+      expect(component.lastPanelOpenInstancesPayload().map((r) => r.instance_id)).toEqual([
+        'open-root',
+      ]);
+    });
+
+    it('reopen renders the LAST GOOD open-state tree immediately (stale-keep fallback, no empty window)', () => {
+      // Seed poll data + first open with a good refetch.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+        ])
+      );
+      component.onPanelOpen();
+      component.setPanelOpenInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'open-root', parent_id: null },
+          { instance_id: 'open-child', parent_id: 'open-root' },
+        ])
+      );
+      // Clear the in-flight flag (mirrors the production
+      // ``next`` handler's ``panelOpenFetchInFlight.set(false)``).
+      // Otherwise the reopen below would be debounced by the
+      // in-flight flag (see the dedicated ``onPanelOpen
+      // debounced by panelOpenFetchInFlight'' test) and the
+      // fetch count would NOT advance.
+      component.panelOpenFetchInFlight.set(false);
+      // Sanity: open-state visible.
+      expect(
+        component.instanceRoots().find((n) => n.instance.instance_id === 'open-root')
+      ).toBeDefined();
+
+      // Close (stale-keep).
+      component.onPanelClose();
+
+      // Reopen — second fetch starts.
+      component.onPanelOpen();
+      expect(component.panelOpenFetchCount).toBe(2);
+      expect(component.panelOpenFetchInFlight()).toBe(true);
+      // instanceRoots renders the LAST GOOD open-state tree
+      // immediately, NOT the empty ``[]`` it would read without
+      // stale-keep. And NOT the cheap poll tree (poll-1 must not
+      // appear in the OPEN state's nested tree).
+      const roots = component.instanceRoots();
+      const openRoot = roots.find((n) => n.instance.instance_id === 'open-root');
+      expect(openRoot).toBeDefined();
+      expect(openRoot!.children.map((c) => c.instance.instance_id)).toEqual(['open-child']);
+      expect(roots.some((n) => n.instance.instance_id === 'poll-1')).toBe(false);
     });
 
     it('a poll tick during the closed state writes only the closed-panel source', () => {
@@ -2808,6 +2888,194 @@ describe('JobQueueIndicatorComponent Logic', () => {
       expect(componentTs).toContain('this.instancesPayload.set(instances);');
       // And the open-state source has a sibling write site.
       expect(componentTs).toContain('this.panelOpenInstancesPayload.set(');
+    });
+
+    // -------------------------------------------------------------------------
+    // Error-path tests (2026-09-09 patch) — pin the
+    // non-empty-preference fallback + stale-keep behavior so a
+    // future regression cannot reintroduce "panel flashes empty
+    // on a failed refetch".
+    //
+    // Test surface covers the four-state matrix:
+    //   (i)   first open + failed refetch (no prior good tree)  ⇒ flat fallback
+    //   (ii)  prior good tree + reopen + failed refetch         ⇒ stale tree
+    //   (iii) first open, pre-resolution (fetch in flight)      ⇒ flat fallback
+    //   (iv)  production subscribe ``error`` callback is side-effect
+    //         free on BOTH payload signals (the pin a future
+    //         regression that writes on error would flip).
+    // -------------------------------------------------------------------------
+
+    it('error path (i): first open + failed refetch → instanceRoots falls back to flat poll data (NEVER empty)', () => {
+      // Pre-condition: closed panel, poll data present.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+          { instance_id: 'poll-2', parent_id: 'poll-1' },
+        ])
+      );
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+
+      // Open the panel — fetch starts.
+      component.onPanelOpen();
+      expect(component.panelOpen()).toBe(true);
+      expect(component.panelOpenFetchInFlight()).toBe(true);
+
+      // PRE-RESOLUTION state (fetch still in flight, payload
+      // not yet written). The open-state payload is empty;
+      // ``instanceRoots`` MUST fall back to ``instancesPayload``
+      // (the closed-panel source) rather than rendering an
+      // empty array.
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+      const preResolutionRoots = component.instanceRoots();
+      expect(preResolutionRoots.map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+      // And the open-state tree is NOT empty in the sense of
+      // "no rows" — the closed-panel fallback is the row
+      // source.
+      expect(preResolutionRoots.length).toBeGreaterThan(0);
+
+      // Fetch ERROR arrives (drives the production subscribe
+      // ``error`` callback). The production callback does NOT
+      // write to either payload signal — the swap picks the
+      // right fallback automatically.
+      component.onPanelOpenFetchError();
+      expect(component.panelOpenFetchInFlight()).toBe(false);
+
+      // Post-error state: ``instanceRoots`` STILL renders the
+      // cheap poll data (NOT empty). The panel never flashed
+      // empty at any point in the open-fetch lifecycle.
+      const postErrorRoots = component.instanceRoots();
+      expect(postErrorRoots.map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+      // And the open-state payload is still empty — the error
+      // handler intentionally did not fabricate a tree.
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+    });
+
+    it('error path (ii): prior good tree + reopen + failed refetch → stale tree survives, NO empty window', () => {
+      // Pre-condition: prior good open-state tree (simulating
+      // a previous successful open) + flat poll data.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+        ])
+      );
+      component.setPanelOpenInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'open-root', parent_id: null },
+          { instance_id: 'open-child', parent_id: 'open-root' },
+        ])
+      );
+      // Closed panel: shows poll data.
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+
+      // Reopen — fetch starts (panelOpen=true, fetchInFlight=true).
+      component.onPanelOpen();
+      expect(component.panelOpen()).toBe(true);
+      expect(component.panelOpenFetchInFlight()).toBe(true);
+
+      // PRE-RESOLUTION state: the non-empty-preference swap
+      // picks the STALE open-state tree (NOT empty, NOT the
+      // poll data — the panel-open user is still looking at
+      // their last good view while the refetch is in flight).
+      const roots = component.instanceRoots();
+      const openRoot = roots.find((n) => n.instance.instance_id === 'open-root');
+      expect(openRoot).toBeDefined();
+      expect(openRoot!.children.map((c) => c.instance.instance_id)).toEqual(['open-child']);
+      // And the poll-only id MUST NOT appear in the open state.
+      expect(roots.some((n) => n.instance.instance_id === 'poll-1')).toBe(false);
+
+      // Fetch ERROR arrives. The error handler does NOT clear
+      // the stale payload — it stays on screen. The user sees
+      // their last good tree across the failed refetch.
+      component.onPanelOpenFetchError();
+      expect(component.panelOpenFetchInFlight()).toBe(false);
+
+      // Post-error state: STALE tree still shown (no empty
+      // window, no fall-through to the poll data when a
+      // previously-good tree exists).
+      const postErrorRoots = component.instanceRoots();
+      const postErrorRoot = postErrorRoots.find(
+        (n) => n.instance.instance_id === 'open-root'
+      );
+      expect(postErrorRoot).toBeDefined();
+      expect(postErrorRoot!.children.map((c) => c.instance.instance_id)).toEqual([
+        'open-child',
+      ]);
+      expect(postErrorRoots.some((n) => n.instance.instance_id === 'poll-1')).toBe(false);
+      // The open-state payload is still the LAST GOOD tree —
+      // the error handler did not fabricate or erase it.
+      expect(component.lastPanelOpenInstancesPayload().map((r) => r.instance_id)).toEqual([
+        'open-root',
+        'open-child',
+      ]);
+    });
+
+    it('error path (iii): first open pre-resolution (fetch in flight) → flat fallback, NOT empty', () => {
+      // Pre-condition: closed panel, poll data present, NO
+      // prior open-state tree.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+          { instance_id: 'poll-2', parent_id: null },
+        ])
+      );
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+
+      // Open the panel — fetch starts.
+      component.onPanelOpen();
+      // PRE-RESOLUTION (in flight, no payload written yet):
+      // ``instanceRoots`` falls back to ``instancesPayload``
+      // (the closed-panel source). The panel is open but
+      // shows the cheap flat poll tree until the refetch
+      // resolves — NO empty flash.
+      const roots = component.instanceRoots();
+      expect(roots.map((n) => n.instance.instance_id).sort()).toEqual([
+        'poll-1',
+        'poll-2',
+      ]);
+      // And NOT empty.
+      expect(roots.length).toBeGreaterThan(0);
+      // The open-state payload is still empty (the fetch has
+      // not resolved yet).
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+    });
+
+    it('error path (iv): production subscribe error callback is side-effect free on BOTH payload signals', () => {
+      // Source-text pin: the production ``error`` callback in
+      // ``onPanelOpen`` MUST NOT write to either payload
+      // signal. The fallback is encoded in the ``instanceRoots``
+      // swap (non-empty-preference), not in the callback.
+      // A future refactor that adds e.g.
+      // ``this.panelOpenInstancesPayload.set([])`` to the
+      // error handler would clobber the stale-keep contract on
+      // failed refetches.
+      //
+      // Tolerates ``this.panelOpenInstancesPayload.set(`` ONLY
+      // in the ``next`` handler's ``if (this.panelOpen())`` guard
+      // — verified separately by the production source pin
+      // above (``expect(componentTs).toContain('this.panelOpenInstancesPayload.set(')``).
+      // Here we assert the broader contract: the only
+      // ``panelOpenInstancesPayload`` write in production is
+      // the single next-handler write; the error handler writes
+      // nothing.
+      //
+      // Heuristic: count occurrences of the write call in the
+      // component TS. The acceptable count is exactly ``1``
+      // (the next-handler write inside the late-write guard).
+      // Zero would mean the open-state tree never populates;
+      // >1 would mean a second write site (likely the error
+      // handler) was added — regression.
+      const writeCallCount = (
+        componentTs.match(/this\.panelOpenInstancesPayload\.set\(/g) || []
+      ).length;
+      expect(writeCallCount).toBe(1);
     });
   });
 });
