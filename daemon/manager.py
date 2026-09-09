@@ -4397,7 +4397,9 @@ class InstanceManager:
                 
                 # Query each non-active status
                 for status in non_active_statuses:
-                    instances, _ = self._instance_repository.list(status=status)
+                    # Flat pagination — ``truncated`` is always False and
+                    # uninteresting here; throwaway third tuple slot.
+                    instances, _, _ = self._instance_repository.list(status=status)
                     
                     for instance in instances:
                         # Only release if graph is in memory
@@ -10234,7 +10236,7 @@ class InstanceManager:
         include_descendants: bool = False,
         search: str | None = None,
         order: str = "pinned",
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
         When ``include_descendants`` is True, pagination is root-based: only root
@@ -10261,7 +10263,11 @@ class InstanceManager:
                 path only.
 
         Returns:
-            Tuple of (list of instance info dictionaries, total count).
+            Tuple of (list of instance info dicts, total count, truncated flag).
+            ``truncated`` is True iff ``include_descendants=True`` AND the
+            descendant cap fired during BFS — surfaces as the ``truncated``
+            boolean on the response envelope at the route layer. Flat
+            pagination never sets the flag.
         """
         return self._lifecycle_service.list_instances(
             limit=limit,
@@ -10477,8 +10483,10 @@ class InstanceManager:
             List of all near-matching instance_ids sorted by edit distance (closest first),
             or empty list if no matches found.
         """
-        # Get recent instances from repository (ordered by recency)
-        instances, _ = self._instance_repository.list(limit=50, offset=0)
+        # Get recent instances from repository (ordered by recency).
+        # Flat pagination — ``truncated`` is always False and uninteresting
+        # here; throwaway third tuple slot.
+        instances, _, _ = self._instance_repository.list(limit=50, offset=0)
 
         return find_near_instance(instance_id, instances, max_distance)
 

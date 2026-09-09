@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,19 @@ _MAX_TRAVERSAL_DEPTH = 256
 # Prevents pathological trees (huge fan-out, accidental cycles) from blowing
 # up response size / DB latency. Triggers a truncation warning when hit.
 MAX_DESCENDANTS_PER_PAGE = 1000
+
+# Rate-limit window for the descendant-cap WARNING (seconds). The 8s badge poll
+# fires ~450 times/hour per session, and prod (6,324 instances) blows past the
+# cap on every tick → ~510 WARN/hr is noise. With a 10-minute window we emit
+# one WARN per process per 10 minutes per offset bucket; repeats land at DEBUG.
+_DESCENDANT_CAP_WARN_WINDOW_SECONDS = 600
+
+# Module-level rate-limit state for the descendant-cap warning. Keyed by offset
+# so two distinct polling windows can each log their first hit; reset lazily by
+# comparing ``time.monotonic()`` to the last-emit timestamp. Both attributes
+# are module-level so the cap (a safety guard) reports its first few overflows
+# without flooding the log on every subsequent call.
+_descendant_cap_warn_last_emit: dict[int, float] = {}
 
 # Kill-switch wrapper state (P1, AF1 governance; removal ticket FT-004).
 # When ``ENSEMBLE_CASCADE_LINEAGE=permanent`` (default), cascades enumerate
@@ -781,10 +795,16 @@ class SQLModelInstanceRepository:
                 disagree on default DESC NULL placement) deterministic.
 
         Returns:
-            Tuple of (flat list of instances, total count). In
-            ``include_descendants=False`` mode, the total reflects all matching
-            instances. In ``include_descendants=True`` mode, the total reflects
-            only root instances (matching the pagination).
+            Tuple of (flat list of instances, total count, truncated flag).
+            In ``include_descendants=False`` mode the total reflects all
+            matching instances and ``truncated`` is always False (no BFS runs).
+            In ``include_descendants=True`` mode the total reflects only root
+            instances (matching the pagination), and ``truncated`` is True iff
+            the descendant cap fired during BFS — some descendants of the
+            selected roots are missing from the response. The route layer
+            surfaces ``truncated`` as the ``truncated`` boolean on the
+            response envelope; internal flat-pagination callers (maintenance,
+            project delete, fuzzy match, cache cleanup) ignore it.
         """
         if not include_descendants:
             # ────────────────────────────────────────────────────────────────
@@ -830,7 +850,8 @@ class SQLModelInstanceRepository:
                     .limit(limit)
                 )
                 instances = list(db_session.exec(stmt))
-                return self._enrich_instances(db_session, instances), total
+                # Flat pagination never truncates — no descendant loading.
+                return self._enrich_instances(db_session, instances), total, False
 
         # ────────────────────────────────────────────────────────────────
         # Root-based pagination + BFS descendant loading (API path).
@@ -910,7 +931,10 @@ class SQLModelInstanceRepository:
             roots = list(db_session.exec(root_stmt))
 
             if not roots:
-                return [], total
+                # No roots → no descendants to truncate. ``truncated=False``
+                # preserves the contract that the flag is only true when the
+                # descendant cap actually fired during BFS.
+                return [], total, False
 
             # 3. Iterative BFS to load ALL descendants of the paginated roots.
             #    Uses instances.parent_id (permanent record), not the working-set
@@ -931,6 +955,9 @@ class SQLModelInstanceRepository:
             seen_ids: set[str] = {r.instance_id for r in roots}
             current_level_ids: list[str] = [r.instance_id for r in roots]
             hit_depth_limit = False
+            # Set to True when the descendant cap truncates the tree; surfaces
+            # back to the route layer as ``truncated=True`` on the response.
+            truncated = False
 
             for _ in range(_MAX_TRAVERSAL_DEPTH):
                 if not current_level_ids:
@@ -969,14 +996,32 @@ class SQLModelInstanceRepository:
 
                 # Safety cap: pathological trees (huge fan-out, accidental
                 # cycles, very deep hierarchies) must not blow up response
-                # size or DB latency. Truncate with a warning.
+                # size or DB latency. Truncate with a WARNING — rate-limited
+                # to ``_DESCENDANT_CAP_WARN_WINDOW_SECONDS`` per offset so the
+                # 8s badge poll can't flood logs (~510 WARN/hr observed in
+                # prod with 6,324 instances). Repeats within the window are
+                # logged at DEBUG so the diagnostic information survives
+                # without becoming noise.
                 if len(all_instances) >= MAX_DESCENDANTS_PER_PAGE:
-                    logger.warning(
-                        "Descendant limit (%d) reached for roots at offset %d; "
-                        "truncating tree load",
-                        MAX_DESCENDANTS_PER_PAGE,
-                        offset,
-                    )
+                    now = time.monotonic()
+                    last = _descendant_cap_warn_last_emit.get(offset)
+                    if last is None or (now - last) >= _DESCENDANT_CAP_WARN_WINDOW_SECONDS:
+                        logger.warning(
+                            "Descendant limit (%d) reached for roots at offset %d; "
+                            "truncating tree load",
+                            MAX_DESCENDANTS_PER_PAGE,
+                            offset,
+                        )
+                        _descendant_cap_warn_last_emit[offset] = now
+                    else:
+                        logger.debug(
+                            "Descendant limit (%d) reached for roots at offset %d; "
+                            "truncating tree load (rate-limited; last WARN %.0fs ago)",
+                            MAX_DESCENDANTS_PER_PAGE,
+                            offset,
+                            now - last,
+                        )
+                    truncated = True
                     break
 
                 current_level_ids = next_level_ids
@@ -1004,7 +1049,7 @@ class SQLModelInstanceRepository:
                     inst for inst in all_instances if inst.agent_id not in KB_AGENT_IDS
                 ]
 
-            return self._enrich_instances(db_session, all_instances), total
+            return self._enrich_instances(db_session, all_instances), total, truncated
 
     def list_by_parent(self, parent_id: str) -> list[Instance]:
         """List all child instances of a parent."""

@@ -4070,7 +4070,7 @@ class InstanceLifecycleService:
         include_descendants: bool = False,
         search: str | None = None,
         order: str = "pinned",
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
         When ``include_descendants`` is True, pagination is root-based: only root
@@ -4101,12 +4101,16 @@ class InstanceLifecycleService:
                 :meth:`SQLModelInstanceRepository.list`.
 
         Returns:
-            Tuple of (list of instance info dictionaries, total count).
+            Tuple of (list of instance info dicts, total count, truncated flag).
+            ``truncated`` is True iff ``include_descendants=True`` AND the
+            descendant cap fired during BFS — callers (route layer) surface it
+            as the ``truncated`` boolean on the response envelope. Flat
+            pagination never sets the flag.
         """
         # Access manager's state dynamically
         instance_repository = self._manager._instance_repository
 
-        instances, total = instance_repository.list(
+        instances, total, truncated = instance_repository.list(
             limit=limit,
             offset=offset,
             project_id=project_id,
@@ -4126,7 +4130,7 @@ class InstanceLifecycleService:
             info = inst.to_dict()
             info["children"] = instance_repository.list_child_ids_permanent(inst.instance_id)
             result.append(info)
-        return result, total
+        return result, total, truncated
 
     def get_instance_info(self, instance_id: str) -> dict:
         """Get information about a specific instance.
