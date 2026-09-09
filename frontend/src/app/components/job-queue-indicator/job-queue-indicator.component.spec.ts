@@ -67,17 +67,68 @@ class MockJobQueueIndicatorComponent {
    * ``instancesPayload`` signal (retention: ``null`` leg ⇒ untouched).
    * Read-only exposure ``lastInstancesPayload`` so the F-5-class
    * pins can assert the tree payload end-to-end.
+   *
+   * The mirror's INSTANCE PANEL-OPEN counterpart is
+   * ``_panelOpenInstancesPayload`` (added 2026-09-09 for the
+   * lazy full-tree fetch). See ``onPanelOpen`` for the swap logic.
    */
   private readonly _instancesPayload = signal<InstanceRow[]>([]);
   readonly lastInstancesPayload = this._instancesPayload.asReadonly();
 
   /**
+   * Panel-open full-tree payload mirror (2026-09-09 follow-up to
+   * the poll-spam fix). ONE-FETCH-PER-OPEN source — populated ONLY
+   * by ``onPanelOpen`` via ``InstanceService.listInstanceTreeFull``
+   * (BE flag ``include_descendants=true``). Mirrors the real
+   * component's ``panelOpenInstancesPayload`` signal. Read-only
+   * exposure so the panel-open-class pins can assert the open
+   * payload end-to-end.
+   */
+  private readonly _panelOpenInstancesPayload = signal<InstanceRow[]>([]);
+  readonly lastPanelOpenInstancesPayload = this._panelOpenInstancesPayload.asReadonly();
+
+  /**
+   * Panel-open state mirror — drives the ``instanceRoots`` swap.
+   * Mirrors the real component's ``panelOpen`` signal (set true by
+   * ``onPanelOpen``, false by ``onPanelClose``).
+   */
+  readonly panelOpen = signal(false);
+
+  /**
+   * Panel-open fetch in-flight guard mirror — set true while a
+   * panel-open fetch is mid-flight and cleared in ``next``/
+   * ``error`` handlers. ``onPanelOpen`` returns early when this
+   * flag is already set, so a rapid menu-open toggle fires ONE
+   * fetch per open action. Mirrors the real component's
+   * ``panelOpenFetchInFlight``.
+   */
+  readonly panelOpenFetchInFlight = signal(false);
+
+  /**
+   * Counter mirror — tracks how many times ``onPanelOpen``
+   * actually triggered a service call. Tests assert this is
+   * ``1`` per open-action and ``0`` when guarded by the
+   * in-flight flag / open-state flag.
+   */
+  panelOpenFetchCount = 0;
+
+  /**
    * Derived nested roots — mirrors the real ``instanceRoots``
    * computed (delegates to the REAL ``buildInstanceNodes`` helper,
-   * as the real component does).
+   * as the real component does). SWAPS based on ``panelOpen``:
+   *
+   *   panel closed → ``buildInstanceNodes(_instancesPayload())``
+   *   panel open  → ``buildInstanceNodes(_panelOpenInstancesPayload())``
+   *
+   * The swap is atomic (one computed, one source per state) so
+   * there is no race window where the two signals blend.
    */
   readonly instanceRoots = computed<InstanceNode[]>(() =>
-    buildInstanceNodes(this._instancesPayload())
+    buildInstanceNodes(
+      this.panelOpen()
+        ? this._panelOpenInstancesPayload()
+        : this._instancesPayload()
+    )
   );
 
   /** Cached project_id → project name. */
@@ -445,6 +496,49 @@ class MockJobQueueIndicatorComponent {
   /** Setter mirroring the writable private signal (test drive). */
   setInstancesPayload(rows: InstanceRow[]): void {
     this._instancesPayload.set(rows);
+  }
+
+  /**
+   * Setter mirroring the writable panel-open payload signal (test
+   * drive). Tests inject the lazy-fetch result here to verify the
+   * ``instanceRoots`` swap without going through the real service.
+   */
+  setPanelOpenInstancesPayload(rows: InstanceRow[]): void {
+    this._panelOpenInstancesPayload.set(rows);
+  }
+
+  /**
+   * Mirror of the real component's ``onPanelOpen``. The real
+   * component calls ``InstanceService.listInstanceTreeFull(10)``;
+   * the mirror increments ``panelOpenFetchCount`` and flips
+   * ``panelOpenFetchInFlight`` to ``true`` so the test can assert
+   * the open-action contract (one fetch per open, debounce-guarded).
+   * The fetch resolution is test-injected via
+   * ``setPanelOpenInstancesPayload`` + clearing
+   * ``panelOpenFetchInFlight`` from outside.
+   *
+   * Mirrors the production guard order: already-open OR
+   * in-flight ⇒ no fetch.
+   */
+  onPanelOpen(): void {
+    if (this.panelOpen() || this.panelOpenFetchInFlight()) {
+      return;
+    }
+    this.panelOpen.set(true);
+    this.panelOpenFetchInFlight.set(true);
+    this.panelOpenFetchCount += 1;
+  }
+
+  /**
+   * Mirror of the real component's ``onPanelClose``. DESIGN
+   * DECISION — REVERT-TO-POLL-DATA: clears the panel-open flag
+   * AND drops the open-state payload so the next open starts
+   * clean. The closed-panel source (``_instancesPayload``) is
+   * untouched — it stays current on the 8s poll regardless.
+   */
+  onPanelClose(): void {
+    this.panelOpen.set(false);
+    this._panelOpenInstancesPayload.set([]);
   }
 
   /**
@@ -1411,8 +1505,13 @@ describe('JobQueueIndicatorComponent Logic', () => {
         // rename/move/revert flips this test.
         expect(componentTs).toContain('this.instancesPayload.set(instances);');
         // And the write must feed the derived tree input the
-        // template binds: instancesPayload → instanceRoots.
-        expect(componentTs).toContain('buildInstanceNodes(this.instancesPayload())');
+        // template binds: instancesPayload → instanceRoots. The
+        // swap (panelOpen ? panelOpenInstancesPayload :
+        // instancesPayload) feeds ``buildInstanceNodes`` so the
+        // closed-panel source still appears inside the call —
+        // pin with a regex tolerant of whitespace AND the
+        // conditional expression that selects the source.
+        expect(componentTs).toMatch(/buildInstanceNodes\s*\([\s\S]*this\.instancesPayload\(\)/);
       });
     });
   });
@@ -2431,6 +2530,284 @@ describe('JobQueueIndicatorComponent Logic', () => {
       component.onFooterClick();
       expect(component.lastNavigated).toBeNull();
       expect(component.lastFooterNavigated).toEqual(['/jobs']);
+    });
+  });
+
+  // ── Panel-open lazy full-tree refetch (FE-only follow-up to the
+  //    poll-spam fix). The badge 8s poll keeps ``listInstanceTree``
+  //    (include_descendants=false, flat); the panel-open path uses
+  //    the sibling ``listInstanceTreeFull`` (include_descendants=true,
+  //    full nested subtree) so the panel renders the pre-fix tree.
+
+  describe('panel-open lazy full-tree refetch (FE-only follow-up to poll-spam fix)', () => {
+    /**
+     * Source-text pin: the REAL component MUST wire the
+     * ``(menuOpened)`` and ``(menuClosed)`` template bindings to
+     * the panel-open / panel-close hooks. The mirror exercises the
+     * hook logic; the source-text pin proves the TEMPLATE actually
+     * fires them. The (menuOpened) binding is the SOLE entry point
+     * to the lazy full-tree fetch — a template regression that
+     * drops the binding would silently leave the panel on the
+     * cheap flat data forever.
+     */
+    let templateHtml: string;
+    let componentTs: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      const specDir = __dirname;
+      templateHtml = fs.readFileSync(
+        path.join(specDir, 'job-queue-indicator.component.html'),
+        'utf-8'
+      );
+      componentTs = fs.readFileSync(
+        path.join(specDir, 'job-queue-indicator.component.ts'),
+        'utf-8'
+      );
+    });
+
+    it('binds (menuOpened)="onPanelOpen()" so the menu open fires the lazy full-tree fetch', () => {
+      // The lazy-fetch contract is gated on the menu-opening event.
+      // Without this binding, the panel stays on the cheap flat
+      // poll data forever — exactly the regression this follow-up
+      // closes.
+      expect(templateHtml).toContain('(menuOpened)="onPanelOpen()"');
+    });
+
+    it('binds (menuClosed)="onPanelClose()" so the menu close reverts to poll data', () => {
+      // The revert-to-poll-data design decision requires the
+      // close hook to fire. Without this binding the open-state
+      // payload stays in memory after the panel closes and a
+      // subsequent panel-open (with a slow network) would show
+      // stale data instead of the cheap poll tree.
+      expect(templateHtml).toContain('(menuClosed)="onPanelClose()"');
+    });
+
+    it('routes the open-fetch through InstanceService.listInstanceTreeFull(10)', () => {
+      // Anti-bypass pin: the open-fetch MUST go through the
+      // service wrapper (``listInstanceTreeFull``), NEVER through
+      // ``api.listInstances`` directly. The sibling pin at
+      // :1362 already covers the POLL path — this is the mirror
+      // for the OPEN path. A future refactor that bypasses the
+      // service wrapper would lose the include_descendants
+      // contract (the BE would receive whatever default the API
+      // service carries).
+      // The call is split across lines in the production source
+      // (chain-style subscribe), so the regex tolerates any
+      // amount of whitespace between ``listInstanceTreeFull`` and
+      // its ``(10)`` arg.
+      expect(componentTs).toMatch(/listInstanceTreeFull\(\s*10\s*\)/);
+    });
+
+    it('anti-bypass: the component does NOT call this.api.listInstances(...) directly for the open-fetch', () => {
+      // The anti-pin at :1362 already covers the POLL path; the
+      // sibling anti-pin for the OPEN path. The whole point of
+      // the service wrapper is to centralize the
+      // include_descendants contract (true for the open-fetch,
+      // false for the poll).
+      // The pin matches ``this.api.listInstances(`` ANYWHERE — a
+      // future refactor that bypasses the service wrapper would
+      // flip this test (the polling leg's
+      // ``this.instanceService.listInstanceTree`` call is the
+      // SAFE path; it does NOT contain ``this.api.listInstances``
+      // verbatim).
+      expect(componentTs).not.toMatch(/this\.api\.listInstances\(/);
+    });
+
+    it('component defines a listInstanceTreeFull method on the service (or its declaration is referenced)', () => {
+      // Anti-regression pin: the production component MUST call
+      // the new service method. The method itself lives on the
+      // service and is pinned by ``instance.service.spec.ts``
+      // (see ``listInstanceTreeFull (panel-open lazy full-tree
+      // fetch)``); this pin guards the COMPONENT's reference.
+      expect(componentTs).toContain('listInstanceTreeFull');
+    });
+
+    it('onPanelOpen triggers exactly ONE fetch and sets the open-state flags', () => {
+      // Pre-condition: closed, no fetch yet.
+      expect(component.panelOpen()).toBe(false);
+      expect(component.panelOpenFetchInFlight()).toBe(false);
+      expect(component.panelOpenFetchCount).toBe(0);
+
+      component.onPanelOpen();
+
+      // Post-condition: open, fetch started, count incremented.
+      expect(component.panelOpen()).toBe(true);
+      expect(component.panelOpenFetchInFlight()).toBe(true);
+      expect(component.panelOpenFetchCount).toBe(1);
+    });
+
+    it('onPanelOpen is debounced by panelOpen (no second fetch when already open)', () => {
+      component.onPanelOpen();
+      expect(component.panelOpenFetchCount).toBe(1);
+
+      // The Material menu can fire (menuOpened) twice on some
+      // toggles; the open-state guard must catch the second one.
+      component.onPanelOpen();
+      expect(component.panelOpenFetchCount).toBe(1);
+    });
+
+    it('onPanelOpen is debounced by panelOpenFetchInFlight (rapid toggle cannot queue a second fetch)', () => {
+      component.onPanelOpen();
+      expect(component.panelOpenFetchInFlight()).toBe(true);
+      expect(component.panelOpenFetchCount).toBe(1);
+
+      // Simulate a close-mid-fetch (panelOpen flips false but
+      // in-flight still true). A re-open within the same tick
+      // must NOT queue a second fetch — the in-flight flag
+      // catches it.
+      component.onPanelClose();
+      // onPanelClose flips panelOpen false but leaves the
+      // in-flight flag (the production behavior mirrors that).
+      component.onPanelOpen();
+      expect(component.panelOpenFetchCount).toBe(1);
+    });
+
+    it('instanceRoots swaps to panelOpenInstancesPayload when panelOpen === true', () => {
+      // Closed-panel source: cheap flat poll data.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+        ])
+      );
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+
+      // Open panel + inject lazy full-tree payload.
+      component.onPanelOpen();
+      component.setPanelOpenInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'open-root', parent_id: null },
+          { instance_id: 'open-child', parent_id: 'open-root' },
+        ])
+      );
+
+      // The swap must read from the OPEN source, not the poll source.
+      const openRoots = component.instanceRoots();
+      const openRoot = openRoots.find((n) => n.instance.instance_id === 'open-root');
+      expect(openRoot).toBeDefined();
+      expect(openRoot!.children.map((c) => c.instance.instance_id)).toEqual(['open-child']);
+      // And the poll-only id MUST NOT appear.
+      expect(
+        component.instanceRoots().some((n) => n.instance.instance_id === 'poll-1')
+      ).toBe(false);
+    });
+
+    it('a poll tick mid-open does NOT clobber the open-state tree (separate-path contract)', () => {
+      // Seed poll data, then open the panel and inject open-state data.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+        ])
+      );
+      component.onPanelOpen();
+      component.setPanelOpenInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'open-root', parent_id: null },
+          { instance_id: 'open-child', parent_id: 'open-root' },
+        ])
+      );
+
+      // A poll tick arrives. The real component writes
+      // ``instancesPayload`` (the cheap flat source) every 8s
+      // regardless of panel state — a brand-new poll payload
+      // must NOT clobber the OPEN tree the user is looking at.
+      component.applyFetchResult(
+        [],
+        [],
+        null,
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-2', parent_id: null },
+        ]),
+        null
+      );
+
+      // The OPEN tree still shows the open-state data — the
+      // poll payload landed in the closed-panel source but
+      // ``instanceRoots`` reads from the open-source while
+      // panelOpen() === true.
+      const ids = component.instanceRoots().map((n) => n.instance.instance_id);
+      expect(ids).toContain('open-root');
+      expect(ids).not.toContain('poll-2');
+      // And the closed-panel source was updated as expected.
+      expect(component.lastInstancesPayload().map((r) => r.instance_id)).toEqual(['poll-2']);
+    });
+
+    it('onPanelClose reverts instanceRoots to the poll data (design decision: revert, not stale-keep)', () => {
+      // Open + inject lazy data.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'poll-1', parent_id: null },
+        ])
+      );
+      component.onPanelOpen();
+      component.setPanelOpenInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'open-root', parent_id: null },
+        ])
+      );
+      // Sanity: open-state visible.
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'open-root',
+      ]);
+
+      // Close the panel.
+      component.onPanelClose();
+
+      // The swap reverts to the poll data IMMEDIATELY (no
+      // debounce, no transition state). And the open-state
+      // payload is dropped so a subsequent re-open starts
+      // clean.
+      expect(component.panelOpen()).toBe(false);
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'poll-1',
+      ]);
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+    });
+
+    it('a poll tick during the closed state writes only the closed-panel source', () => {
+      // Pre-condition: closed, poll data fresh.
+      component.setInstancesPayload(
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'old', parent_id: null },
+        ])
+      );
+
+      // A poll tick arrives (the production component writes
+      // ``instancesPayload`` here).
+      component.applyFetchResult(
+        [],
+        [],
+        null,
+        MockJobQueueIndicatorComponent.buildInstanceRows([
+          { instance_id: 'new', parent_id: null },
+        ]),
+        null
+      );
+
+      // The closed-panel source was updated and ``instanceRoots``
+      // (closed-panel state) reflects it.
+      expect(component.lastInstancesPayload().map((r) => r.instance_id)).toEqual(['new']);
+      expect(component.instanceRoots().map((n) => n.instance.instance_id)).toEqual([
+        'new',
+      ]);
+      // And the open-state source stays untouched — a poll tick
+      // NEVER writes there (the lazy-fetch handler is the only
+      // writer).
+      expect(component.lastPanelOpenInstancesPayload()).toEqual([]);
+    });
+
+    it('production source pin: the F-5 closed-panel write site still fires (poll still writes instancesPayload)', () => {
+      // Re-anchor of the F-5 lesson pin (closed-panel side):
+      // even with the panel-open path added, the poll MUST still
+      // write the closed-panel source on every tick. A future
+      // refactor that skips the write when panelOpen is true
+      // would silently re-flatten the panel tree on close.
+      expect(componentTs).toContain('this.instancesPayload.set(instances);');
+      // And the open-state source has a sibling write site.
+      expect(componentTs).toContain('this.panelOpenInstancesPayload.set(');
     });
   });
 });

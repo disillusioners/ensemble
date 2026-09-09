@@ -108,6 +108,17 @@ class TestableInstanceService {
     return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', false);
   }
 
+  /** Mirror of the real ``InstanceService.listInstanceTreeFull`` —
+   *  the PANEL-OPEN lazy full-tree fetch (2026-09-09 follow-up to
+   *  the poll-spam fix). Re-engages ``include_descendants=true`` so
+   *  the panel renders the full nested subtree when the user opens
+   *  it, while the cheap 8s poll keeps ``listInstanceTree`` (flat).
+   *  ``order='activity'`` + ``exclude_kb=true`` match the poll path
+   *  so the page content is consistent. */
+  listInstanceTreeFull(limit: number = 10): Observable<MockInstanceListResponse> {
+    return this.api.listInstances(limit, 0, undefined, true, undefined, 'activity', true);
+  }
+
   async loadInstances(projectId?: string, append = false): Promise<void> {
     if (append) {
       this.isLoadingMore.set(true);
@@ -837,6 +848,74 @@ describe('InstanceService', () => {
       expect(mockApi.listInstances).toHaveBeenCalledWith(
         25, 0, undefined, true, undefined, 'activity', false
       );
+    });
+  });
+
+  describe('listInstanceTreeFull (panel-open lazy full-tree fetch)', () => {
+    it('should pass include_descendants=true to re-engage the descendant BFS (PANEL-OPEN)', () => {
+      // Panel-open path (2026-09-09): the user has explicitly
+      // requested the tree, so re-engaging the per-root descendant
+      // BFS is acceptable (bounded by user open-action frequency;
+      // the BE rate-limits the descendant-cap WARN to once/10min).
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTreeFull();
+
+      // Same 7-arg shape as listInstanceTree, but include_descendants
+      // flips to true so the BE BFS-walks each root's subtree.
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        10, 0, undefined, true, undefined, 'activity', true
+      );
+    });
+
+    it('should forward a custom limit while keeping include_descendants=true', () => {
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTreeFull(25);
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(
+        25, 0, undefined, true, undefined, 'activity', true
+      );
+    });
+
+    it('should keep exclude_kb=true and order=activity (consistent with poll path)', () => {
+      // The panel-open path MUST NOT widen the visible scope
+      // (KB agents still excluded, live roots still first) — those
+      // belong to the visible instance-list page contract, not the
+      // panel-open fetch.
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTreeFull();
+
+      const args = (mockApi.listInstances as jest.Mock).mock.calls[0];
+      expect(args[3]).toBe(true);  // exclude_kb=true
+      expect(args[5]).toBe('activity');
+      expect(args[6]).toBe(true);  // include_descendants=true (THE difference)
+    });
+
+    it('should NOT be the same path as listInstanceTree (poll stays flat)', () => {
+      // Structural anti-pin: listInstanceTreeFull MUST re-engage
+      // the descendant BFS, otherwise the panel-open path silently
+      // degrades to the same flat paginated slice the poll uses.
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0, has_more: false })
+      );
+
+      service.listInstanceTreeFull();
+      const openArgs = (mockApi.listInstances as jest.Mock).mock.calls[0];
+
+      mockApi.listInstances.mockClear();
+      service.listInstanceTree();
+      const pollArgs = (mockApi.listInstances as jest.Mock).mock.calls[0];
+
+      expect(openArgs[6]).toBe(true);
+      expect(pollArgs[6]).toBe(false);
     });
   });
 
