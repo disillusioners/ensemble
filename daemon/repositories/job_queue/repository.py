@@ -143,6 +143,38 @@ def _is_postgres(session: SQLModelSession) -> bool:
     )
 
 
+def _terminal_reason_variants(canonical_token: str) -> tuple[str, ...]:
+    """Map-derived terminal_reason IN-list for a canonical status token.
+
+    Delegates to
+    :func:`daemon.services.work_status.terminal_reason_variants_for` —
+    the reverse index derived from ``_STATUS_CANONICAL_MAP`` (single
+    source of truth). Defect provenance (2026-09-10,
+    ``fix/jobs-status-combo-filter``): the per-kind ``cancelled``
+    branch was strict ``terminal_reason == 'cancelled'`` while the
+    read layer (:func:`daemon.services.work_status._derive_legacy_status`)
+    canonicalized ``aborted`` / ``orphan_retired`` /
+    ``watchover_terminated`` onto ``cancelled`` — rows carrying those
+    discriminators silently dropped out of ``?status=cancelled`` (and
+    the panel's combo). The hand-copied strict value at the SQL site
+    was the drift mechanism; consulting the map-derived reverse index
+    here means any future alias added to the canonical map flows
+    through to BOTH layers automatically.
+
+    Lazy import (function-level, not module-level) because
+    ``daemon.repositories.job_queue.__init__`` imports this module
+    first and ``daemon.services.__init__`` pulls heavyweight service
+    modules — a top-level import here would drag the whole services
+    package into every ``import daemon.repositories.job_queue`` and
+    risks a partial-initialization cycle. After the first call the
+    import is cached (sys.modules hit) — the per-query cost is a
+    dict lookup.
+    """
+    from daemon.services.work_status import terminal_reason_variants_for
+
+    return terminal_reason_variants_for(canonical_token)
+
+
 class JobRepository:
     """SQLModel-based Job Queue repository for CRUD operations.
     
@@ -1097,12 +1129,17 @@ class JobRepository:
                     # ``completed`` ⇒ task rows only. Pre-7c hedge
                     # (terminal_reason IS NULL) is included — pre-7c
                     # rows predate the rename and never carry
-                    # ``job_type='message'``.
+                    # ``job_type='message'``. The IN-list is
+                    # map-derived (see the cancelled branch below)
+                    # so an alias added onto the canonical map is
+                    # picked up here automatically.
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "task",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
@@ -1110,31 +1147,69 @@ class JobRepository:
                 if has_settled_token:
                     # ``settled`` ⇒ mirror rows only. NULL hedge
                     # matches the read-API derivation — see the
-                    # sibling defect note above.
+                    # sibling defect note above. The ``settled``
+                    # token has no canonical-map entry of its own
+                    # (it's the per-kind dispatch of
+                    # ``completed`` + ``job_type='message'`` in
+                    # ``_derive_legacy_status``), so the variant
+                    # set consulted here is the ``completed`` one,
+                    # kind-gated by the ``job_type`` clause.
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
                     )
                 if has_failed_token:
-                    # ``failed`` ⇒ rows with terminal_reason='failed'.
-                    # No job_type constraint — a failed job can be
-                    # either task or message kind (the
-                    # admission-state IN-clause above already
-                    # narrows to ``done``).
+                    # ``failed`` ⇒ rows whose terminal_reason
+                    # canonicalizes to ``failed``. No job_type
+                    # constraint — a failed job can be either task
+                    # or message kind (the admission-state
+                    # IN-clause above already narrows to
+                    # ``done``). Map-derived IN-list (the
+                    # canonical map folds ``error`` onto
+                    # ``failed``) so a new alias added to the map
+                    # flows through without a hand-edit here.
                     per_kind_branches.append(
-                        JobItem.terminal_reason == "failed"
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("failed")
+                        )
                     )
                 if has_cancelled_token:
-                    # ``cancelled`` ⇒ rows with
-                    # terminal_reason='cancelled'. No job_type
+                    # ``cancelled`` ⇒ rows whose terminal_reason
+                    # canonicalizes to ``cancelled``. No job_type
                     # constraint — same rationale as ``failed``.
+                    #
+                    # Canonicalization-map fix (2026-09-10): the
+                    # branch was strict ``== 'cancelled'`` while
+                    # the read layer
+                    # (``_derive_legacy_status``) canonicalizes
+                    # ``aborted`` / ``orphan_retired`` /
+                    # ``watchover_terminated`` onto the same
+                    # token — those rows silently dropped from
+                    # ``?status=cancelled`` and the panel combo.
+                    # The IN-list is derived from
+                    # ``_STATUS_CANONICAL_MAP`` via
+                    # ``terminal_reason_variants_for`` (single
+                    # source of truth) so filter and read
+                    # vocabulary cannot drift again.
+                    #
+                    # ``dead_letter`` intentionally has NO
+                    # per-kind branch: its map source (``dead``)
+                    # is an admission_state spelling, not a
+                    # terminal_reason spelling, and the read
+                    # layer does not consult terminal_reason for
+                    # non-done rows — dead rows match purely via
+                    # the admission-state IN-clause above.
                     per_kind_branches.append(
-                        JobItem.terminal_reason == "cancelled"
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("cancelled")
+                        )
                     )
                 if per_kind_branches:
                     count_stmt = count_stmt.where(or_(*per_kind_branches))
@@ -1193,7 +1268,9 @@ class JobRepository:
                         and_(
                             JobItem.job_type == "task",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
@@ -1203,18 +1280,24 @@ class JobRepository:
                         and_(
                             JobItem.job_type == "message",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
                     )
                 if has_failed_token:
                     per_kind_branches.append(
-                        JobItem.terminal_reason == "failed"
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("failed")
+                        )
                     )
                 if has_cancelled_token:
                     per_kind_branches.append(
-                        JobItem.terminal_reason == "cancelled"
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("cancelled")
+                        )
                     )
                 if per_kind_branches:
                     stmt = stmt.where(or_(*per_kind_branches))

@@ -17,6 +17,17 @@ layer):
   (per-kind dispatch on the lossy ``done → completed`` fallthrough).
   The filter and the read API disagreed.
 
+* Sibling defect (2026-09-10, this commit): the ``cancelled`` branch
+  was strict ``terminal_reason == 'cancelled'`` while the read layer
+  canonicalizes ``aborted`` / ``orphan_retired`` /
+  ``watchover_terminated`` onto ``cancelled`` via
+  ``_STATUS_CANONICAL_MAP`` — rows carrying those discriminators
+  silently dropped from ``?status=cancelled`` and the panel's full
+  combo. The fix derives each token's accepted value-set from the
+  canonical map itself (``terminal_reason_variants_for``) — no
+  hand-copied list that can drift again. Pinned by
+  ``TestJobsStatusFilterCanonicalAliases`` below.
+
 The pre-fix ``JobRepository.list`` built per-kind branches only for
 the ``completed`` and ``settled`` tokens; ``failed`` and ``cancelled``
 had no per-kind branch, so a non-empty branch list AND-combined with
@@ -101,10 +112,10 @@ def engine(tmp_path) -> Engine:
         eng.dispose()
 
 
-def _seed_queue(s, queue_id: str) -> None:
+def _seed_queue(s, queue_id: str, project_id: str = "test-project") -> None:
     queue = JobQueue(
         queue_id=queue_id,
-        project_id="test-project",
+        project_id=project_id,
         queue_name=queue_id,
         queue_name_lower=queue_id,
         queue_type="fifo",
@@ -125,6 +136,8 @@ def _seed_job(
     job_type: str,
     terminal_reason: str | None,
     tag: str,
+    project_id: str = "test-project",
+    queue_id: str = "queue-combo",
 ) -> str:
     """Seed a JobItem with the per-kind × terminal-reason params.
 
@@ -136,6 +149,10 @@ def _seed_job(
         tag: Short human-readable tag stored in ``message`` so the
             tests can identify the row in the result set without
             needing to inspect the JobItem shape.
+        project_id: Project scoping — the canonicalization-alias
+            fixture uses its own project so the original combo
+            matrix's strict row-set pins stay isolated.
+        queue_id: Queue scoping — same isolation rationale.
     """
     job = JobItem(
         job_id=job_id,
@@ -143,12 +160,12 @@ def _seed_job(
         agent_dir="/tmp/agents/developer",
         message=tag,
         source="api",
-        project_id="test-project",
+        project_id=project_id,
         priority=5,
         admission_state=AdmissionState.DONE.value,
         terminal_reason=terminal_reason,
         instance_id=None,
-        queue_id="queue-combo",
+        queue_id=queue_id,
         created_at=datetime.now(timezone.utc).isoformat(),
         job_metadata={},
         job_type=job_type,
@@ -373,3 +390,233 @@ class TestJobsStatusComboFilter:
         )
         assert total == len(jobs)
         assert total == len(seeded_combo_matrix)
+
+
+# ─── The terminal_reason canonicalization pin ────────────────────────────
+
+# Raw ``terminal_reason`` discriminators the read layer canonicalizes
+# onto ``cancelled`` via ``_STATUS_CANONICAL_MAP`` (the Phase 7c
+# discriminator block). The SQL filter must accept every one of them
+# under ``status=cancelled`` — a strict ``== 'cancelled'`` branch
+# silently dropped these rows (the defect this pin closes).
+_CANONICAL_CANCELLED_ALIASES: tuple[str, ...] = (
+    "aborted",
+    "orphan_retired",
+    "watchover_terminated",
+)
+
+_ALIAS_PROJECT = "test-project-aliases"
+_ALIAS_QUEUE = "queue-canonical-aliases"
+
+
+@pytest.fixture
+def seeded_canonical_alias_matrix(engine: Engine) -> dict[str, str]:
+    """Seed the terminal_reason canonicalization-alias matrix.
+
+    Three done-cluster rows whose ``terminal_reason`` carries a raw
+    discriminator the read layer (:func:`_derive_legacy_status` →
+    ``canonicalize_status``) folds onto ``cancelled``:
+
+    * ``task-aborted``              (task, ``'aborted'``)
+    * ``task-orphan-retired``       (task, ``'orphan_retired'``)
+    * ``task-watchover-terminated`` (task, ``'watchover_terminated'``)
+
+    Scoped to project ``test-project-aliases`` so the original combo
+    matrix (``test-project``) is untouched — the original
+    single-token pins assert STRICT row-sets and must stay green.
+    """
+    matrix = [
+        ("task", "aborted", "task-aborted"),
+        ("task", "orphan_retired", "task-orphan-retired"),
+        ("task", "watchover_terminated", "task-watchover-terminated"),
+    ]
+    ids: dict[str, str] = {}
+    with Session(engine) as s:
+        _seed_queue(s, _ALIAS_QUEUE, project_id=_ALIAS_PROJECT)
+        for job_type, term, tag in matrix:
+            jid = f"job-combo-{tag}-{uuid.uuid4().hex[:8]}"
+            _seed_job(
+                s,
+                job_id=jid,
+                job_type=job_type,
+                terminal_reason=term,
+                tag=tag,
+                project_id=_ALIAS_PROJECT,
+                queue_id=_ALIAS_QUEUE,
+            )
+            ids[tag] = jid
+    return ids
+
+
+class TestJobsStatusFilterCanonicalAliases:
+    """terminal_reason canonicalization pin — the SQL filter's
+    per-kind branches must accept every raw ``terminal_reason``
+    discriminator the read layer canonicalizes onto the requested
+    token, and must NOT leak those rows under any other token.
+
+    The defect (2026-09-10, same silent-drop class as the
+    settled/failed combo bug): the ``cancelled`` branch was strict
+    ``terminal_reason == 'cancelled'`` while
+    ``_derive_legacy_status`` canonicalizes ``aborted`` /
+    ``orphan_retired`` / ``watchover_terminated`` onto ``cancelled``
+    — rows carrying those discriminators vanished from
+    ``?status=cancelled`` and the panel's full combo.
+
+    The fix derives each token's accepted value-set from
+    ``_STATUS_CANONICAL_MAP`` (single source of truth) via
+    ``terminal_reason_variants_for`` — no hand-copied list that can
+    drift again.
+    """
+
+    ALIAS_TAGS: frozenset[str] = frozenset(
+        {"task-aborted", "task-orphan-retired", "task-watchover-terminated"}
+    )
+
+    @staticmethod
+    def _messages(repo: JobRepository, statuses: list[str]) -> set[str]:
+        """Run the repo filter scoped to the alias project."""
+        jobs, _total = repo.list(
+            statuses=statuses,
+            project_id=_ALIAS_PROJECT,
+            limit=200,
+        )
+        return {j.message for j in jobs}
+
+    # ─── 1. The canonicalization regression ──────────────────────────
+
+    def test_cancelled_token_includes_all_three_canonical_aliases(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``statuses=['cancelled']`` surfaces ALL THREE alias rows.
+
+        Pre-fix: 0 rows (strict ``== 'cancelled'`` matched none of
+        the raw discriminators).
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["cancelled"])
+
+        assert ids == self.ALIAS_TAGS
+
+    def test_panel_full_combo_includes_all_three_canonical_aliases(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """The panel combo (``completed,settled,failed,cancelled,
+        dead_letter``) surfaces all three alias rows — the
+        job-queue panel Recent inherits the fix.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(
+            repo,
+            ["completed", "settled", "failed", "cancelled", "dead_letter"],
+        )
+
+        assert ids == self.ALIAS_TAGS
+
+    # ─── 2. No leakage into non-cancelled tokens ─────────────────────
+
+    def test_failed_token_does_not_leak_canonical_aliases(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``statuses=['failed']`` must NOT return any alias row —
+        the read layer derives those rows to ``cancelled``, not
+        ``failed``; a leak would mean the IN-lists crossed tokens.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["failed"])
+
+        assert ids == set()
+
+    def test_settled_token_does_not_leak_canonical_aliases(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``statuses=['settled']`` must NOT return any alias row.
+
+        The read layer's per-kind dispatch renames
+        ``completed``+message ⇒ ``settled`` — a raw
+        ``aborted`` discriminator canonicalizes to ``cancelled``
+        BEFORE the per-kind dispatch, so it never becomes
+        ``settled``. The filter must agree.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["settled"])
+
+        assert ids == set()
+
+    def test_completed_token_does_not_leak_canonical_aliases(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``statuses=['completed']`` must NOT return any alias row —
+        ``completed`` has no map aliases beyond itself, and the
+        alias rows derive to ``cancelled`` anyway.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["completed"])
+
+        assert ids == set()
+
+    # ─── 3. Symmetry (count == page) for the new fixtures ────────────
+
+    def test_symmetry_count_matches_page_for_cancelled_token(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``total`` == page size for ``status=cancelled`` on the
+        alias matrix — count and list sites carry the SAME
+        map-derived branches.
+        """
+        repo = JobRepository(engine)
+        jobs, total = repo.list(
+            statuses=["cancelled"],
+            project_id=_ALIAS_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == len(seeded_canonical_alias_matrix)
+
+    def test_symmetry_count_matches_page_for_panel_combo(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """``total`` == page size for the panel combo on the alias
+        matrix.
+        """
+        repo = JobRepository(engine)
+        statuses = ["completed", "settled", "failed", "cancelled", "dead_letter"]
+        jobs, total = repo.list(
+            statuses=statuses,
+            project_id=_ALIAS_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == len(seeded_canonical_alias_matrix)
+
+    # ─── 4. Map parity — filter tracks the canonical map ─────────────
+
+    def test_filter_accepts_exactly_the_map_image_for_cancelled(
+        self, engine, seeded_canonical_alias_matrix
+    ) -> None:
+        """The alias set this pin seeds is DERIVED from the map, not
+        hand-copied: every seeded discriminator is a map source whose
+        target is ``cancelled``, and the filter returns exactly the
+        rows whose terminal_reason the map folds onto the token.
+
+        If a future alias is added to ``_STATUS_CANONICAL_MAP``,
+        ``terminal_reason_variants_for`` picks it up automatically —
+        this assertion guards the single-source-of-truth contract at
+        the SQL boundary.
+        """
+        from daemon.services.work_status import _STATUS_CANONICAL_MAP
+
+        map_cancelled_sources = {
+            src for src, tgt in _STATUS_CANONICAL_MAP.items()
+            if tgt == "cancelled"
+        }
+        assert {"aborted", "orphan_retired", "watchover_terminated"} <= (
+            map_cancelled_sources
+        )
+
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["cancelled"])
+        # Every returned row's discriminator is a map source for the
+        # token (tag → discriminator: dashes mirror underscores).
+        for tag in ids:
+            discriminator = tag.replace("task-", "").replace("-", "_")
+            assert discriminator in map_cancelled_sources
