@@ -508,9 +508,11 @@ project_cn_add(
 )
 ```
 
-**Merge Logic**: If a similar entry (same category, ≥2 keyword overlap) exists, they are merged automatically.
+**Duplicate Handling**: Only exact normalized-summary matches count as near-duplicates — there is no automatic merging. A colliding add is REJECTED with an error naming the collided entry (id + summary). Near-duplicate detection is **cross-category** by design: the matcher compares normalized summary text only, so a re-tag of the same wording in a different category still collides. To recategorize, pass `entry_id` of the colliding entry on a follow-up `project_cn_add` call — `category` is now forwarded on the explicit update path, so the change is visible on the returned dict.
 
-**Eviction**: At 30 entries, the oldest lowest-priority entry is evicted.
+**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `source_agent`. `category` is included so a recategorize is visible, never silent.
+
+**Cap**: At 50 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
 #### project_cn_list
 
