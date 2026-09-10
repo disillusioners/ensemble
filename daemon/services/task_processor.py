@@ -19,7 +19,7 @@ from .message_processing_pipeline import (
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.llm_error_classifier import UsageLimitError
 from daemon.repositories.message_queue.models import MessageStatus
-from daemon.repositories.task.models import TaskType
+from daemon.repositories.task.models import SuspensionReason, TaskStatus, TaskType
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -147,6 +147,24 @@ class ProcessMessageProcessor(BaseProcessor):
         atomic status guard was won, and return the canonical skipped
         dict. One authoritative site, one shape.
 
+        Defect-2 carve-out (answer-gate resume chain, 2026-09-10):
+        re-read the live task before completing. If the cascade pause
+        already suspended the task back to PAUSED with a fresh
+        ``awaiting_answer`` handle (the ``finally`` block in
+        ``_process_message_with_tracking`` runs
+        ``pause_instance_cascade`` AFTER the graph turn emits
+        ``ask_questions``, before the ExecutionGate is released to the
+        WorkerPool), the skip path's ``complete_task`` would
+        ``CompleteTurn``-clear the freshly-set handle — and the next
+        user answer endpoint call would land on a stale instance with
+        no resolvable handle. Defect 3 (silent answer drop) cascades
+        from this. In that race window we MUST NOT call
+        ``complete_task``; mark the message COMPLETED (the report was
+        already delivered) and fire the watcher notification so the
+        WorkerPool releases its slot, but leave the task in PAUSED
+        with the awaiting_answer handle intact for the answer endpoint
+        to consume.
+
         Args:
             task: The task to mark completed as a no-op skip.
 
@@ -154,6 +172,68 @@ class ProcessMessageProcessor(BaseProcessor):
             The canonical skipped-result dict expected by the worker
             pool (``{success, content: None, message_id, skipped}``).
         """
+        # Re-read the live task state. The cascade pause runs in the
+        # ``finally`` of ``_process_message_with_tracking`` BEFORE this
+        # skip path runs (the ExecutionGate serialises them). The task
+        # may have transitioned RUNNING → PAUSED with a fresh
+        # awaiting_answer handle — the original ``task`` arg we hold
+        # here is stale and reflects the WorkerPool's claim-time state.
+        live_task = await asyncio.to_thread(
+            self._task_repo.get_by_work_id, task.work_id
+        )
+        if (
+            live_task is not None
+            and live_task.status == TaskStatus.PAUSED.value
+            and live_task.suspension_reason
+            == SuspensionReason.AWAITING_ANSWER.value
+            and live_task.resume_target_turn_id is not None
+        ):
+            # Cascade pause has set a fresh awaiting_answer handle on
+            # this task. Do NOT call ``complete_task`` — that would
+            # clear the handle via ``CompleteTurn`` and orphan the
+            # next pause cycle / next answer endpoint call.
+            logger.info(
+                f"Task {task.id}: cascade pause set a fresh "
+                f"awaiting_answer handle on task {task.id} "
+                f"(message {task.message_id[:8]}...); preserving "
+                f"handle — deferring task completion so the answer "
+                f"endpoint can consume the handle"
+            )
+            # Mark the message COMPLETED so no duplicate report
+            # delivery (the report was already delivered via INJECTED).
+            if self._queue_repository is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._queue_repository.complete, task.message_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Task {task.id}: failed to mark message "
+                        f"{task.message_id[:8]}... COMPLETED on "
+                        f"defer-skip path: {e}"
+                    )
+            # Fire watcher notification so the WorkerPool releases
+            # its slot — the gate release is what allows the next
+            # claim attempt to find (or not find) other tasks.
+            if (
+                self._work_resolver is not None
+                and self._watcher_repo is not None
+            ):
+                await notify_work_watchers(
+                    work_id=task.work_id,
+                    status="completed",
+                    instance_manager=self._manager,
+                    work_resolver=self._work_resolver,
+                    watcher_repo=self._watcher_repo,
+                )
+            return {
+                "success": True,
+                "content": None,
+                "message_id": task.message_id,
+                "skipped": True,
+                "handle_preserved": True,
+            }
+
         completed_task = await asyncio.to_thread(
             self._task_repo.complete_task,
             task.id,
