@@ -645,21 +645,22 @@ class TestContentIdentityDedup:
             status=InstanceStatus.COMPLETED.value, agent_name="giter",
         )
 
-        # Already-delivered (TASK_DELIVERED) under the true anchor.
-        # Model the sweep-recovery class by stamping
-        # ``recovery_attempted_at`` on the terminal twin (the ONLY
-        # writer in production is
-        # ``transition_deferred_to_pending``); the dedup MUST match
-        # stamped rows. Fresh natural enqueues (no stamp) MUST still
-        # claim — pinned separately below.
-        delivered_twin = _seed_delivered_pair(
+        # Already-delivered (TASK_DELIVERED) under the true anchor —
+        # NATURAL delivery (``recovery_attempted_at IS NULL`` on the
+        # twin, the original turn-1 shape). The wrong-anchor sweep-
+        # recovered DUP (the only stamping-eligible class per
+        # council 🟠 round 2) is stamped on the dup row. See the
+        # council-block comment at the drain seam for the full
+        # re-verified premise.
+        _seed_delivered_pair(
             repo, engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-final-{uuid.uuid4().hex[:8]}",
             content="identical terminal report",
         )
-        _stamp_recovery_attempted_at(engine, delivered_twin.injection_id)
         # A duplicate PENDING obligation: WRONG anchor, fresh
         # report_message_id, SAME content (the wrong-anchor artifact).
+        # Stamp ``recovery_attempted_at`` on the DUP row to model the
+        # sweep-recovery class — the dedup MUST match stamped dups.
         dup_rid = _seed_parent_report_row(
             engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-dispatch-{uuid.uuid4().hex[:8]}",
@@ -673,6 +674,7 @@ class TestContentIdentityDedup:
             report_message_id=dup_rid,
             content="identical terminal report",
         )
+        _stamp_recovery_attempted_at(engine, dup_row.injection_id)
         # A legitimate NEW report from a DIFFERENT child must still
         # drain (dedup is scoped per (parent, child), never global).
         new_rid = _seed_parent_report_row(
@@ -730,9 +732,12 @@ class TestContentIdentityDedup:
             engine, instance_id=child_id, parent_id=parent_id,
             status=InstanceStatus.COMPLETED.value, agent_name="reviewer",
         )
-        # Delivered via the live drain (INJECTED terminal twin). Stamp
-        # ``recovery_attempted_at`` to model the sweep-recovery class
-        # — the dedup MUST match stamped rows.
+        # Delivered via the live drain (INJECTED terminal twin) —
+        # NATURAL delivery (``recovery_attempted_at IS NULL`` on the
+        # twin, the original turn-1 shape). The wrong-anchor
+        # sweep-recovered DUP is stamped on the dup row. See the
+        # council-block comment at the task seam for the full
+        # re-verified premise.
         true_rid = _seed_parent_report_row(
             engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-final-{uuid.uuid4().hex[:8]}",
@@ -747,11 +752,11 @@ class TestContentIdentityDedup:
         )
         drained = repo.claim_for_injection(parent_id)
         assert len(drained) == 1
-        _stamp_recovery_attempted_at(
-            engine, _injection_id_for_report(engine, true_rid)
-        )
 
-        # Duplicate PENDING obligation (wrong anchor, fresh id).
+        # Duplicate PENDING obligation (wrong anchor, fresh id) —
+        # stamp ``recovery_attempted_at`` on the DUP row to model the
+        # sweep-recovery class (the only stamping-eligible class
+        # per council 🟠 round 2).
         dup_rid = _seed_parent_report_row(
             engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-grandchild-{uuid.uuid4().hex[:8]}",
@@ -764,6 +769,7 @@ class TestContentIdentityDedup:
             report_message_id=dup_rid,
             content="the same report",
         )
+        _stamp_recovery_attempted_at(engine, dup_row.injection_id)
 
         claim = repo.claim_for_task_delivery(dup_rid)
         assert claim.status == "already_delivered", (
@@ -1018,6 +1024,330 @@ class TestFreshSecondTurnObligationStillClaims:
         )
         assert _row_state(engine, turn2_row.injection_id) == (
             ReportInjectionState.TASK_DELIVERED.value
+        )
+
+
+# ─── Council 🟠 round-2 follow-up: stamp-side carve-out (windows a + b) ───────
+
+
+class TestFreshSecondTurnAfterSweepRecoveryFirstTurnStillClaims:
+    """Council 🟠 follow-up (2026-09-10, round 2) — window (a).
+
+    The previous twin-side ``recovery_attempted_at IS NOT NULL``
+    predicate (commit 5ce021cd) was on the wrong side: it filtered
+    the terminal twin subquery instead of the dup row. When turn-1
+    was delivered via sweep-recovery (the twin carries the stamp)
+    and turn-2 was a fresh natural enqueue (the dup has NULL
+    stamp), the predicate MATCHED the stamped twin and the
+    legitimate second-turn obligation was silently dead-lettered.
+
+    Fix: the stamp-side predicate now lives on the DUP row
+    (``claim_for_injection`` filters ``dup_rows`` by
+    ``recovery_attempted_at IS NOT NULL``;
+    ``claim_for_task_delivery`` checks ``any_row.recovery_attempted_at
+    is not None``). A fresh natural enqueue (NULL stamp) bypasses
+    the dedup entirely.
+
+    Both variants pinned here:
+    """
+
+    def test_fresh_second_turn_after_sweep_recovery_first_turn_drain(
+        self, repo, engine
+    ):
+        """Drain-seam variant: turn-1 STAMPED twin (sweep-recovered
+        delivery) + turn-2 fresh NATURAL dup (NULL stamp) with
+        byte-identical content → turn-2 MUST drain and deliver.
+        Pre-fix the twin-side stamp predicate MATCHED the stamped
+        turn-1 twin and silently dead-lettered turn-2.
+        """
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"wanderer-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="wanderer",
+        )
+
+        # Turn 1: sweep-recovered delivery (twin carries the stamp).
+        # We seed the natural path then stamp the terminal twin to
+        # model the sweep-recovery transition
+        # (:meth:`transition_deferred_to_pending` — sole stamping
+        # writer).
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        turn1_twin = _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="identical turn content",
+        )
+        _stamp_recovery_attempted_at(engine, turn1_twin.injection_id)
+
+        # Turn 2: fresh natural enqueue — ``recovery_attempted_at IS
+        # NULL`` on this PENDING row (the carve-out discriminator).
+        turn2_anchor = f"msg-final-turn2-{uuid.uuid4().hex[:8]}"
+        turn2_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn2_anchor,
+            status=MessageStatus.READY.value,
+            content="identical turn content",
+        )
+        turn2_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=turn2_anchor,
+            report_message_id=turn2_rid,
+            content="identical turn content",
+        )
+        # Sanity: turn-2 dup carries NULL ``recovery_attempted_at``.
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == turn2_row.injection_id
+                )
+            ).one()
+            assert row.recovery_attempted_at is None, (
+                "turn-2 fresh natural enqueue MUST leave "
+                "recovery_attempted_at NULL — the dup-side carve-out"
+            )
+
+        drained = repo.claim_for_injection(parent_id)
+        assert len(drained) == 1, (
+            "the fresh turn-2 obligation MUST drain — the dup-side "
+            "predicate MUST exclude NULL-stamped dups from dedup. "
+            "Got 0 drains (false-suppression)."
+        )
+        assert drained[0]["report_message_id"] == turn2_rid
+        assert _row_state(engine, turn2_row.injection_id) == (
+            ReportInjectionState.INJECTED.value
+        ), (
+            "the fresh turn-2 delivery MUST be INJECTED, not "
+            "dead-lettered"
+        )
+
+    def test_fresh_second_turn_after_sweep_recovery_first_turn_task(
+        self, repo, engine
+    ):
+        """Task-claim-seam variant (sister): turn-1 STAMPED twin +
+        turn-2 fresh NATURAL dup with byte-identical content → turn-2
+        MUST claim via the fallback task path. Pre-fix the twin-side
+        stamp predicate MATCHED the stamped turn-1 twin and returned
+        ``already_delivered`` for the legitimate second delivery.
+        """
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"coder-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="coder",
+        )
+
+        # Turn 1: stamped twin (sweep-recovered delivery).
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        turn1_twin = _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="idempotent task output",
+        )
+        _stamp_recovery_attempted_at(engine, turn1_twin.injection_id)
+
+        # Turn 2: fresh natural enqueue (NULL stamp).
+        turn2_anchor = f"msg-final-turn2-{uuid.uuid4().hex[:8]}"
+        turn2_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn2_anchor,
+            status=MessageStatus.READY.value,
+            content="idempotent task output",
+        )
+        turn2_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=turn2_anchor,
+            report_message_id=turn2_rid,
+            content="idempotent task output",
+        )
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == turn2_row.injection_id
+                )
+            ).one()
+            assert row.recovery_attempted_at is None
+
+        claim = repo.claim_for_task_delivery(turn2_rid)
+        assert claim.status == "claimed", (
+            "the fresh turn-2 obligation MUST claim — the dup-side "
+            "predicate MUST skip the dedup for NULL-stamped dups. "
+            f"Got {claim.status!r}."
+        )
+        assert _row_state(engine, turn2_row.injection_id) == (
+            ReportInjectionState.TASK_DELIVERED.value
+        )
+
+
+class TestLegacyWrongAnchorDupDeadLettered:
+    """Council 🟠 follow-up (2026-09-10, round 2) — window (b).
+
+    The previous twin-side predicate left the FIRST wrong-anchor
+    recovery to slip through: the legacy primary prod shape is
+    a STAMPED dup row (came through
+    :meth:`transition_deferred_to_pending`) against the UNSTAMPED
+    natural turn-1 twin (the original delivery, ``recovery_attempted_at
+    IS NULL``). The twin-side predicate MISSED the unstamped twin
+    and one duplicate was delivered on the first recovery pass.
+
+    Fix: the dup-side stamp predicate keeps the dedup armed — a
+    stamped dup row matches ANY twin with same content regardless
+    of the twin's stamp state. Pin the regression at both seams.
+    """
+
+    def test_legacy_wrong_anchor_dup_dead_lettered_drain(
+        self, repo, engine
+    ):
+        """Drain-seam window (b): stamped wrong-anchor dup vs
+        unstamped natural twin → dup MUST be dead-lettered (FAILED)
+        and twin MUST NOT be re-delivered. The fresh natural twin
+        exists with NULL ``recovery_attempted_at`` — the exact shape
+        that slipped through the previous twin-side predicate.
+        """
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"wanderer-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="wanderer",
+        )
+
+        # Original turn-1: natural delivery — twin carries NULL
+        # ``recovery_attempted_at`` (the pre-recovery shape).
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="legacy report body",
+        )
+        # Sanity: natural twin has NULL stamp (the window-b premise).
+        with Session(engine) as session:
+            twins = list(
+                session.exec(
+                    sm_select(ReportInjection).where(
+                        ReportInjection.parent_instance_id == parent_id
+                    ).where(
+                        ReportInjection.child_instance_id == child_id
+                    ).where(
+                        ReportInjection.state == (
+                            ReportInjectionState.TASK_DELIVERED.value
+                        )
+                    )
+                ).all()
+            )
+            assert len(twins) == 1
+            assert twins[0].recovery_attempted_at is None, (
+                "natural twin MUST carry NULL recovery_attempted_at "
+                "— the window-b premise"
+            )
+
+        # Wrong-anchor sweep-recovered DUP: stamped, fresh
+        # ``child_message_id``, fresh ``report_message_id``, SAME
+        # content (the byte-identical wrong-anchor artifact).
+        dup_anchor = f"msg-dispatch-wrong-{uuid.uuid4().hex[:8]}"
+        dup_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=dup_anchor,
+            status=MessageStatus.READY.value,
+            content="legacy report body",
+        )
+        dup_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=dup_anchor,
+            report_message_id=dup_rid,
+            content="legacy report body",
+        )
+        _stamp_recovery_attempted_at(engine, dup_row.injection_id)
+
+        drained = repo.claim_for_injection(parent_id)
+        assert drained == [], (
+            "the wrong-anchor sweep-recovered dup MUST be dead-"
+            "lettered (FAILED), never delivered — pre-fix this dup "
+            "slipped through the twin-side stamp predicate and was "
+            "delivered as a duplicate. Got drained: "
+            f"{[r['report_message_id'] for r in drained]!r}"
+        )
+        assert _row_state(engine, dup_row.injection_id) == (
+            ReportInjectionState.FAILED.value
+        ), (
+            "the wrong-anchor dup MUST end up FAILED (dead-lettered), "
+            "not INJECTED"
+        )
+        # The dup's companion READY row is completed (the same
+        # hygiene as a real claim — no orphan READY messages).
+        with Session(engine) as session:
+            dup_msg = session.exec(
+                sm_select(MessageQueue).where(
+                    MessageQueue.message_id == dup_rid
+                )
+            ).one()
+        assert dup_msg.status == MessageStatus.COMPLETED.value
+
+    def test_legacy_wrong_anchor_dup_dead_lettered_task(
+        self, repo, engine
+    ):
+        """Task-claim-seam window (b): stamped wrong-anchor dup vs
+        unstamped natural twin → task claim MUST resolve to
+        ``already_delivered`` and the dup MUST end up FAILED.
+        """
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"reviewer-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="reviewer",
+        )
+
+        # Original turn-1 natural twin (NULL stamp).
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="legacy report body",
+        )
+
+        # Wrong-anchor sweep-recovered DUP (stamped).
+        dup_anchor = f"msg-grandchild-wrong-{uuid.uuid4().hex[:8]}"
+        dup_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=dup_anchor,
+            status=MessageStatus.READY.value,
+            content="legacy report body",
+        )
+        dup_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=dup_anchor,
+            report_message_id=dup_rid,
+            content="legacy report body",
+        )
+        _stamp_recovery_attempted_at(engine, dup_row.injection_id)
+
+        claim = repo.claim_for_task_delivery(dup_rid)
+        assert claim.status == "already_delivered", (
+            "the wrong-anchor stamped dup MUST resolve to "
+            "already_delivered — pre-fix it slipped through and "
+            f"was claimed. Got {claim.status!r}."
+        )
+        assert _row_state(engine, dup_row.injection_id) == (
+            ReportInjectionState.FAILED.value
         )
 
 

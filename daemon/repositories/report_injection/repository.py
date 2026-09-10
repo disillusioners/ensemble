@@ -1388,6 +1388,47 @@ class ReportInjectionRepository:
             # Same transaction → atomic; the guarded
             # ``WHERE state='PENDING'`` UPDATE re-checks under
             # concurrency.
+            # Council 🟠 follow-up (2026-09-10, round 2): the dedup
+            # carve-out (``recovery_attempted_at IS NOT NULL``) MUST
+            # be applied to the DUP ROW, not the terminal twin. The
+            # twin filter is on the wrong side — two windows
+            # slipped through:
+            #
+            # (a) FALSE-SUPPRESSION — turn-1 twin delivered via
+            #     sweep-recovery (STAMPED twin) + child revived +
+            #     turn-2 fresh natural enqueue (NULL stamp) with
+            #     byte-identical content: the previous twin-side
+            #     predicate MATCHED and the legitimate second turn
+            #     was silently dead-lettered.
+            # (b) FIRST-RECOVERY GAP — legacy wrong-anchor markers
+            #     (the primary prod shape): the dup row IS stamped
+            #     (came through
+            #     :meth:`transition_deferred_to_pending`) but the
+            #     original natural twin is UNSTAMPED → the previous
+            #     twin-side predicate MISSED → one duplicate
+            #     delivered on the first recovery pass.
+            #
+            # Premise (re-verified, grep evidence below): the ONLY
+            # production writer of ``recovery_attempted_at`` is
+            # ``transition_deferred_to_pending`` (repository.py:971
+            # — the second production assignment in daemon/, the
+            # first at :802 is the None default on a fresh DEFERRED
+            # marker). Fresh natural enqueues (``enqueue`` /
+            # inline path in
+            # ``child_reports._process_child_completion_db_sync``)
+            # inherit the model default ``None`` (models.py:318).
+            #
+            # Therefore: STAMPED dup = sweep-recovered (legitimate
+            # dedup target); UNSTAMPED dup = fresh natural
+            # obligation (MUST always claim). Filtering the DUP
+            # ROWS by ``recovery_attempted_at IS NOT NULL`` closes
+            # both windows in one predicate:
+            #   (a) turn-2 dup has NULL → excluded from dedup
+            #       entirely → claim proceeds (no false-suppression)
+            #   (b) wrong-anchor dup is stamped → included →
+            #       matches the unstamped natural twin (no twin-side
+            #       stamp filter) → dead-letter (no first-recovery
+            #       gap).
             dup_rows = session.exec(
                 select(ReportInjection)
                 .where(
@@ -1399,24 +1440,24 @@ class ReportInjectionRepository:
                 # sentinel row (report_message_id IS NULL) is not
                 # claimable, so it is not dedup-eligible either.
                 .where(ReportInjection.report_message_id.is_not(None))
+                # Council 🟠 — stamp-side carve-out on the DUP row.
+                # Only sweep-recovered dup rows are eligible for
+                # terminal-twin dedup; fresh natural enqueues
+                # bypass dedup and always claim.
+                .where(
+                    ReportInjection.recovery_attempted_at.is_not(None)
+                )
             ).all()
             dup_ids: list[str] = []
             for dup in dup_rows:
-                # Reviewer carve-out (2026-09-10): the terminal_twin
-                # dedup MUST be scoped to sweep-recovered rows only —
-                # the ``recovery_attempted_at`` stamp is set ONLY by
-                # :meth:`transition_deferred_to_pending`
-                # (repository.py stamp site) when a DEFERRED marker
-                # was recovered back to PENDING. A FRESH natural
-                # PENDING enqueue (``enqueue`` / the inline path in
-                # ``child_reports._process_child_completion_db_sync``)
-                # leaves the column NULL — a legitimate second-turn
-                # obligation for the SAME (parent, child) MUST still
-                # claim when the content happens to be byte-identical
-                # to a previously-delivered report (revive-and-turn-2
-                # scenario). Without the carve-out, a legitimate
-                # second delivery would be silently dead-lettered as
-                # an "obligation abandoned".
+                # Deterministic twin lookup (council 🟠 finding):
+                # ORDER BY ``delivered_at DESC, injection_id`` so
+                # multi-twin pathological states never resolve
+                # non-deterministically. INJECTED/TASK_DELIVERED
+                # transitions both stamp ``delivered_at`` (see
+                # ``claim_for_injection`` / ``claim_for_task_delivery``),
+                # so this is a clean ordering key for the terminal
+                # set the dedup targets.
                 terminal_twin = session.exec(
                     select(ReportInjection)
                     .where(
@@ -1438,8 +1479,9 @@ class ReportInjectionRepository:
                         ])
                     )
                     .where(ReportInjection.content == dup.content)
-                    .where(
-                        ReportInjection.recovery_attempted_at.is_not(None)
+                    .order_by(
+                        ReportInjection.delivered_at.desc(),
+                        ReportInjection.injection_id.asc(),
                     )
                 ).first()
                 if terminal_twin is not None:
@@ -1646,15 +1688,23 @@ class ReportInjectionRepository:
             # hygiene as a claimed delivery), and return the existing
             # ``already_delivered`` tri-state so the task skips via
             # the normal dedup path (``_skip_task_as_completed``).
-            if any_row.state == _PENDING_STATE:
-                # Reviewer carve-out (2026-09-10): mirror of the drain
-                # seam's carve-out — terminal_twin MUST be scoped to
-                # sweep-recovered rows only. See the drain-seam
-                # comment for the premise
-                # (``recovery_attempted_at`` is stamped ONLY by
-                # :meth:`transition_deferred_to_pending`). A fresh
-                # natural enqueue for a second-turn obligation
-                # (``recovery_attempted_at IS NULL``) MUST still claim.
+            #
+            # Council 🟠 follow-up (2026-09-10, round 2): the carve-
+            # out lives on the DUP side, not the twin side. The twin
+            # is NOT filtered by ``recovery_attempted_at`` — see the
+            # drain-seam block for the full re-verified premise.
+            # Fresh natural enqueues (``recovery_attempted_at IS NULL``)
+            # MUST always claim; only sweep-recovered dup rows (the
+            # sole stamping writer is
+            # :meth:`transition_deferred_to_pending`) are eligible
+            # for the terminal-twin dead-letter.
+            if (
+                any_row.state == _PENDING_STATE
+                and any_row.recovery_attempted_at is not None
+            ):
+                # Deterministic twin lookup (council 🟠 finding):
+                # ORDER BY ``delivered_at DESC, injection_id`` — see
+                # drain-seam block for the rationale.
                 terminal_twin = session.exec(
                     select(ReportInjection)
                     .where(
@@ -1678,8 +1728,9 @@ class ReportInjectionRepository:
                     .where(
                         ReportInjection.content == any_row.content
                     )
-                    .where(
-                        ReportInjection.recovery_attempted_at.is_not(None)
+                    .order_by(
+                        ReportInjection.delivered_at.desc(),
+                        ReportInjection.injection_id.asc(),
                     )
                 ).first()
                 if terminal_twin is not None:
