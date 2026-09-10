@@ -1028,7 +1028,11 @@ class JobRepository:
             # only. Pre-7c rows (NULL ``terminal_reason``) keep
             # surfacing under ``completed`` — they predate the rename
             # and never carry ``job_type='message'``. ``settled``
-            # matches strictly (no NULL hedge).
+            # carries the same NULL hedge — message rows with
+            # ``terminal_reason IS NULL`` derive to ``settled`` via
+            # ``_derive_legacy_status`` (per-kind dispatch on the
+            # lossy ``done → completed`` fallthrough) so the filter
+            # must include them (M3 sibling defect fix).
             #
             # The disambiguation lives here because the SQL builder
             # uses ``admission_state IN (...)`` as its primary
@@ -1038,15 +1042,22 @@ class JobRepository:
             # per-kind. ``_statuses_to_admission`` is preserved for
             # its collapsing semantic; we layer per-kind predicates
             # on top.
-            # Build per-kind predicates: when ``completed`` is in
-            # statuses, restrict to ``job_type='task'`` (with NULL
-            # hedge on terminal_reason); when ``settled`` is in
-            # statuses, restrict to ``job_type='message'`` (strict).
-            # Unknown values fall through the legacy admission map
-            # (the §8.2 source-less degrade precedent — unknown ⇒
-            # empty, do NOT widen).
+            #
+            # Per-kind predicates are built for EVERY done-cluster
+            # token in the requested set (``completed`` /
+            # ``settled`` / ``failed`` / ``cancelled``); the four
+            # are OR-combined so a row matches when its DERIVED
+            # status is ANY of the requested tokens. Non-done
+            # tokens (``pending`` / ``processing`` / ``paused`` /
+            # ``dead_letter``) are handled purely by the
+            # admission-state IN-clause above and need no per-kind
+            # branch. Unknown values fall through the legacy
+            # admission map (the §8.2 source-less degrade precedent
+            # — unknown ⇒ empty, do NOT widen).
             has_completed_token = "completed" in (statuses or [])
             has_settled_token = "settled" in (statuses or [])
+            has_failed_token = "failed" in (statuses or [])
+            has_cancelled_token = "cancelled" in (statuses or [])
 
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
@@ -1059,15 +1070,28 @@ class JobRepository:
                         JobItem.admission_state.in_(admission_set)
                     )
                 # M3 per-kind predicates — applied alongside the
-                # admission-state IN-clause. ``completed`` restricts
-                # the result to task rows with terminal_reason
-                # 'completed' (with NULL hedge for pre-7c rows);
-                # ``settled`` restricts to mirror rows with
-                # terminal_reason 'completed' (strict). The two
-                # predicates are OR-combined (a row matches when
-                # it satisfies EITHER kind) — see the corresponding
-                # list-query branch for the rationale (the post-A6
-                # ``done`` alias expansion is the primary driver).
+                # admission-state IN-clause. Each done-cluster token
+                # (``completed`` / ``settled`` / ``failed`` /
+                # ``cancelled``) gets its own per-kind branch; the
+                # four are OR-combined so a row matches when its
+                # DERIVED status is any of the requested tokens.
+                # Combo drop fix: the original builder only emitted
+                # branches for ``completed`` and ``settled`` —
+                # ``failed`` / ``cancelled`` had no per-kind branch
+                # and so were silently DROPPED whenever ``settled``
+                # was also in the combo (the non-empty branch list
+                # AND-combined with the admission IN-clause and
+                # narrowed the result to settled-eligible rows
+                # only). Per-kind predicates now cover every
+                # done-cluster token so the filter returns every
+                # row whose derived status is in the requested set,
+                # regardless of combo composition. Sibling defect
+                # fix (M3): ``settled`` now carries the same NULL
+                # hedge as ``completed`` — a message row with
+                # ``terminal_reason IS NULL`` derives to
+                # ``settled`` via ``_derive_legacy_status`` (the
+                # per-kind dispatch on the lossy ``done → completed``
+                # fallthrough) so the filter must include it.
                 per_kind_branches: list = []
                 if has_completed_token:
                     # ``completed`` ⇒ task rows only. Pre-7c hedge
@@ -1084,14 +1108,33 @@ class JobRepository:
                         )
                     )
                 if has_settled_token:
-                    # ``settled`` ⇒ mirror rows only. Strict — no
-                    # NULL hedge (pre-7c rows never carry
-                    # ``job_type='message'``).
+                    # ``settled`` ⇒ mirror rows only. NULL hedge
+                    # matches the read-API derivation — see the
+                    # sibling defect note above.
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
-                            JobItem.terminal_reason == "completed",
+                            or_(
+                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.is_(None),
+                            ),
                         )
+                    )
+                if has_failed_token:
+                    # ``failed`` ⇒ rows with terminal_reason='failed'.
+                    # No job_type constraint — a failed job can be
+                    # either task or message kind (the
+                    # admission-state IN-clause above already
+                    # narrows to ``done``).
+                    per_kind_branches.append(
+                        JobItem.terminal_reason == "failed"
+                    )
+                if has_cancelled_token:
+                    # ``cancelled`` ⇒ rows with
+                    # terminal_reason='cancelled'. No job_type
+                    # constraint — same rationale as ``failed``.
+                    per_kind_branches.append(
+                        JobItem.terminal_reason == "cancelled"
                     )
                 if per_kind_branches:
                     count_stmt = count_stmt.where(or_(*per_kind_branches))
@@ -1127,13 +1170,23 @@ class JobRepository:
                     stmt = stmt.where(JobItem.admission_state.in_(admission_set))
                 # M3 per-kind predicates — mirrors the count query
                 # above so the page and the total stay consistent.
-                # The two predicates are OR-combined (a row matches
-                # when it satisfies EITHER kind); an AND-combine
-                # would produce zero rows for any input that mixes
-                # ``completed`` and ``settled`` (the post-A6
-                # ``done`` alias expansion is the primary driver —
-                # but the same logic applies to any caller that
-                # passes both tokens explicitly).
+                # Per-kind branches are OR-combined so a row matches
+                # when its DERIVED status is ANY of the requested
+                # tokens. The previous builder only emitted
+                # branches for ``completed`` and ``settled`` — the
+                # non-empty branch list AND-combined with the
+                # admission IN-clause and silently dropped every
+                # other row whenever ``settled`` was in the combo
+                # (the live-measured drop: ``['settled','failed']``
+                # returned 1 row instead of 4). Per-kind predicates
+                # now cover every done-cluster token
+                # (``completed`` / ``settled`` / ``failed`` /
+                # ``cancelled``); see the count-query branch above
+                # for the full rationale. The ``settled`` branch
+                # also carries the NULL hedge (M3 sibling defect
+                # fix) — a message row with ``terminal_reason IS
+                # NULL`` derives to ``settled`` via
+                # ``_derive_legacy_status``.
                 per_kind_branches: list = []
                 if has_completed_token:
                     per_kind_branches.append(
@@ -1149,8 +1202,19 @@ class JobRepository:
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
-                            JobItem.terminal_reason == "completed",
+                            or_(
+                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.is_(None),
+                            ),
                         )
+                    )
+                if has_failed_token:
+                    per_kind_branches.append(
+                        JobItem.terminal_reason == "failed"
+                    )
+                if has_cancelled_token:
+                    per_kind_branches.append(
+                        JobItem.terminal_reason == "cancelled"
                     )
                 if per_kind_branches:
                     stmt = stmt.where(or_(*per_kind_branches))
