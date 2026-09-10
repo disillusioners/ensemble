@@ -1,5 +1,13 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-09-08 — explorer-shared-context-injection (feature/explorer-shared-context-injection @ fd582efd..d097a8a2), Iteration 001
+- Dispatch: 2 parallel workers (tidier-readable-code @fbd63a85, tidier-static-hygiene @83f8343e), worktree agents-ensemble-wt-explorer-ctx. Both reported fully; skill_feedback soft-failed on both (known load_skill-untracked pattern).
+- Verdict: NEEDS-FIX (light) — 1 High / 5 Medium / 7 Low; all mechanical (doc rewrite, 2 imports, comment dedup, test parametrize). No structural work, no merge-blocker class.
+- Key: H = docs/context_injection_migration.md:15+:96 asserts "delivery is unconditional / do not add a context-delivery field to meta.json" — the canonical doc now forbids exactly what the branch ships (context_injection.heuristic_match_shared_md_files opt-in). M: duplicate project_id/parent_id comment blocks instance_messaging.py:3654-3675 (old narrower block not deleted); M (downgraded from worker High — house precedent 08-15 rates test-scaffold duplication Medium): 4× ~25-line setup boilerplate in test_persistence_w2_parent_normalize.py; M: stale cross-ref external_opencode.py:623 "Mirrors explore()'s context injection" (branch-caused staleness OUTSIDE the diff — caught only because corpus sweep included non-diff files; playbook "corrected claim survives in code-side surfaces" pattern); M: unused imports SimpleNamespace (integration test :67) + pytest (parent_resolution :39).
+- Clean: attach removal complete + symmetric (no orphaned helpers/fixtures/mocks; negative pins incl. assert_not_called); test DB recipe file-backed SQLite/WAL/NullPool compliant, StaticPool explicitly banned; meta.json byte-matches canonical 13-agent shape; commits conventional; no volatile shas; collect-only 215/0.
+- Ledger (pre-existing, not branch-caused): instance_messaging.py 4846L + test_knowledge_tools.py 3387L >3000 flags; knowledge_tools.py 1034L lacks why-docstring; base dead imports test_knowledge_tools.py:18-19,:1259,:1332.
+- Deferred to Reviewer: none observed.
+
 ## 2026-09-06 — ask-questions doc-only polish pass (feature/ask-questions-format-validation @ 07290356 → 5e4e33b9), Iteration 001
 - Dispatch: 1 worker readable-code (review, read-only) → SAME worker revived for sequential apply pass (house apply-chain shape from 08-25). COMPLETED-revive reuse worked clean; worker self-caught 3-vs-2-space `_full_doc_` indent mismatch pre-land.
 - Verdict: Pass. 0 High / 1 Medium / 1 Low — both applied, commit 5e4e33b9 (docs(question-tools), 2 files +32/−3, explicit-path staging, no `git add -A`). Tests: 48 collected / 48 passed post-apply.

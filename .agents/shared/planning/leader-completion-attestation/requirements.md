@@ -852,5 +852,3 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 ---
 
 **2026-09-08 user decision:** Completion Attestation prompt-contract sections removed from `agents/leader/rule.md` + `agents/leader/workflow.md`. The deny-time nudge is the sole teaching source (header + conditional semantics + two-step pattern + embedded mermaid); the LLM judge releases genuine reports. Rationale: a standing prompt section is redundant. Accepted cost: possibly one extra nudge cycle on delegated missions whose report the judge cannot confirm.
-
-**2026-09-08 follow-up:** suppression rule + concise conditional `attest_completion` description added; rationale = LLMs spontaneously call visible tools even on non-delegated missions.
