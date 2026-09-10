@@ -508,9 +508,11 @@ project_cn_add(
 )
 ```
 
-**Merge Logic**: If a similar entry (same category, ≥2 keyword overlap) exists, they are merged automatically.
+**Duplicate Handling**: Only exact normalized-summary matches count as near-duplicates — there is no automatic merging. A colliding add is REJECTED with an error naming the collided entry (id + summary).
 
-**Eviction**: At 30 entries, the oldest lowest-priority entry is evicted.
+**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match).
+
+**Cap**: At 50 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
 #### project_cn_list
 

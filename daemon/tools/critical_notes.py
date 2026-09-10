@@ -224,6 +224,9 @@ When adding an entry:
 - If the list is full (50 entries), the call REJECTS with an error naming
   eviction candidates. No silent eviction.
 - Pass entry_id to update a specific entry in place (exact match, no fuzzy).
+- Updates cannot clear a reference: passing reference=None (or omitting
+  it) leaves the existing reference unchanged; the repository guard
+  applies only non-None values.
 
 Args:
     project_id: The project to add the note to
