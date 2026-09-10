@@ -407,6 +407,18 @@ class TestResumeEndpointGateSupersession:
         state["manager"] = manager
         state["live_hub"] = _make_live_hub()
 
+        # The supersession path delivers the message via the normal
+        # ``enqueue_message`` path (NOT via the answer-gate route).
+        # The enqueue must complete before the DB-only cascade begins;
+        # pin that ordering while the endpoint is executing rather than
+        # merely asserting both calls happened afterward.
+        async def _enqueue_only_after_cascade(*args, **kwargs):
+            manager.resume_instance_cascade.assert_not_called()
+            return MagicMock(
+                message_id="msg-supersede-fresh",
+                job_id="job-supersede-fresh",
+            )
+        manager.enqueue_message = AsyncMock(side_effect=_enqueue_only_after_cascade)
         resp = client.post(
             "/instances/inst-gate-steal/resume",
             json={"message": "actually I just want to ask something else"},
@@ -442,6 +454,43 @@ class TestResumeEndpointGateSupersession:
         assert target_result["status"] == "enqueued_as_fresh_message"
         assert target_result["route"] == "api_gate_supersede"
         assert target_result["message_id"] == "msg-supersede-fresh"
+
+    def test_gate_supersession_enqueue_failure_keeps_instance_paused(
+        self, client_and_state,
+    ):
+        """A failed supersession enqueue must surface 500 and never
+        invoke the DB-only cascade, which would leave the instance
+        RUNNING without a Task."""
+        from daemon.services.question_manager import QuestionPack
+
+        pack = QuestionPack(
+            instance_id="inst-supersede-failure",
+            questions=[],
+        )
+        client, state = client_and_state
+        manager = _make_gate_manager(
+            instance_id="inst-supersede-failure",
+            pending_pack=pack,
+            enqueue_side_effect=RuntimeError("enqueue boom"),
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        resp = client.post(
+            "/instances/inst-supersede-failure/resume",
+            json={"message": "try superseding"},
+        )
+
+        assert resp.status_code == 500, resp.text
+        assert (
+            "superseded question gate but failed to enqueue message: "
+            "enqueue boom"
+        ) in resp.json()["detail"]
+        # The DB-only state transition is the dangerous part: it was
+        # never reached, so the instance remains paused.
+        manager.enqueue_message.assert_awaited_once()
+        manager.resume_instance_cascade.assert_not_awaited()
+        manager.resume_processing_job.assert_not_awaited()
 
     def test_plain_message_via_resume_clears_pack_and_emits_sse(
         self, client_and_state,
@@ -554,42 +603,42 @@ class TestResumeEndpointGateSupersession:
 # ============================================================================
 
 
-class TestCleanupPreservesAwaitingAnswerHandle:
-    """Fix 2a: ``_schedule_explicit_handle_resume`` cleanup MUST skip
-    cancel for PAUSED tasks carrying an awaiting_answer handle —
-    the cascade-resume's ``ResumeTurn`` is the sole consumer of the
-    handle. Cancelling the handle task here orphans the gate."""
+class TestScheduleExplicitHandleResumeRealSeamPreservesAwaitingAnswerHandle:
+    """Drive Fix 2a's carve-out through the real manager seam.
 
-    def test_cleanup_skips_cancel_for_awaiting_answer_handle_task(
+    The cleanup in ``_schedule_explicit_handle_resume`` must preserve a
+    PAUSED ``awaiting_answer`` handle while still cancelling a normal
+    PAUSED external task.  This test does not duplicate the predicate:
+    it invokes the real method with real task/message repositories.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_seam_preserves_handle_and_cancels_paused_external(
         self, engine,
     ):
-        """When the cleanup encounters a PAUSED task with
-        ``suspension_reason='awaiting_answer'`` + a non-null
-        ``resume_target_turn_id``, it MUST NOT call
-        ``cancel_task`` on it. The cascade-resume (caller of
-        ``_schedule_explicit_handle_resume``) consumes the handle
-        via ``ResumeTurn``."""
-        from daemon.services.task_processor import ProcessMessageProcessor
+        """The real cleanup preserves the handle and cancels the control."""
+        from daemon.cancellation import CancellationTokenSource
+        from daemon.manager import InstanceManager
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.repositories.task.repository import TaskRepository
 
-        # Seed an instance + a PAUSED PROCESS_REPORT task with the
-        # production-defect handle shape.
-        instance_id = "inst-cleanup-handle"
+        instance_id = "inst-real-seam-cleanup"
         _seed_instance(engine, instance_id=instance_id)
 
         handle_work_id = str(uuid.uuid4())
         handle_message_id = str(uuid.uuid4())
-        task_pk = _seed_task(
+        handle_task_id = _seed_task(
             engine,
             work_id=handle_work_id,
             instance_id=instance_id,
             task_type=TaskType.PROCESS_REPORT.value,
             status=TaskStatus.PAUSED.value,
             suspension_reason=SuspensionReason.AWAITING_ANSWER.value,
-            resume_target_turn_id=handle_work_id,  # points at self
+            resume_target_turn_id=handle_work_id,
             message_id=handle_message_id,
         )
-        # Seed a PROCESSING message_queue row that the cleanup will
-        # find and try to cancel+complete.
         _seed_message(
             engine,
             message_id=handle_message_id,
@@ -597,152 +646,71 @@ class TestCleanupPreservesAwaitingAnswerHandle:
             status=MessageStatus.PROCESSING.value,
         )
 
-        # Wire the manager mock with a real TaskRepository and
-        # ExerciseMessageRepository so the cleanup sees the seeded
-        # rows.
-        from daemon.repositories.task.repository import TaskRepository
-        from daemon.repositories.message_queue.repository import (
-            SQLModelMessageQueueRepository,
-        )
-
-        manager = MagicMock()
-        manager.engine = engine
-        manager._task_repo = TaskRepository(engine=engine)
-        manager._queue_repository = SQLModelMessageQueueRepository(
-            engine=engine,
-        )
-        manager._report_injection_repo = MagicMock()
-        manager._has_non_terminal_injection_for = MagicMock(return_value=False)
-        manager._execution_gate = MagicMock()
-        manager._request_registry = MagicMock()
-
-        # Stub ``_resume_processing_background`` so we can construct
-        # ``InstanceManager._schedule_explicit_handle_resume`` without
-        # actually scheduling a graph turn.
-        async def _noop_background(*args, **kwargs):  # noqa: ANN001
-            return None
-        manager._resume_processing_background = _noop_background
-
-        from daemon.manager import InstanceManager
-        svc = InstanceManager.__new__(InstanceManager)
-        svc._task_repo = manager._task_repo
-        svc._queue_repository = manager._queue_repository
-        svc._report_injection_repo = manager._report_injection_repo
-        svc._has_non_terminal_injection_for = (
-            manager._has_non_terminal_injection_for
-        )
-        svc._execution_gate = manager._execution_gate
-        svc._request_registry = manager._request_registry
-        svc._resume_processing_background = (
-            manager._resume_processing_background
-        )
-        # We can't easily call the full private method without the
-        # full manager wiring, so exercise the cleanup carve-out
-        # directly via the skip path: invoke the cleanup branch by
-        # checking that ``cancel_task`` does NOT get called on the
-        # handle task when we exercise the manager-level helper that
-        # wraps the carve-out.
-        #
-        # Direct exercise of the carve-out: the cleanup iterates
-        # pending_messages and calls ``cancel_task`` for
-        # PAUSED/CANCELLED/COMPLETED/FAILED tasks — except for the
-        # awaiting_answer carve-out we just inserted. We assert the
-        # handle task stays PAUSED after the cleanup runs by calling
-        # the carve-out predicate directly via a minimal harness.
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-
-        # Re-read the task fresh — the carve-out predicate reads
-        # ``suspension_reason`` and ``resume_target_turn_id`` from
-        # the task row.
-        from sqlmodel import Session, select
-        with Session(engine) as session:
-            row = session.exec(
-                select(Task).where(Task.id == task_pk)
-            ).first()
-            assert row is not None
-            assert row.status == TaskStatus.PAUSED.value
-            assert (
-                row.suspension_reason
-                == SuspensionReason.AWAITING_ANSWER.value
-            )
-            assert row.resume_target_turn_id == handle_work_id
-
-        # Verify the cleanup carve-out condition we wrote: when
-        # status=PAUSED + suspension_reason=AWAITING_ANSWER +
-        # resume_target_turn_id IS NOT NULL, the cleanup's
-        # ``continue`` branch fires and ``cancel_task`` is NOT
-        # called. We assert this by exercising the predicate
-        # equivalent in isolation — the same shape that the
-        # cleanup uses to gate the skip.
-        live_row = manager._task_repo.get_by_work_id(handle_work_id)
-        assert live_row is not None
-        assert (
-            live_row.status == TaskStatus.PAUSED.value
-            and live_row.suspension_reason
-            == SuspensionReason.AWAITING_ANSWER.value
-            and live_row.resume_target_turn_id is not None
-        ), (
-            "carve-out predicate inputs must match — if they "
-            "don't, the cleanup would skip the await_answer "
-            "carve-out and (incorrectly) cancel the handle task."
-        )
-
-    def test_cleanup_still_cancels_paused_tasks_without_awaiting_answer(
-        self, engine,
-    ):
-        """Regression: non-handle PAUSED tasks (e.g. paused_external)
-        are NOT resume handles and the existing cancel+complete
-        behaviour stays intact. The carve-out MUST NOT widen to
-        every PAUSED task — only to awaiting_answer handles."""
-        instance_id = "inst-cleanup-paused-ext"
-        _seed_instance(engine, instance_id=instance_id)
-
-        ext_work_id = str(uuid.uuid4())
-        ext_message_id = str(uuid.uuid4())
-        # PAUSED with paused_external — not a resume handle.
-        _seed_task(
+        control_work_id = str(uuid.uuid4())
+        control_message_id = str(uuid.uuid4())
+        control_task_id = _seed_task(
             engine,
-            work_id=ext_work_id,
+            work_id=control_work_id,
             instance_id=instance_id,
             task_type=TaskType.PROCESS_MESSAGE.value,
             status=TaskStatus.PAUSED.value,
             suspension_reason=SuspensionReason.PAUSED_EXTERNAL.value,
             resume_target_turn_id=None,
-            message_id=ext_message_id,
+            message_id=control_message_id,
         )
         _seed_message(
             engine,
-            message_id=ext_message_id,
+            message_id=control_message_id,
             instance_id=instance_id,
             status=MessageStatus.PROCESSING.value,
         )
 
-        # Carve-out predicate MUST NOT fire for non-handle PAUSED
-        # tasks: the conjunction is suspension_reason ==
-        # AWAITING_ANSWER, not just "status==PAUSED".
-        from sqlmodel import Session, select
-        from daemon.repositories.task.repository import TaskRepository
+        manager = InstanceManager.__new__(InstanceManager)
+        manager._graph_tasks = {}
+        manager._deferred_question_pause = set()
+        manager._task_repo = TaskRepository(engine=engine)
+        manager._queue_repository = SQLModelMessageQueueRepository(
+            engine=engine,
+        )
+        manager._request_registry = MagicMock()
+        token_source = CancellationTokenSource()
+        manager._request_registry.register.return_value = token_source
 
-        repo = TaskRepository(engine=engine)
-        live_row = repo.get_by_work_id(ext_work_id)
-        assert live_row is not None
-        # The cleanup's carve-out predicate is intentionally narrow:
-        # it only fires when ALL of (status==PAUSED,
-        # suspension_reason==AWAITING_ANSWER, resume_target_turn_id
-        # IS NOT NULL) hold. A paused_external task has the first
-        # but NOT the second — the predicate stays False and the
-        # existing cancel+complete path runs.
-        carve_out_holds = (
-            live_row.status == TaskStatus.PAUSED.value
-            and live_row.suspension_reason
-            == SuspensionReason.AWAITING_ANSWER.value
-            and live_row.resume_target_turn_id is not None
+        async def _noop_background(*args, **kwargs):  # noqa: ANN001
+            return None
+
+        manager._resume_processing_background = _noop_background
+        manager._schedule_explicit_handle_resume = (
+            InstanceManager._schedule_explicit_handle_resume.__get__(
+                manager
+            )
         )
-        assert carve_out_holds is False, (
-            "carve-out predicate widened incorrectly — non-handle "
-            "PAUSED tasks must still be cancelled by the cleanup"
+
+        await manager._schedule_explicit_handle_resume(
+            instance_id=instance_id,
+            message="resume trigger",
+            silent=True,
+            images=None,
+            target_work_id=handle_work_id,
+            selected_suspension_reason=(
+                SuspensionReason.AWAITING_ANSWER.value
+            ),
+            handle_work_id=handle_work_id,
+            route_outcome="answer_gate_existing_turn",
         )
+
+        with Session(engine) as session:
+            handle_task = session.get(Task, handle_task_id)
+            control_task = session.get(Task, control_task_id)
+            assert handle_task is not None
+            assert control_task is not None
+            assert handle_task.status == TaskStatus.PAUSED.value
+            assert control_task.status == TaskStatus.CANCELLED.value
+
+        # The real method scheduled only the no-op replacement task. Drain
+        # it so this focused test leaves no background task behind.
+        scheduled_task = manager._graph_tasks.pop(instance_id)
+        await scheduled_task
 
 
 # ============================================================================
