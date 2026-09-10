@@ -20,8 +20,6 @@ Design notes (2026-09-10):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from langchain_core.tools import tool
 
 from ..repositories.project.models import (
@@ -118,10 +116,15 @@ def create_critical_notes_tools(
 
         Behavior:
         - If entry_id is provided, that specific row is updated exactly
-          (summary/priority/reference/source_agent). No fuzzy matching.
+          (summary/priority/reference/category/source_agent). No fuzzy
+          matching. Category is forwarded on update, so a recategorize is
+          visible on the returned dict — never silent.
         - Otherwise, if a near-duplicate summary already exists in the
           same project, the call REJECTS with an error naming the
           colliding entry's id and summary — caller decides next step.
+          Collision detection is CROSS-CATEGORY by design (normalized-
+          summary equality ignores category), so passing entry_id on
+          the conflicting entry's id is the supported recategorize path.
         - Otherwise, a new entry is appended. If the project is at the
           cap (_MAX_ENTRIES=50), the call REJECTS with an error naming
           eviction candidates — no silent data loss.
@@ -161,20 +164,17 @@ def create_critical_notes_tools(
                 entry_id,
                 priority=priority,
                 summary=summary,
+                category=category,
                 reference=reference,
                 source_agent=agent_id,
             )
-            if updated:
-                return updated.to_dict()
-            # Repo returned None — fall back to echoing intended new state
-            return CriticalNotes(
-                id=entry_id,
-                category=target.category,
-                priority=priority,
-                summary=summary,
-                reference=reference,
-                source_agent=agent_id,
-            ).to_dict()
+            if updated is None:
+                # Repo could not find/apply the update — surface this as an
+                # error so the caller is not misled by a SUCCESS-shaped echo
+                # with fabricated timestamps. Matches the {"error": ...}
+                # return convention used elsewhere in this tool.
+                return {"error": f"Entry '{entry_id}' no longer exists; update not applied"}
+            return updated.to_dict()
 
         # Step 5: STRICT COLLISION CHECK (new-add path)
         duplicate = _find_near_duplicate_entry(entries, summary)
@@ -217,13 +217,17 @@ def create_critical_notes_tools(
     project_cn_add._full_doc_ = """Add or update a critical notes entry for a project.
 
 When adding an entry:
-- If a near-duplicate summary (normalized equality) already exists for the
-  project, the call REJECTS with an error naming the colliding entry's id
-  and summary. The caller decides whether to remove it via project_cn_remove
-  or update it via entry_id.
+- If a near-duplicate summary (normalized equality, CROSS-CATEGORY by
+  design — category is ignored for collision detection) already exists for
+  the project, the call REJECTS with an error naming the colliding
+  entry's id and summary. The caller decides whether to remove it via
+  project_cn_remove or update it via entry_id.
 - If the list is full (50 entries), the call REJECTS with an error naming
   eviction candidates. No silent eviction.
 - Pass entry_id to update a specific entry in place (exact match, no fuzzy).
+  An entry_id update can change any updatable field including category —
+  the returned dict reflects the new category, never silently retaining
+  the old one.
 - Updates cannot clear a reference: passing reference=None (or omitting
   it) leaves the existing reference unchanged; the repository guard
   applies only non-None values.

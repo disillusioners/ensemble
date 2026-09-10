@@ -824,7 +824,7 @@ class TestUpdateByEntryId:
         # Update by id with a COMPLETELY DIFFERENT summary
         r2 = add_tool.invoke({
             "project_id": "test_project",
-            "category": "risk",  # category is NOT updated by the explicit update path (only priority/summary/reference)
+            "category": "risk",  # category IS now forwarded by the explicit update path
             "priority": "critical",
             "summary": "Totally different summary now",
             "reference": "https://new.example.com",
@@ -836,6 +836,9 @@ class TestUpdateByEntryId:
         assert r2["summary"] == "Totally different summary now"
         assert r2["priority"] == "critical"
         assert r2["reference"] == "https://new.example.com"
+        # Category forwarding is part of the explicit update path (since
+        # 2026-09-10 hardening): a recategorize is visible, never silent.
+        assert r2["category"] == "risk"
 
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == 1, "Update must NOT create a duplicate entry"
@@ -865,30 +868,95 @@ class TestUpdateByEntryId:
         assert list_result["count"] == 0
 
     def test_update_by_id_bypasses_collision_check(self, mock_repo):
-        """Pass entry_id -> collision check is skipped (explicit intent)."""
+        """Pass entry_id -> collision check is skipped (explicit intent).
+
+        Shim-discriminating fixture design:
+          The update payload's summary is a NORMALIZED-EQUAL twin of a
+          DIFFERENT existing entry's summary (preserving the bypass-
+          collision intent — without entry_id, the strict near-duplicate
+          matcher would reject the new add as a near-duplicate of that
+          entry), AND strictly LONGER (raw char count) than the target
+          entry's current summary.
+
+          Under the OLD fuzzy-upsert behavior run through a compat shim
+          (old code made to accept entry_id, falling through to
+          _merge_entries): _merge_entries kept the SHORTER summary, so
+          the target's original short summary would survive — the
+          `r2["summary"] == payload_summary` assertion FAILS.
+          Under the NEW explicit update path: the payload is applied
+          verbatim, so the assertion PASSES.
+
+        source_agent note: the OLD shim and the NEW path both bind
+        source_agent to the tool's agent_id ("test_agent"), so this
+        field cannot discriminate on its own. It is kept as a sanity
+        pin; the discriminant is the summary assertion above.
+        """
         tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
+        # Target entry T: SHORT summary so the OLD _merge_entries picks
+        # T's side as the "shorter" winner (the discriminant condition).
         r1 = add_tool.invoke({
             "project_id": "test_project",
             "category": "convention",
             "priority": "medium",
-            "summary": "Use PostgreSQL for the main database",
+            "summary": "pg",
         })
         entry_id = r1["id"]
 
-        # Without entry_id, the same exact summary would be rejected.
-        # WITH entry_id, the update is explicit and proceeds.
+        # Different existing entry D: same category, summary whose
+        # NORMALIZED form equals the payload's normalized form. Without
+        # entry_id, the strict near-duplicate matcher would reject the
+        # add with the payload summary as a near-duplicate of D —
+        # that is the "bypass the collision check" intent under test.
+        add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": "use postgres for main store",
+        })
+
+        # Update payload: NORMALIZED-EQUAL twin of D's summary, but
+        # strictly LONGER (raw chars) than T's current "pg". Whitespace
+        # + case variation pads the length while preserving normalized
+        # equality. Without entry_id this would collide with D and be
+        # rejected — WITH entry_id it is the explicit in-place update.
+        payload_summary = "USE   POSTGRES   FOR   MAIN   STORE"
+        assert len(payload_summary) > len("pg"), (
+            "Discriminant invariant: payload must be longer than T's "
+            "current summary so OLD _merge_entries picks T's side."
+        )
+        assert _normalize_summary(payload_summary) == _normalize_summary(
+            "use postgres for main store"
+        ), (
+            "Discriminant invariant: payload must normalize-equal D's "
+            "summary so without-entry_id the strict matcher rejects."
+        )
+
         r2 = add_tool.invoke({
             "project_id": "test_project",
             "category": "convention",
             "priority": "high",
-            "summary": "Use PostgreSQL for the main database",
+            "summary": payload_summary,
             "entry_id": entry_id,
         })
-        assert "error" not in r2
-        assert r2["id"] == entry_id
+        assert "error" not in r2, f"Explicit update rejected: {r2}"
+        assert r2["id"] == entry_id, "Explicit update must preserve the entry id"
         assert r2["priority"] == "high"
+        # Pin that the explicit update path applies the UPDATE payload
+        # verbatim — old merge logic kept the shorter summary, so under
+        # the shim r2["summary"] would be the target's original "pg",
+        # NOT the payload.
+        assert r2["summary"] == payload_summary, (
+            f"Explicit update must apply the payload summary verbatim. "
+            f"Expected {payload_summary!r}, got {r2['summary']!r}. "
+            f"If this fails under the shim world, the OLD merge kept "
+            f"the shorter summary instead of applying the payload."
+        )
+        # source_agent cannot discriminate (see docstring); kept as a
+        # sanity pin that the path forwarded source_agent from the
+        # tool binding.
+        assert r2["source_agent"] == "test_agent"
 
     def test_update_by_id_empty_string_returns_error(self, mock_repo):
         """Pass entry_id='' -> error (defensive, since we accept None)."""
@@ -905,6 +973,57 @@ class TestUpdateByEntryId:
         assert "error" in result
         assert "entry_id" in result["error"]
 
+    def test_update_by_id_repo_returns_none_surfaces_error(self, mock_repo):
+        """When the repo's update_critical_note returns None (entry vanished
+        between the existence check and the update), the tool MUST surface
+        an error rather than echo a SUCCESS-shaped dict with fabricated
+        timestamps (round-3 hardening)."""
+        from daemon.tools import critical_notes as cn_module
+
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
+
+        # Add an entry that EXISTS at the existence-check step
+        r1 = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": unique_summary(0),
+        })
+        target_id = r1["id"]
+
+        # Force the repo's update to return None (simulating the entry
+        # vanishing in a TOCTOU race / deleted by another caller).
+        original_update = mock_repo.update_critical_note.side_effect
+
+        def _vanishing_update(pid, entry_id, **updates):
+            return None
+
+        mock_repo.update_critical_note.side_effect = _vanishing_update
+        try:
+            result = add_tool.invoke({
+                "project_id": "test_project",
+                "category": "convention",
+                "priority": "high",
+                "summary": unique_summary(0) + " [updated]",
+                "entry_id": target_id,
+            })
+        finally:
+            mock_repo.update_critical_note.side_effect = original_update
+
+        # NEW behavior: error dict, NOT a SUCCESS-shaped echo.
+        assert "error" in result, (
+            f"Repo returned None but tool returned SUCCESS-shaped dict "
+            f"instead of an error: {result}"
+        )
+        assert target_id in result["error"], (
+            f"Error message must name the entry id; got: {result['error']!r}"
+        )
+        assert "no longer exists" in result["error"] or "not applied" in result["error"], (
+            f"Error message should be specific; got: {result['error']!r}"
+        )
+
 
 # =============================================================================
 # Test Class: TestCapBehavior — replaces TestEvictionLogic
@@ -920,6 +1039,14 @@ class TestCapBehavior:
 
     def test_add_below_cap_succeeds(self, mock_repo):
         """49 entries -> add 50th distinct summary -> succeeds, count=50."""
+        from daemon.tools import critical_notes
+
+        # Pin the cap value: if it silently regresses to 30 (the OLD cap),
+        # this test must fail so the silent-eviction regression is caught.
+        assert critical_notes._MAX_ENTRIES == 50
+
+        first_summary = unique_summary(0)
+
         tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
@@ -945,6 +1072,14 @@ class TestCapBehavior:
 
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == _MAX_ENTRIES
+        # Pin: the FIRST-added entry must still survive at the cap. Under the
+        # OLD silent-eviction code (cap=30), the first ~19 of these would
+        # have been evicted as we kept adding past 30, so this assertion
+        # fails under the old behavior.
+        surviving_summaries = {entry["summary"] for entry in list_result["entries"]}
+        assert first_summary in surviving_summaries, (
+            "First-added entry was silently evicted; cap behavior regressed"
+        )
 
     def test_add_at_cap_is_rejected_with_eviction_candidates(self, mock_repo):
         """_MAX_ENTRIES entries -> add 51st distinct summary -> REJECTED with eviction candidates."""
@@ -1018,11 +1153,27 @@ class TestCapBehavior:
     def test_cap_priority_order_in_eviction_candidates(self, mock_repo):
         """When at cap, the lowest-priority oldest entries are named first in
         the eviction-candidate list (so the caller can pick sensibly)."""
+        import re
+
         tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
-        # Fill with 49 medium entries
-        for i in range(49):
+        # Capture the FIRST-ADDED medium entry's id — under the new sort
+        # key `(-priority_value, created_at)` it must be the FIRST candidate
+        # (oldest medium). Under the OLD inverted sort (priority_value asc)
+        # the critical entry would lead instead, so this assertion fails
+        # under the old behavior.
+        first_added = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": unique_summary(0),
+        })
+        first_added_id = first_added["id"]
+
+        # Fill with the remaining 48 medium entries
+        for i in range(1, 49):
             add_tool.invoke({
                 "project_id": "test_project",
                 "category": "convention",
@@ -1031,12 +1182,15 @@ class TestCapBehavior:
             })
             time.sleep(0.002)
         # Add 1 critical entry to fill to cap
-        add_tool.invoke({
+        critical_added = add_tool.invoke({
             "project_id": "test_project",
             "category": "risk",
             "priority": "critical",
             "summary": "Critical security vulnerability found",
         })
+        critical_id = critical_added["id"]
+
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES
 
         # Next add must be rejected; eviction candidates should NOT lead with the critical
         reject = add_tool.invoke({
@@ -1059,6 +1213,18 @@ class TestCapBehavior:
         assert first_candidate_line is not None, "Error must list at least one eviction candidate"
         assert "priority=medium" in first_candidate_line, (
             f"First eviction candidate should be lowest priority (medium), got: {first_candidate_line}"
+        )
+        # Pin: among ties at the same (lowest) priority, the OLDEST medium
+        # surfaces first. Under the OLD sort (priority_value asc, then
+        # created_at asc) the critical entry led instead, so this assertion
+        # fails under the old behavior.
+        match = re.search(r"id=([^\s]+)", first_candidate_line)
+        assert match is not None, f"Could not parse id from candidate line: {first_candidate_line}"
+        first_candidate_id = match.group(1)
+        assert first_candidate_id == first_added_id, (
+            f"First eviction candidate should be the OLDEST medium entry "
+            f"(id={first_added_id}); got {first_candidate_id}. "
+            f"Critical id was {critical_id}."
         )
 
     def test_explicit_update_by_id_at_cap_still_works(self, mock_repo):
@@ -1099,6 +1265,12 @@ class TestCapBehavior:
         assert "error" not in upd, f"Explicit update at cap rejected: {upd}"
         assert upd["id"] == target_id
         assert upd["priority"] == "high"
+        # Pin: the SUMMARY was actually updated (this assertion fails under
+        # the OLD silent-merge echo which could leave summary stale).
+        assert upd["summary"] == unique_summary(0) + " [updated]"
+        # Pin: source_agent reflects the current call's agent_id (would
+        # diverge if the path bypassed source_agent forwarding).
+        assert upd["source_agent"] == "test_agent"
         # Count unchanged
         assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES
 
