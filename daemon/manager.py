@@ -9671,12 +9671,22 @@ class InstanceManager:
                     # carry the explicit handle the answer endpoint
                     # resolves via ``find_suspended_turn_for_answer``.
                     # Cancelling the task here would orphan the handle
-                    # (``cancel_task``'s cold path keeps
-                    # ``suspension_reason`` set on the row, but the
-                    # cascade-resume's ``ResumeTurn`` only operates on
-                    # ``status='paused'`` rows, so a CANCELLED resume
-                    # handle can never be consumed by the cascade).
-                    # The downstream effect is the second pause cascade
+                    # because the answer-endpoint lookup
+                    # (``daemon/repositories/task/repository.py:295-302``)
+                    # filters on ``status='paused'`` — a CANCELLED
+                    # resume handle is INVISIBLE to the lookup, and
+                    # ``ResumeTurn``
+                    # (``daemon/services/turn_transitions.py:326-338``)
+                    # only operates on ``status='paused'`` rows, so a
+                    # CANCELLED handle can never be consumed. (The
+                    # cold-path UPDATE in
+                    # ``daemon/repositories/task/repository.py:3651-3670``
+                    # leaves ``suspension_reason`` set on the row, but
+                    # that is incidental — the orphaning mechanism is
+                    # the ``status='paused'`` filter mismatch on the
+                    # answer-endpoint lookup and on ``ResumeTurn``'s
+                    # gate, not the preservation of the column.) The
+                    # downstream effect is the second pause cascade
                     # has no RUNNING task to suspend → the next user
                     # answer lands on a stale instance with no
                     # resolvable handle. Skip the cancel+complete for

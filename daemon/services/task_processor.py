@@ -150,20 +150,29 @@ class ProcessMessageProcessor(BaseProcessor):
         Defect-2 carve-out (answer-gate resume chain, 2026-09-10):
         re-read the live task before completing. If the cascade pause
         already suspended the task back to PAUSED with a fresh
-        ``awaiting_answer`` handle (the ``finally`` block in
+        ``awaiting_answer`` handle (the ``finally`` in
         ``_process_message_with_tracking`` runs
-        ``pause_instance_cascade`` AFTER the graph turn emits
-        ``ask_questions``, before the ExecutionGate is released to the
-        WorkerPool), the skip path's ``complete_task`` would
-        ``CompleteTurn``-clear the freshly-set handle — and the next
-        user answer endpoint call would land on a stale instance with
-        no resolvable handle. Defect 3 (silent answer drop) cascades
-        from this. In that race window we MUST NOT call
-        ``complete_task``; mark the message COMPLETED (the report was
-        already delivered) and fire the watcher notification so the
-        WorkerPool releases its slot, but leave the task in PAUSED
-        with the awaiting_answer handle intact for the answer endpoint
-        to consume.
+        ``pause_instance_cascade`` after the graph turn emits
+        ``ask_questions``, before the ExecutionGate releases to the
+        WorkerPool), the skip path's ``complete_task`` silently
+        no-ops on the PAUSED row — ``complete_task`` returns None
+        when ``prior_status != RUNNING.value``
+        (``daemon/repositories/task/repository.py:2054-2058``); the
+        CompleteTurn-wipe at ``daemon/services/turn_transitions.py:386-389``
+        only fires on RUNNING rows, so the handle-clearing concern
+        does NOT apply on this path. The actual broken state on the
+        no-op path is: (a) the message-level COMPLETED row is never
+        written, risking duplicate INJECTED report delivery; and (b)
+        ``notify_work_watchers`` never fires because the caller gates
+        it on a non-None ``completed_task``, so parents and the queue
+        are not released. The carve-out's primary repairs are the
+        explicit ``queue_repository.complete`` and watcher-notification
+        calls below. Preserving the freshly-set ``awaiting_answer``
+        handle is a downstream CONSEQUENCE of skipping
+        ``complete_task``, not the primary repair — handle preservation
+        matters because the answer endpoint resolves it via
+        ``find_suspended_turn_for_answer``, but the proximate fix is
+        the two explicit calls.
 
         Args:
             task: The task to mark completed as a no-op skip.
