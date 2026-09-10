@@ -768,21 +768,36 @@ async def resume_instance(
         manager.clear_question_pause_requested(instance_id)
         manager._deferred_question_pause.discard(instance_id)
 
+        # Enqueue the fresh message BEFORE the cascade. The cascade
+        # transitions the instance DB-only (PAUSED → RUNNING), so a
+        # failed enqueue must never leave it RUNNING without a Task.
+        # Keep the earlier question-state supersession mutations above
+        # intact; this is deliberately the only ordering change here.
+        try:
+            enqueue_result = await manager.enqueue_message(
+                instance_id=instance_id,
+                message=message_text,
+                source="api_gate_supersede",
+            )
+        except Exception as enqueue_err:
+            logger.error(
+                f"resume_instance: gate-supersession enqueue failed "
+                f"for {instance_id[:8]}...: {enqueue_err}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "superseded question gate but failed to enqueue "
+                    f"message: {enqueue_err}"
+                ),
+            ) from enqueue_err
+
         # Cascade-resume consumes the awaiting_answer handle (ResumeTurn
         # PAUSED → PENDING, clears suspension_reason). The plain message
         # must NOT go through ``resume_processing_job`` — that path would
         # route as answer_gate_existing_turn and re-create the defect.
-        # Cascade first, then enqueue the plain message as a fresh user
-        # message; the agent processes it as a brand-new turn.
-        # ``ResumeRequest`` carries only ``message`` (no images), so the
-        # enqueue is text-only — the plain user message is the only
-        # content the supersede carries forward.
+        # The enqueue above is intentionally before this DB-only transition.
         cascade_result = await manager.resume_instance_cascade(instance_id)
-        enqueue_result = await manager.enqueue_message(
-            instance_id=instance_id,
-            message=message_text,
-            source="api_gate_supersede",
-        )
         return {
             "resumed": True,
             "resumed_ids": cascade_result["resumed_ids"],
