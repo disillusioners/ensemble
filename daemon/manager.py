@@ -69,7 +69,7 @@ from .repositories.instance.repository import (
 )
 from .repositories.instance.models import Instance, InstanceStatus
 from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from .repositories.task.models import Task, TaskType, TaskStatus
+from .repositories.task.models import SuspensionReason, Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
 from .repositories.shared_meta_kv.models import SharedMetaKV
@@ -9664,6 +9664,51 @@ class InstanceManager:
                     # COMPLETED / FAILED — the task will not deliver
                     # this message, so it is safe to mark
                     # COMPLETED and cancel the task.
+                    #
+                    # Defect-2 carve-out (answer-gate resume chain,
+                    # 2026-09-10): tasks with ``suspension_reason=
+                    # 'awaiting_answer'`` are RESUME HANDLES — they
+                    # carry the explicit handle the answer endpoint
+                    # resolves via ``find_suspended_turn_for_answer``.
+                    # Cancelling the task here would orphan the handle
+                    # because the answer-endpoint lookup
+                    # (``daemon/repositories/task/repository.py:295-302``)
+                    # filters on ``status='paused'`` — a CANCELLED
+                    # resume handle is INVISIBLE to the lookup, and
+                    # ``ResumeTurn``
+                    # (``daemon/services/turn_transitions.py:326-338``)
+                    # only operates on ``status='paused'`` rows, so a
+                    # CANCELLED handle can never be consumed. (The
+                    # cold-path UPDATE in
+                    # ``daemon/repositories/task/repository.py:3651-3670``
+                    # leaves ``suspension_reason`` set on the row, but
+                    # that is incidental — the orphaning mechanism is
+                    # the ``status='paused'`` filter mismatch on the
+                    # answer-endpoint lookup and on ``ResumeTurn``'s
+                    # gate, not the preservation of the column.) The
+                    # downstream effect is the second pause cascade
+                    # has no RUNNING task to suspend → the next user
+                    # answer lands on a stale instance with no
+                    # resolvable handle. Skip the cancel+complete for
+                    # resume handles; the cascade-resume consumes the
+                    # handle naturally via ``ResumeTurn`` and the
+                    # message re-runs through the resumed turn.
+                    if (
+                        stale_task.status == TaskStatus.PAUSED.value
+                        and stale_task.suspension_reason
+                        == SuspensionReason.AWAITING_ANSWER.value
+                        and stale_task.resume_target_turn_id is not None
+                    ):
+                        logger.info(
+                            f"[RESUME] preserving awaiting_answer "
+                            f"handle task {stale_task.id} (message "
+                            f"{msg.message_id[:8]}...) — cascade-resume "
+                            f"will consume the handle via ResumeTurn; "
+                            f"skipping cancel+complete to avoid "
+                            f"orphaning the gate"
+                        )
+                        skipped_phantom_count += 1
+                        continue
                     try:
                         await asyncio.to_thread(
                             self._queue_repository.complete, msg.message_id
