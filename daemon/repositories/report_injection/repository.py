@@ -1042,30 +1042,69 @@ class ReportInjectionRepository:
         parent_not_terminal: bool,
         limit: int = 100,
     ) -> list[dict[str, str]]:
-        """Find children with no delivery row, message, or watcher (C3 Lane 2).
+        """Find children with no delivery evidence (C3 Lane 2).
 
-        Phase 2 (pause-report-recovery, C3). The designed-from-scratch
-        no-row backstop query — replaces the v2 placeholder name. The
-        periodic sweep runs this query as **Lane 2**: every row it
-        returns is a candidate recovery obligation that no other
-        marker wrote (FM-11 escape / cancel-mid-shield / crash
-        without a marker / no-row drop). The 5-case false-positive
-        matrix (C3) is enforced by the LEFT-JOINs below — every
-        false-positive shape (existing message / existing injection
-        row / existing FIRED watcher) is excluded.
+        Phase 2 (pause-report-recovery, C3). The no-row backstop
+        query — every row it returns is a candidate recovery
+        obligation with ZERO delivery evidence: no completion_report
+        row on the parent, no ``report_injections`` marker, no FIRED
+        watcher.
+
+        RESUME_ROUTER duplicate-report fix (2026-09-10, incident
+        ca14e233/c3ac30f7): the previous shape joined the CHILD's
+        ``message_queue`` COMPLETED rows one-to-one and checked
+        delivery evidence per ANCHOR (exact
+        ``internal_report:{child}:{anchor}`` source equality + a
+        PENDING/DEFERRED-only injection join). That had two defects
+        that jointly produced the 4× byte-identical re-delivery:
+
+        1. **Anchor-blindness to the true terminal anchor.** The
+           child's terminal report is the child's last checkpoint
+           message — it is NOT a ``message_queue`` row of the child,
+           so the exact-source LEFT JOIN could never see the
+           already-delivered evidence keyed to it. Every child whose
+           report HAD been delivered therefore still looked
+           "no-row", and each of its non-report completed messages
+           (initial dispatch, injected grandchild reports) became a
+           fresh wrong-anchor obligation — one per ~300s sweep pass,
+           each re-delivering the same terminal report content with
+           a fresh ``report_message_id`` (bypassing
+           ``idempotency_skip`` which keys on the anchor id, and the
+           partial unique index which only gates PENDING/DEFERRED).
+
+        2. **Per-child fan-out.** The one-to-one join returned N
+           candidate rows for an N-message child in a single pass,
+           creating N distinct obligation triples for ONE logical
+           report.
+
+        The corrected semantics (delivery evidence is PER CHILD,
+        never per anchor; one obligation per child):
+
+        * A child is excluded when ANY parent-side
+          ``internal_report:{child}:%`` message row exists (prefix
+          match — any anchor, any status). This recognizes the
+          terminal report as already delivered (or in flight)
+          regardless of which anchor the delivering path used.
+        * A child is excluded when ANY ``report_injections`` row
+          exists for (parent, child) in ANY state — non-terminal
+          rows belong to recovery lanes 1/3/4, terminal rows are
+          positive delivery evidence or dead-letter abandonment.
+        * The FIRED-watcher exclusion is preserved (unchanged
+          semantics — join via ``tasks`` stays driver-neutral).
+        * Exactly ONE anchor per child is returned: the child's
+          latest COMPLETED ``message_queue`` row (correlated scalar
+          subquery). The anchor is a correlation handle for the
+          obligation triple — the recovered content is fetched from
+          the child's checkpoint terminal report at reconcile time
+          (``_fetch_subshape_a_content_*``), never from the anchor.
 
         Join keys (verified, driver-neutral):
 
         * ``instances.parent_id = c.parent_id`` — the parent is the
           ``c`` row's parent.
-        * ``message_queue.source = 'internal_report:' || c.instance_id
-          || ':' || m.message_id`` — string concat is driver-neutral
-          (TEXT columns; PG supports ``||``, SQLite supports ``||``).
-        * ``dependency_watchers.source_task_id = child's TASK id`` and
-          ``dependency_watchers.target_instance_id = parent`` — join
-          via ``tasks`` table to keep the join driver-neutral (the
-          ``watcher_metadata`` JSONB holds the child id but is
-          driver-dependent to query per the design review).
+        * ``source LIKE 'internal_report:' || c.instance_id || ':%'``
+          — ``LIKE`` + ``||`` work identically on SQLite and PG
+          (instance ids are UUIDs: no ``%``/``_`` wildcard chars).
 
         Args:
             parent_not_terminal: ``True`` → exclude terminal parents
@@ -1079,94 +1118,65 @@ class ReportInjectionRepository:
 
         Returns:
             List of ``{"child_id", "child_msg_id", "parent_id"}``
-            dicts. Empty list when none.
+            dicts — at most ONE row per child. Empty list when none.
         """
-        # String concat via SQL ``||`` (driver-neutral on TEXT
-        # columns; both SQLite and PostgreSQL support it).
-        source_predicate = (
-            literal("internal_report:")
-            + Instance.instance_id
-            + literal(":")
-            + MessageQueue.message_id
-        )
-        # Cast to text so the LEFT JOIN's ON predicate compares the
-        # computed expression to ``message_queue.source`` (a String
-        # column). SQLAlchemy resolves the cast automatically when the
-        # column type is String — we keep the literal() expression
-        # opaque to avoid driver-specific string concat differences.
-        # The placeholder SELECT below is removed — the real query
-        # uses explicit ``aliased`` table instances to keep the join
-        # keys driver-neutral (no raw-table aliases that depend on
-        # SQLAlchemy internals).
-
-        # NOT EXISTS — driver-neutral FIRED-watcher exclusion.
-        # Use SQLAlchemy's ``exists()`` with a ``select()``
-        # subquery so the predicate is a ColumnElement (raw
-        # ``text()`` is not — see SQLAlchemy 1.4+
-        # ``expect(ExpressionElementRole)`` assertion). The
-        # join keys (verified, driver-neutral):
-        #   * ``tasks.id = dependency_watchers.source_task_id``
-        #     (the child's Task id, stored as String for
-        #     portability — CAST ensures driver neutrality)
-        #   * ``tasks.instance_id = c.instance_id``
-        #     (the child instance)
-        #   * ``dependency_watchers.target_instance_id = p.instance_id``
-        #     (the parent instance)
-        #   * ``dependency_watchers.state = 'FIRED'``
-        # The ``watcher_metadata`` JSONB alternative is
-        # driver-dependent per the design review; the JOIN
-        # on ``tasks`` is the canonical driver-neutral path.
         from sqlalchemy import Integer, cast as sa_cast, exists
 
         with Session(self.engine) as session:
             parent_inst = aliased(Instance, name="p")
             child_inst = aliased(Instance, name="c")
-            child_msg = aliased(MessageQueue, name="m")
-            # source_match = 'internal_report:' || c.instance_id || ':' || m.message_id
-            source_expr = (
+
+            # Per-child delivery evidence: ANY parent-side
+            # completion_report row whose source carries this child's
+            # prefix — any anchor, any status. This is the
+            # already-delivered recognition the exact-anchor join
+            # could never express (the true terminal anchor is the
+            # child's checkpoint message, not a child message_queue
+            # row).
+            delivered_report = aliased(MessageQueue, name="dr")
+            source_prefix = (
                 literal("internal_report:")
                 + child_inst.instance_id
-                + literal(":")
-                + child_msg.message_id
+                + literal(":%")
             )
-            stmt = (
-                select(
-                    child_inst.instance_id.label("child_id"),
-                    child_msg.message_id.label("child_msg_id"),
-                    parent_inst.instance_id.label("parent_id"),
+            has_delivery_row = exists(
+                select(delivered_report.message_id)
+                .where(
+                    delivered_report.instance_id
+                    == parent_inst.instance_id
                 )
-                .select_from(child_inst)
-                .join(
-                    child_msg,
-                    (child_msg.instance_id == child_inst.instance_id)
-                    & (child_msg.status == _MSG_COMPLETED),
+                .where(delivered_report.source.like(source_prefix))
+            ).correlate(child_inst, parent_inst)
+
+            # Per-child marker evidence: ANY injection row for
+            # (parent, child) in ANY state. Non-terminal rows are
+            # lanes 1/3/4 territory; terminal rows are positive
+            # delivery evidence (INJECTED / TASK_DELIVERED) or
+            # dead-letter abandonment (FAILED). The old join keyed
+            # this to the exact anchor AND to PENDING/DEFERRED only,
+            # which is why a delivered child kept re-qualifying.
+            inj = aliased(ReportInjection, name="ri")
+            has_injection_row = exists(
+                select(inj.injection_id)
+                .where(
+                    inj.parent_instance_id == parent_inst.instance_id
                 )
-                .join(
-                    parent_inst,
-                    parent_inst.instance_id == child_inst.parent_id,
+                .where(
+                    inj.child_instance_id == child_inst.instance_id
                 )
-                # LEFT JOIN report_queue (existence of a queued
-                # report message → no recovery needed)
-                .outerjoin(
-                    MessageQueue,
-                    (MessageQueue.instance_id == parent_inst.instance_id)
-                    & (MessageQueue.source == source_expr),
-                )
-                # LEFT JOIN report_injections (existence of any
-                # non-terminal injection row → no recovery needed)
-                .outerjoin(
-                    ReportInjection,
-                    (ReportInjection.child_instance_id == child_inst.instance_id)
-                    & (ReportInjection.child_message_id == child_msg.message_id)
-                    & (ReportInjection.state.in_([
-                        _PENDING_STATE,
-                        _DEFERRED_STATE,
-                    ])),
-                )
-            )
+            ).correlate(child_inst, parent_inst)
+
+            # NOT EXISTS — driver-neutral FIRED-watcher exclusion
+            # (unchanged from the C3 design). Join keys:
+            #   * ``tasks.id = dependency_watchers.source_task_id``
+            #     (the child's Task id, stored as String for
+            #     portability — CAST ensures driver neutrality)
+            #   * ``tasks.instance_id = c.instance_id``
+            #   * ``dependency_watchers.target_instance_id = p.instance_id``
+            #   * ``dependency_watchers.state = 'FIRED'``
             dw = aliased(DependencyWatcher, name="dw")
             task_tt = aliased(Task, name="tt")
-            not_exists_predicate = ~exists(
+            has_fired_watcher = exists(
                 select(dw.watch_id)
                 .join(
                     task_tt,
@@ -1177,12 +1187,37 @@ class ReportInjectionRepository:
                 .where(
                     dw.state == DependencyWatcherState.FIRED.value
                 )
+            ).correlate(child_inst, parent_inst)
+
+            # ONE deterministic anchor per child: the child's latest
+            # COMPLETED message_queue row (correlated scalar
+            # subquery; message_id tie-break keeps the order total).
+            # NULL (child with no completed message rows) → filtered
+            # out — nothing to key the obligation triple on.
+            anchor_msg = aliased(MessageQueue, name="am")
+            anchor_subq = (
+                select(anchor_msg.message_id)
+                .where(anchor_msg.instance_id == child_inst.instance_id)
+                .where(anchor_msg.status == _MSG_COMPLETED)
+                .order_by(
+                    anchor_msg.enqueued_at.desc(),
+                    anchor_msg.message_id.desc(),
+                )
+                .limit(1)
+                .scalar_subquery()
             )
-            # Append the remaining ``where`` / ``order_by`` /
-            # ``limit`` clauses to the chained ``stmt``.
+
             stmt = (
-                stmt
-                .where(not_exists_predicate)
+                select(
+                    child_inst.instance_id.label("child_id"),
+                    anchor_subq.label("child_msg_id"),
+                    parent_inst.instance_id.label("parent_id"),
+                )
+                .select_from(child_inst)
+                .join(
+                    parent_inst,
+                    parent_inst.instance_id == child_inst.parent_id,
+                )
                 # Only COMPLETED child instances.
                 .where(child_inst.status == InstanceStatus.COMPLETED.value)
                 # Periodic-sweep contract: terminal parents excluded.
@@ -1196,10 +1231,14 @@ class ReportInjectionRepository:
                     if parent_not_terminal
                     else true()
                 )
-                # NULL on the LEFT JOINs = no matching row exists
-                # = the row IS a candidate recovery obligation.
-                .where(MessageQueue.message_id.is_(None))
-                .where(ReportInjection.injection_id.is_(None))
+                # NULL-evidence contract: a child with ANY of these
+                # is NOT a no-row obligation.
+                .where(~has_delivery_row)
+                .where(~has_injection_row)
+                .where(~has_fired_watcher)
+                # Anchor must exist (child with no completed message
+                # rows has nothing to key the triple on).
+                .where(anchor_subq.is_not(None))
                 .order_by(child_inst.last_activity_at.asc().nullslast())
                 .limit(limit)
             )
@@ -1329,6 +1368,152 @@ class ReportInjectionRepository:
         """
         now_iso = self._now_iso()
         with Session(self.engine) as session:
+            # ── Content-identity dedup (RESUME_ROUTER dup fix, 2026-09-10) ──
+            # A PENDING row whose (parent, child, content) matches an
+            # already-TERMINAL row for the same (parent, child) is a
+            # DUPLICATE obligation — the wrong-anchor recovery
+            # artifact class from incident ca14e233/c3ac30f7: each
+            # sweep pass minted a fresh obligation (fresh anchor +
+            # fresh report_message_id) for a report that had ALREADY
+            # been delivered, and no existing guard absorbed it
+            # (``idempotency_skip`` keys on the anchor id; the
+            # obligation-triple partial unique index only gates
+            # PENDING/DEFERRED; the fresh report_message_id defeated
+            # FE id-dedup). Delivery evidence must be keyed on
+            # CONTENT IDENTITY, not anchor id: dead-letter the
+            # duplicate PENDING row (state=FAILED — the documented
+            # "obligation abandoned, not delivered" terminal) + mark
+            # its companion READY message row COMPLETED (same hygiene
+            # the claim itself applies), THEN run the normal claim.
+            # Same transaction → atomic; the guarded
+            # ``WHERE state='PENDING'`` UPDATE re-checks under
+            # concurrency.
+            # Council 🟠 follow-up (2026-09-10, round 2): the dedup
+            # carve-out (``recovery_attempted_at IS NOT NULL``) MUST
+            # be applied to the DUP ROW, not the terminal twin. The
+            # twin filter is on the wrong side — two windows
+            # slipped through:
+            #
+            # (a) FALSE-SUPPRESSION — turn-1 twin delivered via
+            #     sweep-recovery (STAMPED twin) + child revived +
+            #     turn-2 fresh natural enqueue (NULL stamp) with
+            #     byte-identical content: the previous twin-side
+            #     predicate MATCHED and the legitimate second turn
+            #     was silently dead-lettered.
+            # (b) FIRST-RECOVERY GAP — legacy wrong-anchor markers
+            #     (the primary prod shape): the dup row IS stamped
+            #     (came through
+            #     :meth:`transition_deferred_to_pending`) but the
+            #     original natural twin is UNSTAMPED → the previous
+            #     twin-side predicate MISSED → one duplicate
+            #     delivered on the first recovery pass.
+            #
+            # Premise (re-verified, grep evidence below): the ONLY
+            # production writer of ``recovery_attempted_at`` is
+            # ``transition_deferred_to_pending`` (repository.py:971
+            # — the second production assignment in daemon/, the
+            # first at :802 is the None default on a fresh DEFERRED
+            # marker). Fresh natural enqueues (``enqueue`` /
+            # inline path in
+            # ``child_reports._process_child_completion_db_sync``)
+            # inherit the model default ``None`` (models.py:318).
+            #
+            # Therefore: STAMPED dup = sweep-recovered (legitimate
+            # dedup target); UNSTAMPED dup = fresh natural
+            # obligation (MUST always claim). Filtering the DUP
+            # ROWS by ``recovery_attempted_at IS NOT NULL`` closes
+            # both windows in one predicate:
+            #   (a) turn-2 dup has NULL → excluded from dedup
+            #       entirely → claim proceeds (no false-suppression)
+            #   (b) wrong-anchor dup is stamped → included →
+            #       matches the unstamped natural twin (no twin-side
+            #       stamp filter) → dead-letter (no first-recovery
+            #       gap).
+            dup_rows = session.exec(
+                select(ReportInjection)
+                .where(
+                    ReportInjection.parent_instance_id
+                    == parent_instance_id
+                )
+                .where(ReportInjection.state == _PENDING_STATE)
+                # Mirror the claim's own W1 claimability filter: a
+                # sentinel row (report_message_id IS NULL) is not
+                # claimable, so it is not dedup-eligible either.
+                .where(ReportInjection.report_message_id.is_not(None))
+                # Council 🟠 — stamp-side carve-out on the DUP row.
+                # Only sweep-recovered dup rows are eligible for
+                # terminal-twin dedup; fresh natural enqueues
+                # bypass dedup and always claim.
+                .where(
+                    ReportInjection.recovery_attempted_at.is_not(None)
+                )
+            ).all()
+            dup_ids: list[str] = []
+            for dup in dup_rows:
+                # Deterministic twin lookup (council 🟠 finding):
+                # ORDER BY ``delivered_at DESC, injection_id`` so
+                # multi-twin pathological states never resolve
+                # non-deterministically. INJECTED/TASK_DELIVERED
+                # transitions both stamp ``delivered_at`` (see
+                # ``claim_for_injection`` / ``claim_for_task_delivery``),
+                # so this is a clean ordering key for the terminal
+                # set the dedup targets.
+                terminal_twin = session.exec(
+                    select(ReportInjection)
+                    .where(
+                        ReportInjection.parent_instance_id
+                        == parent_instance_id
+                    )
+                    .where(
+                        ReportInjection.child_instance_id
+                        == dup.child_instance_id
+                    )
+                    .where(
+                        ReportInjection.injection_id
+                        != dup.injection_id
+                    )
+                    .where(
+                        ReportInjection.state.in_([
+                            _INJECTED_STATE,
+                            _TASK_DELIVERED_STATE,
+                        ])
+                    )
+                    .where(ReportInjection.content == dup.content)
+                    .order_by(
+                        ReportInjection.delivered_at.desc(),
+                        ReportInjection.injection_id.asc(),
+                    )
+                ).first()
+                if terminal_twin is not None:
+                    dup_ids.append(dup.injection_id)
+            if dup_ids:
+                session.execute(
+                    sa_update(ReportInjection)
+                    .where(ReportInjection.injection_id.in_(dup_ids))
+                    .where(ReportInjection.state == _PENDING_STATE)
+                    .values(state=_FAILED_STATE, delivered_at=now_iso)
+                )
+                session.execute(
+                    sa_update(MessageQueue)
+                    .where(
+                        MessageQueue.message_id.in_([
+                            r.report_message_id
+                            for r in dup_rows
+                            if r.injection_id in dup_ids
+                        ])
+                    )
+                    .where(MessageQueue.status == MessageStatus.READY.value)
+                    .values(status=_MSG_COMPLETED)
+                )
+                logger.warning(
+                    f"[ReportInjection] Drain content-dedup: "
+                    f"dead-lettered {len(dup_ids)} duplicate obligation "
+                    f"row(s) for parent {parent_instance_id[:8]}... — "
+                    f"identical content already delivered for the same "
+                    f"child (wrong-anchor recovery artifact class); "
+                    f"states={[r.injection_id[:8] for r in dup_rows if r.injection_id in dup_ids]}"
+                )
+
             # Single atomic ``UPDATE ... RETURNING``: transitions every
             # PENDING report for this parent to INJECTED and returns
             # ONLY the rows this call actually claimed. This is symmetric
@@ -1371,23 +1556,26 @@ class ReportInjectionRepository:
             )
             claimed = list(session.execute(stmt).all())
 
+            if claimed:
+                report_message_ids = [r.report_message_id for r in claimed]
+
+                # Mark companion message_queue rows COMPLETED so the
+                # parent's own-queue pending count does not include
+                # already-delivered reports. Best-effort / guarded by
+                # ``status = 'ready'`` — see method docstring.
+                session.execute(
+                    sa_update(MessageQueue)
+                    .where(MessageQueue.message_id.in_(report_message_ids))
+                    .where(MessageQueue.status == MessageStatus.READY.value)
+                    .values(status=_MSG_COMPLETED)
+                )
+
+            # Commit on BOTH paths — the content-dedup dead-letter
+            # must survive even when nothing was claimed.
+            session.commit()
+
             if not claimed:
                 return []
-
-            report_message_ids = [r.report_message_id for r in claimed]
-
-            # Mark companion message_queue rows COMPLETED so the
-            # parent's own-queue pending count does not include
-            # already-delivered reports. Best-effort / guarded by
-            # ``status = 'ready'`` — see method docstring.
-            session.execute(
-                sa_update(MessageQueue)
-                .where(MessageQueue.message_id.in_(report_message_ids))
-                .where(MessageQueue.status == MessageStatus.READY.value)
-                .values(status=_MSG_COMPLETED)
-            )
-
-            session.commit()
 
             # Stable delivery order: oldest first. created_at is an ISO
             # timestamp (TEXT); lexicographic sort is chronological for
@@ -1436,7 +1624,12 @@ class ReportInjectionRepository:
         * ``"already_delivered"`` — a row exists but is terminal
           (``INJECTED`` by the live agent-node drain, or
           ``TASK_DELIVERED`` by a prior run); the task MUST skip
-          (dedup gate).
+          (dedup gate). Also returned by the content-identity dedup
+          (2026-09-10): a PENDING row whose (parent, child, content)
+          matches an already-terminal row for the same child is a
+          duplicate obligation — it is dead-lettered (``FAILED``) and
+          the task skips, so a wrong-anchor recovery artifact can
+          never re-deliver a byte-identical report copy.
         * ``"missing"`` — no ``report_injections`` row exists for this
           ``report_message_id`` (a ``PROCESS_REPORT`` task from older
           code, or a path that did not enqueue); the task MUST proceed
@@ -1477,6 +1670,106 @@ class ReportInjectionRepository:
             ).first()
             if any_row is None:
                 return TaskDeliveryClaim("missing", None)
+
+            # ── Content-identity dedup (RESUME_ROUTER dup fix,
+            # 2026-09-10) ──
+            # BEFORE claiming: if a TERMINAL row for the same
+            # (parent, child) already carries the SAME content, this
+            # row is a duplicate obligation (wrong-anchor recovery
+            # artifact class — incident ca14e233/c3ac30f7). Delivering
+            # it would put a byte-identical copy of the child's
+            # terminal report into the parent a second time with a
+            # fresh report_message_id — no existing guard absorbs that
+            # (``idempotency_skip`` keys on the anchor id; the
+            # obligation-triple partial unique index only gates
+            # PENDING/DEFERRED). Dead-letter the duplicate row
+            # (state=FAILED — "obligation abandoned, not delivered"),
+            # mark its companion READY message row COMPLETED (same
+            # hygiene as a claimed delivery), and return the existing
+            # ``already_delivered`` tri-state so the task skips via
+            # the normal dedup path (``_skip_task_as_completed``).
+            #
+            # Council 🟠 follow-up (2026-09-10, round 2): the carve-
+            # out lives on the DUP side, not the twin side. The twin
+            # is NOT filtered by ``recovery_attempted_at`` — see the
+            # drain-seam block for the full re-verified premise.
+            # Fresh natural enqueues (``recovery_attempted_at IS NULL``)
+            # MUST always claim; only sweep-recovered dup rows (the
+            # sole stamping writer is
+            # :meth:`transition_deferred_to_pending`) are eligible
+            # for the terminal-twin dead-letter.
+            if (
+                any_row.state == _PENDING_STATE
+                and any_row.recovery_attempted_at is not None
+            ):
+                # Deterministic twin lookup (council 🟠 finding):
+                # ORDER BY ``delivered_at DESC, injection_id`` — see
+                # drain-seam block for the rationale.
+                terminal_twin = session.exec(
+                    select(ReportInjection)
+                    .where(
+                        ReportInjection.parent_instance_id
+                        == any_row.parent_instance_id
+                    )
+                    .where(
+                        ReportInjection.child_instance_id
+                        == any_row.child_instance_id
+                    )
+                    .where(
+                        ReportInjection.injection_id
+                        != any_row.injection_id
+                    )
+                    .where(
+                        ReportInjection.state.in_([
+                            _INJECTED_STATE,
+                            _TASK_DELIVERED_STATE,
+                        ])
+                    )
+                    .where(
+                        ReportInjection.content == any_row.content
+                    )
+                    .order_by(
+                        ReportInjection.delivered_at.desc(),
+                        ReportInjection.injection_id.asc(),
+                    )
+                ).first()
+                if terminal_twin is not None:
+                    result = session.execute(
+                        sa_update(ReportInjection)
+                        .where(
+                            ReportInjection.injection_id
+                            == any_row.injection_id
+                        )
+                        .where(ReportInjection.state == _PENDING_STATE)
+                        .values(
+                            state=_FAILED_STATE, delivered_at=now_iso
+                        )
+                    )
+                    if result.rowcount:
+                        if any_row.report_message_id:
+                            session.execute(
+                                sa_update(MessageQueue)
+                                .where(
+                                    MessageQueue.message_id
+                                    == any_row.report_message_id
+                                )
+                                .where(
+                                    MessageQueue.status
+                                    == MessageStatus.READY.value
+                                )
+                                .values(status=_MSG_COMPLETED)
+                            )
+                        session.commit()
+                        logger.warning(
+                            f"[ReportInjection] Task claim content-dedup: "
+                            f"report {report_message_id[:8]}... "
+                            f"(child={any_row.child_instance_id[:8]}...) "
+                            f"dead-lettered — identical content already "
+                            f"delivered via injection "
+                            f"{terminal_twin.injection_id[:8]}... "
+                            f"(state={terminal_twin.state})"
+                        )
+                    return TaskDeliveryClaim("already_delivered", None)
 
             # Guarded transition — only PENDING → TASK_DELIVERED. A row
             # that is already INJECTED/TASK_DELIVERED yields rowcount 0.
