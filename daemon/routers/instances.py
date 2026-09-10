@@ -720,6 +720,87 @@ async def resume_instance(
 
     message_text = (body.message.strip() if body and body.message else None) or "resume"
 
+    # ── Defect-1 (answer-gate resume chain, 2026-09-10) ──────────────────
+    # A plain user message hitting ``POST /resume`` while the instance is
+    # paused awaiting an answer MUST NOT be routed as
+    # ``answer_gate_existing_turn`` — that selector consumes the
+    # awaiting_answer handle as if the message were the answer, with no
+    # way for the real answer endpoint to ever find the handle again. The
+    # answer endpoint (``POST /answer``) is the SOLE entry that consumes
+    # the answer-gate handle; resume is for unblocking paused work, not
+    # for substituting answers.
+    #
+    # Coherent semantics: treat the plain message as a GATE SUPERSESSION.
+    # Emit ``question_pack`` SSE with ``status="superseded"`` so the FE
+    # closes the pending-question UI, clear the in-memory pack + the
+    # pause flag + the deferred-pause marker (mirror of dismiss), then
+    # cascade-resume (consumes the awaiting_answer handle via ResumeTurn
+    # → PENDING) and enqueue the user's message as a fresh user message
+    # via the normal ``enqueue_message`` path. The agent sees the user's
+    # message as a brand-new turn; the question lifecycle is closed.
+    # This keeps every invariant alive: pack is cleared (no stale-pack-
+    # forever), handle is consumed by the cascade (no orphaned handle),
+    # and the user's content reaches the agent.
+    from daemon.services.question_manager import pack_to_dict
+
+    pending_pack = manager._question_manager.get_question_pack(instance_id)
+    if pending_pack is not None and pending_pack.status == "pending":
+        # Emit SSE: question_pack with status="superseded" (best-effort —
+        # the resume cascade must proceed even if SSE fails). Reuses the
+        # frozen pack_to_dict schema so the FE's existing parser
+        # handles the event without code changes.
+        live_hub = getattr(request.app.state, "live_hub", None)
+        if live_hub is not None:
+            try:
+                superseded_payload = pack_to_dict(pending_pack)
+                superseded_payload["status"] = "superseded"
+                await live_hub.stream_question_pack(
+                    instance_id, superseded_payload
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"question_pack SSE emission failed for resume "
+                    f"gate-supersession on instance {instance_id}: {e}"
+                )
+
+        # Unwind question state — mirror dismiss_question (lines ~1280-1290)
+        manager._question_manager.clear_question_pack(instance_id)
+        manager.clear_question_pause_requested(instance_id)
+        manager._deferred_question_pause.discard(instance_id)
+
+        # Cascade-resume consumes the awaiting_answer handle (ResumeTurn
+        # PAUSED → PENDING, clears suspension_reason). The plain message
+        # must NOT go through ``resume_processing_job`` — that path would
+        # route as answer_gate_existing_turn and re-create the defect.
+        # Cascade first, then enqueue the plain message as a fresh user
+        # message; the agent processes it as a brand-new turn.
+        # ``ResumeRequest`` carries only ``message`` (no images), so the
+        # enqueue is text-only — the plain user message is the only
+        # content the supersede carries forward.
+        cascade_result = await manager.resume_instance_cascade(instance_id)
+        enqueue_result = await manager.enqueue_message(
+            instance_id=instance_id,
+            message=message_text,
+            source="api_gate_supersede",
+        )
+        return {
+            "resumed": True,
+            "resumed_ids": cascade_result["resumed_ids"],
+            "skipped_ids": cascade_result["skipped_ids"],
+            "target_id": cascade_result.get("target_id", instance_id),
+            "resume_results": {
+                instance_id: {
+                    "status": "enqueued_as_fresh_message",
+                    "message_id": enqueue_result.message_id,
+                    "job_id": enqueue_result.job_id,
+                    "route": "api_gate_supersede",
+                },
+            },
+            # Surfaced so the FE can distinguish gate-supersession from a
+            # plain resume (different lifecycle implications).
+            "gate_superseded": True,
+        }
+
     # Resolve the target's resume handle FIRST (while its task is still
     # PAUSED), THEN cascade-resume. Same ordering invariant as the
     # answer / dismiss endpoints above: ``resume_processing_job`` calls
@@ -1061,18 +1142,68 @@ async def answer_questions(
         )
         job_result = {"status": "error", "error": str(e)}
     if job_result is None:
-        # No suspended turn matched the awaiting_answer handle. The
-        # cascade still proceeds so children get unblocked, but the
-        # target resumes WITHOUT the answer message — it transitions
-        # to RUNNING via the cascade, the WorkerPool re-drives the
-        # checkpoint, and the LLM turn re-executes without seeing the
-        # user's answer. This is a degraded state (answer lost); the
-        # warning log below surfaces it for operators.
+        # Defect-3 (answer-gate resume chain, 2026-09-10): the
+        # previous behavior here was a silent 200-mask — log a warning,
+        # still run the cascade (which flips PAUSED → RUNNING DB-only),
+        # and return ``no_active_job``. The user's answer was lost: no
+        # task row to resume, no message enqueued, no event emitted,
+        # the instance ended up ``running`` but idle, and the FE kept
+        # polling GET /question against the stale pending pack.
+        #
+        # The fix NEVER drops the answer payload. Two guarantees:
+        #   (a) The answer content reaches the agent as a fresh user
+        #       message via ``enqueue_message``. The user typed the
+        #       answer; the system must deliver it.
+        #   (b) No DB-only paused→running flip that leaves the
+        #       instance running-idle. If the cascade has no work to
+        #       do (no paused children, no handle), the instance
+        #       stays in whatever state it was. We enqueue real work
+        #       and let the cascade deliver the instance to RUNNING
+        #       with a real Task row to drive.
         logger.warning(
-            f"answer_questions: resume_processing_job returned None for "
-            f"{instance_id[:8]}... — no suspended turn found"
+            f"answer_questions: resume_processing_job returned None "
+            f"for {instance_id[:8]}... — no awaiting_answer handle "
+            f"found. Defect-3 fallback: enqueueing answer as fresh "
+            f"user message (NEVER 200-mask an undeliverable answer)."
         )
-        job_result = {"status": "no_active_job"}
+        try:
+            fallback_result = await manager.enqueue_message(
+                instance_id=instance_id,
+                # Wrap the original Q↔A text with a marker so the
+                # agent can correlate this is the answer payload
+                # (the original ask_questions tool's questions are
+                # already in the checkpoint; the agent can match by
+                # content). The full structured answer is preserved.
+                message=answer_msg,
+                source="api_answer_fallback",
+            )
+            job_result = {
+                "status": "enqueued_as_fresh_message",
+                "message_id": fallback_result.message_id,
+                "job_id": fallback_result.job_id,
+                "instance_id": instance_id,
+                "route": "api_answer_fallback",
+            }
+        except Exception as enqueue_err:
+            logger.error(
+                f"answer_questions: Defect-3 fallback enqueue failed "
+                f"for {instance_id[:8]}...: {enqueue_err}"
+            )
+            # The cascade below would flip the instance to RUNNING
+            # DB-only. Surface the failure so the caller knows the
+            # answer was not delivered and the instance was not
+            # resumed.
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=(
+                        f"Failed to deliver answer: no awaiting_answer "
+                        f"handle and fallback enqueue also failed: "
+                        f"{enqueue_err}"
+                    ),
+                ).model_dump(),
+            )
 
     # Cascade-resume the instance tree (transitions PAUSED → RUNNING for
     # instances, PAUSED → PENDING for tasks). The background resume task
@@ -1121,11 +1252,17 @@ async def answer_questions(
     # W1: Surface a degraded status when the answer couldn't be routed.
     # The cascade still ran (children unblocked), but the target's
     # answer was lost — return a distinct status so the caller knows.
-    answer_status = (
-        "answered"
-        if job_result.get("status") != "no_active_job"
-        else "no_active_job"
-    )
+    # Defect-3 fix (2026-09-10): the fallback path now enqueues the
+    # answer as a fresh user message, so the answer is NEVER lost —
+    # surface ``answer_fallback_enqueued`` as a distinct status so the
+    # FE can distinguish a normal answer-resume from a fallback
+    # enqueue (different lifecycle / message_id).
+    if job_result.get("status") == "enqueued_as_fresh_message":
+        answer_status = "answer_fallback_enqueued"
+    elif job_result.get("status") != "no_active_job":
+        answer_status = "answered"
+    else:
+        answer_status = "no_active_job"
 
     return {
         "status": answer_status,
