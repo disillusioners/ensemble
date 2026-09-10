@@ -20,6 +20,7 @@ Make the page's data window honest and cheap: the silent newest-50 cap becomes a
 |---|---|
 | `frontend/src/app/pages/jobs/jobs-window.model.ts` (+ `.spec.ts`) | **NEW** — window policy (pure) |
 | `frontend/src/app/pages/jobs/jobs-poll.model.ts` (+ `.spec.ts`) | **NEW** — poll gate policy (pure): shouldTick(visible, overlayOpen, inFlight) |
+| `frontend/src/app/pages/jobs/jobs-empty-state.model.ts` (+ `.spec.ts`) | **NEW** — `{filterEmpty, dataEmpty, errored, loading}` union + copy variants (task 8) |
 | `frontend/src/app/pages/jobs/jobs.component.ts` / `.html` / `.scss` | Modify — banner mount, virtual scroll, poll rewiring |
 | `frontend/src/app/pages/jobs/jobs-page.store.ts` | Modify — expose window/degraded signals consumed by banner |
 | `frontend/package.json` | Verify `@angular/cdk` present (ScrollingModule) |
@@ -28,13 +29,14 @@ Make the page's data window honest and cheap: the silent newest-50 cap becomes a
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | Window model: `windowIsFull(rowCount, limit=100)` → banner state; banner copy: "Showing newest 100 · the list may continue — refine filters to narrow" + manual Reload button; NO claim of completeness (we cannot know — gap-c) | P1 store | Model spec: exactly-at-100 shows banner; 99 does not; copy consts pinned |
-| 2 | Honesty banner in template (both view modes) driven by window model + store degraded flag (degraded ⇒ "last refresh failed — showing retained data", never silent) | Task 1 | Template renders banner variant per state; audit hunks recorded |
-| 3 | All-work cap guard: pure `renderGuard(rows)` — refuse render >1000 rows, show explicit truncation notice with count; never silently slice | none | Spec with fixtures AT (1000) and PAST (1001) the cap |
+| 1 | Window model: `windowIsFull(rowCount, limit=100)` → banner state; banner copy: "Showing newest 100 · the list may continue or may be complete — refine filters to narrow" (honest BOTH-WAYS edge copy at exactly-100: full-window-complete is indistinguishable from truncated — we cannot know, gap-c) + manual Reload button; NO claim of completeness | P1 store | Model spec: exactly-at-100 shows banner; 99 does not; copy consts pinned incl. the exactly-100 edge variant |
+| 2 | Honesty banner in template (both view modes) driven by window model + store degraded flag (degraded ⇒ "last refresh failed — showing retained data", never silent); banner region is `aria-live="polite"`, and the Reload button carries an explicit accessible label ("Reload jobs") — never icon-only | Task 1 | Template renders banner variant per state; `aria-live` + Reload accessible-label pins; audit hunks recorded |
+| 3 | All-work cap guard: pure `renderGuard(rows)` — refuse render >1000 rows, show explicit truncation notice with count; never silently slice; guard fires at RENDER time over the template-bound projected rows (not fetch-time — growth between fetch and render cannot slip through); the truncation notice carries a "switch to Queues view" affordance (queues view is the bounded window surface) | none | Spec with fixtures AT (1000) and PAST (1001) the cap; render-time evaluation pinned (guard consumes the projected rows bound to the template, not the raw fetch payload) |
 | 4 | `cdk-virtual-scroll` over the flat projection (itemSize tuned to card min-height); `track` by `job_id`; grouping (Phase 3) must render as a flattened (header\|row) item list — structure the scroll source as `readonly items: WindowItem[]` from day 1 | P1 | Render capped at viewport; expand/collapse a card inside the virtual viewport keeps state |
 | 5 | Poll gate model: `shouldTick = tabVisible && !drawerOpen && !modalOpen && !fetchInFlight`; `document.visibilitychange` listener: pause hidden, **immediate refresh on re-focus**; keep 30s cadence (OQ-5 default, D3) | P1 store | Model spec covers all gate combinations; component wires listener + teardown in `ngOnDestroy` |
 | 6 | Degraded-state sweep for BOTH views: fetch failure retains last rows + degraded banner (extends P1 discipline to the whole-work leg; kills the snackbar-only lossy failure `:628-641`) | P1 store | Retain-last-data pins: fetch-error, empty-200, degraded:true shapes |
 | 7 | Keep the panel's freshness contract intact: header indicator (`job-queue-indicator`, 8s forkJoin) is NOT touched (non-goal #1) | — | Grep: zero edits under `components/job-queue-indicator/`, `components/job-queue-panel/` |
+| 8 | Empty-state model `jobs-empty-state.model.ts` (+ spec): `{filterEmpty, dataEmpty, errored, loading}` union + copy variants per state (filter-empty ≠ truly-empty ≠ failed ≠ first-load); first-fetch LOADING SKELETON — rendered only before the first successful fetch, never during background refreshes (those retain-last-data) | Tasks 1-3 | Model spec: state-transition table pinned (loading→dataEmpty, loading→filterEmpty, any→errored); copy variants pinned; template audit for skeleton hunks |
 
 ## Dependencies
 

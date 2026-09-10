@@ -87,6 +87,8 @@ Each entry: Decision / Rationale / Alternatives considered / Open-question bindi
 
 **OQ binding:** none directly; enables cheap OQ-1 reversal.
 
+**Contingency (OQ-1 flip).** If OQ-1 ever flips to collapsing the modes into one list + kind/personality facet, queue CRUD (create/start/stop/delete in `queue-list`) needs an explicit NEW home (e.g., a Queues management dialog/drawer reachable from the filter bar); queue *selection* is plain `JobsFilterState` and survives untouched — the store is unaffected, only the sidebar surface relocates. Default remains keep-both-modes, so this is contingency only.
+
 ---
 
 ## D8 — Mission-title strategy: honest fallback chain day 1; capped lazy missions-join enrichment

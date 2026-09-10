@@ -80,6 +80,12 @@ graph TD
 
 Linear spine P1→P2→P3→P6 with P4/P5 parallelizable against P2/P3; close-out last. GATE-COMBO-FIX gates only settled-involving multi-status combos (fixtures/presets/bookmarks), not the phases themselves.
 
+## Merge & Branch Hygiene
+
+- **Merge to `latest` with `--no-ff`** — one merge commit per phase; no fast-forwards, no direct pushes to `latest`.
+- **Evidence-commit discipline** — evidence commits are path-scoped (e.g. `.agents/tester/RESULTS/*`); every artifact verified IN the worktree before commit; verify claimed close-out diff-stats with `git show --stat` (a claimed "2 files" has been 12 before) — never const-existence or docstring claims.
+- **GATE-COMBO-FIX order rule: DEPLOY-gate, not merge-gate.** Either branch may land/merge first — the FE forwards status combos verbatim, so merge ORDER is irrelevant. The gate opens only when the FIXED DAEMON DEPLOYS to the environment serving this FE (probe: `GET /api/jobs?status=settled,failed` returns ≥ rows of `?status=failed`). Until the probe passes: settled-involving combo fixtures stay skipped-with-reason (Phase 1/5 codecs), and the honesty banner already makes no completeness claim (D2).
+
 ## Coupling Map
 
 | | P1 | P2 | P3 | P4 | P5 | P6 |
@@ -108,7 +114,7 @@ Linear spine P1→P2→P3→P6 with P4/P5 parallelizable against P2/P3; close-ou
 | 1 | Dead-filter class eliminated structurally | Cross-seam invariant spec: every rendered filter control changes `store.filteredJobs()` output in BOTH view modes; grep for bypass paths (`filteredJobs` not touching active dataset) | 0 no-op controls; invariant spec green in both modes |
 | 2 | Capped window surfaced honestly (50-cap class dead) | FE always sends `limit=100` (service spec pins query string); banner renders whenever response length == 100; all-work 1001-row fixture cannot render silently (render-guard spec) | 3 pins green; silent-cap path unreachable from page (no `listJobs` call without `limit`) |
 | 3 | Defer-blocked visible ≤1 interaction from page root | Manual + spec: banner visible on load when data present; one click on "Review holders →" lists holders; actions fire only post-confirm | Banner on load; drill-down depth 1; confirm-gated dispatch spec green |
-| 4 | Spec coverage complete | New plain-TS suites exist for `jobs-page.store`, `jobs-filter-state`, `jobs-grouping`, `jobs-window`, `jobs-url-state`, `mission.service`, `work.service` (real-construction parity), `system-cleanup-confirm-dialog`, `queue-list`, `job-create-dialog` | All present and passing via `npx jest` |
+| 4 | Spec coverage complete | END-STATE suite inventory (13): `jobs-page.store`, `jobs-filter-state.model`, `jobs-window.model`, `jobs-poll.model`, `jobs-empty-state.model`, `jobs-grouping.model`, `jobs-url-state.model`, `jobs-keyboard.model`, `mission.service` (split — migrated + NEW URL pins), `work.service` (real-construction parity), `system-cleanup-confirm-dialog`, `queue-list`, `job-create-dialog`; per-phase budget ≤3 NEW spec files; `jobs.component.spec.ts` is migration/deletion-pin archive only (P6 DECLINE default) | All present and passing via `npx jest` |
 | 5 | Build green | `npx tsc --noEmit -p tsconfig.app.json` + `npm run build` per phase and at close | tsc clean; build succeeds; warning corpus == known-10 or every delta attributed |
 | 6 | All-work drawer repaired | Drawer spec: report/settled rows show Result when `result_summary` present; Timeline shows created+started+completed with computable duration | 2 pins green (Phase 5 tasks 4–5) |
 | 7 | Never-hide grouping property | Grouping property test over randomized fixtures (null mission_id, both-populated, no-context rows) | Every row renders exactly once across groups |
@@ -135,6 +141,7 @@ Linear spine P1→P2→P3→P6 with P4/P5 parallelizable against P2/P3; close-ou
 | OQ-6 | URL filter state + `?job=` deep-link; separate `/jobs/:id` route? | **URL state yes; `?job=` drawer deep-link yes; separate route only if requested.** |
 | OQ-7 | Queue sidebar on mobile (≤768px): sheet or filter-bar move? | **Collapse into a sheet** (queue operations stay reachable). Only meaningful while OQ-1 keeps queues. |
 | OQ-8 | Defer remediation ownership: inline force-complete/resend, or link out? | **Inline behind two-stage ConfirmDialog**, matching cleanup-dialog gravity; link-out is the fallback if rejected. |
+| R-7 (review) | Split the 2,085-line `jobs.component.spec.ts` monolith, or freeze it as a migration/deletion-pin archive? (Phase 1 spec-file placement) | Determines spec-file discipline for Phases 1–6; splitting mid-arc is a refactor tax on every later phase | **DECLINE — freeze as archive; all new pins land in NEW spec files** (split available as explicit user override) |
 
 ## File Map
 
