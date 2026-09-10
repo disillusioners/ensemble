@@ -120,7 +120,7 @@ class TestStreamingLoopGuardsNoneNodeUpdates:
 
     def test_progressive_dispatch_site_guards_non_dict_update(self):
         # Site 1 — the progressive-dispatch branch (node == "agent").
-        assert self.SOURCE.count("if not isinstance(node_data, dict)") >= 2, (
+        assert self.SOURCE.count("if not isinstance(node_data, dict)") == 2, (
             "both node_data consumption sites must guard non-dict "
             "(None) node updates with isinstance(node_data, dict)"
         )

@@ -278,6 +278,50 @@ def _parent_report_rows(engine: Engine, parent_id: str) -> list[MessageQueue]:
         )
 
 
+def _stamp_recovery_attempted_at(
+    engine: Engine, injection_id: str
+) -> None:
+    """Mark a terminal ``ReportInjection`` row as sweep-recovered.
+
+    Models the stamp side-effect of
+    :meth:`ReportInjectionRepository.transition_deferred_to_pending`
+    (the ONLY writer of ``recovery_attempted_at`` in production). Used
+    by the dedup tests to pin the intended dedup class — sweep-
+    recovered wrong-anchor rows — without invoking the full DEFERRED→
+    PENDING round-trip. Fresh natural enqueues (``enqueue`` / the
+    inline path in
+    ``child_reports._process_child_completion_db_sync``) MUST leave
+    the column NULL.
+    """
+    with Session(engine) as session:
+        session.execute(
+            sa_update(ReportInjection)
+            .where(ReportInjection.injection_id == injection_id)
+            .values(recovery_attempted_at=datetime.now(timezone.utc).isoformat())
+        )
+        session.commit()
+
+
+def _injection_id_for_report(engine: Engine, report_message_id: str) -> str:
+    """Return the ``injection_id`` of the row keyed by ``report_message_id``.
+
+    The drain (``claim_for_injection``) returns ``content`` /
+    ``report_message_id`` / ``created_at`` / ``child_instance_id`` —
+    not ``injection_id`` — so the dedup tests look the row up
+    directly when they need to stamp ``recovery_attempted_at``.
+    """
+    with Session(engine) as session:
+        return (
+            session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.report_message_id == report_message_id
+                )
+            )
+            .one()
+            .injection_id
+        )
+
+
 def _build_service(
     engine: Engine,
     *,
@@ -602,11 +646,18 @@ class TestContentIdentityDedup:
         )
 
         # Already-delivered (TASK_DELIVERED) under the true anchor.
-        _seed_delivered_pair(
+        # Model the sweep-recovery class by stamping
+        # ``recovery_attempted_at`` on the terminal twin (the ONLY
+        # writer in production is
+        # ``transition_deferred_to_pending``); the dedup MUST match
+        # stamped rows. Fresh natural enqueues (no stamp) MUST still
+        # claim — pinned separately below.
+        delivered_twin = _seed_delivered_pair(
             repo, engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-final-{uuid.uuid4().hex[:8]}",
             content="identical terminal report",
         )
+        _stamp_recovery_attempted_at(engine, delivered_twin.injection_id)
         # A duplicate PENDING obligation: WRONG anchor, fresh
         # report_message_id, SAME content (the wrong-anchor artifact).
         dup_rid = _seed_parent_report_row(
@@ -679,7 +730,9 @@ class TestContentIdentityDedup:
             engine, instance_id=child_id, parent_id=parent_id,
             status=InstanceStatus.COMPLETED.value, agent_name="reviewer",
         )
-        # Delivered via the live drain (INJECTED terminal twin).
+        # Delivered via the live drain (INJECTED terminal twin). Stamp
+        # ``recovery_attempted_at`` to model the sweep-recovery class
+        # — the dedup MUST match stamped rows.
         true_rid = _seed_parent_report_row(
             engine, parent_id=parent_id, child_id=child_id,
             anchor=f"msg-final-{uuid.uuid4().hex[:8]}",
@@ -692,7 +745,11 @@ class TestContentIdentityDedup:
             report_message_id=true_rid,
             content="the same report",
         )
-        assert len(repo.claim_for_injection(parent_id)) == 1
+        drained = repo.claim_for_injection(parent_id)
+        assert len(drained) == 1
+        _stamp_recovery_attempted_at(
+            engine, _injection_id_for_report(engine, true_rid)
+        )
 
         # Duplicate PENDING obligation (wrong anchor, fresh id).
         dup_rid = _seed_parent_report_row(
@@ -798,6 +855,169 @@ class TestContentIdentityDedup:
         assert drained[0]["report_message_id"] == rid_b
         assert _row_state(engine, row_b.injection_id) == (
             ReportInjectionState.INJECTED.value
+        )
+
+
+# ─── Reviewer carve-out: fresh natural enqueues MUST still claim ────────────
+
+
+class TestFreshSecondTurnObligationStillClaims:
+    """Reviewer Finding #1 (2026-09-10): the terminal_twin content
+    dedup MUST be scoped to sweep-recovered rows only
+    (``recovery_attempted_at IS NOT NULL``).
+
+    The wrong-anchor sweep-recovery class — rows that flowed through
+    :meth:`transition_deferred_to_pending` and were re-driven by the
+    recovery sweep — is the ONLY legitimate dedup target (those rows
+    carry an artifact that duplicates a previously-delivered report).
+
+    A FRESH natural enqueue (``recovery_attempted_at IS NULL``) is
+    always a genuine delivery obligation, even when the content
+    happens to byte-match a previously-delivered report. The carve-out
+    scenario: the child completes turn 1 → ``row_1`` is delivered
+    (terminal). The child is REVIVED via ``send_message`` → completes
+    turn 2 → ``child_reports._process_child_completion_db_sync``
+    enqueues ``row_2`` (PENDING, fresh ``child_message_id``, same
+    content because the task is idempotent). The carve-out MUST let
+    ``row_2`` claim — not dead-letter it as a duplicate obligation.
+    """
+
+    def test_fresh_second_turn_obligation_with_same_content_still_claims(
+        self, repo, engine
+    ):
+        """Drain-seam carve-out: a fresh natural PENDING row whose
+        content byte-matches a previously-delivered twin (terminal,
+        ``recovery_attempted_at IS NULL`` — natural delivery, never
+        sweep-recovered) MUST still drain and deliver. Pre-carve-out
+        the dedup dead-lettered the legitimate second delivery."""
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"wanderer-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="wanderer",
+        )
+
+        # Turn 1: delivered via the natural path. The terminal twin
+        # has ``recovery_attempted_at IS NULL`` because natural
+        # delivery never stamps the column (only
+        # ``transition_deferred_to_pending`` does).
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="identical turn content",
+        )
+
+        # Turn 2: child revived → fresh ``child_message_id``, fresh
+        # ``report_message_id``, SAME content (idempotent task). The
+        # ``recovery_attempted_at`` MUST stay NULL on this PENDING
+        # row — that is the carve-out trigger.
+        turn2_anchor = f"msg-final-turn2-{uuid.uuid4().hex[:8]}"
+        turn2_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn2_anchor,
+            status=MessageStatus.READY.value,
+            content="identical turn content",
+        )
+        turn2_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=turn2_anchor,
+            report_message_id=turn2_rid,
+            content="identical turn content",
+        )
+        # Sanity: fresh row carries NULL ``recovery_attempted_at``.
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == turn2_row.injection_id
+                )
+            ).one()
+            assert row.recovery_attempted_at is None, (
+                "fresh natural enqueues MUST leave recovery_attempted_at "
+                "NULL — the carve-out discriminator"
+            )
+
+        drained = repo.claim_for_injection(parent_id)
+        assert len(drained) == 1, (
+            "the fresh turn-2 obligation MUST drain — the carved-out "
+            "dedup must NOT match a non-stamped terminal twin"
+        )
+        assert drained[0]["report_message_id"] == turn2_rid
+        assert drained[0]["content"] == "identical turn content"
+        assert _row_state(engine, turn2_row.injection_id) == (
+            ReportInjectionState.INJECTED.value
+        ), (
+            "the fresh turn-2 delivery MUST be INJECTED, not "
+            "dead-lettered as a duplicate obligation"
+        )
+
+    def test_fresh_second_turn_obligation_at_task_claim_seam(
+        self, repo, engine
+    ):
+        """Task-claim-seam carve-out (sister variant): a fresh
+        natural PENDING row whose content byte-matches a
+        previously-delivered twin (``recovery_attempted_at IS NULL``
+        on the twin — natural delivery) MUST still claim via the
+        fallback task path. Pre-carve-out the dedup returned
+        ``already_delivered`` for the legitimate second delivery."""
+        parent_id = f"leader-{uuid.uuid4().hex[:8]}"
+        child_id = f"coder-{uuid.uuid4().hex[:8]}"
+        _seed_instance(
+            engine, instance_id=parent_id, parent_id=None,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            agent_name="leader",
+        )
+        _seed_instance(
+            engine, instance_id=child_id, parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value, agent_name="coder",
+        )
+
+        # Turn 1: delivered via the natural drain. Terminal twin has
+        # ``recovery_attempted_at IS NULL``.
+        turn1_anchor = f"msg-final-turn1-{uuid.uuid4().hex[:8]}"
+        _seed_delivered_pair(
+            repo, engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn1_anchor, content="idempotent task output",
+        )
+
+        # Turn 2: fresh natural enqueue (NULL ``recovery_attempted_at``).
+        turn2_anchor = f"msg-final-turn2-{uuid.uuid4().hex[:8]}"
+        turn2_rid = _seed_parent_report_row(
+            engine, parent_id=parent_id, child_id=child_id,
+            anchor=turn2_anchor,
+            status=MessageStatus.READY.value,
+            content="idempotent task output",
+        )
+        turn2_row = repo.enqueue(
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+            child_message_id=turn2_anchor,
+            report_message_id=turn2_rid,
+            content="idempotent task output",
+        )
+        with Session(engine) as session:
+            row = session.exec(
+                sm_select(ReportInjection).where(
+                    ReportInjection.injection_id == turn2_row.injection_id
+                )
+            ).one()
+            assert row.recovery_attempted_at is None
+
+        # Task-path claim — MUST return ``claimed``, NOT
+        # ``already_delivered``.
+        claim = repo.claim_for_task_delivery(turn2_rid)
+        assert claim.status == "claimed", (
+            "the fresh turn-2 obligation MUST claim — the carved-out "
+            "dedup must NOT match a non-stamped terminal twin. Got "
+            f"{claim.status!r}."
+        )
+        assert _row_state(engine, turn2_row.injection_id) == (
+            ReportInjectionState.TASK_DELIVERED.value
         )
 
 

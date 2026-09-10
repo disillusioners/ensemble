@@ -1402,6 +1402,21 @@ class ReportInjectionRepository:
             ).all()
             dup_ids: list[str] = []
             for dup in dup_rows:
+                # Reviewer carve-out (2026-09-10): the terminal_twin
+                # dedup MUST be scoped to sweep-recovered rows only —
+                # the ``recovery_attempted_at`` stamp is set ONLY by
+                # :meth:`transition_deferred_to_pending`
+                # (repository.py stamp site) when a DEFERRED marker
+                # was recovered back to PENDING. A FRESH natural
+                # PENDING enqueue (``enqueue`` / the inline path in
+                # ``child_reports._process_child_completion_db_sync``)
+                # leaves the column NULL — a legitimate second-turn
+                # obligation for the SAME (parent, child) MUST still
+                # claim when the content happens to be byte-identical
+                # to a previously-delivered report (revive-and-turn-2
+                # scenario). Without the carve-out, a legitimate
+                # second delivery would be silently dead-lettered as
+                # an "obligation abandoned".
                 terminal_twin = session.exec(
                     select(ReportInjection)
                     .where(
@@ -1423,6 +1438,9 @@ class ReportInjectionRepository:
                         ])
                     )
                     .where(ReportInjection.content == dup.content)
+                    .where(
+                        ReportInjection.recovery_attempted_at.is_not(None)
+                    )
                 ).first()
                 if terminal_twin is not None:
                     dup_ids.append(dup.injection_id)
@@ -1629,6 +1647,14 @@ class ReportInjectionRepository:
             # ``already_delivered`` tri-state so the task skips via
             # the normal dedup path (``_skip_task_as_completed``).
             if any_row.state == _PENDING_STATE:
+                # Reviewer carve-out (2026-09-10): mirror of the drain
+                # seam's carve-out — terminal_twin MUST be scoped to
+                # sweep-recovered rows only. See the drain-seam
+                # comment for the premise
+                # (``recovery_attempted_at`` is stamped ONLY by
+                # :meth:`transition_deferred_to_pending`). A fresh
+                # natural enqueue for a second-turn obligation
+                # (``recovery_attempted_at IS NULL``) MUST still claim.
                 terminal_twin = session.exec(
                     select(ReportInjection)
                     .where(
@@ -1651,6 +1677,9 @@ class ReportInjectionRepository:
                     )
                     .where(
                         ReportInjection.content == any_row.content
+                    )
+                    .where(
+                        ReportInjection.recovery_attempted_at.is_not(None)
                     )
                 ).first()
                 if terminal_twin is not None:
