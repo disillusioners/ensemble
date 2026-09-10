@@ -41,7 +41,7 @@ Fixture (mirror the governor acceptance file's structure): file-backed SQLite en
 
 ### T2 — budget & lifecycle non-interaction pins (requirements 4)
 
-1. ReviveGuard non-interaction (**P9 addition 2 — assert for BOTH statuses**): after a full COMPLETED-revive cycle (T1 walk), `manager.get_agent_tool_revive_count(charter_id) == 0`, AND after a full ERROR-revive cycle (T3), the same count is still 0 — the programmatic path must never call `note_agent_tool_revive` in either case (`manager.py:2832-2834`); the local counter is a separate mechanism (P5).
+1. ReviveGuard non-interaction (**P9 addition 2 — assert for BOTH statuses**): after a full COMPLETED-revive cycle (T1 walk), `manager.get_agent_tool_revive_count(charter_id) == 0`, AND after a full ERROR-revive cycle (T3), the same count is still 0 — the programmatic path must never call `note_agent_tool_revive` in either case (`manager.py:2832-2834`); the local counter is a separate mechanism (P5). **TERMINATED echo (W3):** a TERMINATED charter (operator-killed orphan) also revives free on the next reuse call with count still 0 — grounding for the operator ladder in plan-overview R1 (termination stops the turn; it does not retire the charter from discovery).
 2. Spawn-cap non-consumption: with `limits.max_children_per_instance` pinned low in the test config, a caller at the cap can STILL reuse its completed charter (reuse enqueues; it never spawns) — asserting the cap counts transient `instance_hierarchy` rows only (`instance_lifecycle.py:1563-1570`, `count_children` → hierarchy, `repository.py:439-452`), while `get_children` (permanent) still finds the charter.
 3. Cleanup realism: completed charter row + checkpoint persist (no reaper — `research-lifecycle-revive.md` §4); the reuse path neither deletes nor archives anything (scope guard — "NO cross-session persistence beyond what reuse requires").
 - **Gates:** none — these pins are decision-independent (asserted under the adjudicated P1–P9 verdicts; they hold regardless).
@@ -74,6 +74,10 @@ Fixture (mirror the governor acceptance file's structure): file-backed SQLite en
 1. Verification (always run): `grep` the Phase 1 diff for added kwargs on any `manager.*` / `InstanceMessagingService` / repository method — the proposed design adds NONE (`enqueue_message` called with existing kwargs only, `instance_messaging.py:2070-2083`); record the grep as evidence (facade-forwarding discipline satisfied vacuously).
 2. Conditional (fires ONLY if the implementer introduces a new kwarg on a manager/daemon-service method — none exists in the adjudicated design): per Core-Architecture blueprint — grep `daemon/manager.py` for the kwarg forwarding + add a real-dispatch integration test asserting the intended exception/behavior at the `InstanceManager.enqueue_message` seam (guards: `tests/unit/test_manager_enqueue_message_work_id_required.py` pattern + `tests/integration/test_job_driven_enqueue_work_id_facade.py` pattern).
 - **Gates:** adjudication removed the flip triggers (P1(b)/P2(d) rejected); step 1 always runs, step 2 is pure insurance.
+
+### T7 — OPTIONAL, discretionary (budget permitting; F8 — note only, not a gate)
+
+- **Compaction canary (optional):** one real-routing test seeding a refine history large enough to cross the L1 pre-dispatch threshold — 0.80× of `DEFAULT_CONTEXT_LIMIT` (700k, `compaction.py:1090`) — asserting a mid-loop compaction event is OBSERVABLE (status/`compacted_at` channel) so the residual R2 cliff can be detected empirically rather than argued. Realistic refine histories (10–150 KB) sit orders of magnitude below the threshold, so this is insurance, not acceptance — skip without ceremony if the fixture budget is tight.
 
 ## Coupling
 
