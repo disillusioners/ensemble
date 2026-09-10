@@ -4205,6 +4205,16 @@ class InstanceMessagingService:
                         if dispatch_source and self._manager.source_dispatcher:
                             for node_name, node_data in data.items():
                                 if node_name == "agent":
+                                    # LangGraph emits ``{node: None}`` for a node
+                                    # with no state update (a node returning
+                                    # ``{}`` — e.g. ``question_pause_node`` at
+                                    # the ask_questions pause instant). A None
+                                    # update carries no messages; skip it
+                                    # instead of raising
+                                    # ``'NoneType' object has no attribute
+                                    # 'get'`` and aborting the stream loop.
+                                    if not isinstance(node_data, dict):
+                                        continue
                                     node_messages = node_data.get("messages", [])
                                     for msg in node_messages:
                                         # Check if it's an AI message
@@ -4256,6 +4266,17 @@ class InstanceMessagingService:
                         # Accumulate messages from ALL nodes
                         any_new = False
                         for node_name, node_data in data.items():
+                            # LangGraph emits ``{node: None}`` for a node
+                            # with no state update (a node returning ``{}``
+                            # — e.g. ``question_pause_node`` at the
+                            # ask_questions pause instant; also
+                            # ``watchover_terminate_node``). A None update
+                            # carries no messages — skip it instead of
+                            # raising ``'NoneType' object has no attribute
+                            # 'get'`` (logged as "Streaming failed for
+                            # message ..." at the pause instant).
+                            if not isinstance(node_data, dict):
+                                continue
                             node_messages = node_data.get("messages", [])
                             if node_messages:
                                 any_new = True
