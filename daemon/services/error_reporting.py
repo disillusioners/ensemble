@@ -604,6 +604,54 @@ class ErrorReportingService:
                                 f"(parent={parent_id[:8]}..., "
                                 f"child={instance_id[:8]}...): {hook_err}"
                             )
+                        # C1 (Batch C, 2026-09-11): corrective
+                        # (parent, child) instance-pair emit on the
+                        # ERROR lane — mirrors the
+                        # ``regular_child_completed`` /
+                        # ``child_still_running_defer`` corrective
+                        # emit in ``child_reports.py:_dispatch_post_commit_side_effects``
+                        # (~line 3711 / 3933). The task-keyed emit
+                        # above matches watchers on the
+                        # CURRENT-task id (single-turn child case)
+                        # — correct for a child whose terminal
+                        # graph turn lands on the same task that
+                        # registered the parent's watcher. For a
+                        # multi-turn child (Wanderer-class — the
+                        # watcher was registered on the FIRST
+                        # ``process_message`` task but the child
+                        # reaches its terminal turn on a LATER
+                        # ``PROCESS_REPORT`` task), the task-keyed
+                        # emit is a no-op and the parent's
+                        # PENDING watcher is stranded. The
+                        # instance-pair emit fires watchers by
+                        # ``(target_instance_id, metadata.child_id)``
+                        # — closing that gap. Exactly-once is
+                        # preserved by ``transition_state``'s
+                        # guarded UPDATE (single-turn case: the
+                        # task-keyed emit already fired the
+                        # watcher → ``rowcount == 0`` here, no-op).
+                        # No new env flag (HARD POLICY: bugfixes
+                        # are NOT user-togglable).
+                        try:
+                            await _child_reports_svc._emit_terminal_for_child_instance_via_bus(
+                                parent_instance_id=parent_id,
+                                child_instance_id=instance_id,
+                                status="error",
+                                error=error,
+                                summary=(
+                                    f"child errored (corrective multi-turn "
+                                    f"emit; parent watcher release): "
+                                    f"{error_type}"
+                                ),
+                            )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook: "
+                                f"_emit_terminal_for_child_instance_via_bus "
+                                f"(error) failed "
+                                f"(parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}...): {hook_err}"
+                            )
                     else:
                         # Defensive fallback: ``child_reports``
                         # service is not wired (unit tests with a
@@ -661,6 +709,70 @@ class ErrorReportingService:
                         except Exception as hook_err:
                             logger.warning(
                                 f"bus hook: emit_terminal (error) failed "
+                                f"(parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}...): {hook_err}"
+                            )
+                        # C1 (Batch C, 2026-09-11): corrective
+                        # (parent, child) instance-pair emit on
+                        # the ERROR lane's defensive fallback
+                        # path. Mirrors the task-keyed emit
+                        # above — same multi-turn child class
+                        # (Wanderer). The bus's
+                        # ``emit_terminal_for_child_instance``
+                        # is the same primitive the happy path
+                        # uses via
+                        # ``_emit_terminal_for_child_instance_via_bus``;
+                        # calling it directly here keeps the
+                        # fallback path self-contained when the
+                        # ``ChildReportsService`` is not wired
+                        # (unit tests with a bare MagicMock
+                        # manager, partial init). Exactly-once
+                        # preserved by ``transition_state``'s
+                        # guarded UPDATE — single-turn case is
+                        # a no-op here.
+                        #
+                        # INDEPENDENT try/except: deliberately
+                        # outside the task-keyed emit's try
+                        # block so a task-keyed failure does NOT
+                        # skip the corrective emit (the
+                        # multi-turn child class is exactly the
+                        # case where the task-keyed emit
+                        # cannot help, so skipping the
+                        # corrective when the task-keyed
+                        # raises would re-introduce the silent
+                        # park bug for any future bug that
+                        # breaks the task-keyed emit).
+                        try:
+                            _fired_corrective = (
+                                await _bus.emit_terminal_for_child_instance(
+                                    parent_instance_id=parent_id,
+                                    child_instance_id=instance_id,
+                                    outcome=Outcome(
+                                        status="error",
+                                        error=error,
+                                        summary=(
+                                            f"child errored (corrective "
+                                            f"multi-turn emit; parent "
+                                            f"watcher release): {error_type}"
+                                        ),
+                                    ),
+                                )
+                            )
+                            for _fu in _fired_corrective:
+                                logger.debug(
+                                    f"bus error (corrective fallback): "
+                                    f"FIRED watcher "
+                                    f"target={_fu.target_instance_id[:8]}..., "
+                                    f"outcome=error",
+                                    extra={
+                                        "completion_delivery_path": "bus"
+                                    },
+                                )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook (error fallback): "
+                                f"emit_terminal_for_child_instance "
+                                f"failed "
                                 f"(parent={parent_id[:8]}..., "
                                 f"child={instance_id[:8]}...): {hook_err}"
                             )
