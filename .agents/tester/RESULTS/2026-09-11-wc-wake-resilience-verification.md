@@ -210,3 +210,36 @@ No quarantine rows warranted (context-flakes are not stable runner signals; note
 **✅ PASS FOR MERGE.** The sole round-1 blocker (B4) is resolved and independently verified end-to-end (flip + re-mint probe + exactly-once + skip-shape coverage). D2 and B3 polish confirmed fixed with narrowed-semantics pins. Full default suite + PG: **zero new branch-caused failures** — every R2 failure is baseline-identical, quarantine-family, or adjudicated context-flake. FE compatible (unchanged from round 1 — no FE files in R2 delta). ensure.md Core remains 3/3 (concurrency pack re-run not required for this focused scope; nothing in the R2 delta touches those gates' surfaces — logger kwargs, watchdog probe, child_reports re-mint are all outside the concurrency/thread-identity assertions; if desired pre-merge, a 7-second re-run of `concurrency_atomic_unit_test.sh` is the cheap confirmation).
 
 **Merge recommendation: GO.**
+
+
+---
+
+# R3 DELTA-CONFIRM — final scoped check @ e18f8c46 (dc73fb6f + 79340190 + e18f8c46)
+
+**Scope:** 2 polish commits, 4 files, +354/−31 (claim verified exact). Dev delta: W1 conditional heal-WARNING + N1 debug logs + docs; test class `TestReMintConditionalHealWarning` + N4 PACKS reword; disclosed fixture enhancement to `_seed_parent_watcher`.
+
+**Deviation (benign, flagged):** `daemon/services/waiting_children_watchdog.py` appears beyond the stated allow-list — entire 5-line diff is **docstring-only** (stale `:1267` line-anchor → text-search anchor). Zero executable change.
+
+## 1. Independent fixture check (the one real risk) — ✅ CLEAN
+- **Additive-only:** file diff has **zero removed lines**; 4 hunks (logging import, docstring, 3 payload keys added to `_seed_parent_watcher`, EOF append of new class + log filter).
+- **KeyError claim substantiated at contract level:** `FollowUp.from_payload` (dependency_bus.py:227-246) hard-subscripts `target_instance_id` and `message`; the old payload had neither. `emit_terminal_for_child_instance` runs `transition_state` (:904) BEFORE `from_payload` (:921) → old fixture reliably raised KeyError AFTER the durable commit; child_reports' defensive `except` (:3940) swallowed it and FollowUp returns were discarded. Claim fully confirmed.
+- **Assertion-neutral:** `git diff | grep '^-' | grep -i assert` → empty; all 16 pre-existing test bodies byte-identical.
+- **Semantics: strengthens, never flips.** No pre-existing test was vacuous (all assert real DB state), but emit-reaching tests previously passed over the swallowed-exception path — they could not distinguish "healed + clean return" from "healed DB + raised exception". The repair is also a hard prerequisite for the new positive W1 test (old payload → helper raises → WARNING never fires → `len==1` assertion would fail).
+
+## 2. W1/N1 confirmed (child_reports.py)
+- **W1:** heal-WARNING now conditional — `fired_followups = (await …)` :3907, gate `if fired_followups:` :3924, message appends `"(N watcher(s) FIRED)"` :3931. Closes the round-2 matched=0 overclaim nit. Emit call args byte-identical (capture + gate only).
+- **N1:** two `except Exception as fetch_exc:` + `logger.debug` additions (:3881 re-mint, :4349 backstop) — log-only, `inst = None` unchanged.
+
+## 3. Nodes + families — ✅ all exact-match (266 passed / 0 failures)
+- vgap_b4 file `18 passed` (16 + 2 new; collect = 18) — **new class both directions PASS** (`test_heal_warning_fires_on_non_empty_return`, `test_heal_warning_silent_on_empty_return`; filter precisely excludes the failure-path text), **flipped pin PASS**, **my double-fire probe PASS**.
+- dev b4 `9` · watchdog family `51` · census/per-fix `81` · `child_reports_unit` pack `48` · `wc_wake_d1_w5_pairing` pack `59`. Dev's claimed 116 is a consistent subset.
+
+## 4. Bounded suite spot — ✅ 0 NEW
+- `regression_unit_services`: `7 failed, 1577 passed, 122 warnings in 13.87s` (7 = quarantined proxy_phase1; +3P vs R2 = 2 new class nodes + 1 pass-side noise).
+- `regression_job_queue`: `7 failed, 1723 passed, 38 skipped, 1528 warnings in 23.43s` (identical to R2 baseline).
+- `tests/test_dependency_bus.py`: `1 failed, 74 passed, 7 warnings in 4.22s` — the exact quarantined `TestGenerationCounterBump` lock-flake node, pre-flagged.
+- **PG skipped — justified:** delta touches only child_reports.py (+175), watchdog docstring (5), and the test file; zero PG-marked surfaces (grep clean).
+
+## R3 VERDICT
+
+**✅ GO — delta confirmed.** Fixture enhancement verified genuine/neutral at contract level, W1 both-directions proven, all named nodes green, families exact-match, bounded spot baseline-clean. Cosmetic nits only (docstring line-anchor swaps; one narrow comment cite ~:866-921). **The PASS FOR MERGE verdict stands at e18f8c46.**
