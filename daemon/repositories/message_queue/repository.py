@@ -779,6 +779,50 @@ class SQLModelMessageQueueRepository:
             rows = session.exec(stmt).all()
             return [(row[0], row[1]) for row in rows]
 
+    def get_unprocessed_for_instances(
+        self, instance_ids: list[str]
+    ) -> list[tuple[str, str]]:
+        """Get (instance_id, message_id) pairs for NOT-yet-processed messages.
+
+        Wider than :meth:`get_pending_for_instances`: this predicate
+        ALSO includes ``PENDING`` rows — the status written by retry
+        scheduling (``schedule_retry_for_stuck`` family) while the row
+        waits for its ``next_retry_at`` window. A PENDING row is work
+        en route to the instance even though it is not claimable yet.
+
+        Consumer: ``InstanceManager.count_live_descendants``
+        (attestation-gate R2 third input). A dormant (``IDLE`` /
+        ``QUEUED``) descendant with ANY unprocessed message row is
+        live — a wakeup is en route. Incident b08f40fe (2026-09-11):
+        IDLE-orphan grandchildren with zero message rows were wrongly
+        counted live; this method is the message-lane half of the
+        two-set live predicate (the job-lane half lives in
+        ``JobRepository.get_active_by_instance``).
+
+        Args:
+            instance_ids: Instance IDs to filter by. Empty list returns
+                an empty result.
+
+        Returns:
+            List of (instance_id, message_id) tuples for messages whose
+            status is PENDING, READY, PROCESSING, or RETRYING.
+        """
+        if not instance_ids:
+            return []
+        with Session(self.engine) as session:
+            stmt = (
+                select(MessageQueue.instance_id, MessageQueue.message_id)
+                .where(MessageQueue.instance_id.in_(instance_ids))
+                .where(MessageQueue.status.in_([
+                    MessageStatus.PENDING.value,
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            )
+            rows = session.exec(stmt).all()
+            return [(row[0], row[1]) for row in rows]
+
     # --------------------------------------------------------
     # CLEANUP
     # --------------------------------------------------------

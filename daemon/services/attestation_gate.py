@@ -384,9 +384,12 @@ def decide(
         queued_or_expected_wakeups: R2 input from
             ``manager.get_queued_or_expected_wakeups``.
         live_descendants: R2 third input from
-            ``manager.count_live_descendants`` — count of descendants
-            whose status is NOT IN {COMPLETED, TERMINATED, ERROR,
-            FAILED}. Closes the watcher-fire-on-defer gap.
+            ``manager.count_live_descendants`` — count of WORK-BEARING
+            descendants (two-set semantics, incident b08f40fe
+            2026-09-11: RUNNING/WAITING/WAITING_CHILDREN/PAUSED
+            unconditionally; dormant IDLE/QUEUED only with an
+            unprocessed message row or an unsettled QUEUED/ACTIVE job;
+            terminal excluded). Closes the watcher-fire-on-defer gap.
         denied_count: Current ``attestation_denied_count`` (Phase 2
             stand-in: the caller passes 0; Phase 3 threads the ledger).
         bound: Deny bound (D5, default 3).

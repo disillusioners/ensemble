@@ -122,10 +122,20 @@ def attestation_manager_factory():
     ``pending_children=None`` (the default), the facade reads the real
     ``dependency_watchers`` table, allowing a test to assert the PENDING
     row before asking the gate to evaluate. ``live_descendants`` defaults
-    to None which triggers a real BFS over the instance tree (mirroring
-    the production facade) — tests that want to assert a specific
-    descendant count can set it explicitly.
+    to None which triggers the REAL production facade over the instance
+    tree — tests that want to assert a specific descendant count can
+    set it explicitly.
+
+    NOTE on the ``InstanceManager`` import: it is deliberately LAZY
+    (inside this factory body, not at module scope). This conftest is
+    loaded via ``pytest_plugins`` at COLLECTION time, before the root
+    conftest's langgraph mocks are evicted — a module-level import of
+    ``daemon.manager`` (which imports ``daemon.graph``) would bind the
+    mocked langgraph into the session-wide ``daemon.manager`` module
+    identity. Importing here runs at test time, inside the
+    ``real_graph_module`` eviction window.
     """
+    from daemon.manager import InstanceManager
 
     def factory(
         engine,
@@ -138,6 +148,9 @@ def attestation_manager_factory():
     ):
         class GraphTestManager:
             _instance_repository = repo
+            # The real facade (delegated to above) reads the cap via
+            # ``self.`` — pin the production constant on the stub.
+            LIVE_DESCENDANTS_BFS_CAP = InstanceManager.LIVE_DESCENDANTS_BFS_CAP
             enqueue_message = MagicMock(name="enqueue_message")
 
             def count_pending_children(self, target_instance_id: str) -> int:
@@ -159,36 +172,33 @@ def attestation_manager_factory():
             def get_queued_or_expected_wakeups(self, target_instance_id: str) -> int:
                 return int(queued_wakeups)
 
-            # Third R2 input (2026-09-06) — count of descendants whose
-            # status is NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}.
-            # Mirrors ``InstanceManager.count_live_descendants`` (BFS over
-            # the permanent ``instances.parent_id`` lineage, root excluded,
-            # terminal-set excluded). ``live_descendants=None`` (default)
-            # means "use the real facade"; tests that want a specific
-            # count override via the kwarg.
+            # Third R2 input (2026-09-06) — count of WORK-BEARING
+            # descendants. Incident b08f40fe (2026-09-11): this used to
+            # be an inline MIRROR of the terminal-set logic, which
+            # silently drifts from the production facade. It now
+            # DELEGATES to the real ``InstanceManager
+            # .count_live_descendants`` (two-set live semantics:
+            # RUNNING/WAITING/WAITING_CHILDREN/PAUSED unconditional;
+            # IDLE/QUEUED live only with an unprocessed message row or
+            # an unsettled QUEUED/ACTIVE job; terminal excluded) so the
+            # gate-level tests exercise the production semantics with a
+            # single source of truth. ``live_descendants=None``
+            # (default) means "use the real facade"; tests that want a
+            # specific count override via the kwarg. The real facade
+            # reads ``LIVE_DESCENDANTS_BFS_CAP`` /
+            # ``_queue_repository`` / ``_job_queue_service`` off the
+            # class — ``LIVE_DESCENDANTS_BFS_CAP`` is pinned below;
+            # the two lanes are absent here ⇒ they contribute nothing,
+            # matching the no-work tree shape these graph tests plant.
             def count_live_descendants(self, target_instance_id: str) -> int:
                 if live_descendants is not None:
                     return live_descendants
-                from daemon.repositories.instance.models import InstanceStatus
+                from types import MethodType
 
-                terminal_statuses = {
-                    InstanceStatus.COMPLETED.value,
-                    InstanceStatus.TERMINATED.value,
-                    InstanceStatus.ERROR.value,
-                    InstanceStatus.FAILED.value,
-                }
-                # BFS over the permanent lineage via get_tree_ids_permanent.
-                tree_ids = repo.get_tree_ids_permanent(target_instance_id)
-                count = 0
-                for iid in tree_ids:
-                    if iid == target_instance_id:
-                        continue
-                    row = repo.get(iid)
-                    if row is None:
-                        continue
-                    if row.status not in terminal_statuses:
-                        count += 1
-                return count
+                bound = MethodType(
+                    InstanceManager.count_live_descendants, self
+                )
+                return bound(target_instance_id)
 
             @staticmethod
             def is_watchover_enabled(_target_instance_id: str) -> bool:

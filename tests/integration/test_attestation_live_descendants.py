@@ -24,6 +24,15 @@ Covered scenarios (REQUIRED — see task spec):
   the cap are NOT counted).
 * (f) Log row carries ``live_descendants`` (canonical-schema drift pin).
 * (g) P95 timing sanity (gate stays inside the 20ms NFR-1 budget).
+* (h) TWO-SET live semantics (2026-09-11 amendment — incident
+  b08f40fe): the former single live-set pin
+  (``test_live_set_includes_idle_queued_running_waiting_children_paused``)
+  is SPLIT — ``RUNNING``/``WAITING``/``WAITING_CHILDREN``/``PAUSED``
+  stay UNCONDITIONALLY live; dormant ``IDLE``/``QUEUED`` are live ONLY
+  with work en route (an unprocessed ``message_queue`` row OR an
+  unsettled QUEUED/ACTIVE ``job_queue_items`` row). An IDLE orphan
+  with neither is NOT live — it can never report, so it must never
+  look like delegation-in-flight.
 
 The canonical decision enum is NOT extended — same five values,
 ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` is reused for the third-input
@@ -40,11 +49,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlmodel import Session
+from sqlmodel import Session, SQLModel
 
 from daemon.manager import InstanceManager
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.models import AdmissionState
+from daemon.repositories.message_queue.models import MessageQueue, MessageStatus
 from daemon.services.attestation_gate import (
     CANONICAL_LOG_SCHEMA_FIELDS,
     Decision,
@@ -110,9 +121,13 @@ def _seed_instance(engine, instance_id, parent_id, status):
 class _StubManager:
     """Bare class used to build a facade-testing stub via ``object.__new__``.
 
-    The real facade reads ``self._instance_repository`` and
-    ``self.LIVE_DESCENDANTS_BFS_CAP``; we attach both attributes
-    manually via ``object.__new__`` (bypassing ``__init__``).
+    The real facade reads ``self._instance_repository``,
+    ``self.LIVE_DESCENDANTS_BFS_CAP`` and — since the b08f40fe two-set
+    amendment — ``self._queue_repository`` and
+    ``self._job_queue_service`` via ``getattr(..., None)``. We attach
+    the requested attributes manually via ``object.__new__`` (bypassing
+    ``__init__``); unwired lanes simply contribute no work-en-route
+    signal, exactly like a production embedding without a job service.
     """
 
     pass
@@ -518,21 +533,60 @@ class TestFacadeBfsCap:
     table; the permanent ``instances.parent_id`` lineage is the only
     source the facade reads, so the direct insert is exactly the
     shape under test).
+
+    2026-09-11 amendment (incident b08f40fe): ``_build_manager`` can
+    optionally wire the two work-en-route lanes — the message-queue
+    repository (``_queue_repository``) and the job repository behind a
+    ``_job_queue_service`` namespace (the production
+    ``JobQueueService._repository`` shape) — so the dormant-set tests
+    can exercise both halves of the conditional-live predicate.
     """
 
-    def _build_manager(self, file_sqlite_engine, repo):
+    def _build_manager(
+        self,
+        file_sqlite_engine,
+        repo,
+        *,
+        with_message_lane: bool = False,
+        with_job_lane: bool = False,
+    ):
         # The facade is bound on ``InstanceManager`` instances; the
         # ``count_live_descendants`` method only reads from
-        # ``_instance_repository`` + ``InstanceStatus`` so we can
-        # build a stub InstanceManager-like object with just those
-        # two attributes.
-        from types import MethodType
+        # ``_instance_repository`` + ``InstanceStatus`` (plus the two
+        # optional work-en-route lanes) so we can build a stub
+        # InstanceManager-like object with just those attributes.
+        from types import MethodType, SimpleNamespace
+
+        from daemon.repositories.job_queue.repository import JobRepository
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
 
         manager = object.__new__(_StubManager)
         manager._instance_repository = repo
+        if with_message_lane:
+            manager._queue_repository = SQLModelMessageQueueRepository(
+                file_sqlite_engine
+            )
+        if with_job_lane:
+            # Production shape: the manager reaches the job repository
+            # through the late-bound JobQueueService (``_repository``
+            # attribute holds a ``JobRepository``). The shared
+            # ``file_sqlite_engine`` fixture does not create the
+            # ``job_queue_items`` table — add it here (idempotent for
+            # already-present tables) so an empty wired lane reads as
+            # zero jobs instead of a missing-table error.
+            from daemon.repositories.job_queue.models import JobItem
+            from daemon.repositories.job_queue.repository import JobRepository
+
+            SQLModel.metadata.create_all(file_sqlite_engine, tables=[JobItem.__table__])
+            manager._job_queue_service = SimpleNamespace(
+                _repository=JobRepository(file_sqlite_engine)
+            )
         # Bind the cap constant AND the facade method onto the stub
         # (the facade reads both via ``self.`` so attribute lookups
-        # must resolve on the stub).
+        # must resolve on the stub; the work-en-route helper is
+        # MODULE-LEVEL in daemon.manager — no second binding needed).
         manager.LIVE_DESCENDANTS_BFS_CAP = InstanceManager.LIVE_DESCENDANTS_BFS_CAP
         manager.count_live_descendants = MethodType(
             InstanceManager.count_live_descendants, manager
@@ -545,6 +599,42 @@ class TestFacadeBfsCap:
     # deliberately does NOT create that table; the permanent
     # ``instances.parent_id`` lineage is the only source the facade
     # reads, which is exactly the shape under test).
+
+    def _seed_message(self, engine, instance_id, status):
+        """Insert a MessageQueue row DIRECTLY (queue-lane fixture)."""
+        with Session(engine) as session:
+            session.add(
+                MessageQueue(
+                    instance_id=instance_id,
+                    content="work en route (test)",
+                    source="test",
+                    status=status,
+                )
+            )
+            session.commit()
+
+    def _seed_job(self, engine, instance_id, admission_state):
+        """Insert a JobItem row DIRECTLY (job-lane fixture).
+
+        The ``job_queue_items`` table may not exist yet in the shared
+        ``file_sqlite_engine`` fixture — ensure it additively here too
+        (``create_all`` is idempotent for already-present tables), so
+        seed-before-build call orders both work.
+        """
+        from daemon.repositories.job_queue.models import JobItem
+
+        SQLModel.metadata.create_all(engine, tables=[JobItem.__table__])
+        with Session(engine) as session:
+            session.add(
+                JobItem(
+                    agent_id="worker",
+                    agent_dir="./agents/worker",
+                    message="queued work (test)",
+                    instance_id=instance_id,
+                    admission_state=admission_state,
+                )
+            )
+            session.commit()
 
     def test_cap_value_is_500(self):
         assert InstanceManager.LIVE_DESCENDANTS_BFS_CAP == 500
@@ -561,17 +651,24 @@ class TestFacadeBfsCap:
             "leader (root) MUST be excluded; only the child counts"
         )
 
-    def test_live_set_includes_idle_queued_running_waiting_waiting_children_paused(
+    def test_unconditional_live_set_counts_without_work_checks(
         self, file_sqlite_engine
     ):
-        """Live set: ``IDLE``, ``QUEUED``, ``RUNNING``, ``WAITING``,
-        ``WAITING_CHILDREN``, ``PAUSED`` all count as live.
+        """(d) UNCONDITIONAL live set — RUNNING, WAITING,
+        WAITING_CHILDREN, PAUSED all count as live with NO
+        message/job lanes wired (no work-en-route check needed).
+
+        2026-09-11 b08f40fe amendment: this replaces the pre-amendment
+        single pin
+        ``test_live_set_includes_idle_queued_running_waiting_children_paused``
+        — the dormant members (``IDLE``/``QUEUED``) were moved OUT of
+        the unconditional set into the conditional (work-bearing)
+        tests below; the running-ish members keep the exact old
+        semantics, PAUSED included.
         """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-set", None, InstanceStatus.IDLE.value)
         for status in [
-            InstanceStatus.IDLE.value,
-            InstanceStatus.QUEUED.value,
             InstanceStatus.RUNNING.value,
             InstanceStatus.WAITING.value,
             InstanceStatus.WAITING_CHILDREN.value,
@@ -579,7 +676,156 @@ class TestFacadeBfsCap:
         ]:
             _seed_instance(file_sqlite_engine, f"c-{status}", "root-set", status)
         manager = self._build_manager(file_sqlite_engine, repo)
-        assert manager.count_live_descendants("root-set") == 6
+        assert manager.count_live_descendants("root-set") == 4
+
+    # ── (h) CONDITIONAL-live set (b08f40fe two-set amendment) ─────────
+    # Dormant statuses are live ONLY with work en route.
+
+    @pytest.mark.parametrize("status", [MessageStatus.PENDING.value, MessageStatus.READY.value, MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value])
+    def test_idle_with_unprocessed_message_counts_live(
+        self, file_sqlite_engine, status
+    ):
+        """(a) IDLE WITH an unprocessed message → live.
+
+        All four not-yet-processed message statuses pin live:
+        PENDING (retry-scheduled), READY, PROCESSING, RETRYING.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-msg", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "idle-child", "root-msg", InstanceStatus.IDLE.value)
+        self._seed_message(file_sqlite_engine, "idle-child", status)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True
+        )
+        assert manager.count_live_descendants("root-msg") == 1
+
+    def test_queued_status_with_unprocessed_message_counts_live(
+        self, file_sqlite_engine
+    ):
+        """(h.a) QUEUED (dormant) + unprocessed message → live."""
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-q", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "queued-child", "root-q", InstanceStatus.QUEUED.value)
+        self._seed_message(file_sqlite_engine, "queued-child", MessageStatus.READY.value)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True
+        )
+        assert manager.count_live_descendants("root-q") == 1
+
+    def test_terminal_message_does_not_count_live(self, file_sqlite_engine):
+        """(h) A COMPLETED message row is processed — not work en route.
+
+        An IDLE descendant whose only message row is terminal
+        (completed) must NOT count live.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-done-msg", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "idle-child", "root-done-msg", InstanceStatus.IDLE.value)
+        self._seed_message(file_sqlite_engine, "idle-child", MessageStatus.COMPLETED.value)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True
+        )
+        assert manager.count_live_descendants("root-done-msg") == 0
+
+    @pytest.mark.parametrize("admission", [AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value])
+    def test_idle_with_active_job_only_counts_live(
+        self, file_sqlite_engine, admission
+    ):
+        """(b) IDLE with a QUEUED/ACTIVE job item ONLY (no message) → live.
+
+        The job lane is a MANDATORY second check: an IDLE instance with
+        a queued job has NO message_queue row yet — the job row is the
+        only work-en-route evidence. Both in-flight admission states
+        (the ``ACTIVE_ADMISSION_STATES`` set) pin live.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-job", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "idle-child", "root-job", InstanceStatus.IDLE.value)
+        self._seed_job(file_sqlite_engine, "idle-child", admission)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_job_lane=True
+        )
+        assert manager.count_live_descendants("root-job") == 1
+
+    @pytest.mark.parametrize("admission", [AdmissionState.DONE.value, AdmissionState.DEAD.value])
+    def test_idle_with_settled_job_is_not_live(self, file_sqlite_engine, admission):
+        """(h) DONE/DEAD jobs are settled — they do NOT make dormant live."""
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-settled", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "idle-child", "root-settled", InstanceStatus.IDLE.value)
+        self._seed_job(file_sqlite_engine, "idle-child", admission)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_job_lane=True
+        )
+        assert manager.count_live_descendants("root-settled") == 0
+
+    def test_idle_orphan_without_message_or_job_is_not_live(
+        self, file_sqlite_engine
+    ):
+        """(c) THE b08f40fe regression at the count level.
+
+        IDLE-orphan descendants with NO message row and NO unsettled
+        job are NOT live. The incident leader (b08f40fe, 2026-09-11
+        14:50:10 UTC) completed via ``allowed_legitimate_pending_wakeup``
+        because four never-dispatched IDLE-orphan grandchildren were
+        counted live; branch 5's rationale ("a child report will revive
+        the leader") cannot apply — orphans never report. Pinned in
+        BOTH wiring shapes:
+
+        * both lanes WIRED but empty (the honest zero), and
+        * NO lanes wired (the pre-amendment stub shape — the dormant
+          member alone can no longer hold the count up).
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        # Incident tree shape at the count level: a terminal child
+        # (tester c6f57749 in the incident) carrying IDLE-orphan
+        # grandchildren that were spawned but NEVER dispatched.
+        _seed_instance(file_sqlite_engine, "root-orphan", None, InstanceStatus.RUNNING.value)
+        _seed_instance(file_sqlite_engine, "tester-child", "root-orphan", InstanceStatus.COMPLETED.value)
+        for i in range(4):
+            _seed_instance(
+                file_sqlite_engine, f"orphan-gc-{i}", "tester-child",
+                InstanceStatus.IDLE.value,
+            )
+
+        wired = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
+        )
+        assert wired.count_live_descendants("root-orphan") == 0, (
+            "IDLE orphans (no message, no job) MUST NOT count live — b08f40fe"
+        )
+        bare = self._build_manager(file_sqlite_engine, repo)
+        assert bare.count_live_descendants("root-orphan") == 0
+
+    def test_queued_orphan_without_work_is_not_live(self, file_sqlite_engine):
+        """(h) QUEUED (dormant) orphan with no work en route → NOT live."""
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-q-orphan", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "q-orphan", "root-q-orphan", InstanceStatus.QUEUED.value)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
+        )
+        assert manager.count_live_descendants("root-q-orphan") == 0
+
+    def test_mixed_dormant_tree_counts_only_work_bearing(
+        self, file_sqlite_engine
+    ):
+        """(h) Per-descendant conditionality — mixed tree pins exactly 1.
+
+        One IDLE child WITH an unprocessed message + one IDLE orphan
+        + one RUNNING child → count is exactly 2 (the messaged dormant
+        one and the running one); the orphan contributes nothing.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-mix", None, InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "mix-idle-msg", "root-mix", InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "mix-idle-orphan", "root-mix", InstanceStatus.IDLE.value)
+        _seed_instance(file_sqlite_engine, "mix-running", "root-mix", InstanceStatus.RUNNING.value)
+        self._seed_message(file_sqlite_engine, "mix-idle-msg", MessageStatus.READY.value)
+        manager = self._build_manager(
+            file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
+        )
+        assert manager.count_live_descendants("root-mix") == 2
 
     def test_terminal_set_excludes_completed_terminated_error_failed(
         self, file_sqlite_engine

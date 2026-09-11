@@ -852,3 +852,20 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 ---
 
 **2026-09-08 user decision:** Completion Attestation prompt-contract sections removed from `agents/leader/rule.md` + `agents/leader/workflow.md`. The deny-time nudge is the sole teaching source (header + conditional semantics + two-step pattern + embedded mermaid); the LLM judge releases genuine reports. Rationale: a standing prompt section is redundant. Accepted cost: possibly one extra nudge cycle on delegated missions whose report the judge cannot confirm.
+---
+
+**2026-09-11 incident requirement (incident b08f40fe): `live_descendants` counts WORK-BEARING descendants only (two-set semantics).**
+
+**Requirement:** `InstanceManager.count_live_descendants` (attestation-gate R2 third input) must not let dormant never-reporting descendants satisfy branch (5). Verified incident shape: leader `b08f40fe` completed 2026-09-11 14:50:10 UTC via `allowed_legitimate_pending_wakeup` with `live_descendants=4` where all four were IDLE-orphan grandchildren (spawned by tester `c6f57749`, never dispatched: 0 `message_queue` rows, 0 `message_metadata` rows, all dependency watchers FIRED). Branch (5)'s premise — "a child report will revive the leader" — is false for orphans; they must not look like delegation-in-flight.
+
+**Acceptance criteria:**
+
+* AC-L1: UNCONDITIONAL-live = `{RUNNING, WAITING, WAITING_CHILDREN, PAUSED}` — counted with no further checks; PAUSED-is-live unchanged.
+* AC-L2: CONDITIONAL-live = `{IDLE, QUEUED}` — counted IFF (a) a not-yet-processed `message_queue` row targets the descendant (`PENDING`/`READY`/`PROCESSING`/`RETRYING`), OR (b) a not-yet-settled `job_queue_items` row targets it (`admission_state` QUEUED | ACTIVE — the `ACTIVE_ADMISSION_STATES` in-flight set). The job lane is mandatory (an IDLE instance with only a QUEUED job has no message row); DONE/DEAD never count.
+* AC-L3: IDLE orphan with NO message and NO unsettled job is NOT live — the incident regression at the count level AND at the gate level (branch (5) must not fire; DENIED + nudge + counter increments; pinned by `tests/integration/test_attestation_idle_orphan_incident.py` and the count-level split in `tests/integration/test_attestation_live_descendants.py`).
+* AC-L4: terminal set unchanged (`COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` excluded); BFS cap, permanent-`parent_id` walk, and root exclusion preserved byte-for-byte in behavior.
+* AC-L5: fail-open preserved — a DB error in the new conditional sub-checks propagates to the gate DB seam (`live_descendants=-1`, fail-open ALLOWED); it never fails toward orphan=not-live. Unwired lanes contribute no signal.
+* AC-L6: after the orphans are terminated and `attest_completion` is in window → attested ALLOWED (counter reset); terminated-but-unattested still denies (original protection survives).
+* AC-L7: gate-level test reconstructs the EXACT b08f40fe tree (8 terminal children + 4 IDLE-orphan grandchildren under the tester child, delegation anchored after the last real user message, mode=enforce) — named after the incident and referencing `b08f40fe` in its docstring.
+
+**Files (this requirement):** `daemon/manager.py`; `daemon/repositories/message_queue/repository.py`; `tests/support/conftest.py`; `tests/integration/test_attestation_live_descendants.py`; `tests/integration/test_attestation_idle_orphan_incident.py` (new); `docs/setup.md`.
