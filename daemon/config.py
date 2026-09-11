@@ -1343,6 +1343,27 @@ class ServicesConfig(BaseSettings):
             "SERVICES_ELIGIBLE_PENDING_SWEEP_MIN_PENDING_AGE_SECONDS."
         ),
     )
+    orphan_watcher_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Batch C — C2 (2026-09-11): how often the orphan-watcher "
+            "sweep runs (seconds). Default 90s — shares the A3 cadence. "
+            "The sweep is ALWAYS-ON infrastructure (no kill-switch env "
+            "var — per the project owner's HARD POLICY on Batch A); "
+            "the interval knob tunes responsiveness vs DB load. The "
+            "sweep is the steady-state companion to the startup-time "
+            "``DependencyBus.start()`` sweep: the startup sweep cleans "
+            "the restart-window, the periodic sweep cleans orphans "
+            "that accumulate mid-run (mid-run force-cancel, mid-run "
+            "task death). Lower = more responsive but more DB scans; "
+            "the floor is 1s to prevent spin. Out-of-range values FAIL "
+            "FAST AT BOOT via pydantic ValidationError at Settings "
+            "instantiation (deliberate fail-fast, not a runtime "
+            "disable). Override via "
+            "SERVICES_ORPHAN_WATCHER_SWEEP_INTERVAL_SECONDS env var."
+        ),
+    )
     lease_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description=(

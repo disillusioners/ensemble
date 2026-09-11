@@ -610,6 +610,50 @@ async def lifespan(app: FastAPI):
         )
 
     # ─────────────────────────────────────────────────────────────
+    # Batch C — C2 (2026-09-11): periodic orphan-watcher sweep.
+    # Steady-state companion to the startup-time
+    # ``DependencyBus.start()`` sweep (which cleans the restart-
+    # window). The periodic sweep cleans orphans that accumulate
+    # mid-run (mid-run force-cancel, mid-run task death) so the
+    # parent's ``count_pending_for_target(parent)`` completion gate
+    # doesn't hold the parent in ``waiting_children`` forever.
+    # ALWAYS ON — no env flag (per the project owner's HARD POLICY
+    # on Batch A). Single config knob: interval (default 90s, shares
+    # the A3 cadence so the two sweeps tick together on the same
+    # bound). Shares the same asyncio-task + cancel/await lifecycle
+    # as the eligible-pending sweep above.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.dependency_bus import get_dependency_bus
+    from daemon.services.orphan_watcher_sweep import (
+        DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        OrphanWatcherSweepService,
+    )
+    orphan_sweep_interval = (
+        config.services.orphan_watcher_sweep_interval_seconds
+    )
+    orphan_watcher_sweep = OrphanWatcherSweepService(
+        dependency_bus=get_dependency_bus(),
+        interval_seconds=orphan_sweep_interval,
+    )
+    # Sanity: refuse to start when the canonical defaults regress
+    # (defensive — the config Field constraint enforces the bound,
+    # this is a second line of defence for legacy test fixtures
+    # that construct the service directly).
+    if orphan_sweep_interval < 1:
+        logger.error(
+            f"OrphanWatcherSweepService DISABLED — interval="
+            f"{orphan_sweep_interval}s below the floor of 1s"
+        )
+    else:
+        orphan_watcher_sweep.start()
+        app.state.orphan_watcher_sweep = orphan_watcher_sweep
+        logger.info(
+            f"OrphanWatcherSweepService started: interval="
+            f"{orphan_sweep_interval}s (default "
+            f"{DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS}s)"
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
@@ -1194,6 +1238,22 @@ async def lifespan(app: FastAPI):
                 f"EligiblePendingSweepService shutdown error: {e}"
             )
         app.state.eligible_pending_sweep = None
+
+    # Batch C — C2 (2026-09-11): stop the orphan-watcher sweep.
+    # Same lifecycle as the eligible-pending sweep above; the
+    # ``stop()`` method cancels + awaits the asyncio task so the
+    # shutdown branch stays compact.
+    orphan_sweep = getattr(
+        app.state, "orphan_watcher_sweep", None
+    )
+    if orphan_sweep is not None:
+        try:
+            await orphan_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"OrphanWatcherSweepService shutdown error: {e}"
+            )
+        app.state.orphan_watcher_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down
