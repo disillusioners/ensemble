@@ -964,18 +964,27 @@ Case-insensitive substring match against the AIMessage content; catalog is curat
 
 The marker path respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables). With the judge disabled, marker hits are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: marker-only signal is too weak to deny — the LLM verdict disambiguates ambiguous marker hits; without the verdict, plain allow + log is the safer default.
 
+When the kill-switch is OFF, the marker path emits a distinct `event=leader_completion_gate_marker_judge_disabled` log row with `verdict=<skipped>` (grep-disjoint from the existing `event=leader_completion_gate_marker_judge` family — operators grep the correct event for the operator-disabled case). This row is the operator-observable signal that the canonical `event=leader_completion_gate` row's `marker_judge_verdict` field stayed at the transient `<pending>` sentinel — the gate did not call the judge (kill-switch open), did not inject a hint, and did not deny.
+
+### Dry-mode marker logging
+
+The marker scan runs in `dry` mode (Decision.DRY_LOG) too — the scan is side-effect-free and pure LOG-ONLY: it populates `marker_hit` / `marker_terms` / `marker_path` on the canonical log row so operators see the signal in `decision=dry_log` soak rows. No judge call fires (the marker-path judge wiring in `daemon/graph.py` early-outs for DRY_LOG decisions before any judge/hint/deny/counter side effect), no hint is injected, no deny, no counter — the dry-mode `allow unconditionally` posture is preserved end-to-end. The marker scan runs on DRY_LOG so the bake-time observability surfaces how often mid-work phrasing would have triggered the marker path; the gate still allows the END as before. The marker-path's `"<pending>"` marker_path sentinel stays as the final value on the dry-log row (log-only; never resolved to `a`/`b`/`c`/`d` because no judge ran).
+
 ### Completion Check Note (path (b))
 
 Injected alongside END on path (b). Canonical home `daemon/graph.py::COMPLETION_CHECK_NOTE_TEXT`. The note is a `HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]` header (reuses the existing prefix convention so `is_real_user_message` in `attestation_scanner.py` recognizes it as not-a-real-user-message). Content: confirms the gate noticed mid-work phrasing while real pending work is outstanding; asks the leader to confirm the wake-up arrives on the next turn; reminds about the two-step attestation protocol.
 
+The hint carries a **stable id per instance** minted via `_stable_id_for("completion_check_note", instance_id=...)` — a new row in the canonical `_stable_id_for` id-format table at `daemon/services/context_messages.py` (F1 Shape A, 2026-09-12). Each subsequent (b) event on the same instance SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer — the resulting state carries EXACTLY ONE Completion Check Note block regardless of how many (b) events fired. Without the stable id, repeated (b) hints compound as a permanently-hoisted `context_kind=task_context` tail under three-bucket compaction (merge 77ce4ae8) and dominate the budget (`INJECTIONS_DOMINATE` skip); the stable id collapses that unbounded hint accumulation. The factory's `instance_id=None` fallback preserves the pre-F1 fresh-uuid4 behavior for degenerate / test-only call sites.
+
 ### Log schema (additive)
 
-The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths.
+The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths. The kill-switch OFF path emits `event=leader_completion_gate_marker_judge_disabled` (grep-disjoint event name — distinct from the existing judge/event family so operators can pinpoint the operator-disabled case). All three events live alongside each other in the same daemon log; operators `grep event=leader_completion_gate_marker_judge` to see the live judge calls, `grep event=leader_completion_gate_marker_judge_disabled` to see the kill-switch OFF soak signal, and `grep event=leader_completion_gate_marker_judge_error` to see the wrapper-fault class.
 
 ### References
 
-- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (this feature)
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (this feature); F1 amendment 2026-09-12 (Shape A landed)
 - `daemon/services/attestation_marker_scanner.py` — pure-function scanner
 - `daemon/services/attestation_gate.py` — gate integration + additive log fields
-- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + gate-node marker-path wiring
-- `tests/unit/test_attestation_marker_scanner.py` (38 tests) + `tests/unit/test_attestation_marker_wiring.py` (14 tests)
+- `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring
+- `tests/unit/test_attestation_marker_scanner.py` (38 tests) + `tests/unit/test_attestation_marker_wiring.py` (23 tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)

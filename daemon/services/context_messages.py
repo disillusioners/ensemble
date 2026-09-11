@@ -148,18 +148,30 @@ def _stable_id_for(
     single source of truth — all callers route through this helper so
     the mint site stays grep-able and the formats stay append-only):
 
-    ================  ==============================  =====================
-    ``kind``          id format                       required parts
-    ================  ==============================  =====================
-    ``project``       ``project:{instance_id}``       ``instance_id``
-    ``shared_meta_kv``  ``kv:{context_key}``          ``context_key``
-    ================  ==============================  =====================
+    =====================  ===========================================  =====================
+    ``kind``               id format                                    required parts
+    =====================  ===========================================  =====================
+    ``project``            ``project:{instance_id}``                    ``instance_id``
+    ``shared_meta_kv``     ``kv:{context_key}``                         ``context_key``
+    ``completion_check_note``  ``completion_check_note:{instance_id}``   ``instance_id``
+    =====================  ===========================================  =====================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
     id suffix IS the partition the block content was read from, so
     supersede granularity matches data granularity exactly. Splitting
     the key (e.g. ``context_key.split(':')[-1]``) is a WRONG-ID hazard
     and must never be reintroduced (S19/D3 erratum).
+
+    ``completion_check_note`` (2026-09-12, F1 Shape A landed per the
+    external reviewer's W2 ordered fix) mints a stable id per
+    ``instance_id`` so each subsequent (b)-event Completion Check
+    Note hint SUPERSEDES the prior checkpoint entry in place via
+    LangGraph's ``add_messages`` reducer — without a stable id,
+    repeated hints on the same instance compound as a permanently-
+    hoisted ``context_kind=task_context`` tail under three-bucket
+    compaction (merge 77ce4ae8) and dominate the budget
+    (``INJECTIONS_DOMINATE`` skip). The id is what collapses the
+    unbounded hint accumulation the original F1 backlog flagged.
 
     C0 scope: only the ``project`` + ``shared_meta_kv`` kinds mint ids
     (S16). Any other kind — including the existing auto-load /
@@ -169,7 +181,8 @@ def _stable_id_for(
 
     Args:
         kind: The block kind (see table above).
-        instance_id: Owning instance id (``project`` kind).
+        instance_id: Owning instance id (``project`` /
+            ``completion_check_note`` kind).
         context_key: Full resolved tree-root partition key
             (``shared_meta_kv`` kind).
         agent_id: Agent id. Accepted for signature stability across the
@@ -195,9 +208,17 @@ def _stable_id_for(
                 "context_key (resolved tree-root partition key)"
             )
         return f"kv:{context_key}"
+    if kind == "completion_check_note":
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('completion_check_note') requires "
+                "instance_id"
+            )
+        return f"completion_check_note:{instance_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
-        "for 'project' and 'shared_meta_kv' blocks"
+        "for 'project', 'shared_meta_kv', and 'completion_check_note' "
+        "blocks"
     )
 
 

@@ -73,7 +73,6 @@ rationale: marker-only signal is too weak to deny; allow + log).
 from __future__ import annotations
 
 import logging
-import re
 from typing import Iterable, NamedTuple
 
 from langchain_core.messages import AIMessage, BaseMessage
@@ -274,13 +273,11 @@ __all__ = [
 # the trigger half of a two-stage disambiguator; an empty catalog
 # would make the scan a no-op). The marker count should be in the
 # 12-18 range documented in the brief (balance recall vs false
-# positives). Pinned by the unit suite.
-assert 12 <= len(MID_WORK_MARKERS) <= 18, (
-    "MID_WORK_MARKERS must hold 12-18 patterns per the brief; "
-    "see module docstring + tests/unit/test_attestation_marker_scanner.py"
-)
-
-# Unused-import silencer — the catalog intentionally lives in this
-# module as a literal tuple, not as a compiled regex (substring match
-# is the documented semantics; the catalog is curated, not generated).
-_ = re
+# positives). Pinned by the unit suite. Raised as an explicit
+# RuntimeError (not a bare ``assert``) so the catalog pin survives
+# ``python -O`` (which strips assertions).
+if not 12 <= len(MID_WORK_MARKERS) <= 18:
+    raise RuntimeError(
+        "MID_WORK_MARKERS must hold 12-18 patterns per the brief; "
+        "see module docstring + tests/unit/test_attestation_marker_scanner.py"
+    )

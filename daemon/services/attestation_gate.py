@@ -922,21 +922,33 @@ def evaluate(
         #   * ``Decision.TERMINAL_AFTER_BOUND`` — escalation already
         #     fired; the leader has hit the bound and the gate has
         #     decided to allow terminal. A marker scan would be moot.
-        #   * ``Decision.DRY_LOG`` — dry mode is a passive observer; the
-        #     marker scan is a side-effect-free cheap check that logs
-        #     the hit but does NOT route (the existing dry-log path
-        #     allows unconditionally; surfacing marker hits in the
-        #     log row is the documented soak signal — see FR-10 schema
-        #     amendment #3, decisions.md D-ENTRY 2026-09-11).
         #   * meta-condition bypass (mode=off / scope not applicable /
         #     attestation_enabled=False) — the gate is byte-equivalent
         #     OFF; no scan.
+        #
+        # NOTE — DRY_LOG is INCLUDED (2026-09-12, review W1 fix). The
+        # marker scan is a side-effect-free cheap check; in dry mode
+        # it populates ``marker_hit`` / ``marker_terms`` / ``marker_path``
+        # on the canonical log row so operators see the signal in
+        # ``decision=dry_log`` soak rows (the documented bake-time
+        # observability — see decisions.md D-ENTRY 2026-09-11 / W1
+        # amendment 2026-09-12). The marker path's judge wiring
+        # (daemon/graph.py) early-outs for DRY_LOG before any
+        # judge/hint/deny/counter side effect — the marker scan here
+        # is pure LOG-ONLY on the dry branch (zero side effects per
+        # the dry-mode contract; the existing dry-mode
+        # ``allow unconditionally`` posture is preserved end-to-end).
         #
         # Cost control (decision tree e): NO marker hit ⇒ NO judge
         # call (the judge is best-effort + costly; the cheap scan is
         # the gate). NO judge call ⇒ no behavioral change vs baseline.
         if (
-            result.decision in (Decision.ALLOWED, Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP)
+            result.decision
+            in (
+                Decision.ALLOWED,
+                Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
+                Decision.DRY_LOG,
+            )
             and not result.attestation_present
         ):
             marker_result = scan_for_mid_work_markers(
@@ -951,7 +963,10 @@ def evaluate(
                 # marker_path="<pending>" so the canonical log row
                 # carries the diagnostic fields. The graph node reads
                 # these, calls the judge, and re-emits the final
-                # marker_path value (a/b/c/d).
+                # marker_path value (a/b/c/d). On DRY_LOG the graph
+                # node early-outs before any judge/hint/deny/counter
+                # side effect — the sentinel stays as the final
+                # marker_path on the dry-log row (log-only).
                 result = replace(
                     result,
                     marker_hit=True,

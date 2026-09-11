@@ -1126,7 +1126,7 @@ Marker-scanner unit matrix (38 tests in `tests/unit/test_attestation_marker_scan
 - `daemon/services/attestation_gate.py` — `GateDecision` extended with `marker_hit` / `marker_terms` / `marker_path` / `marker_judge_verdict` / `marker_judge_latency_ms` / `marker_judge_error_class` / `marker_hint_message`; marker scan inserted in `evaluate()` for ALLOWED / ALLOWED_LEGITIMATE_PENDING_WAKEUP decisions with `attestation_present=False`; canonical log format string gains 6 additive fields.
 - `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` constant (canonical home, NFR-6 parity with `ATTESTATION_NUDGE_TEXT`); `create_attestation_gate_node` extended with the marker-path judge wiring (kill-switch respected; routing to (a)/(b)/(c)/(d); `_make_context_message` factory used for hint construction); existing would-be-deny judge is SKIPPED when `decision.marker_path in {"a", "d"}` (the marker-path judge IS the disambiguator); END branch consumes `decision.marker_hint_message`.
 - `tests/unit/test_attestation_marker_scanner.py` (NEW) — 38 tests (catalog + case-insensitivity + verbatim phrase + benign negatives + window + non-AI invisible + content flattening + multi-marker + cap).
-- `tests/unit/test_attestation_marker_wiring.py` (NEW) — 14 tests (acceptance matrix (a)/(b)/(c)/(d)/(e)/(f)/(g)/(h)/(i)/(j)/(k)).
+- `tests/unit/test_attestation_marker_wiring.py` (NEW) — 23 tests (acceptance matrix (a)/(b)/(c)/(d)/(e)/(f)/(g)/(h)/(i)/(j)/(k) + 2 wrapper-fault tests (F2 P0 close) + 7 review-pass tests (W1 dry-mode marker logging ×1, W2 Shape A supersede/isolation/compaction ×3, green #1 kill-switch OFF `<skipped>` stamp ×1, green #3 dead-import removal ×1, green #5 catalog pin RuntimeError ×1)).
 - `requirements.md` — append-only FR amendment (see immediately below).
 - `docs/setup.md` — append-only runbook note (mid-work marker scan section; judge kill-switch explanation).
 
@@ -1144,26 +1144,41 @@ Marker-scanner unit matrix (38 tests in `tests/unit/test_attestation_marker_scan
 
 ## Open residual — F1 (2026-09-12) — Unbounded `context_kind` hint accumulation under three-bucket compaction
 
+**AMENDMENT (2026-09-12, review W2 ordered fix — Shape A landed):**
+
+Shape A has been implemented per the external reviewer's W2 ordered fix. This entry is now RESOLVED-FIXED, not backlog. The implementation lands in this same commit (review-pass commit on top of 06ddad57):
+
+- `_make_completion_check_note_message(instance_id)` plumbs a stable id through the helper's reserved `instance_id` slot using the new `_stable_id_for("completion_check_note", instance_id=...)` row in the canonical id-format table at `daemon/services/context_messages.py`. The factory's `instance_id=None` fallback preserves the pre-F1 fresh-uuid4 behavior for degenerate / test-only call sites.
+- Each subsequent (b) event on the same instance now SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer. The resulting state carries EXACTLY ONE Completion Check Note block regardless of how many (b) events fired — the unbounded `context_kind=task_context` tail that previously drove `INJECTIONS_DOMINATE` skips under three-bucket compaction (merge 77ce4ae8) is closed.
+- The three-bucket compaction seam (`daemon/compaction.py::_is_hoisted_injected` + `build_sentinel_replacement`) does NOT need a dedupe fix — its partition reads `current_messages` post-LangGraph-channel-upsert, where same-id messages have already been collapsed to one. The dedupe happens at the LangGraph layer (the canonical id is the one canonical upsert key).
+
+Tests (added this pass):
+- `tests/unit/test_attestation_marker_wiring.py::test_marker_b_hint_stable_id_collapses_on_supersede` — two `(b)` events on the same instance ⇒ ONE Completion Check Note block in resulting state (LangGraph `add_messages` upsert by id; counts assertion).
+- `tests/unit/test_attestation_marker_wiring.py::test_marker_b_hint_stable_id_isolates_per_instance` — two `(b)` events on DIFFERENT instances ⇒ TWO blocks (the stable id is per-instance, not global).
+- `tests/unit/test_attestation_marker_wiring.py::test_completion_check_note_compaction_seam_hoists_once` — compaction seam (`_partition_injected_for_compaction`) hoists exactly ONE Completion Check Note after the LangGraph upsert.
+
+DO NOT TOUCH (this amendment):
+- The `(b)-path` semantics (route, log row, hint content) — unchanged.
+- The `context_messages._make_context_message` `id_=None` default — unchanged for any other caller.
+- The id-format table row "completion_check_note" — append-only; any new kind MUST go through `_stable_id_for` and follow the canonical table convention.
+
+---
+
+**Original entry (preserved for audit history — Shape A was the recommended next step, see below):**
+
 **Symptom (recorded during 2026-09-11 adversarial review pass):**
 
 Every (b)-path "Completion Check Note" mint currently goes through `daemon.graph._make_completion_check_note_message(instance_id)` → `_make_context_message(kind=CONTEXT_KIND_TASK_CONTEXT, title=..., content=...)`. The factory lets `_make_context_message` mint a fresh `uuid4` per call (the `id_=None` default; see `daemon/services/context_messages.py:118-125`). Repeated (b) events on the same session therefore stamp a distinct `HumanMessage.id` each time, and each one survives compaction as a permanently-hoisted `context_kind=task_context` block under the three-bucket contract (per merge 77ce4ae8 / `daemon/compaction.py` threshold numerator counts ALL messages incl. injected `[SYSTEM CONTEXT]`). Net effect: a leader that mid-work-phrases across many turns accumulates an unbounded tail of Completion Check Note hints in its context, dominating the budget without ever being absorbed.
 
-**Proposed fix shapes (not yet implemented):**
+**Proposed fix shapes (not yet implemented — superseded by amendment above):**
 
 - *Shape A — stable id per session:* `id_=_stable_id_for("completion_check_note", instance_id=effective_instance_id)` plumbed through the new helper's reserved `instance_id` slot. Adds a new kind to `_stable_id_for`'s canonical id-format table (decisions.md D3 — kv-ambient-awareness-fix; single source of truth — all callers route through this helper so the mint site stays grep-able and the formats stay append-only). Each subsequent (b) event on the same instance SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer.
 - *Shape B — drop `context_kind` for the bare-flag shape:* mint the hint with `injected_message=True` but NO `context_kind` field (the bare-flag UNANSWERED treatment per merge 77ce4ae8 — preserved verbatim and hoisted). Lower-priority — changes how FE / consumers filter these blocks (the `context_kind` enumeration becomes a fuzzy set vs. an exact match).
 
-**Recommended next step:** Shape A — minimal diff, no consumer-key changes, single new `_stable_id_for` row, and the helper's already-reserved `instance_id` slot is the natural seam. Defer until the F1 shape gets a small operational bake (soak the (b) path in a real session and confirm hint count actually grows before committing to the id-format-table edit).
+**Recommended next step (landed per amendment above):** Shape A — minimal diff, no consumer-key changes, single new `_stable_id_for` row, and the helper's already-reserved `instance_id` slot is the natural seam.
 
-**Out-of-scope for the 2026-09-11 commit (F2/F3/F4 are the in-scope residual fixes):** this entry is BACKLOG hygiene, no code change.
+**Files (FIXED — implementation landed this pass):**
 
-**Files (potential future change — none edited today):**
-
-- `daemon/graph.py` — `_make_completion_check_note_message` (the helper already plumbs `instance_id` for this exact purpose; just one line at the call site to `_make_context_message` to use `_stable_id_for("completion_check_note", instance_id=...)`).
+- `daemon/graph.py` — `_make_completion_check_note_message` (the helper already plumbs `instance_id` for this exact purpose; ONE line at the call site to `_make_context_message` to use `_stable_id_for("completion_check_note", instance_id=...)`).
 - `daemon/services/context_messages.py` — append the `completion_check_note` row to `_stable_id_for`'s id-format table (the single source of truth for stable-id formats per D3 kv-ambient-awareness-fix).
-- `tests/unit/test_attestation_marker_wiring.py` — add a (b)-path test asserting the second emit SUPERSEDES the first (LangGraph `add_messages` reducer collapses by `id`); pins the Shape A contract end-to-end.
-
-**DO NOT TOUCH (this backlog entry):**
-
-- The `(b)-path` semantics (route, log row, hint content) — unchanged.
-- The `context_messages._make_context_message` `id_=None` default — unchanged for any other caller.
+- `tests/unit/test_attestation_marker_wiring.py` — added the supersede + per-instance isolation + compaction-seam hoists-once tests (Shape A contract end-to-end).

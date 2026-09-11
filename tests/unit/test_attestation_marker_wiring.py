@@ -748,10 +748,24 @@ def test_marker_kill_switch_env_off_no_judge_call(monkeypatch, caplog):
     ledger.reset.assert_not_called()
 
     # The canonical gate log row still carries marker_hit=True (so the
-    # operator sees the hit in dry-log soak); but no judge row.
+    # operator sees the hit in dry-log soak); the kill-switch OFF
+    # branch emits a NEW distinct log row (event=leader_completion_
+    # gate_marker_judge_disabled with verdict=<skipped>) — but the
+    # original marker-path judge row MUST NOT fire (the judge call
+    # itself is what would have produced the standard
+    # event=leader_completion_gate_marker_judge log line, which is
+    # what operators grep for live calls; the new disabled row is
+    # the grep-disjoint sink for kill-switch OFF). Pin both: the
+    # disabled row IS emitted, the live-judge row IS NOT.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=True" in log_text
-    assert "event=leader_completion_gate_marker_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_marker_judge_disabled" in log_text
+    )
+    assert (
+        "event=leader_completion_gate_marker_judge " not in log_text
+        and "event=leader_completion_gate_marker_judge\n" not in log_text
+    )
 
 
 def test_marker_kill_switch_config_off_no_judge_call(monkeypatch):
@@ -1052,3 +1066,434 @@ def test_quick_question_with_marker_reaches_judge(monkeypatch, caplog):
     assert "messages" in result
     assert result["attestation_route"] == "agent"
     ledger.increment.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review pass W1 (2026-09-12) — dry-mode marker signal
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_dry_mode_marker_hit_logs_signal_no_side_effects(
+    monkeypatch, caplog
+):
+    """W1: dry mode + mid-work marker → canonical log row carries
+    marker_hit / marker_terms / marker_path; ZERO side effects.
+
+    The review-pass defect was that the gate-level scan at
+    ``daemon/services/attestation_gate.py`` excluded
+    ``Decision.DRY_LOG`` from the marker-scan trigger tuple, so the
+    documented "marker hits logged in dry mode" signal never fired.
+    The fix opens the trigger tuple to include ``DRY_LOG`` (LOG-ONLY
+    side-effect-free path); the graph node early-outs for DRY_LOG
+    before any judge/hint/deny/counter side effect. Pin the end-to-
+    end contract on a delegated-mission dry run.
+    """
+    # The judge service must NEVER be called on the dry-mode path —
+    # the marker-path judge wiring in graph.py early-outs for DRY_LOG
+    # via the tuple check ``decision.decision in (Decision.ALLOWED,
+    # Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP)``. Track any
+    # accidental call as a regression.
+    judge_calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        judge_calls.append(True)
+        return (
+            '{"is_complete_report": true, "reason": "genuine"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+
+    # Dry-mode wiring: GateSettings(mode="dry", window=3, deny_bound=3).
+    manager = MagicMock()
+    manager.count_pending_children.return_value = 0
+    manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 0
+    manager.enqueue_message = MagicMock()
+    manager.revive = MagicMock()
+    manager.send_message = MagicMock()
+
+    ledger = MagicMock()
+    ledger.increment.return_value = 1
+    ledger.reset.return_value = True
+    ledger.set_escalated_and_reset.return_value = True
+    ledger.get.return_value = 0
+
+    config = build_gate_config(
+        "marker-dry-it", GateSettings("dry", 3, 3),
+        llm_judge_enabled=True,
+    )
+    node = create_attestation_gate_node(
+        config,
+        GateSettings("dry", 3, 3),
+        manager,
+        "marker-dry-it",
+        denied_count_getter=lambda: 0,
+        ledger=ledger,
+    )
+
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting final four: C12a/b/c + blame-worker. "
+                    "Then I aggregate and write RESULTS. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "marker-dry-it"}},
+            )
+        )
+
+    # ZERO side effects on the dry-mode path.
+    assert judge_calls == [], (
+        "W1: dry mode + marker MUST NOT call the judge — the marker-"
+        "path judge wiring early-outs for DRY_LOG before any judge/"
+        "hint/deny/counter side effect"
+    )
+    assert "messages" not in result, (
+        "W1: dry mode + marker MUST NOT inject a hint (no judge → no "
+        "(b)-path Completion Check Note injection)"
+    )
+    assert result["attestation_route"] is None, (
+        "W1: dry mode + marker MUST NOT re-route — plain END preserved"
+    )
+    ledger.increment.assert_not_called()
+    ledger.reset.assert_not_called()
+    ledger.set_escalated_and_reset.assert_not_called()
+
+    # Canonical log row carries the dry-mode marker signal — the W1
+    # fix that lets the bake-time observability surface the marker
+    # hits. Asserted at the format-string level so the row stays
+    # grep-disjoint from the (a)/(b)/(c)/(d) routing rows.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    canonical_row = next(
+        (m for m in log_text.splitlines() if "event=leader_completion_gate" in m),
+        None,
+    )
+    assert canonical_row is not None, (
+        "W1: the canonical gate log row MUST be emitted on the dry path"
+    )
+    assert "decision=dry_log" in canonical_row
+    assert "marker_hit=True" in canonical_row
+    # Verbatim incident phrase fires three markers in CATALOG order
+    # (catalog iteration order, NOT first-occurrence — the scanner
+    # orders by catalog per the brief). Catalog order is "ending
+    # turn" → "awaiting" → "then i aggregate" (see
+    # daemon/services/attestation_marker_scanner.py:114-131).
+    assert (
+        "marker_terms=ending turn,awaiting,then i aggregate"
+        in canonical_row
+    )
+    # marker_path stays at the transient "<pending>" sentinel — the
+    # graph node early-out never resolved it to "a"/"b"/"c"/"d"
+    # (no judge ran). This is the dry-mode LOG-ONLY contract.
+    assert "marker_path=<pending>" in canonical_row
+    assert "marker_judge_verdict=<pending>" in canonical_row
+
+    # No marker-path judge row, no marker-path judge error row, no
+    # kill-switch disabled row — dry mode is the gate's pure-passive
+    # observer branch.
+    assert "event=leader_completion_gate_marker_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_marker_judge_error" not in log_text
+    )
+    assert (
+        "event=leader_completion_gate_marker_judge_disabled"
+        not in log_text
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review pass W2 (2026-09-12) — Completion Check Note stable id supersede
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _langgraph_upsert_by_id(left, right):
+    """Mimic langgraph 1.0.9's ``add_messages`` upsert-by-id behavior.
+
+    The test conftest mocks out ``langgraph`` as a MagicMock namespace
+    (so importing ``from langgraph.graph import add_messages`` raises
+    ImportError under pytest). The Shape A contract — "same id ⇒
+    upsert ⇒ one block in resulting state" — is invariant on the
+    upsert rule itself, not on the import path. This helper mirrors
+    ``langgraph/graph/message.py::add_messages`` source-verified
+    behavior: ``merged[existing_idx] = m`` (line 225) for same-id
+    messages in ``right``.
+    """
+    merged = list(left)
+    merged_by_id = {m.id: i for i, m in enumerate(merged) if m.id}
+    for m in right:
+        if not getattr(m, "id", None):
+            merged.append(m)
+            continue
+        existing_idx = merged_by_id.get(m.id)
+        if existing_idx is not None:
+            merged[existing_idx] = m
+        else:
+            merged_by_id[m.id] = len(merged)
+            merged.append(m)
+    return merged
+
+
+def test_completion_check_note_stable_id_collapses_on_supersede():
+    """W2 (Shape A): two (b) events on the SAME instance → ONE block.
+
+    The F1 Shape A contract: ``_stable_id_for("completion_check_note",
+    instance_id=...)`` mints a stable id per instance, so each
+    subsequent (b) event on the same instance SUPERSEDES the prior
+    checkpoint entry in place via LangGraph's ``add_messages``
+    reducer. Pin the contract end-to-end: same id → upsert → one
+    block in the resulting state.
+    """
+    from daemon.graph import _make_completion_check_note_message
+
+    instance_id = "lca-supersede-it"
+
+    hint_1 = _make_completion_check_note_message(instance_id)
+    hint_2 = _make_completion_check_note_message(instance_id)
+
+    # Stable id is the F1 Shape A contract — same instance ⇒ same id.
+    assert hint_1.id == hint_2.id, (
+        "W2 (Shape A): same instance_id MUST mint the same stable id "
+        "so LangGraph's add_messages reducer supersedes in place"
+    )
+    assert hint_1.id == f"completion_check_note:{instance_id}"
+
+    # Body content unchanged — the supersede must NOT alter the hint
+    # body or the canonical prefix.
+    assert hint_1.content == COMPLETION_CHECK_NOTE_TEXT
+    assert hint_2.content == COMPLETION_CHECK_NOTE_TEXT
+    assert hint_1.content.startswith(
+        "[SYSTEM CONTEXT: Completion Check Note]"
+    )
+
+    # Upsert-by-id collapses the two same-id hints to ONE. The
+    # behavior is source-verified on langgraph 1.0.9
+    # (``langgraph/graph/message.py::add_messages`` line 225:
+    # ``merged[existing_idx] = m`` for same-id messages in right).
+    merged = _langgraph_upsert_by_id([hint_1], [hint_2])
+    assert len(merged) == 1, (
+        "W2: LangGraph add_messages MUST collapse the two same-id "
+        "Completion Check Note hints to ONE block — the supersede "
+        f"got {len(merged)} blocks instead"
+    )
+    assert merged[0].id == hint_2.id
+    # context_kind is preserved on the surviving block so the three-
+    # bucket compaction seam still classifies it as a permanent
+    # injected message.
+    assert merged[0].additional_kwargs.get("context_kind") == (
+        "task_context"
+    )
+
+
+def test_completion_check_note_stable_id_isolates_per_instance():
+    """W2 (Shape A): two (b) events on DIFFERENT instances → TWO blocks.
+
+    The stable id is per-instance, not global — instances do not
+    collide. Two leaders mid-work phrasing on the same turn-end
+    each get their own Completion Check Note block.
+    """
+    from daemon.graph import _make_completion_check_note_message
+
+    hint_a = _make_completion_check_note_message("lca-iso-A")
+    hint_b = _make_completion_check_note_message("lca-iso-B")
+
+    # Distinct ids — the id format is ``completion_check_note:{instance_id}``.
+    assert hint_a.id != hint_b.id
+    assert hint_a.id == "completion_check_note:lca-iso-A"
+    assert hint_b.id == "completion_check_note:lca-iso-B"
+
+    # And the fallback (instance_id=None) preserves the pre-F1
+    # fresh-uuid4 behavior — degenerate / test-only call sites
+    # stay green.
+    hint_unbound = _make_completion_check_note_message()
+    assert hint_unbound.id != hint_a.id
+    assert hint_unbound.id != hint_b.id
+
+
+def test_completion_check_note_compaction_seam_hoists_once():
+    """W2 (Shape A): compaction seam hoists exactly ONE hint after upsert.
+
+    After LangGraph's add_messages reducer collapses the two same-id
+    hints to ONE in the channel, the three-bucket compaction seam
+    (``daemon/compaction.py::_partition_injected_for_compaction``)
+    sees ONE Completion Check Note and hoists ONE — the partition
+    is dedupe-by-id-correct downstream of the LangGraph upsert.
+    """
+    from daemon.compaction import _partition_injected_for_compaction
+    from daemon.graph import _make_completion_check_note_message
+
+    instance_id = "lca-compact-it"
+    hint_1 = _make_completion_check_note_message(instance_id)
+    hint_2 = _make_completion_check_note_message(instance_id)
+
+    # Pre-channel mix: one AIMessage user-turn + two same-id hints.
+    # The LangGraph upsert happens BEFORE the compaction seam reads
+    # the channel — so we feed the seam the post-upsert state.
+    user_turn = AIMessage(content="user prompt")
+    seeded = [user_turn, hint_1, hint_2]
+    post_upsert = _langgraph_upsert_by_id([], seeded)
+    # Two hints collapse to ONE (and the user AIMessage stays).
+    assert len(post_upsert) == 2
+
+    # Three-bucket partition. The post-upsert channel has ONE hint;
+    # the seam hoists it via the ``context_kind`` predicate
+    # (``_has_context_kind(msg) == True`` → hoisted verbatim).
+    selectable, preserved_injected, _ = _partition_injected_for_compaction(
+        post_upsert
+    )
+    hint_blocks = [
+        m
+        for m in preserved_injected
+        if getattr(m, "id", "").startswith("completion_check_note:")
+    ]
+    assert len(hint_blocks) == 1, (
+        "W2 (Shape A): the three-bucket compaction seam MUST hoist "
+        f"exactly ONE Completion Check Note; got {len(hint_blocks)}"
+    )
+    assert hint_blocks[0].id == f"completion_check_note:{instance_id}"
+    # The user-turn AIMessage stays in the selectable pool (no
+    # context_kind, not bare-flag injected).
+    assert any(m is user_turn for m in selectable)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review pass green #1 (2026-09-12) — kill-switch OFF stamps <skipped>
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_marker_kill_switch_off_stamps_skipped_verdict(
+    monkeypatch, caplog
+):
+    """Green #1: kill-switch OFF stamps marker_judge_verdict=<skipped>.
+
+    The kill-switch OFF branch in graph.py stamps
+    ``marker_judge_verdict="<skipped>"`` on the decision AND emits a
+    distinct log row so operators can grep-distinguish OFF-skipped
+    from judge-error/timeout/unparsable. Pin both: the decision
+    field AND the new log row.
+    """
+    # The judge service must NEVER be called on the kill-switch OFF
+    # path — track any accidental call as a regression.
+    judge_calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        judge_calls.append(True)
+        return (
+            '{"is_complete_report": true, "reason": "genuine"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+
+    # Real env var + real resolver reset to drive the kill-switch OFF
+    # branch through the canonical resolver (not the gate-config
+    # bypass).
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "0")
+    judge_resolver_mod.reset_llm_judge_resolver_for_tests()
+    assert judge_resolver_mod.is_llm_judge_enabled() is False
+
+    node, manager, ledger = _make_node(instance_id="marker-skip-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Awaiting reply. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "marker-skip-it"}},
+            )
+        )
+
+    # ZERO judge calls — the kill-switch OFF path bypasses the judge.
+    assert judge_calls == []
+
+    # Distinct log row emitted by the kill-switch OFF branch —
+    # ``event=leader_completion_gate_marker_judge_disabled`` with
+    # ``verdict=<skipped>``. Grep-disjoint from the existing judge
+    # event family so operators can pinpoint the operator-disabled
+    # case.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert (
+        "event=leader_completion_gate_marker_judge_disabled" in log_text
+    ), "green #1: kill-switch OFF MUST emit the disabled-row signal"
+    assert "verdict=<skipped>" in log_text, (
+        "green #1: the disabled-row verdict MUST be the literal "
+        "<skipped> sentinel (operators grep for this exact token)"
+    )
+
+    # The canonical gate log row's marker_judge_verdict stays at the
+    # transient "<pending>" sentinel — graph.py cannot mutate a row
+    # that was emitted before this code runs. The disabled row IS
+    # the operator-observable signal.
+    canonical_row = next(
+        (m for m in log_text.splitlines() if "event=leader_completion_gate" in m),
+        None,
+    )
+    assert canonical_row is not None
+    assert "marker_judge_verdict=<pending>" in canonical_row
+
+
+def test_marker_scan_catalog_pin_survives_optimization():
+    """Green #5: catalog pin raises RuntimeError (not bare assert).
+
+    The catalog size pin at module load was a bare ``assert`` —
+    ``python -O`` strips assertions and silently disables the pin.
+    Convert to an explicit ``RuntimeError`` so the pin survives
+    optimization. Verify the runtime pin function shape via a
+    focused contract test: the same check expression (12 ≤ N ≤ 18)
+    is reachable both as a conditional raise and via the now-active
+    module-load pin — pin the public surface so a future regression
+    to ``assert`` is caught.
+    """
+    import textwrap
+
+    from daemon.services import attestation_marker_scanner as scanner_mod
+
+    # The catalog at module load must currently be in range (sanity).
+    assert 12 <= len(scanner_mod.MID_WORK_MARKERS) <= 18, (
+        "green #5: catalog pin pre-condition — the real catalog MUST "
+        "be in range 12-18 (per the brief)"
+    )
+
+    # The pin must NOT be a bare ``assert`` (which ``python -O``
+    # strips). Verify by sourcing the module's compiled code and
+    # confirming the catalog-pinning statement uses an explicit
+    # ``raise RuntimeError`` — the same expression an ``assert``
+    # could be replaced with, but one that survives optimization.
+    source = textwrap.dedent(
+        open(scanner_mod.__file__).read()
+    )
+    assert "assert 12 <= len(MID_WORK_MARKERS)" not in source, (
+        "green #5: the catalog pin MUST NOT be a bare ``assert`` "
+        "(stripped by ``python -O``); use an explicit RuntimeError "
+        "raise"
+    )
+    assert "raise RuntimeError" in source, (
+        "green #5: the catalog pin MUST raise RuntimeError explicitly "
+        "so it survives ``python -O``"
+    )
+    assert "12-18 patterns" in source, (
+        "green #5: the pin error message MUST name the 12-18 range so "
+        "operators see the contract when it fires"
+    )
+
+
+def test_marker_scanner_module_no_re_import():
+    """Green #3: the unused ``re`` import is gone.
+
+    The marker scanner uses substring match (not regex), so the
+    ``re`` module import + the ``_ = re`` silencer at module bottom
+    were both dead weight. Pin: the module has no ``re`` symbol in
+    its namespace (the silencer is gone too).
+    """
+    from daemon.services import attestation_marker_scanner as scanner_mod
+
+    # The module must not import ``re`` (the scanner uses substring
+    # match — the dead ``re`` import is removed).
+    assert not hasattr(scanner_mod, "re"), (
+        "green #3: the unused ``re`` import MUST be removed from "
+        "attestation_marker_scanner.py (substring match, not regex)"
+    )

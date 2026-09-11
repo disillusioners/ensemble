@@ -15,7 +15,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
 from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _replace
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
@@ -2921,12 +2921,26 @@ def _make_completion_check_note_message(
     :data:`COMPLETION_CHECK_NOTE_TEXT` byte-for-byte — the existing
     hint-content test pins this invariant.
 
+    F1 Shape A (2026-09-12, review W2 — Shape A landed): when an
+    ``instance_id`` is supplied, the hint carries a stable id minted
+    via :func:`_stable_id_for('completion_check_note', instance_id=...)`
+    — the canonical id-format table row added in this pass. The
+    stable id collapses repeated (b) events on the same instance:
+    LangGraph's ``add_messages`` reducer SUPERSEDES the prior
+    checkpoint entry in place, so the Completion Check Note block
+    appears EXACTLY ONCE in the resulting state regardless of how
+    many (b) events fire — the unbounded ``context_kind=task_context``
+    tail under three-bucket compaction (merge 77ce4ae8) is closed.
+    When ``instance_id`` is ``None`` (degenerate / test-only call
+    sites) the factory falls back to the pre-F1 fresh-uuid4 behavior
+    so tests that don't care about supersede semantics stay green.
+
     Args:
-        instance_id: Owning instance id. Reserved for the F1 backlog
-            fix (a stable id per session collapses the unbounded
-            ``context_kind`` hint accumulation under three-bucket
-            compaction); unused at present — every caller currently
-            lets ``_make_context_message`` mint a fresh uuid4.
+        instance_id: Owning instance id. When supplied, the hint
+            carries a stable id so repeated (b) events on the SAME
+            instance supersede in place (Shape A contract). When
+            ``None``, the factory falls back to a fresh ``uuid4``
+            (the pre-F1 behavior).
 
     Returns:
         A ``HumanMessage`` with the canonical Completion Check Note
@@ -2937,13 +2951,20 @@ def _make_completion_check_note_message(
         CONTEXT_PREFIX,
         CONTEXT_SUFFIX,
         _make_context_message,
+        _stable_id_for,
     )
     header = CONTEXT_PREFIX + _COMPLETION_CHECK_NOTE_TITLE + CONTEXT_SUFFIX
     body = COMPLETION_CHECK_NOTE_TEXT[len(header):]
+    stable_id = (
+        _stable_id_for("completion_check_note", instance_id=instance_id)
+        if instance_id
+        else None
+    )
     return _make_context_message(
         kind=CONTEXT_KIND_TASK_CONTEXT,
         title=_COMPLETION_CHECK_NOTE_TITLE,
         content=body,
+        id_=stable_id,
     )
 
 #: Graph node name + conditional-route name for the attestation gate.
@@ -3321,8 +3342,20 @@ def create_attestation_gate_node(
         # through to plain ALLOW (marker-only signal is too weak to
         # deny — allow + log; DECIDED, do not relitigate, see
         # decisions.md D-ENTRY 2026-09-11).
+        #
+        # DRY-mode early-out (2026-09-12, review W1 fix). The tuple
+        # check below deliberately EXCLUDES ``Decision.DRY_LOG`` so
+        # the marker-path judge/hint/deny/counter wiring NEVER fires
+        # for dry-mode decisions — ``evaluate()`` stamps
+        # marker_hit + marker_terms + marker_path="<pending>" on the
+        # canonical log row (LOG-ONLY, side-effect-free) and the
+        # graph node falls through to plain ALLOW without ever
+        # calling the judge, without ever injecting a hint, and
+        # without ever incrementing the counter. The dry-mode
+        # ``allow unconditionally`` posture is preserved end-to-end.
         if (
-            decision.decision in (
+            decision.decision
+            in (
                 Decision.ALLOWED,
                 Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             )
@@ -3338,7 +3371,35 @@ def create_attestation_gate_node(
             except Exception:  # noqa: BLE001 — kill-switch resolver fault
                 marker_judge_on = False
 
-            if marker_judge_on:
+            if not marker_judge_on:
+                # Kill-switch OFF (2026-09-12, green #1) — the operator
+                # disabled the marker-path judge. Stamp
+                # ``marker_judge_verdict="<skipped>"`` on the decision
+                # and emit a distinct log row so operators can
+                # grep-distinguish OFF-skipped from
+                # judge-error/timeout/unparsable (the log row event
+                # name is grep-disjoint from the existing judge/event
+                # family per docs/setup.md amendment). NO judge call,
+                # NO hint, NO deny, NO counter — the gate falls
+                # through to plain ALLOW (the existing kill-switch
+                # contract). Note: the canonical ``event=leader_
+                # completion_gate`` log row emitted inside
+                # ``evaluate()`` already carries ``marker_judge_
+                # verdict="<pending>"`` — graph.py cannot mutate a
+                # row that was emitted before this code runs; the
+                # extra row below is the operator-observable signal.
+                decision = _replace(
+                    decision,
+                    marker_judge_verdict="<skipped>",
+                )
+                logger.info(
+                    "event=leader_completion_gate_marker_judge_disabled "
+                    "instance_id=%s verdict=<skipped> "
+                    "marker_terms=%s",
+                    effective_instance_id,
+                    ",".join(decision.marker_terms) if decision.marker_terms else "<none>",
+                )
+            else:
                 # Resolve the judge config (mirror the would-be-deny
                 # judge pattern earlier in this function).
                 marker_judge_result = None
@@ -3414,7 +3475,6 @@ def create_attestation_gate_node(
                             effective_instance_id,
                             marker_judge_verdict,
                         )
-                        from dataclasses import replace as _replace
                         decision = _replace(
                             decision,
                             decision=Decision.DENIED,
@@ -3444,7 +3504,6 @@ def create_attestation_gate_node(
                                 effective_instance_id
                             )
                         )
-                        from dataclasses import replace as _replace
                         decision = _replace(
                             decision,
                             marker_path=marker_path,
@@ -3535,7 +3594,6 @@ def create_attestation_gate_node(
                         # requires ``dataclasses.replace`` — but
                         # ``decision`` here is a local and we only
                         # rebuild it for the path-flip.
-                        from dataclasses import replace as _replace
                         decision = _replace(
                             decision,
                             decision=Decision.DENIED,
@@ -3563,7 +3621,6 @@ def create_attestation_gate_node(
                                 effective_instance_id
                             )
                         )
-                        from dataclasses import replace as _replace
                         decision = _replace(
                             decision,
                             marker_path=marker_path,
