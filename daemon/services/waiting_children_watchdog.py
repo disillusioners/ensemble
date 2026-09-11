@@ -816,7 +816,10 @@ class WaitingChildrenWatchdog:
         * *explicit fail-closed on DB-error* (B3 polish,
           cycle-2 2026-09-11): the previous behavior caught the
           probe's DB error ONLY via the watchdog's broad per-parent
-          ``except Exception`` at :1267+ — fail-closed by accident,
+          ``except Exception as exc`` clause (the
+          ``WaitingChildrenWatchdog.run_once`` body — search for
+          ``except Exception as exc`` near ``stats["errors"]`` to
+          locate the exact handler) — fail-closed by accident,
           not by design. Any tightening of that broad catch (the
           vgap test fails loudly if that ever happens) would
           re-introduce the wedge. This helper now catches the

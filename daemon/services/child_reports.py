@@ -3836,38 +3836,100 @@ Provide a concise summary:"""
         #   2. ``inst.status == COMPLETED`` (the defer was NOT
         #      legitimate — the child is actually done, not in a
         #      retry/pause bridge).
-        #   3. The bus's ``fetch_pending_for_target_and_child`` finds
-        #      a PENDING watcher for the (parent, child) pair. (When
-        #      the natural path already fired, no PENDING watcher
-        #      exists, the helper is a no-op, and we silently return.)
+        #   3. No TOCTOU at this seam: the re-mint site does NOT
+        #      pre-check for a PENDING watcher. The bus helper's
+        #      ``emit_terminal_for_child_instance``
+        #      (``daemon/services/dependency_bus.py:874-887``) reads
+        #      ``matched_rows`` via ``fetch_pending_for_target_and_
+        #      child`` and then atomically transitions each matched
+        #      row with ``transition_state``'s guarded
+        #      ``WHERE state='PENDING'`` UPDATE — the atomic write-
+        #      time re-verify inside the helper is what actually
+        #      serializes concurrent callers and exactly-once-fires
+        #      the PENDING watcher. When the natural path already
+        #      fired, the helper's ``matched_rows`` read returns
+        #      ``[]`` (no PENDING row exists) and the helper returns
+        #      an empty FollowUp list — no spurious emit, no double
+        #      fire. The helper is unconditionally safe to call
+        #      without a separate pre-check.
+        #
+        # SCOPE NOTE (W2, R2 polish 2026-09-11): this re-mint is
+        # COMPLETED-only BY DESIGN. ERROR-terminal children are NOT
+        # covered here — they reach the bus's corrective multi-turn
+        # emit via the error-lane pair at ``error_reporting.py:636``
+        # (see the ``_emit_terminal_for_child_instance_via_bus`` call
+        # in the ``status="error"`` branch). ACCEPTED RESIDUAL: if
+        # that error-lane hook itself fails (the helper logs WARNING
+        # and the call is unguarded against a top-level raise there),
+        # the ERROR-shape stays unhealed — documented as a backlog
+        # item, not in scope for this branch.
         if outcome == "idempotency_skip":
             if parent_id is not None:
                 try:
                     inst = await asyncio.to_thread(
                         self._manager._instance_repository.get, instance_id
                     )
-                except Exception:
+                except Exception as fetch_exc:
+                    # Forensics: a parent-repo read failure here means
+                    # the wedge-shape re-mint is silently skipped (no
+                    # caller-visible error). Surface at DEBUG so
+                    # operators can correlate with downstream parent-
+                    # still-parked symptoms.
+                    logger.debug(
+                        f"B4 cycle-2 re-mint: instance repo fetch "
+                        f"failed for {instance_id[:8]}...; "
+                        f"deferring re-mint (no-op): {fetch_exc!r}"
+                    )
                     inst = None
                 if inst is not None and inst.status == (
                     InstanceStatus.COMPLETED.value
                 ):
                     try:
-                        await self._emit_terminal_for_child_instance_via_bus(
-                            parent_instance_id=parent_id,
-                            child_instance_id=instance_id,
-                            status="completed",
-                            summary=(
-                                "idempotency_skip obligation re-mint "
-                                "(B4 cycle-2 wedge fix; 84563a03)"
-                            ),
+                        # Capture the helper's returned FollowUp list
+                        # to distinguish "wedge healed" (non-empty) from
+                        # "legit skip / watcher already FIRED"
+                        # (empty list — see
+                        # ``_emit_terminal_for_child_instance_via_bus``
+                        # docstring at child_reports.py:608-613). The
+                        # helper returns ``[]`` when:
+                        #   * parent_instance_id is None (root)
+                        #   * bus singleton is None (wiring failure)
+                        #   * matched_rows → 0 (no PENDING watcher)
+                        #   * task-keyed emit already fired
+                        #     (transition_state's guarded UPDATE
+                        #     yielded rowcount == 0)
+                        # In all four cases the obligation is already
+                        # satisfied or inapplicable — a WARNING here
+                        # would be a misleading ops-log overclaim under
+                        # the recurring RESUME_ROUTER ×4-dup shape
+                        # (each post-resume turn reruns the natural
+                        # path → idempotency_skip → helper returns []).
+                        fired_followups = (
+                            await self._emit_terminal_for_child_instance_via_bus(
+                                parent_instance_id=parent_id,
+                                child_instance_id=instance_id,
+                                status="completed",
+                                summary=(
+                                    "idempotency_skip obligation re-mint "
+                                    "(B4 cycle-2 wedge fix; 84563a03)"
+                                ),
+                            )
                         )
-                        logger.warning(
-                            f"B4 cycle-2: idempotency_skip wedge "
-                            f"re-mit for child {instance_id[:8]}... "
-                            f"/ parent {parent_id[:8]}... — instance "
-                            f"COMPLETED, PENDING watcher obligation "
-                            f"honored via corrective multi-turn emit."
-                        )
+                        # Only log the WARNING when the helper
+                        # actually healed a PENDING watcher (the wedge
+                        # case). Empty list = legit skip / natural
+                        # path already fired — silent no-op (the
+                        # expected common case under RESUME_ROUTER
+                        # dup-shapes and post-completion revives).
+                        if fired_followups:
+                            logger.warning(
+                                f"B4 cycle-2: idempotency_skip wedge "
+                                f"re-mit for child {instance_id[:8]}... "
+                                f"/ parent {parent_id[:8]}... — instance "
+                                f"COMPLETED, PENDING watcher obligation "
+                                f"honored via corrective multi-turn emit "
+                                f"({len(fired_followups)} watcher(s) FIRED)."
+                            )
                     except Exception as remit_exc:
                         # Defense-in-depth: the helper itself logs
                         # exceptions and returns an empty FollowUp
@@ -3879,6 +3941,23 @@ Provide a concise summary:"""
                             f"{instance_id[:8]}... / "
                             f"{parent_id[:8]}...: {remit_exc!r}"
                         )
+            # Structural mutual exclusion (N5, R2 polish 2026-09-11):
+            # the inline ``return`` here is the ONLY outcome class
+            # the cycle-2 re-mint covers. The backstop at
+            # ``child_reports.py:~4195`` is structurally unreachable
+            # for ``idempotency_skip`` — every other canonical
+            # outcome (``root_completed``, ``deferred_pause``,
+            # ``dead_parent_skip``, ``tool_invocation_completed``,
+            # ``deferred_waiting_children``,
+            # ``root_waiting_children``, ``child_still_running_defer``,
+            # ``regular_child_completed``,
+            # ``instance_not_found``) early-returns ABOVE this branch
+            # too. The backstop is therefore reachable ONLY for
+            # outcome strings NOT in the canonical set (unknown /
+            # synthetic outcomes) — the legacy "idempotency_skip
+            # backstop" claim from the cycle-1 commit message is no
+            # longer accurate; the re-mint owns the obligation path
+            # for the canonical ``idempotency_skip`` shape.
             return
 
         # Phase 1 (pause-report-recovery Variant B fix 2): the
@@ -4193,14 +4272,40 @@ Provide a concise summary:"""
             return
 
         # B4 RESOLVED 2026-09-11: child report obligation BACKSTOP.
-        # If the natural completion path returned an outcome that
-        # does NOT emit (idempotency_skip, deferred_pause, dead_
-        # parent_skip, root_completed, tool_invocation_completed) but
-        # the instance is actually COMPLETED with a parent, force-emit
-        # via the corrective multi-turn primitive. This closes the
-        # 84563a03 wedge class (turn done 10:59:15+07, no terminal
-        # report, parent parked ~4.5h) where the natural path was
-        # bypassed entirely.
+        # Reachable ONLY for UNKNOWN outcome strings at HEAD (R2
+        # polish 2026-09-11) — every canonical outcome now early-
+        # returns BEFORE this site:
+        #
+        #   * ``regular_child_completed`` and
+        #     ``child_still_running_defer`` → set
+        #     ``bus_terminal_emitted=True`` and return via their own
+        #     branches; the backstop's ``not bus_terminal_emitted``
+        #     guard short-circuits.
+        #   * ``idempotency_skip`` → handled INLINE by the cycle-2
+        #     re-mint at ``child_reports.py:~3843`` (W5 obligation
+        #     re-mint) when parent ∧ COMPLETED ∧ PENDING watcher.
+        #     When those conditions are absent (no parent, not
+        #     COMPLETED, no PENDING watcher) the branch is a silent
+        #     legit-skip — see the structural mutual-exclusion
+        #     comment above the inline ``return``.
+        #   * ``root_completed`` → root has no parent obligation.
+        #   * ``tool_invocation_completed`` → lifecycle events, no
+        #     bus emit.
+        #   * ``deferred_pause`` → DEFERRED marker persisted in
+        #     DB-sync helper.
+        #   * ``dead_parent_skip`` → no live parent.
+        #   * ``deferred_waiting_children`` /
+        #     ``root_waiting_children`` → SSE-only paths.
+        #   * ``instance_not_found`` → no instance, no obligation.
+        #
+        # So this backstop is structurally reachable ONLY for
+        # synthetic / unknown outcome strings — the legacy cycle-1
+        # claim "backstop handles idempotency_skip" is no longer
+        # accurate (the inline re-mint owns that path now). The
+        # backstop exists as a safety net for future outcome shapes
+        # added without a dedicated handler; it's also the wedge
+        # closure for the 84563a03 class when the inline re-mint
+        # ever fails silently (defense-in-depth).
         #
         # Skip conditions (each is a legitimate non-emit):
         #  * No parent — root instance, no obligation.
@@ -4231,7 +4336,19 @@ Provide a concise summary:"""
                 inst = await asyncio.to_thread(
                     self._manager._instance_repository.get, instance_id
                 )
-            except Exception:
+            except Exception as fetch_exc:
+                # Forensics: a parent-repo read failure here means
+                # the backstop's force-emit is silently skipped. At
+                # HEAD this site is only reachable for unknown
+                # outcome strings (see comment above), so a silent
+                # skip here is a defense-in-depth safety net —
+                # surface at DEBUG so operators can correlate with
+                # downstream parent-still-parked symptoms.
+                logger.debug(
+                    f"B4 backstop: instance repo fetch failed for "
+                    f"{instance_id[:8]}...; deferring force-emit "
+                    f"(no-op): {fetch_exc!r}"
+                )
                 inst = None
             if inst is not None and inst.status == (
                 InstanceStatus.COMPLETED.value
