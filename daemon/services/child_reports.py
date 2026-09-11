@@ -165,8 +165,14 @@ class _ChildCompletionDbResult(NamedTuple):
         ``"root_completed"`` — root completed cleanly, commit + SSE
             ``completed`` + CompletionRegistry + lifecycle event + title gen.
         ``"idempotency_skip"`` — already reported (terminal
-            COMPLETED/ERROR state), nothing to do. Phase 1: no marker
-            for terminal-failed delivery.
+            COMPLETED/ERROR state). B4 cycle-2 (W5 obligation re-mint):
+            when the obligation IS met (no PENDING watcher for the
+            (parent, child) pair, or the instance is NOT yet in
+            COMPLETED status) this branch is a no-op. When the
+            obligation IS unmet (parent alive, instance COMPLETED,
+            PENDING watcher present — the 84563a03 wedge), the
+            corrective multi-turn emit re-mints the obligation.
+            Phase 1: no marker for terminal-failed delivery.
         ``"deferred_pause"`` — Phase 1 (pause-report-recovery Variant B
             fix 2): CHILD is PAUSED at completion. The helper persists
             a DEFERRED marker on ``report_injections`` so the parent's
@@ -3801,8 +3807,78 @@ Provide a concise summary:"""
                 )
             return
 
-        # Idempotency skip: nothing to do (terminal COMPLETED/ERROR — delivery has happened or terminal-failed; no obligation to recover).
+        # B4 cycle-2 (2026-09-11, W5 obligation re-mint): the
+        # ``idempotency_skip`` outcome USUALLY means "already reported,
+        # nothing to do" — the natural path's prior turn already wrote
+        # the ``internal_report:`` MessageQueue row and the bus emit
+        # fired. The common case is a no-op here.
+        #
+        # But in the 84563a03 wedge (turn done 10:59:15+07, no terminal
+        # report, parent parked ~4.5h) the natural path returned this
+        # outcome WITHOUT firing the bus emit: the report row was
+        # created but the obligation was never honored — the parent's
+        # PENDING watcher on the (parent, child) pair stays PENDING
+        # and the parent stays wedged in ``waiting_children``.
+        #
+        # The bus's corrective multi-turn primitive
+        # ``_emit_terminal_for_child_instance_via_bus`` is the only
+        # obligation-honoring primitive that can fire a (parent, child)-
+        # keyed watcher regardless of which task id the terminal graph
+        # turn landed on. It is unconditionally safe — its underlying
+        # ``transition_state`` guarded UPDATE returns ``rowcount == 0``
+        # when the natural path already fired (matched_rows → 0,
+        # empty FollowUp list). So when the obligation IS unmet (wedge
+        # case), this branch re-mints the emit; when the obligation IS
+        # met (legit skip), this branch is a no-op.
+        #
+        # Obligation-unmet conditions — all three required:
+        #   1. ``parent_id`` is non-None (root has no obligation).
+        #   2. ``inst.status == COMPLETED`` (the defer was NOT
+        #      legitimate — the child is actually done, not in a
+        #      retry/pause bridge).
+        #   3. The bus's ``fetch_pending_for_target_and_child`` finds
+        #      a PENDING watcher for the (parent, child) pair. (When
+        #      the natural path already fired, no PENDING watcher
+        #      exists, the helper is a no-op, and we silently return.)
         if outcome == "idempotency_skip":
+            if parent_id is not None:
+                try:
+                    inst = await asyncio.to_thread(
+                        self._manager._instance_repository.get, instance_id
+                    )
+                except Exception:
+                    inst = None
+                if inst is not None and inst.status == (
+                    InstanceStatus.COMPLETED.value
+                ):
+                    try:
+                        await self._emit_terminal_for_child_instance_via_bus(
+                            parent_instance_id=parent_id,
+                            child_instance_id=instance_id,
+                            status="completed",
+                            summary=(
+                                "idempotency_skip obligation re-mint "
+                                "(B4 cycle-2 wedge fix; 84563a03)"
+                            ),
+                        )
+                        logger.warning(
+                            f"B4 cycle-2: idempotency_skip wedge "
+                            f"re-mit for child {instance_id[:8]}... "
+                            f"/ parent {parent_id[:8]}... — instance "
+                            f"COMPLETED, PENDING watcher obligation "
+                            f"honored via corrective multi-turn emit."
+                        )
+                    except Exception as remit_exc:
+                        # Defense-in-depth: the helper itself logs
+                        # exceptions and returns an empty FollowUp
+                        # list, but a top-level catch here keeps the
+                        # flow returning clean so no caller sees a
+                        # half-fired obligation.
+                        logger.warning(
+                            f"B4 cycle-2 re-mint failed for "
+                            f"{instance_id[:8]}... / "
+                            f"{parent_id[:8]}...: {remit_exc!r}"
+                        )
             return
 
         # Phase 1 (pause-report-recovery Variant B fix 2): the
