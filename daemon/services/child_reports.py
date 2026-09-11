@@ -3608,6 +3608,20 @@ Provide a concise summary:"""
         agent_id = result.agent_id
         parent_id = result.parent_id
 
+        # B4 RESOLVED 2026-09-11: child report obligation backstop.
+        # Track whether the natural path emitted a terminal via the
+        # bus. The backstop at the bottom of the function fires a
+        # corrective emit if the natural path DID NOT emit but the
+        # child is actually completed with a parent. This closes the
+        # 84563a03 wedge (turn done 10:59:15+07, no terminal report,
+        # parent parked ~4.5h): the natural path returned early via
+        # some silent outcome (or was bypassed entirely by a race),
+        # leaving the parent's PENDING watcher un-fired. The backstop
+        # is the last line of defense — soft-fail (logged warning,
+        # never block the success path) and exactly-once preserved by
+        # the bus's ``transition_state`` guarded UPDATE.
+        bus_terminal_emitted = False
+
         # Emit SSE for deferred waiting_children (no commit happened)
         if outcome in ("deferred_waiting_children",):
             if self._manager._live_hub:
@@ -3619,6 +3633,10 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
                     )
+            # B4: defer cases do NOT emit a terminal report — the
+            # child is not actually completed yet (active children /
+            # pending tasks / deferred marker covers the obligation).
+            # No backstop fire needed here.
             return
 
         # Root waiting_children: commit + SSE
@@ -3632,6 +3650,8 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
                     )
+            # B4: root_waiting_children is a root instance — no
+            # parent, no obligation.
             return
 
         # Child still running defer (Fix 1, Wanderer active-children guard):
@@ -3714,6 +3734,12 @@ Provide a concise summary:"""
                 status="completed",
                 summary="child_still_running_defer (corrective multi-turn emit; parent watcher release)",
             )
+            # B4: terminal WAS emitted — the corrective multi-turn
+            # emit covers the obligation. The backstop below MUST
+            # NOT re-emit (exactly-once preserved by the bus's
+            # transition_state guarded UPDATE; the backstop is a
+            # no-op for this outcome).
+            bus_terminal_emitted = True
             return
 
         # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone
@@ -3910,6 +3936,10 @@ Provide a concise summary:"""
                 status="completed",
                 summary="regular child completed (corrective multi-turn emit)",
             )
+            # B4: terminal WAS emitted — the task-keyed + corrective
+            # multi-turn emit covers the obligation. The backstop
+            # below MUST NOT re-emit.
+            bus_terminal_emitted = True
 
             # Phase 1 (2026-06-24, report-lane decoupling): Wake the
             # worker pool after the report Task is committed. Before
@@ -4081,9 +4111,83 @@ Provide a concise summary:"""
 
             return
 
-        # instance_not_found or unknown outcome: nothing to do
+        # instance_not_found: no obligation (no parent reachable,
+        # no child to report).
         if outcome in ("instance_not_found",):
             return
+
+        # B4 RESOLVED 2026-09-11: child report obligation BACKSTOP.
+        # If the natural completion path returned an outcome that
+        # does NOT emit (idempotency_skip, deferred_pause, dead_
+        # parent_skip, root_completed, tool_invocation_completed) but
+        # the instance is actually COMPLETED with a parent, force-emit
+        # via the corrective multi-turn primitive. This closes the
+        # 84563a03 wedge class (turn done 10:59:15+07, no terminal
+        # report, parent parked ~4.5h) where the natural path was
+        # bypassed entirely.
+        #
+        # Skip conditions (each is a legitimate non-emit):
+        #  * No parent — root instance, no obligation.
+        #  * bus_terminal_emitted already True — the natural path
+        #    emitted; exactly-once is preserved, do NOT re-emit.
+        #  * The instance is NOT in a terminal status — the defer
+        #    was legitimate (the child isn't actually done yet).
+        #
+        # Exactly-once preservation: the bus's
+        # transition_state guarded WHERE state = 'PENDING'
+        # Core UPDATE makes a redundant backstop emit a safe no-op.
+        if (
+            not bus_terminal_emitted
+            and parent_id is not None
+            and outcome not in (
+                "root_completed",
+                "tool_invocation_completed",
+                "child_still_running_defer",
+                "deferred_waiting_children",
+                "root_waiting_children",
+                "dead_parent_skip",
+                "deferred_pause",
+            )
+        ):
+            # Verify the instance is actually COMPLETED — only
+            # then is the obligation unmet.
+            try:
+                inst = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+            except Exception:
+                inst = None
+            if inst is not None and inst.status == (
+                InstanceStatus.COMPLETED.value
+            ):
+                # The instance is COMPLETED but no terminal was
+                # emitted. Force-emit via the corrective multi-turn
+                # primitive — it fires the parent's PENDING watcher
+                # keyed on the (parent, child) instance pair. Logged
+                # at WARNING so a regression in the natural path
+                # surfaces in the operator logs.
+                logger.warning(
+                    f"B4 BACKSTOP: child {instance_id[:8]}... is "
+                    f"COMPLETED but no terminal report was emitted "
+                    f"(outcome={outcome!r}). Force-emitting corrective "
+                    f"terminal for parent {parent_id[:8]}... — "
+                    f"this is the 84563a03 wedge fix."
+                )
+                try:
+                    await self._emit_terminal_for_child_instance_via_bus(
+                        parent_instance_id=parent_id,
+                        child_instance_id=instance_id,
+                        status="completed",
+                        summary=(
+                            f"B4 backstop force-emit (outcome={outcome!r})"
+                        ),
+                    )
+                except Exception as backstop_exc:
+                    logger.warning(
+                        f"B4 backstop force-emit failed for "
+                        f"{instance_id[:8]}... / parent "
+                        f"{parent_id[:8]}...: {backstop_exc!r}"
+                    )
 
         logger.warning(
             f"Unknown child completion outcome '{outcome}' for "
