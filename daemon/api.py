@@ -588,6 +588,17 @@ async def lifespan(app: FastAPI):
         worker_pool=getattr(manager, "_worker_pool", None),
         interval_seconds=eligible_sweep_interval,
         min_pending_age_seconds=eligible_sweep_min_age,
+        # W-D liveness filter (feature/fix-wc-wake-resilience,
+        # 2026-09-11): wire the manager's instance_repository so
+        # the sweep can skip PENDING rows whose owning instance
+        # is paused or terminal. The claim gate already excludes
+        # those rows, so notify_work is wasted and the persistent
+        # re-notify at every 90s tick never converges without this
+        # filter. Mirrors the watchdog's task_repository wiring
+        # pattern above.
+        instance_repository=getattr(
+            manager, "_instance_repository", None
+        ),
     )
     # Sanity: refuse to start when the canonical defaults
     # regress (defensive — the config Field constraints enforce

@@ -115,11 +115,21 @@ class EligiblePendingSweepService:
         *,
         interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS,
         min_pending_age_seconds: int = DEFAULT_MIN_PENDING_AGE_SECONDS,
+        instance_repository: Any | None = None,
     ) -> None:
         self._task_repository = task_repository
         self._worker_pool = worker_pool
         self._interval_seconds = max(1, int(interval_seconds))
         self._min_pending_age_seconds = max(0, int(min_pending_age_seconds))
+        # W-D liveness filter (feature/fix-wc-wake-resilience,
+        # 2026-09-11). Optional ``instance_repository`` injection
+        # enables the paused/terminal filter on the eligible-PENDING
+        # set. Strictly opt-in: when ``None``, the sweep falls
+        # through to the pre-W-D behavior (no filter). Production
+        # wiring in ``daemon/api.py`` passes
+        # ``manager._instance_repository``; tests wire the helper
+        # explicitly when they want to assert the filter.
+        self._instance_repository = instance_repository
 
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -213,6 +223,64 @@ class EligiblePendingSweepService:
                 t for t in (tasks or [])
                 if not getattr(t, "is_deferred", False)
             ]
+            # W-D LIVENESS FILTER (feature/fix-wc-wake-resilience,
+            # 2026-09-11). The pre-W-D sweep notified the worker
+            # pool for EVERY eligible PENDING row regardless of
+            # whether the owning instance could even accept a claim
+            # — paused and terminal instances never can. The claim
+            # gate at ``TaskRepository.claim_pending_task`` (around
+            # line 1533-1538) explicitly excludes paused and
+            # terminated instances; the W-D filter aligns the
+            # sweep with the claim gate so notify_work is not
+            # wasted AND the persistent re-notify at every 90s
+            # tick converges (a paused instance would otherwise
+            # re-notify forever, the bug class W-D targeted).
+            #
+            # The filter is strictly opt-in via
+            # ``self._instance_repository`` (constructor arg). When
+            # unwired, the sweep falls through to the pre-W-D
+            # behavior — preserves existing test fixtures that
+            # don't wire the repo. Production wires it via
+            # ``daemon/api.py`` so the filter is active in prod.
+            #
+            # One batched query for the entire eligible set (not
+            # N per-row fetches): the helper
+            # ``InstanceRepository.list_paused_or_terminal_instance_ids``
+            # returns the union in a single ``SELECT instance_id
+            # WHERE instance_id IN (...) AND status IN (...)``.
+            # Cost is proportional to the eligible set size, not
+            # N times that.
+            #
+            # **Bounded one-shot notify for genuinely dead rows is
+            # acceptable** — the spirit of the review. Eternal
+            # re-notify is not. The W-D filter achieves the latter
+            # by mapping the status check to the claim-gate
+            # predicate (paused + terminal); a row whose instance
+            # status is paused/terminal cannot progress until the
+            # instance is resumed (paused → running) or recreated
+            # (terminal → new instance). When that transition
+            # happens, the row is either garbage-collected by the
+            # reconciler (terminal) or naturally surfaces via the
+            # claim path (resumed).
+            if eligible and self._instance_repository is not None:
+                blocked_instance_ids = (
+                    self._instance_repository
+                    .list_paused_or_terminal_instance_ids(
+                        list({t.instance_id for t in eligible})
+                    )
+                )
+                if blocked_instance_ids:
+                    eligible = [
+                        t for t in eligible
+                        if t.instance_id not in blocked_instance_ids
+                    ]
+                    logger.debug(
+                        f"EligiblePendingSweepService: W-D filter "
+                        f"excluded {len(blocked_instance_ids)} "
+                        f"paused/terminal instance(s) — their "
+                        f"PENDING rows are not notified (the claim "
+                        f"gate excludes them too)"
+                    )
             eligible_count = len(eligible)
             self._eligible_total += eligible_count
 
