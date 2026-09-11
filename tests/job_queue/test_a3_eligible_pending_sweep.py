@@ -648,3 +648,295 @@ class TestA3ConstitutionStatic:
             "A3 sweep MUST call the canonical notify_work seam — "
             "same primitive as task creation and A2 autopromote"
         )
+
+
+# ─── W-D liveness filter ──────────────────────────────────────────────
+#
+# W-C (feature/fix-wc-wake-resilience, 2026-09-11): the A3 sweep
+# must skip PENDING rows whose owning instance is paused or
+# terminal — the claim gate already excludes those rows, so
+# notify_work is wasted, and the persistent re-notify at every
+# 90s tick never converges. W-D adds the filter; tests below
+# pin the behavior at the sweeper surface.
+
+
+def _seed_instance(
+    engine: Engine,
+    *,
+    instance_id: str,
+    status: str,
+) -> None:
+    """Insert an ``Instance`` row with the given status. Required
+    to drive the W-D liveness filter — the sweep reads instance
+    status via the injected ``instance_repository``.
+
+    Uses the production :meth:`SQLModelInstanceRepository.create`
+    helper so the DDL stays in sync with the model. The helper
+    also handles the version + agent_name + project_id + metadata
+    defaults — raw-SQL hand-written DDL would drift if the
+    schema evolves.
+    """
+    from daemon.repositories.instance.repository import (
+        SQLModelInstanceRepository,
+    )
+
+    repo = SQLModelInstanceRepository(engine=engine)
+    # The repo helper sets all required defaults. Status is the
+    # only knob we care about — it drives the W-D filter.
+    repo.create(
+        instance_id=instance_id,
+        agent_id="wb-test-agent",
+        agent_dir="/tmp/wb-test",
+        status=status,
+    )
+
+
+class TestWDEligibleSweepLivenessFilter:
+    """W-D (2026-09-11): the A3 sweep's W-D liveness filter
+    excludes PENDING rows whose owning instance is paused or
+    terminal. Strictly opt-in via ``instance_repository=...``.
+
+    The filter must align the sweep with the claim gate
+    (TaskRepository.claim_pending_task around line 1533-1538)
+    so notify_work is not wasted AND the persistent re-notify at
+    every 90s tick converges.
+
+    File-backed SQLite engine fixture (same recipe as the rest of
+    this file). The ``instances`` table is created via raw DDL
+    to avoid SQLModel transitive-import noise.
+    """
+
+    @pytest.fixture
+    def engine_with_instances(self, tmp_path: Path) -> Engine:
+        """File-backed SQLite with both ``task`` and ``instances``
+        tables. Same recipe as ``engine`` fixture plus the
+        ``instances`` schema."""
+        import daemon.repositories.instance.models  # noqa: F401
+
+        db_path = tmp_path / "wd_eligible_pending_sweep.db"
+        eng = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
+        )
+
+        @event.listens_for(eng, "connect")
+        def _configure_sqlite(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=10000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        SQLModel.metadata.create_all(eng)
+        try:
+            yield eng
+        finally:
+            eng.dispose()
+
+    @pytest.mark.asyncio
+    async def test_paused_instance_pending_row_NOT_notified(
+        self, engine_with_instances
+    ):
+        """A PENDING task whose instance is paused MUST NOT be
+        notified — the claim gate already excludes it, and
+        notify_work would just re-fire every 90s tick forever."""
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        eng = engine_with_instances
+        now = datetime.now(timezone.utc)
+        _seed_instance(eng, instance_id="iid-wd-paused", status="paused")
+        _seed_pending_task(
+            eng, instance_id="iid-wd-paused",
+            created_at=now - timedelta(seconds=120),
+        )
+
+        worker_pool = MagicMock()
+        service = EligiblePendingSweepService(
+            task_repository=TaskRepository(eng),
+            worker_pool=worker_pool,
+            interval_seconds=DEFAULT_SWEEP_INTERVAL_SECONDS,
+            min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
+            instance_repository=SQLModelInstanceRepository(engine=eng),
+        )
+        stats = await service.sweep_once()
+
+        # Filter excludes the paused-instance row → eligible=0 →
+        # notify_work NOT called.
+        assert stats["eligible"] == 0, (
+            f"W-D MUST exclude paused-instance PENDING rows; "
+            f"got eligible={stats['eligible']!r}"
+        )
+        assert stats["notified"] == 0
+        assert worker_pool.notify_work.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_terminal_instance_pending_row_NOT_notified(
+        self, engine_with_instances
+    ):
+        """A PENDING task whose instance is terminal (completed /
+        error / terminated / failed) MUST NOT be notified — same
+        reasoning as the paused case."""
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        eng = engine_with_instances
+        now = datetime.now(timezone.utc)
+        for terminal_status in ("completed", "error", "terminated", "failed"):
+            _seed_instance(
+                eng,
+                instance_id=f"iid-wd-{terminal_status}",
+                status=terminal_status,
+            )
+            _seed_pending_task(
+                eng,
+                instance_id=f"iid-wd-{terminal_status}",
+                created_at=now - timedelta(seconds=120),
+            )
+
+        worker_pool = MagicMock()
+        service = EligiblePendingSweepService(
+            task_repository=TaskRepository(eng),
+            worker_pool=worker_pool,
+            interval_seconds=DEFAULT_SWEEP_INTERVAL_SECONDS,
+            min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
+            instance_repository=SQLModelInstanceRepository(engine=eng),
+        )
+        stats = await service.sweep_once()
+
+        # All 4 terminal-status rows must be filtered out.
+        assert stats["eligible"] == 0, (
+            f"W-D MUST exclude terminal-instance PENDING rows "
+            f"(all 4 statuses); got eligible={stats['eligible']!r}"
+        )
+        assert stats["notified"] == 0
+        assert worker_pool.notify_work.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_running_instance_pending_row_IS_notified(
+        self, engine_with_instances
+    ):
+        """A PENDING task whose instance is RUNNING (or any
+        non-paused / non-terminal status) IS notified — the
+        filter must not over-suppress."""
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        eng = engine_with_instances
+        now = datetime.now(timezone.utc)
+        # Two non-blocked instances: RUNNING and WAITING_CHILDREN.
+        # Both are claim-eligible (neither paused nor terminal).
+        for iid, status in (
+            ("iid-wd-running", "running"),
+            ("iid-wd-waiting-children", "waiting_children"),
+        ):
+            _seed_instance(eng, instance_id=iid, status=status)
+            _seed_pending_task(
+                eng, instance_id=iid,
+                created_at=now - timedelta(seconds=120),
+            )
+
+        worker_pool = MagicMock()
+        service = EligiblePendingSweepService(
+            task_repository=TaskRepository(eng),
+            worker_pool=worker_pool,
+            interval_seconds=DEFAULT_SWEEP_INTERVAL_SECONDS,
+            min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
+            instance_repository=SQLModelInstanceRepository(engine=eng),
+        )
+        stats = await service.sweep_once()
+
+        # Both rows pass the W-D filter → 2 eligible → 1 notify.
+        assert stats["eligible"] == 2
+        assert stats["notified"] == 1
+        assert worker_pool.notify_work.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_mixed_batch_filter_isolates_paused_row(
+        self, engine_with_instances
+    ):
+        """Mixed batch: 1 paused (skip) + 2 non-paused (notify).
+        Verifies per-row isolation — the filter does not all-or-
+        nothing cancel the entire batch."""
+        from daemon.repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        eng = engine_with_instances
+        now = datetime.now(timezone.utc)
+        for iid, status in (
+            ("iid-wd-paused-mix", "paused"),
+            ("iid-wd-running-mix-1", "running"),
+            ("iid-wd-running-mix-2", "running"),
+        ):
+            _seed_instance(eng, instance_id=iid, status=status)
+            _seed_pending_task(
+                eng, instance_id=iid,
+                created_at=now - timedelta(seconds=120),
+            )
+
+        worker_pool = MagicMock()
+        service = EligiblePendingSweepService(
+            task_repository=TaskRepository(eng),
+            worker_pool=worker_pool,
+            interval_seconds=DEFAULT_SWEEP_INTERVAL_SECONDS,
+            min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
+            instance_repository=SQLModelInstanceRepository(engine=eng),
+        )
+        stats = await service.sweep_once()
+
+        # 3 rows total → 1 paused skipped, 2 running pass → eligible=2.
+        assert stats["eligible"] == 2, (
+            f"W-D mixed batch: 3 total rows, 1 paused → must have "
+            f"eligible=2; got eligible={stats['eligible']!r}"
+        )
+        assert stats["notified"] == 1
+        assert worker_pool.notify_work.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_instance_repository_keeps_pre_wd_behavior(
+        self, engine
+    ):
+        """Without ``instance_repository`` wired (the default), the
+        W-D filter is INACTIVE — every eligible row is notified
+        regardless of instance status. Mirrors the production
+        deployment shape (``daemon/api.py`` passes the repo) and
+        preserves test fixtures that don't wire the repo.
+
+        This pins the strict opt-in contract: the filter is
+        inactive unless the constructor arg is supplied."""
+        eng = engine
+        now = datetime.now(timezone.utc)
+        # Insert a PENDING task with a known-bad instance_id
+        # (no matching instance row). Pre-W-D behavior: the
+        # sweep would notify (no filter). W-D wired behavior:
+        # the filter sees no instance status and treats the row
+        # as 'alive' (notify). This test verifies the pre-W-D
+        # path with NO instance_repository.
+        _seed_pending_task(
+            eng, instance_id="iid-wd-orphan-task",
+            created_at=now - timedelta(seconds=120),
+        )
+
+        worker_pool = MagicMock()
+        service = EligiblePendingSweepService(
+            task_repository=TaskRepository(eng),
+            worker_pool=worker_pool,
+            interval_seconds=DEFAULT_SWEEP_INTERVAL_SECONDS,
+            min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
+            # instance_repository=None (default)
+        )
+        stats = await service.sweep_once()
+
+        # Filter is OFF → the row passes through → eligible=1.
+        assert stats["eligible"] == 1, (
+            f"Without instance_repository wired, the W-D filter is "
+            f"OFF and the eligible set is unchanged; got "
+            f"eligible={stats['eligible']!r}"
+        )
+        assert stats["notified"] == 1
+        assert worker_pool.notify_work.call_count == 1
