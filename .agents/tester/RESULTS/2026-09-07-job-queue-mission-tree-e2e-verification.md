@@ -331,3 +331,58 @@ Worktree `agents-ensemble-wt-panel-activity` (main checkout + other worktrees un
 2. `.agents/tester/PACKS.md` (2 rows: instances_activity_unit_test NEW, mission_tree_fe_targeted updated)
 3. `test/packs/instances_activity_unit_test.sh` (NEW, executable)
 4. `test/packs/mission_tree_fe_targeted_test.sh` (re-pinned @ bbe8d0c0, 3-suite list)
+
+---
+
+## Worktree Round — jobs status combo-filter @ `fix/jobs-status-combo-filter` `b8644dde` (2026-09-10) — **VERDICT: headline symptom DEAD + all 6 acceptance checks PASS on their letter, BUT 1 fix-introduced leak (Gap A) → ⚠️ FIX-FIRST recommended**
+
+Worktree `agents-ensemble-wt-jobs-combo` (main + other worktrees untouched). Scope claim HOLDS: `33731abb` + `b8644dde` touch only `daemon/` + `tests/` (`job_queue/repository.py` +211, `work_status.py` +70, 2 NEW test files). Stack: worktree daemon on disposable `ensemble_wt_jc` (boot line verified; daemon on :8123 with FE proxy override — no repo files mutated; **zero ensemble_prod contact**); FE from worktree; zero LLM calls; seed = 10 receipts (settled-completed, settled-trNULL, msg-failed, task-failed, 3 cancelled aliases, msg-error, 2 dead-letter) + root/child instances.
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| 1 2-vs-3 headline | ✅ PASS | `settled,failed` → all requested rows present (total 5 = 4 task-specified + msg-error via error→failed canonicalization — internally consistent with item 3); pre-fix live-measured drop closed. Solo `failed` = 3; solo `settled` = 2 message-scoped, **zero task rows** ✓ (dead-row leak under settled-solo = Gap A below) |
+| 2 Cancelled aliases | ✅ PASS | `cancelled` → exactly the 3 aliases (aborted/orphan_retired/watchover_terminated); full combo 10/10 includes them; absent from failed/completed/settled solos |
+| 3 error→failed | ✅ PASS | msg-error row surfaces under `failed` (verbatim row captured) |
+| 4 count==page + dead isolation | ✅ PASS* | total==page on ALL 8 probes (5,3,3,3,10,0,2,3); `dead_letter` solo = exactly 2; dead absent from done-cluster solos *except the Gap A settled-solo leak*; dead-in-combo drops = Gap B |
+| 5 Panel effect | ✅ PASS | all 10 rows RENDER with correct glyphs: failed→`error`, settled→`receipt_long`, settled-completed +`check_circle`, cancelled→`cancel`, dead→`report_problem`; previously-silently-dropped failed receipts now visible |
+| 6 Bracket | ✅ PASS | derived tight scope `jobs_combo_unit_test` **22/22** (pin 16/16 + canonical-fold variants 6/6, zero failures); surrounding scope `regression_job_queue` **1,678P/7F/38S** = exactly the 7 quarantined family nodes, **byte-matched signatures**, zero new/drift (touched `repository.py` seam shows no signature drift) |
+
+**Gap A 🟠 (fix-introduced leak):** `status=settled` SOLO returns dead-letter message rows (3, not 2). Mechanism: `_LEGACY_TO_ADMISSION` has no `settled` entry → settled-only queries get no admission_state narrowing → the fix's new tr-IS-NULL hedge matches dead message rows. Base (strict `tr='completed'`) did not leak. Any combo containing a mapped token is unaffected. Fix direction: add the settled→done-cluster admission mapping (or narrow settled with `admission_state IN (done-cluster)`).
+**Gap B 🟠 (pre-existing residual, same family):** `dead_letter` + any done-cluster token drops dead rows (`failed,dead_letter`→3, `cancelled,dead_letter`→3, `completed,dead_letter`→1, `settled,dead_letter`→1 — membership traded sides vs base). Correct union = `OR admission_state='dead'` into the branch OR-list. Backlog or same-fix.
+
+**Merge-readiness: ⚠️ FIX-FIRST recommended** — the user's symptoms are dead and the panel now shows previously-invisible failures, but Gap A is a NEW solo-probe leak introduced by this fix (small, one-mapping fix); Gap B is a pre-existing union bug worth the same touch. Leader's call: fix-then-reverify (single API-probe pass, ~2 min) or merge with both tracked.
+
+Artifacts: `/tmp/jc-wt/` (seed.sql, probe.sh + verbatim probe-results.txt, panel captures + glyphs JSON, screenshots, boot logs). `ensemble_wt_jc` DROPPED after run.
+
+### Landing artifacts for giter (worktree dirty set)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (this append)
+2. `.agents/tester/PACKS.md` (jobs_combo row + regression_job_queue Last Run)
+3. `test/packs/jobs_combo_unit_test.sh` (NEW, executable)
+
+---
+
+## Gap A/B Re-Probe @ `19b40e49` (2026-09-10, worktree) — **VERDICT: BOTH GAPS DEAD — ALL PASS → ✅ merge proceeds**
+
+Single new commit `19b40e49` ("fix(api): settled admission mapping + dead_letter combo union") — exactly the two filed gaps. Same seed inventory re-used verbatim (10 receipts incl. 2 dead-letter, aliases, error); fresh disposable `ensemble_wt_jc2` (boot line verified; dropped after; zero prod contact); daemon :8123 + FE :4199 with /tmp proxy override (no repo mutations); zero LLM calls.
+
+| Check | Expected | Got | Verdict |
+|---|---|---|---|
+| **Gap A**: `settled` solo | exactly 2 settled, 0 dead | 2 (both message-kind, admission=done); dead rows ABSENT | ✅ DEAD |
+| **Gap B**: `settled,dead_letter` | 4 (2+2) | 4 | ✅ DEAD |
+| **Gap B**: `failed,dead_letter` | 5 (3+2) | 5 (incl. msg-error) | ✅ DEAD |
+| **Gap B** (extra): `cancelled,dead_letter` / `completed,dead_letter` | 5 / 2 | 5 / 2 (union preserved, no drop) | ✅ |
+| **Gap B** (full panel combo) | all 10 | 10/10, each seeded id once | ✅ DEAD |
+| Prior round holds | 2-vs-3=5, failed=3, settled message-scoped, cancelled=3 aliases, dead solo=2, dead absent from done solos, completed=0 | all exact | ✅ |
+| count==page | every probe | **12/12 TRUE** | ✅ |
+| Panel (live FE) | all rows render, correct glyphs | 10/10 cards; failed→`error`, dead→`report_problem`, cancelled→`cancel`, settled→`help`+`receipt_long`, completed+`check_circle`; **0 pageerrors** (1 pre-existing Plane-iframe CSP console line) | ✅ |
+
+**Bracket**: `jobs_combo_unit_test` re-pinned @ `19b40e49` — **27/27** (pin 21/21 incl. +5 Gap A/B tests; canonical-fold 6/6; zero failures). Surrounding scope from the prior round stands (7 known family failures, byte-matched; zero new).
+
+Honest gaps: `pending,dead_letter` union not live-probeable with this seed (0 pending rows) — rests on the unit pins (27/27). Glyph capture v3 (`panel-cards-final.json`) is authoritative. Foreign `ng serve :4200` (not ours) left running per port-safety.
+
+**Merge-readiness: ✅ READY** — headline symptom, Gap A, and Gap B all dead; union semantics correct across every probe; panel renders the previously-invisible rows with exact glyphs; brackets green.
+
+### Final landing artifacts for giter (worktree dirty set, zero extras)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (worktree + re-probe appends)
+2. `.agents/tester/PACKS.md` (jobs_combo row + regression_job_queue Last Run)
+3. `test/packs/jobs_combo_unit_test.sh` (untracked, executable, pin @ `19b40e49` — header comment still cites b8644dde, cosmetic docstring drift)

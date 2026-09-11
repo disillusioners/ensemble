@@ -51,6 +51,7 @@ Defined by :data:`_STATUS_CANONICAL_MAP`:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Final
 
 from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
@@ -144,6 +145,75 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"completed", "settled", "failed", "cancelled", "dead_letter"}
 )
+
+
+# ── Derived reverse index: canonical target → accepted source values ─────
+# Built FROM :data:`_STATUS_CANONICAL_MAP` at import time — every key
+# here is a derived view of the map. Consumers (the jobs status filter
+# in ``daemon.repositories.job_queue.repository``) consult
+# :func:`terminal_reason_variants_for` so adding a new alias onto the
+# map is a one-line change that flows through to BOTH the read layer
+# (via ``canonicalize_status``) and the SQL filter layer automatically.
+#
+# Defect provenance (2026-09-10, ``fix/jobs-status-combo-filter``):
+# the SQL filter's ``cancelled`` branch was strict
+# ``terminal_reason == 'cancelled'`` while the read layer
+# canonicalized ``aborted`` / ``orphan_retired`` /
+# ``watchover_terminated`` onto ``cancelled`` — the filter and the
+# read vocabulary disagreed (same class as the settled/failed drop
+# the prior commit closed). The hand-copied value list at the SQL
+# site is the drift mechanism this index eliminates: the SQL IN-list
+# is now derived from the map at query time. A new alias mapped onto
+# any canonical target in the map is picked up by both layers.
+def _build_canonical_to_sources() -> dict[str, tuple[str, ...]]:
+    index: dict[str, list[str]] = defaultdict(list)
+    for _src, _tgt in _STATUS_CANONICAL_MAP.items():
+        index[_tgt].append(_src)
+    return {tgt: tuple(srcs) for tgt, srcs in index.items()}
+
+
+_CANONICAL_TO_SOURCES: Final[dict[str, tuple[str, ...]]] = _build_canonical_to_sources()
+
+
+def terminal_reason_variants_for(canonical_token: str) -> tuple[str, ...]:
+    """Return every source value that canonicalizes to ``canonical_token``.
+
+    Derived from :data:`_STATUS_CANONICAL_MAP` (single source of truth):
+    the returned tuple contains the union of map-keys whose value is
+    ``canonical_token``. A canonical token with no map entry maps to
+    itself — callers that pre-validate against
+    :data:`_TERMINAL_STATUSES` always get a non-empty tuple for any
+    canonical token present in the map's image set; tokens absent
+    from the map's image return ``()``.
+
+    Used by the jobs status filter to build the per-kind SQL IN-list
+    so filter and read vocabulary cannot drift apart. The SQL filter
+    mirrors :func:`_derive_legacy_status` semantics: for a JobItem row
+    with ``admission_state='done'`` and ``terminal_reason`` set, the
+    canonical status is ``canonicalize_status(terminal_reason)`` and
+    the row surfaces under any canonical token whose variant-set
+    contains ``terminal_reason``.
+
+    Note: ``settled`` is intentionally NOT a canonical target in the
+    map — it's a per-kind dispatch artefact of :func:`_derive_legacy_status`
+    (``completed`` + ``job_type == 'message'`` ⇒ ``settled``). The
+    filter's ``settled`` branch therefore uses
+    ``terminal_reason_variants_for('completed')`` (kind-gated by
+    ``job_type='message'``) — same source set as the ``completed``
+    branch, kind-discriminated by the WHERE clause, NOT a separate
+    ``settled`` variant-set.
+
+    Args:
+        canonical_token: A canonical status string (one of
+            ``pending`` / ``processing`` / ``paused`` / ``completed``
+            / ``failed`` / ``cancelled`` / ``dead_letter``).
+
+    Returns:
+        Tuple of accepted ``terminal_reason`` source values for the
+        SQL IN-list. Empty tuple if the token has no map entry (no
+        aliases collapse onto it).
+    """
+    return _CANONICAL_TO_SOURCES.get(canonical_token, ())
 
 
 def canonicalize_status(status: str) -> str:

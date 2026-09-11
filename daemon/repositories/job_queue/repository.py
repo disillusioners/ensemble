@@ -34,6 +34,16 @@ _LEGACY_TO_ADMISSION: dict[str, str] = {
     "failed": AdmissionState.DONE.value,
     "cancelled": AdmissionState.DONE.value,
     "dead_letter": AdmissionState.DEAD.value,
+    # Gap A (tester-live round, 2026-09-11): ``settled`` is the M3
+    # mirror-receipt terminal — as a FILTER token it must pin the
+    # admission IN-clause to ``done`` exactly like the rest of the
+    # done cluster. Without this entry ``_statuses_to_admission``
+    # dropped the token, a ``settled`` solo filter skipped the
+    # admission IN-clause entirely, and the per-kind branch's
+    # ``terminal_reason IS NULL`` hedge matched DEAD rows (dead rows
+    # carry no ``terminal_reason`` discriminator) — dead-letter
+    # receipts leaked into ``?status=settled`` (3 vs 2 live).
+    "settled": AdmissionState.DONE.value,
 }
 
 
@@ -141,6 +151,38 @@ def _is_postgres(session: SQLModelSession) -> bool:
         session.bind is not None
         and session.bind.dialect.name == "postgresql"
     )
+
+
+def _terminal_reason_variants(canonical_token: str) -> tuple[str, ...]:
+    """Map-derived terminal_reason IN-list for a canonical status token.
+
+    Delegates to
+    :func:`daemon.services.work_status.terminal_reason_variants_for` —
+    the reverse index derived from ``_STATUS_CANONICAL_MAP`` (single
+    source of truth). Defect provenance (2026-09-10,
+    ``fix/jobs-status-combo-filter``): the per-kind ``cancelled``
+    branch was strict ``terminal_reason == 'cancelled'`` while the
+    read layer (:func:`daemon.services.work_status._derive_legacy_status`)
+    canonicalized ``aborted`` / ``orphan_retired`` /
+    ``watchover_terminated`` onto ``cancelled`` — rows carrying those
+    discriminators silently dropped out of ``?status=cancelled`` (and
+    the panel's combo). The hand-copied strict value at the SQL site
+    was the drift mechanism; consulting the map-derived reverse index
+    here means any future alias added to the canonical map flows
+    through to BOTH layers automatically.
+
+    Lazy import (function-level, not module-level) because
+    ``daemon.repositories.job_queue.__init__`` imports this module
+    first and ``daemon.services.__init__`` pulls heavyweight service
+    modules — a top-level import here would drag the whole services
+    package into every ``import daemon.repositories.job_queue`` and
+    risks a partial-initialization cycle. After the first call the
+    import is cached (sys.modules hit) — the per-query cost is a
+    dict lookup.
+    """
+    from daemon.services.work_status import terminal_reason_variants_for
+
+    return terminal_reason_variants_for(canonical_token)
 
 
 class JobRepository:
@@ -1028,7 +1070,11 @@ class JobRepository:
             # only. Pre-7c rows (NULL ``terminal_reason``) keep
             # surfacing under ``completed`` — they predate the rename
             # and never carry ``job_type='message'``. ``settled``
-            # matches strictly (no NULL hedge).
+            # carries the same NULL hedge — message rows with
+            # ``terminal_reason IS NULL`` derive to ``settled`` via
+            # ``_derive_legacy_status`` (per-kind dispatch on the
+            # lossy ``done → completed`` fallthrough) so the filter
+            # must include them (M3 sibling defect fix).
             #
             # The disambiguation lives here because the SQL builder
             # uses ``admission_state IN (...)`` as its primary
@@ -1038,15 +1084,27 @@ class JobRepository:
             # per-kind. ``_statuses_to_admission`` is preserved for
             # its collapsing semantic; we layer per-kind predicates
             # on top.
-            # Build per-kind predicates: when ``completed`` is in
-            # statuses, restrict to ``job_type='task'`` (with NULL
-            # hedge on terminal_reason); when ``settled`` is in
-            # statuses, restrict to ``job_type='message'`` (strict).
-            # Unknown values fall through the legacy admission map
-            # (the §8.2 source-less degrade precedent — unknown ⇒
-            # empty, do NOT widen).
+            #
+            # Per-kind predicates are built for EVERY done-cluster
+            # token in the requested set (``completed`` /
+            # ``settled`` / ``failed`` / ``cancelled``); the four
+            # are OR-combined so a row matches when its DERIVED
+            # status is ANY of the requested tokens. Non-done
+            # tokens (``pending`` / ``processing`` / ``paused``)
+            # are handled purely by the admission-state IN-clause
+            # above and need no per-kind branch; ``dead_letter``
+            # matches via the IN-clause too and gains an
+            # ``admission_state='dead'`` OR-term below ONLY when a
+            # done-cluster token is also requested (the Gap B union
+            # repair — see the branch site). Unknown values fall
+            # through the legacy
+            # admission map (the §8.2 source-less degrade precedent
+            # — unknown ⇒ empty, do NOT widen).
             has_completed_token = "completed" in (statuses or [])
             has_settled_token = "settled" in (statuses or [])
+            has_failed_token = "failed" in (statuses or [])
+            has_cancelled_token = "cancelled" in (statuses or [])
+            has_dead_letter_token = "dead_letter" in (statuses or [])
 
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
@@ -1059,39 +1117,136 @@ class JobRepository:
                         JobItem.admission_state.in_(admission_set)
                     )
                 # M3 per-kind predicates — applied alongside the
-                # admission-state IN-clause. ``completed`` restricts
-                # the result to task rows with terminal_reason
-                # 'completed' (with NULL hedge for pre-7c rows);
-                # ``settled`` restricts to mirror rows with
-                # terminal_reason 'completed' (strict). The two
-                # predicates are OR-combined (a row matches when
-                # it satisfies EITHER kind) — see the corresponding
-                # list-query branch for the rationale (the post-A6
-                # ``done`` alias expansion is the primary driver).
+                # admission-state IN-clause. Each done-cluster token
+                # (``completed`` / ``settled`` / ``failed`` /
+                # ``cancelled``) gets its own per-kind branch; the
+                # four are OR-combined so a row matches when its
+                # DERIVED status is any of the requested tokens.
+                # Combo drop fix: the original builder only emitted
+                # branches for ``completed`` and ``settled`` —
+                # ``failed`` / ``cancelled`` had no per-kind branch
+                # and so were silently DROPPED whenever ``settled``
+                # was also in the combo (the non-empty branch list
+                # AND-combined with the admission IN-clause and
+                # narrowed the result to settled-eligible rows
+                # only). Per-kind predicates now cover every
+                # done-cluster token so the filter returns every
+                # row whose derived status is in the requested set,
+                # regardless of combo composition. Sibling defect
+                # fix (M3): ``settled`` now carries the same NULL
+                # hedge as ``completed`` — a message row with
+                # ``terminal_reason IS NULL`` derives to
+                # ``settled`` via ``_derive_legacy_status`` (the
+                # per-kind dispatch on the lossy ``done → completed``
+                # fallthrough) so the filter must include it.
                 per_kind_branches: list = []
                 if has_completed_token:
                     # ``completed`` ⇒ task rows only. Pre-7c hedge
                     # (terminal_reason IS NULL) is included — pre-7c
                     # rows predate the rename and never carry
-                    # ``job_type='message'``.
+                    # ``job_type='message'``. The IN-list is
+                    # map-derived (see the cancelled branch below)
+                    # so an alias added onto the canonical map is
+                    # picked up here automatically.
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "task",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
                     )
                 if has_settled_token:
-                    # ``settled`` ⇒ mirror rows only. Strict — no
-                    # NULL hedge (pre-7c rows never carry
-                    # ``job_type='message'``).
+                    # ``settled`` ⇒ mirror rows only. NULL hedge
+                    # matches the read-API derivation — see the
+                    # sibling defect note above. The ``settled``
+                    # token has no canonical-map entry of its own
+                    # (it's the per-kind dispatch of
+                    # ``completed`` + ``job_type='message'`` in
+                    # ``_derive_legacy_status``), so the variant
+                    # set consulted here is the ``completed`` one,
+                    # kind-gated by the ``job_type`` clause.
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
-                            JobItem.terminal_reason == "completed",
+                            or_(
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
+                                JobItem.terminal_reason.is_(None),
+                            ),
                         )
+                    )
+                if has_failed_token:
+                    # ``failed`` ⇒ rows whose terminal_reason
+                    # canonicalizes to ``failed``. No job_type
+                    # constraint — a failed job can be either task
+                    # or message kind (the admission-state
+                    # IN-clause above already narrows to
+                    # ``done``). Map-derived IN-list (the
+                    # canonical map folds ``error`` onto
+                    # ``failed``) so a new alias added to the map
+                    # flows through without a hand-edit here.
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("failed")
+                        )
+                    )
+                if has_cancelled_token:
+                    # ``cancelled`` ⇒ rows whose terminal_reason
+                    # canonicalizes to ``cancelled``. No job_type
+                    # constraint — same rationale as ``failed``.
+                    #
+                    # Canonicalization-map fix (2026-09-10): the
+                    # branch was strict ``== 'cancelled'`` while
+                    # the read layer
+                    # (``_derive_legacy_status``) canonicalizes
+                    # ``aborted`` / ``orphan_retired`` /
+                    # ``watchover_terminated`` onto the same
+                    # token — those rows silently dropped from
+                    # ``?status=cancelled`` and the panel combo.
+                    # The IN-list is derived from
+                    # ``_STATUS_CANONICAL_MAP`` via
+                    # ``terminal_reason_variants_for`` (single
+                    # source of truth) so filter and read
+                    # vocabulary cannot drift again.
+                    #
+                    # ``dead_letter`` intentionally has NO
+                    # per-kind branch: its map source (``dead``)
+                    # is an admission_state spelling, not a
+                    # terminal_reason spelling, and the read
+                    # layer does not consult terminal_reason for
+                    # non-done rows — dead rows match purely via
+                    # the admission-state IN-clause above.
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("cancelled")
+                        )
+                    )
+                # Gap B (tester-live round, 2026-09-11) — the
+                # ``dead_letter`` union branch. When a done-cluster
+                # token is also requested, this OR-list AND-combines
+                # with the admission IN-clause, which is then pinned
+                # to BOTH buckets (``done`` from the done-cluster map
+                # entries + ``dead`` from ``dead_letter``); every
+                # survivor had to satisfy a done-cluster per-kind
+                # shape, so dead rows — which match via admission
+                # alone and carry no ``terminal_reason`` — fell out
+                # of e.g. ``settled,dead_letter`` (membership traded
+                # sides: intersection instead of union). This OR-term
+                # restores the union: a row matches when its DERIVED
+                # status is a requested done-cluster token OR its
+                # admission state is ``dead``. Gated on a non-empty
+                # done-cluster branch list — solo ``dead_letter`` and
+                # ``dead_letter`` + non-done tokens keep the pure
+                # admission IN-clause path (an unconditional append
+                # would narrow ``pending,dead_letter`` to dead-only).
+                if has_dead_letter_token and per_kind_branches:
+                    per_kind_branches.append(
+                        JobItem.admission_state == AdmissionState.DEAD.value
                     )
                 if per_kind_branches:
                     count_stmt = count_stmt.where(or_(*per_kind_branches))
@@ -1127,20 +1282,32 @@ class JobRepository:
                     stmt = stmt.where(JobItem.admission_state.in_(admission_set))
                 # M3 per-kind predicates — mirrors the count query
                 # above so the page and the total stay consistent.
-                # The two predicates are OR-combined (a row matches
-                # when it satisfies EITHER kind); an AND-combine
-                # would produce zero rows for any input that mixes
-                # ``completed`` and ``settled`` (the post-A6
-                # ``done`` alias expansion is the primary driver —
-                # but the same logic applies to any caller that
-                # passes both tokens explicitly).
+                # Per-kind branches are OR-combined so a row matches
+                # when its DERIVED status is ANY of the requested
+                # tokens. The previous builder only emitted
+                # branches for ``completed`` and ``settled`` — the
+                # non-empty branch list AND-combined with the
+                # admission IN-clause and silently dropped every
+                # other row whenever ``settled`` was in the combo
+                # (the live-measured drop: ``['settled','failed']``
+                # returned 1 row instead of 4). Per-kind predicates
+                # now cover every done-cluster token
+                # (``completed`` / ``settled`` / ``failed`` /
+                # ``cancelled``); see the count-query branch above
+                # for the full rationale. The ``settled`` branch
+                # also carries the NULL hedge (M3 sibling defect
+                # fix) — a message row with ``terminal_reason IS
+                # NULL`` derives to ``settled`` via
+                # ``_derive_legacy_status``.
                 per_kind_branches: list = []
                 if has_completed_token:
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "task",
                             or_(
-                                JobItem.terminal_reason == "completed",
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
                                 JobItem.terminal_reason.is_(None),
                             ),
                         )
@@ -1149,8 +1316,35 @@ class JobRepository:
                     per_kind_branches.append(
                         and_(
                             JobItem.job_type == "message",
-                            JobItem.terminal_reason == "completed",
+                            or_(
+                                JobItem.terminal_reason.in_(
+                                    _terminal_reason_variants("completed")
+                                ),
+                                JobItem.terminal_reason.is_(None),
+                            ),
                         )
+                    )
+                if has_failed_token:
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("failed")
+                        )
+                    )
+                if has_cancelled_token:
+                    per_kind_branches.append(
+                        JobItem.terminal_reason.in_(
+                            _terminal_reason_variants("cancelled")
+                        )
+                    )
+                # Gap B union branch — mirrors the count query above:
+                # when a done-cluster token is also requested, the
+                # AND-composition would otherwise drop dead rows from
+                # the combo; this OR-term keeps both sides of the
+                # union. Same non-empty-branch gate as the count site
+                # so solo/non-done combos are untouched.
+                if has_dead_letter_token and per_kind_branches:
+                    per_kind_branches.append(
+                        JobItem.admission_state == AdmissionState.DEAD.value
                     )
                 if per_kind_branches:
                     stmt = stmt.where(or_(*per_kind_branches))
