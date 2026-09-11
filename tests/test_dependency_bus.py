@@ -2101,7 +2101,7 @@ class TestOrphanSweep:
         assert pending_before[0].state == DependencyWatcherState.PENDING.value
 
         # Sweep — direct call. Returns the number of orphans cancelled.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 1, (
             f"orphan sweep must cancel exactly 1 watcher "
             f"(source_task_id={orphan_source} has no active task); "
@@ -2178,7 +2178,7 @@ class TestOrphanSweep:
             )
 
         # Sweep — must be a no-op for active tasks.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 0, (
             f"sweep must NOT cancel watchers for active tasks "
             f"(running/pending/paused); got swept={swept}"
@@ -2233,7 +2233,7 @@ class TestOrphanSweep:
         bus_repo.insert(watcher)
 
         # First sweep: cancels the orphan.
-        swept_first = await bus._sweep_orphan_watchers()
+        swept_first = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept_first == 1, (
             f"first sweep must cancel the orphan; got swept={swept_first}"
         )
@@ -2250,7 +2250,7 @@ class TestOrphanSweep:
 
         # Second sweep: nothing left to sweep. The guarded UPDATE
         # (``WHERE state='PENDING'``) matches zero rows, returns 0.
-        swept_second = await bus._sweep_orphan_watchers()
+        swept_second = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept_second == 0, (
             f"second sweep must return 0 (no PENDING orphans left); "
             f"got swept={swept_second}"
@@ -2332,7 +2332,7 @@ class TestOrphanSweep:
         )
 
         # Sweep — must cancel ONLY the 1 orphan.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 1, (
             f"sweep must cancel exactly 1 (the orphan); "
             f"running/paused watchers must be preserved; "

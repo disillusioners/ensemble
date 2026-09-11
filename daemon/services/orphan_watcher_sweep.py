@@ -74,6 +74,13 @@ logger = logging.getLogger(__name__)
 # ``ServicesConfig`` so the config layer owns the resolution order.
 DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS: int = 90
 
+# Default grace window — mirrors
+# ``dependency_bus.DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS`` (W-C, 30s).
+# Sized to comfortably exceed the worst-case commit→emit latency
+# observed in production while bounding orphan-recovery latency by
+# ``grace + sweep_interval`` (30s + 90s = 120s worst case).
+DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS: int = 30
+
 
 class OrphanWatcherSweepService:
     """Periodic orphan-watcher sweep — C2 systemic backstop.
@@ -103,6 +110,17 @@ class OrphanWatcherSweepService:
             (mirrors A3's brief range). Floor 1 to avoid spin;
             out-of-range values FAIL FAST AT BOOT via the pydantic
             ``Field(ge=1)`` constraint in ``ServicesConfig``.
+        min_watcher_age_seconds: Grace window (W-C, 2026-09-11)
+            forwarded to ``bus._sweep_orphan_watchers``. Watchers
+            younger than this are protected from the sweep during
+            the commit→emit window — the natural emit_terminal
+            path needs the window to transition the watcher to
+            FIRED before the sweep races it. Default
+            ``DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS`` (30s). Floor 0
+            (= disable grace — same as pre-W-C behavior). Mirrors
+            the
+            ``ServicesConfig.orphan_watcher_sweep_grace_seconds``
+            knob.
 
     Lifecycle:
         * ``start()`` — spawn the asyncio task. Idempotent.
@@ -115,9 +133,11 @@ class OrphanWatcherSweepService:
         dependency_bus: "DependencyBus | None" = None,
         *,
         interval_seconds: int = DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        min_watcher_age_seconds: int = DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
     ) -> None:
         self._dependency_bus = dependency_bus
         self._interval_seconds = max(1, int(interval_seconds))
+        self._min_watcher_age_seconds = max(0, int(min_watcher_age_seconds))
 
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -208,7 +228,11 @@ class OrphanWatcherSweepService:
                 )
             else:
                 cancelled = int(
-                    await bus._sweep_orphan_watchers() or 0
+                    await bus._sweep_orphan_watchers(
+                        min_watcher_age_seconds=(
+                            self._min_watcher_age_seconds
+                        ),
+                    ) or 0
                 )
                 self._cancelled_total += cancelled
                 if cancelled > 0:

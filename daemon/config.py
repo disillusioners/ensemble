@@ -1364,6 +1364,32 @@ class ServicesConfig(BaseSettings):
             "SERVICES_ORPHAN_WATCHER_SWEEP_INTERVAL_SECONDS env var."
         ),
     )
+    orphan_watcher_sweep_grace_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Batch C — W-C (2026-09-11): grace window (seconds) that "
+            "protects young PENDING watchers from the orphan sweep "
+            "(``DependencyBus._sweep_orphan_watchers``). Watchers "
+            "whose ``created_at`` is newer than ``now - grace`` are "
+            "NOT cancelled, even if their ``source_task_id`` is no "
+            "longer in the active-task set — the natural "
+            "``emit_terminal`` path needs the commit→emit window to "
+            "transition the watcher to FIRED before the sweep races "
+            "it. Default 30s comfortably exceeds the worst-case "
+            "commit→emit latency observed in production. Floor 0 "
+            "(= disable grace; the sweep cancels every orphan "
+            "regardless of age — same as the pre-W-C behavior, kept "
+            "for operators who want the unbounded race surface "
+            "during incident triage). Out-of-range values FAIL FAST "
+            "AT BOOT via pydantic ValidationError. The grace is "
+            "ALWAYS-ON infrastructure (no kill-switch env var — "
+            "per the project owner's HARD POLICY on Batch A); the "
+            "knob tunes responsiveness vs the commit→emit race. "
+            "Override via SERVICES_ORPHAN_WATCHER_SWEEP_GRACE_SECONDS "
+            "env var."
+        ),
+    )
     lease_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description=(

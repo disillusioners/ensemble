@@ -625,15 +625,20 @@ async def lifespan(app: FastAPI):
     # ─────────────────────────────────────────────────────────────
     from daemon.services.dependency_bus import get_dependency_bus
     from daemon.services.orphan_watcher_sweep import (
+        DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
         DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
         OrphanWatcherSweepService,
     )
     orphan_sweep_interval = (
         config.services.orphan_watcher_sweep_interval_seconds
     )
+    orphan_sweep_grace = (
+        config.services.orphan_watcher_sweep_grace_seconds
+    )
     orphan_watcher_sweep = OrphanWatcherSweepService(
         dependency_bus=get_dependency_bus(),
         interval_seconds=orphan_sweep_interval,
+        min_watcher_age_seconds=orphan_sweep_grace,
     )
     # Sanity: refuse to start when the canonical defaults regress
     # (defensive — the config Field constraint enforces the bound,
@@ -650,7 +655,9 @@ async def lifespan(app: FastAPI):
         logger.info(
             f"OrphanWatcherSweepService started: interval="
             f"{orphan_sweep_interval}s (default "
-            f"{DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS}s)"
+            f"{DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS}s), grace="
+            f"{orphan_sweep_grace}s (default "
+            f"{DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS}s)"
         )
 
     # ─────────────────────────────────────────────────────────────
