@@ -1869,6 +1869,41 @@ class InstanceMessagingService:
             )
             task: Task | None = None
 
+            # ── Batch A — A1 revival carve-out (2026-09-11) ──────────
+            # A just-revived terminal instance (COMPLETED / TERMINATED /
+            # ERROR / FAILED) has NO in-flight turn to defer past. When
+            # the resolved queue is a defer queue (orchestrator opted in
+            # via ``enqueue_message(is_deferred=True)``), the
+            # Task.is_deferred=True stamp would land the revival carrier
+            # behind every non-defer work in the project; the defer gate's
+            # WS1 self-witness carve-out alone does not always resolve
+            # the wedge (the P1 incident: born-deferred → flip → no claim
+            # → orphan wedge). Forcing ``is_deferred=False`` on revival
+            # is structural: the freshly-revived instance is the only
+            # candidate, no defer semantics apply to a first turn. The
+            # derived flag below stays correct for ALL other callers
+            # (idle/running/waiting_children/paused instances retain
+            # the resolved queue's ``is_deferred`` value).
+            previous_instance_status = (
+                getattr(instance_for_pause_guard, "status", None)
+            )
+            is_terminal_revival = previous_instance_status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            )
+            is_deferred_for_task = bool(is_deferred) and not is_terminal_revival
+            if is_terminal_revival and is_deferred:
+                logger.info(
+                    f"instance_messaging: revival carve-out — forcing "
+                    f"is_deferred=False on the PROCESS_MESSAGE Task for "
+                    f"instance {instance_id[:8]}... (previous_status="
+                    f"{previous_instance_status!r}); the freshly-revived "
+                    f"terminal instance has no in-flight turn to defer "
+                    f"past, so defer semantics do not apply"
+                )
+
             # 2. Insert the Task row in the same transaction as the
             #    MessageQueue row unless the in-window marker guard fires.
             #    The structural D13 fix makes Task the dispatch primitive;
@@ -1879,7 +1914,10 @@ class InstanceMessagingService:
             #    stamped at creation time so the defer-queue idle gate
             #    can recognise the row without a follow-up UPDATE.
             #    Default False matches every pre-existing caller; the
-            #    orchestrator opts in via ``enqueue_message``.
+            #    orchestrator opts in via ``enqueue_message``. The
+            #    ``is_deferred_for_task`` local carries the A1 revival
+            #    carve-out override above so the revival carrier is
+            #    NEVER born deferred.
             if deferred_pause_marker_set:
                 logger.warning(
                     f"instance_messaging: SKIPPING PROCESS_MESSAGE Task creation "
@@ -1896,7 +1934,7 @@ class InstanceMessagingService:
                     message_id=message_id,
                     status=TaskStatus.PENDING.value,
                     created_at=datetime.now(timezone.utc),
-                    is_deferred=is_deferred,
+                    is_deferred=is_deferred_for_task,
                     is_background=is_background,
                     # ``work_id`` is the linkage handle for the
                     # JobItem/Task pair (POC path) or a fresh UUID minted
