@@ -565,6 +565,51 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # Batch A — A3 (2026-09-11): eligible-PENDING sweep, the
+    # load-bearing systemic backstop for every "miss-reason"
+    # (born-deferred-then-flipped, pool-busy at creation, notify
+    # lost to crash, watchdog notices). Always ON — no env flag
+    # (per project owner's HARD POLICY). Single config knobs:
+    # interval + min age (tuning, not kill-switch).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.eligible_pending_sweep import (
+        DEFAULT_MIN_PENDING_AGE_SECONDS,
+        DEFAULT_SWEEP_INTERVAL_SECONDS,
+        EligiblePendingSweepService,
+    )
+    eligible_sweep_interval = (
+        config.services.eligible_pending_sweep_interval_seconds
+    )
+    eligible_sweep_min_age = (
+        config.services.eligible_pending_sweep_min_pending_age_seconds
+    )
+    eligible_pending_sweep = EligiblePendingSweepService(
+        task_repository=getattr(manager, "_task_repo", None),
+        worker_pool=getattr(manager, "_worker_pool", None),
+        interval_seconds=eligible_sweep_interval,
+        min_pending_age_seconds=eligible_sweep_min_age,
+    )
+    # Sanity: refuse to start when the canonical defaults
+    # regress (defensive — the config Field constraints enforce
+    # the bound, this is a second line of defence for legacy
+    # test fixtures that construct the service directly).
+    if eligible_sweep_interval < 1:
+        logger.error(
+            f"EligiblePendingSweepService DISABLED — interval="
+            f"{eligible_sweep_interval}s below the floor of 1s"
+        )
+    else:
+        eligible_pending_sweep.start()
+        app.state.eligible_pending_sweep = eligible_pending_sweep
+        logger.info(
+            f"EligiblePendingSweepService started: interval="
+            f"{eligible_sweep_interval}s (default "
+            f"{DEFAULT_SWEEP_INTERVAL_SECONDS}s), min_pending_age="
+            f"{eligible_sweep_min_age}s (default "
+            f"{DEFAULT_MIN_PENDING_AGE_SECONDS}s)"
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
@@ -1133,6 +1178,22 @@ async def lifespan(app: FastAPI):
                 f"Waiting-children watchdog shutdown error: {e}"
             )
     app.state.waiting_children_watchdog_task = None
+
+    # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
+    # The service exposes ``stop()`` which cancels + awaits the
+    # asyncio task; the watchdog-style cancel/await is folded
+    # inside the service so the shutdown branch stays compact.
+    eligible_sweep = getattr(
+        app.state, "eligible_pending_sweep", None
+    )
+    if eligible_sweep is not None:
+        try:
+            await eligible_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"EligiblePendingSweepService shutdown error: {e}"
+            )
+        app.state.eligible_pending_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down

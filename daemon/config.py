@@ -1312,6 +1312,37 @@ class ServicesConfig(BaseSettings):
             "don't false-positive flag live tasks."
         ),
     )
+    eligible_pending_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Batch A — A3 (2026-09-11): how often the eligible-PENDING "
+            "sweep runs (seconds). Default 90s (midpoint of the 60-120s "
+            "brief range). The sweep is ALWAYS-ON infrastructure (no "
+            "kill-switch env var — per the project owner's HARD POLICY "
+            "on Batch A); the interval knob tunes responsiveness vs DB "
+            "load. Lower = more responsive but more DB scans; the floor "
+            "is 1s to prevent spin. Out-of-range values FAIL FAST AT BOOT "
+            "via pydantic ValidationError at Settings instantiation "
+            "(deliberate fail-fast, not a runtime disable). Override "
+            "via SERVICES_ELIGIBLE_PENDING_SWEEP_INTERVAL_SECONDS env var."
+        ),
+    )
+    eligible_pending_sweep_min_pending_age_seconds: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Batch A — A3 (2026-09-11): minimum age (seconds) for a "
+            "PENDING task to be considered eligible for the wake. "
+            "Default 60s (the brief lower bound) — fresh enqueues are "
+            "left alone to avoid racing with the natural claim path. "
+            "The atomic claim guard on the worker-pool side prevents "
+            "double-dispatch even when the sweep heals a row that is "
+            "about to be claimed anyway. Out-of-range values FAIL FAST "
+            "AT BOOT. Override via "
+            "SERVICES_ELIGIBLE_PENDING_SWEEP_MIN_PENDING_AGE_SECONDS."
+        ),
+    )
     lease_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description=(
