@@ -1176,7 +1176,11 @@ Mission projection ships **always-on**. The former M1 kill-switch env var
 **Revert hatch:** if a deploy needs to unwind mission projection, the sanctioned
 path is `git revert` of the removal commit + restart. There is no runtime toggle.
 (The staged-soak discipline this flag once served — the
-`ENSEMBLE_WC_WAKE_ENQUEUE` precedent — is retired with it.)
+`ENSEMBLE_WC_WAKE_ENQUEUE` precedent — was retired together with it on the
+`feature/fix-wc-wake-resilience` branch (B1, commit 88a27f71, 2026-09-11): the
+flag itself was removed AND the legacy WC RAM-FIFO route was removed in the
+same commit, so there is no longer a "durable-enqueue vs. legacy FIFO" toggle to
+discuss. WC routing is durable-enqueue-only.)
 
 #### Migration sequencing (consistent with §6.6)
 
