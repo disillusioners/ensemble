@@ -735,6 +735,126 @@ class WaitingChildrenWatchdog:
             return True
         return len(live) > 0
 
+    # ─── W-B liveness-gate helper ────────────────────────────────────
+
+    def _has_recent_heartbeat(
+        self, child_id: str, threshold_seconds: int
+    ) -> bool:
+        """Return True iff ``child_id`` has any task row with a heartbeat
+        fresher than ``threshold_seconds`` ago.
+
+        **W-B liveness gate** (feature/fix-wc-wake-resilience, 2026-09-11).
+        The pre-W-B B3 escalation / release decision was gated only on
+        the freshness proxy ``instances.last_activity_at`` — but that
+        column is NOT refreshed by in-flight tool calls, LLM turns, or
+        OpenCode subprocess activity. Only ``task.last_heartbeat_at``
+        (which the worker pool's heartbeat thread updates on a bounded
+        interval) moves during a running turn. A genuinely-working-but-
+        DB-silent child turn can therefore have a very stale
+        ``last_activity_at`` while its task row carries a freshly-
+        beating heartbeat — exactly the bug class the W-B review
+        flagged: "the B3 claim that forced release 'cannot fire while
+        a child is genuinely still working' is overstated — it holds
+        only under the freshness proxy, not true liveness."
+
+        W-B closes the gap by routing escalation AND release through
+        this helper. The signal is "any task row for the child with
+        ``last_heartbeat_at`` newer than the threshold". If true, the
+        child is by construction genuinely working — the watchdog
+        suppresses escalation AND release for this pair.
+
+        **Failure modes** (recorded for the next operator reading):
+
+        * *False negative* (we say "dead" when the child is alive):
+          happens when the child's most-recent heartbeat is older
+          than ``threshold_seconds`` but the child is actually
+          grinding through a long-running tool call. Risk = spurious
+          release. Mitigated by using the existing
+          ``hang_threshold_seconds`` (default 3600s = 1h) — the same
+          window that already classifies the child as "hung" for the
+          parent's view. A child whose heartbeat is >1h old is, by
+          the watchdog's own definition, hung.
+        * *False positive* (we say "alive" when actually dead):
+          happens when an OLD heartbeat row exists but the worker is
+          actually wedged. This is the same operational surface as
+          the existing ``list_hung_children_for_parent`` helper — no
+          regression.
+
+        Net: the gate only changes behavior on the borderline cases
+        where the freshness proxy says "hung" but the heartbeat says
+        "alive". Those cases are exactly the ones the W-B fix targets.
+
+        **Wiring**: backed by
+        :meth:`daemon.repositories.task.repository.TaskRepository.child_has_recent_heartbeat`.
+        The helper is sync (one indexed probe on ``instance_id`` +
+        a covering predicate on ``last_heartbeat_at``); cheap enough
+        to call per-(parent, child) pair inside the watchdog's
+        per-tick scan.
+
+        **Strictly opt-in via constructor**: the helper consults ONLY
+        ``self._task_repository`` (the constructor-injected
+        ``task_repository=...`` arg). It does NOT fall back to
+        ``self._manager._task_repo`` because the B3 test fixtures
+        (and any future MagicMock-based test that does not wire the
+        helper explicitly) rely on the manager's MagicMock auto-attrs
+        — a MagicMock ``child_has_recent_heartbeat`` returns a truthy
+        MagicMock, which would wrongly suppress escalation. By
+        gating the helper on a real, constructor-injected repo, the
+        gate is:
+
+        * *active in production* — ``daemon/api.py:701`` wires the
+          manager's real ``TaskRepository`` as ``task_repository=``
+          on every watchdog construction.
+        * *opt-in for tests* — tests that want to assert the gate
+          behavior must wire the helper explicitly (see the W-B
+          test surface for examples).
+        * *permissive when unwired* — any caller that does not
+          inject ``task_repository`` keeps the pre-W-B B3 behavior
+          unchanged (escalation/release fire on the nudge-count
+          thresholds with no liveness gate).
+
+        Args:
+            child_id: The child instance_id whose recent-heartbeat
+                presence we are checking. This is the child leg of
+                the (parent, child) pair — the watchdog is asking
+                "is this child actually still working?".
+            threshold_seconds: Maximum age (in seconds) of the most
+                recent heartbeat that still counts as "live".
+                Typically the watchdog's
+                ``hang_threshold_seconds`` (default 3600s). Same
+                threshold the freshness proxy uses — keeps the two
+                predicates on the same time axis.
+
+        Returns:
+            True iff at least one task row for ``child_id`` has a
+            ``last_heartbeat_at`` newer than ``threshold_seconds``
+            ago. False otherwise (no task rows, all tasks have
+            NULL heartbeat, no repo injected, the helper is not
+            implemented, or the newest heartbeat is older than the
+            threshold). False means "no recent liveness evidence"
+            — the watchdog is free to escalate or release.
+        """
+        repo = self._task_repository
+        if repo is None:
+            # Strictly opt-in: when no ``task_repository`` was
+            # injected via the constructor, the gate is permissive
+            # (returns False — "no liveness evidence"). This
+            # preserves the pre-W-B B3 behavior for callers that
+            # do not wire the helper. Production wiring always
+            # passes the manager's real ``TaskRepository`` so the
+            # gate is active in prod.
+            return False
+        method = getattr(repo, "child_has_recent_heartbeat", None)
+        if method is None or not callable(method):
+            # Test fixtures using AsyncMock / MagicMock without
+            # the helper — silent permissive fallback (same shape
+            # as ``_has_live_carrier_task`` above). The production
+            # TaskRepository always implements the helper.
+            return False
+        return bool(
+            method(child_id, threshold_seconds)
+        )
+
     # ─── Core scan ──────────────────────────────────────────────────────
 
     async def run_once(self) -> dict[str, int]:
@@ -922,6 +1042,65 @@ class WaitingChildrenWatchdog:
                         self._nudge_counts.get(pair, 0) + 1
                     )
                     nudge_count = self._nudge_counts[pair]
+                    # W-B LIVENESS GATE (feature/fix-wc-wake-resilience,
+                    # 2026-09-11). The freshness proxy
+                    # (``instances.last_activity_at``) that the B3
+                    # pre-W-B code relied on does NOT refresh during
+                    # a running turn — only ``task.last_heartbeat_at``
+                    # moves. A genuinely-working-but-DB-silent >~6h
+                    # child turn would otherwise get its parent
+                    # force-released. W-B requires TRUE liveness
+                    # evidence absence: a child with a recently-
+                    # beating task heartbeat must NOT be eligible for
+                    # escalation OR release.
+                    #
+                    # The gate is Boolean (True = heartbeat fresher
+                    # than threshold = suppress both paths). The
+                    # helper resolves to True on a wired repo with
+                    # task rows carrying a fresh ``last_heartbeat_at``;
+                    # False otherwise (no repo wired, no task rows,
+                    # all NULL heartbeats, or all heartbeats older
+                    # than threshold). The fallback-to-False shape is
+                    # intentional: when no liveness evidence is
+                    # available the existing B3 behavior is
+                    # preserved, not weakened — a release-eligible
+                    # pair that has no heartbeat is already in the
+                    # "hung by every signal" bucket.
+                    #
+                    # Same threshold as ``hang_threshold_seconds``:
+                    # the heartbeat signal is on the same time axis
+                    # as the freshness proxy, so a child whose
+                    # heartbeat is fresher than ``hang_threshold``
+                    # ago is by construction NOT in the "hung by
+                    # threshold" category the freshness proxy said
+                    # it was. The two predicates agree on the
+                    # borderline case W-B targets.
+                    child_has_recent_heartbeat = (
+                        self._has_recent_heartbeat(
+                            child_id,
+                            self._hang_threshold_seconds,
+                        )
+                    )
+                    if child_has_recent_heartbeat:
+                        # Child is genuinely working — suppress both
+                        # escalation and release for this tick. The
+                        # nudge count keeps climbing (so a future
+                        # tick that finds the heartbeat silent still
+                        # has the count) but the gate re-evaluates
+                        # every tick, so a child that subsequently
+                        # goes silent will see escalation/release
+                        # resume at the next nudge threshold. Logged
+                        # at INFO for diagnosability — the operator
+                        # following the watchdog's per-tick log sees
+                        # why a stuck pair is not escalating.
+                        logger.info(
+                            f"[Watchdog] (parent={parent_id[:8]}..., "
+                            f"child={child_id[:8]}...) "
+                            f"nudge={nudge_count} suppressed by W-B "
+                            f"liveness gate — recent heartbeat "
+                            f"detected on child's task rows."
+                        )
+                        continue
                     if (
                         nudge_count >= self._release_after_nudge_count
                         and pair not in self._release_notified

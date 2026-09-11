@@ -861,6 +861,102 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
+    def child_has_recent_heartbeat(
+        self,
+        instance_id: str,
+        threshold_seconds: int,
+    ) -> bool:
+        """Return True iff any ``task`` row for ``instance_id`` carries a
+        ``last_heartbeat_at`` fresher than ``threshold_seconds`` ago.
+
+        True liveness evidence predicate (W-B fix, 2026-09-11, on
+        ``feature/fix-wc-wake-resilience``). Backs the watchdog's B3
+        escalation / release liveness gate — see
+        ``daemon/services/waiting_children_watchdog.py::_has_recent_heartbeat``
+        for the calling predicate and the rationale.
+
+        Why this predicate (not ``instances.last_activity_at``): only
+        ``task.last_heartbeat_at`` is refreshed by the worker's
+        heartbeat thread during a running turn. ``instances.last_activity_at``
+        is touched by a subset of lifecycle writers (terminal
+        transitions, instance.status flips) and is NOT updated by
+        in-flight tool calls, LLM turns, or OpenCode subprocess
+        activity. A genuinely-working-but-DB-silent child turn can
+        therefore have a very stale ``last_activity_at`` while its
+        task row carries a freshly-beating heartbeat. Using the
+        heartbeat closes that gap.
+
+        Predicate:
+            ``EXISTS (SELECT 1 FROM task
+              WHERE task.instance_id = :instance_id
+                AND task.last_heartbeat_at IS NOT NULL
+                AND task.last_heartbeat_at > :threshold)``
+
+        Index: ``Task.last_heartbeat_at`` is indexed (see
+        :class:`daemon.repositories.task.models.Task` — ``index=True``
+        on the column). For the typical hot path (one watchdog pair
+        per tick) the query plan is a single index probe with a
+        covering predicate on ``instance_id`` (also indexed). Both
+        SQLite and PG serialize the comparison the same way; the
+        bound parameter is a Python ``datetime`` and SQLAlchemy
+        renders it as a ``?`` placeholder on SQLite and a ``$1``
+        psycopg bind on PG.
+
+        Args:
+            instance_id: The child's instance ID. Typically the
+                ``child_id`` argument in a watchdog (parent, child)
+                pair — the child whose terminal commit the watchdog
+                is waiting on.
+            threshold_seconds: Maximum age (in seconds) of the most
+                recent heartbeat that still counts as "live". A
+                child whose newest heartbeat is older than this is
+                considered silent. Typical value: the watchdog's
+                ``hang_threshold_seconds`` (default 3600s).
+
+        Returns:
+            True iff at least one task row for ``instance_id`` has a
+            ``last_heartbeat_at`` newer than ``threshold_seconds``
+            ago. False when:
+              * no task rows exist for ``instance_id``,
+              * every task row has ``last_heartbeat_at IS NULL``,
+              * or the most-recent ``last_heartbeat_at`` is older
+                than the threshold.
+
+        Notes:
+            * No task statuses are filtered — even COMPLETED / FAILED
+              task rows count, because the worker's heartbeat thread
+              updates ``last_heartbeat_at`` during the run, then the
+              task is finalized. A COMPLETED task with a fresh
+              heartbeat still indicates "the worker was alive within
+              the window" — exactly the signal the watchdog wants.
+            * Heartbeat age is computed in Python via
+              ``datetime.now(timezone.utc) - timedelta(...)`` and
+              bound as a parameter, NOT via SQL ``now()`` — keeps the
+              SQL dialect-portable (SQLite's ``julianday`` quirks
+              are not in play here) and matches the
+              ``list_pending_tasks_older_than`` precedent (W-B shares
+              the same per-instance predicate shape).
+        """
+        if threshold_seconds < 0:
+            raise ValueError(
+                f"threshold_seconds must be >= 0; got "
+                f"{threshold_seconds!r}"
+            )
+        threshold = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=threshold_seconds)
+        )
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.last_heartbeat_at.isnot(None))
+                .where(Task.last_heartbeat_at > threshold)
+            )
+            count = db_session.exec(stmt).one()
+            return int(count or 0) > 0
+
     def reconcile_turn_mirror(
         self, work_id: str, connection: Any | None = None
     ) -> dict[str, Any]:
