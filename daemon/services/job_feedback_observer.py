@@ -48,13 +48,13 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlmodel import Session, select, update as sqlmodel_update
-from sqlalchemy import func, text as _sa_text
+from sqlalchemy import case, func, text as _sa_text
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository
@@ -512,6 +512,68 @@ class JobFeedbackObserver:
                 f"may cause premature job finalization if persistent)"
             )
             return 0
+
+    def _partition_pending_tasks_for_instance_sync(
+        self, instance_id: str
+    ) -> tuple[int, int]:
+        """Sync helper: partition PENDING ``task`` rows for ``instance_id``
+        into total + orphan counts.
+
+        Batch A — A4 (2026-09-11): the F14 in-session gate partitions
+        the PENDING set into live / deferred / orphans (the P1
+        incident shape). The total count alone is no longer
+        sufficient — the gate's behavior differs for the pure-
+        orphan case (``notify_work()`` + fall through) vs the
+        live-or-deferred case (park as before).
+
+        An orphan is defined as: ``status='pending' AND
+        is_deferred=False AND created_at < now() - 60s``. The 60s
+        threshold matches ``EligiblePendingSweepService``'s
+        ``min_pending_age_seconds`` default — both backstops share
+        the same age boundary so a row classified orphan here is
+        also classified eligible by A3.
+
+        Returns:
+            ``(total_pending, orphan_count)``. Both zero on DB
+            failure (fail-OPEN — the in-session inline query is the
+            authoritative safety net).
+        """
+        from sqlmodel import Session as _SQLModelSession, select as _select
+        from daemon.repositories.task.models import Task, TaskStatus
+
+        engine = getattr(self._instance_manager, "engine", None)
+        if engine is None:
+            return (0, 0)
+        try:
+            orphan_age_threshold = datetime.now(
+                timezone.utc
+            ) - timedelta(seconds=60)
+            with _SQLModelSession(engine) as db_session:
+                total_stmt = (
+                    _select(func.count())
+                    .select_from(Task)
+                    .where(Task.instance_id == instance_id)
+                    .where(Task.status == TaskStatus.PENDING.value)
+                )
+                orphan_stmt = (
+                    _select(func.count())
+                    .select_from(Task)
+                    .where(Task.instance_id == instance_id)
+                    .where(Task.status == TaskStatus.PENDING.value)
+                    .where(Task.is_deferred.is_(False))
+                    .where(Task.created_at < orphan_age_threshold)
+                )
+                total = int(db_session.scalar(total_stmt) or 0)
+                orphan = int(db_session.scalar(orphan_stmt) or 0)
+                return (total, orphan)
+        except Exception as e:
+            logger.warning(
+                f"_partition_pending_tasks_for_instance_sync failed "
+                f"for {instance_id[:8]}...: {e} — treating as (0, 0) "
+                f"(FAIL-OPEN: A4 partition skipped, the in-session "
+                f"inline query is the authoritative safety net)"
+            )
+            return (0, 0)
 
     async def start(self) -> None:
         """Start the observer.
@@ -3270,29 +3332,67 @@ class JobFeedbackObserver:
         # authoritative in-session check is below (inside
         # WriteGuardSession) and shares the same transaction as the
         # JobItem UPDATE.
-        _pending_tasks = self._count_pending_tasks_for_instance_sync(
-            instance_id
+        #
+        # Batch A — A4 (2026-09-11): the early check applies the same
+        # partition as the in-session gate — pure-orphans dispatch
+        # ``notify_work()`` and fall through (no park), live /
+        # deferred tasks still park. The notify here mirrors the
+        # in-session call so the pool sees the wake before the
+        # in-session re-checks (a duplicate-notify is benign —
+        # ``notify_work()`` is idempotent).
+        _pending_total, _pending_orphans = (
+            self._partition_pending_tasks_for_instance_sync(instance_id)
         )
-        if _pending_tasks > 0:
-            logger.info(
-                f"Observer: aborting terminal transition for "
-                f"{instance_id[:8]}... — instance has {_pending_tasks} "
-                f"PENDING task(s) not registered in the bus (F14), "
-                f"deferring finalization"
-            )
-            return _FinalizeJobResult(
-                skip=True,
-                terminal_status=None,
-                job_id=None,
-                instance_id=None,
-                parent_id=None,
-                agent_id=None,
-                result_summary=None,
-                error_message=None,
-                locks_released=0,
-                instance_was_terminal=False,
-                gate_deferred=True,
-            )
+        if _pending_total > 0:
+            if _pending_orphans >= _pending_total:
+                # Pure-orphan signature — same shape as the
+                # in-session gate below. Dispatch notify + fall
+                # through.
+                logger.warning(
+                    f"Observer: F14 early gate — instance "
+                    f"{instance_id[:8]}... has {_pending_total} "
+                    f"PENDING task(s), ALL orphans; dispatching "
+                    f"notify_work() and proceeding (A4 "
+                    f"orphan-detection — pure-orphan branch)"
+                )
+                worker_pool = getattr(
+                    self._instance_manager, "_worker_pool", None
+                )
+                if worker_pool is not None:
+                    try:
+                        worker_pool.notify_work()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"Observer: F14 early gate notify_work "
+                            f"raised {notify_err!r} for instance "
+                            f"{instance_id[:8]}... — orphans heal "
+                            f"on the next A3 sweep tick"
+                        )
+                # Fall through — do NOT return the deferred
+                # ``_FinalizeJobResult``.
+            else:
+                logger.info(
+                    f"Observer: aborting terminal transition for "
+                    f"{instance_id[:8]}... — instance has "
+                    f"{_pending_total} PENDING task(s) "
+                    f"({_pending_orphans} orphan, "
+                    f"{_pending_total - _pending_orphans} live/"
+                    f"deferred) not registered in the bus (F14), "
+                    f"deferring finalization"
+                )
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                    gate_deferred=True,
+                )
 
         # ─── Single WriteGuardSession for ALL three DB writes ───
         with WriteGuardSession(
@@ -3453,40 +3553,152 @@ class JobFeedbackObserver:
             # task package pulls in JobItem transitively for the
             # cross-system guard, which pulls in
             # ``job_feedback_observer``).
+            #
+            # ─── Batch A — A4 (2026-09-11): orphan-detection ──────
+            # The pre-A4 gate parked the parent UNCONDITIONALLY when
+            # any PENDING task existed for the instance — including
+            # orphaned rows that should have been claimed but never
+            # were (P1 incident: task 33231 born is_deferred=True via
+            # revival enqueue 11:48:46 → autopromote flip 11:58:42 →
+            # STILL PENDING 12:32:14 → F14 parks the parent at
+            # completion → "indefinite park"). A4 partitions the
+            # PENDING set:
+            #
+            # * **Live tasks** — recent enqueue (created_at within
+            #   the orphan-age threshold). The orchestrator's
+            #   deliberate opt-in; the parent must wait.
+            # * **Deferred tasks** — ``is_deferred=True`` rows. The
+            #   Pattern (g) autopromote handles the defer lane; the
+            #   parent must still wait for the cycle to resolve.
+            # * **Orphans** — ``is_deferred=False`` + aged past the
+            #   threshold. The P1 class: a row that should have been
+            #   claimed but never was (notify lost, pool-busy, etc.).
+            #   These are eligible NOW — the worker pool just has no
+            #   signal.
+            #
+            # Conservative A4 rule: park when ANY live or deferred
+            # task is present (genuine work). When the ONLY PENDING
+            # rows are orphans, dispatch ``notify_work()`` so the
+            # pool picks them up; skip the park (the next
+            # completion attempt sees the orphans claimed and falls
+            # through). The systemic A3 sweep is the secondary
+            # backstop for any notify that crashes.
             from daemon.repositories.task.models import (
                 Task as _Task,
                 TaskStatus as _TaskStatus,
             )
-            _pending_tasks_stmt = (
-                select(func.count())
+            # Bounded orphan-age threshold (60s default — matches
+            # A3 sweep's ``min_pending_age_seconds``). Fresh enqueues
+            # are left alone to avoid racing with the natural claim
+            # path.
+            _orphan_age_threshold = datetime.now(
+                timezone.utc
+            ) - timedelta(seconds=60)
+            _pending_partition_stmt = (
+                select(
+                    func.count().label("total_pending"),
+                    func.sum(
+                        case(
+                            (
+                                _Task.is_deferred.is_(False)
+                                & (_Task.created_at < _orphan_age_threshold),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ).label("orphan_count"),
+                )
                 .select_from(_Task)
                 .where(_Task.instance_id == instance_id)
                 .where(_Task.status == _TaskStatus.PENDING.value)
             )
-            _pending_tasks = int(
-                session.scalar(_pending_tasks_stmt) or 0
-            )
+            _partition_row = session.execute(
+                _pending_partition_stmt
+            ).one()
+            _pending_tasks = int(_partition_row.total_pending or 0)
+            _orphan_tasks = int(_partition_row.orphan_count or 0)
             if _pending_tasks > 0:
-                logger.info(
-                    f"Observer: aborting terminal transition for "
-                    f"{instance_id[:8]}... — instance has "
-                    f"{_pending_tasks} PENDING task(s) not registered "
-                    f"in the bus (F14, in-session gate), "
-                    f"deferring finalization"
-                )
-                return _FinalizeJobResult(
-                    skip=True,
-                    terminal_status=None,
-                    job_id=None,
-                    instance_id=None,
-                    parent_id=None,
-                    agent_id=None,
-                    result_summary=None,
-                    error_message=None,
-                    locks_released=0,
-                    instance_was_terminal=False,
-                    gate_deferred=True,
-                )
+                # A4 partition decision:
+                if _orphan_tasks >= _pending_tasks:
+                    # All PENDING rows are orphans — eligible + aged.
+                    # Dispatch ``notify_work()`` so the pool picks
+                    # them up; the next completion attempt (post-
+                    # claim) will fall through. Loud log so the
+                    # operator sees the orphan signature.
+                    logger.warning(
+                        f"Observer: F14 in-session gate — instance "
+                        f"{instance_id[:8]}... has "
+                        f"{_pending_tasks} PENDING task(s), ALL "
+                        f"orphans (eligible + aged past 60s); "
+                        f"dispatching notify_work() and proceeding "
+                        f"with finalization (A4 orphan-detection — "
+                        f"the pool will surface the orphans before "
+                        f"the next completion attempt)"
+                    )
+                    worker_pool = getattr(
+                        self._instance_manager, "_worker_pool", None
+                    )
+                    if worker_pool is not None:
+                        try:
+                            worker_pool.notify_work()
+                        except Exception as notify_err:
+                            # Transient pool-side blip — the A3
+                            # sweep is the systemic backstop.
+                            logger.warning(
+                                f"Observer: F14 orphan-detection "
+                                f"notify_work() raised "
+                                f"{notify_err!r} for instance "
+                                f"{instance_id[:8]}... — orphans "
+                                f"heal on the next A3 sweep tick"
+                            )
+                    else:
+                        logger.debug(
+                            f"Observer: F14 orphan-detection "
+                            f"skipped notify_work() — "
+                            f"worker_pool not wired (legacy test "
+                            f"fixture / pre-wiring lifespan); "
+                            f"orphans heal on the next A3 sweep "
+                            f"tick"
+                        )
+                    # Fall through to the UPDATE / Step 1 / Step 2 /
+                    # Step 3 path — the orphans will be claimed
+                    # concurrently with the JobItem transition (the
+                    # atomic ``UPDATE task ... WHERE
+                    # status='pending'`` claim guard prevents
+                    # double-dispatch). DO NOT return the deferred
+                    # ``_FinalizeJobResult`` here.
+                    pass  # continue past the F14 gate
+                else:
+                    # Mixed: some live (or deferred-only) tasks +
+                    # some orphans. Park — the live / deferred tasks
+                    # are genuine work that the parent must wait
+                    # for. The orphan notify is intentionally NOT
+                    # dispatched here — the live tasks' claim cycle
+                    # is the natural wake signal, and the A3 sweep
+                    # is the secondary backstop for the orphans.
+                    logger.info(
+                        f"Observer: aborting terminal transition "
+                        f"for {instance_id[:8]}... — instance has "
+                        f"{_pending_tasks} PENDING task(s) "
+                        f"({_orphan_tasks} orphan, "
+                        f"{_pending_tasks - _orphan_tasks} live/"
+                        f"deferred) not registered in the bus "
+                        f"(F14, in-session gate), deferring "
+                        f"finalization"
+                    )
+                    return _FinalizeJobResult(
+                        skip=True,
+                        terminal_status=None,
+                        job_id=None,
+                        instance_id=None,
+                        parent_id=None,
+                        agent_id=None,
+                        result_summary=None,
+                        error_message=None,
+                        locks_released=0,
+                        instance_was_terminal=False,
+                        gate_deferred=True,
+                    )
             # Gate passed cleanly under CM authority — fall through
             # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
             # Reset the bounded defer counter so any future transient
