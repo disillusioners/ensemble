@@ -268,6 +268,123 @@ def _build_hang_notice(
     return "\n".join(lines)
 
 
+def _build_escalation_notice(
+    parent_id: str,
+    child_id: str,
+    nudge_count: int,
+    *,
+    hang_threshold_seconds: int,
+) -> str:
+    """Build the B3 escalation notice for a stuck (parent, child) pair.
+
+    The escalation is a more urgent cousin of the hang notice. It
+    fires after the watchdog has nudged the same pair
+    ``escalation_nudge_count`` times without resolution. The notice
+    tells the parent that the persistent hang has crossed the
+    escalation threshold and recommends the
+    replace-the-stuck-child path (a fresh child with a new
+    identity can complete what the wedged child could not).
+
+    Kept terse and directive per the hang-notice contract.
+
+    Args:
+        parent_id: The parent instance ID.
+        child_id: The hung child instance ID.
+        nudge_count: Total nudges fired for this pair (must be >=
+            ``escalation_nudge_count`` to make the notice meaningful).
+        hang_threshold_seconds: The hang threshold (for context).
+    """
+    parent_short = parent_id[:8] if len(parent_id) > 8 else parent_id
+    child_short = child_id[:8] if len(child_id) > 8 else child_id
+    threshold_human = _format_age_human(float(hang_threshold_seconds))
+    lines: list[str] = [
+        f"[system:watchdog:escalation] Escalation — your parked "
+        f"child {child_short}... has been non-terminal for "
+        f"{nudge_count} watchdog nudges in a row (threshold: "
+        f"{threshold_human}). The previous hang notice has not "
+        f"produced a resolution.",
+        "",
+        "Recommended playbook (urgent):",
+        "  1. The previous hang notice's revive / spawn-replacement "
+        "steps have not been acted on. Spawn a fresh child "
+        "(different agent_id or message content) to take over the "
+        "stuck work — the wedged child will be silently replaced.",
+        "  2. If a replacement is undesirable, terminate the wedged "
+        "child explicitly (it has been idle past the threshold; "
+        "operator action is the cleanest path).",
+        "  3. If the parent itself cannot make progress without this "
+        "child, escalate to the user — the watchdog will keep "
+        "observing until the episode ends.",
+        "",
+        "This escalation fires ONCE per hang episode. The next "
+        "B3 release may fire if the pair remains stuck past the "
+        "release threshold.",
+    ]
+    return "\n".join(lines)
+
+
+def _build_release_notice(
+    parent_id: str,
+    child_id: str,
+    nudge_count: int,
+    *,
+    hang_threshold_seconds: int,
+) -> str:
+    """Build the B3 release notice for a stuck (parent, child) pair.
+
+    The release is a SYNTHESIZED wake that tells the parent to
+    proceed without the hung child. It fires after
+    ``release_after_nudge_count`` nudges without resolution —
+    the parent has been parked long enough that infinite silent
+    park is itself the bug. The release wakes the parent (WC→RUNNING
+    flip via ``enqueue_message``) and instructs it to either
+    spawn a replacement OR proceed with the partial tree.
+
+    The release is best-effort: if the parent has a genuine
+    blocker (e.g., the stuck child carries state only it has),
+    the parent's LLM is the right place to decide — the release
+    just breaks the silent-park cycle. The notice carries enough
+    context for the parent to make that decision.
+
+    Kept terse and directive per the hang-notice contract.
+
+    Args:
+        parent_id: The parent instance ID.
+        child_id: The hung child instance ID.
+        nudge_count: Total nudges fired for this pair (must be >=
+            ``release_after_nudge_count``).
+        hang_threshold_seconds: The hang threshold (for context).
+    """
+    parent_short = parent_id[:8] if len(parent_id) > 8 else parent_id
+    child_short = child_id[:8] if len(child_id) > 8 else child_id
+    threshold_human = _format_age_human(float(hang_threshold_seconds))
+    lines: list[str] = [
+        f"[system:watchdog:release] Release — your parked child "
+        f"{child_short}... has been non-terminal for "
+        f"{nudge_count} watchdog nudges in a row. You are being "
+        f"RELEASED from WAITING_CHILDREN to proceed.",
+        "",
+        "This is an automated B3 release (see watchdog B3 doc). The "
+        "watchdog has waited long enough that infinite silent park "
+        "is itself the bug. You MUST take one of these paths on "
+        "your next turn:",
+        "  1. Spawn a fresh child to take over the wedged work "
+        "(preferred). The wedged child's state is preserved; the "
+        "replacement can consult it via subtree_messages.",
+        "  2. Proceed with the partial tree (skip the wedged child). "
+        "Note any work the wedged child owed the parent in your "
+        "response so the operator can decide whether to manually "
+        "retry.",
+        "  3. Terminate and respawn yourself if you cannot make "
+        "progress without this child. The watchdog has given up; "
+        "operator action is the next step.",
+        "",
+        "The release fires ONCE per hang episode. Do not block on "
+        f"the wedged child again. (Threshold was {threshold_human}.)",
+    ]
+    return "\n".join(lines)
+
+
 def _build_wedge_notice(parent_id: str) -> str:
     """Build the directive wedge-notice for ``parent_id``.
 
@@ -339,6 +456,16 @@ class WaitingChildrenWatchdog:
         interval_seconds: Seconds between scans. Default 3600 = 1h.
         hang_threshold_seconds: Strictly-greater-than threshold for
             hang detection. Default 3600 = 1h.
+        escalation_nudge_count: Number of nudges before an
+            escalation notice fires. Default 3.
+        release_after_nudge_count: Number of nudges before the
+            watchdog synthesizes a release (enqueues a wake turn with
+            a directive to proceed without the hung children, since
+            infinite silent park is a bug). Default 5.
+
+    B3 RESOLVED 2026-09-11 (Watchdog escalation): the design freedom
+    in the invariant is exercised via ``escalation_nudge_count`` and
+    ``release_after_nudge_count``. No env flags (HARD POLICY).
 
     Anti-spam invariant: ``_notified`` (a ``set`` of
     ``(parent_id, child_id)`` tuples) records every pair currently in
@@ -360,6 +487,8 @@ class WaitingChildrenWatchdog:
         interval_seconds: int = 3600,
         hang_threshold_seconds: int = 3600,
         task_repository: Any | None = None,
+        escalation_nudge_count: int = 3,
+        release_after_nudge_count: int = 5,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError(
@@ -370,12 +499,29 @@ class WaitingChildrenWatchdog:
                 "hang_threshold_seconds must be >= 0; got "
                 f"{hang_threshold_seconds!r}"
             )
+        if escalation_nudge_count < 1:
+            raise ValueError(
+                f"escalation_nudge_count must be >= 1; got "
+                f"{escalation_nudge_count!r}"
+            )
+        if release_after_nudge_count <= escalation_nudge_count:
+            raise ValueError(
+                f"release_after_nudge_count must be > "
+                f"escalation_nudge_count ({escalation_nudge_count}); "
+                f"got {release_after_nudge_count!r}"
+            )
 
         self._repo = instance_repository
         self._manager = manager
         self._enabled = bool(enabled)
         self._interval_seconds = int(interval_seconds)
         self._hang_threshold_seconds = int(hang_threshold_seconds)
+        # B3: escalation policy. ``escalation_nudge_count`` triggers
+        # an escalation notice; ``release_after_nudge_count``
+        # synthesizes a release turn. The values are passed through
+        # from the config layer (no env flags per HARD POLICY).
+        self._escalation_nudge_count = int(escalation_nudge_count)
+        self._release_after_nudge_count = int(release_after_nudge_count)
         # Wedge-fix backstop: optional task repository for the
         # live-carrier presence query. When ``None``, the watchdog
         # falls back to ``self._manager._task_repo`` at scan time —
@@ -404,6 +550,31 @@ class WaitingChildrenWatchdog:
         # restart. Exposed via properties below.
         self._wedge_parents_scanned_total: int = 0
         self._wedge_notices_enqueued_total: int = 0
+
+        # B3: per-(parent, child) episode nudge counter (lifetime
+        # within this process). Tracks how many nudges the watchdog
+        # has fired for each pair so the escalation and release
+        # thresholds fire on the right tick. The counter resets
+        # only when the pair leaves the notified set (episode ends).
+        # Daemon restart resets all counters — documented limitation
+        # (consistent with the cooldown-set semantics).
+        self._nudge_counts: dict[tuple[str, str], int] = {}
+
+        # B3: escalation cooldown — parents that have already
+        # received an escalation notice for this episode. Same
+        # episode-boundary semantics as ``_notified``.
+        self._escalation_notified: set[tuple[str, str]] = set()
+
+        # B3: release cooldown — parents that have already been
+        # synthesized-released for this episode. Same
+        # episode-boundary semantics.
+        self._release_notified: set[tuple[str, str]] = set()
+
+        # B3: per-tick observability counters — separate from the
+        # existing 4-key ``run_once`` stats dict so existing tests
+        # stay green. Reset only on daemon restart.
+        self._escalation_notices_enqueued_total: int = 0
+        self._release_notices_enqueued_total: int = 0
 
     # ─── Public introspection (tests) ──────────────────────────────────
 
@@ -457,6 +628,43 @@ class WaitingChildrenWatchdog:
         daemon restart.
         """
         return self._wedge_notices_enqueued_total
+
+    # ─── B3 escalation / release introspection ──────────────────────
+
+    @property
+    def escalation_nudge_count(self) -> int:
+        return self._escalation_nudge_count
+
+    @property
+    def release_after_nudge_count(self) -> int:
+        return self._release_after_nudge_count
+
+    @property
+    def escalation_notices_enqueued(self) -> int:
+        """Lifetime count of escalation notices enqueued (B3)."""
+        return self._escalation_notices_enqueued_total
+
+    @property
+    def release_notices_enqueued(self) -> int:
+        """Lifetime count of release notices enqueued (B3)."""
+        return self._release_notices_enqueued_total
+
+    @property
+    def escalation_episodes(self) -> frozenset[tuple[str, str]]:
+        """Read-only view of the B3 escalation cooldown set."""
+        return frozenset(self._escalation_notified)
+
+    @property
+    def release_episodes(self) -> frozenset[tuple[str, str]]:
+        """Read-only view of the B3 release cooldown set."""
+        return frozenset(self._release_notified)
+
+    def nudge_count_for(self, parent_id: str, child_id: str) -> int:
+        """Return the current per-pair nudge count (B3 observability).
+
+        Returns 0 for pairs with no recorded nudges (default).
+        """
+        return self._nudge_counts.get((parent_id, child_id), 0)
 
     # ─── Wedge-fix backstop helper ─────────────────────────────────────
 
@@ -526,6 +734,160 @@ class WaitingChildrenWatchdog:
         if _inspect.iscoroutine(live):
             return True
         return len(live) > 0
+
+    # ─── W-B liveness-gate helper ────────────────────────────────────
+
+    def _has_recent_heartbeat(
+        self, child_id: str, threshold_seconds: int
+    ) -> bool:
+        """Return True iff ``child_id`` has any task row with a heartbeat
+        fresher than ``threshold_seconds`` ago.
+
+        **W-B liveness gate** (feature/fix-wc-wake-resilience, 2026-09-11).
+        The pre-W-B B3 escalation / release decision was gated only on
+        the freshness proxy ``instances.last_activity_at`` — but that
+        column is NOT refreshed by in-flight tool calls, LLM turns, or
+        OpenCode subprocess activity. Only ``task.last_heartbeat_at``
+        (which the worker pool's heartbeat thread updates on a bounded
+        interval) moves during a running turn. A genuinely-working-but-
+        DB-silent child turn can therefore have a very stale
+        ``last_activity_at`` while its task row carries a freshly-
+        beating heartbeat — exactly the bug class the W-B review
+        flagged: "the B3 claim that forced release 'cannot fire while
+        a child is genuinely still working' is overstated — it holds
+        only under the freshness proxy, not true liveness."
+
+        W-B closes the gap by routing escalation AND release through
+        this helper. The signal is "any task row for the child with
+        ``last_heartbeat_at`` newer than the threshold". If true, the
+        child is by construction genuinely working — the watchdog
+        suppresses escalation AND release for this pair.
+
+        **Failure modes** (recorded for the next operator reading):
+
+        * *False negative* (we say "dead" when the child is alive):
+          happens when the child's most-recent heartbeat is older
+          than ``threshold_seconds`` but the child is actually
+          grinding through a long-running tool call. Risk = spurious
+          release. Mitigated by using the existing
+          ``hang_threshold_seconds`` (default 3600s = 1h) — the same
+          window that already classifies the child as "hung" for the
+          parent's view. A child whose heartbeat is >1h old is, by
+          the watchdog's own definition, hung.
+        * *False positive* (we say "alive" when actually dead):
+          happens when an OLD heartbeat row exists but the worker is
+          actually wedged. This is the same operational surface as
+          the existing ``list_hung_children_for_parent`` helper — no
+          regression.
+
+        Net: the gate only changes behavior on the borderline cases
+        where the freshness proxy says "hung" but the heartbeat says
+        "alive". Those cases are exactly the ones the W-B fix targets.
+
+        **Wiring**: backed by
+        :meth:`daemon.repositories.task.repository.TaskRepository.child_has_recent_heartbeat`.
+        The helper is sync (one indexed probe on ``instance_id`` +
+        a covering predicate on ``last_heartbeat_at``); cheap enough
+        to call per-(parent, child) pair inside the watchdog's
+        per-tick scan.
+
+        **Strictly opt-in via constructor**: the helper consults ONLY
+        ``self._task_repository`` (the constructor-injected
+        ``task_repository=...`` arg). It does NOT fall back to
+        ``self._manager._task_repo`` because the B3 test fixtures
+        (and any future MagicMock-based test that does not wire the
+        helper explicitly) rely on the manager's MagicMock auto-attrs
+        — a MagicMock ``child_has_recent_heartbeat`` returns a truthy
+        MagicMock, which would wrongly suppress escalation. By
+        gating the helper on a real, constructor-injected repo, the
+        gate is:
+
+        * *active in production* — ``daemon/api.py``'s lifespan
+          ``WaitingChildrenWatchdog(...)`` construction wires the
+          manager's real ``TaskRepository`` as ``task_repository=``
+          on every watchdog construction.
+        * *opt-in for tests* — tests that want to assert the gate
+          behavior must wire the helper explicitly (see the W-B
+          test surface for examples).
+        * *permissive when unwired* — any caller that does not
+          inject ``task_repository`` keeps the pre-W-B B3 behavior
+          unchanged (escalation/release fire on the nudge-count
+          thresholds with no liveness gate).
+        * *explicit fail-closed on DB-error* (B3 polish,
+          cycle-2 2026-09-11): the previous behavior caught the
+          probe's DB error ONLY via the watchdog's broad per-parent
+          ``except Exception as exc`` clause (the
+          ``WaitingChildrenWatchdog.run_once`` body — search for
+          ``except Exception as exc`` near ``stats["errors"]`` to
+          locate the exact handler) — fail-closed by accident,
+          not by design. Any tightening of that broad catch (the
+          vgap test fails loudly if that ever happens) would
+          re-introduce the wedge. This helper now catches the
+          probe's exceptions itself and returns ``True`` (assume
+          alive — suppress escalation/release for this tick).
+          Fail-closed is by contract, not by incidental broad catch.
+
+        Args:
+            child_id: The child instance_id whose recent-heartbeat
+                presence we are checking. This is the child leg of
+                the (parent, child) pair — the watchdog is asking
+                "is this child actually still working?".
+            threshold_seconds: Maximum age (in seconds) of the most
+                recent heartbeat that still counts as "live".
+                Typically the watchdog's
+                ``hang_threshold_seconds`` (default 3600s). Same
+                threshold the freshness proxy uses — keeps the two
+                predicates on the same time axis.
+
+        Returns:
+            True iff at least one task row for ``child_id`` has a
+            ``last_heartbeat_at`` newer than ``threshold_seconds``
+            ago. False otherwise (no task rows, all tasks have
+            NULL heartbeat, no repo injected, the helper is not
+            implemented, or the newest heartbeat is older than the
+            threshold). False means "no recent liveness evidence"
+            — the watchdog is free to escalate or release.
+        """
+        repo = self._task_repository
+        if repo is None:
+            # Strictly opt-in: when no ``task_repository`` was
+            # injected via the constructor, the gate is permissive
+            # (returns False — "no liveness evidence"). This
+            # preserves the pre-W-B B3 behavior for callers that
+            # do not wire the helper. Production wiring always
+            # passes the manager's real ``TaskRepository`` so the
+            # gate is active in prod.
+            return False
+        method = getattr(repo, "child_has_recent_heartbeat", None)
+        if method is None or not callable(method):
+            # Test fixtures using AsyncMock / MagicMock without
+            # the helper — silent permissive fallback (same shape
+            # as ``_has_live_carrier_task`` above). The production
+            # TaskRepository always implements the helper.
+            return False
+        # B3 polish (cycle-2 2026-09-11, W-B review): wrap the
+        # sync DB probe in an explicit try/except returning True
+        # on any error — assume-alive is the fail-CLOSED direction
+        # for the B3 release/escalation decision (a release-notice
+        # row landing in MessageQueue while the DB is unhealthy is
+        # a worse outcome than a spurious release suppression).
+        # Mirrors the watchdog's broad per-parent ``except
+        # Exception`` at :1267+ as the SECOND backstop (in case
+        # the helper itself raises in an unexpected path) — the
+        # FIRST backstop is this try/except, designed to guarantee
+        # the fail-closed direction without relying on the broad
+        # catch's incidental coverage.
+        try:
+            return bool(method(child_id, threshold_seconds))
+        except Exception as probe_exc:
+            logger.warning(
+                f"[Watchdog] _has_recent_heartbeat probe raised "
+                f"({probe_exc!r}); failing-CLOSED (assuming "
+                f"alive, suppressing B3 escalation/release for "
+                f"child={child_id[:8]}...) — fail-closed by design, "
+                f"not by incidental broad-catch."
+            )
+            return True
 
     # ─── Core scan ──────────────────────────────────────────────────────
 
@@ -676,7 +1038,211 @@ class WaitingChildrenWatchdog:
                     for child_id, age in hung
                     if (parent_id, child_id) not in self._notified
                 ]
+
+                # B3 RESOLVED 2026-09-11: escalation policy. After
+                # the first nudge, bump the per-pair nudge counter
+                # and check the escalation / release thresholds.
+                # Runs BEFORE the ``if not new_pairs`` early-out so
+                # persistent pairs (already in ``_notified`` from a
+                # prior tick) still get their nudge count bumped —
+                # otherwise a base notice on tick 1 + a stuck pair
+                # would never reach the escalation threshold.
+                #
+                # - ``escalation_nudge_count`` (default 3): fire an
+                #   escalation notice (one per episode, gated by
+                #   ``_escalation_notified`` cooldown set).
+                # - ``release_after_nudge_count`` (default 5):
+                #   synthesize a release — enqueue a wake with a
+                #   directive to proceed without the hung children
+                #   (one per episode, gated by
+                #   ``_release_notified`` cooldown set).
+                # - Pairs that persist in BOTH the SQL result AND
+                #   the cooldown set are in a continuing episode
+                #   and their nudge count keeps climbing each tick
+                #   until the episode ends (the wedge-pass purge
+                #   below).
+                # - Episode-end resets the nudge count (the pair
+                #   leaves ``_notified`` at episode end → its nudge
+                #   count is purged below).
+                #
+                # Scope: ALL pairs in this tick's ``hung`` list
+                # (still currently hung) are counted — both the
+                # first-time ``new_pairs`` AND the persistent pairs
+                # that already triggered the base notice on a prior
+                # tick.
+                for child_id, _age in hung:
+                    pair = (parent_id, child_id)
+                    self._nudge_counts[pair] = (
+                        self._nudge_counts.get(pair, 0) + 1
+                    )
+                    nudge_count = self._nudge_counts[pair]
+                    # W-B LIVENESS GATE (feature/fix-wc-wake-resilience,
+                    # 2026-09-11). The freshness proxy
+                    # (``instances.last_activity_at``) that the B3
+                    # pre-W-B code relied on does NOT refresh during
+                    # a running turn — only ``task.last_heartbeat_at``
+                    # moves. A genuinely-working-but-DB-silent >~6h
+                    # child turn would otherwise get its parent
+                    # force-released. W-B requires TRUE liveness
+                    # evidence absence: a child with a recently-
+                    # beating task heartbeat must NOT be eligible for
+                    # escalation OR release.
+                    #
+                    # The gate is Boolean (True = heartbeat fresher
+                    # than threshold = suppress both paths). The
+                    # helper resolves to True on a wired repo with
+                    # task rows carrying a fresh ``last_heartbeat_at``;
+                    # False otherwise (no repo wired, no task rows,
+                    # all NULL heartbeats, or all heartbeats older
+                    # than threshold). The fallback-to-False shape is
+                    # intentional: when no liveness evidence is
+                    # available the existing B3 behavior is
+                    # preserved, not weakened — a release-eligible
+                    # pair that has no heartbeat is already in the
+                    # "hung by every signal" bucket.
+                    #
+                    # Same threshold as ``hang_threshold_seconds``:
+                    # the heartbeat signal is on the same time axis
+                    # as the freshness proxy, so a child whose
+                    # heartbeat is fresher than ``hang_threshold``
+                    # ago is by construction NOT in the "hung by
+                    # threshold" category the freshness proxy said
+                    # it was. The two predicates agree on the
+                    # borderline case W-B targets.
+                    child_has_recent_heartbeat = (
+                        self._has_recent_heartbeat(
+                            child_id,
+                            self._hang_threshold_seconds,
+                        )
+                    )
+                    if child_has_recent_heartbeat:
+                        # Child is genuinely working — suppress both
+                        # escalation and release for this tick. The
+                        # nudge count keeps climbing (so a future
+                        # tick that finds the heartbeat silent still
+                        # has the count) but the gate re-evaluates
+                        # every tick, so a child that subsequently
+                        # goes silent will see escalation/release
+                        # resume at the next nudge threshold. Logged
+                        # at INFO for diagnosability — the operator
+                        # following the watchdog's per-tick log sees
+                        # why a stuck pair is not escalating.
+                        logger.info(
+                            f"[Watchdog] (parent={parent_id[:8]}..., "
+                            f"child={child_id[:8]}...) "
+                            f"nudge={nudge_count} suppressed by W-B "
+                            f"liveness gate — recent heartbeat "
+                            f"detected on child's task rows."
+                        )
+                        # Known residual (W-B review): a wedged turn
+                        # whose child heartbeat keeps beating suppresses
+                        # B3 release indefinitely — the heartbeat signal
+                        # is independent of worker execution progress,
+                        # so a hung-but-heartbeating child stays parked.
+                        # The pre-W-B base hang-notice (escalation, not
+                        # release) preserves operator visibility into
+                        # the wedged state.
+                        continue
+                    if (
+                        nudge_count >= self._release_after_nudge_count
+                        and pair not in self._release_notified
+                    ):
+                        # Release: synthesize a wake turn that
+                        # tells the parent to proceed without the
+                        # hung children (the same primitive B2
+                        # uses for cascade resume). This breaks the
+                        # infinite-silent-park cycle — the parent's
+                        # next turn sees the release directive and
+                        # either spawns a replacement child or
+                        # proceeds with the partial tree.
+                        release_notice = _build_release_notice(
+                            parent_id=parent_id,
+                            child_id=child_id,
+                            nudge_count=nudge_count,
+                            hang_threshold_seconds=self._hang_threshold_seconds,
+                        )
+                        try:
+                            await self._manager.enqueue_message(
+                                instance_id=parent_id,
+                                message=release_notice,
+                                source=WATCHDOG_SOURCE,
+                                priority=0,
+                                metadata={
+                                    "watchdog_release": True,
+                                    "released_pair": {
+                                        "parent_id": parent_id,
+                                        "child_id": child_id,
+                                    },
+                                    "nudge_count": nudge_count,
+                                },
+                            )
+                            self._release_notified.add(pair)
+                            self._release_notices_enqueued_total += 1
+                            logger.warning(
+                                f"[Watchdog] Release enqueued for "
+                                f"parent {parent_id[:8]}... after "
+                                f"{nudge_count} nudges — parked "
+                                f"child {child_id[:8]}...; releasing "
+                                f"the parent to proceed without it."
+                            )
+                        except Exception as release_exc:
+                            # Soft-fail — the release is best-effort.
+                            # The escalation notice (below) and the
+                            # next tick will retry.
+                            logger.warning(
+                                f"[Watchdog] release enqueue failed "
+                                f"for {pair}: {release_exc!r}"
+                            )
+                    elif (
+                        nudge_count >= self._escalation_nudge_count
+                        and pair not in self._escalation_notified
+                        and pair not in self._release_notified
+                    ):
+                        # Escalation notice: more urgent than the
+                        # base hang notice. Same delivery path
+                        # (enqueue_message + notify_work) but with
+                        # a different provenance marker and a
+                        # different message body.
+                        escalation = _build_escalation_notice(
+                            parent_id=parent_id,
+                            child_id=child_id,
+                            nudge_count=nudge_count,
+                            hang_threshold_seconds=self._hang_threshold_seconds,
+                        )
+                        try:
+                            await self._manager.enqueue_message(
+                                instance_id=parent_id,
+                                message=escalation,
+                                source=WATCHDOG_SOURCE,
+                                priority=0,
+                                metadata={
+                                    "watchdog_escalation": True,
+                                    "escalated_pair": {
+                                        "parent_id": parent_id,
+                                        "child_id": child_id,
+                                    },
+                                    "nudge_count": nudge_count,
+                                },
+                            )
+                            self._escalation_notified.add(pair)
+                            self._escalation_notices_enqueued_total += 1
+                            logger.warning(
+                                f"[Watchdog] Escalation enqueued for "
+                                f"parent {parent_id[:8]}... after "
+                                f"{nudge_count} nudges — parked "
+                                f"child {child_id[:8]}... is still "
+                                f"non-terminal; consider replacement."
+                            )
+                        except Exception as esc_exc:
+                            logger.warning(
+                                f"[Watchdog] escalation enqueue "
+                                f"failed for {pair}: {esc_exc!r}"
+                            )
+
                 if not new_pairs:
+                    # No new pairs to base-notify. The B3
+                    # escalation/release loop above still ran (it
+                    # covers both new and persistent pairs).
                     scanned_ok.add(parent_id)
                     continue
 
@@ -807,6 +1373,7 @@ class WaitingChildrenWatchdog:
         # One cheap SQL check over every child still referenced by
         # the cooldown set, independent of per-parent scan success
         # (deep-review "also required" clause).
+        terminal_pairs: set[tuple[str, str]] = set()
         if self._notified:
             child_ids = {child for _p, child in self._notified}
             try:
@@ -835,6 +1402,30 @@ class WaitingChildrenWatchdog:
                     f"[Watchdog] {len(terminal_pairs)} (parent, child) "
                     f"pair(s) dropped — child reached terminal status."
                 )
+
+        # ─── B3 episode-end purges for escalation state ────────────
+        # Pairs that left ``_notified`` (episode ended — child
+        # terminal, parent left WC, or the scan-driven sweep
+        # cleared them) MUST also clear their nudge count and the
+        # escalation/release cooldowns. A future episode with the
+        # same pair must start fresh at nudge=1.
+        all_ended_pairs = (
+            ended_pairs | departed_parent_pairs | terminal_pairs
+        )
+        if all_ended_pairs:
+            # Drop the per-pair nudge counts.
+            purged_nudge_count = sum(
+                1 for pair in all_ended_pairs
+                if self._nudge_counts.pop(pair, None) is not None
+            )
+            if purged_nudge_count:
+                logger.info(
+                    f"[Watchdog] Purged {purged_nudge_count} per-pair "
+                    f"nudge count(s) at episode end."
+                )
+            # Drop the escalation / release cooldowns.
+            self._escalation_notified -= all_ended_pairs
+            self._release_notified -= all_ended_pairs
 
         # ─── Wedge-fix backstop pass ─────────────────────────────────
         # Detect the wedge signature: parent in WAITING_CHILDREN +
@@ -978,6 +1569,54 @@ class WaitingChildrenWatchdog:
                         ),
                     },
                 )
+                # ── Batch A — A5 (2026-09-11): direct notify ────
+                # ``enqueue_message`` internally calls
+                # ``worker_pool.notify_work()`` once the Task row is
+                # committed, but that notify has proven unreliable
+                # on the wedge-notice path (incident 33252
+                # 2026-09-11: the wedge notice was stranded PENDING
+                # for zero claims ever). The cause is opaque — could
+                # be a lost wake between the enqueue commit and the
+                # pool's notify, or a defer-gate race that parked the
+                # notice behind a busy witness.
+                #
+                # The defensive fix: dispatch a DIRECT notify from
+                # the watchdog, AFTER ``enqueue_message`` returns, so
+                # the pool sees the wake regardless of whatever race
+                # swallowed the creation-time notify. Idempotent on
+                # the pool side (``notify_work()`` is a condition-
+                # variable signal — double-notify is wasted but
+                # benign). Wrapped in try/except so a transient
+                # pool-side blip does NOT abort the sweep (A3 sweep
+                # is the systemic backstop).
+                worker_pool = getattr(
+                    self._manager, "_worker_pool", None
+                )
+                if worker_pool is not None:
+                    try:
+                        _notify_result = worker_pool.notify_work()
+                        # Production ``WorkerPool.notify_work()`` is
+                        # sync (returns ``None``). Some test fixtures
+                        # attach an ``AsyncMock`` whose ``notify_work``
+                        # returns a coroutine — handle that case so
+                        # the coroutine is awaited (no RuntimeWarning)
+                        # without breaking the production path.
+                        import inspect
+                        if inspect.iscoroutine(_notify_result):
+                            await _notify_result
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"[Watchdog] wedge-pass direct "
+                            f"notify_work() raised {notify_err!r} "
+                            f"for parent {parent_id[:8]}... — "
+                            f"the A3 sweep is the systemic backstop"
+                        )
+                else:
+                    logger.debug(
+                        f"[Watchdog] wedge-pass direct notify "
+                        f"skipped — worker_pool not wired (legacy "
+                        f"test fixture / pre-wiring lifespan)"
+                    )
                 self._wedge_notified.add(parent_id)
                 self._wedge_notices_enqueued_total += 1
                 logger.warning(

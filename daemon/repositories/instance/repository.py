@@ -3133,3 +3133,80 @@ class SQLModelInstanceRepository:
                 )
             ).all()
             return set(rows)
+
+    def list_paused_or_terminal_instance_ids(
+        self, instance_ids: list[str]
+    ) -> set[str]:
+        """Return the subset of ``instance_ids`` whose status is in
+        the paused-or-terminal superset — ``paused`` plus the
+        4-status terminal set ``{completed, error, terminated,
+        failed}`` (``SQLModelInstanceRepository._WAITING_CHILDREN_HUNG_TERMINAL_SET``).
+        Deliberately broader than the claim gate's pause-only guard
+        (see cross-reference): the eligible sweep's W-D liveness
+        filter wants to skip notify_work for any parent instance
+        whose tasks are not actually being processed (paused OR
+        finalized — both qualify).
+
+        Used by the A3 eligible-PENDING sweep's W-D liveness filter
+        (``daemon/services/eligible_pending_sweep.py``) to skip
+        PENDING rows whose owning instance is paused or terminal
+        — the claim gate
+        (:meth:`daemon.repositories.task.repository.TaskRepository.claim_pending_task`)
+        already excludes those rows via the cross-system pause
+        guard (see ``TaskRepository`` around the
+        ``status IN (:status_paused, :status_terminated)`` predicate
+        at lines 1533-1538). notify_work for such rows would be
+        wasted, and the persistent re-notify at every sweep tick
+        would never converge — the bug class W-D targeted.
+
+        **Paused + terminal set** (deliberate superset of the claim
+        gate's exclusion):
+
+        * ``paused`` — the claim gate explicitly excludes paused
+          instances (per Decision 2 of the Pause/Resume redesign:
+          pause leaves tasks RUNNING so resume can continue; the
+          claim gate must not steal from a paused instance).
+        * ``completed`` / ``error`` / ``terminated`` / ``failed``
+          — terminal instances whose tasks have been (or are about
+          to be) finalized. Same reasoning as the
+          ``list_terminal_instance_ids`` helper.
+
+        Done as a SINGLE batched query (``SELECT instance_id WHERE
+        instance_id IN (...) AND status IN (...)``) rather than N
+        per-row fetches — keeps the cost proportional to the
+        number of eligible candidates, not N times that.
+
+        Args:
+            instance_ids: Candidate ids. Duplicates are fine; the
+                result is a set. Empty list short-circuits to an
+                empty set (no SQL emitted).
+
+        Returns:
+            Set of the input ids whose status is paused OR
+            terminal. Ids that do not exist in the table are
+            absent from the result (a missing row cannot be
+            concluded paused or terminal — callers keep their
+            notifications for those, mirroring
+            ``list_terminal_instance_ids`` semantics).
+        """
+        if not instance_ids:
+            return set()
+        # Paused + terminal superset. ``paused`` is a separate
+        # status from the terminal set — built explicitly here so
+        # a future addition to the terminal set (e.g., a new
+        # "abandoned" status) does not silently widen the W-D
+        # filter unless the operator also updates this union.
+        # ``_WAITING_CHILDREN_HUNG_TERMINAL_SET`` is a tuple;
+        # union with a set yields a set.
+        paused_or_terminal = (
+            {InstanceStatus.PAUSED.value}
+            | set(self._WAITING_CHILDREN_HUNG_TERMINAL_SET)
+        )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.instance_id).where(
+                    Instance.instance_id.in_(instance_ids),
+                    Instance.status.in_(list(paused_or_terminal)),
+                )
+            ).all()
+            return set(rows)

@@ -492,6 +492,14 @@ async def lifespan(app: FastAPI):
         # lifespan, so the refs are guaranteed available here.
         task_repository=getattr(manager, "_task_repo", None),
         stale_task_recovery=getattr(manager, "_stale_recovery", None),
+        # Batch A — A2 (2026-09-11): Pattern (g) autopromote calls
+        # ``worker_pool.notify_work()`` immediately after flipping
+        # ``task.is_deferred=True → False`` so the freshly-eligible
+        # row reaches the next claim cycle without waiting for the
+        # pool's idle timeout (3s). Without the notify the flip
+        # landed eligibility but scheduled nothing — see the P1
+        # incident on ``feature/fix-wc-wake-resilience``.
+        worker_pool=getattr(manager, "_worker_pool", None),
     )
     recovery_stats = await job_recovery.recover_on_startup()
     logger.info(f"Job recovery: {recovery_stats}")
@@ -555,6 +563,113 @@ async def lifespan(app: FastAPI):
         f"min_orphan_age={min_orphan_age}s, "
         f"f1_tree_activity_max_age={f1_tree_activity_max_age}s"
     )
+
+    # ─────────────────────────────────────────────────────────────
+    # Batch A — A3 (2026-09-11): eligible-PENDING sweep, the
+    # load-bearing systemic backstop for every "miss-reason"
+    # (born-deferred-then-flipped, pool-busy at creation, notify
+    # lost to crash, watchdog notices). Always ON — no env flag
+    # (per project owner's HARD POLICY). Single config knobs:
+    # interval + min age (tuning, not kill-switch).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.eligible_pending_sweep import (
+        DEFAULT_MIN_PENDING_AGE_SECONDS,
+        DEFAULT_SWEEP_INTERVAL_SECONDS,
+        EligiblePendingSweepService,
+    )
+    eligible_sweep_interval = (
+        config.services.eligible_pending_sweep_interval_seconds
+    )
+    eligible_sweep_min_age = (
+        config.services.eligible_pending_sweep_min_pending_age_seconds
+    )
+    eligible_pending_sweep = EligiblePendingSweepService(
+        task_repository=getattr(manager, "_task_repo", None),
+        worker_pool=getattr(manager, "_worker_pool", None),
+        interval_seconds=eligible_sweep_interval,
+        min_pending_age_seconds=eligible_sweep_min_age,
+        # W-D liveness filter (feature/fix-wc-wake-resilience,
+        # 2026-09-11): wire the manager's instance_repository so
+        # the sweep can skip PENDING rows whose owning instance
+        # is paused or terminal. The claim gate already excludes
+        # those rows, so notify_work is wasted and the persistent
+        # re-notify at every 90s tick never converges without this
+        # filter. Mirrors the watchdog's task_repository wiring
+        # pattern above.
+        instance_repository=getattr(
+            manager, "_instance_repository", None
+        ),
+    )
+    # Sanity: refuse to start when the canonical defaults
+    # regress (defensive — the config Field constraints enforce
+    # the bound, this is a second line of defence for legacy
+    # test fixtures that construct the service directly).
+    if eligible_sweep_interval < 1:
+        logger.error(
+            f"EligiblePendingSweepService DISABLED — interval="
+            f"{eligible_sweep_interval}s below the floor of 1s"
+        )
+    else:
+        eligible_pending_sweep.start()
+        app.state.eligible_pending_sweep = eligible_pending_sweep
+        logger.info(
+            f"EligiblePendingSweepService started: interval="
+            f"{eligible_sweep_interval}s (default "
+            f"{DEFAULT_SWEEP_INTERVAL_SECONDS}s), min_pending_age="
+            f"{eligible_sweep_min_age}s (default "
+            f"{DEFAULT_MIN_PENDING_AGE_SECONDS}s)"
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # Batch C — C2 (2026-09-11): periodic orphan-watcher sweep.
+    # Steady-state companion to the startup-time
+    # ``DependencyBus.start()`` sweep (which cleans the restart-
+    # window). The periodic sweep cleans orphans that accumulate
+    # mid-run (mid-run force-cancel, mid-run task death) so the
+    # parent's ``count_pending_for_target(parent)`` completion gate
+    # doesn't hold the parent in ``waiting_children`` forever.
+    # ALWAYS ON — no env flag (per the project owner's HARD POLICY
+    # on Batch A). Single config knob: interval (default 90s, shares
+    # the A3 cadence so the two sweeps tick together on the same
+    # bound). Shares the same asyncio-task + cancel/await lifecycle
+    # as the eligible-pending sweep above.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.dependency_bus import get_dependency_bus
+    from daemon.services.orphan_watcher_sweep import (
+        DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
+        DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        OrphanWatcherSweepService,
+    )
+    orphan_sweep_interval = (
+        config.services.orphan_watcher_sweep_interval_seconds
+    )
+    orphan_sweep_grace = (
+        config.services.orphan_watcher_sweep_grace_seconds
+    )
+    orphan_watcher_sweep = OrphanWatcherSweepService(
+        dependency_bus=get_dependency_bus(),
+        interval_seconds=orphan_sweep_interval,
+        min_watcher_age_seconds=orphan_sweep_grace,
+    )
+    # Sanity: refuse to start when the canonical defaults regress
+    # (defensive — the config Field constraint enforces the bound,
+    # this is a second line of defence for legacy test fixtures
+    # that construct the service directly).
+    if orphan_sweep_interval < 1:
+        logger.error(
+            f"OrphanWatcherSweepService DISABLED — interval="
+            f"{orphan_sweep_interval}s below the floor of 1s"
+        )
+    else:
+        orphan_watcher_sweep.start()
+        app.state.orphan_watcher_sweep = orphan_watcher_sweep
+        logger.info(
+            f"OrphanWatcherSweepService started: interval="
+            f"{orphan_sweep_interval}s (default "
+            f"{DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS}s), grace="
+            f"{orphan_sweep_grace}s (default "
+            f"{DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS}s)"
+        )
 
     # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
@@ -1125,6 +1240,38 @@ async def lifespan(app: FastAPI):
                 f"Waiting-children watchdog shutdown error: {e}"
             )
     app.state.waiting_children_watchdog_task = None
+
+    # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
+    # The service exposes ``stop()`` which cancels + awaits the
+    # asyncio task; the watchdog-style cancel/await is folded
+    # inside the service so the shutdown branch stays compact.
+    eligible_sweep = getattr(
+        app.state, "eligible_pending_sweep", None
+    )
+    if eligible_sweep is not None:
+        try:
+            await eligible_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"EligiblePendingSweepService shutdown error: {e}"
+            )
+        app.state.eligible_pending_sweep = None
+
+    # Batch C — C2 (2026-09-11): stop the orphan-watcher sweep.
+    # Same lifecycle as the eligible-pending sweep above; the
+    # ``stop()`` method cancels + awaits the asyncio task so the
+    # shutdown branch stays compact.
+    orphan_sweep = getattr(
+        app.state, "orphan_watcher_sweep", None
+    )
+    if orphan_sweep is not None:
+        try:
+            await orphan_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"OrphanWatcherSweepService shutdown error: {e}"
+            )
+        app.state.orphan_watcher_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down

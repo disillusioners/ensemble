@@ -1075,15 +1075,16 @@ class TestBootLogEmitAtBoot:
         here executes the actual ``daemon/manager.py`` emit site.
         """
         import daemon.services.context_messages as cm
-        import daemon.services.instance_messaging as im
         from daemon.migrations.runner import MigrationRunner
 
-        # Reset BOTH one-time emit guards so THIS test's construction
+        # Reset the one-time emit guard so THIS test's construction
         # (not a prior test's manager in the same process) is what
-        # emits. monkeypatch restores both after the test.
+        # emits. monkeypatch restores after the test.
+        # B1 (2026-09-11): the WC-wake kill-switch was REMOVED, so
+        # the ``_WC_WAKE_ENQUEUE_ENABLED`` / ``_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED``
+        # module-level guards are GONE — only the ambient-KV guard
+        # remains to reset.
         monkeypatch.setattr(cm, "_AMBIENT_KV_FRESH_BOOT_LOG_EMITTED", False)
-        monkeypatch.setattr(im, "_WC_WAKE_ENQUEUE_ENABLED", None)
-        monkeypatch.setattr(im, "_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED", False)
 
         project_root = Path(__file__).resolve().parents[3]
         config_path = project_root / "config.yaml"
@@ -1117,25 +1118,20 @@ class TestBootLogEmitAtBoot:
             "freshness boot line (manager.py → "
             "emit_ambient_kv_fresh_boot_log)"
         )
-        assert any(
-            "WC-wake enqueue routing resolved" in m for m in messages
-        ), (
-            "InstanceManager construction must emit the WC-wake boot "
-            "line (manager.py → emit_wc_wake_enqueue_boot_log) — the "
-            "C3 amend replaced this import and every daemon boot "
-            "NameError'd (the regression this execution pin exists "
-            "for)"
-        )
+        # B1 (2026-09-11): the WC-wake boot line was REMOVED entirely
+        # (the kill-switch is gone). The absence of the line is the
+        # correct post-fix invariant — assert the manager did not emit
+        # it instead.
 
     def test_emit_function_is_idempotent(self, monkeypatch, caplog) -> None:
         """The boot-log emit function is idempotent across calls.
 
         Calling ``emit_ambient_kv_fresh_boot_log()`` twice emits
         exactly ONE boot INFO line (mirrors the Shape B precedent —
-        ``emit_wc_wake_enqueue_boot_log``, etc.). The one-time guard
-        is reset FIRST so this pin is deterministic regardless of
-        whether an earlier test in the same process already emitted
-        (e.g. the kv_ambient_config boot-log pin).
+        the WC-wake emit helper was REMOVED in B1, 2026-09-11). The
+        one-time guard is reset FIRST so this pin is deterministic
+        regardless of whether an earlier test in the same process
+        already emitted (e.g. the kv_ambient_config boot-log pin).
         """
         import daemon.services.context_messages as cm
         emit = getattr(cm, "emit_ambient_kv_fresh_boot_log", None)

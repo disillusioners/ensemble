@@ -38,31 +38,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture(autouse=True)
-def _reset_wc_wake_enqueue_flag_cache():
-    """Reset the WC-wake kill-switch cache around EVERY test in this module.
-
-    W1 (2026-08-30 pre-flip batch): flag-ON tests set
-    ``ENSEMBLE_WC_WAKE_ENQUEUE=1`` and call ``_reset_wc_wake_enqueue_for_tests()``
-    so the resolver re-reads the env — but monkeypatch only restores the ENV at
-    teardown; the resolver's module-global cache stays ``True`` and leaks into
-    later flag-implicit tests (both the cross-file-order and subset-by-name
-    vectors reproduce ``assert 200 == 202`` on the legacy 202 expectation).
-    Clear the cache BEFORE and AFTER every test so each test resolves the flag
-    from the ambient env. Module-scoped on purpose — a suite-global autouse in
-    ``tests/conftest.py`` would mask intentional flag-state tests and add
-    overhead everywhere.
-    """
-    from daemon.services.instance_messaging import (
-        _reset_wc_wake_enqueue_for_tests,
-    )
-
-    _reset_wc_wake_enqueue_for_tests()
-    yield
-    _reset_wc_wake_enqueue_for_tests()
-
-
 # ---------------------------------------------------------------------------
+
 # Test doubles
 # ---------------------------------------------------------------------------
 
@@ -354,41 +331,18 @@ class TestInjectionPath:
         )
         assert user_payload["created_at"] == "2026-07-13T00:00:00+00:00"
 
-    def test_waiting_children_routes_to_injection_with_202(self, client_and_state):
-        """WAITING_CHILDREN → injection path (queue survives the parent wait)."""
-        client, state = client_and_state
-        state["manager"] = _make_manager(status="waiting_children", pending_count=1)
-        state["live_hub"] = _make_live_hub()
-
-        resp = client.post(
-            "/instances/inst-abc/messages",
-            json={"content": "please advise"},
-        )
-
-        assert resp.status_code == 202, resp.text
-        assert resp.json()["status"] == "injected"
-        state["manager"].set_injection.assert_called_once()
-
-    def test_waiting_children_routes_to_enqueue_with_200_flag_on(
-        self, client_and_state, monkeypatch: pytest.MonkeyPatch
+    def test_waiting_children_routes_to_enqueue(
+        self, client_and_state,
     ):
-        """wc-wake-report-integrity (T4 + C1-Q2): when
-        ``ENSEMBLE_WC_WAKE_ENQUEUE=1``, WAITING_CHILDREN targets fall
-        to the enqueue branch (durable wake, 200 ``MessageResponse``)
-        instead of the legacy FIFO injection (202).
+        """B1 RESOLVED 2026-09-11: WAITING_CHILDREN ALWAYS routes
+        through the enqueue branch (durable wake, 200 ``MessageResponse``)
+        — the ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag was REMOVED entirely.
 
         This pins the HTTP side of the routing pivot — the
-        ``injection_pending`` SSE does NOT fire for WC under flag ON
-        (FE sees the message via the normal turn-start
-        ``user_message`` pre-emit instead).
+        ``injection_pending`` SSE does NOT fire for WC (FE sees the
+        message via the normal turn-start ``user_message`` pre-emit
+        instead).
         """
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-        _reset_wc_wake_enqueue_for_tests()
-
         client, state = client_and_state
         state["manager"] = _make_manager(status="waiting_children", queued=True)
         state["live_hub"] = _make_live_hub()

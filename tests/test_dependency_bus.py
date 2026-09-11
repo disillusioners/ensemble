@@ -2101,7 +2101,7 @@ class TestOrphanSweep:
         assert pending_before[0].state == DependencyWatcherState.PENDING.value
 
         # Sweep — direct call. Returns the number of orphans cancelled.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 1, (
             f"orphan sweep must cancel exactly 1 watcher "
             f"(source_task_id={orphan_source} has no active task); "
@@ -2178,7 +2178,7 @@ class TestOrphanSweep:
             )
 
         # Sweep — must be a no-op for active tasks.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 0, (
             f"sweep must NOT cancel watchers for active tasks "
             f"(running/pending/paused); got swept={swept}"
@@ -2233,7 +2233,7 @@ class TestOrphanSweep:
         bus_repo.insert(watcher)
 
         # First sweep: cancels the orphan.
-        swept_first = await bus._sweep_orphan_watchers()
+        swept_first = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept_first == 1, (
             f"first sweep must cancel the orphan; got swept={swept_first}"
         )
@@ -2250,7 +2250,7 @@ class TestOrphanSweep:
 
         # Second sweep: nothing left to sweep. The guarded UPDATE
         # (``WHERE state='PENDING'``) matches zero rows, returns 0.
-        swept_second = await bus._sweep_orphan_watchers()
+        swept_second = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept_second == 0, (
             f"second sweep must return 0 (no PENDING orphans left); "
             f"got swept={swept_second}"
@@ -2332,7 +2332,7 @@ class TestOrphanSweep:
         )
 
         # Sweep — must cancel ONLY the 1 orphan.
-        swept = await bus._sweep_orphan_watchers()
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
         assert swept == 1, (
             f"sweep must cancel exactly 1 (the orphan); "
             f"running/paused watchers must be preserved; "
@@ -2426,3 +2426,277 @@ class TestOrphanSweep:
         assert cancelled_w.watch_id not in result_ids, (
             "CANCELLED watcher must be excluded from the result"
         )
+
+
+# ---------------------------------------------------------
+# W-C grace window — feature/fix-wc-wake-resilience, 2026-09-11
+# ---------------------------------------------------------
+#
+# The pre-W-C orphan sweep could race the natural emit_terminal
+# in the commit→emit window: a child's terminal commit landed, the
+# bus's transition_state→FIRED UPDATE was queued behind it, and the
+# sweep tick fired in between. Result: the watcher was CANCELLED as
+# an orphan while the FollowUp was about to fire — the FollowUp is
+# dropped.
+#
+# W-C adds a per-watch grace predicate on created_at. Watchers
+# younger than ``min_watcher_age_seconds`` are protected from the
+# sweep so an in-flight emit has time to land. Tests below exercise
+# the boundary cases.
+
+
+class TestWCSweepGraceWindow:
+    """W-C (2026-09-11): grace predicate on
+    ``_sweep_orphan_watchers`` protects young watchers from the
+    commit→emit race. The grace is configurable per-call via
+    ``min_watcher_age_seconds`` (default 30s).
+    """
+
+    @pytest.mark.asyncio
+    async def test_young_orphan_is_protected_by_default_grace(
+        self, bus_repo_with_task, bus
+    ):
+        """A freshly-inserted orphan watcher (created_at=now) is
+        younger than the default grace window (30s) → the sweep
+        MUST NOT cancel it. This is the core W-C invariant: the
+        commit→emit window is sub-second, so a young watcher must
+        be preserved until either the natural emit lands (transitions
+        to FIRED) or the grace elapses (then it becomes a true
+        orphan and the next tick cancels it)."""
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-young-orphan"
+        # Source task id that does NOT exist in the ``task`` table.
+        orphan_source = "young-orphan-source-9999"
+
+        # Insert the orphan with ``created_at`` defaulted to "now"
+        # — so it is well within the 30s grace window.
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+        )
+        bus_repo.insert(watcher)
+
+        # Sweep with the DEFAULT grace (30s) — the freshly-inserted
+        # watcher MUST be protected.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 0, (
+            f"W-C grace MUST protect a freshly-inserted orphan; "
+            f"got swept={swept} (default grace=30s, watcher "
+            f"created_at=now)"
+        )
+
+        # The watcher must STILL be PENDING (not CANCELLED).
+        all_pending_after = bus_repo.fetch_all_pending()
+        pending_ids = {w.watch_id for w in all_pending_after}
+        assert watcher.watch_id in pending_ids, (
+            "young orphan watcher MUST remain PENDING (not "
+            "CANCELLED) under the grace window"
+        )
+
+    @pytest.mark.asyncio
+    async def test_old_orphan_is_cancelled(self, bus_repo_with_task, bus):
+        """A backdated orphan watcher (created_at older than the
+        default grace) IS cancelled — the grace only protects young
+        watchers."""
+        from datetime import datetime, timedelta, timezone
+
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-old-orphan"
+        orphan_source = "old-orphan-source-9999"
+
+        # Backdate ``created_at`` past the default 30s grace.
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=120)
+        ).isoformat()
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+            created_at=old_time,
+        )
+        bus_repo.insert(watcher)
+
+        # Default grace (30s) — the backdated watcher is past
+        # the grace → cancelled.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 1, (
+            f"old orphan (created_at=120s ago) MUST be cancelled "
+            f"under default grace=30s; got swept={swept}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_min_watcher_age_zero_disables_grace(
+        self, bus_repo_with_task, bus
+    ):
+        """``min_watcher_age_seconds=0`` disables the grace —
+        preserves the pre-W-C behavior (every orphan cancelled
+        regardless of age). The 5 existing orphan-sweep tests
+        rely on this when they call ``_sweep_orphan_watchers()``
+        without args — actually they pass ``min_watcher_age_seconds=0``
+        explicitly. This test pins that the kwarg works."""
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-no-grace"
+        orphan_source = "no-grace-source-9999"
+
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+        )
+        bus_repo.insert(watcher)
+
+        # grace=0 → no protection → orphan cancelled immediately.
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=0)
+        assert swept == 1, (
+            f"grace=0 MUST disable the grace window; "
+            f"got swept={swept}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_grace_boundary_just_inside_is_protected(
+        self, bus_repo_with_task, bus
+    ):
+        """A watcher created 5 seconds ago is protected by a
+        10s grace. Tests the lexicographic ISO-8601 comparison
+        boundary at the time-of-check boundary."""
+        from datetime import datetime, timedelta, timezone
+
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-boundary-inside"
+        orphan_source = "boundary-inside-source-9999"
+
+        # 5 seconds old — younger than the 10s grace.
+        recent_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=5)
+        ).isoformat()
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+            created_at=recent_time,
+        )
+        bus_repo.insert(watcher)
+
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=10)
+        assert swept == 0, (
+            f"watcher (5s old) MUST be protected by 10s grace; "
+            f"got swept={swept}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_grace_boundary_just_outside_is_cancelled(
+        self, bus_repo_with_task, bus
+    ):
+        """A watcher created 15 seconds ago is past a 10s grace →
+        cancelled. Tests the boundary in the opposite direction."""
+        from datetime import datetime, timedelta, timezone
+
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-boundary-outside"
+        orphan_source = "boundary-outside-source-9999"
+
+        # 15 seconds old — older than the 10s grace.
+        older_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=15)
+        ).isoformat()
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+            created_at=older_time,
+        )
+        bus_repo.insert(watcher)
+
+        swept = await bus._sweep_orphan_watchers(min_watcher_age_seconds=10)
+        assert swept == 1, (
+            f"watcher (15s old) MUST be cancelled past 10s grace; "
+            f"got swept={swept}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_grace_does_not_protect_active_task_watchers(
+        self, bus_repo_with_task, bus
+    ):
+        """The grace is additive to the active-task predicate —
+        a young watcher on a RUNNING task is still preserved
+        (the grace is irrelevant because the active-task predicate
+        already exempts it)."""
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-active-protected"
+        instance_id = "instance-active-grace"
+
+        running_id = _insert_task(
+            bus_repo.engine, instance_id, "running"
+        )
+        # Insert a watcher with created_at=now (young) on a
+        # RUNNING task.
+        watcher = DependencyWatcher(
+            source_task_id=str(running_id),
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+        )
+        bus_repo.insert(watcher)
+
+        # Default grace (30s) — but the active-task predicate
+        # exempts the watcher; sweep returns 0 regardless.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 0
+        # The watcher must STILL be PENDING.
+        all_pending_after = bus_repo.fetch_all_pending()
+        pending_ids = {w.watch_id for w in all_pending_after}
+        assert watcher.watch_id in pending_ids
+
+    @pytest.mark.asyncio
+    async def test_grace_rejects_young_orphan_keeps_old_active(
+        self, bus_repo_with_task, bus
+    ):
+        """Mixed batch — young orphan (protected by grace) + old
+        active-task watcher (preserved by active-task predicate).
+        The grace MUST NOT cancel the young orphan; the active
+        predicate MUST preserve the old active watcher. Sweep
+        returns 0."""
+        from datetime import datetime, timedelta, timezone
+
+        bus_repo = bus_repo_with_task
+        parent_young = "parent-young-mixed"
+        parent_old = "parent-old-active"
+        instance_id = "instance-old-active"
+
+        # Young orphan — created_at=now (within 30s grace).
+        young = DependencyWatcher(
+            source_task_id="young-orphan-mixed-9999",
+            target_instance_id=parent_young,
+            follow_up_payload=make_fu(target_id=parent_young).to_payload(),
+        )
+        bus_repo.insert(young)
+
+        # Old active-task watcher — created_at=120s ago, but the
+        # task is RUNNING so the active predicate exempts it.
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=120)
+        ).isoformat()
+        running_id = _insert_task(
+            bus_repo.engine, instance_id, "running"
+        )
+        old_active = DependencyWatcher(
+            source_task_id=str(running_id),
+            target_instance_id=parent_old,
+            follow_up_payload=make_fu(target_id=parent_old).to_payload(),
+            created_at=old_time,
+        )
+        bus_repo.insert(old_active)
+
+        # Default grace — neither should be cancelled.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 0, (
+            f"mixed batch MUST return 0 (young orphan protected "
+            f"by grace, old active protected by predicate); "
+            f"got swept={swept}"
+        )
+
+        pending_ids = {
+            w.watch_id for w in bus_repo.fetch_all_pending()
+        }
+        assert young.watch_id in pending_ids
+        assert old_active.watch_id in pending_ids

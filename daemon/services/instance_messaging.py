@@ -56,147 +56,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WC-wake kill-switch (wc-wake-report-integrity, C1-Q2 RESOLVED 2026-08-30)
-# ─────────────────────────────────────────────────────────────────────────────
-# The P1 routing pivot (T2 / T4 / T7) replaces the legacy "WC → RAM FIFO
-# set_injection" path with "WC → enqueue_message (durable wake turn)". That
-# change has three call sites — HTTP ``POST /messages``
-# (``daemon/routers/messages.py``), agent-tool ``send_message``
-# (``daemon/tools/instance.py``), and ``job_inject``
-# (``daemon/tools/job_queue.py``) — and they ALL cross the same
-# ``INJECTION_ELIGIBLE_STATUSES`` constant in ``daemon/constants.py`` (T2
-# shrinks it to ``frozenset({"running"})``).
-#
-# Per ``decisions.md`` C1-Q2 (RESOLVED 2026-08-30, leader-locked) the
-# pivot ships behind an env-driven kill-switch and is **DEFAULT OFF** at
-# code-land: the routing pivot only activates when
-# ``ENSEMBLE_WC_WAKE_ENQUEUE=1``. The flag mirrors the precedent set by
-# ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` (governor-chain guard,
-# 2026-08-30; same shape: env-driven, cached on first access, restart-
-# required to flip, one-shot INFO log on boot, valid truthy/falsy values
-# spelled out below).
-#
-# Flag states:
-#
-#   * **OFF (default)** — the LEGACY behavior is preserved at all three
-#     call sites: HTTP returns 202-injected, agent-tool injection route
-#     returns the W3-stranding text, ``job_inject`` returns
-#     ``{status: "injected"}``. This is the documented revert path; an
-#     operator with an incident can flip the env back to the previous
-#     behavior in O(restart) without code changes. **The constant
-#     ``INJECTION_ELIGIBLE_STATUSES`` stays shrunk to ``{"running"}``
-#     regardless** — the flag-off branch reads that shrunk set and adds
-#     the legacy ``"waiting_children"`` glock back at the call sites
-#     (constant stays single-home, fork lives ONLY at the gating branch).
-#
-#   * **ON** — the new routing pivot is live everywhere: WC targets get
-#     real ``enqueue_message`` durable wake turns, HTTP returns 200 with
-#     ``MessageResponse{message_id, job_id, queued}``, the agent-tool
-#     enqueue branch handles WC, ``job_inject`` mirrors Option A.
-#
-# Always-active (no gating, no flag check): the D1 enqueue-seam pairing
-# tail-guard (T6), the D2 seam-drain of parked FIFO leftovers (T5), the
-# R1 deterministic placeholder ids (T1), and the T6b deletion of the
-# legacy ``Manager.send_message`` -> ``InstanceMessagingService.send_message``
-# -> ``graph.ainvoke`` bypass. These are correctness fixes that ship
-# regardless of which way the routing flag points.
-#
-# Soak / flip policy (per C2-D2.5-FLIP precedent, leader-locked 2026-08-30):
-# ≤ 2-week soak on the OFF default, operator flips ON on first deploy
-# thereafter; immediate flip to OFF on any silent-death incident. The
-# exact ``--flip-window``, soak duration, and incident criteria are
-# recorded in ``docs/setup.md`` next to the env var documentation.
-_WC_WAKE_ENQUEUE_ENV = "ENSEMBLE_WC_WAKE_ENQUEUE"
-_WC_WAKE_ENQUEUE_ENABLED: bool | None = None
-_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED: bool = False
-
-
-def _resolve_wc_wake_enqueue_enabled() -> bool:
-    """Resolve and cache the WC-wake routing-pivot kill-switch.
-
-    Returns:
-        ``True`` when the routing pivot is enabled — i.e. WC targets
-        route through ``enqueue_message`` (durable wake) instead of
-        ``set_injection`` (RAM FIFO). ``False`` when disabled via
-        ``ENSEMBLE_WC_WAKE_ENQUEUE=0`` — the LEGACY behavior is
-        preserved at all three call sites (HTTP, agent-tool, ``job_inject``).
-
-    Valid truthy values: ``("1", "true", "yes", "on")``. Valid falsy
-    values: ``("0", "false", "no", "off")``. Blank / unset / unknown
-    values all resolve ``False`` (the OFF default) — blanking the env
-    mid-incident (``ENSEMBLE_WC_WAKE_ENQUEUE=``) is the instant-revert
-    path, so it MUST resolve OFF. (Note: ``""`` is NOT in the truthy
-    tuple — unlike the governor-guard resolver, whose ``get(..., "1")``
-    unset default makes a blank env consistent with its ON direction;
-    this resolver defaults OFF via ``get(..., "0")``.) Unknown (non-blank)
-    values additionally fall back to ``False`` with a one-shot WARN
-    cached on first access.
-
-    Caching and the boot-log emission are independent: this function
-    caches ONLY the resolved boolean; the one-shot INFO log naming the
-    resolved state is emitted by :func:`emit_wc_wake_enqueue_boot_log`
-    itself (gated by its own ``_WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED``
-    flag), which is called from ``InstanceManager.__init__``
-    (``daemon/manager.py:740`` — manager-init path). Flipping the env
-    mid-flight has no effect on either: the boolean is cached for the
-    daemon's lifetime, and the log fires exactly once per process.
-    """
-    global _WC_WAKE_ENQUEUE_ENABLED
-    if _WC_WAKE_ENQUEUE_ENABLED is not None:
-        return _WC_WAKE_ENQUEUE_ENABLED
-    raw = os.environ.get(_WC_WAKE_ENQUEUE_ENV, "0").strip().lower()
-    if raw in ("0", "false", "no", "off"):
-        _WC_WAKE_ENQUEUE_ENABLED = False
-    elif raw in ("1", "true", "yes", "on"):
-        _WC_WAKE_ENQUEUE_ENABLED = True
-    else:
-        logger.warning(
-            "%s=%r is not a recognized truthy/falsy value; falling back "
-            "to OFF (default — legacy WC injection routing). Valid falsy: "
-            "0/false/no/off. Valid truthy: 1/true/yes/on.",
-            _WC_WAKE_ENQUEUE_ENV,
-            raw,
-        )
-        _WC_WAKE_ENQUEUE_ENABLED = False
-    return _WC_WAKE_ENQUEUE_ENABLED
-
-
-def emit_wc_wake_enqueue_boot_log() -> None:
-    """Emit the one-time boot-time INFO log naming the resolved flag state.
-
-    Called from ``InstanceManager.__init__`` after the messaging service
-    is wired (mirrors ``emit_governor_recursion_guard_boot_log``). Restart-
-    required semantics — same as the governor-guard wrapper. The actual
-    routing logic is gated on ``_resolve_wc_wake_enqueue_enabled()`` at
-    every call site, so flipping the env mid-flight has no effect.
-    """
-    global _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
-    if _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED:
-        return
-    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = True
-    enabled = _resolve_wc_wake_enqueue_enabled()
-    logger.info(
-        "WC-wake enqueue routing resolved: %s (env %s=%s); "
-        "WC targets %s. Restart required to flip. "
-        "See docs/setup.md (ENSEMBLE_WC_WAKE_ENQUEUE).",
-        "enabled" if enabled else "DISABLED (legacy FIFO injection)",
-        _WC_WAKE_ENQUEUE_ENV,
-        os.environ.get(_WC_WAKE_ENQUEUE_ENV, "<unset>"),
-        "route to enqueue_message (durable wake, first-class turn)"
-        if enabled
-        else "still route to set_injection (RAM FIFO; 202-injected)",
-    )
-
-
-def _reset_wc_wake_enqueue_for_tests() -> None:
-    """Clear the cached kill-switch state so tests can re-resolve after
-    mutating the env. Test-only — production code never invokes this."""
-    global _WC_WAKE_ENQUEUE_ENABLED, _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED
-    _WC_WAKE_ENQUEUE_ENABLED = None
-    _WC_WAKE_ENQUEUE_BOOT_LOG_EMITTED = False
-
-
 def _derive_task_flags_from_queue_type(
     queue_type: str | None,
     is_deferred: bool = False,
@@ -1869,6 +1728,41 @@ class InstanceMessagingService:
             )
             task: Task | None = None
 
+            # ── Batch A — A1 revival carve-out (2026-09-11) ──────────
+            # A just-revived terminal instance (COMPLETED / TERMINATED /
+            # ERROR / FAILED) has NO in-flight turn to defer past. When
+            # the resolved queue is a defer queue (orchestrator opted in
+            # via ``enqueue_message(is_deferred=True)``), the
+            # Task.is_deferred=True stamp would land the revival carrier
+            # behind every non-defer work in the project; the defer gate's
+            # WS1 self-witness carve-out alone does not always resolve
+            # the wedge (the P1 incident: born-deferred → flip → no claim
+            # → orphan wedge). Forcing ``is_deferred=False`` on revival
+            # is structural: the freshly-revived instance is the only
+            # candidate, no defer semantics apply to a first turn. The
+            # derived flag below stays correct for ALL other callers
+            # (idle/running/waiting_children/paused instances retain
+            # the resolved queue's ``is_deferred`` value).
+            previous_instance_status = (
+                getattr(instance_for_pause_guard, "status", None)
+            )
+            is_terminal_revival = previous_instance_status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            )
+            is_deferred_for_task = bool(is_deferred) and not is_terminal_revival
+            if is_terminal_revival and is_deferred:
+                logger.info(
+                    f"instance_messaging: revival carve-out — forcing "
+                    f"is_deferred=False on the PROCESS_MESSAGE Task for "
+                    f"instance {instance_id[:8]}... (previous_status="
+                    f"{previous_instance_status!r}); the freshly-revived "
+                    f"terminal instance has no in-flight turn to defer "
+                    f"past, so defer semantics do not apply"
+                )
+
             # 2. Insert the Task row in the same transaction as the
             #    MessageQueue row unless the in-window marker guard fires.
             #    The structural D13 fix makes Task the dispatch primitive;
@@ -1879,7 +1773,10 @@ class InstanceMessagingService:
             #    stamped at creation time so the defer-queue idle gate
             #    can recognise the row without a follow-up UPDATE.
             #    Default False matches every pre-existing caller; the
-            #    orchestrator opts in via ``enqueue_message``.
+            #    orchestrator opts in via ``enqueue_message``. The
+            #    ``is_deferred_for_task`` local carries the A1 revival
+            #    carve-out override above so the revival carrier is
+            #    NEVER born deferred.
             if deferred_pause_marker_set:
                 logger.warning(
                     f"instance_messaging: SKIPPING PROCESS_MESSAGE Task creation "
@@ -1896,7 +1793,7 @@ class InstanceMessagingService:
                     message_id=message_id,
                     status=TaskStatus.PENDING.value,
                     created_at=datetime.now(timezone.utc),
-                    is_deferred=is_deferred,
+                    is_deferred=is_deferred_for_task,
                     is_background=is_background,
                     # ``work_id`` is the linkage handle for the
                     # JobItem/Task pair (POC path) or a fresh UUID minted
@@ -3895,12 +3792,10 @@ class InstanceMessagingService:
         # between the clear and ``graph.astream`` loses the leftovers
         # — same exposure, no new risk.
         #
-        # The drain is flag-INDEPENDENT (no gating; the constant
-        # ``INJECTION_ELIGIBLE_STATUSES`` shrunk to ``{"running"}``
-        # in T2 — but the drain operates on the RAM FIFO which is
-        # also the RUNNING-target lane; under flag OFF a WC-wake
-        # send still lands here via the legacy FIFO injection route
-        # and the drain picks it up the same way).
+        # The drain is constant-driven: ``INJECTION_ELIGIBLE_STATUSES``
+        # shrunk to ``{"running"}`` (T2) — only RUNNING-target sends
+        # land in the FIFO; WC targets route through durable enqueue
+        # (B1 fix). The drain picks up the FIFO on the wake turn.
         pending_snapshot = self._manager.get_injection(instance_id)
         leftover_fifo_msgs: list[HumanMessage] = []
         for entry in pending_snapshot or []:
@@ -4172,8 +4067,9 @@ class InstanceMessagingService:
         # The helper short-circuits on ``graph_input is None`` (the
         # silent-resume branch :3407 injects no new mid-turn HumanMessage
         # at the seam; the in-graph pairing guard already covers it).
-        # Flag-INDEPENDENT — always active regardless of the
-        # ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch.
+        # Flag-INDEPENDENT — always active (B1: WC now routes through
+        # durable enqueue_message; the legacy ``set_injection`` path
+        # is removed, no kill-switch exists).
         if graph_input is not None:
             await _heal_poisoned_checkpoint_tail(
                 graph, config, graph_input, instance_id[:8],

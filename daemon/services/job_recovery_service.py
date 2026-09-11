@@ -419,6 +419,7 @@ class JobRecoveryService:
         job_queue_service: "JobQueueService | None" = None,
         task_repository: "TaskRepository | None" = None,
         stale_task_recovery: "StaleTaskRecovery | None" = None,
+        worker_pool: Any = None,
     ) -> None:
         """Initialize the recovery service.
 
@@ -439,6 +440,19 @@ class JobRecoveryService:
                 tests can construct the recovery service with only
                 ``task_repository`` (F5-only), only ``stale_task_recovery``
                 (F10-only), or both (full drift detection).
+            worker_pool: Optional ``WorkerPool`` (Batch A — A2 fix,
+                2026-09-11). Used by Pattern (g) autopromote to call
+                ``notify_work()`` immediately after flipping
+                ``task.is_deferred`` from True → False so the next
+                claim cycle picks the freshly-eligible row up.
+                Pre-A2 the flip landed the row eligible but
+                scheduled no wake signal — the worker pool had no
+                reason to look at the row and the task sat PENDING
+                indefinitely (P1 incident on 2026-09-11). When
+                ``None`` (legacy test fixtures / pre-wiring
+                lifespan), Pattern (g) writes the flip and emits
+                a DEBUG log; the periodic A3 sweep is the
+                systemic backstop that catches the orphaned row.
         """
         self._job_repository = job_repository
         self._lock_repository = lock_repository
@@ -450,6 +464,11 @@ class JobRecoveryService:
         # "skip drift correction" — production always wires both.
         self._task_repository = task_repository
         self._stale_task_recovery = stale_task_recovery
+        # Batch A — A2 (2026-09-11): the worker-pool seam is the
+        # SAME ``notify_work()`` used at task creation; Pattern (g)
+        # autopromote calls it after the flip so the pool's claim
+        # path actually sees the newly-eligible row.
+        self._worker_pool = worker_pool
 
     def _is_instance_alive(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates the instance is still alive.
@@ -3559,6 +3578,50 @@ class JobRecoveryService:
                         f"regular task"
                     ),
                 })
+
+                # ── Batch A — A2 (2026-09-11): wake the worker pool ──
+                # The flip lands the row eligible for the next claim
+                # cycle, but the worker pool has no wake signal — it
+                # only re-polls when ``notify_work()`` is called or a
+                # worker times out (3s idle). Without this notify,
+                # the freshly-eligible row sits PENDING up to 3s per
+                # claim cycle, accumulating latency on top of the
+                # 10-minute drift-detect budget. P1 incident 2026-09-11:
+                # the flip OK was logged at 11:58:42 and the task was
+                # STILL PENDING at 12:32:14 when the F14 gate parked the
+                # parent — zero claims between flip and park.
+                #
+                # Same primitive as task creation
+                # (``InstanceMessagingService.enqueue_message`` →
+                # ``worker_pool.notify_work()``). Idempotent — a
+                # double-notify on the same pool is benign. Wrapped
+                # in try/except so a transient pool-side blip does
+                # NOT abort the sweep (the periodic A3 sweep is the
+                # systemic backstop that catches the missed row).
+                if self._worker_pool is not None:
+                    try:
+                        self._worker_pool.notify_work()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (g) "
+                            f"notify_work() raised {notify_err!r} "
+                            f"for task {task.id} on instance "
+                            f"{target_instance_id[:8]}... — flip "
+                            f"already committed; the A3 sweep is "
+                            f"the systemic backstop"
+                        )
+                else:
+                    # No pool wired (legacy test fixture / pre-wiring
+                    # lifespan). The DEBUG log preserves forensic
+                    # traceability without polluting prod logs.
+                    logger.debug(
+                        f"reconcile_drift_states: Pattern (g) "
+                        f"notify_work() skipped — worker_pool not "
+                        f"wired (test fixture / pre-wiring lifespan); "
+                        f"task {task.id} on instance "
+                        f"{target_instance_id[:8]}... relies on the "
+                        f"A3 sweep to surface the eligible row"
+                    )
 
             except Exception as row_err:
                 # Per-row isolation — log + continue. The sweep

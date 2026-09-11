@@ -29,29 +29,6 @@ from daemon import constants
 from daemon.services import project_normalizer
 
 
-@pytest.fixture(autouse=True)
-def _reset_wc_wake_enqueue_flag_cache():
-    """Reset the WC-wake kill-switch cache around EVERY test in this module.
-
-    W1 (2026-08-30 pre-flip batch): the flag-parametrized ``job_inject`` tests
-    set ``ENSEMBLE_WC_WAKE_ENQUEUE`` and call ``_reset_wc_wake_enqueue_for_tests()``
-    so the resolver re-reads the env — but monkeypatch only restores the ENV at
-    teardown; the resolver's module-global cache stays at the last test's value
-    and leaks into later flag-implicit tests (cross-file order AND
-    subset-by-name both reproduce ``assert 200 == 202`` failures on legacy
-    202 expectations). Clear the cache BEFORE and AFTER every test so each
-    test resolves the flag from the ambient env. Module-scoped on purpose —
-    a suite-global autouse in ``tests/conftest.py`` would mask intentional
-    flag-state tests and add overhead everywhere.
-    """
-    from daemon.services.instance_messaging import (
-        _reset_wc_wake_enqueue_for_tests,
-    )
-
-    _reset_wc_wake_enqueue_for_tests()
-    yield
-    _reset_wc_wake_enqueue_for_tests()
-
 # Test constant for system default project ID (mirrors test_job_queue_tools.py)
 TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 
@@ -989,44 +966,14 @@ class TestJobInjectTool:
         assert "job_continue" in result["error"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("flag_value", "expected_error"),
-        [
-            pytest.param(
-                "0",
-                "Instance is completed — job_inject "
-                "only works on RUNNING or WAITING_CHILDREN instances. "
-                "Use job_continue for IDLE/terminal instances.",
-                id="flag_off_legacy_string",
-            ),
-            pytest.param(
-                "1",
-                "Instance is completed — job_inject "
-                "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
-                "terminal targets get the message enqueued (WC under "
-                "the flag-ON routing pivot) or should use job_continue. "
-                "Use job_continue for IDLE/PAUSED/terminal instances.",
-                id="flag_on_pivot_string",
-            ),
-        ],
-    )
-    async def test_job_inject_error_text_branches_on_flag(
+    async def test_job_inject_error_text_for_completed(
         self, mock_services, mock_manager, job_inject_tool,
-        monkeypatch: pytest.MonkeyPatch, flag_value: str, expected_error: str,
     ):
-        """D3 (2026-08-30 pre-flip batch): the ``job_inject`` eligibility
-        error TEXT branches on the kill-switch. Flag OFF pins the
-        byte-faithful legacy string from 1f8f8ed4 — OFF is the
-        instant-revert path, so the revert contract is byte-compatible,
-        not just behavioral. Flag ON pins the routing-pivot wording.
-        The eligibility CONDITION is identical in both states."""
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", flag_value)
-        _reset_wc_wake_enqueue_for_tests()
-
+        """B1 RESOLVED 2026-09-11: WC always routes through enqueue
+        (flag removed), so the error TEXT is fixed — no flag-aware
+        branching. The eligibility check is identical to the post-flip
+        state.
+        """
         job_service, _, _ = mock_services
 
         record = _make_work_record(
@@ -1043,7 +990,17 @@ class TestJobInjectTool:
             "message": "Hello",
         })
 
-        assert result == {"error": expected_error}
+        # B1: the error text is the post-flip wording (no flag-OFF
+        # legacy branch — the kill-switch was removed).
+        assert result == {
+            "error": (
+                "Instance is completed — job_inject "
+                "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
+                "terminal targets get the message enqueued or should "
+                "use job_continue. "
+                "Use job_continue for IDLE/PAUSED/terminal instances."
+            )
+        }
 
     @pytest.mark.asyncio
     async def test_job_inject_project_id_mismatch(
@@ -1153,69 +1110,19 @@ class TestJobInjectTool:
         assert "SECRET INTERNAL ERROR" not in str(result)
 
     @pytest.mark.asyncio
-    async def test_job_inject_waiting_children_flag_off_legacy(
+    async def test_job_inject_waiting_children_enqueue(
         self, mock_services, mock_manager, job_inject_tool,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        """wc-wake-report-integrity (T7 + C1-Q2): WAITING_CHILDREN under
-        flag OFF (default) keeps the legacy FIFO injection route —
-        ``set_injection`` is called, returns ``{status: \"injected\"}``.
+        """B1 RESOLVED 2026-09-11: WAITING_CHILDREN ALWAYS routes
+        through ``manager.enqueue_message`` (the flag was REMOVED) —
+        durable wake turn. Returns
+        ``{status: \"enqueued\", message_id, queued: True}``.
         """
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "0")
-        _reset_wc_wake_enqueue_for_tests()
-
         job_service, _, _ = mock_services
 
-        root_id = "inject-wc-off"
+        root_id = "inject-wc"
         record = _make_work_record(
-            "inject-wc-off", instance_id=root_id, project_id="proj-1",
-            agent_id="developer",
-        )
-        job_service.get_work = AsyncMock(return_value=record)
-
-        root = _make_instance(root_id, status="waiting_children")
-        mock_manager._instance_repository.get = MagicMock(return_value=root)
-        mock_manager.set_injection = MagicMock(
-            return_value={"content": "wake", "timestamp": "t"}
-        )
-        mock_manager.get_injection_count = MagicMock(return_value=1)
-
-        result = await job_inject_tool.ainvoke({
-            "job_id": "inject-wc-off",
-            "message": "wake up",
-        })
-
-        # Legacy injection path was taken.
-        assert result["status"] == "injected"
-        mock_manager.set_injection.assert_called_once_with(root_id, "wake up")
-        mock_manager.enqueue_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_job_inject_waiting_children_flag_on_enqueue(
-        self, mock_services, mock_manager, job_inject_tool,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        """wc-wake-report-integrity (T7 + LOCKED C1-D3 Option A):
-        WAITING_CHILDREN under flag ON routes through
-        ``manager.enqueue_message`` — durable wake turn. Returns
-        ``{status: \"enqueued\", message_id, queued}``.
-        """
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-        _reset_wc_wake_enqueue_for_tests()
-
-        job_service, _, _ = mock_services
-
-        root_id = "inject-wc-on"
-        record = _make_work_record(
-            "inject-wc-on", instance_id=root_id, project_id="proj-1",
+            "inject-wc", instance_id=root_id, project_id="proj-1",
             agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)
@@ -1236,7 +1143,7 @@ class TestJobInjectTool:
             mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
 
         result = await job_inject_tool.ainvoke({
-            "job_id": "inject-wc-on",
+            "job_id": "inject-wc",
             "message": "wake up",
         })
 
@@ -1244,7 +1151,7 @@ class TestJobInjectTool:
         assert result["status"] == "enqueued"
         assert result["message_id"] == "msg-wake-1"
         assert result["queued"] is True
-        assert result["job_id"] == "inject-wc-on"
+        assert result["job_id"] == "inject-wc"
         assert result["instance_id"] == root_id
         mock_manager.enqueue_message.assert_awaited_once()
         kwargs = mock_manager.enqueue_message.await_args.kwargs
@@ -1255,11 +1162,10 @@ class TestJobInjectTool:
         mock_manager.set_injection.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_job_inject_waiting_children_flag_on_enqueue_returns_literal_queued(
+    async def test_job_inject_waiting_children_enqueue_returns_literal_queued(
         self, mock_services, mock_manager, job_inject_tool,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        """m2 fix (LOCKED C1-D3 Option A): the flag-ON WC branch returns
+        """m2 fix (LOCKED C1-D3 Option A): the WC branch returns
         ``queued: True`` LITERALLY — NOT the ``AsyncMessageResult.queued``
         capacity flag.
 
@@ -1275,18 +1181,11 @@ class TestJobInjectTool:
         returns ``queued=True``. The pre-m2 implementation would have
         propagated ``False``.
         """
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-        _reset_wc_wake_enqueue_for_tests()
-
         job_service, _, _ = mock_services
 
-        root_id = "inject-wc-on-m2"
+        root_id = "inject-wc-m2"
         record = _make_work_record(
-            "inject-wc-on-m2", instance_id=root_id, project_id="proj-1",
+            "inject-wc-m2", instance_id=root_id, project_id="proj-1",
             agent_id="developer",
         )
         job_service.get_work = AsyncMock(return_value=record)
@@ -1326,21 +1225,14 @@ class TestJobInjectTool:
         )
 
     @pytest.mark.asyncio
-    async def test_job_inject_waiting_children_flag_on_busy(
+    async def test_job_inject_waiting_children_busy(
         self, mock_services, mock_manager, job_inject_tool,
-        monkeypatch: pytest.MonkeyPatch,
     ):
         """wc-wake-report-integrity (T7): the ``has_instance_busy``
         pre-check makes a WC target that already has a queued wake
-        fail fast under flag ON with a clean error.
+        fail fast with a clean error (B1: WC always routes through
+        enqueue, the busy check is always active).
         """
-        from daemon.services.instance_messaging import (
-            _reset_wc_wake_enqueue_for_tests,
-        )
-
-        monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-        _reset_wc_wake_enqueue_for_tests()
-
         job_service, _, _ = mock_services
 
         root_id = "inject-wc-busy"

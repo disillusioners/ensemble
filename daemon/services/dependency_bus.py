@@ -80,7 +80,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -93,6 +93,42 @@ from daemon.repositories.dependency_bus import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# -------------------------------------------------------------------------
+# Module-level constants
+# -------------------------------------------------------------------------
+
+
+#: Default grace window for the orphan-watcher sweep
+#: (:meth:`DependencyBus._sweep_orphan_watchers`).
+#:
+#: **W-C grace window** (feature/fix-wc-wake-resilience, 2026-09-11).
+#: Watchers younger than this age are NOT cancelled by the sweep —
+#: the commit→emit window between a child's terminal commit and the
+#: bus's transition_state→FIRED UPDATE is sub-second in practice,
+#: but a wider margin (default 30s) gives the natural emit path
+#: ample time to land before the sweep considers the watcher
+#: orphaned. Sized to comfortably exceed the worst-case commit→
+#: emit latency observed in production while bounding the orphan-
+#: recovery latency by ``grace + sweep_interval`` (30s + 90s =
+#: 120s worst case, vs. the pre-W-C unbounded window that could
+#: race the emit at any moment).
+#:
+#: The grace is per-watch (not per-source-task): a young watcher
+#: whose source task is gone is preserved for the grace window so
+#: an in-flight emit_terminal has time to transition the watcher
+#: to FIRED. Once the watcher ages past the grace, the next sweep
+#: tick cancels it as a true orphan.
+#:
+#: The constant lives on the bus module (not the orphan-sweep
+#: service) because the startup sweep (called from
+#: :meth:`DependencyBus.start`) and the periodic sweep (called from
+#: ``OrphanWatcherSweepService.sweep_once``) both route through the
+#: same bus primitive — keeping the default here ensures both paths
+#: use the same value without leaking the knob into the periodic
+#: service.
+DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS: int = 30
 
 
 # -------------------------------------------------------------------------
@@ -1857,7 +1893,11 @@ class DependencyBus:
             for row in rows
         ]
 
-    async def _sweep_orphan_watchers(self) -> int:
+    async def _sweep_orphan_watchers(
+        self,
+        *,
+        min_watcher_age_seconds: int = DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
+    ) -> int:
         """Cancel orphan PENDING watchers whose source task is gone.
 
         Defense-in-depth sweep (Phase 1 of the orphan-watcher
@@ -1905,6 +1945,48 @@ class DependencyBus:
         the actual on-disk column values; a single case style
         would silently match zero rows.
 
+        **W-C grace window** (feature/fix-wc-wake-resilience,
+        2026-09-11): the pre-W-C sweep could race a natural
+        ``emit_terminal`` in the commit→emit window between the
+        child's terminal commit and the bus's transition_state
+        → FIRED UPDATE. The race is:
+
+          1. Child task is RUNNING; parent has a PENDING watcher
+             keyed on the child's task id.
+          2. Child task commits its terminal status (the task
+             row leaves the active set the sweep's IN-list
+             depends on).
+          3. **Sweep ticks here** — the watcher's
+             ``source_task_id`` is no longer in the active set,
+             so the sweep cancels the watcher as an orphan.
+          4. The natural emit_terminal lands a moment later,
+             but the watcher is already CANCELLED — the
+             FollowUp is dropped.
+
+        The W-C fix adds a per-watch grace predicate:
+        ``created_at < :cutoff_iso`` where ``cutoff_iso`` is
+        ``now - grace``. A young watcher is preserved for the
+        grace window so an in-flight emit has time to transition
+        it to FIRED. Once the watcher ages past the grace, the
+        next sweep tick cancels it as a true orphan.
+
+        The grace is implemented as a lexicographic ISO-8601
+        string comparison (``created_at < :cutoff_iso``) —
+        ISO-8601 timestamps in UTC sort lexicographically the
+        same as chronologically, so the predicate is
+        dialect-portable (works identically on SQLite and PG)
+        without needing per-dialect SQL. The same idiom is used
+        by the existing ``reset_stale_tasks`` / ``find_stale_*
+        `` family in ``TaskRepository`` where the
+        ``last_heartbeat_at`` predicate is a direct
+        datetime comparison.
+
+        Defaults are bounded: ``DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS``
+        = 30s. Sized to comfortably exceed the worst-case
+        commit→emit latency observed in production while
+        bounding orphan-recovery latency by ``grace +
+        sweep_interval`` (30s + 90s = 120s worst case).
+
         **Fail-open** — startup sweep is best-effort
         defense-in-depth. A DB error during the sweep MUST NOT
         crash the daemon startup (the bus is already wired with
@@ -1919,7 +2001,17 @@ class DependencyBus:
         complete and BEFORE the bus starts processing new events
         — so orphans cleaned here do not interfere with the
         cache snapshot (the cache is read-from-DB next, not
-        populated here).
+        populated here). The periodic sweep
+        (``OrphanWatcherSweepService.sweep_once``) also routes
+        through this method on each tick — same grace default.
+
+        Args:
+            min_watcher_age_seconds: Watchers whose ``created_at``
+                is younger than this are protected from the
+                sweep. Default ``DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS``
+                (30s). Independent knob from the sweep
+                interval — operators tuning one does not
+                accidentally affect the other.
 
         Returns:
             The number of orphan PENDING watchers transitioned
@@ -1930,24 +2022,39 @@ class DependencyBus:
         cancelled_state = DependencyWatcherState.CANCELLED.value
         pending_state = DependencyWatcherState.PENDING.value
         fired_at_iso = self._now_iso()
+        # W-C: grace cutoff. The sweep cancels only watchers
+        # whose ``created_at`` is OLDER than this threshold.
+        # Watchers newer than the grace are preserved for the
+        # natural emit_terminal path. ISO-8601 lexicographic
+        # comparison is dialect-portable.
+        cutoff_iso = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=min_watcher_age_seconds)
+        ).isoformat()
 
         def _sweep_atomic() -> int:
             """Atomic conditional UPDATE — dialect-portable (SQLite + PG).
 
             Uses ``sqlalchemy.text()`` with bound parameters
-            (``:cancelled_state``,``:pending_state``,``:now``) so the
-            runtime substitutes the correct bind-param syntax for the
-            active dialect (``?`` for SQLite, ``$1``/``$2``/``$3`` for
-            PostgreSQL via psycopg/asyncpg). The IN-list for active
-            statuses is intentionally embedded as a string literal
-            (no user input flows through it) — this avoids having to
-            bind a variable number of params and keeps the query
-            plan stable.
+            (``:cancelled_state``,``:pending_state``,``:now``,
+            ``:cutoff_iso``) so the runtime substitutes the correct
+            bind-param syntax for the active dialect (``?`` for
+            SQLite, ``$1``/``$2``/``$3``/``$4`` for PostgreSQL via
+            psycopg/asyncpg). The IN-list for active statuses is
+            intentionally embedded as a string literal (no user
+            input flows through it) — this avoids having to bind a
+            variable number of params and keeps the query plan
+            stable.
             """
             stmt = text(
                 "UPDATE dependency_watchers "
                 "SET state = :cancelled_state, fired_at = :now "
                 "WHERE state = :pending_state "
+                # W-C: grace predicate — protect watchers younger
+                # than the cutoff from the commit→emit race window.
+                # Lexicographic ISO-8601 comparison (UTC) is
+                # dialect-portable.
+                "AND created_at < :cutoff_iso "
                 "AND source_task_id NOT IN ("
                 "  SELECT CAST(id AS TEXT) FROM task "
                 "  WHERE status IN ('running', 'pending', 'paused')"
@@ -1960,6 +2067,7 @@ class DependencyBus:
                         "cancelled_state": cancelled_state,
                         "pending_state": pending_state,
                         "now": fired_at_iso,
+                        "cutoff_iso": cutoff_iso,
                     },
                 )
                 session.commit()
@@ -1982,11 +2090,13 @@ class DependencyBus:
             logger.info(
                 f"sweep_orphan_watchers: cancelled {rowcount} orphan "
                 f"PENDING watcher(s) (source_task_id no longer "
-                f"corresponds to an active task)"
+                f"corresponds to an active task; grace="
+                f"{min_watcher_age_seconds}s)"
             )
         else:
             logger.debug(
-                "sweep_orphan_watchers: no orphan PENDING watchers found"
+                "sweep_orphan_watchers: no orphan PENDING watchers "
+                "found (after grace filter)"
             )
         return rowcount
 

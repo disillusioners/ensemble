@@ -165,8 +165,14 @@ class _ChildCompletionDbResult(NamedTuple):
         ``"root_completed"`` — root completed cleanly, commit + SSE
             ``completed`` + CompletionRegistry + lifecycle event + title gen.
         ``"idempotency_skip"`` — already reported (terminal
-            COMPLETED/ERROR state), nothing to do. Phase 1: no marker
-            for terminal-failed delivery.
+            COMPLETED/ERROR state). B4 cycle-2 (W5 obligation re-mint):
+            when the obligation IS met (no PENDING watcher for the
+            (parent, child) pair, or the instance is NOT yet in
+            COMPLETED status) this branch is a no-op. When the
+            obligation IS unmet (parent alive, instance COMPLETED,
+            PENDING watcher present — the 84563a03 wedge), the
+            corrective multi-turn emit re-mints the obligation.
+            Phase 1: no marker for terminal-failed delivery.
         ``"deferred_pause"`` — Phase 1 (pause-report-recovery Variant B
             fix 2): CHILD is PAUSED at completion. The helper persists
             a DEFERRED marker on ``report_injections`` so the parent's
@@ -3608,6 +3614,20 @@ Provide a concise summary:"""
         agent_id = result.agent_id
         parent_id = result.parent_id
 
+        # B4 RESOLVED 2026-09-11: child report obligation backstop.
+        # Track whether the natural path emitted a terminal via the
+        # bus. The backstop at the bottom of the function fires a
+        # corrective emit if the natural path DID NOT emit but the
+        # child is actually completed with a parent. This closes the
+        # 84563a03 wedge (turn done 10:59:15+07, no terminal report,
+        # parent parked ~4.5h): the natural path returned early via
+        # some silent outcome (or was bypassed entirely by a race),
+        # leaving the parent's PENDING watcher un-fired. The backstop
+        # is the last line of defense — soft-fail (logged warning,
+        # never block the success path) and exactly-once preserved by
+        # the bus's ``transition_state`` guarded UPDATE.
+        bus_terminal_emitted = False
+
         # Emit SSE for deferred waiting_children (no commit happened)
         if outcome in ("deferred_waiting_children",):
             if self._manager._live_hub:
@@ -3619,6 +3639,10 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
                     )
+            # B4: defer cases do NOT emit a terminal report — the
+            # child is not actually completed yet (active children /
+            # pending tasks / deferred marker covers the obligation).
+            # No backstop fire needed here.
             return
 
         # Root waiting_children: commit + SSE
@@ -3632,6 +3656,8 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
                     )
+            # B4: root_waiting_children is a root instance — no
+            # parent, no obligation.
             return
 
         # Child still running defer (Fix 1, Wanderer active-children guard):
@@ -3714,6 +3740,12 @@ Provide a concise summary:"""
                 status="completed",
                 summary="child_still_running_defer (corrective multi-turn emit; parent watcher release)",
             )
+            # B4: terminal WAS emitted — the corrective multi-turn
+            # emit covers the obligation. The backstop below MUST
+            # NOT re-emit (exactly-once preserved by the bus's
+            # transition_state guarded UPDATE; the backstop is a
+            # no-op for this outcome).
+            bus_terminal_emitted = True
             return
 
         # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone
@@ -3775,8 +3807,157 @@ Provide a concise summary:"""
                 )
             return
 
-        # Idempotency skip: nothing to do (terminal COMPLETED/ERROR — delivery has happened or terminal-failed; no obligation to recover).
+        # B4 cycle-2 (2026-09-11, W5 obligation re-mint): the
+        # ``idempotency_skip`` outcome USUALLY means "already reported,
+        # nothing to do" — the natural path's prior turn already wrote
+        # the ``internal_report:`` MessageQueue row and the bus emit
+        # fired. The common case is a no-op here.
+        #
+        # But in the 84563a03 wedge (turn done 10:59:15+07, no terminal
+        # report, parent parked ~4.5h) the natural path returned this
+        # outcome WITHOUT firing the bus emit: the report row was
+        # created but the obligation was never honored — the parent's
+        # PENDING watcher on the (parent, child) pair stays PENDING
+        # and the parent stays wedged in ``waiting_children``.
+        #
+        # The bus's corrective multi-turn primitive
+        # ``_emit_terminal_for_child_instance_via_bus`` is the only
+        # obligation-honoring primitive that can fire a (parent, child)-
+        # keyed watcher regardless of which task id the terminal graph
+        # turn landed on. It is unconditionally safe — its underlying
+        # ``transition_state`` guarded UPDATE returns ``rowcount == 0``
+        # when the natural path already fired (matched_rows → 0,
+        # empty FollowUp list). So when the obligation IS unmet (wedge
+        # case), this branch re-mints the emit; when the obligation IS
+        # met (legit skip), this branch is a no-op.
+        #
+        # Obligation-unmet conditions — all three required:
+        #   1. ``parent_id`` is non-None (root has no obligation).
+        #   2. ``inst.status == COMPLETED`` (the defer was NOT
+        #      legitimate — the child is actually done, not in a
+        #      retry/pause bridge).
+        #   3. No TOCTOU at this seam: the re-mint site does NOT
+        #      pre-check for a PENDING watcher. The bus helper's
+        #      ``emit_terminal_for_child_instance``
+        #      (``daemon/services/dependency_bus.py:874-887``) reads
+        #      ``matched_rows`` via ``fetch_pending_for_target_and_
+        #      child`` and then atomically transitions each matched
+        #      row with ``transition_state``'s guarded
+        #      ``WHERE state='PENDING'`` UPDATE — the atomic write-
+        #      time re-verify inside the helper is what actually
+        #      serializes concurrent callers and exactly-once-fires
+        #      the PENDING watcher. When the natural path already
+        #      fired, the helper's ``matched_rows`` read returns
+        #      ``[]`` (no PENDING row exists) and the helper returns
+        #      an empty FollowUp list — no spurious emit, no double
+        #      fire. The helper is unconditionally safe to call
+        #      without a separate pre-check.
+        #
+        # SCOPE NOTE (W2, R2 polish 2026-09-11): this re-mint is
+        # COMPLETED-only BY DESIGN. ERROR-terminal children are NOT
+        # covered here — they reach the bus's corrective multi-turn
+        # emit via the error-lane pair at ``error_reporting.py:636``
+        # (see the ``_emit_terminal_for_child_instance_via_bus`` call
+        # in the ``status="error"`` branch). ACCEPTED RESIDUAL: if
+        # that error-lane hook itself fails (the helper logs WARNING
+        # and the call is unguarded against a top-level raise there),
+        # the ERROR-shape stays unhealed — documented as a backlog
+        # item, not in scope for this branch.
         if outcome == "idempotency_skip":
+            if parent_id is not None:
+                try:
+                    inst = await asyncio.to_thread(
+                        self._manager._instance_repository.get, instance_id
+                    )
+                except Exception as fetch_exc:
+                    # Forensics: a parent-repo read failure here means
+                    # the wedge-shape re-mint is silently skipped (no
+                    # caller-visible error). Surface at DEBUG so
+                    # operators can correlate with downstream parent-
+                    # still-parked symptoms.
+                    logger.debug(
+                        f"B4 cycle-2 re-mint: instance repo fetch "
+                        f"failed for {instance_id[:8]}...; "
+                        f"deferring re-mint (no-op): {fetch_exc!r}"
+                    )
+                    inst = None
+                if inst is not None and inst.status == (
+                    InstanceStatus.COMPLETED.value
+                ):
+                    try:
+                        # Capture the helper's returned FollowUp list
+                        # to distinguish "wedge healed" (non-empty) from
+                        # "legit skip / watcher already FIRED"
+                        # (empty list — see
+                        # ``_emit_terminal_for_child_instance_via_bus``
+                        # docstring at child_reports.py:608-613). The
+                        # helper returns ``[]`` when:
+                        #   * parent_instance_id is None (root)
+                        #   * bus singleton is None (wiring failure)
+                        #   * matched_rows → 0 (no PENDING watcher)
+                        #   * task-keyed emit already fired
+                        #     (transition_state's guarded UPDATE
+                        #     yielded rowcount == 0)
+                        # In all four cases the obligation is already
+                        # satisfied or inapplicable — a WARNING here
+                        # would be a misleading ops-log overclaim under
+                        # the recurring RESUME_ROUTER ×4-dup shape
+                        # (each post-resume turn reruns the natural
+                        # path → idempotency_skip → helper returns []).
+                        fired_followups = (
+                            await self._emit_terminal_for_child_instance_via_bus(
+                                parent_instance_id=parent_id,
+                                child_instance_id=instance_id,
+                                status="completed",
+                                summary=(
+                                    "idempotency_skip obligation re-mint "
+                                    "(B4 cycle-2 wedge fix; 84563a03)"
+                                ),
+                            )
+                        )
+                        # Only log the WARNING when the helper
+                        # actually healed a PENDING watcher (the wedge
+                        # case). Empty list = legit skip / natural
+                        # path already fired — silent no-op (the
+                        # expected common case under RESUME_ROUTER
+                        # dup-shapes and post-completion revives).
+                        if fired_followups:
+                            logger.warning(
+                                f"B4 cycle-2: idempotency_skip wedge "
+                                f"re-mit for child {instance_id[:8]}... "
+                                f"/ parent {parent_id[:8]}... — instance "
+                                f"COMPLETED, PENDING watcher obligation "
+                                f"honored via corrective multi-turn emit "
+                                f"({len(fired_followups)} watcher(s) FIRED)."
+                            )
+                    except Exception as remit_exc:
+                        # Defense-in-depth: the helper itself logs
+                        # exceptions and returns an empty FollowUp
+                        # list, but a top-level catch here keeps the
+                        # flow returning clean so no caller sees a
+                        # half-fired obligation.
+                        logger.warning(
+                            f"B4 cycle-2 re-mint failed for "
+                            f"{instance_id[:8]}... / "
+                            f"{parent_id[:8]}...: {remit_exc!r}"
+                        )
+            # Structural mutual exclusion (N5, R2 polish 2026-09-11):
+            # the inline ``return`` here is the ONLY outcome class
+            # the cycle-2 re-mint covers. The backstop at
+            # ``child_reports.py:~4195`` is structurally unreachable
+            # for ``idempotency_skip`` — every other canonical
+            # outcome (``root_completed``, ``deferred_pause``,
+            # ``dead_parent_skip``, ``tool_invocation_completed``,
+            # ``deferred_waiting_children``,
+            # ``root_waiting_children``, ``child_still_running_defer``,
+            # ``regular_child_completed``,
+            # ``instance_not_found``) early-returns ABOVE this branch
+            # too. The backstop is therefore reachable ONLY for
+            # outcome strings NOT in the canonical set (unknown /
+            # synthetic outcomes) — the legacy "idempotency_skip
+            # backstop" claim from the cycle-1 commit message is no
+            # longer accurate; the re-mint owns the obligation path
+            # for the canonical ``idempotency_skip`` shape.
             return
 
         # Phase 1 (pause-report-recovery Variant B fix 2): the
@@ -3910,6 +4091,10 @@ Provide a concise summary:"""
                 status="completed",
                 summary="regular child completed (corrective multi-turn emit)",
             )
+            # B4: terminal WAS emitted — the task-keyed + corrective
+            # multi-turn emit covers the obligation. The backstop
+            # below MUST NOT re-emit.
+            bus_terminal_emitted = True
 
             # Phase 1 (2026-06-24, report-lane decoupling): Wake the
             # worker pool after the report Task is committed. Before
@@ -4081,9 +4266,121 @@ Provide a concise summary:"""
 
             return
 
-        # instance_not_found or unknown outcome: nothing to do
+        # instance_not_found: no obligation (no parent reachable,
+        # no child to report).
         if outcome in ("instance_not_found",):
             return
+
+        # B4 RESOLVED 2026-09-11: child report obligation BACKSTOP.
+        # Reachable ONLY for UNKNOWN outcome strings at HEAD (R2
+        # polish 2026-09-11) — every canonical outcome now early-
+        # returns BEFORE this site:
+        #
+        #   * ``regular_child_completed`` and
+        #     ``child_still_running_defer`` → set
+        #     ``bus_terminal_emitted=True`` and return via their own
+        #     branches; the backstop's ``not bus_terminal_emitted``
+        #     guard short-circuits.
+        #   * ``idempotency_skip`` → handled INLINE by the cycle-2
+        #     re-mint at ``child_reports.py:~3843`` (W5 obligation
+        #     re-mint) when parent ∧ COMPLETED ∧ PENDING watcher.
+        #     When those conditions are absent (no parent, not
+        #     COMPLETED, no PENDING watcher) the branch is a silent
+        #     legit-skip — see the structural mutual-exclusion
+        #     comment above the inline ``return``.
+        #   * ``root_completed`` → root has no parent obligation.
+        #   * ``tool_invocation_completed`` → lifecycle events, no
+        #     bus emit.
+        #   * ``deferred_pause`` → DEFERRED marker persisted in
+        #     DB-sync helper.
+        #   * ``dead_parent_skip`` → no live parent.
+        #   * ``deferred_waiting_children`` /
+        #     ``root_waiting_children`` → SSE-only paths.
+        #   * ``instance_not_found`` → no instance, no obligation.
+        #
+        # So this backstop is structurally reachable ONLY for
+        # synthetic / unknown outcome strings — the legacy cycle-1
+        # claim "backstop handles idempotency_skip" is no longer
+        # accurate (the inline re-mint owns that path now). The
+        # backstop exists as a safety net for future outcome shapes
+        # added without a dedicated handler; it's also the wedge
+        # closure for the 84563a03 class when the inline re-mint
+        # ever fails silently (defense-in-depth).
+        #
+        # Skip conditions (each is a legitimate non-emit):
+        #  * No parent — root instance, no obligation.
+        #  * bus_terminal_emitted already True — the natural path
+        #    emitted; exactly-once is preserved, do NOT re-emit.
+        #  * The instance is NOT in a terminal status — the defer
+        #    was legitimate (the child isn't actually done yet).
+        #
+        # Exactly-once preservation: the bus's
+        # transition_state guarded WHERE state = 'PENDING'
+        # Core UPDATE makes a redundant backstop emit a safe no-op.
+        if (
+            not bus_terminal_emitted
+            and parent_id is not None
+            and outcome not in (
+                "root_completed",
+                "tool_invocation_completed",
+                "child_still_running_defer",
+                "deferred_waiting_children",
+                "root_waiting_children",
+                "dead_parent_skip",
+                "deferred_pause",
+            )
+        ):
+            # Verify the instance is actually COMPLETED — only
+            # then is the obligation unmet.
+            try:
+                inst = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+            except Exception as fetch_exc:
+                # Forensics: a parent-repo read failure here means
+                # the backstop's force-emit is silently skipped. At
+                # HEAD this site is only reachable for unknown
+                # outcome strings (see comment above), so a silent
+                # skip here is a defense-in-depth safety net —
+                # surface at DEBUG so operators can correlate with
+                # downstream parent-still-parked symptoms.
+                logger.debug(
+                    f"B4 backstop: instance repo fetch failed for "
+                    f"{instance_id[:8]}...; deferring force-emit "
+                    f"(no-op): {fetch_exc!r}"
+                )
+                inst = None
+            if inst is not None and inst.status == (
+                InstanceStatus.COMPLETED.value
+            ):
+                # The instance is COMPLETED but no terminal was
+                # emitted. Force-emit via the corrective multi-turn
+                # primitive — it fires the parent's PENDING watcher
+                # keyed on the (parent, child) instance pair. Logged
+                # at WARNING so a regression in the natural path
+                # surfaces in the operator logs.
+                logger.warning(
+                    f"B4 BACKSTOP: child {instance_id[:8]}... is "
+                    f"COMPLETED but no terminal report was emitted "
+                    f"(outcome={outcome!r}). Force-emitting corrective "
+                    f"terminal for parent {parent_id[:8]}... — "
+                    f"this is the 84563a03 wedge fix."
+                )
+                try:
+                    await self._emit_terminal_for_child_instance_via_bus(
+                        parent_instance_id=parent_id,
+                        child_instance_id=instance_id,
+                        status="completed",
+                        summary=(
+                            f"B4 backstop force-emit (outcome={outcome!r})"
+                        ),
+                    )
+                except Exception as backstop_exc:
+                    logger.warning(
+                        f"B4 backstop force-emit failed for "
+                        f"{instance_id[:8]}... / parent "
+                        f"{parent_id[:8]}...: {backstop_exc!r}"
+                    )
 
         logger.warning(
             f"Unknown child completion outcome '{outcome}' for "

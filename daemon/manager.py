@@ -87,7 +87,7 @@ from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
-from .services.instance_messaging import InstanceMessagingService, emit_wc_wake_enqueue_boot_log
+from .services.instance_messaging import InstanceMessagingService
 from .services.context_messages import emit_ambient_kv_fresh_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
@@ -803,12 +803,12 @@ class InstanceManager:
         # syntax. Mirrors the cascade-lineage wrapper precedent.
         emit_governor_recursion_guard_boot_log()
 
-        # WC-wake enqueue routing pivot (wc-wake-report-integrity,
-        # 2026-08-30): one-time INFO log naming the resolved kill-switch
-        # state. Default DISABLED (legacy FIFO injection); restart-required
-        # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
-        # Mirrors the governor-guard wrapper precedent.
-        emit_wc_wake_enqueue_boot_log()
+        # WC-wake enqueue routing pivot REMOVED (B1, 2026-09-11): the
+        # ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag and the legacy
+        # ``emit_wc_wake_enqueue_boot_log`` wrapper were deleted. WC
+        # ALWAYS routes through durable ``enqueue_message`` — no
+        # boot-time log, no flag state. Mirrors the governor-guard
+        # wrapper precedent (kept).
         emit_ambient_kv_fresh_boot_log()
 
         # Report-integrity (b) terminal-waiting guard (wc-wake-report-
@@ -9270,10 +9270,96 @@ class InstanceManager:
             }
 
         # 3. No suspension handle and no paused turn.
+        # B2 RESOLVED 2026-09-11: a silent cascade resume on a parked
+        # (WAITING_CHILDREN) parent is NEVER a no-op. The previous
+        # ``silent_resume`` return caused the FE to see "success"
+        # while the parent stayed parked indefinitely (incident 84563a03).
+        # B2 invariants:
+        #   * WC parent + silent=True → enqueue a real wake turn
+        #     (durable ``enqueue_message``). If the wake fails for any
+        #     reason (genuine impossibility — no children, no carrier,
+        #     DB error), return a LOUD refusal with structured details
+        #     so the FE / caller can reason about the wedge.
+        #   * Non-WC parent + silent=True → preserve the
+        #     ``internal_child_noop`` contract (§9.3): the parent owns
+        #     the actual work and the child does not need a new
+        #     message (the legitimate silent cascade case).
         if silent:
-            # internal_child_noop: legitimate silent child cascade
-            # where the parent owns the actual work and the child
-            # does not need a new message. Preserved per §9.3.
+            # B2: detect a WAITING_CHILDREN parent and route the
+            # silent resume through a real wake. Use the lifecycle
+            # service's ``get_instance_info`` (the public facade per
+            # D14) so the test fixtures that don't wire the lifecycle
+            # service get a clean ``None`` (silent_resume path
+            # preserved) and production paths get the WC-aware wake.
+            current_status: str | None = None
+            try:
+                instance_info = await asyncio.to_thread(
+                    self._lifecycle_service.get_instance_info,
+                    instance_id,
+                )
+                if instance_info:
+                    current_status = instance_info.get("status")
+            except (KeyError, AttributeError):
+                # Lifecycle service not wired (test fixture) or
+                # instance row missing — fall through to the
+                # legitimate silent cascade path.
+                current_status = None
+
+            if current_status == InstanceStatus.WAITING_CHILDREN.value:
+                # WC parent + silent=True → real wake or loud
+                # refusal. Try to enqueue a wake; on failure return
+                # a structured refusal.
+                try:
+                    wake_result = await self.enqueue_message(
+                        instance_id=instance_id,
+                        message=(
+                            message
+                            if message
+                            and message.strip()
+                            and message != "resume"
+                            else "continue"
+                        ),
+                        source="system:resume_wake",
+                        priority=0,
+                    )
+                    logger.info(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"route_outcome=b2_wc_wake "
+                        f"silent=True — enqueued wake turn "
+                        f"(WC→RUNNING flip via enqueue_message)"
+                    )
+                    return {
+                        "instance_id": instance_id,
+                        "job_id": getattr(wake_result, "job_id", None),
+                        "message_id": getattr(wake_result, "message_id", None),
+                        "status": "wake_enqueued",
+                    }
+                except Exception as wake_exc:
+                    # Loud refusal: the parent is parked AND we
+                    # could not enqueue a wake. The FE must not see
+                    # success — surface the wedge with structured
+                    # details so the operator can investigate.
+                    logger.warning(
+                        f"[RESUME] instance={instance_id[:8]} "
+                        f"route_outcome=b2_loud_refusal "
+                        f"silent=True WC parent — wake enqueue failed: "
+                        f"{type(wake_exc).__name__}: {wake_exc}"
+                    )
+                    return {
+                        "instance_id": instance_id,
+                        "job_id": None,
+                        "message_id": None,
+                        "status": "wake_failed",
+                        "error": (
+                            f"Parent {instance_id} is parked in "
+                            f"WAITING_CHILDREN and a wake turn could "
+                            f"not be enqueued: {type(wake_exc).__name__}: "
+                            f"{wake_exc}"
+                        ),
+                        "refusal_kind": "wc_wake_failed",
+                    }
+            # Non-WC silent resume (the legitimate internal_child_noop
+            # case from §9.3): preserve the silent no-op contract.
             logger.info(
                 f"[RESUME] instance={instance_id[:8]} "
                 f"route_outcome=internal_child_noop "
