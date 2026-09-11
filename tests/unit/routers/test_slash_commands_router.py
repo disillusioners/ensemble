@@ -1072,24 +1072,12 @@ class TestEscapePathSingleWrite:
         manager.resume_instance_cascade.assert_not_called()
         manager.resume_processing_job.assert_not_called()
 
-    def test_waiting_children_legacy_flag_off_one_injection_zero_enqueue(
+    def test_waiting_children_routes_through_enqueue(
         self, client_with_manager, dispatcher
     ):
-        """WAITING_CHILDREN with the WC-wake kill-switch OFF (the
-        legacy default — ``_resolve_wc_wake_enqueue_enabled()``
-        resolves to False unless ``ENSEMBLE_WC_WAKE_ENQUEUE=1``):
-        → legacy FIFO injection, no DB enqueue."""
-        # Default flag state is OFF — no env set means False.
-        from daemon.services.instance_messaging import (
-            _resolve_wc_wake_enqueue_enabled,
-        )
-        # Sanity check the test precondition.
-        assert _resolve_wc_wake_enqueue_enabled() is False, (
-            "test precondition: ENSEMBLE_WC_WAKE_ENQUEUE must NOT be "
-            "set in this test environment; otherwise the WC branch "
-            "falls through to enqueue instead of legacy injection."
-        )
-
+        """WAITING_CHILDREN (B1 RESOLVED 2026-09-11): WC ALWAYS routes
+        through durable enqueue_message_job — the flag was REMOVED,
+        no legacy FIFO injection path exists. Returns 200."""
         client, state = client_with_manager
         _register_compact(dispatcher)
         manager = _make_manager(dispatcher, instance_status="waiting_children")
@@ -1099,10 +1087,11 @@ class TestEscapePathSingleWrite:
             "/instances/inst-A/messages",
             json={"content": self.ESCAPE_TEXT},
         )
-        assert resp.status_code == 202, resp.text
+        assert resp.status_code == 200, resp.text
 
-        manager.set_injection.assert_called_once()
-        manager.enqueue_message_job.assert_not_awaited()
+        # Enqueue path was taken; set_injection NOT called.
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
         manager.resume_instance_cascade.assert_not_called()
         manager.resume_processing_job.assert_not_called()
 

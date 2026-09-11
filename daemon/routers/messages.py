@@ -18,7 +18,6 @@ from daemon.constants import (
 )
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.instance_messaging import _resolve_wc_wake_enqueue_enabled
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.work_status import canonicalize_status
 from daemon.utils import serialize_message
@@ -166,25 +165,17 @@ async def send_message(
 ) -> dict:
     """Send a message to an instance (async via queue).
 
-    Routing table (wc-wake-report-integrity, T2 + T4 + C1-Q2 RESOLVED 2026-08-30):
+    Routing table (wc-wake-report-integrity, T2 + T4 + B1 RESOLVED 2026-09-11):
         * RUNNING → set RAM injection slot, emit ``injection_pending``
           SSE, return **202 Accepted**.
-        * WAITING_CHILDREN → depends on the ``ENSEMBLE_WC_WAKE_ENQUEUE``
-          kill-switch (``decisions.md`` C1-Q2):
-            - **Flag OFF (default — legacy FIFO injection):** set RAM
-              injection slot, emit ``injection_pending`` SSE, return
-              **202 Accepted** (same shape as RUNNING). The queue
-              survives the parent wait and is consumed on the next
-              ``agent_node`` pass when a child report wakes the
-              instance. Carries the documented defect that ``images``
-              are silently dropped (FE-latency analysis defect #2;
-              unfixed in the legacy path).
-            - **Flag ON (post-flip):** route through
-              ``enqueue_message_job(source="api", images, queue_id)``
-              — durable ``MessageQueue`` + ``Task`` row, WC→RUNNING
-              flip, real wake, first-class turn. Return **200 OK**
-              with ``MessageResponse{message_id, job_id, queued}``
-              (D4). ``images`` are now carried end-to-end.
+        * WAITING_CHILDREN → durable wake turn via
+          ``enqueue_message_job(source="api", images, queue_id)`` — a
+          durable ``MessageQueue`` + ``Task`` row, WC→RUNNING flip, real
+          wake, first-class turn. Return **200 OK** with
+          ``MessageResponse{message_id, job_id, queued}`` (D4). The
+          legacy ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-OFF RAM-FIFO injection
+          path was REMOVED entirely (B1 fix) — WC targets ALWAYS route
+          through durable enqueue. ``images`` carry end-to-end.
         * PAUSED → existing auto-resume behavior (**NO CHANGE — C4**):
           cascade-resume + resume_processing_job, return 200.
         * IDLE / terminal → existing enqueue_message path (**NO CHANGE**):
@@ -194,9 +185,9 @@ async def send_message(
     any routing decision is made.
 
     Note: ``injection_pending`` SSE + ``GET /{id}/injection`` fallback
-    do NOT fire for WC under the flag-ON path — WC now produces a
-    real durable ``message_id`` at POST and the normal turn-start
-    ``user_message`` pre-emit covers the FE-side indicator.
+    do NOT fire for WC — WC produces a real durable ``message_id`` at
+    POST and the normal turn-start ``user_message`` pre-emit covers the
+    FE-side indicator.
     """
     manager = _get_manager(request)
     if manager.is_write_paused:
@@ -416,13 +407,11 @@ async def send_message(
             },
         }
 
-    # --- INJECTION PATH (Phase 3 / Tasks 3, 5): RUNNING / WAITING_CHILDREN ---
-    # The agent is in an active turn (RUNNING) or, under the
-    # ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-OFF legacy window, parked
-    # waiting for child completion reports (WAITING_CHILDREN). The
-    # injection queue is RAM-only (Phase 1 W1) — the agent_node pulls
-    # + clears the queue on its next invocation and threads each
-    # resulting HumanMessage into the LLM call.
+    # --- INJECTION PATH (Phase 3 / Tasks 3, 5): RUNNING ---
+    # The agent is in an active turn (RUNNING). The injection queue is
+    # RAM-only (Phase 1 W1) — the agent_node pulls + clears the queue
+    # on its next invocation and threads each resulting HumanMessage
+    # into the LLM call.
     #
     # Phase 3 append-list semantics (Task 5): ``set_injection`` appends
     # to the queue. The single-message ``injection_cleared`` event is
@@ -430,18 +419,14 @@ async def send_message(
     # ``injection_pending`` (one per message) → ``injection_consumed``
     # (one, for all messages) when the agent picks up the queue.
     #
-    # wc-wake-report-integrity (T2 + C1-Q2): ``INJECTION_ELIGIBLE_STATUSES``
-    # is now ``frozenset({"running"})``; the legacy WC injection route
-    # is preserved as an explicit ``status == "waiting_children" and not
-    # <flag>`` branch (per the dispatch directive — the constant stays
-    # single-home and config-free; the flag branch lives at the call
-    # site). Under the flag ON, WC falls through to the enqueue branch
-    # below (durable wake, 200 ``MessageResponse``). The transient
-    # flag-off window is the documented revert path.
-    if current_status in INJECTION_ELIGIBLE_STATUSES or (
-        current_status == "waiting_children"
-        and not _resolve_wc_wake_enqueue_enabled()
-    ):
+    # wc-wake-report-integrity (T2): ``INJECTION_ELIGIBLE_STATUSES`` is
+    # ``frozenset({"running"})``. WC targets fall through to the enqueue
+    # branch below — a durable ``enqueue_message`` wake turn (B1 fix,
+    # 2026-09-11: the legacy ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-OFF
+    # RAM-FIFO injection route was removed entirely; WC now ALWAYS
+    # routes through durable enqueue). Returns 200 ``MessageResponse``
+    # (not 202).
+    if current_status in INJECTION_ELIGIBLE_STATUSES:
         live_hub = _get_live_hub(request)
 
         # message-display-latency Phase 1: mint the stable server-side

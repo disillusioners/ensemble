@@ -87,7 +87,7 @@ from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
-from .services.instance_messaging import InstanceMessagingService, emit_wc_wake_enqueue_boot_log
+from .services.instance_messaging import InstanceMessagingService
 from .services.context_messages import emit_ambient_kv_fresh_boot_log
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
@@ -803,12 +803,12 @@ class InstanceManager:
         # syntax. Mirrors the cascade-lineage wrapper precedent.
         emit_governor_recursion_guard_boot_log()
 
-        # WC-wake enqueue routing pivot (wc-wake-report-integrity,
-        # 2026-08-30): one-time INFO log naming the resolved kill-switch
-        # state. Default DISABLED (legacy FIFO injection); restart-required
-        # to flip. See _resolve_wc_wake_enqueue_enabled for env syntax.
-        # Mirrors the governor-guard wrapper precedent.
-        emit_wc_wake_enqueue_boot_log()
+        # WC-wake enqueue routing pivot REMOVED (B1, 2026-09-11): the
+        # ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag and the legacy
+        # ``emit_wc_wake_enqueue_boot_log`` wrapper were deleted. WC
+        # ALWAYS routes through durable ``enqueue_message`` — no
+        # boot-time log, no flag state. Mirrors the governor-guard
+        # wrapper precedent (kept).
         emit_ambient_kv_fresh_boot_log()
 
         # Report-integrity (b) terminal-waiting guard (wc-wake-report-

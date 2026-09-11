@@ -123,25 +123,9 @@ def restore_langgraph_modules():
         "daemon.services.task_processor",
         "daemon.services.message_processing_pipeline",
         "daemon.services.execution_gate",
-        # Module-identity cache pollution audit (wc-wake-report-integrity
-        # residual, W2 follow-up): any ``daemon.*`` module that holds a
-        # module-level ``from daemon.services.instance_messaging import
-        # _resolve_wc_wake_enqueue_enabled`` binding captures the
-        # ORIGINAL (pre-pop) instance-messaging module's function ref
-        # at pytest-collection time. After ``instance_messaging`` is
-        # popped above, a fresh module loads with ``_WC_WAKE_ENQUEUE_ENABLED
-        # = None`` — but the stale binding in this module's function
-        # ``__globals__`` still resolves through the OLD instance, which
-        # carries a polluted cache (set by an earlier ``ENSEMBLE_WC_WAKE_ENQUEUE=1``
-        # test that monkeypatch-teardown doesn't reach). The first
-        # flag-implicit test in the next file then sees the cached True
-        # and routes through ``enqueue_message`` instead of the legacy
-        # ``set_injection`` (the ``assert 200 == 202`` vector).
-        # Audited call sites (``grep -n "_resolve_wc_wake_enqueue_enabled"
-        # daemon/``):
-        #   daemon/routers/messages.py:19    module-level (← THIS list)
-        #   daemon/tools/job_queue.py:19     module-level (← THIS list)
-        #   daemon/tools/instance.py:863     lazy import INSIDE function
+        # B1 (2026-09-11): the WC-wake kill-switch was REMOVED — the
+        # module-level bindings and the cache-pollution audit are
+        # stale. The list below is kept as a seam marker.
         #                                    body — each call re-resolves
         #                                    against sys.modules, so the
         #                                    post-pop ``instance_messaging``
@@ -184,13 +168,11 @@ def _reset_wc_wake_enqueue_flag_cache():
     a suite-global autouse in ``tests/conftest.py`` would mask
     intentional flag-state tests and add overhead everywhere.
     """
-    from daemon.services.instance_messaging import (
-        _reset_wc_wake_enqueue_for_tests,
-    )
-
-    _reset_wc_wake_enqueue_for_tests()
+    # B1 (2026-09-11): the WC-wake kill-switch was REMOVED entirely
+    # (no flag state, no reset helper). The fixture is now a
+    # no-op kept as a seam marker so any future flag-aware tests
+    # can be re-introduced without touching the call sites.
     yield
-    _reset_wc_wake_enqueue_for_tests()
 
 
 
@@ -639,10 +621,6 @@ async def test_http_post_messages_wakes_parked_wc_parent(wake_harness, monkeypat
     """Surface (a): HTTP POST /messages — WC → 200 durable wake → real turn."""
     from daemon.routers.messages import MessageCreate, send_message as http_send_message
 
-    monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-    from daemon.services.instance_messaging import _reset_wc_wake_enqueue_for_tests
-
-    _reset_wc_wake_enqueue_for_tests()
 
     manager, engine, llm = wake_harness
     parent_id, child_id = await _park_parent_with_hung_child(manager, engine)
@@ -700,10 +678,6 @@ async def test_agent_tool_send_message_wakes_parked_wc_parent(
         patch_heavy_helpers,
     )
 
-    monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-    from daemon.services.instance_messaging import _reset_wc_wake_enqueue_for_tests
-
-    _reset_wc_wake_enqueue_for_tests()
 
     manager, engine, llm = wake_harness
     parent_id, child_id = await _park_parent_with_hung_child(manager, engine)
@@ -742,10 +716,6 @@ async def test_job_inject_wakes_parked_wc_parent(wake_harness, monkeypatch):
     ``enqueue_message`` (Option A) — durable wake + real turn."""
     from daemon.tools.job_queue import create_job_tools
 
-    monkeypatch.setenv("ENSEMBLE_WC_WAKE_ENQUEUE", "1")
-    from daemon.services.instance_messaging import _reset_wc_wake_enqueue_for_tests
-
-    _reset_wc_wake_enqueue_for_tests()
 
     manager, engine, llm = wake_harness
     parent_id, child_id = await _park_parent_with_hung_child(manager, engine)

@@ -11,13 +11,6 @@ should consider splitting into:
   (the ``@register_tool_category`` entries).
 * ``job_queue_runtime.py`` — the legacy ``list_jobs`` resolver,
   watch-job notify branches, mission opt-in helper.
-* ``job_queue_wcwake.py`` — the WC-wake enqueue toggle resolver
-  (the ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch consumer).
-
-The split is tracked as a follow-up; the module is intentionally
-left as-is this round to keep the M3 fix round surgical. The
-docstring + this note together form the seam marker for the
-future split.
 
 The tool surface (additive through M3 — no removal):
 job_create, job_get, job_list, job_cancel, job_retry, watch_job,
@@ -46,7 +39,6 @@ from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
-from daemon.services.instance_messaging import _resolve_wc_wake_enqueue_enabled
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.work_status import _derive_legacy_status
 
@@ -414,9 +406,10 @@ Example:
     job_progress(job_id="job_abc123")""",
 
     "job_inject": """Inject a message into a RUNNING job's instance mid-execution, or
-queue a durable wake turn for a WAITING_CHILDREN target (under the
-``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-ON routing pivot — wc-wake-report-
-integrity, LOCKED C1-D3 Option A, 2026-08-30).
+queue a durable wake turn for a WAITING_CHILDREN target (wc-wake-report-
+integrity, B1 RESOLVED 2026-09-11 — the legacy
+``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-OFF RAM-FIFO injection route for WC
+was REMOVED; WC ALWAYS routes through durable enqueue).
 
 Routing (split):
   * ``RUNNING`` → RAM FIFO injection via
@@ -427,26 +420,18 @@ Routing (split):
     content, timestamp}``. Status flag (``injection_pending`` SSE) is
     unchanged.
 
-  * ``WAITING_CHILDREN`` → depends on the
-    ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch (``decisions.md`` C1-Q2):
-      - **Flag OFF (default — legacy FIFO injection):** same as
-        ``RUNNING`` above — ``set_injection`` is called, returns
-        ``{status: \"injected\", pending_count, ...}``. The message
-        sits in the parked parent's FIFO until the next ``agent_node``
-        pass when a child report wakes the parent. This is the
-        documented revert path; an operator can flip the flag and
-        restart to switch to the new behavior.
-      - **Flag ON (post-flip):** durable wake enqueue via
-        ``manager.enqueue_message(source=f\"internal_agent:{caller}\")``
-        — durable ``MessageQueue`` row + ``Task``, WC→RUNNING flip,
-        real wake, first-class turn. Returns
-        ``{job_id, instance_id, status: \"enqueued\", message_id,
-        queued: True}``. A ``has_instance_busy`` pre-check (mirrors
-        ``job_continue`` 5a, :975-995) makes a WC target that
-        already has a queued wake fail fast with a clean error
-        instead of silently queueing a second turn. No
-        ``injection_pending`` SSE under this path (the FE sees the
-        message via the normal turn-start ``user_message`` pre-emit).
+  * ``WAITING_CHILDREN`` → durable wake enqueue via
+    ``manager.enqueue_message(source=f\"internal_agent:{caller}\")``
+    — durable ``MessageQueue`` row + ``Task``, WC→RUNNING flip,
+    real wake, first-class turn. Returns
+    ``{job_id, instance_id, status: \"enqueued\", message_id,
+    queued: True}``. A ``has_instance_busy`` pre-check (mirrors
+    ``job_continue`` 5a, :975-995) makes a WC target that
+    already has a queued wake fail fast with a clean error
+    instead of silently queueing a second turn. No
+    ``injection_pending`` SSE under this path (the FE sees the
+    message via the normal turn-start ``user_message`` pre-emit).
+    B1 fix (2026-09-11): no flag state — WC ALWAYS routes here.
 
   * ``IDLE`` / ``PAUSED`` / terminal → error: use ``job_continue``
     instead (it handles wake + revive + Task creation for those
@@ -454,26 +439,26 @@ Routing (split):
     and points the agent to ``job_continue``.
 
 Eligibility (matches the routing above): RUNNING is always accepted;
-WC is accepted via the flag branch; other statuses are rejected with
-the eligibility error.
+WC is always accepted via the durable-enqueue branch (B1); other
+statuses are rejected with the eligibility error.
 
 Unlike ``job_continue`` (which creates a new Task and requires the
 instance to be IDLE/terminal), ``job_inject`` piggybacks on the
 existing turn for RUNNING targets — it does NOT spawn a new job, does
 NOT interrupt tool execution, and does NOT race with the active
-``enqueue_message_job`` path. Under flag ON for WC, ``job_inject``
-moves to ``enqueue_message`` and DOES create a new first-class turn
-(durable wake) — the same primitive the agent-tool send_message uses.
+``enqueue_message_job`` path. For WC (B1), ``job_inject`` moves to
+``enqueue_message`` and DOES create a new first-class turn (durable
+wake) — the same primitive the agent-tool send_message uses.
 
 Return shape (m2 fix, LOCKED C1-D3 Option A, 2026-08-30): the
-``queued`` flag on the flag-ON WC branch is a LITERAL ``True``,
-meaning "message was enqueued as a first-class turn" — NOT the
-``AsyncMessageResult.queued`` capacity flag (a spec collision:
-``AsyncMessageResult.queued`` means "blocked at capacity" and
-defaults to ``False``). Mirror the HTTP lane's 200-enqueue
-``MessageResponse.queued=True`` on success. The ``getattr(result,
-"queued", True)`` propagation that pre-m2 carried the
-AsyncMessageResult field through to the tool response was a
+``queued`` flag on the WC branch (B1: the only branch; was flag-ON WC
+pre-B1) is a LITERAL ``True``, meaning "message was enqueued as a
+first-class turn" — NOT the ``AsyncMessageResult.queued`` capacity
+flag (a spec collision: ``AsyncMessageResult.queued`` means "blocked
+at capacity" and defaults to ``False``). Mirror the HTTP lane's
+200-enqueue ``MessageResponse.queued=True`` on success. The
+``getattr(result, "queued", True)`` propagation that pre-m2 carried
+the AsyncMessageResult field through to the tool response was a
 silent-spec-collision defect; the literal ``True`` matches the
 LOCKED decisions.md C1-D3 contract.
 
@@ -2233,53 +2218,43 @@ def create_job_tools(
             if instance_meta is None:
                 return {"error": f"Instance {instance_id} not found"}
 
-            # wc-wake-report-integrity (T7 + C1-Q2): the eligibility
-            # check accepts RUNNING (always) AND WAITING_CHILDREN
-            # (both flag states — legacy FIFO under flag OFF,
-            # ``enqueue_message`` under flag ON per LOCKED C1-D3
-            # Option A). Other statuses (IDLE, PAUSED, terminal)
-            # still hit the error path with the rewritten wording.
-            # The constant ``INJECTION_ELIGIBLE_STATUSES`` was shrunk
-            # to ``{\"running\"}`` in T2 — the constant stays single-home
-            # and config-free; the WC acceptance is an explicit branch
-            # at the call site, mirroring the HTTP / agent-tool lanes
-            # per the dispatch directive.
+            # wc-wake-report-integrity (T7 + B1 RESOLVED 2026-09-11):
+            # the eligibility check accepts RUNNING (always) AND
+            # WAITING_CHILDREN (B1: WC ALWAYS routes through durable
+            # ``enqueue_message`` — the legacy ``ENSEMBLE_WC_WAKE_ENQUEUE``
+            # flag-OFF RAM-FIFO injection route was REMOVED entirely).
+            # Other statuses (IDLE, PAUSED, terminal) still hit the
+            # error path with the rewritten wording. The constant
+            # ``INJECTION_ELIGIBLE_STATUSES`` is ``{"running"}`` — the
+            # constant stays single-home and config-free; the WC
+            # acceptance is an explicit branch at the call site,
+            # mirroring the HTTP / agent-tool lanes per the dispatch
+            # directive.
             current_status = instance_meta.status
             if (
                 current_status not in INJECTION_ELIGIBLE_STATUSES
                 and current_status != "waiting_children"
             ):
-                # D3 (2026-08-30 pre-flip batch): the error TEXT branches on
-                # the kill-switch. Flag OFF shows the byte-faithful legacy
-                # string from 1f8f8ed4 — OFF is the instant-revert path, so
-                # the revert contract is byte-compatible, not just behavioral
-                # (the eligibility CONDITION above is identical in both
-                # states). Flag ON shows the routing-pivot wording.
-                if _resolve_wc_wake_enqueue_enabled():
-                    return {
-                        "error": (
-                            f"Instance is {instance_meta.status} — job_inject "
-                            "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
-                            "terminal targets get the message enqueued (WC under "
-                            "the flag-ON routing pivot) or should use job_continue. "
-                            "Use job_continue for IDLE/PAUSED/terminal instances."
-                        )
-                    }
+                # B1 (2026-09-11): the error text is fixed — WC no
+                # longer has a flag-OFF legacy branch to preserve
+                # (the kill-switch was removed).
                 return {
                     "error": (
                         f"Instance is {instance_meta.status} — job_inject "
-                        "only works on RUNNING or WAITING_CHILDREN instances. "
-                        "Use job_continue for IDLE/terminal instances."
+                        "injects into RUNNING turns; WAITING_CHILDREN/IDLE/"
+                        "terminal targets get the message enqueued or should "
+                        "use job_continue. "
+                        "Use job_continue for IDLE/PAUSED/terminal instances."
                     )
                 }
 
-            # Flag-ON WAITING_CHILDREN branch: durable wake turn via
-            # ``manager.enqueue_message`` (LOCKED C1-D3 Option A). The
-            # ``has_instance_busy`` pre-check (mirrors ``job_continue``
-            # 5a, :975-995) makes a WC target that already has a queued
-            # wake fail fast with a clean error instead of silently
-            # queueing a second turn.
-            if current_status == "waiting_children" and _resolve_wc_wake_enqueue_enabled():
+            # B1 WAITING_CHILDREN branch: durable wake turn via
+            # ``manager.enqueue_message`` (no flag state — B1 fix).
+            # The ``has_instance_busy`` pre-check (mirrors
+            # ``job_continue`` 5a, :975-995) makes a WC target that
+            # already has a queued wake fail fast with a clean error
+            # instead of silently queueing a second turn.
+            if current_status == "waiting_children":
                 if getattr(manager, "_task_repo", None) is not None:
                     has_inflight = await asyncio.to_thread(
                         manager._task_repo.has_instance_busy, instance_id

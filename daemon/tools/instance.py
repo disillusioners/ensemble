@@ -832,14 +832,11 @@ def _route_send_message(
         A ``(routed_via, prior_status)`` tuple, or ``None`` if the target
         is not routable (i.e. ``manager.get_instance_info(...)`` raised
         ``KeyError``). ``routed_via`` is one of:
-          * ``"injection"`` — RUNNING (always), plus WAITING_CHILDREN
-            when the ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch is OFF
-            (the legacy behavior, preserved as the documented revert
-            path per ``decisions.md`` C1-Q2 RESOLVED 2026-08-30). When
-            the flag is ON, WC falls through to ``"enqueue"``. The
-            caller should invoke ``manager.set_injection(...)`` and
-            DROP the queue-busy guard (status is the source of truth
-            per D11).
+          * ``"injection"`` — RUNNING (only — B1 fix, 2026-09-11:
+            ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag removed; WC no longer
+            takes the RAM-FIFO injection route). The caller should
+            invoke ``manager.set_injection(...)`` and DROP the
+            queue-busy guard (status is the source of truth per D11).
           * ``"enqueue-revive"`` — terminal state (COMPLETED / TERMINATED /
             ERROR / FAILED). The caller should invoke
             ``manager.enqueue_message(...)`` (which already revives the
@@ -849,8 +846,9 @@ def _route_send_message(
             serializes terminal-revives against in-flight child reports.
           * ``"enqueue"`` — non-eligible non-terminal state (IDLE /
             WAITING / QUEUED + future additions) AND WAITING_CHILDREN
-            under the flag-ON routing pivot. Same as the pre-Phase 1
-            behavior for the first set; for WC-under-flag-ON it is a
+            (B1 fix: WC now ALWAYS routes through durable
+            ``enqueue_message`` wake turn; no flag state). Same as the
+            pre-Phase 1 behavior for the first set; for WC it is a
             durable wake turn via ``enqueue_message``. The queue-busy
             guard STAYS.
           * ``"paused"`` — PAUSED. The caller returns the verbatim R-O1
@@ -863,9 +861,10 @@ def _route_send_message(
     # Lazy import — circular-import breaker (mirrors the pattern at the
     # governor-guard helper above; ``daemon.tools`` sits below
     # ``daemon.services`` in the import graph).
-    from ..services.instance_messaging import (
-        _resolve_wc_wake_enqueue_enabled,
-    )
+    # B1 (2026-09-11): the WC-wake kill-switch resolver
+    # ``_resolve_wc_wake_enqueue_enabled`` was REMOVED — WC now
+    # ALWAYS routes through durable ``enqueue_message`` (no flag
+    # state). The legacy flag-aware lazy import is no longer needed.
     try:
         info = manager.get_instance_info(target_instance_id)
     except KeyError:
@@ -889,18 +888,12 @@ def _route_send_message(
     if prior_status == "paused":
         return ("paused", prior_status)
 
-    # Injection branch — RUNNING, plus WC under the flag-OFF legacy
-    # window. wc-wake-report-integrity (T2 + C1-Q2) shrunk
-    # ``INJECTION_ELIGIBLE_STATUSES`` to ``{\"running\"}``; the legacy
-    # WC injection route is preserved here as an explicit
-    # ``status == \"waiting_children\" and not <flag>`` branch (per the
-    # dispatch directive: the constant stays single-home and config-free;
-    # the flag branch lives at the call site). Under the flag ON, WC
-    # falls through to the enqueue branch below — a durable wake turn.
-    if prior_status in INJECTION_ELIGIBLE_STATUSES or (
-        prior_status == "waiting_children"
-        and not _resolve_wc_wake_enqueue_enabled()
-    ):
+    # Injection branch — RUNNING only. wc-wake-report-integrity (T2)
+    # shrunk ``INJECTION_ELIGIBLE_STATUSES`` to ``{"running"}``. The B1
+    # fix (2026-09-11) REMOVED the legacy ``ENSEMBLE_WC_WAKE_ENQUEUE``
+    # flag entirely; WC now ALWAYS falls through to the enqueue branch
+    # below — a durable wake turn via ``enqueue_message``.
+    if prior_status in INJECTION_ELIGIBLE_STATUSES:
         return ("injection", prior_status)
 
     # Terminal-revive branch — all four terminal states flow through the
@@ -2678,7 +2671,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             # trim-check reject:
             "Message content is empty; nothing to send."
 
-            # injection (RUNNING / WAITING_CHILDREN):
+            # injection (RUNNING only — B1 fix removed WC injection):
             "Message injected into running target. The next agent_node
             cycle will deliver it to the live turn.
 
@@ -3080,24 +3073,17 @@ status at the moment of invocation:
     ``enqueue_message``'s pipeline) and would be lost or land as raw
     tag text on the injection branch.
 
-  * ``WAITING_CHILDREN`` → depends on the
-    ``ENSEMBLE_WC_WAKE_ENQUEUE`` kill-switch
-    (``decisions.md`` C1-Q2 RESOLVED 2026-08-30):
-      - **Flag OFF (default — legacy FIFO injection):** INJECTION via
-        ``Manager.set_injection(...)``. The message lands in the
-        parked parent's FIFO and is consumed on the next ``agent_node``
-        pass when a child report wakes the parent. This is the
-        documented revert path. Carries the W3 stranding caveat
-        (pause-loss parity with the user messages API).
-      - **Flag ON (post-flip):** ENQUEUE via
-        ``manager.enqueue_message(...)`` — a durable ``MessageQueue``
-        + ``Task`` row, WC→RUNNING flip, real wake, first-class turn.
-        The queued-wake message carries no ``injected_message`` marker
-        (D5) and the busy gate (``get_queue_stats`` pending/processing
-        > 0 → busy ERROR) trips during the enqueue→claim window when a
-        WC target already has a queued wake (D6 busy-gate consequence).
-        No W3 stranding caveat (the message is durable, not
-        RAM-FIFO-volatile).
+  * ``WAITING_CHILDREN`` → ENQUEUE via
+    ``manager.enqueue_message(...)`` — a durable ``MessageQueue``
+    + ``Task`` row, WC→RUNNING flip, real wake, first-class turn.
+    The queued-wake message carries no ``injected_message`` marker
+    (D5) and the busy gate (``get_queue_stats`` pending/processing
+    > 0 → busy ERROR) trips during the enqueue→claim window when a
+    WC target already has a queued wake (D6 busy-gate consequence).
+    No W3 stranding caveat (the message is durable, not
+    RAM-FIFO-volatile). B1 fix (2026-09-11): the legacy
+    ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag-OFF RAM-FIFO injection route
+    was REMOVED entirely; WC ALWAYS routes through durable enqueue.
     EXCEPTION: a send bearing ``load_skill`` or a non-empty ``context``
     ALWAYS routes via ENQUEUE regardless of the flag — both parameters
     are enqueue-pipeline-only and would be lost on the injection branch.
@@ -3180,16 +3166,15 @@ Returns:
       * ``"Instance '<id>' is PAUSED. …"`` (PAUSED reject —
         no dispatch; full text below).
       * ``"Message injected into {prior_status} target. …"``
-        (injection branch — RUNNING always; WC only when
-        ``ENSEMBLE_WC_WAKE_ENQUEUE`` is OFF). Carries the W3
-        stranding caveat.
+        (injection branch — RUNNING only; B1 fix removed the WC
+        injection route). Carries the W3 stranding caveat.
       * ``"Message queued and sent to <id>. The completion report …"``
         (enqueue branch — terminal-revive, non-eligible non-terminal,
-        OR WC under the flag-ON routing pivot). For WC under
-        flag-ON, the message is a durable wake turn — no stranding
-        caveat, but the busy gate can trip if a wake is already
-        queued (D6 busy-gate consequence — the ERROR text is
-        verbatim: ``"ERROR: Instance '<id>' already has a message in
+        OR WAITING_CHILDREN under the B1 always-durable routing). The
+        WC message is a durable wake turn — no stranding caveat, but
+        the busy gate can trip if a wake is already queued (D6 busy-
+        gate consequence — the ERROR text is verbatim:
+        ``"ERROR: Instance '<id>' already has a message in
         progress. Pending: N, Processing: M. Please wait for the
         current message to complete before sending another."``).
 
@@ -3197,11 +3182,10 @@ Quietness: routing errors (not-found, paused, trim-check) return
 a friendly message and NEVER raise. The calling LLM sees a
 well-formed tool result and can reason about it.
 
-Revert path: the legacy WC injection route is preserved by setting
-``ENSEMBLE_WC_WAKE_ENQUEUE=0`` and restarting the daemon
-(documented in ``docs/setup.md``). Operator escape hatch for any
-silent-death incident on the flag-ON path — flip to OFF, restart,
-the constant + flag branches revert to pre-feature behavior.
+Revert path: there is no flag revert path — B1 fix (2026-09-11)
+REMOVED the ``ENSEMBLE_WC_WAKE_ENQUEUE`` flag and the legacy
+RAM-FIFO injection route for WC entirely. WC ALWAYS routes through
+durable enqueue.
 
 Example outputs::
 
