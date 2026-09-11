@@ -62,6 +62,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# tests use this constant so the suite stays portable across machines
+# and CI (no hardcoded absolute checkout paths).
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 # ---------------------------------------------------------------------------
 # Helpers — manager fixture and tool-builder (shared with the two
