@@ -813,6 +813,16 @@ class WaitingChildrenWatchdog:
           inject ``task_repository`` keeps the pre-W-B B3 behavior
           unchanged (escalation/release fire on the nudge-count
           thresholds with no liveness gate).
+        * *explicit fail-closed on DB-error* (B3 polish,
+          cycle-2 2026-09-11): the previous behavior caught the
+          probe's DB error ONLY via the watchdog's broad per-parent
+          ``except Exception`` at :1267+ — fail-closed by accident,
+          not by design. Any tightening of that broad catch (the
+          vgap test fails loudly if that ever happens) would
+          re-introduce the wedge. This helper now catches the
+          probe's exceptions itself and returns ``True`` (assume
+          alive — suppress escalation/release for this tick).
+          Fail-closed is by contract, not by incidental broad catch.
 
         Args:
             child_id: The child instance_id whose recent-heartbeat
@@ -852,9 +862,29 @@ class WaitingChildrenWatchdog:
             # as ``_has_live_carrier_task`` above). The production
             # TaskRepository always implements the helper.
             return False
-        return bool(
-            method(child_id, threshold_seconds)
-        )
+        # B3 polish (cycle-2 2026-09-11, W-B review): wrap the
+        # sync DB probe in an explicit try/except returning True
+        # on any error — assume-alive is the fail-CLOSED direction
+        # for the B3 release/escalation decision (a release-notice
+        # row landing in MessageQueue while the DB is unhealthy is
+        # a worse outcome than a spurious release suppression).
+        # Mirrors the watchdog's broad per-parent ``except
+        # Exception`` at :1267+ as the SECOND backstop (in case
+        # the helper itself raises in an unexpected path) — the
+        # FIRST backstop is this try/except, designed to guarantee
+        # the fail-closed direction without relying on the broad
+        # catch's incidental coverage.
+        try:
+            return bool(method(child_id, threshold_seconds))
+        except Exception as probe_exc:
+            logger.warning(
+                f"[Watchdog] _has_recent_heartbeat probe raised "
+                f"({probe_exc!r}); failing-CLOSED (assuming "
+                f"alive, suppressing B3 escalation/release for "
+                f"child={child_id[:8]}...) — fail-closed by design, "
+                f"not by incidental broad-catch."
+            )
+            return True
 
     # ─── Core scan ──────────────────────────────────────────────────────
 
