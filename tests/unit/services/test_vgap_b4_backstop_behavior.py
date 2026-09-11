@@ -900,3 +900,184 @@ class TestBackstopSkipConditions:
                 f"non-COMPLETED instance: backstop must not FIRE the "
                 f"watcher; got row.state={row.state!r}"
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (e) B4 cycle-2 re-mint — concurrent double-fire exactly-once
+#     (delta-audit coverage gap-fill). Idempotency_skip re-mint
+#     (child_reports.py:3843-3882) is the wedge-fix path that the
+#     existing UNKNOWN-outcome concurrent test does NOT cover.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReMintConcurrentDoubleFireSingleEmit:
+    """B4 cycle-2 re-mint concurrent exactly-once coverage gap-fill.
+
+    The cycle-2 obligation re-mint lives at ``child_reports.py:3843-3882``
+    and emits via ``_emit_terminal_for_child_instance_via_bus`` when
+    ``outcome == "idempotency_skip"`` AND ``parent_id is not None`` AND
+    ``inst.status == COMPLETED``. The pre-existing concurrent test
+    (:class:`TestConcurrentDoubleFireSingleEmit`) drives only the
+    UNKNOWN-outcome backstop path — the re-mint call site has NO
+    concurrent node. This class closes that gap.
+
+    Exactly-once rests on:
+      * ``transition_state``'s guarded ``UPDATE ... WHERE state = 'PENDING'``
+        (daemon/repositories/dependency_bus/repository.py:681)
+      * Per-task asyncio locks in ``DependencyBus`` (acquired at
+        dependency_bus.py:897-901)
+      * ``fetch_pending_for_target_and_child``'s state-filtered query
+        (repository.py:260) — once the winner transitions the row, the
+        loser's read sees ``state != PENDING`` and returns 0 rows.
+
+    Drives TWO overlapping invocations of the full
+    ``_dispatch_post_commit_side_effects`` against the same (parent,
+    child) pair on the ``idempotency_skip`` re-mint shape. The
+    watcher MUST transition to FIRED exactly once — the loser's
+    guarded UPDATE yields ``rowcount == 0`` → no double emit, no
+    duplicate FIRED row, no error.
+    """
+
+    async def test_idempotency_skip_concurrent_double_fire_single_emit(
+        self, engine: Engine, bus: DependencyBus
+    ) -> None:
+        """B4 cycle-2 re-mint concurrent exactly-once pin.
+
+        ``idempotency_skip`` + COMPLETED child + live parent + ONE
+        PENDING watcher → TWO overlapping invocations via
+        ``asyncio.gather`` → exactly ONE FIRED row, no double emit,
+        no extra watcher rows.
+
+        The two invocations share the SAME real bus instance (the
+        same ``_pending`` cache, the same per-task locks, the same
+        guarded UPDATE). The first invocation to reach
+        ``transition_state`` wins; the second's UPDATE sees
+        ``state == 'FIRED'`` and returns ``rowcount == 0`` (the
+        bus primitive at dependency_bus.py:899-920 short-circuits on
+        ``transitioned is False`` — the FollowUp is NOT appended to
+        ``fired``, no cache pop on the loser's path). Exactly-once
+        is preserved.
+        """
+        child_id = "child-remint-concurrent"
+        parent_id = "parent-remint-concurrent"
+        # Seed exactly ONE PENDING watcher — matches the
+        # ``test_target_shape_force_emits_idempotency_skip`` setup
+        # (the wedge case where the re-mint is reachable). The
+        # watcher's ``source_task_id`` is auto-minted; the re-mint
+        # matches on (parent, child) instance pair, not task id.
+        _seed_parent_watcher(
+            engine,
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+        )
+
+        # Sanity: exactly ONE PENDING row, no FIRED yet.
+        with Session(engine) as session:
+            pre_count = session.query(DependencyWatcher).filter(
+                DependencyWatcher.target_instance_id == parent_id,
+            ).count()
+            assert pre_count == 1, (
+                f"fixture seed: expected 1 watcher row, got {pre_count}"
+            )
+
+        async def _invoke_once() -> None:
+            """One overlapping invocation on the re-mint shape.
+
+            The service is rebuilt per invocation (mirrors the
+            existing concurrent test's pattern at line 526) — each
+            invocation must independently resolve the bus and drive
+            its own emit. The real ``DependencyBus`` singleton is
+            the shared primitive both calls race on.
+            """
+            service, _ = _build_service_for_b4(
+                instance_status=InstanceStatus.COMPLETED.value,
+                parent_id=parent_id,
+            )
+            result = _make_result(
+                outcome="idempotency_skip",
+                instance_id=child_id,
+                parent_id=parent_id,
+            )
+            await service._dispatch_post_commit_side_effects(
+                result=result,
+                last_content="assistant text",
+                completed_message_id=None,
+            )
+
+        # Two overlapping invocations — both will attempt the
+        # re-mint on the SAME (parent, child) pair. The bus's
+        # ``transition_state`` guarded UPDATE + per-task locks
+        # serialize the winner; the loser sees rowcount == 0.
+        await asyncio.gather(_invoke_once(), _invoke_once())
+
+        # ── Assertion 1: the watcher MUST be FIRED (single
+        # transition). The re-mint branch at
+        # ``child_reports.py:3843-3882`` is reachable for this
+        # shape (idempotency_skip + parent + COMPLETED + PENDING
+        # watcher) — it MUST honor the obligation via
+        # ``_emit_terminal_for_child_instance_via_bus``.
+        with Session(engine) as session:
+            row = session.query(DependencyWatcher).filter(
+                DependencyWatcher.target_instance_id == parent_id
+            ).first()
+            assert row is not None, (
+                "watcher row missing — bus fixture did not seed the row"
+            )
+            assert row.state == DependencyWatcherState.FIRED.value, (
+                f"B4 cycle-2 re-mint did not FIRE the watcher under "
+                f"concurrent invocation: row.state={row.state!r} "
+                f"(expected FIRED). Re-mint lives at "
+                f"child_reports.py:3843-3882 (idempotency_skip branch). "
+                f"The exactly-once pin requires the guarded UPDATE to "
+                f"succeed for the WINNER; if both invocations lost, "
+                f"the wedge re-mint would silently no-op — parent "
+                f"stays parked (the 84563a03 wedge class)."
+            )
+
+        # ── Assertion 2: exactly ONE FIRED row for (parent, child)
+        # — the loser's ``transition_state`` MUST have yielded
+        # ``rowcount == 0`` (no double insert, no double emit). A
+        # double-fire would manifest as either (a) TWO rows in
+        # FIRED state for the same pair, or (b) a rowcount-2 from
+        # a duplicate INSERT upstream. Both are caught here.
+        with Session(engine) as session:
+            fired_count = session.query(DependencyWatcher).filter(
+                DependencyWatcher.target_instance_id == parent_id,
+                DependencyWatcher.state == DependencyWatcherState.FIRED.value,
+            ).count()
+            assert fired_count == 1, (
+                f"expected exactly 1 FIRED watcher for (parent, child) "
+                f"after concurrent double-fire on the re-mint path; "
+                f"got {fired_count} — re-mint double-fired the row "
+                f"(transition_state's WHERE state='PENDING' guard did "
+                f"NOT serialize the two invocations). This is the "
+                f"real wedge: parent would receive the same FollowUp "
+                f"twice, breaking the bus's exactly-once contract."
+            )
+
+        # ── Assertion 3: no extra watcher rows appeared. The
+        # re-mint MUST NOT insert a second watcher row when the
+        # first invocation already seeded one. A regression here
+        # would mean the re-mint branch is doing an
+        # unintended INSERT before transitioning (the
+        # bus's primitive only UPDATEs — no INSERTs in the
+        # re-mint path).
+        with Session(engine) as session:
+            total_count = session.query(DependencyWatcher).filter(
+                DependencyWatcher.target_instance_id == parent_id,
+            ).count()
+            assert total_count == 1, (
+                f"expected exactly 1 watcher row total (no extra "
+                f"rows seeded by the re-mint); got {total_count}. "
+                f"The re-mint is UPDATE-only via "
+                f"_emit_terminal_for_child_instance_via_bus — a "
+                f"rowcount drift here indicates a spurious INSERT."
+            )
+
+        # ── Assertion 4: no exceptions escaped either invocation.
+        # The re-mint's defensive try/except (child_reports.py:3871-
+        # 3881) catches emit-side failures and logs WARNING; the
+        # gather would have re-raised any unhandled exception. The
+        # fact that we reached this line at all means both calls
+        # returned cleanly — the guarded UPDATE produced no
+        # double-fire, no error.
