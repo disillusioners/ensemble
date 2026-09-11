@@ -940,3 +940,42 @@ ver |
 ---
 
 *Last updated: Version 0.3.6*
+
+## Mid-work marker scan (LCA Phase 6.5 follow-up, 2026-09-11)
+
+The completion gate's ALLOW branches (`Decision.ALLOWED` not-attested + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP`) trigger a cheap mid-work marker scan before the END. Markers fire → the existing inline-LLM judge runs (verdict) → verdict + R2 inputs drive the (a)/(b)/(c)/(d) routing. This is the incident b08f40fe-class kill: a leader whose final AIMessage reads mid-work phrasing while the R2 inputs are clean would otherwise complete silently.
+
+### Marker catalog (16 patterns, 12-18 balance)
+
+`ending turn`, `ending my turn`, `awaiting`, `then i aggregate`, `then i compile`, `will write`, `will aggregate`, `not a completion report`, `interim`, `in progress`, `not yet complete`, `still pending`, `to be continued`, `will report back`, `standby`, `stand by`.
+
+Case-insensitive substring match against the AIMessage content; catalog is curated for high recall on the incident family. Excluded: `done`, `completed`, `finished`, `shipped`, `summary`, `results` alone (would false-positive on legitimate completions). The judge is the verdict — any false-positive marker hits are filtered by the LLM verdict.
+
+### Routing
+
+| Path | Conditions | Behavior |
+|------|------------|----------|
+| (a) | markers + judge-no + nothing pending | CONVERT TO DENY (existing nudge machinery: counter+1, nudge, route to agent) |
+| (b) | markers + judge-no + real pending work | ALLOW + checkpoint-durable hint (NO counter, NO deny, NO re-route — turn still ends) |
+| (c) | markers + judge-yes | ALLOW normally (log marker_hit + verdict; no action) |
+| (d) | markers + judge-error/timeout/unparsable | (a)-behavior if nothing pending, (b)-behavior otherwise |
+
+### Kill-switch coupling
+
+The marker path respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables). With the judge disabled, marker hits are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: marker-only signal is too weak to deny — the LLM verdict disambiguates ambiguous marker hits; without the verdict, plain allow + log is the safer default.
+
+### Completion Check Note (path (b))
+
+Injected alongside END on path (b). Canonical home `daemon/graph.py::COMPLETION_CHECK_NOTE_TEXT`. The note is a `HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]` header (reuses the existing prefix convention so `is_real_user_message` in `attestation_scanner.py` recognizes it as not-a-real-user-message). Content: confirms the gate noticed mid-work phrasing while real pending work is outstanding; asks the leader to confirm the wake-up arrives on the next turn; reminds about the two-step attestation protocol.
+
+### Log schema (additive)
+
+The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths.
+
+### References
+
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (this feature)
+- `daemon/services/attestation_marker_scanner.py` — pure-function scanner
+- `daemon/services/attestation_gate.py` — gate integration + additive log fields
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + gate-node marker-path wiring
+- `tests/unit/test_attestation_marker_scanner.py` (38 tests) + `tests/unit/test_attestation_marker_wiring.py` (14 tests)

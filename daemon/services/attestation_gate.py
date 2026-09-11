@@ -91,6 +91,19 @@ from .attestation_scanner import (
     scan_for_attestation_detailed,
 )
 
+# Phase 6 fastfollow (2026-09-11, incident b08f40fe) — mid-work marker
+# scanner. Pure function over the AIMessage tail; case-insensitive
+# substring match against a curated catalog. The marker scan is the
+# TRIGGER half of a two-stage disambiguator on the gate's ALLOW
+# paths. The judge verdict (the existing inline-LLM judge service at
+# :mod:`daemon.services.attestation_report_judge`) is the VERDICT half.
+from .attestation_marker_scanner import (
+    MID_WORK_MARKERS,
+    MARKER_TERMS_LIST_CAP,
+    MarkerScanResult,
+    scan_for_mid_work_markers,
+)
+
 # Phase 4 — canonical resolver lives in its own module (Pattern C, single
 # source of truth for the mode/window/deny_bound env triple). The gate
 # re-imports the resolver via ``resolve_gate_settings`` below (back-compat
@@ -310,6 +323,56 @@ class GateDecision:
     last_real_user_index: int = -1
     first_delegation_after_last_user_index: int = -1
     delegation_tool_call_total: int = 0
+    # ——— Mid-work marker scanner diagnostics (2026-09-11, incident
+    # b08f40fe; additive to the canonical 17-field tuple). The marker
+    # scan is the TRIGGER half of a two-stage disambiguator that runs
+    # on the gate's ALLOW paths (cheap substring match across the
+    # tail). Markers fire → existing inline-LLM judge runs (VERDICT
+    # half); judge verdict drives the (a)/(b)/(c)/(d) routing logged
+    #: below. Logged alongside the canonical tuple — same shape as the
+    #: supplementary conditional-attestation fields.
+    marker_hit: bool = False
+    marker_terms: tuple[str, ...] = ()
+    #: Enum string the gate decided for on the marker path. Empty when
+    #: no markers fired (the cheap path; no judge call). ``"a"`` =
+    #: markers + judge-not-complete + nothing pending → CONVERT TO
+    #: DENY via the existing nudge machinery. ``"b"`` = markers +
+    #: judge-not-complete + real pending work → ALLOW + checkpoint-
+    #: durable hint injection (no counter, no deny). ``"c"`` = markers
+    #: + judge-confirmed-complete → ALLOW normally. ``"d"`` = judge
+    #: error/timeout/unparsable on the marker path → (a)-behavior if
+    #: nothing pending, (b)-behavior otherwise.
+    marker_path: str = ""
+    #: Informational verdict string from the marker-path judge call.
+    #: Mirrors the existing would-be-deny judge's
+    #: ``JudgeResult.verdict`` (``"yes"`` / ``"no"`` / ``"error"`` /
+    #: ``"timeout"`` / ``"unparsable"`` / ``"<skipped>"``). Empty when
+    #: no markers fired (no judge call attempted).
+    marker_judge_verdict: str = ""
+    #: Informational latency (ms) of the marker-path judge call. ``0``
+    #: when no judge call was attempted. Mirrors the would-be-deny
+    #: judge's ``JudgeResult.latency_ms``.
+    marker_judge_latency_ms: int = 0
+    #: Informational error class from the marker-path judge call on
+    #: the error path. ``None`` otherwise. Mirrors the would-be-deny
+    #: judge's ``JudgeResult.error_class``.
+    marker_judge_error_class: str | None = None
+    #: Checkpoint-durable hint HumanMessage the graph node should
+    #: inject on marker path (b) (markers + judge-not-complete + real
+    #: pending work). ``None`` on every other path. The construction-
+    #: time ``id`` invariant is upheld (the ``_make_context_message``
+    #: factory mints a fresh ``uuid4`` when no explicit id is passed).
+    marker_hint_message: "BaseMessage | None" = None
+
+
+#: Marker-path enum constants — the canonical strings the gate emits on
+#: the ``marker_path`` diagnostic field. Single source of truth (the
+#: log-row format string + the wiring tests reference these literals).
+MARKER_PATH_NONE = ""           # no markers → no judge → no path
+MARKER_PATH_A = "a"             # markers + judge-no + nothing pending → DENY
+MARKER_PATH_B = "b"             # markers + judge-no + real pending → ALLOW+hint
+MARKER_PATH_C = "c"             # markers + judge-yes → ALLOW
+MARKER_PATH_D = "d"             # markers + judge-error/timeout/unparsable
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -837,10 +900,77 @@ def evaluate(
             delegation_tool_call_total=delegation_scan.delegation_tool_call_total,
         )
 
+        # (iii.b) Mid-work marker scan (2026-09-11, incident b08f40fe).
+        # The marker scan is the TRIGGER half of a two-stage
+        # disambiguator on the gate's ALLOW paths. It runs ONLY when
+        # the gate is otherwise about to allow (not on DENIED — the
+        # existing judge path on the would-be-deny branch already
+        # handles that family) AND when the allow is NOT an attested
+        # contract (attested_allow is an explicit success path; the
+        # conditional_attestation_required=False branch is scanned —
+        # the brief's "a quick answer ending '...Ending turn, will
+        # continue after your reply' must reach the judge" example
+        # depends on the conditional-off branch also being scanned).
+        # The scan covers BOTH Decision.ALLOWED (attestation_required
+        # is False OR meta-conditions bypassed) AND
+        # Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP (real wakeup is
+        # en route — the b08f40fe incident's natural decision).
+        #
+        # The marker scan NEVER runs on:
+        #   * ``Decision.DENIED`` — handled by the existing judge on
+        #     the would-be-deny branch (Phase 6 fastfollow, 2026-09-07).
+        #   * ``Decision.TERMINAL_AFTER_BOUND`` — escalation already
+        #     fired; the leader has hit the bound and the gate has
+        #     decided to allow terminal. A marker scan would be moot.
+        #   * ``Decision.DRY_LOG`` — dry mode is a passive observer; the
+        #     marker scan is a side-effect-free cheap check that logs
+        #     the hit but does NOT route (the existing dry-log path
+        #     allows unconditionally; surfacing marker hits in the
+        #     log row is the documented soak signal — see FR-10 schema
+        #     amendment #3, decisions.md D-ENTRY 2026-09-11).
+        #   * meta-condition bypass (mode=off / scope not applicable /
+        #     attestation_enabled=False) — the gate is byte-equivalent
+        #     OFF; no scan.
+        #
+        # Cost control (decision tree e): NO marker hit ⇒ NO judge
+        # call (the judge is best-effort + costly; the cheap scan is
+        # the gate). NO judge call ⇒ no behavioral change vs baseline.
+        if (
+            result.decision in (Decision.ALLOWED, Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP)
+            and not result.attestation_present
+        ):
+            marker_result = scan_for_mid_work_markers(
+                messages, mode_resolver.window
+            )
+            if marker_result.marker_hit:
+                # The marker scan is a TRIGGER only. The judge is the
+                # VERDICT. The actual (a)/(b)/(c)/(d) routing happens
+                # in the graph node (async context — the judge is an
+                # async LLM call). ``evaluate()`` marks the gate
+                # decision with marker_hit + marker_terms + a sentinel
+                # marker_path="<pending>" so the canonical log row
+                # carries the diagnostic fields. The graph node reads
+                # these, calls the judge, and re-emits the final
+                # marker_path value (a/b/c/d).
+                result = replace(
+                    result,
+                    marker_hit=True,
+                    marker_terms=marker_result.marker_terms,
+                    marker_path="<pending>",
+                    marker_judge_verdict="<pending>",
+                    marker_judge_latency_ms=0,
+                    marker_judge_error_class=None,
+                )
+
         # (iv) canonical structured log entry (Phase 4 task 4.5 schema —
         # every canonical field; the conditional-attestation
         # supplementary fields are emitted alongside for dry-mode soak
-        # and the FR-3 conditionality audit log).
+        # and the FR-3 conditionality audit log; the mid-work marker
+        # fields (2026-09-11, incident b08f40fe) ride alongside in the
+        # same additive shape — marker_hit / marker_terms / marker_path
+        # are NOT in the canonical 17-field tuple but the format
+        # string is the single log source of truth so dry-mode soak
+        # data is grep-able).
         logger.info(
             "event=leader_completion_gate decision=%s instance_id=%s "
             "gate_location=%s leader_prompt_version=%s mode=%s "
@@ -852,7 +982,10 @@ def evaluate(
             "delegation_tool_call_total=%s "
             "attest_seen_outside_window=%s messages_scanned=%s "
             "scanned_window_size=%s scanner_window_truncated=%s "
-            "scanner_summary_seen=%s should_inject_nudge=%s",
+            "scanner_summary_seen=%s should_inject_nudge=%s "
+            "marker_hit=%s marker_terms=%s marker_path=%s "
+            "marker_judge_verdict=%s marker_judge_latency_ms=%s "
+            "marker_judge_error_class=%s",
             result.decision.value,
             instance_id,
             gate_location,
@@ -875,6 +1008,12 @@ def evaluate(
             result.scanner_window_truncated,
             result.scanner_summary_seen,
             result.should_inject_nudge,
+            result.marker_hit,
+            ",".join(result.marker_terms) if result.marker_terms else "<none>",
+            result.marker_path or "<none>",
+            result.marker_judge_verdict or "<none>",
+            result.marker_judge_latency_ms,
+            result.marker_judge_error_class if result.marker_judge_error_class is not None else "<none>",
             extra=meta,
         )
 

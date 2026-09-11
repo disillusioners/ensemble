@@ -1031,3 +1031,139 @@ The canonical byte-pin test `test_attestation_nudge_text_canonical_byte_pin` (an
 **Incident regression:** `tests/integration/test_attestation_idle_orphan_incident.py` reconstructs the exact tree (8 terminal children + 4 never-dispatched IDLE-orphan grandchildren, delegation anchored, no attestation, mode=enforce): branch (5) MUST NOT fire → `decision=denied` + nudge + counter increments; after the orphans are terminated and `attest_completion` is in window → attested ALLOWED with counter reset; terminated-but-unattested still denies.
 
 **Files (this decision):** `daemon/manager.py` (`count_live_descendants` two-set rewrite + module-level helper); `daemon/repositories/message_queue/repository.py` (`get_unprocessed_for_instances`); `tests/support/conftest.py` (`attestation_manager_factory` mirror replaced by delegation to the real facade — kills the drift-prone logic duplicate); `tests/integration/test_attestation_live_descendants.py` (pin test split into unconditional/conditional sets incl. the b08f40fe count-level orphan regression); `tests/integration/test_attestation_idle_orphan_incident.py` (new, gate level); `docs/setup.md` (runbook note).
+
+---
+
+## 2026-09-11 (incident decision) — Mid-work marker scan trigger on ALLOW paths (D-ENTRY)
+
+**Trigger:** Incident b08f40fe (2026-09-11) — a leader instance completed silently through the gate's `ALLOWED_LEGITIMATE_PENDING_WAKEUP` branch because its final AIMessage read "Awaiting final four: C12a/b/c + blame-worker. Then I aggregate and write RESULTS. Ending turn." — mid-work phrasing that no existing gate predicate detects. The orphan-fix (D-ENTRY 2026-09-11 above) closed the `live_descendants` two-set semantics for the IDLE-orphan subtree but did not address the broader class where the leader's PROSE reads mid-work while the R2 inputs are clean.
+
+**Decision — marker-path disambiguator on ALLOW paths:**
+
+The marker scan is the **TRIGGER** (cheap substring match across the AIMessage tail against ~12-18 curated mid-work phrases). The existing inline-LLM judge at `daemon/services/attestation_report_judge.py` is the **VERDICT**. Markers fire → judge runs → verdict + R2 inputs drive the (a)/(b)/(c)/(d) routing:
+
+| Path | Conditions | Action |
+|------|------------|--------|
+| **(a)** | markers + judge-not-complete + nothing pending | **CONVERT TO DENY** via the existing nudge machinery (counter/bound/escalation apply unchanged) |
+| **(b)** | markers + judge-not-complete + real pending work | **ALLOW STANDS** + inject a checkpoint-durable Completion Check Note alongside END (NO counter, NO deny, NO re-route — the turn still ends so the wake-up can arrive) |
+| **(c)** | markers + judge-confirmed-complete | **ALLOW normally** (log marker_hit=true + verdict; no action) |
+| **(d)** | markers + judge-error/timeout/unparsable | (a)-behavior if nothing pending, (b)-behavior otherwise (log judge_error) |
+
+**Hook scope (where the scan runs):**
+
+* `Decision.ALLOWED` (attested_allow is SKIPPED — attested is an explicit contract) — INCLUDED
+* `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` (real wakeup en route — the b08f40fe-class incident's natural decision) — INCLUDED
+* `Decision.DENIED` — EXCLUDED (existing would-be-deny judge already handles this family)
+* `Decision.TERMINAL_AFTER_BOUND` — EXCLUDED (escalation already fired)
+* `Decision.DRY_LOG` — EXCLUDED (dry mode is passive observer; marker hits logged but no judge call)
+* meta-condition bypass (mode=off / scope not applicable / attestation_enabled=False) — EXCLUDED (byte-equivalent OFF baseline)
+* `attestation_required=False` (conditional OFF) — **INCLUDED** (the brief's "a quick answer ending '...Ending turn, will continue after your reply' must reach the judge" example depends on the conditional-OFF branch being scanned too; this is the spec's explicit requirement that the conditional gate is NOT a marker-skip bypass)
+
+**Kill-switch coupling (DECIDED — do not relitigate):**
+
+The marker path respects the EXISTING judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0`/`=false`/`=no`/`=off` disables). With the judge disabled, marker hits are logged (so dry-log soak sees them) but NO judge call fires; the gate falls through to plain ALLOW in ALL marker cases. Rationale: marker-only signal is too weak to deny — without the LLM verdict the marker hit is ambiguous, and the cost of a false deny (forcing the leader to re-issue a turn) outweighs the cost of a false allow (the deny counter resets on attested allow). Operators who want to disable the marker-path entirely can also set `mode=off` (the meta-condition bypass).
+
+**Marker catalog (curated 16-pattern list, 12-18 balance per the brief):**
+
+`ending turn`, `ending my turn`, `awaiting`, `then i aggregate`, `then i compile`, `will write`, `will aggregate`, `not a completion report`, `interim`, `in progress`, `not yet complete`, `still pending`, `to be continued`, `will report back`, `standby`, `stand by`.
+
+Excluded from the catalog (would false-positive on legitimate completions): `done`, `completed`, `finished`, `shipped`, `summary`, `results` alone. The judge verdict filters any remaining false positives (the marker is the trigger, the LLM is the verdict).
+
+**Completion Check Note constant (canonical home `daemon/graph.py`; NFR-6 parity with `ATTESTATION_NUDGE_TEXT`):**
+
+```
+[SYSTEM CONTEXT: Completion Check Note]
+
+The completion gate noticed mid-work phrasing on a turn where
+real pending work is still outstanding (children, wakeups, or
+live descendants remained). The gate allowed the turn to end so
+the wake-up you expected can still arrive, but please confirm on
+your next turn that the wake-up actually comes — if the pending
+work was orphaned or already idle, clean it up or call
+attest_completion once the work is truly done. Reminder: when
+you do finish, FIRST deliver your full detailed final report as
+its own message, THEN call attest_completion ALONE — never
+bundle the report into the attestation tool-call message.
+```
+
+The hint rides a `HumanMessage` constructed via `_make_context_message(kind=CONTEXT_KIND_TASK_CONTEXT, ...)` (the construction-time `id` invariant is upheld; the existing `[SYSTEM CONTEXT: …]` prefix convention is reused — same exclusion class as `Completion Check Nudge` so the `is_real_user_message` predicate in `attestation_scanner.py` recognizes it as not-a-real-user-message).
+
+**Log schema (additive, NOT in the canonical 17-field tuple):**
+
+* `marker_hit` (bool) — emitted on every `event=leader_completion_gate` log row (False when no scan fired or no marker hit)
+* `marker_terms` (capped list, comma-joined in log; `<none>` when empty) — distinct markers that fired, ordered by catalog order
+* `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / `"<pending>"` transient) — the routing decision; the canonical row carries `<pending>` (synchronous scan, async judge hasn't run yet); the routing log line emits the final value
+* `marker_judge_verdict` (`"yes"` / `"no"` / `"error"` / `"timeout"` / `"unparsable"` / `"<pending>"` / `"<none>"`) — informational
+* `marker_judge_latency_ms` (int; `0` on skip) — informational
+* `marker_judge_error_class` (string or `<none>`) — informational
+
+Tuple-discipline: the additive fields ride alongside the canonical tuple in the SAME format-string log line (same shape as the supplementary conditional-attestation fields `last_real_user_found` / `last_real_user_index` / etc. — `attestation_gate.py:894-1008`). The marker-path judge ALSO emits a separate one-shot `event=leader_completion_gate_marker_judge` log line mirroring the existing would-be-deny judge's `event=leader_completion_gate_judge` shape so operators grep one set of keys for both paths.
+
+**Test matrix (acceptance suite — all required, all green at ship):**
+
+| # | Case | Pinned in |
+|---|------|-----------|
+| (a) | markers + judge-no + nothing pending → DENY + nudge + counter+1 | `tests/unit/test_attestation_marker_wiring.py::test_marker_a_deny_nudge_counter_increments` |
+| (b) | markers + judge-no + real pending → ALLOW + hint, no deny, no counter | `tests/unit/test_attestation_marker_wiring.py::test_marker_b_hint_injection_no_deny_no_counter` |
+| (c) | markers + judge-yes → ALLOW normally | `tests/unit/test_attestation_marker_wiring.py::test_marker_c_judge_yes_allows_normally` |
+| (d1) | markers + judge-error + nothing pending → DENY | `tests/unit/test_attestation_marker_wiring.py::test_marker_d_error_with_nothing_pending_deny` |
+| (d2) | markers + judge-timeout + real pending → ALLOW + hint | `tests/unit/test_attestation_marker_wiring.py::test_marker_d_timeout_with_real_pending_hint` |
+| (d3) | markers + judge-unparsable + nothing pending → DENY | `tests/unit/test_attestation_marker_wiring.py::test_marker_d_unparsable_with_nothing_pending_deny` |
+| (e1) | kill-switch OFF (env var) → markers logged, no judge, plain ALLOW | `tests/unit/test_attestation_marker_wiring.py::test_marker_kill_switch_env_off_no_judge_call` |
+| (e2) | kill-switch OFF (gate-config flag) → markers logged, no judge, plain ALLOW | `tests/unit/test_attestation_marker_wiring.py::test_marker_kill_switch_config_off_no_judge_call` |
+| (f) | no markers → no judge call, plain ALLOW (cost control) | `tests/unit/test_attestation_marker_wiring.py::test_no_markers_no_judge_call` |
+| (g) | attested allow → scan skipped, no judge, no marker fields populated | `tests/unit/test_attestation_marker_wiring.py::test_attested_allow_skips_marker_scan` |
+| (h) | log fields present on marker-(a) path | `tests/unit/test_attestation_marker_wiring.py::test_log_marker_fields_present_on_marker_a_path` |
+| (i) | log fields present on no-marker path | `tests/unit/test_attestation_marker_wiring.py::test_log_marker_fields_present_on_no_marker_path` |
+| (j) | verbatim incident phrase killed by path (a) | `tests/unit/test_attestation_marker_wiring.py::test_verbatim_incident_phrase_killed_by_path_a` |
+| (k) | brief example "Ending turn, will continue after your reply" reaches the judge | `tests/unit/test_attestation_marker_wiring.py::test_quick_question_with_marker_reaches_judge` |
+
+Marker-scanner unit matrix (38 tests in `tests/unit/test_attestation_marker_scanner.py`): catalog size pin (12-18); case-insensitivity; catalog-order marker_terms ordering; marker_terms list cap; verbatim incident phrase fires; every catalog entry fires standalone; benign completion phrases do NOT fire (`"done"`, `"completed"`, `"nothing pending, all shipped"`, `"I delivered the report"`, etc.); window semantics (only the last `window` AIMessages inspected, clamp to ≥1); non-AI messages invisible; list-of-blocks content flattened; empty content handled; empty message list returns no hit; backward walk semantics.
+
+**Files (this decision):**
+
+- `daemon/services/attestation_marker_scanner.py` (NEW) — pure-function scanner (`MID_WORK_MARKERS`, `MarkerScanResult`, `scan_for_mid_work_markers`); 16-pattern curated catalog.
+- `daemon/services/attestation_gate.py` — `GateDecision` extended with `marker_hit` / `marker_terms` / `marker_path` / `marker_judge_verdict` / `marker_judge_latency_ms` / `marker_judge_error_class` / `marker_hint_message`; marker scan inserted in `evaluate()` for ALLOWED / ALLOWED_LEGITIMATE_PENDING_WAKEUP decisions with `attestation_present=False`; canonical log format string gains 6 additive fields.
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` constant (canonical home, NFR-6 parity with `ATTESTATION_NUDGE_TEXT`); `create_attestation_gate_node` extended with the marker-path judge wiring (kill-switch respected; routing to (a)/(b)/(c)/(d); `_make_context_message` factory used for hint construction); existing would-be-deny judge is SKIPPED when `decision.marker_path in {"a", "d"}` (the marker-path judge IS the disambiguator); END branch consumes `decision.marker_hint_message`.
+- `tests/unit/test_attestation_marker_scanner.py` (NEW) — 38 tests (catalog + case-insensitivity + verbatim phrase + benign negatives + window + non-AI invisible + content flattening + multi-marker + cap).
+- `tests/unit/test_attestation_marker_wiring.py` (NEW) — 14 tests (acceptance matrix (a)/(b)/(c)/(d)/(e)/(f)/(g)/(h)/(i)/(j)/(k)).
+- `requirements.md` — append-only FR amendment (see immediately below).
+- `docs/setup.md` — append-only runbook note (mid-work marker scan section; judge kill-switch explanation).
+
+**DO NOT TOUCH (this decision):**
+
+- The 5-value canonical decision enum (`ALLOWED` / `DENIED` / `TERMINAL_AFTER_BOUND` / `DRY_LOG` / `ALLOWED_LEGITIMATE_PENDING_WAKEUP` is UNCHANGED).
+- The `attest_completion` tool semantics — unchanged (idempotent no-op).
+- The would-be-deny judge (`attestation_report_judge.py`) — unchanged, REUSED.
+- The marker-path judge is the SAME judge as the would-be-deny judge; only the routing is new.
+- The R2 inputs (pending_children, queued_or_expected_wakeups, live_descendants) — unchanged.
+- The counter-reset semantics (R1) — unchanged.
+- The `ATTESTATION_NUDGE_TEXT` constant — unchanged (canonical nudge home, NFR-6 parity).
+
+---
+
+## Open residual — F1 (2026-09-12) — Unbounded `context_kind` hint accumulation under three-bucket compaction
+
+**Symptom (recorded during 2026-09-11 adversarial review pass):**
+
+Every (b)-path "Completion Check Note" mint currently goes through `daemon.graph._make_completion_check_note_message(instance_id)` → `_make_context_message(kind=CONTEXT_KIND_TASK_CONTEXT, title=..., content=...)`. The factory lets `_make_context_message` mint a fresh `uuid4` per call (the `id_=None` default; see `daemon/services/context_messages.py:118-125`). Repeated (b) events on the same session therefore stamp a distinct `HumanMessage.id` each time, and each one survives compaction as a permanently-hoisted `context_kind=task_context` block under the three-bucket contract (per merge 77ce4ae8 / `daemon/compaction.py` threshold numerator counts ALL messages incl. injected `[SYSTEM CONTEXT]`). Net effect: a leader that mid-work-phrases across many turns accumulates an unbounded tail of Completion Check Note hints in its context, dominating the budget without ever being absorbed.
+
+**Proposed fix shapes (not yet implemented):**
+
+- *Shape A — stable id per session:* `id_=_stable_id_for("completion_check_note", instance_id=effective_instance_id)` plumbed through the new helper's reserved `instance_id` slot. Adds a new kind to `_stable_id_for`'s canonical id-format table (decisions.md D3 — kv-ambient-awareness-fix; single source of truth — all callers route through this helper so the mint site stays grep-able and the formats stay append-only). Each subsequent (b) event on the same instance SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer.
+- *Shape B — drop `context_kind` for the bare-flag shape:* mint the hint with `injected_message=True` but NO `context_kind` field (the bare-flag UNANSWERED treatment per merge 77ce4ae8 — preserved verbatim and hoisted). Lower-priority — changes how FE / consumers filter these blocks (the `context_kind` enumeration becomes a fuzzy set vs. an exact match).
+
+**Recommended next step:** Shape A — minimal diff, no consumer-key changes, single new `_stable_id_for` row, and the helper's already-reserved `instance_id` slot is the natural seam. Defer until the F1 shape gets a small operational bake (soak the (b) path in a real session and confirm hint count actually grows before committing to the id-format-table edit).
+
+**Out-of-scope for the 2026-09-11 commit (F2/F3/F4 are the in-scope residual fixes):** this entry is BACKLOG hygiene, no code change.
+
+**Files (potential future change — none edited today):**
+
+- `daemon/graph.py` — `_make_completion_check_note_message` (the helper already plumbs `instance_id` for this exact purpose; just one line at the call site to `_make_context_message` to use `_stable_id_for("completion_check_note", instance_id=...)`).
+- `daemon/services/context_messages.py` — append the `completion_check_note` row to `_stable_id_for`'s id-format table (the single source of truth for stable-id formats per D3 kv-ambient-awareness-fix).
+- `tests/unit/test_attestation_marker_wiring.py` — add a (b)-path test asserting the second emit SUPERSEDES the first (LangGraph `add_messages` reducer collapses by `id`); pins the Shape A contract end-to-end.
+
+**DO NOT TOUCH (this backlog entry):**
+
+- The `(b)-path` semantics (route, log row, hint content) — unchanged.
+- The `context_messages._make_context_message` `id_=None` default — unchanged for any other caller.

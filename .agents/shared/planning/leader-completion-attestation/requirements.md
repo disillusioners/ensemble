@@ -869,3 +869,30 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 * AC-L7: gate-level test reconstructs the EXACT b08f40fe tree (8 terminal children + 4 IDLE-orphan grandchildren under the tester child, delegation anchored after the last real user message, mode=enforce) — named after the incident and referencing `b08f40fe` in its docstring.
 
 **Files (this requirement):** `daemon/manager.py`; `daemon/repositories/message_queue/repository.py`; `tests/support/conftest.py`; `tests/integration/test_attestation_live_descendants.py`; `tests/integration/test_attestation_idle_orphan_incident.py` (new); `docs/setup.md`.
+
+---
+
+## Requirement (incident b08f40fe follow-up — 2026-09-11) — Mid-work marker scan trigger on ALLOW paths
+
+**Context:** incident b08f40fe (2026-09-11) closed via the two-set `live_descendants` semantics (D-ENTRY 2026-09-11 above). The orphan-fix closes the IDLE-orphan subtree branch but the broader class — leader PROSE that reads mid-work while the R2 inputs are clean — is still undetected by any existing gate predicate. The leader's final AIMessage VERBATIM was "Awaiting final four: C12a/b/c + blame-worker. Then I aggregate and write RESULTS. Ending turn." With the orphan-fix applied (`live_descendants=0`), the natural decision is DENIED via the canonical R2 predicate; but on a delegated mission whose natural decision is ALLOWED_LEGITIMATE_PENDING_WAKEUP (real wakeup en route), no predicate detects the mid-work phrasing — the leader completes silently.
+
+**Requirement:** the gate MUST detect mid-work phrasing on ALLOW paths (attested_allow is skipped; the conditional-OFF branch is INCLUDED) and route through the existing inline-LLM judge. Markers + judge-no + nothing pending → CONVERT TO DENY + nudge + counter increment. Markers + judge-no + real pending → ALLOW + checkpoint-durable hint (no counter, no deny, no re-route; the turn still ends so the wake-up can arrive). Markers + judge-yes → ALLOW normally. Markers + judge-error/timeout/unparsable → (a)-behavior if nothing pending, (b)-behavior otherwise (conservative fall-through).
+
+**Acceptance criteria:**
+
+* **AC-M1**: marker catalog is curated (12-18 patterns from the incident family: "ending turn", "ending my turn", "awaiting", "then i aggregate", "then i compile", "will write", "will aggregate", "not a completion report", "interim", "in progress", "not yet complete", "still pending", "to be continued", "will report back", "standby", "stand by").
+* **AC-M2**: the verbatim b08f40fe line "Awaiting final four: C12a/b/c + blame-worker. Then I aggregate and write RESULTS. Ending turn." fires the marker scan.
+* **AC-M3**: legitimate completion prose ("All work shipped. Done.", "Nothing pending, all shipped", "I delivered the report") does NOT fire the marker scan.
+* **AC-M4**: case-insensitive match (uppercase, mixed-case, lowercase all fire on the same marker).
+* **AC-M5**: window bounded — only the last `ENSEMBLE_LEADER_ATTESTATION_WINDOW` AIMessages are inspected; a marker in an older AIMessage is invisible.
+* **AC-M6**: only AIMessages contribute to the scan (HumanMessage / ToolMessage / SystemMessage are invisible).
+* **AC-M7**: hook on ALLOW paths only — `Decision.DENIED` / `TERMINAL_AFTER_BOUND` / `DRY_LOG` / meta-bypass are NOT scanned. Attested_allow is NOT scanned. Conditional-OFF (`attestation_required=False`) IS scanned.
+* **AC-M8**: judge-not-complete + nothing pending → CONVERT TO DENY (existing nudge machinery: counter+1, ledger increment, nudge injection, route back to `agent`).
+* **AC-M9**: judge-not-complete + real pending → ALLOW + checkpoint-durable hint (`HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]` header, construction-time `id` invariant via `_make_context_message` factory).
+* **AC-M10**: judge-yes → ALLOW normally (no nudge, no counter, no hint).
+* **AC-M11**: judge error / timeout / unparsable on marker path → (a)-behavior if nothing pending, (b)-behavior otherwise (log `judge_error`).
+* **AC-M12**: kill-switch OFF (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` or `llm_judge_enabled=False` in gate-config) → markers logged, NO judge call, plain ALLOW in ALL marker cases.
+* **AC-M13**: no markers in the message tail → no judge call (cost control).
+* **AC-M14**: canonical `event=leader_completion_gate` log row carries the additive marker fields (marker_hit, marker_terms, marker_path, marker_judge_verdict, marker_judge_latency_ms, marker_judge_error_class). Marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line.
+* **AC-M15**: existing would-be-deny judge (`event=leader_completion_gate_judge` on `Decision.DENIED`) is SKIPPED when `decision.marker_path in {"a", "d"}` — the marker-path judge IS the disambiguator; double-judge must not fire.
+* **AC-M16**: `Completion Check Note` text is a single-source-of-truth constant in `daemon/graph.py` (canonical home; NFR-6 parity with `ATTESTATION_NUDGE_TEXT`). The header `[SYSTEM CONTEXT: Completion Check Note]` reuses the existing prefix convention so the `is_real_user_message` predicate in `attestation_scanner.py` recognizes it as not-a-real-user-message.
