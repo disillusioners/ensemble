@@ -3137,8 +3137,15 @@ class SQLModelInstanceRepository:
     def list_paused_or_terminal_instance_ids(
         self, instance_ids: list[str]
     ) -> set[str]:
-        """Return the subset of ``instance_ids`` whose status is paused
-        OR terminal.
+        """Return the subset of ``instance_ids`` whose status is in
+        the paused-or-terminal superset — ``paused`` plus the
+        4-status terminal set ``{completed, error, terminated,
+        failed}`` (``SQLModelInstanceRepository._WAITING_CHILDREN_HUNG_TERMINAL_SET``).
+        Deliberately broader than the claim gate's pause-only guard
+        (see cross-reference): the eligible sweep's W-D liveness
+        filter wants to skip notify_work for any parent instance
+        whose tasks are not actually being processed (paused OR
+        finalized — both qualify).
 
         Used by the A3 eligible-PENDING sweep's W-D liveness filter
         (``daemon/services/eligible_pending_sweep.py``) to skip

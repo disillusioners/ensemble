@@ -802,7 +802,8 @@ class WaitingChildrenWatchdog:
         gating the helper on a real, constructor-injected repo, the
         gate is:
 
-        * *active in production* — ``daemon/api.py:701`` wires the
+        * *active in production* — ``daemon/api.py``'s lifespan
+          ``WaitingChildrenWatchdog(...)`` construction wires the
           manager's real ``TaskRepository`` as ``task_repository=``
           on every watchdog construction.
         * *opt-in for tests* — tests that want to assert the gate
@@ -1100,6 +1101,14 @@ class WaitingChildrenWatchdog:
                             f"liveness gate — recent heartbeat "
                             f"detected on child's task rows."
                         )
+                        # Known residual (W-B review): a wedged turn
+                        # whose child heartbeat keeps beating suppresses
+                        # B3 release indefinitely — the heartbeat signal
+                        # is independent of worker execution progress,
+                        # so a hung-but-heartbeating child stays parked.
+                        # The pre-W-B base hang-notice (escalation, not
+                        # release) preserves operator visibility into
+                        # the wedged state.
                         continue
                     if (
                         nudge_count >= self._release_after_nudge_count

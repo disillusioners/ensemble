@@ -1387,7 +1387,20 @@ class ServicesConfig(BaseSettings):
             "per the project owner's HARD POLICY on Batch A); the "
             "knob tunes responsiveness vs the commit→emit race. "
             "Override via SERVICES_ORPHAN_WATCHER_SWEEP_GRACE_SECONDS "
-            "env var."
+            "env var.\n\n            **SCOPE — periodic sweep only.** "
+            "This knob governs the steady-state sweep tick driven "
+            "by ``OrphanWatcherSweepService.sweep_once`` (wired in "
+            "``daemon/api.py``). The STARTUP sweep in "
+            "``DependencyBus.start()`` (around "
+            "``daemon/services/dependency_bus.py:1553``) hard-"
+            "defaults to ``DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS`` "
+            "(30s) regardless of this knob — the startup path "
+            "calls ``_sweep_orphan_watchers()`` with no argument, "
+            "so the config value is NOT threaded into the boot-"
+            "time cleanup. This is deliberate: the startup sweep "
+            "is a one-shot restart-window cleanup, not a tunable "
+            "steady-state behavior; tightening the knob for "
+            "incidents does NOT change what survives the restart."
         ),
     )
     lease_heartbeat_interval_seconds: float = Field(
