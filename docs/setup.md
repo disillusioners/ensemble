@@ -622,6 +622,8 @@ These fields are diagnostic extras (NOT in the canonical 17-field `leader_comple
 
 The judge is fail-safe: every failure path (timeout, exception, unparsable JSON) returns `is_complete_report=False` so the existing deny+nudge path runs unchanged. The 3-deny escalation bound caps worst-case misfires. A judge-error wrapper-layer bug emits a separate `event=leader_completion_gate_judge_error` log line with `error_class` and degrades to the existing deny+nudge path.
 
+**Runbook note (2026-09-11, incident b08f40fe): `live_descendants` now means WORK-BEARING descendants.** The third R2 input no longer counts every non-terminal descendant. Two-set semantics: `RUNNING`/`WAITING`/`WAITING_CHILDREN`/`PAUSED` are unconditionally live; dormant `IDLE`/`QUEUED` descendants count live ONLY with work en route — a not-yet-processed `message_queue` row (`PENDING`/`READY`/`PROCESSING`/`RETRYING`) OR a not-yet-settled `job_queue_items` row (`admission_state` QUEUED | ACTIVE) targeting that descendant. IDLE orphans (spawned but never dispatched — no message row, no unsettled job) are EXCLUDED, so the deny/nudge ladder sees the true zero instead of branch (5) holding the gate open for a report that will never arrive. Operator reading of the canonical log row is unchanged: `live_descendants=0` now truthfully means "nothing in my subtree will ever wake me"; a `live_descendants=-1` row is the DB-error fail-open sentinel (gate allowed, signal unknown). Restart required after upgrading (code change, no env). Incident reference: leader `b08f40fe` completed 2026-09-11 14:50:10 UTC via `allowed_legitimate_pending_wakeup` on four never-dispatched IDLE-orphan grandchildren; regression-pinned by `tests/integration/test_attestation_idle_orphan_incident.py`.
+
 ## Database
 
 ### Overview
@@ -937,3 +939,51 @@ ver |
 ---
 
 *Last updated: Version 0.3.6*
+
+## Mid-work marker scan (LCA Phase 6.5 follow-up, 2026-09-11)
+
+The completion gate's ALLOW branches (`Decision.ALLOWED` not-attested + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP`) trigger a cheap mid-work marker scan before the END. Markers fire → the existing inline-LLM judge runs (verdict) → verdict + R2 inputs drive the (a)/(b)/(c)/(d) routing. This is the incident b08f40fe-class kill: a leader whose final AIMessage reads mid-work phrasing while the R2 inputs are clean would otherwise complete silently.
+
+### Marker catalog (16 patterns, 12-18 balance)
+
+`ending turn`, `ending my turn`, `awaiting`, `then i aggregate`, `then i compile`, `will write`, `will aggregate`, `not a completion report`, `interim`, `in progress`, `not yet complete`, `still pending`, `to be continued`, `will report back`, `standby`, `stand by`.
+
+Case-insensitive substring match against the AIMessage content; catalog is curated for high recall on the incident family. Excluded: `done`, `completed`, `finished`, `shipped`, `summary`, `results` alone (would false-positive on legitimate completions). The judge is the verdict — any false-positive marker hits are filtered by the LLM verdict.
+
+### Routing
+
+| Path | Conditions | Behavior |
+|------|------------|----------|
+| (a) | markers + judge-no + nothing pending | CONVERT TO DENY (existing nudge machinery: counter+1, nudge, route to agent) |
+| (b) | markers + judge-no + real pending work | ALLOW + checkpoint-durable hint (NO counter, NO deny, NO re-route — turn still ends) |
+| (c) | markers + judge-yes | ALLOW normally (log marker_hit + verdict; no action) |
+| (d) | markers + judge-error/timeout/unparsable | (a)-behavior if nothing pending, (b)-behavior otherwise |
+
+### Kill-switch coupling
+
+The marker path respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables). With the judge disabled, marker hits are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: marker-only signal is too weak to deny — the LLM verdict disambiguates ambiguous marker hits; without the verdict, plain allow + log is the safer default.
+
+When the kill-switch is OFF, the marker path emits a distinct `event=leader_completion_gate_marker_judge_disabled` log row with `verdict=<skipped>` (grep-disjoint from the existing `event=leader_completion_gate_marker_judge` family — operators grep the correct event for the operator-disabled case). This row is the operator-observable signal that the canonical `event=leader_completion_gate` row's `marker_judge_verdict` field stayed at the transient `<pending>` sentinel — the gate did not call the judge (kill-switch open), did not inject a hint, and did not deny.
+
+### Dry-mode marker logging
+
+The marker scan runs in `dry` mode (Decision.DRY_LOG) too — the scan is side-effect-free and pure LOG-ONLY: it populates `marker_hit` / `marker_terms` / `marker_path` on the canonical log row so operators see the signal in `decision=dry_log` soak rows. No judge call fires (the marker-path judge wiring in `daemon/graph.py` early-outs for DRY_LOG decisions before any judge/hint/deny/counter side effect), no hint is injected, no deny, no counter — the dry-mode `allow unconditionally` posture is preserved end-to-end. The marker scan runs on DRY_LOG so the bake-time observability surfaces how often mid-work phrasing would have triggered the marker path; the gate still allows the END as before. The marker-path's `"<pending>"` marker_path sentinel stays as the final value on the dry-log row (log-only; never resolved to `a`/`b`/`c`/`d` because no judge ran).
+
+### Completion Check Note (path (b))
+
+Injected alongside END on path (b). Canonical home `daemon/graph.py::COMPLETION_CHECK_NOTE_TEXT`. The note is a `HumanMessage` with `[SYSTEM CONTEXT: Completion Check Note]` header (reuses the existing prefix convention so `is_real_user_message` in `attestation_scanner.py` recognizes it as not-a-real-user-message). Content: confirms the gate noticed mid-work phrasing while real pending work is outstanding; asks the leader to confirm the wake-up arrives on the next turn; reminds about the two-step attestation protocol.
+
+The hint carries a **stable id per instance** minted via `_stable_id_for("completion_check_note", instance_id=...)` — a new row in the canonical `_stable_id_for` id-format table at `daemon/services/context_messages.py` (F1 Shape A, 2026-09-12). Each subsequent (b) event on the same instance SUPERSEDES the prior checkpoint entry in place via LangGraph's `add_messages` reducer — the resulting state carries EXACTLY ONE Completion Check Note block regardless of how many (b) events fired. Without the stable id, repeated (b) hints compound as a permanently-hoisted `context_kind=task_context` tail under three-bucket compaction (merge 77ce4ae8) and dominate the budget (`INJECTIONS_DOMINATE` skip); the stable id collapses that unbounded hint accumulation. The factory's `instance_id=None` fallback preserves the pre-F1 fresh-uuid4 behavior for degenerate / test-only call sites.
+
+### Log schema (additive)
+
+The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths. The kill-switch OFF path emits `event=leader_completion_gate_marker_judge_disabled` (grep-disjoint event name — distinct from the existing judge/event family so operators can pinpoint the operator-disabled case). All three events live alongside each other in the same daemon log; operators `grep event=leader_completion_gate_marker_judge` to see the live judge calls, `grep event=leader_completion_gate_marker_judge_disabled` to see the kill-switch OFF soak signal, and `grep event=leader_completion_gate_marker_judge_error` to see the wrapper-fault class.
+
+### References
+
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (this feature); F1 amendment 2026-09-12 (Shape A landed)
+- `daemon/services/attestation_marker_scanner.py` — pure-function scanner
+- `daemon/services/attestation_gate.py` — gate integration + additive log fields
+- `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring
+- `tests/unit/test_attestation_marker_scanner.py` (38 tests) + `tests/unit/test_attestation_marker_wiring.py` (23 tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)

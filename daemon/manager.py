@@ -350,6 +350,48 @@ class MessageResult:
     tool_calls: list[dict[str, Any]] | None = None
 
 
+def _dormant_descendants_with_work_en_route(
+    msg_repo: Any | None,
+    job_repo: Any | None,
+    descendant_ids: list[str],
+) -> set[str]:
+    """Return the subset of dormant descendant ids with work en route.
+
+    Module-level (not a method) DELIBERATELY: it is a pure function of
+    its arguments, and test stubs that bind
+    ``InstanceManager.count_live_descendants`` via ``MethodType`` then
+    need no second attribute binding for the two-set semantics to run
+    (a missing method on a partial stub would otherwise fail open at
+    the gate with ``live_descendants=-1`` — observed in the
+    b08f40fe regression suite before this was made module-level).
+
+    Work en route = a not-yet-processed ``message_queue`` row
+    (PENDING / READY / PROCESSING / RETRYING) OR a not-yet-settled
+    ``job_queue_items`` row (``admission_state`` in
+    ``ACTIVE_ADMISSION_STATES`` = QUEUED | ACTIVE) targeting the
+    descendant. Backs the CONDITIONAL-live arm of
+    ``InstanceManager.count_live_descendants`` (incident b08f40fe).
+
+    Wiring tolerance: a ``None`` lane contributes no signal (no wiring
+    ⇒ no work could exist there) — it is NOT an error. DB errors on a
+    WIRED lane propagate — the gate's DB seam fails open with
+    ``live_descendants=-1``; this helper never swallows a read error
+    into a not-live verdict.
+    """
+    with_work: set[str] = set()
+    if msg_repo is not None:
+        # One batched query for all dormant descendants.
+        pairs = msg_repo.get_unprocessed_for_instances(descendant_ids)
+        with_work.update(iid for iid, _message_id in pairs)
+    if job_repo is not None:
+        for iid in descendant_ids:
+            if iid in with_work:
+                continue
+            if job_repo.get_active_by_instance(iid) is not None:
+                with_work.add(iid)
+    return with_work
+
+
 class InstanceManager:
     """Manages all agent instances, their graphs, and lifecycle."""
 
@@ -8625,7 +8667,7 @@ class InstanceManager:
     LIVE_DESCENDANTS_BFS_CAP = 500
 
     def count_live_descendants(self, instance_id: str) -> int:
-        """Count non-terminal descendants of this instance (R2 third input).
+        """Count work-bearing descendants of this instance (R2 third input).
 
         Attestation-gate R2 input (``live_descendants``). Mirrors
         :meth:`count_pending_children` / :meth:`get_queued_or_expected_wakeups`
@@ -8637,12 +8679,46 @@ class InstanceManager:
         from the count: only true descendants count toward the allow
         signal.
 
-        Live definition (terminal set is the complement of this list):
+        TWO-SET live definition (terminal set is the complement; incident
+        b08f40fe 2026-09-11 — a leader completed via the
+        ``allowed_legitimate_pending_wakeup`` branch with
+        ``live_descendants=4`` where all four were IDLE-orphan
+        grandchildren that had NEVER been dispatched: zero
+        ``message_queue`` rows, zero ``message_metadata`` rows, every
+        dependency watcher already FIRED. Branch 5's rationale is "a
+        child report will revive the leader" — an IDLE orphan never
+        reports, so it must never look like delegation-in-flight.
+        Counting IDLE unconditionally let dead delegation weight hold
+        the gate open and the leader completed prematurely):
 
+        * UNCONDITIONAL-live — ``RUNNING``, ``WAITING``,
+          ``WAITING_CHILDREN``, ``PAUSED``: running-ish states where
+          execution (or an operator-held pause of it) is real; counted
+          with no further checks.
+        * CONDITIONAL-live — ``IDLE``, ``QUEUED``: dormant states.
+          Counted ONLY when work is en route to that descendant:
+          (a) a not-yet-processed ``message_queue`` row targeting it
+          (PENDING / READY / PROCESSING / RETRYING — see
+          ``MessageQueueRepository.get_unprocessed_for_instances``), OR
+          (b) a not-yet-settled ``job_queue_items`` row targeting it
+          (``admission_state`` QUEUED or ACTIVE — the
+          ``ACTIVE_ADMISSION_STATES`` in-flight set, resolved via
+          ``JobRepository.get_active_by_instance``). An IDLE instance
+          with only a QUEUED job has no message row yet, so the job
+          lane is a MANDATORY second check, not a fallback.
         * ``COMPLETED``, ``TERMINATED``, ``ERROR``, ``FAILED`` are
-          terminal (excluded).
-        * ``IDLE``, ``QUEUED``, ``RUNNING``, ``WAITING``,
-          ``WAITING_CHILDREN``, ``PAUSED`` are live (counted).
+          terminal (excluded) — an IDLE orphan with no message row and
+          no unsettled job is therefore NOT live and the deny/nudge
+          ladder sees the TRUE zero.
+
+        Fail-open contract: DB errors do NOT fail toward orphan=not-live.
+        A read error inside the conditional work-en-route sub-checks
+        propagates out of this facade; the gate's ``except Exception``
+        DB seam converts it to fail-open ALLOWED with
+        ``live_descendants=-1`` in the log row — the same surface every
+        other R2 read gets (deliberate: a flaky DB must not let a
+        leader be denied on a possibly-wrong zero, and the -1 row makes
+        the degenerate read visible).
 
         The watcher lifecycle emits PENDING dependency rows for direct
         children but DELIBERATELY fires the watcher on
@@ -8659,20 +8735,24 @@ class InstanceManager:
         budget (current gate P95 ~0.016ms — keep this order of
         magnitude). The cap is well above any realistic leader subtree
         size; if you legitimately exceed it, raise the constant AND
-        the unit-test pin. Deferral emits no report/task row, so the
-        existing two inputs cannot see this state — only the INSTANCE
-        tree can.
+        the unit-test pin. The work-en-route sub-checks run ONLY for
+        dormant (conditional-live) descendants — one batched
+        message-lane query plus one indexed point query per dormant id
+        on the job lane (same per-id query order as the status reads
+        this loop already performs). Deferral emits no report/task row,
+        so the existing two inputs cannot see this state — only the
+        INSTANCE tree can.
 
         Args:
             instance_id: The leader instance whose subtree to scan
                 (root is excluded from the count).
 
         Returns:
-            Non-negative int count of live descendants. 0 when the
-            root is not found OR no descendants exist OR every
-            descendant is terminal. Bounded by
-            :data:`LIVE_DESCENDANTS_BFS_CAP` (the tree walk stops at
-            the cap — admin-tool territory past that).
+            Non-negative int count of live (work-bearing) descendants.
+            0 when the root is not found OR no descendants exist OR
+            every descendant is terminal-or-dormant-without-work.
+            Bounded by :data:`LIVE_DESCENDANTS_BFS_CAP` (the tree walk
+            stops at the cap — admin-tool territory past that).
         """
         repo = getattr(self, "_instance_repository", None)
         if repo is None:
@@ -8699,14 +8779,54 @@ class InstanceManager:
             InstanceStatus.ERROR.value,
             InstanceStatus.FAILED.value,
         }
+        unconditional_live_statuses = {
+            InstanceStatus.RUNNING.value,
+            InstanceStatus.WAITING.value,
+            InstanceStatus.WAITING_CHILDREN.value,
+            InstanceStatus.PAUSED.value,
+        }
+        conditional_live_statuses = {
+            InstanceStatus.IDLE.value,
+            InstanceStatus.QUEUED.value,
+        }
         live_count = 0
+        dormant_ids: list[str] = []
         for iid in scanned:
             row = repo.get(iid)
             if row is None:
                 # Row missing (likely purged) — skip; not live.
                 continue
-            if row.status not in terminal_statuses:
+            status = row.status
+            if status in terminal_statuses:
+                continue
+            if status in unconditional_live_statuses:
                 live_count += 1
+            elif status in conditional_live_statuses:
+                # Dormant — live only if work is en route (checked in
+                # one batch after the walk; incident b08f40fe).
+                dormant_ids.append(iid)
+            else:
+                # Unknown status — preserve the historical default
+                # (not terminal ⇒ live) so a future enum member can
+                # never silently read as not-live.
+                live_count += 1
+        if dormant_ids:
+            # Resolve the two work-en-route lanes (production wiring:
+            # manager-level message-queue repo; job repo behind the
+            # late-bound JobQueueService — see the helper's wiring
+            # notes) and count only the dormant ids that carry work.
+            msg_repo = getattr(self, "_queue_repository", None)
+            job_service = getattr(self, "_job_queue_service", None)
+            job_repo = (
+                getattr(job_service, "_repository", None)
+                if job_service is not None
+                else None
+            )
+            live_count += len(
+                _dormant_descendants_with_work_en_route(
+                    msg_repo, job_repo, dormant_ids
+                )
+            )
         return live_count
 
     async def _has_checkpoint(self, instance_id: str) -> bool:

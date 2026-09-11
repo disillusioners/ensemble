@@ -15,7 +15,7 @@ from langchain_core.runnables.config import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk
 from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _replace
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
@@ -2871,6 +2871,102 @@ ATTESTATION_NUDGE_TEXT = (
     "```"
 )
 
+#: Server-authored Completion Check Note text (2026-09-11, incident
+#: b08f40fe; FR-3 marker-path (b) hint). This is the SINGLE home of
+#: the hint text — never hardcode the literal elsewhere (NFR-6 parity
+#: with :data:`ATTESTATION_NUDGE_TEXT`). Injected by the gate node on
+#: marker path (b) only (markers + judge-not-complete + real pending
+## work). Like the nudge, the note leads with a single non-blank
+#: header line ``[SYSTEM CONTEXT: Completion Check Note]`` so the LLM
+#: recognizes it as system-origin at parse time (per the established
+#: ``_make_context_message`` factory style — same prefix discipline).
+#: NO counter write, NO deny, NO re-route — the turn still ends; the
+#: hint rides alongside the END as a checkpoint-durable reminder for
+#: the next turn.
+COMPLETION_CHECK_NOTE_TEXT = (
+    "[SYSTEM CONTEXT: Completion Check Note]\n\n"
+    "The completion gate noticed mid-work phrasing on a turn where "
+    "real pending work is still outstanding (children, wakeups, or "
+    "live descendants remained). The gate allowed the turn to end so "
+    "the wake-up you expected can still arrive, but please confirm on "
+    "your next turn that the wake-up actually comes — if the pending "
+    "work was orphaned or already idle, clean it up or call "
+    "attest_completion once the work is truly done. Reminder: when "
+    "you do finish, FIRST deliver your full detailed final report as "
+    "its own message, THEN call attest_completion ALONE — never "
+    "bundle the report into the attestation tool-call message."
+)
+
+# Single-source the body derivation for the (b)-path hint. The header
+# string below is sourced from ``context_messages.CONTEXT_PREFIX`` +
+# title + ``CONTEXT_SUFFIX`` — the SAME triplet the
+# ``_make_context_message`` factory re-prepends — so callers never
+# re-literal the ``[SYSTEM CONTEXT: Completion Check Note]\n\n`` prefix
+# in this module (defends against a future header edit silently
+# shifting the hint body). F1 backlog hint accumulation lives here too
+# (a stable id plumbed through ``instance_id`` is the natural fix site).
+_COMPLETION_CHECK_NOTE_TITLE = "Completion Check Note"
+
+
+def _make_completion_check_note_message(
+    instance_id: str | None = None,
+) -> HumanMessage:
+    """Build the (b)-path Completion Check Note hint as a HumanMessage.
+
+    Single-source — derives the body from :data:`COMPLETION_CHECK_NOTE_TEXT`
+    by slicing past the canonical header (the header string is sourced
+    from ``context_messages.CONTEXT_PREFIX`` + title + ``CONTEXT_SUFFIX``,
+    the same triplet the ``_make_context_message`` factory re-emits).
+    The returned ``HumanMessage.content`` equals
+    :data:`COMPLETION_CHECK_NOTE_TEXT` byte-for-byte — the existing
+    hint-content test pins this invariant.
+
+    F1 Shape A (2026-09-12, review W2 — Shape A landed): when an
+    ``instance_id`` is supplied, the hint carries a stable id minted
+    via :func:`_stable_id_for('completion_check_note', instance_id=...)`
+    — the canonical id-format table row added in this pass. The
+    stable id collapses repeated (b) events on the same instance:
+    LangGraph's ``add_messages`` reducer SUPERSEDES the prior
+    checkpoint entry in place, so the Completion Check Note block
+    appears EXACTLY ONCE in the resulting state regardless of how
+    many (b) events fire — the unbounded ``context_kind=task_context``
+    tail under three-bucket compaction (merge 77ce4ae8) is closed.
+    When ``instance_id`` is ``None`` (degenerate / test-only call
+    sites) the factory falls back to the pre-F1 fresh-uuid4 behavior
+    so tests that don't care about supersede semantics stay green.
+
+    Args:
+        instance_id: Owning instance id. When supplied, the hint
+            carries a stable id so repeated (b) events on the SAME
+            instance supersede in place (Shape A contract). When
+            ``None``, the factory falls back to a fresh ``uuid4``
+            (the pre-F1 behavior).
+
+    Returns:
+        A ``HumanMessage`` with the canonical Completion Check Note
+        body and the ``CONTEXT_KIND_TASK_CONTEXT`` ``context_kind``.
+    """
+    from .services.context_messages import (
+        CONTEXT_KIND_TASK_CONTEXT,
+        CONTEXT_PREFIX,
+        CONTEXT_SUFFIX,
+        _make_context_message,
+        _stable_id_for,
+    )
+    header = CONTEXT_PREFIX + _COMPLETION_CHECK_NOTE_TITLE + CONTEXT_SUFFIX
+    body = COMPLETION_CHECK_NOTE_TEXT[len(header):]
+    stable_id = (
+        _stable_id_for("completion_check_note", instance_id=instance_id)
+        if instance_id
+        else None
+    )
+    return _make_context_message(
+        kind=CONTEXT_KIND_TASK_CONTEXT,
+        title=_COMPLETION_CHECK_NOTE_TITLE,
+        content=body,
+        id_=stable_id,
+    )
+
 #: Graph node name + conditional-route name for the attestation gate.
 ATTESTATION_GATE_NODE_NAME = "attestation_gate"
 
@@ -3233,6 +3329,310 @@ def create_attestation_gate_node(
                 "gate_exception_seen": True,
             }
 
+        # Phase 6 fastfollow (2026-09-11, incident b08f40fe) — mid-work
+        # marker scan trigger on the ALLOW path. The marker scan ran
+        # inside ``evaluate()``; if it fired (``decision.marker_hit``
+        # True), call the existing inline-LLM judge to disambiguate
+        # the leader's last AIMessage(s). The judge verdict drives the
+        # (a)/(b)/(c)/(d) routing. Kill-switch coupled to the SAME
+        # ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`` boolean
+        # (Pattern C) — the marker path respects the operator's
+        # judge-enabled posture; with the judge disabled, marker hits
+        # are logged but NO judge call fires, and the gate falls
+        # through to plain ALLOW (marker-only signal is too weak to
+        # deny — allow + log; DECIDED, do not relitigate, see
+        # decisions.md D-ENTRY 2026-09-11).
+        #
+        # DRY-mode early-out (2026-09-12, review W1 fix). The tuple
+        # check below deliberately EXCLUDES ``Decision.DRY_LOG`` so
+        # the marker-path judge/hint/deny/counter wiring NEVER fires
+        # for dry-mode decisions — ``evaluate()`` stamps
+        # marker_hit + marker_terms + marker_path="<pending>" on the
+        # canonical log row (LOG-ONLY, side-effect-free) and the
+        # graph node falls through to plain ALLOW without ever
+        # calling the judge, without ever injecting a hint, and
+        # without ever incrementing the counter. The dry-mode
+        # ``allow unconditionally`` posture is preserved end-to-end.
+        if (
+            decision.decision
+            in (
+                Decision.ALLOWED,
+                Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
+            )
+            and decision.marker_hit
+        ):
+            try:
+                from .services.attestation_judge_resolver import (
+                    is_llm_judge_enabled,
+                )
+                marker_judge_on = is_llm_judge_enabled() and gate_config.get(
+                    "llm_judge_enabled", True
+                )
+            except Exception:  # noqa: BLE001 — kill-switch resolver fault
+                marker_judge_on = False
+
+            if not marker_judge_on:
+                # Kill-switch OFF (2026-09-12, green #1) — the operator
+                # disabled the marker-path judge. Stamp
+                # ``marker_judge_verdict="<skipped>"`` on the decision
+                # and emit a distinct log row so operators can
+                # grep-distinguish OFF-skipped from
+                # judge-error/timeout/unparsable (the log row event
+                # name is grep-disjoint from the existing judge/event
+                # family per docs/setup.md amendment). NO judge call,
+                # NO hint, NO deny, NO counter — the gate falls
+                # through to plain ALLOW (the existing kill-switch
+                # contract). Note: the canonical ``event=leader_
+                # completion_gate`` log row emitted inside
+                # ``evaluate()`` already carries ``marker_judge_
+                # verdict="<pending>"`` — graph.py cannot mutate a
+                # row that was emitted before this code runs; the
+                # extra row below is the operator-observable signal.
+                decision = _replace(
+                    decision,
+                    marker_judge_verdict="<skipped>",
+                )
+                logger.info(
+                    "event=leader_completion_gate_marker_judge_disabled "
+                    "instance_id=%s verdict=<skipped> "
+                    "marker_terms=%s",
+                    effective_instance_id,
+                    ",".join(decision.marker_terms) if decision.marker_terms else "<none>",
+                )
+            else:
+                # Resolve the judge config (mirror the would-be-deny
+                # judge pattern earlier in this function).
+                marker_judge_result = None
+                marker_judge_resolved_model = "<unknown>"
+                try:
+                    from .services.attestation_report_judge import (
+                        judge_completion_report_async,
+                        resolve_judge_model,
+                    )
+                    marker_judge_config = None
+                    manager_config = getattr(manager, "config", None)
+                    if manager_config is not None:
+                        marker_judge_config = manager_config
+                    else:
+                        from ..config import load_config
+                        marker_judge_config = load_config()
+                    try:
+                        marker_judge_resolved_model = resolve_judge_model(
+                            marker_judge_config
+                        )
+                    except Exception:  # noqa: BLE001 — keep `<unknown>`
+                        pass
+                    marker_judge_result = await judge_completion_report_async(
+                        messages,
+                        config=marker_judge_config,
+                        window=settings.window,
+                    )
+                except Exception as marker_judge_exc:  # noqa: BLE001
+                    # Defense-in-depth — the judge service itself
+                    # never-raises (timeout / unparsable JSON /
+                    # LLM-error all return a JudgeResult with
+                    # is_complete_report=False). This except only
+                    # fires on a wrapper-layer bug (e.g. config load
+                    # failure, an import-time cycle). Spec 3(d)
+                    # demands conservative routing on a judge
+                    # error — replicate it here from the SAME R2
+                    # inputs the post-call (d)-path uses
+                    # (pending==0, wakeups==0, live_descendants==0):
+                    # nothing pending → CONVERT TO DENY + nudge +
+                    # counter; else → ALLOW + checkpoint-durable
+                    # hint. The post-call ``if marker_judge_result is
+                    # not None`` block is SKIPPED via the None signal.
+                    logger.error(
+                        "event=leader_completion_gate_marker_judge_error "
+                        "error_class=%s instance_id=%s "
+                        "marker_judge_model=%s "
+                        "gate_location=%s "
+                        "decision=fail_safe_marker_d",
+                        type(marker_judge_exc).__name__,
+                        effective_instance_id,
+                        marker_judge_resolved_model,
+                        gate_config.get("gate_location", "graph_end_candidate"),
+                    )
+                    nothing_pending = (
+                        decision.pending_children == 0
+                        and decision.queued_or_expected_wakeups == 0
+                        and decision.live_descendants == 0
+                    )
+                    marker_path = "d"
+                    marker_judge_verdict = "error"
+                    if nothing_pending:
+                        # (d)-nothing-pending → CONVERT TO DENY via
+                        # the existing nudge machinery (same shape as
+                        # the post-call (a)/(d) branch below).
+                        # Counter write + nudge injection consume
+                        # the DENIED value.
+                        logger.info(
+                            "[AttestationGate] marker-path %s "
+                            "instance=%s verdict=%s; converting "
+                            "ALLOW to DENY via existing nudge "
+                            "machinery (wrapper-fault path)",
+                            marker_path,
+                            effective_instance_id,
+                            marker_judge_verdict,
+                        )
+                        decision = _replace(
+                            decision,
+                            decision=Decision.DENIED,
+                            should_inject_nudge=True,
+                            next_denied_count=(
+                                decision.denied_count + 1
+                            ),
+                            marker_path=marker_path,
+                            marker_judge_verdict=marker_judge_verdict,
+                        )
+                    else:
+                        # (d)-with-pending → ALLOW + checkpoint-
+                        # durable hint. NO counter write, NO deny,
+                        # NO re-route — the turn still ends so the
+                        # wake-up arrives.
+                        logger.info(
+                            "[AttestationGate] marker-path %s "
+                            "instance=%s verdict=%s; allowing END "
+                            "and injecting checkpoint-durable hint "
+                            "(wrapper-fault path)",
+                            marker_path,
+                            effective_instance_id,
+                            marker_judge_verdict,
+                        )
+                        hint_message = (
+                            _make_completion_check_note_message(
+                                effective_instance_id
+                            )
+                        )
+                        decision = _replace(
+                            decision,
+                            marker_path=marker_path,
+                            marker_judge_verdict=marker_judge_verdict,
+                            marker_hint_message=hint_message,
+                        )
+                    # Skip the post-call (d)-path block — wrapper
+                    # fault already routed conservatively above.
+                    marker_judge_result = None
+
+                if marker_judge_result is not None:
+                    # Emit the structured log row for the marker-path
+                    # judge call (mirrors the existing
+                    # ``event=leader_completion_gate_judge`` shape so
+                    # operators grep one set of log keys for both
+                    # paths). The verdict is the canonical signal;
+                    # latency_ms / model / reason / error_class ride
+                    # alongside.
+                    logger.info(
+                        "event=leader_completion_gate_marker_judge "
+                        "instance_id=%s verdict=%s "
+                        "llm_judge_model=%s "
+                        "llm_judge_latency_ms=%s "
+                        "llm_judge_reason=%s llm_judge_error_class=%s "
+                        "marker_terms=%s",
+                        effective_instance_id,
+                        marker_judge_result.verdict,
+                        marker_judge_result.model,
+                        marker_judge_result.latency_ms,
+                        marker_judge_result.reason,
+                        marker_judge_result.error_class or "<none>",
+                        ",".join(decision.marker_terms) if decision.marker_terms else "<none>",
+                    )
+
+                    # ─── Routing per spec ───
+                    # (c) markers + judge-confirmed-complete → ALLOW
+                    if marker_judge_result.is_complete_report:
+                        logger.info(
+                            "[AttestationGate] marker-path judge-yes "
+                            "instance=%s verdict=%s model=%s "
+                            "latency_ms=%s; allowing END without "
+                            "deny or hint",
+                            effective_instance_id,
+                            marker_judge_result.verdict,
+                            marker_judge_result.model,
+                            marker_judge_result.latency_ms,
+                        )
+                        return {"attestation_route": None}
+                    # (a)/(b)/(d) — judge-not-complete (no or
+                    # judge-error/timeout/unparsable).
+                    nothing_pending = (
+                        decision.pending_children == 0
+                        and decision.queued_or_expected_wakeups == 0
+                        and decision.live_descendants == 0
+                    )
+                    # "d" = judge-error/timeout/unparsable on the
+                    # marker path; "a" or "b" = clean judge-no.
+                    is_d_path = marker_judge_result.verdict in {
+                        "error",
+                        "timeout",
+                        "unparsable",
+                    }
+                    marker_path = (
+                        "d" if is_d_path and nothing_pending
+                        else "a" if not is_d_path and nothing_pending
+                        else "d" if is_d_path and not nothing_pending
+                        else "b"
+                    )
+                    if nothing_pending:
+                        # (a)/(d)-nothing-pending → CONVERT TO DENY
+                        # via the existing nudge machinery. We set
+                        # the gate decision's marker_path so the log
+                        # row carries it; the existing DENY branch
+                        # below consumes the nudge injection.
+                        logger.info(
+                            "[AttestationGate] marker-path %s instance=%s "
+                            "verdict=%s; converting ALLOW to DENY "
+                            "via existing nudge machinery",
+                            marker_path,
+                            effective_instance_id,
+                            marker_judge_result.verdict,
+                        )
+                        # Drop the marker scan back to the surface so
+                        # the existing DENY branch emits the nudge +
+                        # counter increment. The Decision enum is
+                        # unchanged — we mutate the dataclass on the
+                        # synchronous gate local. The frozen dataclass
+                        # requires ``dataclasses.replace`` — but
+                        # ``decision`` here is a local and we only
+                        # rebuild it for the path-flip.
+                        decision = _replace(
+                            decision,
+                            decision=Decision.DENIED,
+                            should_inject_nudge=True,
+                            next_denied_count=decision.denied_count + 1,
+                            marker_path=marker_path,
+                            marker_judge_verdict=marker_judge_result.verdict,
+                            marker_judge_latency_ms=marker_judge_result.latency_ms,
+                            marker_judge_error_class=marker_judge_result.error_class,
+                        )
+                    else:
+                        # (b)/(d)-with-pending → ALLOW + checkpoint-
+                        # durable hint. NO counter write, NO deny, NO
+                        # re-route — the turn still ends.
+                        logger.info(
+                            "[AttestationGate] marker-path %s instance=%s "
+                            "verdict=%s; allowing END and injecting "
+                            "checkpoint-durable hint",
+                            marker_path,
+                            effective_instance_id,
+                            marker_judge_result.verdict,
+                        )
+                        hint_message = (
+                            _make_completion_check_note_message(
+                                effective_instance_id
+                            )
+                        )
+                        decision = _replace(
+                            decision,
+                            marker_path=marker_path,
+                            marker_judge_verdict=marker_judge_result.verdict,
+                            marker_judge_latency_ms=marker_judge_result.latency_ms,
+                            marker_judge_error_class=marker_judge_result.error_class,
+                            marker_hint_message=hint_message,
+                        )
+                        # Fall through to the allow END path below —
+                        # the routing layer injects the hint alongside
+                        # END if the marker_hint_message is set.
+
         # Phase 6 fastfollow (2026-09-07) — inline-LLM completion-report
         # judge on the WOULD-BE-DENY path. Runs BEFORE the counter
         # increment so a judge-yes verdict (legitimate completion
@@ -3245,15 +3645,24 @@ def create_attestation_gate_node(
         # resolve to ``is_complete_report=False`` and the existing
         # deny+nudge path runs unchanged.
         if decision.decision is Decision.DENIED:
-            try:
-                from .services.attestation_judge_resolver import (
-                    is_llm_judge_enabled,
-                )
-                judge_on = is_llm_judge_enabled() and gate_config.get(
-                    "llm_judge_enabled", True
-                )
-            except Exception:  # noqa: BLE001 — kill-switch resolver fault
-                judge_on = False
+            # Marker-path (a)/(d) skip: when the marker-path judge
+            # already flipped a would-be-ALLOW to DENY
+            # (``decision.marker_path in {"a", "d"}``), the
+            # would-be-deny judge is NOT re-run — the marker-path
+            # judge IS the disambiguator. The existing ledger
+            # writes + nudge injection below operate on the
+            # already-decided DENIED value.
+            judge_on = False
+            if decision.marker_path not in {"a", "d"}:
+                try:
+                    from .services.attestation_judge_resolver import (
+                        is_llm_judge_enabled,
+                    )
+                    judge_on = is_llm_judge_enabled() and gate_config.get(
+                        "llm_judge_enabled", True
+                    )
+                except Exception:  # noqa: BLE001 — kill-switch resolver fault
+                    judge_on = False
             if judge_on:
                 judge_result = None
                 # S2 review fix — surface the resolved judge model on
@@ -3493,6 +3902,16 @@ def create_attestation_gate_node(
         # effects on the routing. The canonical decision log line was
         # already emitted inside evaluate(); the ledger writes (or
         # skips) happened above.
+        # EXCEPTION (2026-09-11, marker path (b)): when the gate
+        # emitted a checkpoint-durable hint (markers + judge-no + real
+        # pending work), inject the hint alongside the END as a
+        # checkpoint-durable record for the next turn. NO re-route —
+        # the turn still ends; the hint is an informational record.
+        if decision.marker_hint_message is not None:
+            return {
+                "messages": [decision.marker_hint_message],
+                "attestation_route": None,
+            }
         return {"attestation_route": None}
 
     # O8 surface: the exact config the gate will run with, auditable in
