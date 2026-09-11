@@ -3127,8 +3127,7 @@ class TaskRepository:
         if count > 0:
             logger.info(
                 "task.reconciled_to_cancelled",
-                work_id=work_id,
-                count=count,
+                extra={"work_id": work_id, "count": count},
             )
         return count
 
