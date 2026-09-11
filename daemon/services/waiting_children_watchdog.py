@@ -978,6 +978,54 @@ class WaitingChildrenWatchdog:
                         ),
                     },
                 )
+                # ── Batch A — A5 (2026-09-11): direct notify ────
+                # ``enqueue_message`` internally calls
+                # ``worker_pool.notify_work()`` once the Task row is
+                # committed, but that notify has proven unreliable
+                # on the wedge-notice path (incident 33252
+                # 2026-09-11: the wedge notice was stranded PENDING
+                # for zero claims ever). The cause is opaque — could
+                # be a lost wake between the enqueue commit and the
+                # pool's notify, or a defer-gate race that parked the
+                # notice behind a busy witness.
+                #
+                # The defensive fix: dispatch a DIRECT notify from
+                # the watchdog, AFTER ``enqueue_message`` returns, so
+                # the pool sees the wake regardless of whatever race
+                # swallowed the creation-time notify. Idempotent on
+                # the pool side (``notify_work()`` is a condition-
+                # variable signal — double-notify is wasted but
+                # benign). Wrapped in try/except so a transient
+                # pool-side blip does NOT abort the sweep (A3 sweep
+                # is the systemic backstop).
+                worker_pool = getattr(
+                    self._manager, "_worker_pool", None
+                )
+                if worker_pool is not None:
+                    try:
+                        _notify_result = worker_pool.notify_work()
+                        # Production ``WorkerPool.notify_work()`` is
+                        # sync (returns ``None``). Some test fixtures
+                        # attach an ``AsyncMock`` whose ``notify_work``
+                        # returns a coroutine — handle that case so
+                        # the coroutine is awaited (no RuntimeWarning)
+                        # without breaking the production path.
+                        import inspect
+                        if inspect.iscoroutine(_notify_result):
+                            await _notify_result
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"[Watchdog] wedge-pass direct "
+                            f"notify_work() raised {notify_err!r} "
+                            f"for parent {parent_id[:8]}... — "
+                            f"the A3 sweep is the systemic backstop"
+                        )
+                else:
+                    logger.debug(
+                        f"[Watchdog] wedge-pass direct notify "
+                        f"skipped — worker_pool not wired (legacy "
+                        f"test fixture / pre-wiring lifespan)"
+                    )
                 self._wedge_notified.add(parent_id)
                 self._wedge_notices_enqueued_total += 1
                 logger.warning(
