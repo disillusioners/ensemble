@@ -142,3 +142,71 @@
 d evidence.
 
 **[FINAL SECTION PENDING: C12a/b/c raw lines + final default-suite totals + D2 attribution — workers in flight]**
+
+
+---
+
+# R2 RE-VERIFICATION — developer's response to HOLD (new HEAD 01cf157e + verification commit 159ce3a2)
+
+**Scope:** focused re-verification of the 4 R2 commits answering the round-1 HOLD — `f115daf7` (B4 obligation re-mint inline in the idempotency_skip branch), `1e9ceb2f` (D2 `extra=` logger fix), `63cde877` (B3 explicit fail-closed heartbeat probe), `01cf157e` (PACKS stale-row deprecation). Verification arc added `159ce3a2` (re-mint concurrent exactly-once probe). Baseline for comparison: round-1 final state `35f72930`.
+
+## 1. B4 acceptance (the round-1 blocker) — ✅ RESOLVED / VERIFIED
+
+- **Delta audit (scope-clean):** the 4 commits touch exactly 6 files, nothing off-scope. The re-mint replaced the bare `return` IN PLACE (child_reports.py:3843-3882): three-condition gate — parent alive (:3844) ∧ instance COMPLETED via `asyncio.to_thread` fetch with fail-safe skip (:3846-3853) ∧ PENDING watcher for the pair (via `fetch_pending_for_target_and_child`) → `_emit_terminal_for_child_instance_via_bus(..., summary="idempotency_skip obligation re-mint (B4 cycle-2 wedge fix; 84563a03)")`. Exactly-once = `transition_state` guarded UPDATE (`WHERE state='PENDING'`, rowcount-gated, dependency_bus/repository.py:681, :728-757) + per-task `asyncio.Lock` (dependency_bus.py:400/:1602, acquired :897-901) + `mark_enqueued` dedup belt (:932-941).
+- **The flip is honest:** `xfail` grep-removed; ZERO assertion lines deleted from the file; the flipped node is a real end-to-end pin (real PENDING `DependencyWatcher` row → real `DependencyBus` on file-backed SQLite → real `_dispatch_post_commit_side_effects(outcome="idempotency_skip")` → asserts PENDING→FIRED).
+- **Acceptance runs:** vgap_b4 `16 passed` (15 after flip + probe), dev b4 `9 passed`, `child_reports_unit` pack `48 passed`, `wc_wake_d1_w5_pairing` pack `59 passed` (ledger 57 + 2).
+- **Independent probe (mine, commit 159ce3a2):** `TestReMintConcurrentDoubleFireSingleEmit` — two overlapping `asyncio.gather` dispatches on the idempotency_skip shape → **exactly ONE FIRED row** (guarded UPDATE + per-task locks exercised end-to-end). 16/16.
+- **Non-force-emit coverage:** 7 legit-defer outcomes parameterized (each seeds a watcher, asserts stays PENDING; `child_still_running_defer` excluded as EMITTING category — deliberate, documented) + the 3 new legit-skip shapes (`TestLegitimateIdempotencySkipDefer` ×3: no-parent / not-COMPLETED / no-PENDING-watcher) + backstop's own skip conditions ×2. COVERED.
+- **The 84563a03 recurrence is now healed:** idempotency_skip + COMPLETED child + live parent + unmet obligation → emit fires, exactly once.
+
+## 2. Delta polish — all three confirmed
+
+- **D2 FIXED:** `task/repository.py:3127-3132` now `logger.info("task.reconciled_to_cancelled", extra={"work_id":..., "count":...})` (single hunk, valid stdlib, matches the 34-sibling `extra=` convention). Proof under handler: `test_task_reconciliation.py --log-cli-level=INFO` → `13 passed` (round-1 failure mode was handler-conditional TypeError). Partition proof: C7 = `52 failed, 986 passed` vs baseline `54/984` — the −2F/+2P delta is EXACTLY the two recovered nodes.
+- **B3 explicit fail-closed:** `waiting_children_watchdog.py:877-890` — `try: return bool(method(...)) except Exception: logger.warning(...failing-CLOSED...) return True` (assume-alive → release ∧ escalation withheld). Broad per-parent catch retained as second backstop (line drifted :1267→:1297). Narrowed semantics pinned: `test_vgap_b3_dberror_failclosed.py` 3/3 (`release_notices_enqueued == 0 AND escalation_notices_enqueued == 0`). Note: dev retargeted the old `enqueue_message.await_count==0` assertions to the narrowed counters — intentional, documented in commit, not a weakening of the fail-closed contract (the informational base hang-notice may now fire).
+- **PACKS:** `wc_wake_flag_resolver_tools_unit_test` row marked DEPRECATED (2026-09-11, cycle-2) with named successor coverage.
+
+## 3. Full-suite gate @ 01cf157e/159ce3a2 — ✅ ZERO new branch-caused failures
+
+All 18 default chunks re-run + PG ×3 on private disposable clusters (POSTGRES_* scrubbed, PG_TEST_* pinned, serial):
+
+| Chunk | R2 raw line | vs round-1 (18,841P/216F+29E) |
+|---|---|---|
+| C1 unit_tools | `2569 passed, 5 skipped, 50 warnings in 12.92s` | parity (identical counts) |
+| C2 unit_services | `7 failed, 1574 passed, 118 warnings in 13.43s` | 7F identical family; +27P = new vgap nodes |
+| C3 subdirs_routers | `647 passed, 11 warnings in 12.75s` | parity |
+| C4 loose_a_d | `10 failed, 1362 passed, 2 skipped, 5 warnings, 21 errors in 16.85s` | parity (node-set diff EMPTY) |
+| C5 loose_e_l | `19 failed, 1168 passed, 16 warnings in 43.57s` | parity (13 find_near + 6, identical) |
+| C6 loose_m_r | `10 failed, 2005 passed, 40 skipped, 90 warnings in 64.86s` | parity (identical 10) |
+| C7 loose_s_z | `52 failed, 986 passed, 11 skipped, 28 warnings, 2 errors in 17.42s` | −2F/+2P = D2 recovered; rest identical |
+| C8 top_a_h | run1 `20 failed, 1033 passed, 52 skipped, 31 warnings, 2 errors in 99.18s`; run2 `20 failed, 1031 passed, 54 skipped, 33 warnings, 2 errors in 79.92s` | inside documented 20↔21 band; set deltas = the two documented flaky families only |
+| C9 top_i_q | `60 failed, 2386 passed, 73 skipped, 43 warnings in 22.03s` | 58 baseline-identical + 2 suspects → **both CONTEXT-FLAKE** (see below) |
+| C10 top_r_z | `15 failed, 2257 passed, 34 skipped, 5 xfailed, 1139 warnings in 20.96s` | 13 baseline + 2 context-flakes (atomic-family toggle + worker_notification — see below) |
+| C11 job_queue | `7 failed, 1723 passed, 38 skipped, 1528 warnings in 29.50s` | parity (identical 7) |
+| C12a integ a–m | `6 failed, 356 passed, 1 skipped, 13 warnings in 13.18s` | parity (identical 6) |
+| C12b integ n–z | `6 failed, 156 passed, 124 warnings, 2 errors in 10.32s` | same families (SSL-spill variance 6-vs-8 hits, item-set unchanged; `wc_wake_pure_hang` trip moved lanes within its ×3 quarantine row) |
+| C12c opencode+e2e | `4 failed, 516 passed, 1 skipped in 28.26s` | parity (identical 4) |
+| C13 ckpt+persistence | `72 passed in 4.41s` | parity |
+| C14 daemon/tests | `46 passed in 2.93s` | parity |
+| C15 test/ probes | `13 passed, 55 warnings in 14.12s` | parity |
+| **PG A/B/C** | `41 passed in 3.57s` / `4 failed, 165 passed, 33 skipped, 2 xfailed in 18.28s` / `1 failed, 52 passed, 20 deselected in 5.31s` | **identical tallies** (list_queues pair isolation-PASS 5/5 reconfirmed; 3 base-proven pre-existing) |
+
+**R2 default-suite total: 18,869 passed / 216 failed + 25 errors / ~257 skipped.** Deltas vs round-1 fully accounted: +27P/+2P new verification tests, +2P D2-recovered, −2E/+2P SSL-spill variance, −3P/+3F the three flake suspects below.
+
+**Flake adjudications (retry budgets, all serial):**
+1. `test_worker_notification::test_multi_worker_notification` (C10) — 5× isolated + 2× file-context **7/7 PASS** → CONTEXT-FLAKE (load-sensitive claim race; worker-pool claim paths untouched by branch).
+2. `test_skill_evolution_service::TestCheckABTestResolution::test_ab_resolution_force_resolve` (C9) — 3× isolated + file-context (62/62) **all PASS** → CONTEXT-FLAKE (`transaction-in-transaction` only under 12-worker partition load; skill-evolution service untouched).
+3. `test_memory_integration::TestFullLifecycleIntegration::test_concurrent_writes_no_corruption` (C9) — 3× isolated PASS, suspect passes in file-context → CONTEXT-FLAKE (the 10 file-context failures observed alongside are the documented inner_soul baseline family, part of the 58).
+
+No quarantine rows warranted (context-flakes are not stable runner signals; noted for partition-tuning awareness instead).
+
+## 4. Nits carried forward (non-blocking)
+
+- B4 shape-3 legit-skip (COMPLETED, no PENDING watcher) emits a WARNING at child_reports.py:3864-3870 saying "obligation honored via corrective multi-turn emit" even when `matched_rows=0` → nothing fired. Observability overclaim only; unpinned by tests. Suggest gating the log on `fired > 0`.
+- Stale line-cites in docstrings after the inserts (":1267" is now :1297; vgap docstrings cite pre-edit line numbers) — cosmetic.
+- C6 cosmetic: pack script header echoes branch from invocation cwd before `cd $PROJECT_DIR` — pytest itself correctly anchors to the worktree (verified via venv-path counts).
+
+## 5. R2 VERDICT
+
+**✅ PASS FOR MERGE.** The sole round-1 blocker (B4) is resolved and independently verified end-to-end (flip + re-mint probe + exactly-once + skip-shape coverage). D2 and B3 polish confirmed fixed with narrowed-semantics pins. Full default suite + PG: **zero new branch-caused failures** — every R2 failure is baseline-identical, quarantine-family, or adjudicated context-flake. FE compatible (unchanged from round 1 — no FE files in R2 delta). ensure.md Core remains 3/3 (concurrency pack re-run not required for this focused scope; nothing in the R2 delta touches those gates' surfaces — logger kwargs, watchdog probe, child_reports re-mint are all outside the concurrency/thread-identity assertions; if desired pre-merge, a 7-second re-run of `concurrency_atomic_unit_test.sh` is the cheap confirmation).
+
+**Merge recommendation: GO.**
