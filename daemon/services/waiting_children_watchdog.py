@@ -268,6 +268,123 @@ def _build_hang_notice(
     return "\n".join(lines)
 
 
+def _build_escalation_notice(
+    parent_id: str,
+    child_id: str,
+    nudge_count: int,
+    *,
+    hang_threshold_seconds: int,
+) -> str:
+    """Build the B3 escalation notice for a stuck (parent, child) pair.
+
+    The escalation is a more urgent cousin of the hang notice. It
+    fires after the watchdog has nudged the same pair
+    ``escalation_nudge_count`` times without resolution. The notice
+    tells the parent that the persistent hang has crossed the
+    escalation threshold and recommends the
+    replace-the-stuck-child path (a fresh child with a new
+    identity can complete what the wedged child could not).
+
+    Kept terse and directive per the hang-notice contract.
+
+    Args:
+        parent_id: The parent instance ID.
+        child_id: The hung child instance ID.
+        nudge_count: Total nudges fired for this pair (must be >=
+            ``escalation_nudge_count`` to make the notice meaningful).
+        hang_threshold_seconds: The hang threshold (for context).
+    """
+    parent_short = parent_id[:8] if len(parent_id) > 8 else parent_id
+    child_short = child_id[:8] if len(child_id) > 8 else child_id
+    threshold_human = _format_age_human(float(hang_threshold_seconds))
+    lines: list[str] = [
+        f"[system:watchdog:escalation] Escalation — your parked "
+        f"child {child_short}... has been non-terminal for "
+        f"{nudge_count} watchdog nudges in a row (threshold: "
+        f"{threshold_human}). The previous hang notice has not "
+        f"produced a resolution.",
+        "",
+        "Recommended playbook (urgent):",
+        "  1. The previous hang notice's revive / spawn-replacement "
+        "steps have not been acted on. Spawn a fresh child "
+        "(different agent_id or message content) to take over the "
+        "stuck work — the wedged child will be silently replaced.",
+        "  2. If a replacement is undesirable, terminate the wedged "
+        "child explicitly (it has been idle past the threshold; "
+        "operator action is the cleanest path).",
+        "  3. If the parent itself cannot make progress without this "
+        "child, escalate to the user — the watchdog will keep "
+        "observing until the episode ends.",
+        "",
+        "This escalation fires ONCE per hang episode. The next "
+        "B3 release may fire if the pair remains stuck past the "
+        "release threshold.",
+    ]
+    return "\n".join(lines)
+
+
+def _build_release_notice(
+    parent_id: str,
+    child_id: str,
+    nudge_count: int,
+    *,
+    hang_threshold_seconds: int,
+) -> str:
+    """Build the B3 release notice for a stuck (parent, child) pair.
+
+    The release is a SYNTHESIZED wake that tells the parent to
+    proceed without the hung child. It fires after
+    ``release_after_nudge_count`` nudges without resolution —
+    the parent has been parked long enough that infinite silent
+    park is itself the bug. The release wakes the parent (WC→RUNNING
+    flip via ``enqueue_message``) and instructs it to either
+    spawn a replacement OR proceed with the partial tree.
+
+    The release is best-effort: if the parent has a genuine
+    blocker (e.g., the stuck child carries state only it has),
+    the parent's LLM is the right place to decide — the release
+    just breaks the silent-park cycle. The notice carries enough
+    context for the parent to make that decision.
+
+    Kept terse and directive per the hang-notice contract.
+
+    Args:
+        parent_id: The parent instance ID.
+        child_id: The hung child instance ID.
+        nudge_count: Total nudges fired for this pair (must be >=
+            ``release_after_nudge_count``).
+        hang_threshold_seconds: The hang threshold (for context).
+    """
+    parent_short = parent_id[:8] if len(parent_id) > 8 else parent_id
+    child_short = child_id[:8] if len(child_id) > 8 else child_id
+    threshold_human = _format_age_human(float(hang_threshold_seconds))
+    lines: list[str] = [
+        f"[system:watchdog:release] Release — your parked child "
+        f"{child_short}... has been non-terminal for "
+        f"{nudge_count} watchdog nudges in a row. You are being "
+        f"RELEASED from WAITING_CHILDREN to proceed.",
+        "",
+        "This is an automated B3 release (see watchdog B3 doc). The "
+        "watchdog has waited long enough that infinite silent park "
+        "is itself the bug. You MUST take one of these paths on "
+        "your next turn:",
+        "  1. Spawn a fresh child to take over the wedged work "
+        "(preferred). The wedged child's state is preserved; the "
+        "replacement can consult it via subtree_messages.",
+        "  2. Proceed with the partial tree (skip the wedged child). "
+        "Note any work the wedged child owed the parent in your "
+        "response so the operator can decide whether to manually "
+        "retry.",
+        "  3. Terminate and respawn yourself if you cannot make "
+        "progress without this child. The watchdog has given up; "
+        "operator action is the next step.",
+        "",
+        "The release fires ONCE per hang episode. Do not block on "
+        f"the wedged child again. (Threshold was {threshold_human}.)",
+    ]
+    return "\n".join(lines)
+
+
 def _build_wedge_notice(parent_id: str) -> str:
     """Build the directive wedge-notice for ``parent_id``.
 
@@ -339,6 +456,16 @@ class WaitingChildrenWatchdog:
         interval_seconds: Seconds between scans. Default 3600 = 1h.
         hang_threshold_seconds: Strictly-greater-than threshold for
             hang detection. Default 3600 = 1h.
+        escalation_nudge_count: Number of nudges before an
+            escalation notice fires. Default 3.
+        release_after_nudge_count: Number of nudges before the
+            watchdog synthesizes a release (enqueues a wake turn with
+            a directive to proceed without the hung children, since
+            infinite silent park is a bug). Default 5.
+
+    B3 RESOLVED 2026-09-11 (Watchdog escalation): the design freedom
+    in the invariant is exercised via ``escalation_nudge_count`` and
+    ``release_after_nudge_count``. No env flags (HARD POLICY).
 
     Anti-spam invariant: ``_notified`` (a ``set`` of
     ``(parent_id, child_id)`` tuples) records every pair currently in
@@ -360,6 +487,8 @@ class WaitingChildrenWatchdog:
         interval_seconds: int = 3600,
         hang_threshold_seconds: int = 3600,
         task_repository: Any | None = None,
+        escalation_nudge_count: int = 3,
+        release_after_nudge_count: int = 5,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError(
@@ -370,12 +499,29 @@ class WaitingChildrenWatchdog:
                 "hang_threshold_seconds must be >= 0; got "
                 f"{hang_threshold_seconds!r}"
             )
+        if escalation_nudge_count < 1:
+            raise ValueError(
+                f"escalation_nudge_count must be >= 1; got "
+                f"{escalation_nudge_count!r}"
+            )
+        if release_after_nudge_count <= escalation_nudge_count:
+            raise ValueError(
+                f"release_after_nudge_count must be > "
+                f"escalation_nudge_count ({escalation_nudge_count}); "
+                f"got {release_after_nudge_count!r}"
+            )
 
         self._repo = instance_repository
         self._manager = manager
         self._enabled = bool(enabled)
         self._interval_seconds = int(interval_seconds)
         self._hang_threshold_seconds = int(hang_threshold_seconds)
+        # B3: escalation policy. ``escalation_nudge_count`` triggers
+        # an escalation notice; ``release_after_nudge_count``
+        # synthesizes a release turn. The values are passed through
+        # from the config layer (no env flags per HARD POLICY).
+        self._escalation_nudge_count = int(escalation_nudge_count)
+        self._release_after_nudge_count = int(release_after_nudge_count)
         # Wedge-fix backstop: optional task repository for the
         # live-carrier presence query. When ``None``, the watchdog
         # falls back to ``self._manager._task_repo`` at scan time —
@@ -404,6 +550,31 @@ class WaitingChildrenWatchdog:
         # restart. Exposed via properties below.
         self._wedge_parents_scanned_total: int = 0
         self._wedge_notices_enqueued_total: int = 0
+
+        # B3: per-(parent, child) episode nudge counter (lifetime
+        # within this process). Tracks how many nudges the watchdog
+        # has fired for each pair so the escalation and release
+        # thresholds fire on the right tick. The counter resets
+        # only when the pair leaves the notified set (episode ends).
+        # Daemon restart resets all counters — documented limitation
+        # (consistent with the cooldown-set semantics).
+        self._nudge_counts: dict[tuple[str, str], int] = {}
+
+        # B3: escalation cooldown — parents that have already
+        # received an escalation notice for this episode. Same
+        # episode-boundary semantics as ``_notified``.
+        self._escalation_notified: set[tuple[str, str]] = set()
+
+        # B3: release cooldown — parents that have already been
+        # synthesized-released for this episode. Same
+        # episode-boundary semantics.
+        self._release_notified: set[tuple[str, str]] = set()
+
+        # B3: per-tick observability counters — separate from the
+        # existing 4-key ``run_once`` stats dict so existing tests
+        # stay green. Reset only on daemon restart.
+        self._escalation_notices_enqueued_total: int = 0
+        self._release_notices_enqueued_total: int = 0
 
     # ─── Public introspection (tests) ──────────────────────────────────
 
@@ -457,6 +628,43 @@ class WaitingChildrenWatchdog:
         daemon restart.
         """
         return self._wedge_notices_enqueued_total
+
+    # ─── B3 escalation / release introspection ──────────────────────
+
+    @property
+    def escalation_nudge_count(self) -> int:
+        return self._escalation_nudge_count
+
+    @property
+    def release_after_nudge_count(self) -> int:
+        return self._release_after_nudge_count
+
+    @property
+    def escalation_notices_enqueued(self) -> int:
+        """Lifetime count of escalation notices enqueued (B3)."""
+        return self._escalation_notices_enqueued_total
+
+    @property
+    def release_notices_enqueued(self) -> int:
+        """Lifetime count of release notices enqueued (B3)."""
+        return self._release_notices_enqueued_total
+
+    @property
+    def escalation_episodes(self) -> frozenset[tuple[str, str]]:
+        """Read-only view of the B3 escalation cooldown set."""
+        return frozenset(self._escalation_notified)
+
+    @property
+    def release_episodes(self) -> frozenset[tuple[str, str]]:
+        """Read-only view of the B3 release cooldown set."""
+        return frozenset(self._release_notified)
+
+    def nudge_count_for(self, parent_id: str, child_id: str) -> int:
+        """Return the current per-pair nudge count (B3 observability).
+
+        Returns 0 for pairs with no recorded nudges (default).
+        """
+        return self._nudge_counts.get((parent_id, child_id), 0)
 
     # ─── Wedge-fix backstop helper ─────────────────────────────────────
 
@@ -676,7 +884,144 @@ class WaitingChildrenWatchdog:
                     for child_id, age in hung
                     if (parent_id, child_id) not in self._notified
                 ]
+
+                # B3 RESOLVED 2026-09-11: escalation policy. After
+                # the first nudge, bump the per-pair nudge counter
+                # and check the escalation / release thresholds.
+                # Runs BEFORE the ``if not new_pairs`` early-out so
+                # persistent pairs (already in ``_notified`` from a
+                # prior tick) still get their nudge count bumped —
+                # otherwise a base notice on tick 1 + a stuck pair
+                # would never reach the escalation threshold.
+                #
+                # - ``escalation_nudge_count`` (default 3): fire an
+                #   escalation notice (one per episode, gated by
+                #   ``_escalation_notified`` cooldown set).
+                # - ``release_after_nudge_count`` (default 5):
+                #   synthesize a release — enqueue a wake with a
+                #   directive to proceed without the hung children
+                #   (one per episode, gated by
+                #   ``_release_notified`` cooldown set).
+                # - Pairs that persist in BOTH the SQL result AND
+                #   the cooldown set are in a continuing episode
+                #   and their nudge count keeps climbing each tick
+                #   until the episode ends (the wedge-pass purge
+                #   below).
+                # - Episode-end resets the nudge count (the pair
+                #   leaves ``_notified`` at episode end → its nudge
+                #   count is purged below).
+                #
+                # Scope: ALL pairs in this tick's ``hung`` list
+                # (still currently hung) are counted — both the
+                # first-time ``new_pairs`` AND the persistent pairs
+                # that already triggered the base notice on a prior
+                # tick.
+                for child_id, _age in hung:
+                    pair = (parent_id, child_id)
+                    self._nudge_counts[pair] = (
+                        self._nudge_counts.get(pair, 0) + 1
+                    )
+                    nudge_count = self._nudge_counts[pair]
+                    if (
+                        nudge_count >= self._release_after_nudge_count
+                        and pair not in self._release_notified
+                    ):
+                        # Release: synthesize a wake turn that
+                        # tells the parent to proceed without the
+                        # hung children (the same primitive B2
+                        # uses for cascade resume). This breaks the
+                        # infinite-silent-park cycle — the parent's
+                        # next turn sees the release directive and
+                        # either spawns a replacement child or
+                        # proceeds with the partial tree.
+                        release_notice = _build_release_notice(
+                            parent_id=parent_id,
+                            child_id=child_id,
+                            nudge_count=nudge_count,
+                            hang_threshold_seconds=self._hang_threshold_seconds,
+                        )
+                        try:
+                            await self._manager.enqueue_message(
+                                instance_id=parent_id,
+                                message=release_notice,
+                                source=WATCHDOG_SOURCE,
+                                priority=0,
+                                metadata={
+                                    "watchdog_release": True,
+                                    "released_pair": {
+                                        "parent_id": parent_id,
+                                        "child_id": child_id,
+                                    },
+                                    "nudge_count": nudge_count,
+                                },
+                            )
+                            self._release_notified.add(pair)
+                            self._release_notices_enqueued_total += 1
+                            logger.warning(
+                                f"[Watchdog] Release enqueued for "
+                                f"parent {parent_id[:8]}... after "
+                                f"{nudge_count} nudges — parked "
+                                f"child {child_id[:8]}...; releasing "
+                                f"the parent to proceed without it."
+                            )
+                        except Exception as release_exc:
+                            # Soft-fail — the release is best-effort.
+                            # The escalation notice (below) and the
+                            # next tick will retry.
+                            logger.warning(
+                                f"[Watchdog] release enqueue failed "
+                                f"for {pair}: {release_exc!r}"
+                            )
+                    elif (
+                        nudge_count >= self._escalation_nudge_count
+                        and pair not in self._escalation_notified
+                        and pair not in self._release_notified
+                    ):
+                        # Escalation notice: more urgent than the
+                        # base hang notice. Same delivery path
+                        # (enqueue_message + notify_work) but with
+                        # a different provenance marker and a
+                        # different message body.
+                        escalation = _build_escalation_notice(
+                            parent_id=parent_id,
+                            child_id=child_id,
+                            nudge_count=nudge_count,
+                            hang_threshold_seconds=self._hang_threshold_seconds,
+                        )
+                        try:
+                            await self._manager.enqueue_message(
+                                instance_id=parent_id,
+                                message=escalation,
+                                source=WATCHDOG_SOURCE,
+                                priority=0,
+                                metadata={
+                                    "watchdog_escalation": True,
+                                    "escalated_pair": {
+                                        "parent_id": parent_id,
+                                        "child_id": child_id,
+                                    },
+                                    "nudge_count": nudge_count,
+                                },
+                            )
+                            self._escalation_notified.add(pair)
+                            self._escalation_notices_enqueued_total += 1
+                            logger.warning(
+                                f"[Watchdog] Escalation enqueued for "
+                                f"parent {parent_id[:8]}... after "
+                                f"{nudge_count} nudges — parked "
+                                f"child {child_id[:8]}... is still "
+                                f"non-terminal; consider replacement."
+                            )
+                        except Exception as esc_exc:
+                            logger.warning(
+                                f"[Watchdog] escalation enqueue "
+                                f"failed for {pair}: {esc_exc!r}"
+                            )
+
                 if not new_pairs:
+                    # No new pairs to base-notify. The B3
+                    # escalation/release loop above still ran (it
+                    # covers both new and persistent pairs).
                     scanned_ok.add(parent_id)
                     continue
 
@@ -807,6 +1152,7 @@ class WaitingChildrenWatchdog:
         # One cheap SQL check over every child still referenced by
         # the cooldown set, independent of per-parent scan success
         # (deep-review "also required" clause).
+        terminal_pairs: set[tuple[str, str]] = set()
         if self._notified:
             child_ids = {child for _p, child in self._notified}
             try:
@@ -835,6 +1181,30 @@ class WaitingChildrenWatchdog:
                     f"[Watchdog] {len(terminal_pairs)} (parent, child) "
                     f"pair(s) dropped — child reached terminal status."
                 )
+
+        # ─── B3 episode-end purges for escalation state ────────────
+        # Pairs that left ``_notified`` (episode ended — child
+        # terminal, parent left WC, or the scan-driven sweep
+        # cleared them) MUST also clear their nudge count and the
+        # escalation/release cooldowns. A future episode with the
+        # same pair must start fresh at nudge=1.
+        all_ended_pairs = (
+            ended_pairs | departed_parent_pairs | terminal_pairs
+        )
+        if all_ended_pairs:
+            # Drop the per-pair nudge counts.
+            purged_nudge_count = sum(
+                1 for pair in all_ended_pairs
+                if self._nudge_counts.pop(pair, None) is not None
+            )
+            if purged_nudge_count:
+                logger.info(
+                    f"[Watchdog] Purged {purged_nudge_count} per-pair "
+                    f"nudge count(s) at episode end."
+                )
+            # Drop the escalation / release cooldowns.
+            self._escalation_notified -= all_ended_pairs
+            self._release_notified -= all_ended_pairs
 
         # ─── Wedge-fix backstop pass ─────────────────────────────────
         # Detect the wedge signature: parent in WAITING_CHILDREN +
