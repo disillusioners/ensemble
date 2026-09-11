@@ -104,6 +104,7 @@ no external services). ``asyncio_mode = "auto"`` from
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from typing import Any
 from unittest.mock import MagicMock
@@ -267,6 +268,17 @@ def _seed_parent_watcher(
     ``send_message`` watcher-registration shape: ``send_message`` stamps
     ``follow_up_payload.metadata.child_id`` on every watcher (the same
     field the task-keyed emit misses for multi-turn children).
+
+    The ``follow_up_payload`` also carries the bus-side ``message`` and
+    ``source`` fields required by :class:`FollowUp.from_payload` —
+    omitting these previously caused a silent ``KeyError`` on the
+    bus's ``emit_terminal_for_child_instance`` path AFTER
+    ``transition_state`` already committed (so ``row.state == FIRED``
+    but the helper returned a never-resolved exception, caught by the
+    caller's defensive try/except as "re-mint failed"). The R2 polish
+    W1 unit assertion (TestReMintConditionalHealWarning) needs the
+    helper to RETURN the FollowUp list cleanly — this fixture is now
+    complete enough to do so.
     """
     sid = source_task_id or f"task-{uuid.uuid4().hex[:8]}"
     with Session(engine) as session:
@@ -275,6 +287,12 @@ def _seed_parent_watcher(
             target_instance_id=parent_instance_id,
             follow_up_payload={
                 "kind": "follow_up",
+                "target_instance_id": parent_instance_id,
+                "message": (
+                    f"child {child_instance_id} completion follow-up "
+                    f"(seeded for B4 cycle-2 re-mint unit test)"
+                ),
+                "source": "dependency_bus",
                 "metadata": {"child_id": child_instance_id},
             },
             watcher_metadata={"child_id": child_instance_id},
@@ -1081,3 +1099,188 @@ class TestReMintConcurrentDoubleFireSingleEmit:
         # fact that we reached this line at all means both calls
         # returned cleanly — the guarded UPDATE produced no
         # double-fire, no error.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (f) W1 (R2 polish 2026-09-11) — conditional heal-warning
+#     The cycle-2 obligation re-mint WARNING must be CONDITIONAL on
+#     the helper actually healing a PENDING watcher (non-empty
+#     returned FollowUp list). Empty list (legit skip / watcher
+#     already FIRED / no PENDING watcher) must be a silent no-op.
+#     The WARNING was UNCONDITIONAL at HEAD before the fix, producing
+#     misleading ops-log noise under the recurring RESUME_ROUTER
+#     ×4-dup shape (each post-resume turn reruns the natural path →
+#     idempotency_skip → helper returns []).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_CHILD_REPORTS_LOGGER = "daemon.services.child_reports"
+
+
+def _filter_heal_warnings(caplog) -> list:
+    """Filter caplog records to the heal WARNING only.
+
+    Returns the list of WARNING-level records emitted by the
+    ``daemon.services.child_reports`` module whose message carries
+    the heal-WARNING marker text. Excludes the "re-mint failed"
+    WARNING (only fires on exception — different code path) and any
+    unrelated module log.
+    """
+    return [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and r.name == _CHILD_REPORTS_LOGGER
+        and "idempotency_skip wedge re-mit" in r.getMessage()
+    ]
+
+
+class TestReMintConditionalHealWarning:
+    """W1 (R2 polish 2026-09-11): conditional heal-warning.
+
+    Pins the cycle-2 obligation re-mint WARNING to fire ONLY when
+    the helper returns a non-empty FollowUp list (a PENDING watcher
+    was actually healed). The fix captures the helper's returned
+    list and gates the WARNING on ``if fired_followups:``. Before
+    the fix the WARNING was unconditional on ``parent ∧ COMPLETED``
+    — including the routine legit-skip shape where the natural path
+    already fired the watcher and the helper returns ``[]``.
+
+    The W1 condition is structural: ``_emit_terminal_for_child_
+    instance_via_bus`` returns ``[]`` when:
+      * parent_instance_id is None (root) — never reached here
+      * bus singleton is None (wiring failure) — never reached here
+      * ``matched_rows`` is empty (no PENDING watcher)
+      * the task-keyed emit already fired
+        (``transition_state``'s guarded UPDATE yielded rowcount==0)
+
+    Cases (3) and (4) are the legit-skip shape that previously
+    produced the misleading ops-log overclaim. Under the recurring
+    RESUME_ROUTER ×4-dup shape (each post-resume turn reruns the
+    natural path → ``idempotency_skip``), case (3) fires on every
+    duplicate — exactly the noise W1 silences.
+    """
+
+    async def test_heal_warning_fires_on_non_empty_return(
+        self, engine: Engine, bus: DependencyBus, caplog
+    ) -> None:
+        """PENDING watcher seeded → helper returns non-empty FollowUp
+        list → WARNING MUST be logged.
+
+        Wedge-shape regression pin: when a real PENDING watcher is
+        healed by the corrective emit, the WARNING is the operator's
+        only signal that the 84563a03-class wedge closed. Silencing
+        this WARNING across the board would hide real heal events.
+        """
+        child_id = "child-w1-heal-warning"
+        parent_id = "parent-w1-heal-warning"
+        _seed_parent_watcher(
+            engine,
+            parent_instance_id=parent_id,
+            child_instance_id=child_id,
+        )
+        service, _ = _build_service_for_b4(
+            instance_status=InstanceStatus.COMPLETED.value,
+            parent_id=parent_id,
+        )
+        result = _make_result(
+            outcome="idempotency_skip",
+            instance_id=child_id,
+            parent_id=parent_id,
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger=_CHILD_REPORTS_LOGGER
+        ):
+            await service._dispatch_post_commit_side_effects(
+                result=result,
+                last_content="assistant text",
+                completed_message_id=None,
+            )
+
+        # Sanity: the helper actually healed the watcher — the
+        # PENDING row MUST be FIRED. This proves the test is wired
+        # to the heal path (the WARNING would only be misleading if
+        # it fired without a real heal, not if it failed to fire
+        # alongside a heal).
+        with Session(engine) as session:
+            row = session.query(DependencyWatcher).filter(
+                DependencyWatcher.target_instance_id == parent_id
+            ).first()
+            assert row is not None, (
+                "watcher row missing — bus fixture did not seed the row"
+            )
+            assert row.state == DependencyWatcherState.FIRED.value, (
+                f"W1 test setup error: helper did not FIRE the "
+                f"watcher; got row.state={row.state!r}"
+            )
+
+        # The heal-WARNING MUST fire exactly once when the helper
+        # returned a non-empty FollowUp list. The text carries the
+        # parent + child id short prefixes so an ops-log reader can
+        # correlate directly with the bus emit.
+        heal_warnings = _filter_heal_warnings(caplog)
+        assert len(heal_warnings) == 1, (
+            f"W1: heal-WARNING MUST fire exactly once when the helper "
+            f"returns a non-empty FollowUp list (the wedge was "
+            f"healed); got {len(heal_warnings)} matching WARNING(s). "
+            f"All records: {[r.getMessage() for r in caplog.records]}"
+        )
+        msg = heal_warnings[0].getMessage()
+        assert child_id[:8] in msg, (
+            f"W1: heal-WARNING MUST include the child id prefix "
+            f"{child_id[:8]!r}; got {msg!r}"
+        )
+        assert parent_id[:8] in msg, (
+            f"W1: heal-WARNING MUST include the parent id prefix "
+            f"{parent_id[:8]!r}; got {msg!r}"
+        )
+
+    async def test_heal_warning_silent_on_empty_return(
+        self, engine: Engine, bus: DependencyBus, caplog
+    ) -> None:
+        """No PENDING watcher seeded → helper returns empty FollowUp
+        list → WARNING MUST NOT be logged (silent legit-skip).
+
+        W1 regression pin for the RESUME_ROUTER ×4-dup noise class:
+        when the natural path already fired the watcher
+        (``matched_rows → 0``), the re-mint returns silently — no
+        WARNING. Before the fix this same shape logged WARNING on
+        every post-resume turn, producing misleading "wedge re-mit"
+        noise under the recurring dup shape.
+        """
+        child_id = "child-w1-silent-skip"
+        parent_id = "parent-w1-silent-skip"
+        # NO PENDING watcher seeded — the helper's
+        # ``fetch_pending_for_target_and_child`` returns 0 rows, so
+        # ``matched_rows`` is empty and the helper returns ``[]``
+        # (see dependency_bus.py:880-888 — the
+        # ``if not matched_rows: return []`` short-circuit).
+        service, _ = _build_service_for_b4(
+            instance_status=InstanceStatus.COMPLETED.value,
+            parent_id=parent_id,
+        )
+        result = _make_result(
+            outcome="idempotency_skip",
+            instance_id=child_id,
+            parent_id=parent_id,
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger=_CHILD_REPORTS_LOGGER
+        ):
+            await service._dispatch_post_commit_side_effects(
+                result=result,
+                last_content="assistant text",
+                completed_message_id=None,
+            )
+
+        # The WARN-WARNING MUST be silent — zero matches. The
+        # helper's empty FollowUp list is the legit-skip shape; the
+        # WARNING is gated on a non-empty list (W1).
+        heal_warnings = _filter_heal_warnings(caplog)
+        assert len(heal_warnings) == 0, (
+            f"W1: heal-WARNING MUST NOT fire when the helper returns "
+            f"an empty FollowUp list (legit skip — no PENDING "
+            f"watcher); got {len(heal_warnings)} matching WARNING(s). "
+            f"All records: {[r.getMessage() for r in caplog.records]}"
+        )
