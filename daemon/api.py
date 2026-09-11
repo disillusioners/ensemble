@@ -492,6 +492,14 @@ async def lifespan(app: FastAPI):
         # lifespan, so the refs are guaranteed available here.
         task_repository=getattr(manager, "_task_repo", None),
         stale_task_recovery=getattr(manager, "_stale_recovery", None),
+        # Batch A — A2 (2026-09-11): Pattern (g) autopromote calls
+        # ``worker_pool.notify_work()`` immediately after flipping
+        # ``task.is_deferred=True → False`` so the freshly-eligible
+        # row reaches the next claim cycle without waiting for the
+        # pool's idle timeout (3s). Without the notify the flip
+        # landed eligibility but scheduled nothing — see the P1
+        # incident on ``feature/fix-wc-wake-resilience``.
+        worker_pool=getattr(manager, "_worker_pool", None),
     )
     recovery_stats = await job_recovery.recover_on_startup()
     logger.info(f"Job recovery: {recovery_stats}")
