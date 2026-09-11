@@ -34,6 +34,16 @@ _LEGACY_TO_ADMISSION: dict[str, str] = {
     "failed": AdmissionState.DONE.value,
     "cancelled": AdmissionState.DONE.value,
     "dead_letter": AdmissionState.DEAD.value,
+    # Gap A (tester-live round, 2026-09-11): ``settled`` is the M3
+    # mirror-receipt terminal — as a FILTER token it must pin the
+    # admission IN-clause to ``done`` exactly like the rest of the
+    # done cluster. Without this entry ``_statuses_to_admission``
+    # dropped the token, a ``settled`` solo filter skipped the
+    # admission IN-clause entirely, and the per-kind branch's
+    # ``terminal_reason IS NULL`` hedge matched DEAD rows (dead rows
+    # carry no ``terminal_reason`` discriminator) — dead-letter
+    # receipts leaked into ``?status=settled`` (3 vs 2 live).
+    "settled": AdmissionState.DONE.value,
 }
 
 
@@ -1080,16 +1090,21 @@ class JobRepository:
             # ``settled`` / ``failed`` / ``cancelled``); the four
             # are OR-combined so a row matches when its DERIVED
             # status is ANY of the requested tokens. Non-done
-            # tokens (``pending`` / ``processing`` / ``paused`` /
-            # ``dead_letter``) are handled purely by the
-            # admission-state IN-clause above and need no per-kind
-            # branch. Unknown values fall through the legacy
+            # tokens (``pending`` / ``processing`` / ``paused``)
+            # are handled purely by the admission-state IN-clause
+            # above and need no per-kind branch; ``dead_letter``
+            # matches via the IN-clause too and gains an
+            # ``admission_state='dead'`` OR-term below ONLY when a
+            # done-cluster token is also requested (the Gap B union
+            # repair — see the branch site). Unknown values fall
+            # through the legacy
             # admission map (the §8.2 source-less degrade precedent
             # — unknown ⇒ empty, do NOT widen).
             has_completed_token = "completed" in (statuses or [])
             has_settled_token = "settled" in (statuses or [])
             has_failed_token = "failed" in (statuses or [])
             has_cancelled_token = "cancelled" in (statuses or [])
+            has_dead_letter_token = "dead_letter" in (statuses or [])
 
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
@@ -1211,6 +1226,28 @@ class JobRepository:
                             _terminal_reason_variants("cancelled")
                         )
                     )
+                # Gap B (tester-live round, 2026-09-11) — the
+                # ``dead_letter`` union branch. When a done-cluster
+                # token is also requested, this OR-list AND-combines
+                # with the admission IN-clause, which is then pinned
+                # to BOTH buckets (``done`` from the done-cluster map
+                # entries + ``dead`` from ``dead_letter``); every
+                # survivor had to satisfy a done-cluster per-kind
+                # shape, so dead rows — which match via admission
+                # alone and carry no ``terminal_reason`` — fell out
+                # of e.g. ``settled,dead_letter`` (membership traded
+                # sides: intersection instead of union). This OR-term
+                # restores the union: a row matches when its DERIVED
+                # status is a requested done-cluster token OR its
+                # admission state is ``dead``. Gated on a non-empty
+                # done-cluster branch list — solo ``dead_letter`` and
+                # ``dead_letter`` + non-done tokens keep the pure
+                # admission IN-clause path (an unconditional append
+                # would narrow ``pending,dead_letter`` to dead-only).
+                if has_dead_letter_token and per_kind_branches:
+                    per_kind_branches.append(
+                        JobItem.admission_state == AdmissionState.DEAD.value
+                    )
                 if per_kind_branches:
                     count_stmt = count_stmt.where(or_(*per_kind_branches))
             if project_id:
@@ -1298,6 +1335,16 @@ class JobRepository:
                         JobItem.terminal_reason.in_(
                             _terminal_reason_variants("cancelled")
                         )
+                    )
+                # Gap B union branch — mirrors the count query above:
+                # when a done-cluster token is also requested, the
+                # AND-composition would otherwise drop dead rows from
+                # the combo; this OR-term keeps both sides of the
+                # union. Same non-empty-branch gate as the count site
+                # so solo/non-done combos are untouched.
+                if has_dead_letter_token and per_kind_branches:
+                    per_kind_branches.append(
+                        JobItem.admission_state == AdmissionState.DEAD.value
                     )
                 if per_kind_branches:
                     stmt = stmt.where(or_(*per_kind_branches))

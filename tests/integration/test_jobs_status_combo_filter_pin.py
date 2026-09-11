@@ -28,6 +28,24 @@ layer):
   hand-copied list that can drift again. Pinned by
   ``TestJobsStatusFilterCanonicalAliases`` below.
 
+* Gap A (tester-live round, 2026-09-11): ``status=settled`` SOLO
+  leaked dead-letter message rows (3 vs 2 live) —
+  ``_LEGACY_TO_ADMISSION`` had no ``settled`` entry, so the admission
+  IN-clause was skipped and the ``terminal_reason IS NULL`` hedge
+  matched DEAD rows (dead rows carry no ``terminal_reason``
+  discriminator). Fix: ``settled`` maps to ``done`` like the rest of
+  the done cluster. Pinned by ``TestJobsDeadLetterUnionPins``.
+
+* Gap B (tester-live round, 2026-09-11, pre-existing family):
+  ``dead_letter`` + any done-cluster token DROPPED dead rows — the
+  done-cluster per-kind OR-list AND-combined with the admission
+  IN-clause, and the IN-clause (pinned to ``done`` + ``dead``) forced
+  every survivor through a done-cluster shape; membership traded
+  sides (intersection instead of union). Fix: when a done-cluster
+  token is present, ``dead_letter`` contributes an
+  ``admission_state='dead'`` OR-term alongside the done-cluster
+  branches. Pinned by ``TestJobsDeadLetterUnionPins``.
+
 The pre-fix ``JobRepository.list`` built per-kind branches only for
 the ``completed`` and ``settled`` tokens; ``failed`` and ``cancelled``
 had no per-kind branch, so a non-empty branch list AND-combined with
@@ -138,6 +156,7 @@ def _seed_job(
     tag: str,
     project_id: str = "test-project",
     queue_id: str = "queue-combo",
+    admission_state: str = AdmissionState.DONE.value,
 ) -> str:
     """Seed a JobItem with the per-kind × terminal-reason params.
 
@@ -153,6 +172,9 @@ def _seed_job(
             fixture uses its own project so the original combo
             matrix's strict row-set pins stay isolated.
         queue_id: Queue scoping — same isolation rationale.
+        admission_state: ``AdmissionState`` value — defaults to
+            ``done`` (every original matrix row); the dead-union
+            fixture seeds ``dead`` rows (Gap A/B pins).
     """
     job = JobItem(
         job_id=job_id,
@@ -162,7 +184,7 @@ def _seed_job(
         source="api",
         project_id=project_id,
         priority=5,
-        admission_state=AdmissionState.DONE.value,
+        admission_state=admission_state,
         terminal_reason=terminal_reason,
         instance_id=None,
         queue_id=queue_id,
@@ -620,3 +642,250 @@ class TestJobsStatusFilterCanonicalAliases:
         for tag in ids:
             discriminator = tag.replace("task-", "").replace("-", "_")
             assert discriminator in map_cancelled_sources
+
+
+# ─── Gap A + Gap B pins: the dead-admission rows ─────────────────────────
+
+_DEAD_PROJECT = "test-project-dead"
+_DEAD_QUEUE = "queue-dead-union"
+
+
+@pytest.fixture
+def seeded_dead_letter_matrix(engine: Engine) -> dict[str, str]:
+    """Seed the done×dead matrix used by the Gap A/B union pins.
+
+    Scoped to project ``test-project-dead`` so the original combo
+    matrix's strict row-set pins stay isolated. The matrix repeats the
+    original 7-row done-cluster shape (same tags) and adds TWO
+    dead-admission rows — the canonical dead shape (``admission_state
+    ='dead'``, NO ``terminal_reason`` discriminator, per
+    ``_derive_legacy_status``: dead rows match via admission alone):
+
+    * ``task-dead-null``    (task,    ``None``, admission=``dead``)
+    * ``message-dead-null`` (message, ``None``, admission=``dead``)
+
+    The task-kind dead row is the clean witness for Gap B: under the
+    pre-fix intersection composition it matched NO requested token,
+    while the message-kind dead row leaked through the settled NULL
+    hedge — both wrong directions.
+    """
+    matrix = [
+        # done side — same 7-row shape as the original combo matrix
+        ("task", "completed", "task-completed", AdmissionState.DONE.value),
+        ("message", "completed", "message-completed", AdmissionState.DONE.value),
+        ("task", "failed", "task-failed", AdmissionState.DONE.value),
+        ("message", "failed", "message-failed", AdmissionState.DONE.value),
+        ("task", "cancelled", "task-cancelled", AdmissionState.DONE.value),
+        ("message", "cancelled", "message-cancelled", AdmissionState.DONE.value),
+        ("message", None, "message-settled-null", AdmissionState.DONE.value),
+        # dead side — admission='dead', no terminal_reason
+        ("task", None, "task-dead-null", AdmissionState.DEAD.value),
+        ("message", None, "message-dead-null", AdmissionState.DEAD.value),
+    ]
+    ids: dict[str, str] = {}
+    with Session(engine) as s:
+        _seed_queue(s, _DEAD_QUEUE, project_id=_DEAD_PROJECT)
+        for job_type, term, tag, admission in matrix:
+            jid = f"job-combo-{tag}-{uuid.uuid4().hex[:8]}"
+            _seed_job(
+                s,
+                job_id=jid,
+                job_type=job_type,
+                terminal_reason=term,
+                tag=tag,
+                project_id=_DEAD_PROJECT,
+                queue_id=_DEAD_QUEUE,
+                admission_state=admission,
+            )
+            ids[tag] = jid
+    return ids
+
+
+class TestJobsDeadLetterUnionPins:
+    """Gap A + Gap B regression pins — dead-admission rows.
+
+    Gap A (fix-introduced): ``_LEGACY_TO_ADMISSION`` lacked a
+    ``settled`` entry, so a ``settled`` solo filter skipped the
+    admission IN-clause entirely and the per-kind branch's
+    ``terminal_reason IS NULL`` hedge matched DEAD rows (dead rows
+    carry no ``terminal_reason``). Pre-fix: ``['settled']`` leaked
+    ``message-dead-null``.
+
+    Gap B (pre-existing family): ``dead_letter`` + a done-cluster
+    token AND-composed the done-cluster per-kind OR-list with an
+    admission IN-clause pinned to ``{'done','dead'}`` — every
+    survivor had to satisfy a done-cluster shape, so dead rows fell
+    out (and in the ``settled`` combo the done rows fell out too).
+    Pre-fix: ``['settled','dead_letter']`` returned ONLY
+    ``message-dead-null`` (accidental intersection);
+    ``['failed','dead_letter']`` returned NOTHING; the full panel
+    combo returned ONLY the two dead rows (membership traded sides).
+    """
+
+    DEAD_TAGS: frozenset[str] = frozenset(
+        {"task-dead-null", "message-dead-null"}
+    )
+    DONE_SETTLED_TAGS: frozenset[str] = frozenset(
+        {"message-completed", "message-settled-null"}
+    )
+    DONE_FAILED_TAGS: frozenset[str] = frozenset(
+        {"task-failed", "message-failed"}
+    )
+    ALL_DONE_TAGS: frozenset[str] = frozenset(
+        {
+            "task-completed",
+            "message-completed",
+            "task-failed",
+            "message-failed",
+            "task-cancelled",
+            "message-cancelled",
+            "message-settled-null",
+        }
+    )
+
+    @staticmethod
+    def _messages(repo: JobRepository, statuses: list[str]) -> set[str]:
+        """Run the repo filter scoped to the dead-matrix project."""
+        jobs, _total = repo.list(
+            statuses=statuses,
+            project_id=_DEAD_PROJECT,
+            limit=200,
+        )
+        return {j.message for j in jobs}
+
+    # ─── Gap A: settled solo must NOT leak dead rows ─────────────────
+
+    def test_settled_solo_excludes_dead_letter_rows(
+        self, engine, seeded_dead_letter_matrix
+    ) -> None:
+        """``statuses=['settled']`` returns ONLY the done mirror rows.
+
+        The dead rows are seeded ``admission_state='dead'`` with
+        ``terminal_reason IS NULL`` — exactly the shape the pre-fix
+        composition leaked: without a ``settled`` admission-map entry
+        the IN-clause was skipped and the NULL hedge matched
+        ``message-dead-null``.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["settled"])
+
+        # done side present (settled-eligible mirror rows)
+        assert self.DONE_SETTLED_TAGS <= ids
+        # dead rows must NOT surface — the leak this pin closes
+        assert ids.isdisjoint(self.DEAD_TAGS)
+        # nothing else either (settled is mirror-only, done-only)
+        assert ids == self.DONE_SETTLED_TAGS
+
+        # count == page symmetry at the fixed site
+        jobs, total = repo.list(
+            statuses=["settled"],
+            project_id=_DEAD_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == 2
+
+    def test_dead_letter_solo_still_returns_dead_rows(
+        self, engine, seeded_dead_letter_matrix
+    ) -> None:
+        """Sanity: ``statuses=['dead_letter']`` alone still surfaces
+        exactly the two dead rows — proves the fixture's dead rows
+        are visible to the filter, so the Gap A exclusion is a real
+        predicate effect and not a seeding artifact.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["dead_letter"])
+
+        assert ids == self.DEAD_TAGS
+
+    # ─── Gap B: dead + done-cluster combos must UNION both sides ─────
+
+    def test_dead_plus_settled_returns_both_sides(
+        self, engine, seeded_dead_letter_matrix
+    ) -> None:
+        """``statuses=['settled','dead_letter']`` returns the dead
+        rows AND the done settled-eligible rows.
+
+        Pre-fix this returned ONLY ``message-dead-null`` — the
+        admission IN-clause pinned to ``{'done','dead'}`` AND-combined
+        with the settled per-kind branch killed the done rows and the
+        task-kind dead row (membership traded sides).
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["settled", "dead_letter"])
+
+        # dead side present
+        assert self.DEAD_TAGS <= ids
+        # done side present
+        assert self.DONE_SETTLED_TAGS <= ids
+        # and nothing else
+        assert ids == self.DEAD_TAGS | self.DONE_SETTLED_TAGS
+
+        # count == page symmetry for the union
+        jobs, total = repo.list(
+            statuses=["settled", "dead_letter"],
+            project_id=_DEAD_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == 4
+
+    def test_dead_plus_failed_returns_both_sides(
+        self, engine, seeded_dead_letter_matrix
+    ) -> None:
+        """``statuses=['failed','dead_letter']`` returns the dead
+        rows AND the failed rows.
+
+        Pre-fix this returned NOTHING: the admission IN-clause pinned
+        to ``{'done','dead'}`` AND-combined with the failed
+        per-kind branch (``terminal_reason IN failed-variants``) —
+        dead rows carry no ``terminal_reason``, done rows are not
+        ``admission_state='dead'``.
+        """
+        repo = JobRepository(engine)
+        ids = self._messages(repo, ["failed", "dead_letter"])
+
+        assert self.DEAD_TAGS <= ids
+        assert self.DONE_FAILED_TAGS <= ids
+        assert ids == self.DEAD_TAGS | self.DONE_FAILED_TAGS
+
+        jobs, total = repo.list(
+            statuses=["failed", "dead_letter"],
+            project_id=_DEAD_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == 4
+
+    def test_dead_plus_full_panel_combo_returns_both_sides(
+        self, engine, seeded_dead_letter_matrix
+    ) -> None:
+        """The panel's full combo
+        ``['completed','settled','failed','cancelled','dead_letter']``
+        returns EVERY done row AND both dead rows.
+
+        Pre-fix this returned ONLY the two dead rows — the exact
+        membership trade the live round measured (the done rows the
+        panel exists to show were all dropped; dead rows leaked in
+        through the completed/settled NULL hedges).
+        """
+        repo = JobRepository(engine)
+        statuses = [
+            "completed", "settled", "failed", "cancelled", "dead_letter",
+        ]
+        ids = self._messages(repo, statuses)
+
+        # dead side present
+        assert self.DEAD_TAGS <= ids
+        # done side present (all seven done rows)
+        assert self.ALL_DONE_TAGS <= ids
+        # and nothing else
+        assert ids == self.DEAD_TAGS | self.ALL_DONE_TAGS
+
+        jobs, total = repo.list(
+            statuses=statuses,
+            project_id=_DEAD_PROJECT,
+            limit=200,
+        )
+        assert total == len(jobs)
+        assert total == 9
