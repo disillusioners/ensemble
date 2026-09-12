@@ -363,4 +363,14 @@ vscode:
   binary_path: null           # null = auto-detect via PATH lookup (shutil.which)
   user_data_dir: null         # null = uses data/vscode-user-data
   extensions: []              # list of extension IDs to pre-install (e.g. ms-python.python)
+  # fix-vscode-image-preview Step 1 — meta-CSP rewrite gate (default ON).
+  # When ON, the /vscode proxy rewrites the strict meta-CSP inside the
+  # webview HTML response so extension resources on the
+  # vscode-remote+<port>.vscode-resource.vscode-cdn.net virtual host
+  # (e.g. media-preview imagePreview.{css,js}, image bytes) are permitted
+  # to load through the proxy. Override at runtime via
+  # ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX; restart-to-flip. null here = use the
+  # resolver's documented default (true). Setting to false here mirrors
+  # =0 on the env var.
+  webview_csp_fix: null
 
