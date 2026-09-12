@@ -2635,6 +2635,56 @@ def _resolve_vscode_webview_csp_fix_from_sources(
     return bool(yaml_value)
 
 
+def _resolve_vscode_binary_path(
+    yaml_value: str | None,
+    *,
+    env_value: str | None,
+) -> str | None:
+    """Pure resolver for ``VSCODE_BINARY_PATH`` (string Shape A).
+
+    Mirrors :func:`_resolve_compaction_model` /
+    :func:`_resolve_vscode_webview_csp_fix_from_sources`: pydantic-settings
+    gives a passed-in init kwarg priority over env vars, so the YAML
+    ``vscode.binary_path`` passthrough in ``load_config`` silently defeated
+    an operator ``VSCODE_BINARY_PATH`` (live-proven: a yaml
+    ``binary_path: null`` init kwarg dead the env knob, and the manager
+    fell back to ``shutil.which("code-server")`` — the deprecated brew
+    binary — even with the env pointing at a standalone code-server).
+
+    Precedence (documented contract):
+
+      1. ``env_value`` (``VSCODE_BINARY_PATH``) — when SET and NON-EMPTY
+         (empty/whitespace treated as UNSET per
+         :func:`_clean_env_value`), wins outright — ALWAYS, including
+         over a NON-null yaml value.
+      2. ``yaml_value`` (``vscode.binary_path``) — when env is
+         unset/empty, used as-is if non-blank.
+      3. ``None`` — env unset AND yaml null/absent/blank: the manager
+         (``vscode_server_manager._resolve_binary``) then PATH-looks-up
+         via ``shutil.which`` (pre-existing fallback, unchanged).
+
+    Pure function (no ``os.environ`` access): ``load_config`` reads the
+    env once and passes the resolved string-or-``None`` as the init
+    kwarg, so pydantic-settings never re-reads the env itself. String
+    resolver — deliberately NOT the bool parser
+    (:func:`_parse_kv_ambient_env_value`); only
+    :func:`_clean_env_value` empty-string normalization is shared.
+
+    The literal env name ``VSCODE_BINARY_PATH`` at the ``load_config``
+    call site MUST stay in sync with ``VSCodeConfig`` (``env_prefix=
+    "VSCODE_"`` + field ``binary_path``); the unit test pins both sides.
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        return env_clean
+    if yaml_value is None:
+        return None
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        # Defensive — yaml shipped an empty string. Same as unset.
+        return None
+    return yaml_value
+
+
 def _install_vscode_webview_csp_fix(value: bool) -> None:
     """Install the resolved flag into the module cache (boot path).
 
@@ -2971,6 +3021,19 @@ def load_config(config_path: str | None = None) -> Config:
         vs_raw["webview_csp_fix"] = _resolve_vscode_webview_csp_fix_from_sources(
             vs_raw.get("webview_csp_fix"),
             ens_value=os.environ.get(ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX),
+        )
+        # fix-vscode-image-preview Step 2 — same inversion, string flavor:
+        # the yaml ``binary_path`` passthrough (including the common
+        # ``binary_path: null``) would land as an init kwarg and beat an
+        # operator ``VSCODE_BINARY_PATH``. Resolved EXPLICITLY here so
+        # env > yaml > None (None → manager ``shutil.which`` PATH
+        # fallback, unchanged). Literal env name must stay in sync with
+        # ``VSCodeConfig`` (``env_prefix="VSCODE_"`` + field
+        # ``binary_path``) — pinned in
+        # ``tests/unit/test_vscode_binary_path_config.py``.
+        vs_raw["binary_path"] = _resolve_vscode_binary_path(
+            vs_raw.get("binary_path"),
+            env_value=os.environ.get("VSCODE_BINARY_PATH"),
         )
         config_dict["vscode"] = vs_raw
 
