@@ -2084,11 +2084,26 @@ class TestWebviewCspRewrite:
     def test_oversize_body_byte_faithful_re_serve(self):
         """A webview HTML larger than
         ``_WEBVIEW_REWRITE_MAX_BODY_BYTES`` (1 MiB) skips the
-        rewrite and re-serves the original raw bytes with the
+        rewrite and re-serves the FULL original raw bytes with the
         original Content-Encoding preserved (byte-faithful to the
         wire). 1 MiB is ~100× the observed webview HTML size; an
         oversize webview is a future code-server growth signal,
         not a 500.
+
+        Council corrective round on 92784e20 — the previous
+        implementation broke the consume loop BEFORE appending
+        the over-cap chunk, so the response carried the truncated
+        ``≤1 MiB`` prefix. A truncated webview doc is a broken
+        page — worse than the skip the cap replaces. The fixed
+        implementation (mid-stream path) drains the remainder
+        INTO the re-serve accumulator so the FULL upstream body
+        is re-served (prefix + remainder = original bytes).
+
+        This test drives the MID-STREAM path: the fake
+        ``_FakeUpstream.aiter_raw()`` is a single-yield generator
+        (no ``Content-Length`` header), so the pre-consume gate
+        can't pre-decide — we MUST consume and the cap-exceed
+        must trip mid-stream.
         """
         self._install_fn(True)
         cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
@@ -2122,23 +2137,138 @@ class TestWebviewCspRewrite:
                 "webview/browser/pre/index.html?id=x",
                 headers={"Host": "localhost:8079"},
             )
-        # No 500: oversize webview HTML falls back to
-        # byte-faithful re-serve of whatever was buffered before
-        # the cap tripped. The proxy truncates at the cap
-        # (consumes no further bytes); the response carries the
-        # original Content-Encoding and the truncated
-        # Content-Length.
+        # No 500: oversize webview HTML falls back to byte-faithful
+        # re-serve of the FULL upstream body (no truncation).
         assert resp.status_code == 200
         assert resp.headers.get("content-encoding") == "br"
-        # The content-length reflects the truncated chunk count,
-        # not the original body size.
-        cl = int(resp.headers["content-length"])
-        assert cl <= cap, (
-            "content-length on oversize re-serve must reflect the "
-            "truncated chunk count, NOT the original upstream size"
+        # The Content-Length on the re-serve MUST match the
+        # ORIGINAL upstream body size — proof of byte-fidelity
+        # (no truncation). TestClient decodes the br body for us;
+        # the decoded length equals the original raw length.
+        assert int(resp.headers["content-length"]) == len(br), (
+            "Content-Length on oversize re-serve MUST match the "
+            "ORIGINAL upstream body length (byte-faithful, no "
+            "truncation). The previous implementation broke the "
+            "consume loop BEFORE appending the over-cap chunk."
+        )
+        # The full original body — verbatim — must reach the
+        # browser. TestClient auto-decodes brotli; the decoded
+        # bytes equal the upstream's pre-encoding bytes.
+        assert resp.content == oversized, (
+            "oversize re-serve MUST deliver the FULL original "
+            "body — prefix + remainder concatenated. Truncation "
+            "would be a broken page."
         )
         # No virtual-host origin added — we did not get far enough
         # to rewrite the meta-CSP (the doc is too large).
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    def test_oversize_body_content_length_gate_streams_through(self):
+        """The PRE-CONSUME gate (Content-Length advertised > cap)
+        refuses to consume at all and returns ``None`` so the
+        caller streams the upstream body through verbatim. Zero
+        memory cost on the proxy side — the upstream connection
+        itself is what carries the body; the rewrite seam is
+        skipped cleanly.
+
+        Council corrective round on 92784e20 — this is path (a)
+        in the design; the test for path (b) (mid-stream
+        unknown-length) is ``test_oversize_body_byte_faithful_re_serve``
+        above.
+        """
+        self._install_fn(True)
+        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
+        # ``Content-Length`` larger than the cap → gate fires,
+        # no consume.
+        oversized = b"<html><body>" + b"x" * (cap + 1024) + b"</body></html>"
+        cl_header_value = str(len(oversized))
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        # ``content_encoding=None`` so the pre-consume gate path
+        # is exercised without the brotli-encoding complication —
+        # the test pins the gate, not the body.
+        _patch_upstream_for_webview_html(
+            body=oversized,
+            content_type="text/html",
+            content_encoding=None,
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+        # Force Content-Length on the response so the gate sees it.
+        # Patch the upstream class to also include content-length.
+        original_async_client = vscode_proxy.httpx.AsyncClient
+
+        class _SizedUpstream:
+            status_code = 200
+            request = SimpleNamespace(
+                url=SimpleNamespace(
+                    path=(
+                        "/vscode/stable-abc/static/out/vs/workbench/"
+                        "contrib/webview/browser/pre/index.html"
+                    )
+                )
+            )
+            headers = {
+                "content-type": "text/html",
+                "content-length": cl_header_value,
+                "cache-control": "public, max-age=31536000",
+                "etag": '"deadbeef"',
+            }
+            _consumed = False
+
+            async def aiter_raw(self, chunk_size=None):
+                # Verify the gate worked: ``aiter_raw`` must be
+                # callable ONCE (the streaming path) without
+                # raising ``StreamConsumed``.
+                assert not self._consumed, (
+                    "pre-consume gate FAILED — second aiter_raw() "
+                    "call. The proxy consumed then tried to "
+                    "re-consume; real httpx would StreamConsumed."
+                )
+                self._consumed = True
+                yield oversized
+
+            async def aclose(self):
+                pass
+
+        class _FakeClient:
+            async def send(self, *args, **kwargs):
+                return _SizedUpstream()
+
+            def build_request(self, *args, **kwargs):
+                return MagicMock()
+
+            async def aclose(self):
+                pass
+
+        def _factory(*args, **kwargs):
+            return _FakeClient()
+
+        vscode_proxy.httpx.AsyncClient = _factory
+        try:
+            with TestClient(app) as client:
+                resp = client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/"
+                    "contrib/webview/browser/pre/index.html?id=x",
+                    headers={"Host": "localhost:8079"},
+                )
+        finally:
+            vscode_proxy.httpx.AsyncClient = original_async_client
+
+        # The proxy streamed the upstream body through verbatim.
+        # Status 200; the FULL body is delivered (no truncation,
+        # no rewriting — the seam was skipped).
+        assert resp.status_code == 200
+        assert resp.content == oversized, (
+            "Content-Length-gate path MUST stream the FULL "
+            "upstream body through verbatim. Truncation or "
+            "rewriting would defeat the gate's purpose."
+        )
+        # No meta-CSP rewrite happened — we never consumed.
         assert self.VIRTUAL_HOST.encode() not in resp.content
 
 

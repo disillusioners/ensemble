@@ -184,9 +184,26 @@ _ALL_WEBVIEW_CSP_DIRECTIVES: frozenset[str] = frozenset(
 # evidence); the cap is generous to accommodate future code-server
 # growth but bounded to prevent an oversized upstream from forcing
 # the proxy into a memory blow-up. 1 MiB is ~100× the observed
-# size; ``_raw_byte_faithful_response`` re-serves the raw bytes
-# with the original ``Content-Encoding`` preserved so the cap is
-# effectively invisible to the browser on the no-rewrite path.
+# size. TWO distinct paths share this cap:
+#
+# (a) ``Content-Length`` advertised > cap — common case. We
+#     detect this BEFORE consuming (no memory cost) and stream
+#     the upstream through verbatim, never touching ``aiter_raw``.
+#     Pure streaming passthrough; the browser sees the upstream
+#     body, the rewrite seam is skipped (a > 1 MiB webview doc
+#     is not the failure mode we care about anyway).
+#
+# (b) ``Content-Length`` absent or chunked transfer-encoding —
+#     we cannot pre-decide, so we consume chunk-by-chunk. If the
+#     running total exceeds the cap, we STOP appending to the
+#     rewrite buffer but CONTINUE draining into a separate
+#     raw-re-serve accumulator. The accumulator ends up holding
+#     the FULL original body (prefix + remainder); we raw-re-serve
+#     every byte with the original ``Content-Encoding`` preserved
+#     so the wire is byte-faithful. Transient memory for a
+#     pathological oversize doc is acceptable — truncation is not
+#     (a truncated webview doc is a broken page, worse than the
+#     skip the cap replaces).
 _WEBVIEW_REWRITE_MAX_BODY_BYTES: int = 1 * 1024 * 1024
 
 # Per-process one-shot log: at most one warning per worker per
@@ -195,8 +212,9 @@ _WEBVIEW_REWRITE_MAX_BODY_BYTES: int = 1 * 1024 * 1024
 _BROTLI_DECODE_MISSING_LOGGED = False
 
 # Per-process one-shot log: at most one warning per worker per
-# oversized body, so a flood of over-cap responses does not spam
-# the log.
+# oversized body (mid-stream path only — the Content-Length-gate
+# path is silent because no memory was spent), so a flood of
+# over-cap responses does not spam the log.
 _OVERSIZE_BODY_LOGGED = False
 
 # Match a ``<meta http-equiv="Content-Security-Policy" content="...">``
@@ -703,46 +721,85 @@ async def _buffer_and_maybe_rewrite_webview(
     # observed size; the byte-faithful re-serve on oversize is
     # invisible to the browser (no rewrite, original
     # Content-Encoding preserved).
+    # Buffer the body, but with TWO distinct size-cap paths
+    # (council corrective round on 92784e20):
+    #
+    # (a) ``Content-Length`` advertised > cap — pre-consume gate.
+    #     We refuse to consume at all and return ``None`` so the
+    #     caller streams the original bytes through verbatim. Zero
+    #     memory cost, no truncation possible (the upstream
+    #     connection itself is what carries the body).
+    #
+    # (b) ``Content-Length`` absent or chunked — we consume
+    #     chunk-by-chunk. The prefix up to the cap goes to the
+    #     rewrite buffer; everything after the cap (and the cap's
+    #     final chunk) goes to a SEPARATE raw-re-serve accumulator.
+    #     Both buffers concatenated hold the FULL original body;
+    #     we raw-re-serve every byte with the original
+    #     ``Content-Encoding`` preserved. Truncation would be a
+    #     broken page — worse than the skip the cap replaces.
+    advertised_length = upstream.headers.get("content-length")
+    if advertised_length is not None:
+        try:
+            advertised_length_int = int(advertised_length)
+        except (TypeError, ValueError):
+            advertised_length_int = None
+        if (
+            advertised_length_int is not None
+            and advertised_length_int > _WEBVIEW_REWRITE_MAX_BODY_BYTES
+        ):
+            # Common case: advertised-too-large. Do NOT consume.
+            # Pure streaming passthrough — the caller will iterate
+            # ``aiter_raw()`` once, see the full body, and the
+            # rewrite seam is skipped.
+            return None
+
     body_chunks: list[bytes] = []
-    total = 0
+    oversize_chunks: list[bytes] = []
     oversize = False
     async for chunk in upstream.aiter_raw():
-        total += len(chunk)
-        if total > _WEBVIEW_REWRITE_MAX_BODY_BYTES:
-            oversize = True
-            break
-        body_chunks.append(chunk)
+        if not oversize:
+            # Still under the cap — accumulate to the rewrite
+            # buffer. ``total`` is the running prefix size; the
+            # moment it crosses the cap, this branch becomes
+            # False for the rest of the iteration.
+            total = sum(len(c) for c in body_chunks) + len(chunk)
+            if total > _WEBVIEW_REWRITE_MAX_BODY_BYTES:
+                oversize = True
+                # The current chunk straddles the cap boundary;
+                # it belongs to the raw-re-serve accumulator
+                # (not the rewrite buffer — the rewrite buffer
+                # would have to be discarded anyway).
+                oversize_chunks.append(chunk)
+                # One-shot log for the mid-stream oversize path
+                # (the Content-Length-gate path is silent — no
+                # memory was spent there).
+                global _OVERSIZE_BODY_LOGGED
+                if not _OVERSIZE_BODY_LOGGED:
+                    _OVERSIZE_BODY_LOGGED = True
+                    logger.warning(
+                        "VSCode proxy: webview meta-CSP rewrite skipped "
+                        "— mid-stream body exceeded %d-byte cap; "
+                        "byte-faithful raw re-serve of FULL body",
+                        _WEBVIEW_REWRITE_MAX_BODY_BYTES,
+                    )
+            else:
+                body_chunks.append(chunk)
+        else:
+            # Already over the cap — every subsequent chunk goes
+            # to the raw-re-serve accumulator so the eventual
+            # re-serve is byte-faithful to the wire (prefix +
+            # remainder = FULL original bytes).
+            oversize_chunks.append(chunk)
+
     if oversize:
-        # Cap exceeded mid-stream — drain the rest so the upstream
-        # connection is properly closed (else ``aclose`` would have
-        # to read the remaining bytes anyway, and the response
-        # would be RST). Use a one-shot warning to keep the log
-        # quiet under repeated offenders.
-        global _OVERSIZE_BODY_LOGGED
-        if not _OVERSIZE_BODY_LOGGED:
-            _OVERSIZE_BODY_LOGGED = True
-            logger.warning(
-                "VSCode proxy: webview meta-CSP rewrite skipped — "
-                "upstream body exceeds %d-byte cap; byte-faithful "
-                "re-serve",
-                _WEBVIEW_REWRITE_MAX_BODY_BYTES,
-            )
-        # Drain to avoid leaking the connection. The cap is large
-        # enough that we never expect this on a real webview HTML;
-        # this is purely a defense-in-depth measure.
-        try:
-            async for _ in upstream.aiter_raw():
-                pass
-        except httpx.StreamConsumed:
-            pass
-        # Re-serve whatever we buffered (truncated) — the upstream
-        # is still partially valid, and the proxy's contract is
-        # "byte-faithful to whatever the upstream sent." The
-        # browser will see an early-truncated response and treat it
-        # as the upstream's failure.
-        return _raw_byte_faithful_response(
-            b"".join(body_chunks), upstream
-        )
+        # Mid-stream path — we consumed past the cap, but kept
+        # accumulating into the raw-re-serve accumulator so the
+        # wire is byte-faithful. The rewrite buffer's prefix is
+        # discarded; the FULL upstream body goes to the browser
+        # via the raw re-serve.
+        full_body = b"".join(oversize_chunks)
+        return _raw_byte_faithful_response(full_body, upstream)
     raw_body = b"".join(body_chunks)
 
     # Try to decode. Malformed/truncated compressed bytes raise:
