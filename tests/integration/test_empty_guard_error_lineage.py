@@ -384,16 +384,6 @@ class TestMessageProcessingErrorsLaneForEmptyResponse:
     widening fix has a one-line guard.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DEFECT (reported): EmptyLLMResponseError routes to "
-            "execution_error lane — message_processing_errors.py:131-133 "
-            "matches class NAME, not isinstance; spec §3-2/ADR-0001 "
-            "expect validation_error. 1-line prod fix pending leader "
-            "routing."
-        ),
-    )
     def test_classify_error_type_pins_validation_error_lane_for_empty(
         self,
     ):
@@ -437,16 +427,6 @@ class TestMessageProcessingErrorsLaneForEmptyResponse:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DEFECT (reported): EmptyLLMResponseError routes to "
-            "execution_error lane — message_processing_errors.py:131-133 "
-            "matches class NAME, not isinstance; spec §3-2/ADR-0001 "
-            "expect validation_error. 1-line prod fix pending leader "
-            "routing."
-        ),
-    )
     async def test_handle_message_processing_error_routes_to_error_side_effects(
         self, file_sqlite_engine
     ):
