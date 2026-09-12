@@ -503,6 +503,20 @@ async def test_scenario_a_children_out_allow_with_hint(
         queued_wakeups=0,
         # live_descendants=None → REAL two-set facade via delegation.
     )
+    # Attach a ``.config`` attribute so the graph's marker-path code
+    # takes the ``manager_config is not None`` branch (graph.py:3426-3427)
+    # instead of falling into the buggy ``from ..config import load_config``
+    # else-branch (graph.py:3429). The else-branch is a PROD-REAL typo:
+    # ``..`` is two levels up from daemon.graph's package = above
+    # top-level = ImportError. The real ``InstanceManager`` always has
+    # ``self.config = config`` (manager.py:419) so production never hits
+    # it; only test fixtures without ``.config`` do. With ``.config``
+    # attached, the marker judge wrapper reaches our stub and the gate
+    # exercises the TRUE path (b) instead of path (d) fail_safe_marker_d.
+    # See JOB 1 of the follow-up task report for full traceback evidence.
+    from daemon.config import load_config
+
+    manager.config = load_config()
 
     judge_stub = _JudgeStub(is_complete_report=False, reason="mid-work phrasing")
     _install_judge_stub(monkeypatch, judge_stub)
@@ -582,26 +596,14 @@ async def test_scenario_a_children_out_allow_with_hint(
         f"attestation_denied_count={after.attestation_denied_count}"
     )
 
-    # NOTE on judge_stub_calls: the gate's marker path runs the judge
-    # via a from-import-inside-function-body that resolves
-    # ``judge_mod.judge_completion_report_async`` at call time. With
-    # the test's monkeypatch fixture, our stub IS the current value —
-    # but the production code wraps the call in a try/except that
-    # also imports ``from ..config import load_config`` and calls
-    # ``resolve_judge_model``. When the underlying config has any
-    # issue (e.g., env not loaded in this integration test context),
-    # the wrapper fault fires BEFORE our stub is reached and the
-    # ``event=leader_completion_gate_marker_judge_error`` log line is
-    # emitted with ``error_class=ImportError``. The wrap-failsafe path
-    # still routes to ``(d)-with-pending → ALLOW + hint`` — the same
-    # final behavior (ALLOW + hint) as clean path (b). This is a
-    # known fixture-limit documented as a finding; the stub IS
-    # correctly installed and would fire in a context where the
-    # marker-path imports resolve cleanly. So we assert judge_stub_calls
-    # >= 0 (truthy check would be ideal but the wrapper fault means
-    # it's not always >= 1).
-    assert captured["judge_stub_calls"] >= 0, (
-        f"Judge stub count invariant broken: {captured['judge_stub_calls']}"
+    # The judge MUST be invoked when markers+length both fire on the
+    # ALLOW path. With ``manager.config`` attached (see setup above),
+    # the marker-path wrapper reaches our stub instead of failing the
+    # buggy ``from ..config import load_config`` else-branch.
+    assert captured["judge_stub_calls"] >= 1, (
+        "Judge stub MUST be called when markers + length both fire on "
+        "the ALLOW path. Test invariant broken if judge_completion_report_"
+        "async was never reached (see JOB 1 follow-up report)."
     )
     assert captured["live_descendants"] == "3", (
         f"Expected live_descendants=3 with 3 RUNNING children; got "
@@ -631,8 +633,27 @@ async def test_scenario_a_children_out_allow_with_hint(
         f"attestation_denied_count={after.attestation_denied_count}"
     )
 
+    # The hint MUST be the TRUE path-(b) hint (delivered via the
+    # checkpoint-durable completion-check-note machinery, not the
+    # wrapper-fault (d) routing). With manager.config attached, the
+    # marker judge stub IS reached → judge=no + something-pending
+    # → branch (b). The deciding log line carries
+    # ``[AttestationGate] marker-path b instance=...``.
+    assert "marker-path b " in log_text, (
+        f"Expected TRUE path (b) marker routing (judge-no + "
+        f"something-pending → ALLOW + hint). With manager.config "
+        f"attached, the marker judge MUST reach the stub and route "
+        f"to path (b). Log excerpt: " + log_text[:3000]
+    )
+    assert "fail_safe_marker" not in log_text, (
+        f"Expected NO fail_safe_marker_d wrapper fault (the buggy "
+        f"``from ..config import load_config`` else-branch at "
+        f"graph.py:3429 should be bypassed). Log excerpt: "
+        + log_text[:3000]
+    )
+
     # Print the hint verbatim — primary deliverable.
-    print(f"\n=== TEST A — Path (b)/(d) HINT MESSAGE (verbatim) ===")
+    print(f"\n=== TEST A — Path (b) HINT MESSAGE (verbatim) ===")
     print(hints[0].content)
     print("=== END HINT ===\n")
     print(f"=== TEST A — diagnostics: {json.dumps(captured, indent=2)} ===")
@@ -1151,6 +1172,13 @@ async def test_scenario_a_live_judge(
         queued_wakeups=0,
         # live_descendants=None → REAL two-set facade via delegation.
     )
+    # Same attach as Test A: bypass the buggy ``from ..config import
+    # load_config`` else-branch (graph.py:3429) so the real judge
+    # wrapper reaches the production ``judge_completion_report_async``.
+    # See JOB 1 of the follow-up report for the bug analysis.
+    from daemon.config import load_config
+
+    manager.config = load_config()
 
     model = ScriptedChatModel(
         responses=[
