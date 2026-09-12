@@ -80,10 +80,30 @@ export class JobService {
   readonly error = signal<string | null>(null);
 
   /**
-   * GET /api/jobs?status=...&source=...&agent_id=...&queue_id=...&include_deleted=...
+   * GET /api/jobs?status=...&source=...&agent_id=...&queue_id=...&include_deleted=...&limit=100
+   *
+   * P1 (jobs-page-improvement) — ALWAYS sends ``limit=100`` (the
+   * backend clamps 1..100). The pre-P1 behavior sent NO limit, so the
+   * backend's silent default of 50 truncated the page's window
+   * invisibly (P2.1: truncated AND invisible — the worst of both
+   * worlds). The full-window honesty banner lands in Phase 2.
+   *
+   * ERROR CONTRACT (P1): errors PROPAGATE — this method no longer
+   * swallows failures into ``of([])``. The old swallow made a failed
+   * fetch indistinguishable from a healthy empty poll at the call
+   * site, so the store's retain-last-data contract (keep the last
+   * good list on error, never flash a bare empty list) was
+   * unimplementable. The service-level ``error`` signal still records
+   * the failure for legacy readers; the fetch now also FAILS the
+   * observable so callers decide what to retain.
+   *
+   * ``listRecentJobs(10)`` (indicator feed) is untouched.
    */
   listJobs(filters?: JobFilters): Observable<Job[]> {
-    let params = new HttpParams();
+    let params = new HttpParams()
+      // P1 — explicit newest-100 window (BE clamps at 100; see
+      // daemon/routers/jobs_crud.py limit parsing + constants.py).
+      .set('limit', '100');
     if (filters) {
       if (filters.status && filters.status.length > 0) {
         params = params.set('status', filters.status.join(','));
@@ -97,10 +117,13 @@ export class JobService {
 
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
       map((response) => response.jobs),
-      tap((jobs) => this.jobs.set(jobs)),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to fetch jobs');
-        return of([]);
+      tap({
+        next: (jobs) => this.jobs.set(jobs),
+        error: (err: unknown) => {
+          const message =
+            err instanceof Error ? err.message : 'Failed to fetch jobs';
+          this.error.set(message);
+        },
       })
     );
   }

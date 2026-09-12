@@ -28,13 +28,17 @@ import { QueueListComponent } from '../../components/queue-list/queue-list.compo
 import { SearchableSelectComponent } from '../../components';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
-import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
+import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
-import { Work } from '../../models/work.model';
 import { CleanupPreflight } from '../../models/cleanup-preflight.model';
 import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
+import { JobsPageStore } from './jobs-page.store';
+import {
+  JobsViewMode,
+  hasActiveJobsFilter,
+} from '../../models/jobs-filter-state.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -47,8 +51,13 @@ import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked
  *   visible but inactive, main pane shows ALL work records (jobs +
  *   turns + reports) backed by ``WorkService``. The kind chip on
  *   each card tells the user which backing table the row came from.
+ *
+ * P1 (jobs-page-improvement): the type now lives in
+ * ``jobs-filter-state.model.ts`` (view_mode is a ``JobsFilterState``
+ * key) and is re-exported above — both view modes are projections of
+ * ONE ``JobsPageStore`` pipeline.
  */
-export type JobsViewMode = 'queues' | 'all-work';
+export type { JobsViewMode };
 
 @Component({
   selector: 'app-jobs',
@@ -100,21 +109,45 @@ export class JobsComponent implements OnInit, OnDestroy {
   private sseSubscription: Subscription | null = null;
   private projectRestored = false;
 
-  // Signals for state
-  readonly jobs = signal<Job[]>([]);
-  readonly loading = signal(false);
-  readonly error = signal<string | null>(null);
+  /**
+   * P1 (jobs-page-improvement) — THE single fetch + filter pipeline
+   * behind BOTH view modes. The pre-P1 dual path (component-local
+   * ``filteredJobs`` over the jobs dataset; ``worksAsJobs`` bypassing
+   * filters over the work dataset) is DELETED — every view mode is a
+   * projection of this store.
+   *
+   * The fetchers wire the store to the services; both legs propagate
+   * errors so the store's per-leg retain-last-data contract holds.
+   */
+  private readonly store = new JobsPageStore({
+    fetchJobs: (filters) => this.jobService.listJobs(filters),
+    fetchWorks: (filters) => this.workService.getWork(filters),
+  });
+
+  // Dataset + fetch-state aliases — the template keeps reading the
+  // same names, but the signals are OWNED by the store now (single
+  // source of truth; the component holds no shadow copies).
+  readonly jobs = this.store.jobs;
+  readonly works = this.store.works;
+  readonly loading = this.store.jobsLoading;
+  readonly error = this.store.jobsError;
+  readonly workLoading = this.store.worksLoading;
+  readonly workError = this.store.worksError;
+
   readonly agents = signal<Agent[]>([]);
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = this.projectService.projects;
 
-  // Queue sidebar signals
-  readonly selectedQueueId = signal<string | null>(null);
+  // Queue sidebar selection — derived from the single filter state
+  // (pre-P1 this was a component-local signal MIRRORED into the
+  // filters object; the mirror is gone, the state is the store's).
+  readonly selectedQueueId = computed(() => this.store.filterState().queue_id);
   readonly selectedProjectId = computed(() => this.filters().project_id ?? null);
 
-  // Filter signals
-  readonly filters = signal<JobFilters>({});
+  // Filter state — THE store's filterState (single source of truth;
+  // pre-P1 this was a component-local ``JobFilters`` signal).
+  readonly filters = this.store.filterState;
 
   // DLQ signals
   readonly retryingAll = signal(false);
@@ -175,20 +208,17 @@ export class JobsComponent implements OnInit, OnDestroy {
   // type-completeness convenience only.
   readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
 
-  // Deleted jobs filter
-  readonly showDeleted = signal(false);
+  // Deleted jobs filter — derived from the single filter state.
+  readonly showDeleted = computed(() => this.store.filterState().include_deleted);
 
   // View mode signal (Phase 4) — 'queues' (legacy) or 'all-work'
-  // (unified list backed by /api/work). Persisted in localStorage so
-  // the user's preferred view survives a page reload.
-  readonly viewMode = signal<JobsViewMode>('queues');
+  // (unified list backed by /api/work). P1: a PROJECTION of the
+  // store's filter state, not an independent signal. Persisted to
+  // localStorage by the handlers so the user's preferred view
+  // survives a page reload.
+  readonly viewMode = computed<JobsViewMode>(() => this.store.filterState().view_mode);
   private viewModeRestored = false;
 
-  // Unified work list (Phase 4) — only populated when viewMode is
-  // 'all-work'. The mapping to Job[] lives in ``displayedJobs`` so
-  // the rest of the template can stay type-agnostic.
-  readonly works = signal<Work[]>([]);
-  
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
   readonly retryAttempt = this.jobSseService.retryAttempt;
@@ -226,103 +256,41 @@ export class JobsComponent implements OnInit, OnDestroy {
     return map;
   });
 
-  // Computed values
-  readonly filteredJobs = computed(() => {
-    const currentFilters = this.filters();
-    const queueId = this.selectedQueueId();
-    let filtered = this.jobs();
-
-    if (currentFilters.status && currentFilters.status.length > 0) {
-      filtered = filtered.filter(job => currentFilters.status!.includes(job.status));
-    }
-    if (currentFilters.source) {
-      filtered = filtered.filter(job => job.source === currentFilters.source);
-    }
-    if (currentFilters.agent_id) {
-      filtered = filtered.filter(job => job.agent_id === currentFilters.agent_id);
-    }
-    if (queueId) {
-      filtered = filtered.filter(job => job.queue_id === queueId);
-    }
-
-    return filtered;
-  });
-
-  readonly hasJobs = computed(() => this.filteredJobs().length > 0);
-  readonly isEmptyState = computed(() => !this.loading() && this.filteredJobs().length === 0 && !this.error());
-
-  // Phase 4 — unified work view computeds.
+  // ── P1: THE ONE PIPELINE ────────────────────────────────────────────
+  //
+  // The pre-P1 dual path is DELETED from this file:
+  //
+  // * ``filteredJobs`` (computed over ``jobs()`` ONLY) — replaced by
+  //   ``store.filteredJobs``, which filters the ACTIVE dataset.
+  // * ``worksAsJobs()`` / ``workToJob()`` (all-work mapping that
+  //   BYPASSED filters entirely and hard-nulled ``started_at`` /
+  //   ``completed_at``) — replaced by the pure ``workToJob`` mapper
+  //   in ``work.model.ts`` + ``store.filteredJobs``.
+  // * ``displayedJobs``'s view-mode BRANCH — both modes now read the
+  //   same store projection; the alias below is not a second path.
 
   /**
-   * Source for the displayed list — either the legacy filteredJobs
-   * (queues view) or jobs synthesised from the WorkService response
-   * (all-work view). The card template stays type-stable on ``Job``
-   * so it does not need to branch on view mode.
+   * Source for the displayed list — the store's unified projection.
+   * In the all-work view the store projects Work rows through the
+   * row-parity ``workToJob`` mapper INSIDE the pipeline; the card
+   * template stays type-stable on ``Job`` either way.
    */
-  readonly displayedJobs = computed<Job[]>(() => {
-    if (this.viewMode() === 'all-work') {
-      return this.worksAsJobs();
-    }
-    return this.filteredJobs();
-  });
+  readonly displayedJobs = this.store.filteredJobs;
 
-  /**
-   * Map ``Work`` records onto the ``Job`` shape that ``JobCardComponent``
-   * already knows how to render.
-   *
-   * The mapping is deliberately one-way and lossy — turn / report rows
-   * do not have a ``message`` or ``priority`` in the backend, so the
-   * JobCardComponent's ``messagePreview`` falls back to ``result_summary``
-   * and the priority badge reads as ``P0``. The ``kind`` field is what
-   * carries the semantic difference; that is the whole point of the
-   * kind chip.
-   *
-   * The map also pins ``queue_id`` to ``null`` for non-job kinds so a
-   * stale value cannot accidentally re-enable the queue badge after
-   * the kind guardrail runs in JobCardComponent.
-   */
-  private worksAsJobs(): Job[] {
-    return this.works().map((work) => this.workToJob(work));
-  }
-
-  /**
-   * Single-row Work → Job mapper. Kept private and pure so it can be
-   * reused by the SSE update path when a work_id event arrives.
-   */
-  private workToJob(work: Work): Job {
-    return {
-      job_id: work.work_id,
-      agent_id: work.agent_id ?? '',
-      message: undefined,
-      source: undefined,
-      project_id: work.project_id,
-      priority: 0,
-      status: (work.status as Job['status']) ?? 'pending',
-      created_at: work.created_at,
-      started_at: null,
-      completed_at: null,
-      instance_id: work.instance_id,
-      error_message: work.error,
-      result_summary: work.result_summary,
-      queue_id: null,
-      cancelled_at: null,
-      kind: work.kind,
-      // Fix C read-model split (§8.2) — pass the discriminator +
-      // liveness pair through so JobCardComponent can render the
-      // receipt chip and the mission-liveness indicator. Task-backed
-      // records carry null for both and render nothing extra.
-      job_type: (work.job_type ?? null) as Job['job_type'],
-      mission_liveness: work.mission_liveness ?? null,
-    };
-  }
+  readonly hasJobs = computed(() => this.store.filteredJobs().length > 0);
+  readonly isEmptyState = computed(
+    () => !this.loading() && this.store.filteredJobs().length === 0 && !this.error(),
+  );
 
   /**
    * Empty-state flag for the unified work view (Phase 4).
+   * P1: filter-aware — the projection is the truth, so an empty
+   * PROJECTION (not an empty raw dataset) is the empty state.
    */
   readonly isEmptyWorkState = computed(() => {
     return this.viewMode() === 'all-work'
       && !this.workLoading()
-      && this.works().length === 0
+      && this.store.filteredJobs().length === 0
       && !this.workError();
   });
 
@@ -332,13 +300,11 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly isAllWorkView = computed(() => this.viewMode() === 'all-work');
 
   /**
-   * Convenience accessors for the WorkService signals so the template
-   * does not need to reach into a private field. Wrapping in computed
-   * is intentional — it lets Angular track the dependency cleanly
-   * through the template change-detection cycle.
+   * Convenience accessors for the store's per-leg fetch flags so the
+   * template keeps its pre-P1 binding names.
    */
-  readonly workLoading = computed(() => this.workService.loading());
-  readonly workError = computed(() => this.workService.error());
+  readonly jobsDegraded = this.store.jobsDegraded;
+  readonly worksDegraded = this.store.worksDegraded;
 
   // Status filter options
   // M3 (mission-class, 2026-09-03) — ``settled`` added to the
@@ -366,6 +332,15 @@ export class JobsComponent implements OnInit, OnDestroy {
     { value: 'webhook', label: 'Webhook' }
   ];
 
+  // P1 — honest copy for the controls that are queues-view-only
+  // (rendered in their place inside the All Work view; see the
+  // template's @if branches). These state the BE gap instead of
+  // shipping a no-op control (plan task 6: zero no-op controls).
+  readonly sourceUnavailableCopy =
+    'Source filter applies to the Queues view — work records carry no source';
+  readonly showDeletedUnavailableCopy =
+    'Deleted-job filter applies to the Queues view — work records have no deleted state';
+
   // Project filter options — derive from ProjectService.projects() and
   // lead with a sentinel empty-string option so the user can deselect
   // the project. Matches the shape SearchableSelectComponent expects
@@ -385,11 +360,12 @@ export class JobsComponent implements OnInit, OnDestroy {
   ]);
 
   constructor() {
-    // Effect to handle job status updates from SSE
+    // Effect to handle job status updates from SSE — the patch
+    // itself lives in the store (both datasets, order-preserving).
     effect(() => {
       const latestStatus = this.jobSseService.latestStatus();
       if (latestStatus && latestStatus.job_id) {
-        this.updateJobFromSse(latestStatus);
+        this.store.updateJobFromSse(latestStatus);
       }
     });
 
@@ -441,14 +417,14 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.loadJobs();
+    // P1 — both fetch legs live in the store; kick both off so
+    // switching to the All Work view later is instantaneous (the
+    // work fetch is harmless if the user never toggles the view).
+    this.store.fetchJobs();
     this.loadAgents();
     this.loadProjects();
     this.startAutoRefresh();
-    // Phase 4 — kick off an initial WorkService fetch in parallel so
-    // switching to the All Work view later is instantaneous. The fetch
-    // is harmless if the user never toggles the view mode.
-    this.loadWorks();
+    this.store.fetchWorks();
     // Phase 4 — fetch the bad-state preflight so the red-glow + tooltip
     // appear on first paint when the system has stale rows.
     this.refreshBadStateCount();
@@ -473,8 +449,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Check if saved project still exists in the project list
     const projectExists = this.projects().some(p => p.project_id === savedProjectId);
     if (projectExists) {
-      // Directly set the filter without calling loadJobs() — ngOnInit already called it
-      this.filters.update(f => ({ ...f, project_id: savedProjectId }));
+      // Directly set the filter without fetching — ngOnInit already
+      // fetched (the restored scope applies from the next refresh on;
+      // pre-existing restore/fetch ordering is unchanged by P1).
+      this.store.setFilters({ project_id: savedProjectId });
     } else {
       // Clear stale entry
       try {
@@ -498,11 +476,12 @@ export class JobsComponent implements OnInit, OnDestroy {
       return;
     }
     if (saved === 'queues' || saved === 'all-work') {
-      this.viewMode.set(saved);
-      // If the user previously left the page in all-work view, kick
-      // off an initial fetch so the list is not blank on reload.
-      if (saved === 'all-work') {
-        this.loadWorks();
+      this.store.setFilters({ view_mode: saved });
+      // If the user previously left the page in all-work view, make
+      // sure the work leg has data even if the ngOnInit fetch raced
+      // with the restore.
+      if (saved === 'all-work' && this.store.works().length === 0) {
+        this.store.fetchWorks();
       }
     }
   }
@@ -525,22 +504,14 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
-  private loadJobs(): void {
-    this.loading.set(true);
-    this.error.set(null);
-
-    this.jobService.listJobs(this.filters()).subscribe({
-      next: (jobs) => {
-        this.jobs.set(jobs);
-        this.loading.set(false);
-      },
-      error: (err) => {
-        console.error('Failed to load jobs:', err);
-        this.error.set(err.message || 'Failed to load jobs');
-        this.loading.set(false);
-      }
-    });
-  }
+  // ── P1 deletion note ────────────────────────────────────────────────
+  // The pre-P1 ``loadJobs()`` / ``loadWorks()`` component methods are
+  // DELETED. Their fetch logic (filter→query projection, per-leg error
+  // handling, retain-last-data discipline) lives in ``JobsPageStore``
+  // (``fetchJobs`` / ``fetchWorks``), where it serves BOTH view modes
+  // from one pipeline. The pre-P1 ``loadWorks`` snackbar-on-error is
+  // replaced by the store's ``worksError`` signal + the template's
+  // error block — errors no longer bypass the view state.
 
   /**
    * Phase 4 — fetch the system-wide bad-state count from
@@ -590,56 +561,11 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Phase 4 — fetch the unified work list from ``WorkService``.
-   *
-   * Filters mirror what the page already exposes for the legacy
-   * Jobs view (status / project_id); the queue sidebar stays inactive
-   * in this view so we deliberately do NOT push ``queue_id`` into the
-   * filter payload — that filter would force the backend to return
-   * ONLY queued work, defeating the unified surface.
-   *
-   * ``root_only`` is hard-coded to ``false`` here (P-A of the Virtual
-   * Job Tool Completeness plan). The "All Work" view is contractually
-   * named — it must show every row the resolver can find, including
-   * child-instance turns and reports. The backend default is
-   * ``root_only=true`` (jober-management view, excludes children);
-   * we override that default at the only call site that represents
-   * "all" to the user. The Queues view goes through ``JobService``
-   * and is unaffected.
-   *
-   * Errors are non-fatal — the legacy Jobs list still renders and the
-   * snackbar gives the operator a hint about why the work list is
-   * empty.
+   * P1 — the pre-P1 ``loadWorks()`` is deleted (see the store note
+   * above). The fetch — including the ``root_only: false`` P-A
+   * contract and the status/project projection onto ``WorkFilters`` —
+   * is ``JobsPageStore.fetchWorks`` via ``toWorkFilters``.
    */
-  private loadWorks(): void {
-    const projectId = this.filters().project_id;
-    const statusFilter = this.filters().status;
-    this.workService.getWork({
-      project_id: projectId || undefined,
-      status: statusFilter && statusFilter.length > 0 ? statusFilter.join(',') : undefined,
-      // P-A — the All Work view intentionally bypasses the root-only
-      // filter so child-instance rows stay visible. See the method
-      // docstring for the rationale.
-      root_only: false,
-    }).subscribe({
-      next: (works) => {
-        this.works.set(works);
-      },
-      error: (err) => {
-        console.error('[Jobs] Failed to load works:', err);
-        // Surface the error to the user; do NOT clear the legacy
-        // Jobs signal — operators may still want to use that view.
-        this.snackBar.open(
-          err?.message || 'Failed to load unified work list',
-          'Dismiss',
-          {
-            duration: 5000,
-            panelClass: 'error-snackbar'
-          }
-        );
-      }
-    });
-  }
 
   private loadAgents(): void {
     this.api.listAgents().subscribe({
@@ -654,18 +580,9 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   private startAutoRefresh(): void {
     this.refreshInterval = setInterval(() => {
-      if (this.viewMode() === 'all-work') {
-        // Refresh whichever view is currently active. The legacy
-        // refresh path stays untouched so other call sites are not
-        // disturbed.
-        if (!this.workService.loading()) {
-          this.loadWorks();
-        }
-        return;
-      }
-      if (!this.loading()) {
-        this.jobService.refreshJobs(this.filters());
-      }
+      // P1 — refresh the ACTIVE view's leg via the store; the store's
+      // in-flight guards prevent double-firing.
+      this.store.refreshActive();
     }, 30000); // 30 seconds
   }
 
@@ -676,96 +593,15 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
   }
 
-  private updateJobFromSse(status: JobEventPayload): void {
-    // Present-as-null semantics for every Fix C split field:
-    // - key absent on the payload  → keep previous value (stale-tolerant)
-    // - key present + value `null` → degraded-lookup, clear the field
-    // - key present + non-null      → overwrite
-    // The ``in`` check is the only way to distinguish "wire didn't
-    // carry the field" from "wire explicitly said null"; ``??`` would
-    // collapse the two and pin stale liveness through degraded
-    // windows. Same logic applies to the work patch path below.
-    const nextJobType: Job['job_type'] = 'job_type' in status
-      ? (status.job_type ?? null) as Job['job_type']
-      : undefined; // undefined → keep via spread
-    const nextMissionLiveness: Job['mission_liveness'] = 'mission_liveness' in status
-      ? (status.mission_liveness ?? null)
-      : undefined; // undefined → keep via spread
-
-    this.jobs.update(jobs =>
-      jobs.map(job =>
-        job.job_id === status.job_id
-          ? {
-              ...job,
-              status: status.status || job.status,
-              queue_id: status.queue_id ?? job.queue_id,
-              instance_id: status.instance_id || job.instance_id,
-              result_summary: status.result_summary || job.result_summary,
-              error_message: status.error_message || job.error_message,
-              // M3 (mission-class, 2026-09-03) — ``completed_at`` is
-              // stamped for any wire-terminal status, including the
-              // mirror-receipt terminal ``settled``. The pre-M3 check
-              // only matched ``completed``/``failed`` and missed
-              // settled terminals (rename-introduced regression); the
-              // settled-aware helper covers every wire terminal so a
-              // future terminal rename does not silently regress here.
-              completed_at: status.status && isTerminalStatus(status.status)
-                ? new Date().toISOString()
-                : job.completed_at,
-              started_at: status.status === 'processing' && !job.started_at
-                ? new Date().toISOString()
-                : job.started_at,
-              // Fix C (§8.2) — propagate the split-semantics fields
-              // through the jobs[] patch path too (mirrors the works[]
-              // path below). The previous round only patched works[],
-              // so a live mission that finished while the Queues view
-              // was open stayed pinned to its stale live chip. See
-              // job-queue-indicator's liveMissionIds: a terminal
-              // receipt must immediately drop out of the badge.
-              //
-              // M3 (mission-class, 2026-09-03) — prose uses
-              // ``terminal`` (mission-side vocabulary) instead of
-              // ``settled`` (transport-receipt vocabulary).
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : job
-      )
-    );
-
-    // Phase 4 — also patch the unified Work list so SSE updates
-    // land on the right record in the All Work view too. The SSE
-    // payload uses ``job_id`` as the work_id key — the backend SSE
-    // endpoint already resolves work_id through WorkResolverService,
-    // so the same status update is valid for both Job and Work rows.
-    // Fix C (§8.2): the split-semantics SSE payload also carries
-    // ``mission_liveness`` — patch it through so a live mission that
-    // settles while the page is open flips its indicator without a
-    // full refetch. Same present-as-null contract as the jobs[] path
-    // above: absent keeps previous, explicit null clears.
-    this.works.update(works =>
-      works.map(work =>
-        work.work_id === status.job_id
-          ? {
-              ...work,
-              status: status.status || work.status,
-              instance_id: status.instance_id ?? work.instance_id,
-              result_summary: status.result_summary ?? work.result_summary,
-              error: status.error_message ?? work.error,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : work
-      )
-    );
-  }
+  // ── P1 deletion note ────────────────────────────────────────────────
+  // The pre-P1 ``updateJobFromSse`` method is DELETED from this file —
+  // it moved VERBATIM into ``JobsPageStore.updateJobFromSse`` (both
+  // datasets, order-preserving map, present-as-null contract, M3
+  // terminal stamping). The constructor's SSE effect now delegates.
 
   protected onRefresh(): void {
-    if (this.viewMode() === 'all-work') {
-      this.loadWorks();
-    } else {
-      this.loadJobs();
-    }
+    // P1 — refresh the ACTIVE view's leg through the store.
+    this.store.refreshActive();
     // Phase 4 — refresh the preflight count alongside the main list so
     // the red-glow + tooltip reflect post-refresh reality.
     this.refreshBadStateCount();
@@ -785,48 +621,56 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (this.viewMode() === mode) {
       return;
     }
-    this.viewMode.set(mode);
+    // P1 — view_mode is a JobsFilterState key; the projection flips
+    // datasets inside the ONE pipeline (no second fetch path).
+    this.store.setFilters({ view_mode: mode });
     try {
       localStorage.setItem(this.VIEW_MODE_KEY, mode);
     } catch {
       // Private-browsing — silently ignore.
     }
     if (mode === 'all-work' && this.works().length === 0) {
-      this.loadWorks();
+      this.store.fetchWorks();
     }
   }
 
+  /**
+   * Status filter — server-side on BOTH wires (jobs + work), so both
+   * legs refetch; the client-side projection re-applies the same key.
+   */
   protected onStatusFilterChange(statuses: JobStatus[]): void {
-    this.filters.update(filters => ({
-      ...filters,
-      status: statuses.length > 0 ? statuses : undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ status: statuses.length > 0 ? statuses : [] });
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
+  /**
+   * Source filter — WINDOW-SCOPED, client-side only (BE gap-e5: the
+   * jobs list endpoint ignores ``source``; the work endpoint has no
+   * source concept at all). A source change must NOT refetch — the
+   * projection re-derives instantly from the fetched window. The
+   * control is queues-view-only (hidden in all-work with honest
+   * copy, since work rows carry no source to match).
+   */
   protected onSourceFilterChange(source: JobSource | 'all'): void {
-    this.filters.update(filters => ({
-      ...filters,
-      source: source === 'all' ? undefined : source
-    }));
-    this.loadJobs();
+    this.store.setFilters({ source: source === 'all' ? null : source });
   }
 
+  /**
+   * Agent filter — WINDOW-SCOPED, client-side in BOTH views (``Work``
+   * rows carry ``agent_id``, so the projection can match them). No
+   * refetch — same instant re-projection as source.
+   */
   protected onAgentFilterChange(agentId: string): void {
-    this.filters.update(filters => ({
-      ...filters,
-      agent_id: agentId === 'all' ? undefined : agentId
-    }));
-    this.loadJobs();
+    this.store.setFilters({ agent_id: agentId === 'all' ? null : agentId });
   }
 
+  /**
+   * Project filter — server-side on BOTH wires; clears the queue
+   * selection (a queue belongs to a project) and persists the choice.
+   */
   protected onProjectFilterChange(projectId: string): void {
-    this.filters.update(filters => ({
-      ...filters,
-      project_id: projectId || undefined
-    }));
-    // Clear queue selection when project changes
-    this.selectedQueueId.set(null);
+    this.store.setFilters({ project_id: projectId || null, queue_id: null });
     // Persist selection to localStorage
     try {
       if (projectId) {
@@ -837,42 +681,44 @@ export class JobsComponent implements OnInit, OnDestroy {
     } catch {
       // silently ignore
     }
-    this.loadJobs();
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
   protected onClearFilters(): void {
-    this.filters.set({});
-    this.selectedQueueId.set(null);
-    this.showDeleted.set(false);
+    // P1 — store.clearFilters preserves the active view mode.
+    this.store.clearFilters();
     // Clear localStorage so the project isn't silently restored on next visit
     try {
       localStorage.removeItem(this.STORAGE_KEY);
     } catch {
       // silently ignore
     }
-    this.loadJobs();
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
+  /**
+   * Show-deleted toggle — server-side on the jobs wire only
+   * (``/api/work`` has no soft-delete concept). Queues-view-only
+   * control (hidden in all-work with honest copy).
+   */
   protected onToggleShowDeleted(checked: boolean): void {
-    this.showDeleted.set(checked);
-    this.filters.update(filters => ({
-      ...filters,
-      include_deleted: checked ? true : undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ include_deleted: checked });
+    this.store.fetchJobs();
   }
 
+  /**
+   * Queue selection — queues-view-only (server-side on the jobs
+   * wire; work rows carry no queue_id).
+   */
   protected onQueueSelected(queueId: string | null): void {
-    this.selectedQueueId.set(queueId);
-    this.filters.update(filters => ({
-      ...filters,
-      queue_id: queueId || undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ queue_id: queueId || null });
+    this.store.fetchJobs();
   }
 
   protected onQueueChanged(): void {
-    this.loadJobs();
+    this.store.fetchJobs();
   }
 
   protected onOpenCreateDialog(): void {
@@ -906,7 +752,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           duration: 3000,
           panelClass: 'success-snackbar'
         });
-        this.loadJobs();
+        this.store.fetchJobs();
       },
       error: (err) => {
         console.error('Failed to create job:', err);
@@ -1009,18 +855,16 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.snackBar.open('Job deleted', 'Undo', { duration: 5000 })
           .onAction().subscribe(() => {
             this.jobService.restoreJob(job.job_id).subscribe({
-              next: () => this.loadJobs(),
+              next: () => this.store.fetchJobs(),
               error: () => {}
             });
           });
         if (!this.showDeleted()) {
-          // Remove from local list
-          this.jobs.update(jobs => jobs.filter(j => j.job_id !== job.job_id));
+          // Remove from local list (store-owned mutation seam)
+          this.store.removeJob(job.job_id);
         } else {
           // Update the job in place (show as deleted)
-          this.jobs.update(jobs =>
-            jobs.map(j => j.job_id === job.job_id ? { ...j, deleted_at: new Date().toISOString() } : j)
-          );
+          this.store.patchJob(job.job_id, { deleted_at: new Date().toISOString() });
         }
       },
       error: (err) => {
@@ -1034,7 +878,7 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   protected onRestoreJob(job: Job): void {
     this.jobService.restoreJob(job.job_id).subscribe({
-      next: () => this.loadJobs(),
+      next: () => this.store.fetchJobs(),
       error: (err) => {
         this.snackBar.open(err.message || 'Failed to restore job', 'Dismiss', {
           duration: 5000,
@@ -1063,7 +907,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           'Close',
           { duration: 5000 }
         );
-        this.loadJobs();
+        this.store.fetchJobs();
       },
       error: (err) => {
         console.error('Failed to retry all dead letter jobs:', err);
@@ -1203,14 +1047,14 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onDrawerCancelJob(jobId: string): void {
-    const job = this.jobs().find(j => j.job_id === jobId);
+    const job = this.store.findJob(jobId);
     if (job) {
       this.onCancelJob(job);
     }
   }
 
   protected onDrawerRetryJob(jobId: string): void {
-    const job = this.jobs().find(j => j.job_id === jobId);
+    const job = this.store.findJob(jobId);
     if (job) {
       this.onRetryJob(job);
     }
@@ -1227,8 +1071,9 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected hasActiveFilters(): boolean {
-    const filters = this.filters();
-    return !!(filters.status || filters.source || filters.agent_id || filters.queue_id);
+    // P1 — the single model helper (status/source/agent_id/queue_id;
+    // project_id is a scope selection, not a clearable filter).
+    return hasActiveJobsFilter(this.store.filterState());
   }
 
   protected isProjectSelected(): boolean {

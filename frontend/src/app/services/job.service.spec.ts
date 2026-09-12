@@ -15,6 +15,11 @@ class TestJobService {
 
   listJobs(filters?: { status?: string; source?: string; agent_id?: string; project_id?: string; include_deleted?: boolean }) {
     let params = new URLSearchParams();
+    // P1 parity (jobs-page-improvement): the real JobService.listJobs
+    // ALWAYS sends limit=100 (explicit newest-100 window; BE clamps
+    // 1..100). The mirror tracks that construction — see the
+    // ``listJobs limit=100 window (P1)`` describe below.
+    params.set('limit', '100');
     if (filters) {
       if (filters.status) params.set('status', filters.status);
       if (filters.source) params.set('source', filters.source);
@@ -382,6 +387,35 @@ describe('JobService', () => {
       let result: Job[] = [];
       service.listJobs().pipe().subscribe(jobs => { result = jobs; });
       expect(result.length).toBe(3);
+    });
+
+    // P1 (jobs-page-improvement) — the pre-P1 page fetch sent NO
+    // limit, so the backend's silent default of 50 truncated the
+    // window invisibly. The service now ALWAYS sends limit=100 (the
+    // BE max clamp). Mirror-parity: the TestableJobService above
+    // tracks the real params construction; this pin asserts the wire
+    // shape, and jobs-page.bindings.pins.spec.ts anchors the
+    // production source text (F-5).
+    describe('listJobs limit=100 window (P1)', () => {
+      it('should always send limit=100, even with no filters', () => {
+        service.listJobs().pipe().subscribe(() => {});
+        expect(service.lastRequestUrl).toContain('limit=100');
+      });
+
+      it('should send limit=100 alongside filters (never overridden by filter params)', () => {
+        service.listJobs({ status: 'pending', project_id: 'p-1' }).pipe().subscribe(() => {});
+        expect(service.lastRequestUrl).toContain('limit=100');
+        expect(service.lastRequestUrl).toContain('status=pending');
+        expect(service.lastRequestUrl).toContain('project_id=p-1');
+        // Exactly one limit token.
+        expect((service.lastRequestUrl ?? '').match(/limit=/g)).toHaveLength(1);
+      });
+
+      it('should send limit=100 with include_deleted=true (deleted-window parity)', () => {
+        service.listJobs({ include_deleted: true }).pipe().subscribe(() => {});
+        expect(service.lastRequestUrl).toContain('limit=100');
+        expect(service.lastRequestUrl).toContain('include_deleted=true');
+      });
     });
 
     it('should build correct URL with status filter', () => {

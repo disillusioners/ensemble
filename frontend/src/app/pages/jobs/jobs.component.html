@@ -105,7 +105,7 @@
         @for (option of statusOptions; track option.value) {
           <mat-chip-option
             [value]="option.value"
-            [selected]="filters().status?.includes(option.value) ?? false">
+            [selected]="filters().status.includes(option.value)">
             {{ option.label }}
           </mat-chip-option>
         }
@@ -135,28 +135,49 @@
     </div>
 
     <div class="filter-row">
-      <app-searchable-select
-        class="filter-field"
-        label="Source"
-        [options]="sourceOptions"
-        [ngModel]="filters().source || 'all'"
-        (ngModelChange)="onSourceFilterChange($event)">
-      </app-searchable-select>
+      <!-- P1 — Source is WINDOW-SCOPED and queues-view-only: the
+           /api/work wire carries no source concept (gap-e5), so a
+           source control in the All Work view could never match a
+           row. Hidden there with honest copy instead of shipping a
+           no-op control. -->
+      @if (!isAllWorkView()) {
+        <app-searchable-select
+          class="filter-field"
+          label="Source (window-scoped)"
+          [options]="sourceOptions"
+          [ngModel]="filters().source || 'all'"
+          (ngModelChange)="onSourceFilterChange($event)">
+        </app-searchable-select>
+      } @else {
+        <span class="filter-field filter-unavailable-note" [matTooltip]="sourceUnavailableCopy">
+          {{ sourceUnavailableCopy }}
+        </span>
+      }
 
       <app-searchable-select
         class="filter-field"
-        label="Agent"
+        label="Agent (window-scoped)"
         [options]="agentOptions()"
         [ngModel]="filters().agent_id || 'all'"
         (ngModelChange)="onAgentFilterChange($event)">
       </app-searchable-select>
 
-      <mat-checkbox
-        [checked]="showDeleted()"
-        (change)="onToggleShowDeleted($event.checked)"
-        class="show-deleted-checkbox">
-        Show Deleted
-      </mat-checkbox>
+      <!-- P1 — Show Deleted is queues-view-only: /api/work has no
+           soft-delete concept (the resolver's query hides soft-deleted
+           rows with no flag to un-hide), so the toggle is inert in the
+           All Work view. Hidden there with honest copy. -->
+      @if (!isAllWorkView()) {
+        <mat-checkbox
+          [checked]="showDeleted()"
+          (change)="onToggleShowDeleted($event.checked)"
+          class="show-deleted-checkbox">
+          Show Deleted
+        </mat-checkbox>
+      } @else {
+        <span class="filter-unavailable-note">
+          {{ showDeletedUnavailableCopy }}
+        </span>
+      }
 
   </div>
 

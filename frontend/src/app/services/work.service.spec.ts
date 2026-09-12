@@ -292,3 +292,36 @@ describe('WorkService.getWork — All Work view contract', () => {
     expect(falseFilter.root_only).toBe(false);
   });
 });
+// ── P1 mirror-parity pin (jobs-page-improvement) ─────────────────────────
+//
+// Plan task 7 acceptance: the TestableWorkService mirror above
+// duplicates the real service's params construction and can DRIFT
+// silently. This pin anchors the mirror against the REAL source file
+// (readFileSync, F-5 class): if the production HttpParams construction
+// changes without the mirror following (or vice versa), this fails.
+
+describe('WorkService.getWork — real-construction mirror parity (P1)', () => {
+  const realSource = require('fs').readFileSync(
+    require('path').join(__dirname, 'work.service.ts'),
+    'utf-8',
+  );
+
+  it('the real getWork still serialises every param the mirror mirrors', () => {
+    for (const param of ['status', 'project_id', 'instance_id', 'kind', 'root_only']) {
+      expect({ param, ok: realSource.includes(`params.set('${param}', `) })
+        .toEqual({ param, ok: true });
+    }
+  });
+
+  it('the real getWork serialises root_only as explicit true/false literals (FastAPI bool contract)', () => {
+    expect(realSource).toMatch(
+      /params\.set\('root_only', filters\.root_only \? 'true' : 'false'\)/,
+    );
+  });
+
+  it('the real getWork still toggles loading and degrades errors to of([]) (mirror contract unchanged)', () => {
+    expect(realSource).toMatch(/this\.loading\.set\(true\)/);
+    expect(realSource).toMatch(/catchError\(\(err\) => \{/);
+    expect(realSource).toMatch(/return of\(\[\] as Work\[\]\)/);
+  });
+});

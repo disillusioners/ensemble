@@ -426,69 +426,12 @@ class MockJobsComponent {
     return agent ? `${agent.icon} ${agent.name}` : agentId;
   }
 
-  /**
-   * Mirror of the real component's ``updateJobFromSse`` — used by the
-   * SSE propagation specs. Keeps the SAME present-as-null contract
-   * for ``job_type`` and ``mission_liveness`` as the real method:
-   * key absent → keep previous value, key present + null → clear.
-   * See ``jobs.component.ts:updateJobFromSse`` for the canonical
-   * implementation.
-   */
-  updateJobFromSse(status: import('../../models/job.model').JobEventPayload): void {
-    const nextJobType: Job['job_type'] =
-      'job_type' in status
-        ? (status.job_type ?? null) as Job['job_type']
-        : undefined;
-    const nextMissionLiveness: Job['mission_liveness'] =
-      'mission_liveness' in status
-        ? (status.mission_liveness ?? null)
-        : undefined;
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // The ``updateJobFromSse`` mirror method was deleted with the
+  // describes that drove it: the production method moved VERBATIM into
+  // ``JobsPageStore.updateJobFromSse`` (jobs-page.store.ts), and the
+  // pins now drive the REAL store class in jobs-page.store.spec.ts.
 
-    this.jobs.update(jobs =>
-      jobs.map(job =>
-        job.job_id === status.job_id
-          ? {
-              ...job,
-              status: status.status || job.status,
-              queue_id: status.queue_id ?? job.queue_id,
-              instance_id: status.instance_id || job.instance_id,
-              result_summary: status.result_summary || job.result_summary,
-              error_message: status.error_message || job.error_message,
-              // M3 (mission-class, 2026-09-03) — ``completed_at``
-              // is stamped for any wire-terminal status, including
-              // the mirror-receipt terminal ``settled``. Mirrors the
-              // production fix at jobs.component.ts (the mock here
-              // runs the same terminal-aware check; if the production
-              // regresses this fixture will drift).
-              completed_at: status.status && isTerminalStatus(status.status)
-                ? new Date().toISOString()
-                : job.completed_at,
-              started_at: status.status === 'processing' && !job.started_at
-                ? new Date().toISOString()
-                : job.started_at,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : job
-      )
-    );
-
-    this.works.update(works =>
-      works.map(work =>
-        work.work_id === status.job_id
-          ? {
-              ...work,
-              status: status.status || work.status,
-              instance_id: status.instance_id ?? work.instance_id,
-              result_summary: status.result_summary ?? work.result_summary,
-              error: status.error_message ?? work.error,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : work
-      )
-    );
-  }
 }
 
 describe('JobsComponent Logic', () => {
@@ -528,64 +471,18 @@ describe('JobsComponent Logic', () => {
     mockDialog.reset();
   });
 
-  describe('filteredJobs computed', () => {
-    it('should return all jobs when no filters', () => {
-      component.filters.set({});
-      expect(component.filteredJobs()).toHaveLength(mockJobs.length);
-    });
-
-    it('should filter by status', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed' }),
-        createMockJob({ job_id: '3', status: 'pending' }),
-      ]);
-      
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.status === 'pending')).toBe(true);
-    });
-
-    it('should filter by source', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', source: 'api' }),
-        createMockJob({ job_id: '2', source: 'telegram' }),
-      ]);
-      
-      component.onSourceFilterChange('api');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.source === 'api')).toBe(true);
-    });
-
-    it('should filter by agent_id', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', agent_id: 'developer' }),
-        createMockJob({ job_id: '2', agent_id: 'tester' }),
-      ]);
-      
-      component.onAgentFilterChange('developer');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.agent_id === 'developer')).toBe(true);
-    });
-
-    it('should filter by multiple criteria', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', source: 'api', agent_id: 'developer' }),
-        createMockJob({ job_id: '2', status: 'completed', source: 'api', agent_id: 'developer' }),
-        createMockJob({ job_id: '3', status: 'pending', source: 'telegram', agent_id: 'developer' }),
-      ]);
-      
-      component.onStatusFilterChange('pending');
-      component.onSourceFilterChange('api');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.length).toBe(1);
-      expect(filtered[0].job_id).toBe('1');
-    });
-  });
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // The pre-P1 ``filteredJobs computed`` and ``filteredJobs with
+  // deleted jobs`` describes were DELETED, not migrated: they pinned
+  // the component-local dual pipeline (``filteredJobs`` over the jobs
+  // dataset + ``worksAsJobs`` bypassing filters over the work
+  // dataset) that P1 removed. The unified pipeline's coverage now
+  // lives in ``jobs-page.store.spec.ts`` (real store, one pipeline,
+  // both view modes) and ``jobs-filter-state.model.spec.ts`` (pure
+  // ``applyJobsFilter``). Note: the old mirror ALSO filtered
+  // ``deleted_at`` client-side — production never did (soft-delete is
+  // server-side via ``include_deleted``), so those pins were
+  // mirror-drift on top of being dual-path pins.
 
   describe('projectsWithPendingJobs computed', () => {
     it('should return only projects with pending jobs', () => {
@@ -1030,83 +927,12 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('filteredJobs with deleted jobs', () => {
-    it('should hide deleted jobs when showDeleted is false', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '3', status: 'failed' }),
-      ]);
-      component.showDeleted.set(false);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-      expect(filtered.some(j => j.job_id === '1')).toBe(true);
-      expect(filtered.some(j => j.job_id === '2')).toBe(false);
-      expect(filtered.some(j => j.job_id === '3')).toBe(true);
-    });
-
-    it('should show deleted jobs when showDeleted is true', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '3', status: 'failed' }),
-      ]);
-      component.showDeleted.set(true);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(3);
-      expect(filtered.some(j => j.job_id === '1')).toBe(true);
-      expect(filtered.some(j => j.job_id === '2')).toBe(true);
-      expect(filtered.some(j => j.job_id === '3')).toBe(true);
-    });
-
-    it('should not filter jobs without deleted_at when showDeleted is false', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed' }), // no deleted_at
-      ]);
-      component.showDeleted.set(false);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-    });
-
-    it('should work with other filters combined', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '2', status: 'pending' }),
-        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '4', status: 'completed' }),
-      ]);
-      component.showDeleted.set(true);
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-      expect(filtered.every(j => j.status === 'pending')).toBe(true);
-    });
-
-    it('should filter out deleted jobs and apply status filter', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '2', status: 'pending' }),
-        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '4', status: 'completed' }),
-      ]);
-      component.showDeleted.set(false); // Hide deleted
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(1);
-      expect(filtered[0].job_id).toBe('2');
-    });
-  });
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // ``filteredJobs with deleted jobs`` deleted with the dual pipeline
+  // it pinned (see the deletion note above the
+  // ``projectsWithPendingJobs`` describe). Client-side ``deleted_at``
+  // filtering was NEVER production behavior — soft-delete filtering
+  // is server-side (``include_deleted`` on the wire).
 
   describe('onClearFilters resets showDeleted', () => {
     it('should reset showDeleted when clearing filters', () => {
@@ -1514,135 +1340,14 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('All Work view loadWorks — root_only contract (P-A)', () => {
-    /**
-     * Mirrors the body of ``JobsComponent.loadWorks`` (the
-     * Phase-4 unified-work fetch) just enough to assert that the
-     * component hands ``root_only: false`` to ``WorkService.getWork``.
-     *
-     * The real component is heavy with Angular lifecycle hooks,
-     * dialogs, and snackbar wiring; re-declaring just the
-     * work-fetch path keeps the test focused and avoids the
-     * TestBed setup that would otherwise be needed to exercise the
-     * component end-to-end. The URL serialisation guarantee is
-     * separately covered by ``work.service.spec.ts``.
-     */
-    class AllWorkLoadComponent {
-      // Captured filters handed to WorkService.getWork.
-      public lastFilters: any = undefined;
-      // Subscription observers, in case a future test wants to
-      // assert on the snackbar side effect.
-      public errored = false;
-
-      constructor(private readonly filtersValue: { project_id?: string; status?: any }) {}
-
-      loadWorks(workService: { getWork: jest.Mock }): void {
-        const projectId = this.filtersValue.project_id;
-        const statusFilter = this.filtersValue.status;
-        const filters = {
-          project_id: projectId || undefined,
-          status:
-            statusFilter && statusFilter.length > 0
-              ? statusFilter.join(',')
-              : undefined,
-          // P-A — the All Work view intentionally bypasses the
-          // root-only filter so child-instance rows stay visible.
-          root_only: false,
-        };
-        workService.getWork(filters).subscribe({
-          next: (works: unknown[]) => {
-            this.lastFilters = filters;
-          },
-          error: () => {
-            this.errored = true;
-          },
-        });
-      }
-    }
-
-    it('should pass root_only: false to WorkService.getWork (no filters)', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({});
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledTimes(1);
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: undefined,
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should pass root_only: false alongside a project_id filter', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({ project_id: 'project-123' });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: 'project-123',
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should pass root_only: false alongside a status filter', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({
-        project_id: 'project-123',
-        status: ['pending', 'processing'],
-      });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: 'project-123',
-        status: 'pending,processing',
-        root_only: false,
-      });
-    });
-
-    it('should drop status when the filter array is empty', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({ status: [] });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: undefined,
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should always include root_only: false even if other filters are undefined', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({});
-
-      component.loadWorks(workService);
-
-      // ``mock.calls[0]`` is the array of arguments to the first
-      // ``getWork`` call — ``[filters]`` since there's one arg.
-      const filtersArg = workService.getWork.mock.calls[0][0];
-      // The contract: ``root_only`` is always present and is always
-      // exactly ``false`` for the All Work view. If this assertion
-      // fails, the user is back to seeing the backend-default
-      // root-scoped list — the very thing this fix was meant to
-      // prevent.
-      expect(filtersArg.root_only).toBe(false);
-    });
-  });
+  // ── P1 MIGRATION (jobs-page-improvement) ────────────────────────────
+  // ``All Work view loadWorks — root_only contract (P-A)`` migrated to
+  // ``jobs-page.store.spec.ts``: the fetch moved from the deleted
+  // ``JobsComponent.loadWorks`` into ``JobsPageStore.fetchWorks`` (via
+  // the pure ``toWorkFilters``), so the ``root_only: false`` contract
+  // is now pinned against the REAL store construction (behavioral pin
+  // + production-source-text pin) instead of a local ``loadWorks``
+  // clone.
 
   /**
    * Phase 4 — bad-state visibility + enhanced cleanup tests.
@@ -1959,127 +1664,13 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  // ── Fix C (§8.2) — SSE patch propagation ─────────────────────────────
-  //
-  // Round-1 only patched the works[] path, so a terminal mirror in
-  // the Queues view stayed pinned to its stale live chip and the
-  // header badge kept counting it as a live mission. These specs
-  // drive ``updateJobFromSse`` directly so any future regression
-  // that drops the patch or collapses null-vs-absent fails loudly.
-  //
-  // M3 (mission-class, 2026-09-03) — prose uses ``terminal``
-  // (mission-side vocabulary) instead of ``settled`` (transport-
-  // receipt vocabulary; belongs only to mirror rows now). The
-  // data shape (``mission_liveness``) is unchanged.
-
-  describe('updateJobFromSse — mission_liveness propagation (jobs[] path)', () => {
-    function seedMirrorRow(liveness: import('../../models/job.model').MissionLiveness) {
-      component.jobs.set([
-        createMockJob({
-          job_id: 'mirror-1',
-          status: 'completed',
-          instance_id: 'leader-x',
-          job_type: 'message',
-          mission_liveness: liveness,
-        }),
-      ]);
-      component.works.set([
-        {
-          work_id: 'mirror-1',
-          kind: 'job',
-          status: 'completed',
-          instance_id: 'leader-x',
-          project_id: null,
-          agent_id: 'developer',
-          result_summary: null,
-          error: null,
-          created_at: new Date().toISOString(),
-          job_type: 'message',
-          mission_liveness: liveness,
-        },
-      ]);
-    }
-
-    it('jobs[] path: terminal mission_liveness in the payload overwrites the live row', () => {
-      seedMirrorRow('processing');
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        mission_liveness: 'completed',
-      });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('completed');
-      // works[] path also patches — same payload, same contract.
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('completed');
-    });
-
-    it('present-as-null: explicit null CLEARS, absent key KEEPS previous value', () => {
-      seedMirrorRow('processing');
-
-      // Explicit null → cleared on BOTH paths.
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        mission_liveness: null,
-      });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBeNull();
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBeNull();
-
-      // Reset, then payload without the key → previous value survives.
-      seedMirrorRow('processing');
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        // mission_liveness key ABSENT.
-      });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('processing');
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('processing');
-    });
-  });
-
-  // M3 (mission-class, 2026-09-03) — ``completed_at`` is stamped for
-  // every wire-terminal value, INCLUDING the mirror-receipt terminal
-  // ``settled``. The pre-M3 check only matched ``completed``/``failed``;
-  // a settled mirror slipped through and the row stayed pinned to a
-  // stale (null) ``completed_at``. These specs pin the regression so a
-  // future terminal rename cannot silently re-introduce it.
-  describe('updateJobFromSse — completed_at stamped for every wire-terminal (M3 pin)', () => {
-    function seedJob(status: import('../../models/job.model').JobStatus): string {
-      const id = `job-${status}`;
-      component.jobs.set([
-        createMockJob({ job_id: id, status, completed_at: null }),
-      ]);
-      return id;
-    }
-
-    it('stamps completed_at when status === "settled" (mirror-receipt terminal)', () => {
-      const id = seedJob('processing');
-      component.updateJobFromSse({ job_id: id, status: 'settled' });
-      const stamped = component.jobs().find(j => j.job_id === id)!.completed_at;
-      expect(stamped).not.toBeNull();
-      expect(typeof stamped).toBe('string');
-      // Sanity: ISO timestamp parses to a finite Date in the recent past.
-      expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
-    });
-
-    it('also stamps completed_at for the legacy terminals (completed/failed/cancelled)', () => {
-      // Defensive coverage — pins the legacy terminal members so a
-      // future drift back to a hard-coded subset cannot quietly drop one.
-      for (const status of ['completed', 'failed', 'cancelled'] as const) {
-        const id = seedJob('processing');
-        component.updateJobFromSse({ job_id: id, status });
-        expect(component.jobs().find(j => j.job_id === id)!.completed_at).not.toBeNull();
-      }
-    });
-
-    it('does NOT stamp completed_at for non-terminal statuses (pending/processing/paused)', () => {
-      // Negative pin — the settled-aware check must not over-reach into
-      // the live states. A pre-M3 regression that incorrectly stamped
-      // for every status would surface here.
-      for (const status of ['pending', 'processing', 'paused'] as const) {
-        const id = seedJob('pending');
-        component.updateJobFromSse({ job_id: id, status });
-        expect(component.jobs().find(j => j.job_id === id)!.completed_at).toBeNull();
-      }
-    });
-  });
+  // ── P1 MIGRATION (jobs-page-improvement) ────────────────────────────
+  // The two ``updateJobFromSse`` describes (Fix C mission_liveness
+  // propagation; M3 completed_at terminal stamping) migrated to
+  // ``jobs-page.store.spec.ts``: the patch method moved VERBATIM from
+  // this component into ``JobsPageStore.updateJobFromSse``, so the
+  // pins now drive the REAL store class (they previously drove the
+  // ``MockJobsComponent`` mirror — the production referent no longer
+  // exists on the component). Pin coverage is preserved 1:1 there,
+  // plus a new order-preservation pin (merge-order rule).
 });
