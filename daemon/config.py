@@ -489,6 +489,16 @@ class LimitsConfig(BaseSettings):
     governor_recursion_guard_enabled: bool = Field(default=True)
     max_governor_ancestors: int = Field(default=1, ge=0)
 
+    # ── S5 degenerate re-invoke cap (empty-response-guard Phase 1) ──────
+    # Max consecutive reasoning-only / <think>-tag-only AIMessages the
+    # router will re-invoke over before falling through to nudge/END
+    # (``EMPTY_DEGENERATE_REINVOKE_CAP`` in daemon/graph.py — installed
+    # at boot by the daemon entry points). Default 3 matches the
+    # LoopDetector repetition threshold. Without the cap those branches
+    # burned ~100 LLM calls until GraphRecursionError. Restart-required
+    # (the graph module global is installed once at startup).
+    empty_degenerate_reinvoke_cap: int = Field(default=3, ge=1)
+
 
 class PersistenceConfig(BaseSettings):
     """Persistence and checkpoint configuration."""
@@ -2338,6 +2348,64 @@ def _parse_proactive_str(v: str) -> bool:
     )
 
 
+def _parse_bool_switch(v: str, *, setting: str) -> bool:
+    """Parse a permissive boolean env switch value to ``bool``.
+
+    Generic sibling of :func:`_parse_proactive_str` (same accepted
+    vocabulary, same strictness) parameterized by the setting name so
+    the ValueError names the offending knob. Accepts (case-insensitive,
+    whitespace-trimmed): ``"0"``/``"false"``/``"no"``/``"off"`` →
+    ``False``; ``"1"``/``"true"``/``"yes"``/``"on"`` → ``True``. Any
+    other non-empty string raises :class:`ValueError` (boot fails loud
+    — the kill-switch convention).
+    """
+    s = v.strip().lower()
+    if s in _PROACTIVE_FALSE_BOOLS:
+        return False
+    if s in _PROACTIVE_TRUE_BOOLS:
+        return True
+    raise ValueError(
+        f"Invalid {setting} value {v!r} — expected one of "
+        f"0/false/no/off (disable) or 1/true/yes/on (enable)"
+    )
+
+
+def _resolve_empty_response_guard_enabled(env_value: str | None) -> bool:
+    """Pure resolver for the ``ENSEMBLE_EMPTY_RESPONSE_GUARD`` kill-switch.
+
+    Empty-response-guard Phase 1 item 5. Mirrors the
+    :func:`_resolve_proactive_enabled` env-first contract, minus a YAML
+    field (the knob is env-only by design — no config section exists for
+    it; documented default ON). ``load_config`` calls this and installs
+    the result into ``daemon.response_validation`` via
+    :func:`daemon.response_validation.install_empty_guard_config`, so
+    pydantic-settings never re-reads the env and a bare ``KEY=`` line in
+    .env (empty string) normalizes to the default instead of crashing
+    boot. An operator typo MUST fail boot loud (ValueError) per the
+    kill-switch convention.
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return True  # documented default ON (restart-pending activation)
+    return _parse_bool_switch(cleaned, setting="ENSEMBLE_EMPTY_RESPONSE_GUARD")
+
+
+def _resolve_empty_guard_compaction_skip(env_value: str | None) -> bool:
+    """Pure resolver for ``ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP``.
+
+    Empty-response-guard Phase 1 item 5. Default OFF = the S1 guard
+    stays ACTIVE on compaction summarizer calls (leader decision): an
+    empty summary retries then lands in the existing truncation
+    fallback. ON = the compaction call sites opt out via
+    ``response_validation.empty_guard_disabled``. Same env-only +
+    fail-loud contract as :func:`_resolve_empty_response_guard_enabled`.
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return False  # documented default OFF (guard active on compaction)
+    return _parse_bool_switch(cleaned, setting="ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP")
+
+
 def _resolve_proactive_enabled(
     yaml_value: Any,
     *,
@@ -3124,6 +3192,35 @@ def load_config(config_path: str | None = None) -> Config:
         "[VSCode] webview_csp_fix=%s (env %s)",
         config.vscode.webview_csp_fix,
         ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
+    )
+
+    # Empty-response-guard Phase 1 (item 5) — install the RESOLVED
+    # guard knobs into the response_validation module cache and emit
+    # the boot INFO lines HERE, at config-resolution time (same S13
+    # reviewer-gate rationale as the KV-ambient / vscode-CSP installs:
+    # the lines MUST stay on the boot path so a quiet-daemon grep never
+    # false-fails). Kill-switch contract: OFF restores the pre-guard
+    # pass-through byte-identically; restart-required either way (the
+    # install runs once at boot). Lazy import — config.py must not
+    # import langchain-adjacent modules at module load.
+    from .response_validation import install_empty_guard_config
+
+    _empty_guard_enabled = _resolve_empty_response_guard_enabled(
+        os.environ.get("ENSEMBLE_EMPTY_RESPONSE_GUARD")
+    )
+    _empty_guard_compaction_skip = _resolve_empty_guard_compaction_skip(
+        os.environ.get("ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP")
+    )
+    install_empty_guard_config(
+        enabled=_empty_guard_enabled,
+        compaction_skip=_empty_guard_compaction_skip,
+    )
+    logger.info(
+        "[ResponseValidation] empty_response_guard=%s "
+        "(env ENSEMBLE_EMPTY_RESPONSE_GUARD), "
+        "empty_guard_compaction_skip=%s (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)",
+        _empty_guard_enabled,
+        _empty_guard_compaction_skip,
     )
 
     # Push the non-status transient-channel pattern lists into the

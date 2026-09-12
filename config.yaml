@@ -104,6 +104,12 @@ limits:
   instance_timeout_minutes: 60
   graph_recursion_limit: 300
   llm_concurrency: 10
+  # S5 degenerate re-invoke cap (empty-response-guard Phase 1): max
+  # consecutive reasoning-only / <think>-tag-only AI responses the
+  # router re-invokes over before falling through to nudge/END
+  # (default 3, matching LoopDetector). Env override:
+  #   LIMITS_EMPTY_DEGENERATE_REINVOKE_CAP=N. Restart-required.
+  empty_degenerate_reinvoke_cap: 3
   # Governor recursive-spawn guard knobs are NOT live keys here (defaults
   # are pinned in the Config dataclass; adding active YAML keys would
   # alter resolved-config semantics). Both are env-overridable and

@@ -814,6 +814,23 @@ class InstanceManager:
         # Full contract on the accessor methods below.
         self._agent_tool_revive_counts: dict[str, int] = {}
 
+        # Empty-response streak TELEMETRY (empty-response-guard Phase 1,
+        # item 4): per-instance count of CONSECUTIVE predicate-empty,
+        # tool-call-free LLM responses observed by ``agent_node``
+        # (bumped via :meth:`note_empty_response`, reset via
+        # :meth:`reset_empty_response_streak`). RAM-only — a daemon
+        # restart resets it. NON-GATING: it never routes; the S1 raise
+        # (response_validation) and the S5 degenerate cap (graph.py)
+        # own the behavior. Same defensive cleanup in
+        # ``_cleanup_instance_state``, the ``_cleanup_stale_injections``
+        # TTL sweep, and the dead-task branch as the other RAM dicts.
+        # Coverage boundary: with the guard ON, a raising
+        # empty-as-entire-answer storm never reaches ``agent_node``'s
+        # response handling — those surface as validation-exhaustion
+        # errors; the streak measures PASSED empties (nudge flow,
+        # kill-switch-OFF storms, degenerate reasoning-only tails).
+        self._empty_response_streaks: dict[str, int] = {}
+
         # NEW: EventBus for hybrid event delivery (DB + streaming)
 
         # NEW: Source repository for source config and session mapping management
@@ -2937,6 +2954,56 @@ class InstanceManager:
         return count
 
     # ------------------------------------------------------------------
+    # Empty-response streak telemetry (empty-response-guard Phase 1, item 4)
+    # ------------------------------------------------------------------
+
+    def note_empty_response(self, instance_id: str, provider: str | None = None) -> int:
+        """Bump the consecutive-empty streak for ``instance_id`` and WARN.
+
+        Called from ``agent_node`` (``daemon/graph.py``) after a
+        predicate-empty, tool-call-free LLM response. NON-GATING by
+        contract: the return value feeds nothing, no route depends on
+        it — this is Phase-2 decision telemetry only. The
+        ``[LLM-EMPTY]`` WARN line is the operator grep surface.
+
+        Synchronous, ``await``-free (cooperative single-thread asyncio
+        atomicity — same as the other RAM dicts; do not call from a
+        thread pool).
+
+        Args:
+            instance_id: Owning instance id.
+            provider: Best-effort provider identity (base_url or model
+                name from the session LLM config) for the log line.
+
+        Returns:
+            The new consecutive-empty streak count (1 for the first
+            empty, 2 for the next, ...). Restarts reset to 0.
+        """
+        streak = self._empty_response_streaks.get(instance_id, 0) + 1
+        self._empty_response_streaks[instance_id] = streak
+        logger.warning(
+            f"[LLM-EMPTY] provider={provider or 'unknown'} streak={streak} "
+            f"instance={instance_id[:8]}..."
+        )
+        return streak
+
+    def get_empty_response_streak(self, instance_id: str) -> int:
+        """Return the current consecutive-empty streak (0 if unset).
+
+        Currently consumed by tests only; Phase-2 observability will
+        read this.
+        """
+        return self._empty_response_streaks.get(instance_id, 0)
+
+    def reset_empty_response_streak(self, instance_id: str) -> None:
+        """Clear the consecutive-empty streak (healthy output observed).
+
+        Called from ``agent_node`` when the response carries tool_calls
+        or non-empty content under the shared predicate.
+        """
+        self._empty_response_streaks.pop(instance_id, None)
+
+    # ------------------------------------------------------------------
     # Context Injection Restructure — Phase 3 (B2 fix)
     # ------------------------------------------------------------------
     # ``_context_skill_results`` is the per-instance cache of the
@@ -3952,6 +4019,12 @@ class InstanceManager:
         )
         if _explicit_loaded is not None:
             _explicit_loaded.discard(instance_id)
+        # Empty-response-guard Phase 1: drop the empty-response streak
+        # telemetry entry alongside the other RAM dicts — without this
+        # the dict leaks one entry per terminated instance.
+        _empty_streaks = getattr(self, "_empty_response_streaks", None)
+        if _empty_streaks is not None:
+            _empty_streaks.pop(instance_id, None)
         # SSE message-tracking dicts leak fix: ``_original_timestamps``
         # and ``_emitted_message_content`` are keyed by ``{instance_id}:{...}``
         # (msg_id for normal messages, ``context:{...}`` for the persistent
@@ -4113,6 +4186,12 @@ class InstanceManager:
             )
             if _explicit_loaded is not None:
                 _explicit_loaded.discard(iid)
+            # Empty-response-guard Phase 1: drop the empty-response
+            # streak telemetry entry in the TTL sweep too — mirrors the
+            # other RAM dicts so the three cleanup paths cannot drift.
+            _empty_streaks = getattr(self, "_empty_response_streaks", None)
+            if _empty_streaks is not None:
+                _empty_streaks.pop(iid, None)
 
         if stale:
             logger.info(
@@ -8967,6 +9046,12 @@ class InstanceManager:
             )
             if _explicit_loaded is not None:
                 _explicit_loaded.discard(instance_id)
+            # Empty-response-guard Phase 1: drop the empty-response
+            # streak telemetry entry alongside the dead-task cleanup —
+            # mirrors the other RAM dicts.
+            _empty_streaks = getattr(self, "_empty_response_streaks", None)
+            if _empty_streaks is not None:
+                _empty_streaks.pop(instance_id, None)
             return gate_cancelled
 
         if task is not None:

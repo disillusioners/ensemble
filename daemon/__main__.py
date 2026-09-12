@@ -254,6 +254,20 @@ def main(run_preflight: bool = True):
         f"OPENAI_REQUEST_GZIP env var controls it)"
     )
 
+    # Wire the S5 degenerate re-invoke cap (empty-response-guard Phase 1).
+    # The router reads this module global on every routing decision —
+    # installed ONCE at boot from LimitsConfig
+    # (yaml ``limits.empty_degenerate_reinvoke_cap`` /
+    # env ``LIMITS_EMPTY_DEGENERATE_REINVOKE_CAP``); restart-required.
+    import daemon.graph as _graph
+    _graph.EMPTY_DEGENERATE_REINVOKE_CAP = int(
+        config.limits.empty_degenerate_reinvoke_cap
+    )
+    logger.info(
+        f"[Config] empty_degenerate_reinvoke_cap={_graph.EMPTY_DEGENERATE_REINVOKE_CAP} "
+        f"(router stops re-invoking on reasoning-only/<think>-only empties at the cap)"
+    )
+
     # Warn-once if the removed allowlist env var is still set (no-op when
     # load_config already emitted it)
     warn_deprecated_reasoning_echo_env()

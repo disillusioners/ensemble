@@ -107,7 +107,18 @@ from .llm_error_classifier import (
     TransientAPIError,
     _truncate_error,
 )
-from .response_validation import LLMResponseValidationError
+from .response_validation import (
+    LLMResponseValidationError,
+    # Empty-response-guard Phase 1: shared emptiness predicate (S1 gate +
+    # router row-5 nudge gate) + the nudge text (single-sourced in
+    # response_validation so the validator can recognize nudge
+    # HumanMessages without importing daemon.graph — the re-export keeps
+    # ``from daemon.graph import NUDGE_MESSAGE`` working).
+    NUDGE_MARKER_KWARG,
+    NUDGE_MESSAGE,
+    get_empty_response_guard_enabled,
+    is_empty_llm_content,
+)
 from .language_detection import detect_wrong_language
 from .utils import serialize_message
 from .config import LoopBreakerConfig
@@ -2487,7 +2498,7 @@ class SessionState(MessagesState):
 
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
-    
+
     Routes:
     - "tools": LLM returned tool_calls (normal flow)
     - "agent": Ghost promise — LLM text ends with ':' but no tool_call
@@ -2496,11 +2507,50 @@ def should_continue(state: MessagesState) -> str:
     """
     messages = state["messages"]
     last_message = messages[-1]
-    
+
     # Normal case: LLM made tool calls
     if getattr(last_message, 'tool_calls', None):
         return "tools"
-    
+
+    # ── S5 degenerate re-invoke cap (empty-response-guard Phase 1) ──────
+    # Rows 2-3 (reasoning-only / <think>-tag-only) re-invoked UNBOUNDED
+    # before this cap — a provider in one of those failure modes burned
+    # ~100 LLM calls until GraphRecursionError (GRAPH_RECURSION_LIMIT).
+    # The cap counts the TRAILING degenerate AIMessages already present
+    # in state.messages (derived — zero new state) and, at the cap,
+    # refuses the re-invoke so the turn falls through to the nudge/END
+    # rows below (loud WARN + bounded burn). Accurate worst-case LLM-call
+    # bounds (corrected — the old "≤ cap+2" claim ignored the with-tool
+    # shape, where the cap fall-through lands on the row-5 nudge, the
+    # recovery rung, producing a SECOND degenerate cycle):
+    #   * no-tool storm ≤ cap+2 LLM calls (cap fall-through lands on END
+    #     via the human boundary — row-5's _has_recent_tool_result is
+    #     False);
+    #   * with-tool shape ≤ 2×cap LLM calls (cap fall-through → row-5
+    #     nudge → the injected nudge HumanMessage breaks
+    #     _has_recent_tool_result → the second degenerate cycle re-fills
+    #     the cap → END). Bounded either way, never the ~100 legacy burn.
+    # Threshold 3 matches LoopDetector's repetition threshold.
+    # Kill-switch (doc §11b): with ENSEMBLE_EMPTY_RESPONSE_GUARD=0 the
+    # router half is INERT — trailing_degenerate stays 0, so the
+    # re-invoke rows run unbounded and the WARN never fires (legacy
+    # router behavior, pinned by tests).
+    # Row 4 (ghost-promise) is deliberately NOT capped: its content is
+    # truthy real text under the shared predicate (not a degenerate
+    # empty), and the doc's L4 row owns it via S1 truthiness, not S5
+    # (planning doc §6 — only the EMPTY re-invoke branches carry caps).
+    trailing_degenerate = (
+        _count_trailing_degenerate_ai_messages(messages)
+        if get_empty_response_guard_enabled()
+        else 0
+    )
+    if trailing_degenerate >= EMPTY_DEGENERATE_REINVOKE_CAP:
+        logger.warning(
+            f"[LLM-EMPTY] degenerate re-invoke cap hit: trailing={trailing_degenerate} "
+            f"cap={EMPTY_DEGENERATE_REINVOKE_CAP} — falling through to "
+            f"nudge/END instead of re-invoking (bounded burn)"
+        )
+
     # Check if the model produced a "thinking-only" response.
     # Some models (e.g. Claude with extended thinking) emit an AIMessage that
     # carries reasoning_content but no content and no tool_calls — meaning the
@@ -2517,7 +2567,7 @@ def should_continue(state: MessagesState) -> str:
         reasoning = last_message.additional_kwargs.get('reasoning_content')
         content = getattr(last_message, 'content', '') or ''
         has_tool_calls = bool(getattr(last_message, 'tool_calls', None))
-        if reasoning and not content and not has_tool_calls:
+        if reasoning and not content and not has_tool_calls and trailing_degenerate < EMPTY_DEGENERATE_REINVOKE_CAP:
             logger.debug(f"[Graph] Thinking-only response, continuing...")
             return "agent"
 
@@ -2539,7 +2589,7 @@ def should_continue(state: MessagesState) -> str:
     if isinstance(content_str, str) and content_str.strip():
         from .utils import parse_think_tags
         cleaned, _thinking = parse_think_tags(content_str)
-        if not cleaned.strip() and not has_tool_calls:
+        if not cleaned.strip() and not has_tool_calls and trailing_degenerate < EMPTY_DEGENERATE_REINVOKE_CAP:
             logger.debug("[Graph] <think>-only response (content has no visible text), continuing...")
             return "agent"
 
@@ -2549,18 +2599,101 @@ def should_continue(state: MessagesState) -> str:
     if isinstance(content, str) and content.rstrip().endswith(':'):
         logger.warning(f"[Graph] Ghost promise detected, LLM text ends with ':': {content[:100]}...")
         return "agent"  # Re-invoke agent to produce actual tool_call
-    
+
     # Empty response after tool execution: model ACK'd but didn't continue
     # Inject a nudge so the model either continues working or finishes properly
     if _is_empty_content(content) and _has_recent_tool_result(messages):
         logger.info("[Graph] Empty response after tool execution, nudging agent to continue")
         return "nudge"
-    
+
     return END
 
 
+# S5 degenerate re-invoke cap (empty-response-guard Phase 1, item 3).
+# Default 3 — matches the LoopDetector repetition threshold. Installed
+# from ``LimitsConfig.empty_degenerate_reinvoke_cap`` at boot by the
+# daemon entry points (``daemon/__main__.py`` + ``daemon/api.py``),
+# mirroring the ``ThinkingChatOpenAI.reasoning_echo_disabled_models``
+# class-var install pattern. ``LIMITS_EMPTY_DEGENERATE_REINVOKE_CAP``
+# (env_prefix) / yaml ``limits.empty_degenerate_reinvoke_cap`` are the
+# operator surfaces; restart-required.
+EMPTY_DEGENERATE_REINVOKE_CAP: int = 3
+
+
+def _is_degenerate_ai_message(message: Any) -> bool:
+    """True for a reasoning-only or <think>-tag-only AIMessage (S5 cap class).
+
+    These are the two DEGENERATE re-invoke classes the S5 cap bounds:
+    the message carries no visible user-facing payload (empty content
+    under the shared predicate with reasoning_content attached, or
+    think-tag-only content) and no tool_calls. Ghost-promise content is
+    deliberately NOT degenerate (truthy real text — doc L4).
+    """
+    if getattr(message, 'type', None) != 'ai':
+        return False
+    if getattr(message, 'tool_calls', None):
+        return False
+    content = getattr(message, 'content', None)
+    kwargs = getattr(message, 'additional_kwargs', None) or {}
+    if kwargs.get('reasoning_content') and is_empty_llm_content(content):
+        return True
+    if isinstance(content, str) and content.strip():
+        # Local import: the check only runs when content is a non-empty string
+        # (not on the hot path), and a lazy import keeps graph.py's module-load
+        # imports untouched.
+        from .utils import parse_think_tags
+        cleaned, _thinking = parse_think_tags(content)
+        if not cleaned.strip():
+            return True
+    return False
+
+
+def _count_trailing_degenerate_ai_messages(messages: list) -> int:
+    """Count consecutive degenerate AIMessages at the tail of ``messages``.
+
+    Derived S5 counter — zero new state. In ``should_continue`` the last
+    message IS the just-produced degenerate response, so a count >= cap
+    means the current response would be the cap-th consecutive degenerate
+    re-invoke. The walk stops at the first non-degenerate AI message,
+    any tool_call-bearing message, or any non-AI message.
+    """
+    count = 0
+    for message in reversed(messages):
+        if _is_degenerate_ai_message(message):
+            count += 1
+            continue
+        break
+    return count
+
+
 def _is_empty_content(content) -> bool:
-    """Check if content is empty or whitespace-only."""
+    """Check if content is empty or whitespace-only.
+
+    Kill-switch-aware emptiness test for the router's nudge gate (the
+    SINGLE prod caller — grep-pinned by tests):
+
+    * Master switch ON (default) → shared multimodal-safe predicate
+      (``response_validation.is_empty_llm_content`` — empty-response-
+      guard Phase 1): ``None``/whitespace str → empty; list blocks empty
+      iff no non-text blocks and every text block whitespace-only
+      (``[]`` vacuously empty); every other shape fails open as
+      non-empty; think-tag-only strings deliberately NON-empty (rows
+      2-3 + the S5 cap own that class).
+    * Master switch OFF (``ENSEMBLE_EMPTY_RESPONSE_GUARD=0``, doc
+      §11(b)) → the EXACT pre-guard legacy semantics, byte-identical:
+      ``None`` → True; whitespace-only ``str`` → True; ANY list (even
+      all-whitespace text blocks) → False; every other shape (``{}``,
+      ``123``, …) → False. Pinned by tests.
+
+    The flag is the same boot-installed source of truth the S1
+    validator gates on (``response_validation.
+    get_empty_response_guard_enabled`` — installed once at boot by
+    ``load_config``; no second env read here). Kept as a named router
+    function because the router's nudge gate reads it.
+    """
+    if get_empty_response_guard_enabled():
+        return is_empty_llm_content(content)
+    # Legacy body (pre-empty-response-guard), restored verbatim when OFF.
     if content is None:
         return True
     if isinstance(content, str):
@@ -2586,8 +2719,17 @@ def _has_recent_tool_result(messages: list) -> bool:
     return False
 
 
-# Message injected when LLM returns empty after tool execution
-NUDGE_MESSAGE = "Continue with your task, or provide your final response if you are finished."
+# Message injected when LLM returns empty after tool execution.
+# Single-sourced in ``daemon/response_validation`` (imported at module
+# top) so the turn-aware S1 guard can recognize nudge HumanMessages in
+# history without importing daemon.graph; re-exported here verbatim —
+# ``from daemon.graph import NUDGE_MESSAGE`` keeps working.
+# ``nudge_node`` additionally stamps the dedicated
+# ``empty_response_nudge`` marker kwarg (alongside the pre-existing
+# ``injected_message=True`` server-authored stamp) so the §8.1
+# once-per-window nudge allowance in the validator detects the nudge
+# robustly (with a text-equality fallback for checkpoints written
+# before the marker existed).
 
 
 def nudge_node(state):
@@ -2599,12 +2741,19 @@ def nudge_node(state):
     # empty-response nudge is a SERVER-authored injection — stamped so
     # the attestation scanner's exclusion ladder classifies it as NOT a
     # real user message and it cannot reset the delegation window.
+    # ``empty_response_nudge=True`` (empty-response-guard Phase 1):
+    # dedicated marker the S1 validator's nudge allowance keys on —
+    # ``injected_message`` alone is shared with context blocks and
+    # reminders, so it cannot identify a nudge.
     return {
         'messages': [
             HumanMessage(
                 content=NUDGE_MESSAGE,
                 id=str(uuid.uuid4()),
-                additional_kwargs={"injected_message": True},
+                additional_kwargs={
+                    "injected_message": True,
+                    NUDGE_MARKER_KWARG: True,
+                },
             )
         ]
     }
@@ -3903,6 +4052,16 @@ def create_attestation_gate_node(
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "attestation_nudge": True,
+                    # C1 (2026-09-12 review): stamp server-injected like
+                    # every other injection site — the S1 turn-window
+                    # scan must skip this nudge instead of reading it as
+                    # the real user boundary (an empty response after a
+                    # deny nudge on an already-spoken turn must END
+                    # silently, not raise). The scanner's classification
+                    # is unaffected: its attestation_nudge step returns
+                    # False BEFORE reading this flag (and would return
+                    # the same False at the injected_message step).
+                    "injected_message": True,
                     "attestation_nudge_denied_count": counted_denied_count,
                 },
             )
@@ -4305,6 +4464,7 @@ def create_agent_node(
     message_tap_slot: "MessageTapSlot | None" = None,
     compaction_tap_slot: "MessageTapSlot | None" = None,
     precall_compaction_tap_slot: "MessageTapSlot | None" = None,
+    empty_streak_manager: Any = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -4395,6 +4555,15 @@ def create_agent_node(
             replacement messages after the shared seam persists a real
             compaction. ``None`` disables the tap (the hook still
             compacts); backward compatible.
+        empty_streak_manager: Optional duck-typed ``InstanceManager``
+            handle for the empty-response streak TELEMETRY
+            (empty-response-guard Phase 1, item 4 — non-gating). When
+            supplied, the node calls
+            ``note_empty_response(instance_id, provider)`` after a
+            predicate-empty, tool-call-free response and
+            ``reset_empty_response_streak(instance_id)`` on a healthy
+            one. RAM-only, WARN-only — never gates routing. ``None``
+            (tests / legacy wiring) disables the telemetry entirely.
     """
 
     # Resolve once at factory time so the closure does not rebuild a
@@ -5361,6 +5530,51 @@ def create_agent_node(
             logger.info(f'[LLM] Response: {response.content[:80]}...')
         else:
             logger.info('[LLM] Response: empty')
+
+        # ── Empty-response streak TELEMETRY (empty-response-guard Phase 1, item 4) ──
+        # Manager-scoped, RAM-only, NON-GATING (never routes — the S1
+        # raise and the S5 caps make the routing decisions; this counter
+        # only feeds Phase-2 observability/decisions). Bumped on a
+        # predicate-empty, tool-call-free response (the shared
+        # multimodal-safe predicate — reasoning-only empties count,
+        # think-tag-only content does not: it is truthy non-whitespace
+        # and the router's degenerate cap owns that class); reset on any
+        # healthy output. NOTE the coverage boundary: with the guard ON,
+        # a raising (empty-as-entire-answer) storm never reaches this
+        # line — those surface as validation-exhaustion errors instead.
+        # The streak therefore measures PASSED empties (nudge flow,
+        # kill-switch-OFF storms, degenerate reasoning-only tails).
+        # W1 (2026-09-12 review): this telemetry is INTENTIONALLY exempt
+        # from the master kill-switch — with the guard OFF, empties still
+        # bump the streak + WARN by design (observability is the point;
+        # Phase-2 needs the data even during an OFF soak). Pinned by
+        # TestEmptyResponseStreakTelemetry.test_kill_switch_off_still_
+        # bumps_streak_and_warns (tests/unit/test_empty_response_guard.py).
+        _note_empty = getattr(empty_streak_manager, 'note_empty_response', None)
+        _reset_empty = getattr(empty_streak_manager, 'reset_empty_response_streak', None)
+        if callable(_note_empty) or callable(_reset_empty):
+            _resp_has_tool_calls = bool(getattr(response, 'tool_calls', None))
+            _resp_content_empty = is_empty_llm_content(getattr(response, 'content', None))
+            if not _resp_has_tool_calls and _resp_content_empty:
+                if callable(_note_empty):
+                    try:
+                        # W1 (2026-09-12 review): telemetry is deliberately
+                        # UNGATED by the master kill-switch — OFF-mode
+                        # storms must still bump the streak + WARN (the
+                        # [LLM-EMPTY] line is the operator grep surface;
+                        # Phase-2 needs the data even during an OFF soak).
+                        # The return (new streak) is dead here on purpose.
+                        _ = _note_empty(
+                            instance_id,
+                            str(llm_config.get('base_url') or llm_config.get('model') or 'unknown'),
+                        )
+                    except Exception:  # noqa: BLE001 — telemetry must never break the turn
+                        logger.debug("[LLM-EMPTY] streak note failed", exc_info=True)
+            elif callable(_reset_empty):
+                try:
+                    _reset_empty(instance_id)
+                except Exception:  # noqa: BLE001 — telemetry must never break the turn
+                    logger.debug("[LLM-EMPTY] streak reset failed", exc_info=True)
 
         # C2: Persist the injected HumanMessages AND the LLM response
         # so the ``add_messages`` reducer writes them to the checkpoint
@@ -7657,6 +7871,10 @@ def build_instance_graph(
         # P1b — 95% pre-call compaction hook tap (distinct label,
         # constructed by the wiring helper in instance_lifecycle.py).
         precall_compaction_tap_slot=precall_compaction_tap_slot,
+        # Empty-response-guard Phase 1: RAM-only WARN streak telemetry
+        # (non-gating). Duck-typed manager handle; ``None`` (tests)
+        # disables the telemetry entirely.
+        empty_streak_manager=manager,
     ))
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)

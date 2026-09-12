@@ -48,11 +48,35 @@ class TestIsEmptyContent:
         assert _is_empty_content("  Hello  ") is False
         assert _is_empty_content(".") is False
 
-    def test_non_string_returns_false(self):
-        """Non-string types should not be considered empty."""
-        assert _is_empty_content([]) is False
+    def test_non_string_fails_open_as_non_empty(self):
+        """Unrecognized non-string types fail open as non-empty."""
+        # Empty-response-guard Phase 1 (§11b): fail-open for shapes the
+        # predicate does not understand.
         assert _is_empty_content({}) is False
         assert _is_empty_content(123) is False
+
+    def test_empty_list_is_vacuously_empty(self):
+        """Empty list content is vacuously empty under the shared predicate.
+
+        Flipped in the SAME change that introduced the shared multimodal-
+        safe predicate (empty-response-guard Phase 1, doc §10 pin-flip
+        requirement): the legacy router predicate returned False for ANY
+        list; ``[]`` is now vacuously empty (no non-text blocks, no text
+        blocks to be non-whitespace).
+        """
+        assert _is_empty_content([]) is True
+
+    def test_list_with_only_whitespace_text_blocks_is_empty(self):
+        """All-empty-text vision responses are empty (legacy defect closed)."""
+        assert _is_empty_content([{"type": "text", "text": "  "}]) is True
+
+    def test_list_with_real_text_block_is_not_empty(self):
+        assert _is_empty_content([{"type": "text", "text": "answer"}]) is False
+
+    def test_list_with_image_block_is_not_empty(self):
+        """A non-text block makes the content non-empty (L13, fail-open)."""
+        content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]
+        assert _is_empty_content(content) is False
 
 
 class TestHasRecentToolResult:
@@ -376,12 +400,21 @@ class TestNudgeNode:
         exclusion ladder (``daemon/services/attestation_scanner.py``)
         classifies it as NOT a real user message. Without the stamp
         the nudge would reset the delegation window and could relax
-        the conditional attestation gate mid-mission."""
+        the conditional attestation gate mid-mission.
+
+        Empty-response-guard Phase 1 additionally stamps the dedicated
+        ``empty_response_nudge=True`` marker so the S1 validator's §8.1
+        once-per-window nudge allowance can detect the nudge robustly
+        (``injected_message`` alone is shared with context blocks and
+        reminders)."""
         from daemon.services.attestation_scanner import is_real_user_message
 
         result = nudge_node({"messages": []})
         msg = result["messages"][0]
-        assert msg.additional_kwargs == {"injected_message": True}
+        assert msg.additional_kwargs == {
+            "injected_message": True,
+            "empty_response_nudge": True,
+        }
         assert is_real_user_message(msg) is False
 
 

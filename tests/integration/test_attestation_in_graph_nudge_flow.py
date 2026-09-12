@@ -158,8 +158,20 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
     nudges = _nudges(messages)
     assert len(nudges) == 1
     assert nudges[0].content == NUDGE_TEXT
+    # Cadbce48 (2026-09-12 review C1): the attestation-nudge HumanMessage
+    # is now stamped with ``injected_message: True`` alongside the
+    # pre-existing ``attestation_nudge`` + ``attestation_nudge_denied_count``
+    # keys (graph.py:4050-4067, attestation_nudge construction). The
+    # stamp makes the S1 turn-window scan correctly skip the deny nudge
+    # instead of reading it as a real user boundary (empty-response-guard
+    # spec §3 / scenario-d; pre-stamp the nudge silently mis-fed the
+    # scan and produced a false-positive raise on an already-spoken
+    # turn). Empty-response-nudge markers (``empty_response_nudge``) are
+    # a separate concern and are NOT stamped here — only the empty-
+    # response nudge at graph.py:2748-2759 carries that marker.
     assert nudges[0].additional_kwargs == {
         "attestation_nudge": True,
+        "injected_message": True,
         "attestation_nudge_denied_count": 1,
     }
     assert final_state["attestation_nudge_denied_count"] == 1

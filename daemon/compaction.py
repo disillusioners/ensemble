@@ -28,6 +28,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -45,6 +46,36 @@ from .config import CompactionConfig, resolve_injected_notes_absorb
 from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
+
+
+def _invoke_summarizer_llm(llm_wrapper: Any, messages: list) -> Any:
+    """Invoke the compaction summarizer LLM, honoring the guard-skip knob.
+
+    Empty-response-guard Phase 1 (``ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP``):
+    when the installed knob is ON, this enters the
+    ``response_validation.empty_guard_disabled`` scope around the invoke
+    so the S1 empty-response raise never fires for compaction calls
+    (belt-and-braces preservation of the truncation fallback, doc L11).
+    Default OFF — the guard stays ACTIVE and an empty summary retries
+    through the HA facade before falling back.
+
+    Runs ON the ``asyncio.to_thread`` worker thread (the caller passes
+    this function as the thread callable), so the ContextVar scope is
+    set on the thread that actually runs ``invoke``.
+
+    Args:
+        llm_wrapper: The HA-facade-wrapped LLM (``wrap_langchain_failover``).
+        messages: The summarizer prompt messages.
+
+    Returns:
+        Whatever the wrapped invoke returns (an AIMessage).
+    """
+    from .response_validation import empty_guard_disabled, get_empty_guard_compaction_skip
+
+    if get_empty_guard_compaction_skip():
+        with empty_guard_disabled():
+            return llm_wrapper.invoke(messages)
+    return llm_wrapper.invoke(messages)
 
 
 def _extract_text_from_content(content: str | list) -> str:
@@ -3378,9 +3409,22 @@ class ContextCompactor:
         # except in ``_summarize_chunked`` (narrowed to
         # ``(TimeoutError, asyncio.TimeoutError)`` per WS-3.4
         # O14), preserving the partial-summary path (C1).
+        #
+        # Empty-response-guard Phase 1 (L11 / ``ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP``):
+        # when the knob is ON, this summarizer opts out of the S1
+        # empty-response raise so a continuous-empty provider keeps the
+        # pre-guard behavior (single pass-through → truncation
+        # fallback) instead of burning the retry/failover budget.
+        # Default OFF = the guard stays ACTIVE: an empty summary
+        # retries (facade) and only then falls back. The scope is
+        # entered ON the worker thread (inside the ``to_thread``
+        # callable) so the ContextVar is set on the thread that
+        # actually runs ``invoke`` — propagation-proof regardless of
+        # the caller's executor flavor.
         response = await asyncio.wait_for(
             asyncio.to_thread(
-                llm_wrapper.invoke,
+                _invoke_summarizer_llm,
+                llm_wrapper,
                 [
                     SystemMessage(
                         content="You are a helpful assistant that summarizes conversations "

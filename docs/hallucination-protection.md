@@ -538,6 +538,11 @@ Every row verified in `daemon/graph.py:2488-2559`:
    (`phase1-plan.md:125` "Empty response detection raises validation error";
    `plan-overview.md:78` "empty responses … trigger retry"), the shipped
    `response_validation.py` omits it, and `decisions.md` records **no decision** to drop it.
+   ✅ **RESOLVED (empty-response-guard Phase 1, 2026-09-12):** the check shipped as
+   `EmptyLLMResponseError` at `validate_llm_response` (`daemon/response_validation.py`) with
+   the turn-aware L1–L13 exemption gate the original check lacked, plus the retroactive
+   `adr-0001-dropped-empty-content-check.md` (three latent defects, stated as hypothesis) in
+   the plan directory.
 
 ### 6.7 Live log evidence (from the incident investigation)
 
@@ -572,12 +577,27 @@ no new middleware surface. 🟡 *Seam identities 2, 4, 5 and the pairing recomme
 reconstructed from the verified path; the investigation report's exact 5-row table was beyond the
 available excerpt (Seams 1 and 3 are as named by the report).*
 
-**Secondary LLM-call surfaces with the same hole** (they invoke the LLM outside the
-classifier-wrapped agent path, so even Seam 1 alone would not cover them): the compaction
-summarizer (`daemon/compaction.py`), `LoopRepairer._summarize_loop` (`daemon/graph.py:80`), the
-attestation report judge (`daemon/services/attestation_report_judge.py`), and the watchover
-evaluator (`daemon/graph.py:6903` region). 🟡 *List reconstructed from module reading, not from
-the report excerpt.*
+**Secondary LLM-call surfaces — coverage CORRECTED (empty-response-guard Phase 1, 2026-09-12).**
+This paragraph previously claimed the surfaces below "invoke the LLM outside the
+classifier-wrapped agent path, so even Seam 1 alone would not cover them." That claim was
+**wrong for 5 of the 8 secondary surface classes** (5 wrapped + 3 uncovered = 8;
+corrected arithmetic — the earlier "6 of 7" admits no valid partition): every one of the compaction summarizer
+(`daemon/compaction.py:3383/:3395`), title generation
+(`daemon/services/title_generation.py:114`), keyword extraction
+(`daemon/services/keyword_extraction.py:387`), child-report summarization
+(`daemon/services/child_reports.py:803/:1485`), and the attestation report judge
+(`daemon/services/attestation_report_judge.py:485`) builds its client through
+`wrap_langchain_failover` (`daemon/services/llm_failover.py:617`) → `classify_llm_errors` →
+`validate_llm_response` **inside the retry scope** (`daemon/llm_error_classifier.py:911`).
+One S1 edit at the validator therefore covers the agent path AND all of them: their empty
+responses now raise `EmptyLLMResponseError` → bounded retry → failover → each site's existing
+fallback (compaction truncation, title skip-store, keyword heuristic, summarizer except-path,
+`is_complete_report=False`). **Intentionally UNCOVERED (3, by design):** the skill-embedding
+service (raw `openai` SDK — `skill_embedding_service.py`, own fallback), the watchover
+evaluator (fail-closed deny semantics on empties — independent contract, left untouched), and
+`LoopRepairer._summarize_loop` (raw `ThinkingChatOpenAI.invoke`, static-truncation fallback).
+🟡 *Original list was reconstructed from module reading, not from the report excerpt — the
+correction re-verified each wrap site by grep on 2026-09-12.*
 
 ---
 

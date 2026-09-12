@@ -22,7 +22,11 @@ Constructors under sweep:
    enqueue-lane constructor (stamped shape for the four internal
    namespaces; BARE for user / API sources — both directions pinned).
 4. ``daemon.graph.create_attestation_gate_node`` deny-path injection —
-   the attestation nudge (``attestation_nudge=True`` marker).
+   the attestation nudge (``attestation_nudge=True`` marker; post
+   empty-response-guard C1 follow-up also stamped
+   ``injected_message=True`` like every other injection constructor —
+   invisible to this sweep's classification, which returns False at
+   the ``attestation_nudge`` step before reading the injected flag).
 
 If any constructor's shape drifts so its message would (or would not)
 be classified as a real user message, a test HERE fails — this is the
@@ -90,7 +94,13 @@ class TestNudgeNodeConstructorSweep:
         msg = result["messages"][0]
         assert isinstance(msg, HumanMessage)
         assert msg.content == NUDGE_MESSAGE
-        assert msg.additional_kwargs == {"injected_message": True}
+        assert msg.additional_kwargs == {
+            "injected_message": True,
+            # Empty-response-guard Phase 1: dedicated nudge marker the S1
+            # validator's §8.1 nudge allowance keys on (injected_message
+            # alone is shared with context blocks and reminders).
+            "empty_response_nudge": True,
+        }
         assert is_real_user_message(msg) is False
 
 

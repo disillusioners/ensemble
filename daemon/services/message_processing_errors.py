@@ -129,7 +129,15 @@ def _classify_error_type(e: Exception) -> str:
         return "bad_request"
 
     # Validation errors
-    if exc_name in ("LLMResponseValidationError", "APIResponseValidationError"):
+    # Note: ``EmptyLLMResponseError`` is a subclass of ``LLMResponseValidationError``
+    # (defined in ``daemon/response_validation.py``); the name-match machinery
+    # only fires when the literal class name appears, so the subclass must be
+    # listed explicitly to route to ``validation_error``.
+    if exc_name in (
+        "LLMResponseValidationError",
+        "APIResponseValidationError",
+        "EmptyLLMResponseError",
+    ):
         return "validation_error"
 
     # Transient API errors (shouldn't reach here, but just in case)
