@@ -21,6 +21,7 @@
 
 import {
   JobsFilterState,
+  JobsViewMode,
   createEmptyJobsFilterState,
   parseJobsFilterState,
   serializeJobsFilterState,
@@ -77,6 +78,9 @@ export function createEmptyJobsUrlState(): JobsUrlState {
  *   (Angular's `queryParamMap` already collapses duplicates by
  *   the last-wins rule; the spec pins the codec's behavior).
  * * Status combos are forwarded verbatim — see GATE-COMBO-FIX.
+ * * ``include_deleted`` is tolerant: ``'true'`` AND ``'1'`` both
+ *   parse to true (hand-edited URLs must not silently drop the
+ *   flag; see ``parseJobsFilterState``).
  */
 export function parseJobsUrlState(
   raw: Record<string, string | string[] | null | undefined> | null | undefined,
@@ -115,13 +119,120 @@ export function parseJobsUrlState(
   };
 }
 
+// ── P5 rev — the one-time bare-URL migration decision (REAL logic) ────
+//
+// This is the SEED mechanism behind the view-mode/project localStorage
+// migration, extracted as a pure function so the spec drives the REAL
+// production code (the pre-rev spec tests were tautological: a
+// spec-local ``migrate`` that set a flag and asserted the flag — they
+// could not catch the dead-seed regression where the seed became
+// unreachable in the component).
+
+/** What the migration decided for this URL emit. */
+export type JobsUrlMigrationAction =
+  /** Apply ``patch`` to the store, then arm the URL cycle guard. */
+  | 'seed'
+  /** The URL carries an explicit view/job param — the URL is authoritative. */
+  | 'url-wins'
+  /** Nothing to do (already migrated, or the seed would be a no-op). */
+  | 'none';
+
+export interface JobsUrlMigrationInput {
+  /** The RAW query-param map (the parsed shape always has a view_mode). */
+  rawParams: Record<string, string | string[] | null | undefined> | null | undefined;
+  /** One-time guard — true once the migration has completed. */
+  migrationDone: boolean;
+  /** Legacy ``job-page-selected-project`` value (null when unset/unreadable). */
+  savedProjectId: string | null;
+  /** Legacy ``job-page-view-mode`` value (null when unset/unreadable). */
+  savedViewMode: string | null;
+  /** project_ids that exist right now (a stale saved id is dropped). */
+  knownProjectIds: readonly string[];
+  /** The PARSED URL filter — the seed merges INTO it (URL params survive). */
+  urlFilter: JobsFilterState;
+}
+
+export interface JobsUrlMigrationResult {
+  action: JobsUrlMigrationAction;
+  /** The store patch — non-null ONLY for ``action: 'seed'``. */
+  patch: Partial<JobsFilterState> | null;
+}
+
+/** Literal param presence on the RAW map (parsed values never answer this). */
+function rawParamPresent(
+  value: string | string[] | null | undefined,
+): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) {
+    return value.some((v) => typeof v === 'string' && v.length > 0);
+  }
+  return value.length > 0;
+}
+
+/**
+ * Decide the one-time localStorage seed for a boot URL.
+ *
+ * * ``migrationDone`` → ``'none'`` (never re-seed on a second load).
+ * * A ``view_mode`` or ``job`` param LITERALLY present on the raw map
+ *   → ``'url-wins'`` (the URL is authoritative; the caller clears the
+ *   legacy keys — the one-time cleanup). Note the PARSED state cannot
+ *   answer this: ``parseJobsFilterState`` never yields a null
+ *   ``view_mode``, which is exactly why the pre-rev seed was dead.
+ * * Otherwise (job/view params literally absent — an empty-string
+ *   param counts as absent) → ``'seed'`` with a patch that merges the
+ *   legacy keys INTO the parsed URL filter, so URL params like
+ *   ``status`` survive the seed. An explicit ``project_id`` param
+ *   beats the saved project; a saved project is dropped when it no
+ *   longer exists.
+ */
+export function resolveJobsUrlMigration(
+  input: JobsUrlMigrationInput,
+): JobsUrlMigrationResult {
+  if (input.migrationDone) {
+    return { action: 'none', patch: null };
+  }
+  const raw = input.rawParams ?? {};
+  const urlPinsSeedRelevantParams =
+    rawParamPresent(raw['view_mode']) ||
+    rawParamPresent(raw[JOB_QUERY_PARAM]);
+  if (urlPinsSeedRelevantParams) {
+    return { action: 'url-wins', patch: null };
+  }
+  const patch: Partial<JobsFilterState> = { ...input.urlFilter };
+  let seeded = false;
+  const savedProjectApplies =
+    !!input.savedProjectId &&
+    input.urlFilter.project_id === null && // an explicit URL project wins
+    input.knownProjectIds.includes(input.savedProjectId);
+  if (savedProjectApplies) {
+    patch.project_id = input.savedProjectId;
+    seeded = true;
+  }
+  const savedViewMode: JobsViewMode | null =
+    input.savedViewMode === 'queues' || input.savedViewMode === 'all-work'
+      ? input.savedViewMode
+      : null;
+  if (savedViewMode && savedViewMode !== input.urlFilter.view_mode) {
+    patch.view_mode = savedViewMode;
+    seeded = true;
+  }
+  if (!seeded) {
+    return { action: 'none', patch: null };
+  }
+  return { action: 'seed', patch };
+}
+
 /**
  * Serialize the URL state into a flat string map (query params).
  *
  * Unset values are OMITTED — the codec is stable under
- * parse→serialize. `view_mode` is ALWAYS emitted so the URL is
- * always explicit about the active projection (no implicit "queues
- * = missing key" trap on a copy-paste-URL).
+ * parse→serialize. ``view_mode`` is emitted when a FULL state is
+ * serialized — but the PAGE's writes are DIFF-DRIVEN
+ * (``diffJobsUrlState`` emits only the changed keys), so a URL
+ * without ``view_mode`` (a bare URL, or a shared partial URL) is a
+ * VALID wire state: parsing falls back to the store default
+ * (``queues``). The URL is therefore NOT "always explicit" about the
+ * active projection — the earlier docstring overclaimed.
  */
 export function serializeJobsUrlState(
   state: JobsUrlState,

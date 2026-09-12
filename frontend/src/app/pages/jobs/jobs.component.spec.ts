@@ -2287,12 +2287,17 @@ import {
   createEmptyJobsUrlState,
   JOB_QUERY_PARAM,
   JobsUrlState,
+  resolveJobsUrlMigration,
 } from './jobs-url-state.model';
 import {
   JobsFilterState,
   createEmptyJobsFilterState,
   normalizeJobsFilterState,
 } from '../../models/jobs-filter-state.model';
+import { JobsPageStore } from './jobs-page.store';
+import { of } from 'rxjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 /**
  * Mirror of the URL-binding effect's logic. The production code is
@@ -2314,28 +2319,26 @@ class UrlBindingMirror {
 
   /** Apply a URL → store resync (mirror of the page's first effect). */
   applyUrlToStore(): { changed: boolean; migrated: boolean } {
-    // Cycle guard keys MUST use the SAME suffix convention —
-    // both sides append `|${job ?? 'null'}` so the equality check
-    // is symmetric. A previous draft used `?? ''` which made the
-    // URL side bare and missed equality with the store side.
+    // P5 rev — the guard-2 predicate below MUST stay IDENTICAL to
+    // the production effect (jobs.component.ts, URL → store effect):
+    // the identity-grep pins in the mirror-parity describe read the
+    // REAL production source and assert this exact text appears
+    // verbatim (whitespace-normalized). A production drift breaks
+    // the pin; a mirror drift breaks the behavioral tests.
+    const url = this.urlState;
+    const currentStoreKey = JSON.stringify(this.storeFilter);
     const urlKey =
-      JSON.stringify(this.urlState.filter) +
-      '|' +
-      (this.urlState.job ?? 'null');
+      JSON.stringify(url.filter) + '|' + (url.job ?? 'null');
     if (urlKey === this.lastAppliedFromUrl) {
       return { changed: false, migrated: false };
     }
-    const currentStoreKey =
-      JSON.stringify(this.storeFilter) +
-      '|' +
-      (this.urlState.job ?? 'null');
-    if (urlKey === currentStoreKey) {
+    if (urlKey === currentStoreKey + '|' + (url.job ?? 'null')) {
       // Already in sync — record the equality visit.
       this.lastAppliedFromUrl = urlKey;
       return { changed: false, migrated: false };
     }
     this.lastAppliedFromUrl = urlKey;
-    this.storeFilter = this.urlState.filter;
+    this.storeFilter = url.filter;
     return { changed: true, migrated: false };
   }
 
@@ -2432,141 +2435,452 @@ describe('P5 — URL ↔ store binding (plan task 2)', () => {
     });
   });
 
-  describe('localStorage migration (plan task 2 acceptance)', () => {
-    it('legacy project + view-mode keys hydrate the store on a bare URL', () => {
-      // The mirror's applyUrlToStore represents the production
-      // cycle guard; the migration runs in the production code
-      // BEFORE the store.setFilters call (see
-      // runUrlStateMigrationIfNeeded). The test asserts the
-      // contract: a bare URL ⇒ the store is seeded from
-      // localStorage, the legacy keys are cleared, and subsequent
-      // reloads cannot re-seed.
-      let migrationFired = false;
-      let legacyKeysCleared = false;
-      // Simulate the migration hook.
-      const migrate = (binding: UrlBindingMirror, rawParams: Record<string, string | null>) => {
-        const hasAnyParams = Object.keys(rawParams).some(
-          (k) => rawParams[k] !== null && rawParams[k] !== undefined && rawParams[k] !== '',
-        );
-        if (hasAnyParams) {
-          // URL has params — no migration, but legacy keys still cleared.
-          legacyKeysCleared = true;
-          return false;
-        }
-        migrationFired = true;
-        legacyKeysCleared = true;
-        return true;
-      };
-      migrate(binding, {});
-      expect(migrationFired).toBe(true);
-      expect(legacyKeysCleared).toBe(true);
+  describe('P5 rev — REAL view-mode migration (production seed logic)', () => {
+    // These drive the REAL ``resolveJobsUrlMigration`` (imported
+    // from production jobs-url-state.model.ts) + a REAL
+    // ``JobsPageStore`` instance. The pre-rev tests here were
+    // tautological — a spec-local ``migrate`` that set a flag and
+    // asserted the flag — and could not catch the dead-seed
+    // regression (the component's seed became unreachable and every
+    // pre-P5 ``all-work`` user booted back to 'queues').
+    const VIEW_MODE_KEY = 'job-page-view-mode';
+
+    const seedInput = (
+      overrides: Partial<Parameters<typeof resolveJobsUrlMigration>[0]> = {},
+    ): Parameters<typeof resolveJobsUrlMigration>[0] => ({
+      rawParams: {},
+      migrationDone: false,
+      savedProjectId: null,
+      savedViewMode: null,
+      knownProjectIds: [],
+      urlFilter: createEmptyJobsFilterState(),
+      ...overrides,
     });
 
-    it('URL with any params ⇒ NO migration (URL wins, legacy keys still cleared)', () => {
-      const migrate = (binding: UrlBindingMirror, rawParams: Record<string, string | null>) => {
-        const hasAnyParams = Object.keys(rawParams).some(
-          (k) => rawParams[k] !== null && rawParams[k] !== undefined && rawParams[k] !== '',
-        );
-        return !hasAnyParams;
-      };
-      // URL has at least one param — even a stale `?job=` would skip migration.
-      expect(migrate(binding, { [JOB_QUERY_PARAM]: 'abc-123' })).toBe(false);
-      expect(migrate(binding, { status: 'pending' })).toBe(false);
-      // Bare URL DOES migrate.
-      expect(migrate(binding, {})).toBe(true);
+    const newRealStore = (): JobsPageStore =>
+      new JobsPageStore({
+        fetchJobs: () => of<Job[]>([]),
+        fetchWorks: () => of<Work[]>([]),
+        fetchDeferBlocked: () => of(null as unknown as DeferBlockedStatus),
+      });
+
+    it('seed `all-work` + bare URL ⇒ REAL seed decision returns all-work; REAL store boots all-work', () => {
+      // jsdom localStorage: the pre-P5 user's persisted choice.
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const result = resolveJobsUrlMigration(
+        seedInput({ savedViewMode: localStorage.getItem(VIEW_MODE_KEY) }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch!.view_mode).toBe('all-work');
+      // Applying the REAL patch to a REAL store boots all-work —
+      // the exact user-facing regression this fix restores.
+      const store = newRealStore();
+      expect(store.filterState().view_mode).toBe('queues');
+      store.setFilters(result.patch!);
+      expect(store.filterState().view_mode).toBe('all-work');
+    });
+
+    it('seed merges INTO the parsed URL filter — URL params (status etc.) survive the seed', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const urlFilter = normalizeJobsFilterState({ status: ['failed'] });
+      const result = resolveJobsUrlMigration(
+        seedInput({
+          savedViewMode: localStorage.getItem(VIEW_MODE_KEY),
+          urlFilter,
+        }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch).toEqual({ ...urlFilter, view_mode: 'all-work' });
+    });
+
+    it('URL pins view_mode ⇒ URL WINS (no seed); `?job=` present also wins; empty `?job=` counts as bare', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const saved = localStorage.getItem(VIEW_MODE_KEY);
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({ savedViewMode: saved, rawParams: { view_mode: 'queues' } }),
+        ).action,
+      ).toBe('url-wins');
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedViewMode: saved,
+            rawParams: { [JOB_QUERY_PARAM]: 'abc-123' },
+          }),
+        ).action,
+      ).toBe('url-wins');
+      // An empty-string param is LITERALLY absent — the seed fires.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedViewMode: saved,
+            rawParams: { [JOB_QUERY_PARAM]: '' },
+          }),
+        ).action,
+      ).toBe('seed');
+    });
+
+    it('second load (migrationDone) ⇒ NO re-seed — one-time migration contract', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const result = resolveJobsUrlMigration(
+        seedInput({
+          migrationDone: true,
+          savedViewMode: localStorage.getItem(VIEW_MODE_KEY),
+        }),
+      );
+      expect(result.action).toBe('none');
+      expect(result.patch).toBeNull();
+    });
+
+    it('legacy project key seeds ONLY when the URL carries no explicit project (stale id dropped)', () => {
+      const result = resolveJobsUrlMigration(
+        seedInput({ savedProjectId: 'proj-1', knownProjectIds: ['proj-1'] }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch!.project_id).toBe('proj-1');
+      // Stale (deleted) saved project is dropped — no seed.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({ savedProjectId: 'gone', knownProjectIds: ['proj-1'] }),
+        ).action,
+      ).toBe('none');
+      // An explicit URL project beats the saved one.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedProjectId: 'proj-1',
+            knownProjectIds: ['proj-1'],
+            urlFilter: normalizeJobsFilterState({ project_id: 'proj-2' }),
+          }),
+        ).action,
+      ).toBe('none');
+    });
+
+    it('saved view_mode equal to the URL default ⇒ no-op (action none, no pointless write)', () => {
+      expect(
+        resolveJobsUrlMigration(seedInput({ savedViewMode: 'queues' })).action,
+      ).toBe('none');
     });
   });
 });
 
-describe('P5 — `?job=<id>` deep-link lifecycle (plan task 3)', () => {
+describe('P5 — `?job=<id>` deep-link lifecycle (plan task 3, rev guards)', () => {
   /**
-   * Mirror of the deep-link effect: given a urlDeepLinkJobId, the
-   * rows datasets, and a fetch stub, decide the three terminal
-   * states (in-window open / fetch-200 / fetch-404). The behavioral
-   * pins below exercise every branch.
+   * Mirror of the deep-link effect — P5 rev models the DEDUP GUARDS
+   * faithfully (``lastDeepLinkParam`` epoch + ``lastDeepLinkResolved``
+   * + ``lastDeepLinkFetched``, the 🟡7 drawerOpen()-less resolved
+   * guard, the 🟡3 stale-response guards) with a DEFERRED fetch so
+   * tests can navigate the URL between the effect run and the GET
+   * landing. The pre-rev ``resolveDeepLink`` function modeled none of
+   * the guards — it could not see the stale-reopen or dead-re-entry
+   * races at all.
    */
-  function resolveDeepLink(
-    urlJobId: string | null,
-    inJobs: { job_id: string }[],
-    inWorks: { work_id: string }[],
-    fetchStub: (id: string) => 'ok' | 'not-found',
-  ): { outcome: 'in-window-jobs' | 'in-window-works' | 'fetched' | 'missing' | 'none'; jobId: string | null } {
-    if (!urlJobId) return { outcome: 'none', jobId: null };
-    const inJobsHit = inJobs.find((j) => j.job_id === urlJobId);
-    if (inJobsHit) return { outcome: 'in-window-jobs', jobId: urlJobId };
-    const inWorksHit = inWorks.find((w) => w.work_id === urlJobId);
-    if (inWorksHit) return { outcome: 'in-window-works', jobId: urlJobId };
-    const fetchResult = fetchStub(urlJobId);
-    if (fetchResult === 'ok') return { outcome: 'fetched', jobId: urlJobId };
-    return { outcome: 'missing', jobId: urlJobId };
+  class DeepLinkEffectMirror {
+    /** The URL `?job=` value (mutable — Back/forward/close change it). */
+    urlJobId: string | null = null;
+    jobs: { job_id: string }[] = [];
+    works: { work_id: string }[] = [];
+    /** fetch outcome per id — missing entries default to 'ok'. */
+    fetchResults = new Map<string, 'ok' | 'not-found'>();
+    fetchCalls: string[] = [];
+    // Guards (mirror the production fields).
+    lastParam: string | null = null;
+    lastResolved: string | null = null;
+    lastFetched: string | null = null;
+    // Visible state.
+    drawerOpen = false;
+    openedWith: string | null = null;
+    missingJobId: string | null = null;
+    // The deferred GET responses (multiple subscriptions can be in
+    // flight — landed FIFO by the test).
+    private pendingResponses: Array<() => void> = [];
+
+    /** Mirror of the production effect body (P5 rev predicates). */
+    run(): void {
+      const jobId = this.urlJobId;
+      // 🟡4/🟡7 — epoch reset on ANY param change (incl. → null).
+      if (jobId !== this.lastParam) {
+        this.lastParam = jobId;
+        this.lastResolved = null;
+        this.lastFetched = null;
+      }
+      if (!jobId) {
+        return;
+      }
+      // 🟡7 — drawerOpen() half DROPPED from the resolved guard.
+      if (this.lastResolved === jobId) {
+        return;
+      }
+      if (this.lastFetched === jobId) {
+        return;
+      }
+      const inJobs = this.jobs.find((j) => j.job_id === jobId);
+      if (inJobs) {
+        this.lastResolved = jobId;
+        this.open(jobId);
+        return;
+      }
+      const inWorks = this.works.find((w) => w.work_id === jobId);
+      if (inWorks) {
+        this.lastResolved = jobId;
+        this.open(jobId);
+        return;
+      }
+      this.lastFetched = jobId;
+      const id = jobId;
+      this.fetchCalls.push(id);
+      const outcome = this.fetchResults.get(id) ?? 'ok';
+      this.pendingResponses.push(() => {
+        if (outcome === 'ok') {
+          // 🟡3 — stale next: URL moved on ⇒ no reopen.
+          if (this.urlJobId !== id) return;
+          this.lastResolved = id;
+          this.open(id);
+        } else {
+          // 🟡3 + 🟢8 — stale error: same guard, collapsed arms.
+          if (this.urlJobId !== id) return;
+          this.missingJobId = id;
+          this.drawerOpen = true;
+        }
+      });
+    }
+
+    /** Land the OLDEST in-flight GET response (next OR error arm). */
+    landResponse(): void {
+      const respond = this.pendingResponses.shift();
+      respond?.();
+    }
+
+    private open(id: string): void {
+      this.openedWith = id;
+      this.drawerOpen = true;
+      this.missingJobId = null;
+    }
   }
 
+  const mirrorWith = (
+    init: Partial<DeepLinkEffectMirror> = {},
+  ): DeepLinkEffectMirror => {
+    const mirror = new DeepLinkEffectMirror();
+    Object.assign(mirror, init);
+    return mirror;
+  };
+
   it('in-window: jobs dataset has the deep-linked row ⇒ open drawer, NO fetch', () => {
-    let fetchCalls = 0;
-    const result = resolveDeepLink(
-      'job-1',
-      [{ job_id: 'job-1' }],
-      [],
-      () => { fetchCalls++; return 'ok'; },
-    );
-    expect(result.outcome).toBe('in-window-jobs');
-    expect(result.jobId).toBe('job-1');
-    expect(fetchCalls).toBe(0);
+    const mirror = mirrorWith({ urlJobId: 'job-1', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-1');
+    expect(mirror.drawerOpen).toBe(true);
+    expect(mirror.fetchCalls).toHaveLength(0);
   });
 
   it('in-window: works dataset has the deep-linked row (all-work view) ⇒ open drawer, NO fetch', () => {
-    let fetchCalls = 0;
-    const result = resolveDeepLink(
-      'job-1',
-      [],
-      [{ work_id: 'job-1' }],
-      () => { fetchCalls++; return 'ok'; },
+    const mirror = mirrorWith({ urlJobId: 'job-1', works: [{ work_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-1');
+    expect(mirror.drawerOpen).toBe(true);
+    expect(mirror.fetchCalls).toHaveLength(0);
+  });
+
+  it('out-of-window: dataset miss ⇒ fetch via JobService.getJob, 200 ⇒ open drawer', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-2', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.fetchCalls).toEqual(['job-2']);
+    mirror.landResponse();
+    expect(mirror.openedWith).toBe('job-2');
+    expect(mirror.drawerOpen).toBe(true);
+  });
+
+  it('out-of-window: dataset miss ⇒ fetch, 404 ⇒ honest "job not found" (drawer stays open)', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'job-3',
+      fetchResults: new Map([['job-3', 'not-found' as const]]),
+    });
+    mirror.run();
+    expect(mirror.fetchCalls).toEqual(['job-3']);
+    mirror.landResponse();
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.missingJobId).toBe('job-3');
+    expect(mirror.drawerOpen).toBe(true);
+  });
+
+  it('no deep-link (URL bare of `?job=`) ⇒ no-op, no fetch', () => {
+    const mirror = mirrorWith({ urlJobId: null });
+    mirror.run();
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+    expect(mirror.fetchCalls).toHaveLength(0);
+  });
+
+  it('dataset refresh re-runs the effect while the SAME param resolves ⇒ no refetch, no re-open', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    mirror.run(); // dataset emit, same param
+    mirror.run();
+    expect(mirror.fetchCalls).toHaveLength(0);
+    expect(mirror.openedWith).toBe('job-1');
+  });
+
+  it('RACE-A (🟡3): stale 200 after close ⇒ drawer does NOT reopen', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1' });
+    mirror.run(); // GET in flight
+    mirror.urlJobId = null; // user closed the drawer (URL stripped)
+    mirror.run(); // close cycle clears the guards
+    mirror.landResponse(); // the stale 200 lands
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+  });
+
+  it('RACE-A variant (🟡3): stale 404 after close ⇒ drawer does NOT reopen with the honest-missing card', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'job-1',
+      fetchResults: new Map([['job-1', 'not-found' as const]]),
+    });
+    mirror.run();
+    mirror.urlJobId = 'job-2'; // Back to a different id
+    mirror.run();
+    mirror.landResponse(); // job-1's 404 lands while ?job=job-2
+    expect(mirror.missingJobId).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+  });
+
+  it('RACE-B (🟡4): 404 then Back to the same id ⇒ RE-RESOLVES (fetch fires again)', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'dead-id',
+      fetchResults: new Map([['dead-id', 'not-found' as const]]),
+    });
+    mirror.run();
+    mirror.landResponse();
+    expect(mirror.missingJobId).toBe('dead-id');
+    // Back past the deep link, then Back to the same dead id.
+    mirror.urlJobId = null;
+    mirror.run();
+    mirror.urlJobId = 'dead-id';
+    mirror.run();
+    // The pre-rev guards stayed armed forever — this fetch would
+    // never have fired and re-entry was a silent no-op.
+    expect(mirror.fetchCalls).toEqual(['dead-id', 'dead-id']);
+    mirror.landResponse();
+    expect(mirror.missingJobId).toBe('dead-id');
+  });
+
+  it('RACE-C (🟡7): Back ?job=y → ?job=x re-opens x (drawer follows the URL, no drawerOpen() bail)', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-x', jobs: [{ job_id: 'job-x' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-x');
+    // Navigate to y (in-window too), then Back to x.
+    mirror.urlJobId = 'job-y';
+    mirror.jobs.push({ job_id: 'job-y' });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-y');
+    mirror.urlJobId = 'job-x';
+    mirror.run();
+    // The pre-rev `lastDeepLinkResolved === jobId && drawerOpen()`
+    // guard bailed here (drawer was open showing y) — URL/visible
+    // divergence. The epoch reset + dropped drawerOpen() half fix it.
+    expect(mirror.openedWith).toBe('job-x');
+  });
+});
+
+// ── P5 rev — mirror-parity identity pins (spec ↔ production) ──────────
+//
+// Mirror-parity pin pattern: the UrlBindingMirror above MUST compute
+// the SAME key conventions as the production URL → store effect. The
+// pre-rev mirror's guard-2 used `urlState.job ?? 'null'` while
+// production hardcoded `'|null'` — the parity drifted SILENTLY (both
+// suites stayed green against different predicates). These pins read
+// the REAL production source and assert the mirrored predicate text
+// appears verbatim (whitespace-normalized): a production drift breaks
+// the pin, a mirror drift breaks the behavioral tests above.
+describe('P5 rev — identity-grep pins (mirror predicate ↔ production source)', () => {
+  const componentSource = readFileSync(join(__dirname, 'jobs.component.ts'), 'utf-8');
+  const norm = (s: string) => s.replace(/\s+/g, ' ');
+  const production = norm(componentSource);
+
+  it('guard-1 urlKey assembly: mirror key convention appears VERBATIM in production', () => {
+    const mirrored = norm(
+      `const urlKey = JSON.stringify(url.filter) + '|' + (url.job ?? 'null');`,
     );
-    expect(result.outcome).toBe('in-window-works');
-    expect(result.jobId).toBe('job-1');
-    expect(fetchCalls).toBe(0);
+    expect(production).toContain(mirrored);
   });
 
-  it('out-of-window: jobs dataset miss ⇒ fetch via JobService.getJob, 200 ⇒ open drawer', () => {
-    let fetchCalls = 0;
-    const result = resolveDeepLink(
-      'job-2',
-      [{ job_id: 'job-1' }], // in-window has job-1, NOT job-2
-      [],
-      (id) => { fetchCalls++; return id === 'job-2' ? 'ok' : 'not-found'; },
+  it('guard-2: full-key compare (incl. job suffix) appears VERBATIM in production', () => {
+    const mirrored = norm(
+      `if (urlKey === currentStoreKey + '|' + (url.job ?? 'null')) {`,
     );
-    expect(result.outcome).toBe('fetched');
-    expect(result.jobId).toBe('job-2');
-    expect(fetchCalls).toBe(1);
+    expect(production).toContain(mirrored);
+    // The pre-rev dead-predicate literal is GONE.
+    expect(production).not.toContain(norm(`currentStoreKey + '|null'`));
   });
 
-  it('out-of-window: jobs dataset miss ⇒ fetch via JobService.getJob, 404 ⇒ honest "job not found"', () => {
-    let fetchCalls = 0;
-    const result = resolveDeepLink(
-      'job-3',
-      [],
-      [],
-      () => { fetchCalls++; return 'not-found'; },
+  it('seed ordering: runUrlStateMigrationIfNeeded runs BEFORE the pre-arm early-return (the 🔴1 fix)', () => {
+    const seedIdx = production.indexOf(norm(`this.runUrlStateMigrationIfNeeded()`));
+    const preArmIdx = production.indexOf(norm(`if (urlKey === this.lastAppliedFromUrl) {`));
+    expect(seedIdx).toBeGreaterThan(-1);
+    expect(preArmIdx).toBeGreaterThan(-1);
+    expect(seedIdx).toBeLessThan(preArmIdx);
+    // And the seed APPLIES → arm + bail (the clobber prevention).
+    expect(production).toContain(
+      norm(`if (!this.urlMigrationDone() && this.runUrlStateMigrationIfNeeded()) {
+        this.lastAppliedFromUrl = urlKey;
+        return;
+      }`),
     );
-    expect(result.outcome).toBe('missing');
-    expect(result.jobId).toBe('job-3');
-    expect(fetchCalls).toBe(1);
   });
 
-  it('no deep-link (URL bare of `?job=`) ⇒ no-op', () => {
-    const result = resolveDeepLink(null, [], [], () => 'ok');
-    expect(result.outcome).toBe('none');
-    expect(result.jobId).toBeNull();
+  it('🟡5 — the view-mode snapshot precedes setFilters (the dead refresh branch revives)', () => {
+    const snapIdx = production.indexOf(norm(`const beforeViewMode = this.viewMode();`));
+    const setFiltersIdx = production.indexOf(norm(`this.store.setFilters(url.filter);`));
+    expect(snapIdx).toBeGreaterThan(-1);
+    expect(setFiltersIdx).toBeGreaterThan(snapIdx);
   });
 
-  it('close-drawer cycle: closing clears `?job=` from the URL (URL stays consistent)', () => {
-    // The production onCloseDrawer handler calls clearUrlDeepLink
-    // when the URL still has the deep-link. The mirror asserts the
-    // intent: a close-drawer followed by a URL parse yields null.
-    let urlAfterClose: JobsUrlState = parseJobsUrlState({ job: 'job-1' });
-    expect(urlAfterClose.job).toBe('job-1');
-    // Simulate the close path: clearUrlDeepLink writes job=null.
-    urlAfterClose = parseJobsUrlState({ ...serializeJobsUrlState(urlAfterClose), job: '' });
-    expect(urlAfterClose.job).toBeNull();
+  it('🟡3 — the stale-response guard guards BOTH subscribe arms', () => {
+    const guard = norm(`if (this.urlDeepLinkJobId() !== jobId) {`);
+    const count = production.split(guard).length - 1;
+    expect(count).toBeGreaterThanOrEqual(2);
+  });
+
+  it('🟡4/🟡7 — the epoch reset owns the dedup guards; the drawerOpen() half is gone', () => {
+    expect(production).toContain(norm(`if (jobId !== this.lastDeepLinkParam) {`));
+    expect(production).toContain(norm(`this.lastDeepLinkResolved = null;`));
+    expect(production).toContain(norm(`this.lastDeepLinkFetched = null;`));
+    // The pre-rev guard shape is GONE.
+    expect(production).not.toContain(
+      norm(`if (this.lastDeepLinkResolved === jobId && this.drawerOpen()) {`),
+    );
+  });
+
+  it('🟢8 — the dead 404/other-error arm split is collapsed (no status check)', () => {
+    expect(production).not.toContain(norm(`const status = err?.status ?? null;`));
+    expect(production).toContain(norm(`this.deepLinkMissingJobId.set(jobId);`));
+  });
+
+  it('🟢10 — the bare `?job=` strip rides the store → URL effect', () => {
+    const stripIdx = production.indexOf(norm(`typeof rawJobParam === 'string' && rawJobParam === ''`));
+    expect(stripIdx).toBeGreaterThan(-1);
+    expect(production).toContain(norm(`this.clearUrlDeepLink();`));
+  });
+
+  it('second-load cleanup: markUrlMigrationDone clears BOTH legacy keys (regex pin)', () => {
+    expect(componentSource).toMatch(
+      /private markUrlMigrationDone\(\): void \{\s*this\.urlMigrationDone\.set\(true\);\s*this\.clearLegacyLocalStorageKeys\(\);/,
+    );
+    expect(componentSource).toMatch(/localStorage\.removeItem\(this\.VIEW_MODE_KEY\)/);
+    expect(componentSource).toMatch(/localStorage\.removeItem\(this\.STORAGE_KEY\)/);
+  });
+
+  it('🔴1 — the toggle stops re-writing the legacy key once migration is done', () => {
+    expect(componentSource).toMatch(
+      /if \(!this\.urlMigrationDone\(\)\) \{\s*try \{\s*localStorage\.setItem\(this\.VIEW_MODE_KEY, mode\);/,
+    );
+  });
+
+  it('the dead tryRestoreViewMode seed site is deleted (root-cause removal, not symptom patch)', () => {
+    // Pins target the DEFINITIONS (doc comments may reference the
+    // retired names when explaining the fix).
+    expect(production).not.toContain(norm(`private tryRestoreViewMode(): void {`));
+    expect(production).not.toContain(norm(`this.tryRestoreViewMode();`));
+    expect(production).not.toContain(norm(`viewModeRestored = true;`));
   });
 });

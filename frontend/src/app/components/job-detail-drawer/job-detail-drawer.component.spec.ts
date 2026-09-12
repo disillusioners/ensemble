@@ -1,4 +1,6 @@
 import { signal, computed } from '@angular/core';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Job, JobStatus, JobSource, MissionLivenessChip, missionLivenessChip } from '../../models/job.model';
 import { createMockJob } from '../../testing/job-test-helpers';
 
@@ -632,5 +634,33 @@ describe('JobDetailDrawerComponent Logic', () => {
       // Case-insensitive hex form is what the chip carries through the
       // template binding into <app-mission-liveness-chip>.
     });
+  });
+});
+
+// ── P5 rev — REAL template gate source pins (mirror ↔ production parity) ──
+//
+// The behavior pins above drive a spec-local mock (the template gates
+// are not exposed as getters), so they can only prove the MOCK is
+// self-consistent. These source pins read the REAL template text and
+// assert the mirrored predicates' gate expressions — plus the honest
+// copy — appear verbatim: a template drift breaks these pins even
+// though the mock keeps passing (the mirror-parity pin pattern).
+describe('P5 rev — REAL template gate source pins (job-detail-drawer.component.html)', () => {
+  const templateSource = readFileSync(
+    join(__dirname, 'job-detail-drawer.component.html'),
+    'utf-8',
+  );
+
+  it('Result gate: the REAL template gates Result on result_summary PRESENCE (not status)', () => {
+    expect(templateSource).toContain('@if (job().result_summary)');
+  });
+
+  it('Message gates: @if (job().message) with the report-kind @else if arm present', () => {
+    expect(templateSource).toContain('@if (job().message)');
+    expect(templateSource).toContain("@else if (job().kind === 'report')");
+  });
+
+  it('honest copy: the report-kind empty-message text is verbatim', () => {
+    expect(templateSource).toContain('Report rows do not carry message content.');
   });
 });

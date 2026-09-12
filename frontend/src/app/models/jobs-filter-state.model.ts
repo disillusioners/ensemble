@@ -276,6 +276,10 @@ export function serializeJobsFilterState(
  * Parse a flat string map (query params) back into a valid
  * ``JobsFilterState``. Unknown values are tolerated and dropped per
  * ``normalizeJobsFilterState`` — a hand-edited URL must never throw.
+ *
+ * ``include_deleted`` is tolerant: ``'true'`` AND ``'1'`` both parse
+ * to true (the serializer emits ``'true'``; ``'1'`` is accepted for
+ * hand-edited/aliased URLs).
  */
 export function parseJobsFilterState(
   raw: Record<string, string | null | undefined> | null | undefined,
@@ -295,7 +299,8 @@ export function parseJobsFilterState(
     agent_id: raw['agent_id'] ?? undefined,
     project_id: raw['project_id'] ?? undefined,
     queue_id: raw['queue_id'] ?? undefined,
-    include_deleted: raw['include_deleted'] === 'true',
+    include_deleted:
+      raw['include_deleted'] === 'true' || raw['include_deleted'] === '1',
     view_mode: asJobsViewMode((raw['view_mode'] ?? '').trim()) ?? base.view_mode,
   });
 }

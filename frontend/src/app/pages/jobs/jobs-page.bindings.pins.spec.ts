@@ -1001,8 +1001,16 @@ describe('P5 — URL binding + deep-link template↔component binding pins', () 
     // Migration hook — runs on the first non-matching URL emit.
     expect(componentSrc).toMatch(/this\.runUrlStateMigrationIfNeeded\(\)/);
     // Active-leg fetch — the store's setFilters is filter-only;
-    // the URL restore path triggers the wire fetch.
-    expect(componentSrc).toMatch(/this\.refreshActiveLegsForFilter\(url\.filter\)/);
+    // the URL restore path triggers the wire fetch. P5 rev (🟡5):
+    // the view-mode snapshot is taken by the CALLER before
+    // setFilters (a post-write snapshot made the view-mode branch
+    // dead) and passed in.
+    expect(componentSrc).toMatch(
+      /const beforeViewMode = this\.viewMode\(\);\s*this\.store\.setFilters\(url\.filter\);\s*[\s\S]{0,400}?this\.refreshActiveLegsForFilter\(url\.filter, beforeViewMode\)/,
+    );
+    expect(componentSrc).toMatch(
+      /private refreshActiveLegsForFilter\(\s*filter: ReturnType<typeof this\.store\.filterState>,\s*beforeViewMode: JobsViewMode,/,
+    );
   });
 
   it('store → URL effect navigates with diff + merge + replaceUrl (no history pollution)', () => {
@@ -1038,9 +1046,12 @@ describe('P5 — URL binding + deep-link template↔component binding pins', () 
     // and flips the missing flag so the template renders the
     // honest empty card. The error branch lives inside the
     // ``jobService.getJob`` subscribe callback (window set wide
-    // enough to cover the status-conditional block).
+    // enough to cover the missing-flag block). P5 rev (🟢8): the
+    // identical 404/other-error arms are collapsed (the ``status``
+    // check was dead) and the 🟡3 stale-response guard fronts the
+    // honest-missing flip.
     expect(componentSrc).toMatch(
-      /error: \(err\) => \{[\s\S]{0,800}?this\.deepLinkMissingJobId\.set\(jobId\)[\s\S]{0,200}?this\.drawerOpen\.set\(true\)/,
+      /error: \(\) => \{[\s\S]{0,800}?this\.deepLinkMissingJobId\.set\(jobId\)[\s\S]{0,200}?this\.drawerOpen\.set\(true\)/,
     );
     // In-flight flag flips on entry (the fetch guard) + clears on
     // completion (both success + error branches).
