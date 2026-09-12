@@ -56,6 +56,7 @@ import {
   RenderGuardOutcome,
   WindowItem,
   renderGuard,
+  toBoundedWindowItems,
   toWindowItems,
 } from './jobs-window.model';
 import {
@@ -75,6 +76,7 @@ import {
   groupJobs,
   groupMetaLine,
 } from '../../models/jobs-grouping.model';
+import { pickEnrichmentTargets } from '../../models/jobs-enrichment.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -232,11 +234,19 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   /**
    * G1 port (panel :145-154) — group ids the user has MANUALLY
-   * toggled (chevron click, ArrowRight / ArrowLeft). The auto-seed
-   * effect only seeds UNTOUCHED first-2-live group ids; once an id
-   * is touched, the auto-seed NEVER un-toggles or re-expands it,
-   * regardless of how the live-group set drifts across polls. The
-   * user's choice wins.
+   * toggled (chevron button click; native ``Enter`` / ``Space`` on
+   * the button activate the same path). The auto-seed effect only
+   * seeds UNTOUCHED first-2-live group ids; once an id is touched,
+   * the auto-seed NEVER un-toggles or re-expands it, regardless of
+   * how the live-group set drifts across polls. The user's choice
+   * wins.
+   *
+   * Note (P3 review — doc-truth): the earlier draft of this comment
+   * mentioned ``ArrowRight / ArrowLeft`` as keyboard surfaces; no
+   * such wiring exists. The real surface is the chevron ``<button>``
+   * + native button-key activation (``Enter`` / ``Space``). The
+   * ``aria-expanded`` attribute on the button is the ARIA hint for
+   * the group state.
    */
   readonly userTouchedGroupIds = signal<Set<string>>(new Set());
 
@@ -252,25 +262,70 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly titleOverrides = signal<Map<string, string>>(new Map());
 
   /**
-   * Helper: pick the FIRST MAX_TITLE_ENRICHMENT_FETCHES group keys
-   * that are (a) eligible for enrichment (NOT the no-context
-   * fallback group) AND (b) not yet enriched. Returns the keys in
-   * display order so the cap is honored even when many groups are
-   * eligible.
+   * P3 review — title-enrichment cascade prevention. Plain
+   * ``Set`` (NOT a signal) so writes don't self-trigger the
+   * enrichment effect. The effect reads ``jobGroups()`` and
+   * ``titleOverrides()`` (those are the cascade triggers); the
+   * sets below are mutated as a side-effect of subscribe / next
+   * / error and cleared by the dataset-change effect above.
+   *
+   * * ``attemptedKeys`` — keys we've fired a GET for in the
+   *   current dataset generation. Cleared on every poll (a new
+   *   jobGroups reference means the dataset is fresh and the
+   *   cap is available again). The picker filters against it
+   *   so the effect never re-attempts a key in the same
+   *   cascade.
+   * * ``inFlightKeys`` — keys with an outstanding subscribe.
+   *   Cleared on every poll (orphan in-flight entries from a
+   *   destroyed group must be cleared so the picker doesn't
+   *   dedup against a request that will never resolve). The
+   *   picker filters against it so two concurrent effect runs
+   *   can't fire duplicate GETs for the same key.
+   * * ``failedKeys`` — keys that have failed at least once.
+   *   PERSISTS across polls (no infinite retry). A failed
+   *   enrichment keeps the fallback title for the lifetime of
+   *   the page; the picker filters against it.
+   */
+  private readonly attemptedKeys = new Set<string>();
+  private readonly inFlightKeys = new Set<string>();
+  private readonly failedKeys = new Set<string>();
+
+  /**
+   * Dataset-change effect — clears the per-generation dedup state
+   * (``attemptedKeys``, ``inFlightKeys``) when the jobGroups
+   * REFERENCE changes (a poll brought new data). ``failedKeys``
+   * persists: the spec's "no infinite retry across polls" rule.
+   *
+   * Tracked on ``jobGroups()`` only — reading titleOverrides here
+   * would re-clear the dedup state on every successful fetch,
+   * which is exactly the cascade the picker prevents.
+   */
+  private readonly jobGroupsVersion = computed(() => this.jobGroups());
+
+  /**
+   * Helper: pick the FIRST ``MAX_TITLE_ENRICHMENT_FETCHES``
+   * group keys that are eligible for enrichment. Delegates to
+   * the pure ``pickEnrichmentTargets`` helper in
+   * ``jobs-enrichment.model.ts`` (the policy lives there so it
+   * is unit-testable as a plain function). The component just
+   * wires the dedup-state Sets as parameters.
+   *
+   * The picker enforces:
+   *
+   * * child-bound (missionId null) groups are never picked;
+   * * the no-context fallback group is never picked;
+   * * already-enriched groups (success-side) are skipped;
+   * * attempted / in-flight / failed keys are skipped.
    */
   private pickEnrichmentTargets(): readonly string[] {
-    const overrides = this.titleOverrides();
-    const targets: string[] = [];
-    for (const g of this.jobGroups()) {
-      if (g.key === NO_MISSION_CONTEXT_KEY) continue; // never enrich the fallback
-      if (overrides.has(g.key)) continue; // already enriched
-      // Need an id to enrich — group.missionId OR group.instanceId
-      // (the coalesced key).
-      if (!g.key) continue;
-      targets.push(g.key);
-      if (targets.length >= MAX_TITLE_ENRICHMENT_FETCHES) break;
-    }
-    return targets;
+    return pickEnrichmentTargets(
+      this.jobGroups(),
+      this.attemptedKeys,
+      this.inFlightKeys,
+      this.failedKeys,
+      this.titleOverrides(),
+      MAX_TITLE_ENRICHMENT_FETCHES,
+    );
   }
 
   /**
@@ -319,6 +374,15 @@ export class JobsComponent implements OnInit, OnDestroy {
    * is pure given the inputs; the component memoizes by reference
    * equality on the underlying arrays so it doesn't fire on every
    * change-detection pass.
+   *
+   * Note (P3 review — guard honesty): ``windowItems`` is the
+   * UNBOUNDED projection. The render guard (``renderGuardOutcome``
+   * below) uses ``toBoundedWindowItems`` directly against the
+   * groups + expansion set so it can slice on GROUP boundaries
+   * (an expanded group is rendered whole or omitted whole — never
+   * a header without its rows, which would be the silent-slice
+   * orphan case the legacy ``renderGuard`` would produce when fed
+   * the flat ``windowItems``).
    */
   readonly windowItems = computed<readonly WindowItem[]>(() =>
     toWindowItems(
@@ -329,8 +393,29 @@ export class JobsComponent implements OnInit, OnDestroy {
     ),
   );
 
+  /**
+   * Render-guard outcome — boundary-aware slice over the grouped
+   * projection. P3 review: the legacy ``renderGuard(this.windowItems())``
+   * would silently slice the flat list, producing the orphan
+   * expanded-header case (header renders with zero visible rows).
+   * ``toBoundedWindowItems`` walks groups in order and includes a
+   * group ONLY if its full cost (1 header + N rows if expanded)
+   * fits in the remaining cap; otherwise the whole group is
+   * omitted and its expanded rows count toward ``hidden``.
+   *
+   * Collapsed groups contribute a 1-item cost (header only) — the
+   * spec's "collapsed group is header-only by design" path. The
+   * hidden count is ROWS dropped by the cap (NOT collapsed-by-user
+   * rows; collapsed = by user choice, not by truncation). The
+   * template's "N hidden rows" copy stays truthful.
+   */
   readonly renderGuardOutcome = computed<RenderGuardOutcome<WindowItem>>(() =>
-    renderGuard(this.windowItems()),
+    toBoundedWindowItems(
+      this.jobGroups(),
+      this.expandedGroupIds(),
+      this.titleForGroup,
+      this.metaLineForGroup,
+    ),
   );
 
   /**
@@ -707,21 +792,55 @@ export class JobsComponent implements OnInit, OnDestroy {
       });
     });
 
-    // P3 (jobs-page-improvement) — lazy title enrichment. Fires
-    // once per group-list change and tops up the
-    // ``titleOverrides`` map for the FIRST
-    // ``MAX_TITLE_ENRICHMENT_FETCHES`` groups that (a) are not the
-    // no-context fallback AND (b) don't already have an override.
-    // Errors retain the fallback title (retain-last-data — the
-    // panel pattern). The effect is idempotent — re-firing on a
-    // re-key only fetches what changed.
+    // P3 review — lazy title enrichment. The effect is keyed on
+    // the group list (via the dataset-change effect below clearing
+    // the dedup Sets) and on ``titleOverrides`` (so a successful
+    // enrichment triggers a re-evaluation that picks the NEXT
+    // un-attempted key within the cap). The picker
+    // (``pickEnrichmentTargets``) ensures the returned list:
+    //
+    // * never exceeds ``MAX_TITLE_ENRICHMENT_FETCHES``;
+    // * contains no key in ``attemptedKeys`` (cascade dedup);
+    // * contains no key in ``inFlightKeys`` (concurrent dedup);
+    // * contains no key in ``failedKeys`` (no infinite retry);
+    // * contains no key with ``missionId == null`` (child-bound
+    //   groups never fetch — their coalesced key is the
+    //   instance_id and ``GET /api/missions/{instance_id}`` is
+    //   semantically wrong).
+    //
+    // After firing each GET, the key is added to
+    // ``attemptedKeys`` + ``inFlightKeys`` so subsequent
+    // picker calls within the same dataset generation never
+    // re-pick it. ``next`` clears the in-flight flag and (on
+    // non-empty title) writes to ``titleOverrides``; ``error``
+    // clears the in-flight flag and writes the key to
+    // ``failedKeys`` (no retry).
     effect(() => {
       const targets = this.pickEnrichmentTargets();
       for (const id of targets) {
+        // Defence-in-depth cap: even if the picker returned
+        // more than ``MAX_TITLE_ENRICHMENT_FETCHES`` (it can't,
+        // but a future refactor might), stop at the cap.
+        if (this.attemptedKeys.size >= MAX_TITLE_ENRICHMENT_FETCHES) {
+          break;
+        }
+        // Mark attempted BEFORE the subscribe so a concurrent
+        // effect run (triggered by the titleOverrides write in
+        // a sibling key's ``next`` handler) doesn't re-pick
+        // this key mid-flight.
+        this.attemptedKeys.add(id);
+        this.inFlightKeys.add(id);
         this.missionService.getMission(id).subscribe({
           next: (resp) => {
+            this.inFlightKeys.delete(id);
             const title = resp?.mission?.title;
-            if (!title) return;
+            if (!title) {
+              // 200-with-null-title is treated as a failure
+              // (no enrichment would mean re-pick every poll —
+              // same bug class as a network failure).
+              this.failedKeys.add(id);
+              return;
+            }
             this.titleOverrides.update((m) => {
               const next = new Map(m);
               next.set(id, title);
@@ -729,10 +848,33 @@ export class JobsComponent implements OnInit, OnDestroy {
             });
           },
           error: () => {
-            // Retain the fallback title (retain-last-data).
+            this.inFlightKeys.delete(id);
+            // No-retry — the spec: a failed key never re-fires
+            // for the page lifetime. The fallback title stays
+            // rendered (retain-last-data discipline).
+            this.failedKeys.add(id);
           },
         });
       }
+    });
+
+    // Dataset-change effect — clears the per-generation dedup
+    // state when the jobGroups REFERENCE changes. A poll that
+    // produces a new group list resets the cascade; a poll that
+    // produces the same reference (no real change) keeps the
+    // dedup state, so a re-fetch of identical data never
+    // re-attempts the same keys.
+    //
+    // ``failedKeys`` persists across polls: the spec's
+    // "no infinite retry across polls" rule. A previously-
+    // failed key keeps the fallback title for the page
+    // lifetime.
+    effect(() => {
+      this.jobGroupsVersion();
+      this.attemptedKeys.clear();
+      this.inFlightKeys.clear();
+      // failedKeys intentionally NOT cleared — see comment
+      // above + the picker doc.
     });
 
     // Effect to handle SSE errors with user-friendly messages

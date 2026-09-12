@@ -15,6 +15,7 @@ import {
   MAX_RENDER_ROWS,
   WINDOW_BANNER_COPY,
   renderGuard,
+  toBoundedWindowItems,
   toWindowItems,
   windowIsFull,
 } from './jobs-window.model';
@@ -281,5 +282,240 @@ describe('jobs-window — toWindowItems (virtual scroll source)', () => {
     const termHeader = items.find((i) => i.kind === 'header' && (i as { key: string }).key === 'term-1') as Extract<typeof items[0], { kind: 'header' }>;
     expect(liveHeader.isLive).toBe(true);
     expect(termHeader.isLive).toBe(false);
+  });
+});
+
+// P3 review — boundary-aware render guard. The legacy
+// ``renderGuard(this.windowItems())`` silently slices the FLAT
+// items list, which produces the orphan-header case (header
+// rendered, zero visible rows) for an expanded group that
+// crosses the cap. ``toBoundedWindowItems`` walks groups in
+// order and includes a group only if its FULL cost (1 header +
+// N rows if expanded) fits in the remaining cap; otherwise the
+// whole group is omitted and its expanded rows count toward
+// ``hidden``. Collapsed groups contribute a 1-item cost
+// (header only — the spec's "collapsed group is header-only by
+// design" path). The hidden count is ROWS dropped by the cap
+// (NOT collapsed-by-user rows; collapsed = by user choice, not
+// by truncation). The template's "N hidden rows" copy stays
+// truthful.
+describe('jobs-window — toBoundedWindowItems (P3 review: boundary slicing)', () => {
+  // Fixture shape: an array of groups with the fields the
+  // projection reads. Kept inline (mirrors the toWindowItems
+  // spec convention) so the test reads as a self-contained
+  // unit.
+  const identityTitle = (g: { key: string }): string => g.key;
+  const identityMeta = (): string => 'meta';
+
+  function buildGroup(key: string, rowCount: number) {
+    return {
+      key,
+      missionId: key,
+      instanceId: key,
+      agentId: null,
+      jobCount: rowCount,
+      lastActivityAt: null,
+      jobs: Array.from({ length: rowCount }, (_, i) =>
+        createMockJob({ job_id: `${key}-j-${i}`, mission_id: key }),
+      ),
+      isLive: true,
+    };
+  }
+
+  it('120-row grouped fixture (mixed expanded/collapsed): hidden count + zero orphan expanded headers + never-hide', () => {
+    // The flagship P3-review pin: a 120-row dataset split into 3
+    // groups with the cap set so the third expanded group is
+    // cut. Asserts:
+    //
+    // * hidden = rows dropped by cap (NOT collapsed-by-user
+    //   rows).
+    // * zero orphan expanded headers — the third group is
+    //   omitted ENTIRELY (no header rendered with no rows).
+    // * never-hide — every input row is either in ``kept``
+    //   (rendered) or in ``hidden`` (dropped by cap).
+    const groups = [
+      buildGroup('g-1', 30), // expanded: 30 rows + 1 header = 31 items
+      buildGroup('g-2', 40), // COLLAPSED: 1 header = 1 item, rows user-collapsed
+      buildGroup('g-3', 50), // expanded: 50 rows + 1 header = 51 items
+    ];
+    const expanded = new Set(['g-1', 'g-3']);
+    // Cap = 80 items: fits g-1 (31) + g-2 header (1) = 32 items,
+    // g-3 (51) doesn't fit → omitted entirely, hidden += 50.
+    const out = toBoundedWindowItems(
+      groups,
+      expanded,
+      identityTitle,
+      identityMeta,
+      80,
+    );
+    expect(out.kind).toBe('guarded');
+    if (out.kind !== 'guarded') return;
+
+    // Hidden count = 50 (rows dropped by cap from g-3). NOT
+    // g-3's full cost (51) — headers don't count.
+    expect(out.hidden).toBe(50);
+    expect(out.cap).toBe(80);
+
+    // ZERO orphan expanded headers. g-3's header is NOT in
+    // ``kept`` (the group was omitted whole).
+    const headerKeysInKept = out.kept
+      .filter((i) => i.kind === 'header')
+      .map((i) => (i as { groupKey: string }).groupKey);
+    expect(headerKeysInKept).toEqual(['g-1', 'g-2']);
+
+    // Never-hide: every input row is either rendered (in
+    // ``kept``) or counted in ``hidden``.
+    const renderedRowKeys = out.kept
+      .filter((i) => i.kind === 'row')
+      .map((i) => (i as { job: { job_id: string } }).job.job_id);
+    // g-1's 30 rows are rendered.
+    expect(renderedRowKeys.length).toBe(30);
+    // g-2's 40 rows are user-collapsed → NOT rendered, NOT in
+    // hidden (collapsed-by-user, not cap-dropped).
+    // g-3's 50 rows are cap-dropped → counted in hidden.
+    // 30 rendered + 50 hidden = 80 (rows the cap actually
+    // dealt with). The other 40 (g-2 collapsed) are part of
+    // the dataset but neither rendered nor cap-hidden — that's
+    // correct (collapsed-by-user is a deliberate choice).
+    expect(renderedRowKeys.length + out.hidden).toBe(80);
+  });
+
+  it('all groups fit: returns ``ok`` (no truncation)', () => {
+    const groups = [
+      buildGroup('g-1', 3),
+      buildGroup('g-2', 4),
+      buildGroup('g-3', 5),
+    ];
+    const expanded = new Set(['g-1', 'g-2', 'g-3']);
+    // Cap = 100: easily fits 1+3 + 1+4 + 1+5 = 15 items.
+    const out = toBoundedWindowItems(
+      groups,
+      expanded,
+      identityTitle,
+      identityMeta,
+      100,
+    );
+    expect(out.kind).toBe('ok');
+    if (out.kind === 'ok') {
+      // Every header rendered, every row rendered.
+      const rendered = out.rows.length;
+      const expected = (1 + 3) + (1 + 4) + (1 + 5);
+      expect(rendered).toBe(expected);
+    }
+  });
+
+  it('empty input returns ok branch with empty rows', () => {
+    const out = toBoundedWindowItems([], new Set(), identityTitle, identityMeta);
+    expect(out.kind).toBe('ok');
+    if (out.kind === 'ok') {
+      expect(out.rows).toEqual([]);
+    }
+  });
+
+  it('a group that fits EXACTLY at the cap boundary is included (no off-by-one)', () => {
+    // 5 collapsed groups, cap = 5 → exactly fits (5 headers,
+    // zero rows).
+    const groups = [
+      buildGroup('g-1', 0),
+      buildGroup('g-2', 0),
+      buildGroup('g-3', 0),
+      buildGroup('g-4', 0),
+      buildGroup('g-5', 0),
+    ];
+    const out = toBoundedWindowItems(
+      groups,
+      new Set(),
+      identityTitle,
+      identityMeta,
+      5,
+    );
+    expect(out.kind).toBe('ok');
+    if (out.kind === 'ok') {
+      expect(out.rows.length).toBe(5);
+    }
+  });
+
+  it('orphan-header pin: an expanded group that does not fit is omitted ENTIRELY (header + rows, not header alone)', () => {
+    // Cap = 5: g-1 (1 header + 1 row = 2 items) fits; g-2
+    // (1 header + 4 rows = 5 items) does not fit at 2+5=7 >
+    // cap → omitted entirely.
+    const groups = [
+      buildGroup('g-1', 1),
+      buildGroup('g-2', 4),
+    ];
+    const expanded = new Set(['g-1', 'g-2']);
+    const out = toBoundedWindowItems(
+      groups,
+      expanded,
+      identityTitle,
+      identityMeta,
+      5,
+    );
+    expect(out.kind).toBe('guarded');
+    if (out.kind !== 'guarded') return;
+    // g-2's header is NOT in kept — no orphan header.
+    const headerKeys = out.kept
+      .filter((i) => i.kind === 'header')
+      .map((i) => (i as { groupKey: string }).groupKey);
+    expect(headerKeys).toEqual(['g-1']);
+    // g-2's 4 rows are counted in hidden.
+    expect(out.hidden).toBe(4);
+  });
+
+  it('collapsed-only overflow: a collapsed group that does not fit contributes ZERO to hidden', () => {
+    // Cap = 1: g-1 header fits (1 item); g-2 header doesn't
+    // (1+1=2 > cap). g-2's rows (collapsed = not rendered
+    // anyway) do NOT count toward hidden.
+    const groups = [
+      buildGroup('g-1', 0),
+      buildGroup('g-2', 5),
+    ];
+    const out = toBoundedWindowItems(
+      groups,
+      new Set(),
+      identityTitle,
+      identityMeta,
+      1,
+    );
+    expect(out.kind).toBe('guarded');
+    if (out.kind !== 'guarded') return;
+    // g-2 was COLLAPSED — its 5 rows weren't going to render
+    // anyway. Hidden = 0 (no cap-induced row drops).
+    expect(out.hidden).toBe(0);
+  });
+
+  it('hidden count excludes collapsed-by-user rows (only cap-induced drops count)', () => {
+    // The exact spec wording: "Hidden count = hidden ROWS
+    // (headers excluded from the count)" — collapsed groups
+    // are NOT counted. Their rows are not rendered, but the
+    // user chose to collapse them (deliberate view choice), so
+    // they're not "hidden by the cap".
+    const groups = [
+      buildGroup('g-1', 30), // expanded
+      buildGroup('g-2', 40), // collapsed (user choice)
+    ];
+    const expanded = new Set(['g-1']);
+    // Cap = 35: g-1 (1+30 = 31) fits; g-2's collapsed header
+    // (1 item, 31+1 = 32 ≤ 35) fits. All groups fit → ok
+    // branch. (Different test path: when ALL fit, no
+    // truncation. The hidden-counts-collapsed-rows-not
+    // assertion lives in the 120-row fixture above.)
+    const out = toBoundedWindowItems(
+      groups,
+      expanded,
+      identityTitle,
+      identityMeta,
+      35,
+    );
+    expect(out.kind).toBe('ok');
+    if (out.kind === 'ok') {
+      // g-2's header is rendered (user collapsed the rows but
+      // not the header — the chevron is the only expand
+      // toggle).
+      const headerKeys = out.rows
+        .filter((i) => i.kind === 'header')
+        .map((i) => (i as { groupKey: string }).groupKey);
+      expect(headerKeys).toEqual(['g-1', 'g-2']);
+    }
   });
 });

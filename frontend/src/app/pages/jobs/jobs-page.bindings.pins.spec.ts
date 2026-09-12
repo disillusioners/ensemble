@@ -304,15 +304,20 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(componentSrc).toMatch(/readonly windowDegraded = this\.store\.windowDegraded/);
   });
 
-  it('render-guard truncation notice wires the pure renderGuard + the "switch to Queues" affordance', () => {
-    // Plan task 3 — guard fires at RENDER time over the template-bound
-    // projected rows (not the fetch payload); the notice carries a
-    // "switch to Queues view" affordance.
+  it('render-guard truncation notice wires the pure boundary-slicing guard + the "switch to Queues" affordance', () => {
+    // P3 review — the legacy ``renderGuard(this.windowItems())``
+    // call silently slices the FLAT items list, which produces the
+    // orphan-header case (header rendered, zero visible rows) for
+    // expanded groups that cross the cap. The page now wires the
+    // BOUNDARY-AWARE ``toBoundedWindowItems`` directly against
+    // ``jobGroups + expandedGroupIds`` so a group is rendered whole
+    // or omitted whole (no orphan). Plan task 3 acceptance:
+    // the notice carries a "switch to Queues view" affordance.
     expect(templateSrc).toMatch(/@if \(truncationNotice\(\); as notice\)/);
     expect(templateSrc).toMatch(/class="render-guard-notice"/);
     expect(templateSrc).toMatch(/\(click\)="onSwitchToQueuesView\(\)"/);
     expect(componentSrc).toMatch(/readonly renderGuardOutcome = computed/);
-    expect(componentSrc).toMatch(/renderGuard\(this\.windowItems\(\)\)/);
+    expect(componentSrc).toMatch(/toBoundedWindowItems\(/);
   });
 
   it('expansion state is keyed by job_id in the parent (survives virtual recycle)', () => {
@@ -534,14 +539,39 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(componentSrc).toMatch(/this\.missionService\.getMission\(/);
   });
 
-  it('P3 lazy title enrichment is capped at MAX_TITLE_ENRICHMENT_FETCHES (named constant, not a magic number)', () => {
+  it('P3 review — lazy title enrichment is capped at MAX_TITLE_ENRICHMENT_FETCHES + cascade / dedup / no-retry / missionId gate', () => {
+    // Cap (named constant, not a magic number).
     expect(componentSrc).toMatch(/MAX_TITLE_ENRICHMENT_FETCHES/);
-    // The cap is enforced in the targets picker (named-constant
-    // contract), and the grouping-model spec pins the value at 3.
-    expect(componentSrc).toMatch(/if \(targets\.length >= MAX_TITLE_ENRICHMENT_FETCHES\) break/);
+    // The picker is the cap enforcer now (extracted to
+    // ``pickEnrichmentTargets`` in ``jobs-enrichment.model.ts``);
+    // the component calls the helper. The behaviour spec pins
+    // the cap value.
+    expect(componentSrc).toMatch(/pickEnrichmentTargets\(/);
+    // Defence-in-depth: the component ALSO checks
+    // attemptedKeys.size before firing each request (the
+    // cascade-prevention belt to the picker's braces).
+    expect(componentSrc).toMatch(/attemptedKeys\.size >= MAX_TITLE_ENRICHMENT_FETCHES/);
     // Retain-last-data: the failure handler keeps the fallback
-    // title — empty body, never a re-fetch.
-    expect(componentSrc).toMatch(/error: \(\) => \{[\s\S]{0,200}?Retain the fallback title/);
+    // title — empty body, never a re-fetch (the picker filters
+    // failed keys; the error handler adds to failedKeys).
+    expect(componentSrc).toMatch(/error: \(\) => \{[\s\S]{0,500}?failedKeys\.add\(id\)/);
+    // No-retry: the error handler stamps the key into
+    // ``failedKeys`` so the picker never re-emits it across
+    // polls (the spec's "no infinite retry" pin).
+    expect(componentSrc).toMatch(/failedKeys\.add\(id\)/);
+    // Cascade / concurrent dedup: the subscribe path stamps the
+    // key into both ``attemptedKeys`` and ``inFlightKeys`` BEFORE
+    // the request fires; the picker filters both sets.
+    expect(componentSrc).toMatch(/attemptedKeys\.add\(id\)[\s\S]{0,40}?inFlightKeys\.add\(id\)/);
+    // Child-bound (missionId null) groups never fetch — the
+    // picker enforces the gate. Pin the picker model file too.
+    const fs = require('fs');
+    const path = require('path');
+    const enrichmentModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/jobs-enrichment.model.ts'),
+      'utf-8',
+    );
+    expect(enrichmentModelSrc).toMatch(/if \(!g\.missionId\) continue/);
   });
 
   it('P3 header title uses the instanceDisplayTitle chain (NOT the job-row resolveTitle chain)', () => {
@@ -572,24 +602,46 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(groupingModelSrc).toMatch(/NO_MISSION_CONTEXT_TITLE\s*=\s*'No mission context'/);
   });
 
-  it('P3 vocabulary sweep: settled → teal #14B8A6 + receipt_long (job-card pinned already)', () => {
-    // The job-card component renders settled with the panel's
-    // canonical glyph + colour. This pin anchors the production
-    // source-text so a drift in the job-card spec would surface.
+  it('P3 review — settled → teal #14B8A6 + RECEIPT_LONG_GLYPH constant (single source of truth)', () => {
+    // P3 review: the literal ``receipt_long`` was promoted to a
+    // NAMED export (``RECEIPT_LONG_GLYPH``) in ``job.model.ts``
+    // so the card / panel / receipt-chip share one constant —
+    // drift risk on three independent literals is closed. The
+    // card imports + uses the constant; the panel imports +
+    // uses the constant; the receipt-chip template binds to
+    // the constant via a component field.
     const fs = require('fs');
     const path = require('path');
-    const jobCardSrc = fs.readFileSync(
-      path.join(__dirname, '../../components/job-card/job-card.component.ts'),
-      'utf-8',
-    );
-    // ``receipt_long`` icon for settled.
-    expect(jobCardSrc).toMatch(/'settled':[\s\S]{0,200}?return 'receipt_long'/);
-    // Teal color #14B8A6 for settled (NOT green completed).
     const jobModelSrc = fs.readFileSync(
       path.join(__dirname, '../../models/job.model.ts'),
       'utf-8',
     );
+    const jobCardSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-card/job-card.component.ts'),
+      'utf-8',
+    );
+    const panelSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-queue-panel/job-queue-panel.component.ts'),
+      'utf-8',
+    );
+    const jobCardHtmlSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-card/job-card.component.html'),
+      'utf-8',
+    );
+    // Model export — single source of truth for the glyph.
+    expect(jobModelSrc).toMatch(/export const RECEIPT_LONG_GLYPH = 'receipt_long'/);
+    // Teal color #14B8A6 for settled (NOT green completed).
     expect(jobModelSrc).toMatch(/case 'settled':[\s\S]{0,80}?#14B8A6/);
+    // Card imports the constant; the literal is gone from the
+    // status switch.
+    expect(jobCardSrc).toMatch(/RECEIPT_LONG_GLYPH/);
+    expect(jobCardSrc).not.toMatch(/case 'settled':[\s\S]{0,200}?return 'receipt_long'/);
+    // Panel imports + uses the constant.
+    expect(panelSrc).toMatch(/RECEIPT_LONG_GLYPH/);
+    // Receipt-chip template binds via the component field — no
+    // bare literal in the HTML.
+    expect(jobCardHtmlSrc).not.toMatch(/receipt-icon">receipt_long/);
+    expect(jobCardHtmlSrc).toMatch(/receipt-icon">\{\{ receiptLongGlyph \}\}/);
   });
 
   it('P3 carry-over — dead-legacy aliases isEmptyState / isEmptyWorkState are removed from the component', () => {

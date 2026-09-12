@@ -73,6 +73,18 @@ export const NO_MISSION_CONTEXT_TITLE = 'No mission context';
  * number)". The component reads this constant when deciding how many
  * group headers to enrich; the spec pins the value so a future bump
  * is a deliberate edit, not a typo.
+ *
+ * Note (P3 review — approximation): the cap is APPROXIMATELY
+ * "visible groups" — the picker iterates ``jobGroups()`` in
+ * insertion order and stops after the cap is reached, so the actual
+ * targets are the FIRST ``MAX_TITLE_ENRICHMENT_FETCHES`` eligible
+ * groups in display order. Collapsed / terminal / no-context /
+ * already-enriched / already-attempted groups are filtered BEFORE
+ * the cap applies, so the 3 GETs may be fewer if the page has
+ * many ineligible groups. The cap is also bounded by the
+ * in-effect-attempted-keys tracking (the cap is checked against
+ * ``attemptedKeys.size``, not per-targets.length), so the cascade
+ * prevention lives here too.
  */
 export const MAX_TITLE_ENRICHMENT_FETCHES = 3;
 
@@ -314,6 +326,16 @@ export function groupMetaLine(
     // fallback "idle" reads as a neutral liveness descriptor.
     'idle';
   const parts: string[] = [agent];
+  // P3 review — defensive / unreachable branch (doc-truth).
+  // ``JobGroup.jobCount`` is always ``>= 1`` because the group is
+  // BUILT from the rows it contains (see ``groupJobs`` — every
+  // branch appends a row, so a fresh group has ``jobCount === 1``
+  // and a recycled group only ever grows). The branch stays as a
+  // belt-and-braces guard against a future refactor that lets a
+  // group exist without rows (e.g. a manually-constructed group
+  // passed in by a test or a future "empty placeholder" group); a
+  // 0-count group would render as ``agent · idle`` rather than
+  // ``agent · 0 jobs · idle``.
   if (group.jobCount > 0) {
     parts.push(`${group.jobCount} job${group.jobCount === 1 ? '' : 's'}`);
   }

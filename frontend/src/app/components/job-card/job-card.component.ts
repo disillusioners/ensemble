@@ -6,7 +6,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip } from '../../models/job.model';
+import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip, RECEIPT_LONG_GLYPH } from '../../models/job.model';
 import {
   getKindColor,
   getKindIcon,
@@ -95,7 +95,11 @@ export class JobCardComponent {
       // reads as transport-handled (receipt) rather than work-done
       // (completed's check_circle). Keeps the transport/work
       // vocabulary split visible on every surface.
-      case 'settled': return 'receipt_long';
+      //
+      // P3 review — the literal was promoted to ``RECEIPT_LONG_GLYPH``
+      // in ``models/job.model.ts`` so the card / panel / receipt-
+      // chip stay in sync (three literals would drift).
+      case 'settled': return RECEIPT_LONG_GLYPH;
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
       case 'dead_letter': return 'report_problem';
@@ -194,6 +198,14 @@ export class JobCardComponent {
    * extra.
    */
   showReceiptChip = computed(() => isReceiptRow(this.job()));
+
+  /**
+   * P3 review — promoted from the literal ``receipt_long`` (the
+   * receipt-chip glyph) so the card / panel / receipt-chip stay
+   * in sync with the model export. The template binds to this
+   * property to keep a single source of truth.
+   */
+  readonly receiptLongGlyph = RECEIPT_LONG_GLYPH;
 
   /**
    * Mission-liveness chip for mirror rows, or ``null`` when the row

@@ -258,3 +258,144 @@ export function toWindowItems(
   }
   return items;
 }
+
+/**
+ * Bounded projection — produces a list of items at or under the cap,
+ * slicing on GROUP boundaries (whole groups fit or overflow together).
+ *
+ * Why a separate function (not a slice inside ``toWindowItems``):
+ * the projection and the cap are orthogonal concerns. The pure
+ * ``toWindowItems`` projection stays spec-clean (every group
+ * contributes its full set of items, no truncation logic). The
+ * cap is a separate concern that needs to KNOW about groups to do
+ * boundary slicing — it cannot be expressed as a flat-row slice
+ * without producing orphan headers.
+ *
+ * Boundary slicing rules:
+ *
+ * * Walk groups in the order ``groupJobs`` produced them.
+ * * For each group, its item cost is: ``1 header + (expanded ? N
+ *   rows : 0)``.
+ * * If the group fits in the remaining cap, include ALL its items.
+ * * Else:
+ *   * For an EXPANDED group that doesn't fit: omit the entire
+ *     group (no header, no rows). The orphan-header case (header
+ *     rendered + zero rows) would mislead the user (a header
+ *     advertising "N jobs" with no jobs visible). The group's
+ *     rows count toward the hidden total.
+ *   * For a COLLAPSED group that doesn't fit: omit the header too.
+ *     (A collapsed group is a 1-item group; the cap can still be
+ *     reached if there are many collapsed groups. Headerless
+ *     collapse means the user sees a truncation banner with the
+ *     correct hidden-row count, which is zero for collapsed-only
+ *     overflow but never lies about what was rendered.)
+ *
+ * Hidden count semantics:
+ *
+ * * Only ROWS dropped BY THE CAP count toward ``hidden``. Collapsed
+ *   group's rows are NOT in the rendered list by user choice
+ *   (chevron state), NOT by the cap — they are NOT counted as
+ *   hidden. A user-collapsed group is a deliberate view choice,
+ *   not truncation.
+ * * Headers are NEVER counted toward hidden. The user-visible copy
+ *   stays truthful: "N rows hidden", never "N groups hidden".
+ *
+ * NEVER-hide: every input row is either rendered (its group was
+ * fully included) or counted in ``hidden`` (its expanded group was
+ * cut by the cap). A row in a collapsed group is neither rendered
+ * nor counted hidden — that's correct (collapsed = by user choice).
+ *
+ * The notice copy mirrors ``renderGuard``'s "newest N of M" wording
+ * so the banner stays consistent across the two guards (legacy flat
+ * rows vs new grouped projection).
+ *
+ * Returns the SAME ``RenderGuardOutcome`` discriminated union so
+ * the component's existing ``kind === 'ok' | 'guarded'`` branch
+ * keeps working without a typed change at the call site.
+ */
+export function toBoundedWindowItems(
+  groups: ReadonlyArray<{
+    readonly key: string;
+    readonly missionId: string | null;
+    readonly instanceId: string | null;
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+    readonly jobs: readonly Job[];
+    readonly isLive: boolean;
+  }>,
+  expandedGroupIds: ReadonlySet<string>,
+  titleFor: (group: {
+    readonly key: string;
+    readonly agentId: string | null;
+    readonly lastActivityAt: string | null;
+  }) => string,
+  metaLineFor: (group: {
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+  }) => string,
+  cap: number = MAX_RENDER_ROWS,
+): RenderGuardOutcome<WindowItem> {
+  const items: WindowItem[] = [];
+  let totalRows = 0;
+  let hidden = 0;
+  let datasetTotalRows = 0;
+  let hitCap = false;
+  for (const group of groups) {
+    datasetTotalRows += group.jobs.length;
+    const isExpanded = expandedGroupIds.has(group.key);
+    const rowsInGroup = isExpanded ? group.jobs.length : 0;
+    const groupCost = 1 + rowsInGroup;
+    if (items.length + groupCost <= cap) {
+      items.push({
+        kind: 'header',
+        key: group.key,
+        groupKey: group.key,
+        title: titleFor(group),
+        metaLine: metaLineFor(group),
+        isLive: group.isLive,
+        jobCount: group.jobCount,
+      });
+      totalRows += rowsInGroup;
+      if (isExpanded) {
+        for (const job of group.jobs) {
+          items.push({ kind: 'row', job, key: job.job_id });
+        }
+      }
+    } else if (rowsInGroup > 0) {
+      // EXPANDED group didn't fit — omit the whole group (no
+      // orphan header). All of its rows count toward hidden.
+      hidden += rowsInGroup;
+      hitCap = true;
+    } else {
+      // COLLAPSED group didn't fit (header-only). The header is
+      // omitted too: a header without its rows renders, but the
+      // cap still has to give somewhere; the user-visible effect
+      // is "scroll past this group, see the truncation banner".
+      // Zero rows to add to hidden — the rows weren't going to
+      // render anyway.
+      hitCap = true;
+    }
+  }
+  if (!hitCap) {
+    return { kind: 'ok', rows: items };
+  }
+  // Notice copy stays truthful against the dataset: M is the
+  // total rows the page knows about (sum of every group's jobs),
+  // not the rendered count. Collapsed rows are part of the dataset
+  // (the user can expand to see them) but the "X hidden rows"
+  // figure beside the title is the cap-dropped count only — the
+  // template binds ``hidden`` to that label.
+  const notice =
+    `Showing the newest ${totalRows} of ${datasetTotalRows} rows — ` +
+    `the rest are hidden to keep the page responsive. ` +
+    `Switch to the Queues view for a bounded window, or refine filters to narrow.`;
+  return {
+    kind: 'guarded',
+    kept: items,
+    hidden,
+    cap,
+    notice,
+  };
+}

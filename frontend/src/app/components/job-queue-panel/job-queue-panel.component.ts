@@ -8,6 +8,7 @@ import {
   Job,
   JobStatus,
   missionLivenessChip,
+  RECEIPT_LONG_GLYPH,
 } from '../../models/job.model';
 import {
   InstanceNode,
@@ -617,7 +618,12 @@ export class JobQueuePanelComponent {
         // Receipt-style glyph — a settled mirror row IS a delivery receipt,
         // not a completed mission. `receipt_long` (Material Icons codepoint
         // ef6e) is visually distinct from completed's check_circle.
-        return 'receipt_long';
+        //
+        // P3 review — promoted to the ``RECEIPT_LONG_GLYPH`` named
+        // export (single source of truth shared with the job card
+        // + receipt chip); the literal lives on the model so a
+        // future glyph swap stays in one place.
+        return RECEIPT_LONG_GLYPH;
       case 'failed':
         return 'error';
       case 'cancelled':

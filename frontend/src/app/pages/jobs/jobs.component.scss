@@ -448,6 +448,16 @@
   // visual weight from the cards beneath it: muted surface,
   // left-aligned title, chevron-only toggle. ``itemSize`` is the
   // same value the cards use so the fixed-size assumption holds.
+  //
+  // P3 review — the virtual-scroll ``itemSize`` is 144 (cards); the
+  // header row's natural content height is much smaller (~56px),
+  // which leaves a visible dead band inside the fixed-stride slot.
+  // Stretch to ``100%`` of the slot so the header fills the same
+  // vertical band the card would — keeps the scrollbar math and
+  // recycled-row layout in sync with ``cdkVirtualFor``'s spacer.
+  // The visual weight stays the same (the inner content is still
+  // ~56px tall, padding included); the slot just doesn't leave a
+  // gap underneath before the next row renders.
   .group-header {
     display: flex;
     align-items: center;
@@ -458,6 +468,8 @@
     border: 1px solid var(--border-color, #3c3c3c);
     border-radius: 6px;
     max-width: 900px;
+    height: 100%;
+    box-sizing: border-box;
   }
 
   .group-header-live {

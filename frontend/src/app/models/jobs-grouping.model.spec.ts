@@ -312,6 +312,70 @@ describe('jobs-grouping — groupJobs property: every row appears exactly once',
     expect(groupJobs([])).toEqual([]);
   });
 
+  it('P3 cross-seam invariant: filter change → regrouping keeps Σ jobCount == input length (no orphans)', () => {
+    // The plan's cross-seam pin: a filter change that re-groups
+    // the dataset (e.g. status filter flips from "all" to a
+    // single status) MUST preserve the never-hide invariant on
+    // the surviving rows. Σ jobCount across the regrouped
+    // output must equal the input length, and every input
+    // job_id must appear exactly once in the output.
+    const allJobs = [
+      // Group A: live
+      createMockJob({ job_id: 'a-1', mission_id: 'm-A', instance_id: 'i-A', status: 'pending' }),
+      createMockJob({ job_id: 'a-2', mission_id: 'm-A', instance_id: 'i-A', status: 'processing' }),
+      // Group B: terminal
+      createMockJob({ job_id: 'b-1', mission_id: 'm-B', instance_id: 'i-B', status: 'completed' }),
+      createMockJob({ job_id: 'b-2', mission_id: 'm-B', instance_id: 'i-B', status: 'failed' }),
+      // Group C: mixed (terminal + live)
+      createMockJob({ job_id: 'c-1', mission_id: 'm-C', instance_id: 'i-C', status: 'pending' }),
+      createMockJob({ job_id: 'c-2', mission_id: 'm-C', instance_id: 'i-C', status: 'completed' }),
+      // Group D: child-bound
+      createMockJob({ job_id: 'd-1', mission_id: null, instance_id: 'i-D', status: 'completed' }),
+      // Group E: no-context
+      createMockJob({ job_id: 'e-1', mission_id: null, instance_id: null, status: 'pending' }),
+    ];
+    const allLength = allJobs.length; // 8
+
+    // Re-group #1: NO filter — every row in.
+    const groupsAll = groupJobs(allJobs);
+    const sumAll = groupsAll.reduce((sum, g) => sum + g.jobCount, 0);
+    expect(sumAll).toBe(allLength);
+    const idsAll = new Set<string>();
+    groupsAll.forEach((g) => g.jobs.forEach((j) => idsAll.add(j.job_id)));
+    for (const j of allJobs) expect(idsAll.has(j.job_id)).toBe(true);
+
+    // Re-group #2: status filter to "pending" — only a-1, c-1,
+    // e-1 survive. The regrouped output MUST have 3 jobs total
+    // across the surviving groups (a new group may form when
+    // c-1 alone is in m-C, or a group may shrink to a single
+    // row). The never-hide invariant holds.
+    const pendingJobs = allJobs.filter((j) => j.status === 'pending');
+    expect(pendingJobs.length).toBe(3);
+    const groupsPending = groupJobs(pendingJobs);
+    const sumPending = groupsPending.reduce((sum, g) => sum + g.jobCount, 0);
+    expect(sumPending).toBe(pendingJobs.length);
+    expect(sumPending).toBe(3);
+
+    // Re-group #3: status filter to "completed" — b-1, c-2,
+    // d-1 survive.
+    const completedJobs = allJobs.filter((j) => j.status === 'completed');
+    expect(completedJobs.length).toBe(3);
+    const groupsCompleted = groupJobs(completedJobs);
+    const sumCompleted = groupsCompleted.reduce((sum, g) => sum + g.jobCount, 0);
+    expect(sumCompleted).toBe(completedJobs.length);
+    expect(sumCompleted).toBe(3);
+
+    // Re-group #4: status filter to "failed" — only b-2.
+    const failedJobs = allJobs.filter((j) => j.status === 'failed');
+    expect(failedJobs.length).toBe(1);
+    const groupsFailed = groupJobs(failedJobs);
+    const sumFailed = groupsFailed.reduce((sum, g) => sum + g.jobCount, 0);
+    expect(sumFailed).toBe(failedJobs.length);
+    expect(sumFailed).toBe(1);
+    // The single-row group carries its original key.
+    expect(groupsFailed[0].key).toBe('m-B');
+  });
+
   it('coalesced-key identity: a row with both fields populated joins the SAME group as a row with only mission_id', () => {
     // The plan's identity rule: when both fields are populated they
     // are equal by the mission identity rule — the fallback cannot
