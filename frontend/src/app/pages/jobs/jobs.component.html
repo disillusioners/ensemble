@@ -37,23 +37,27 @@
 
       @if (drawerOpen()) {
         @if (isConnected()) {
-          <span class="connection-status connected" title="Real-time updates connected">
-            <mat-icon>wifi</mat-icon>
+          <span class="connection-status connected" title="Real-time updates connected"
+                aria-label="Real-time updates connected">
+            <mat-icon aria-hidden="true">wifi</mat-icon>
             Live
           </span>
         } @else if (isRetrying()) {
-          <span class="connection-status retrying" title="Reconnecting to server...">
-            <mat-icon class="spinning">sync</mat-icon>
+          <span class="connection-status retrying" title="Reconnecting to server..."
+                [attr.aria-label]="'Reconnecting to server, attempt ' + retryAttempt() + ' of 5'">
+            <mat-icon class="spinning" aria-hidden="true">sync</mat-icon>
             Reconnecting ({{ retryAttempt() }}/5)
           </span>
         } @else if (isFailed()) {
-          <span class="connection-status disconnected" title="Connection failed - click refresh to retry">
-            <mat-icon>wifi_off</mat-icon>
+          <span class="connection-status disconnected" title="Connection failed - click refresh to retry"
+                aria-label="Real-time connection failed — click Refresh to retry">
+            <mat-icon aria-hidden="true">wifi_off</mat-icon>
             Offline
           </span>
         } @else {
-          <span class="connection-status disconnected" title="Real-time updates disconnected">
-            <mat-icon>wifi_off</mat-icon>
+          <span class="connection-status disconnected" title="Real-time updates disconnected"
+                aria-label="Real-time updates disconnected">
+            <mat-icon aria-hidden="true">wifi_off</mat-icon>
             Offline
           </span>
         }
@@ -96,12 +100,17 @@
           <span class="cleanup-btn-degraded-tag" aria-label="preflight stale">stale</span>
         }
       </button>
+      <!-- P6 (task 8 / P5.3) — the disabled New Job button EXPLAINS
+           itself: all-work rows have no queue concept, and task
+           creation requires a queue, so the tooltip names the reason
+           AND the remedy (switch to Queues view). Copy pinned via
+           NEW_JOB_ALL_WORK_TOOLTIP in jobs-page.bindings.pins.spec. -->
       <button
         mat-flat-button
         color="primary"
         (click)="onOpenCreateDialog()"
         [disabled]="!filters().project_id || isAllWorkView()"
-        [matTooltip]="isAllWorkView() ? 'Switch to Queues view to create jobs' : ''"
+        [matTooltip]="newJobAllWorkTooltip"
         class="create-btn">
         <mat-icon>add</mat-icon>
         New Job
@@ -113,9 +122,12 @@
   <div class="filter-bar">
     <div class="filter-group">
       <span class="filter-label">Status:</span>
+      <!-- P6 (a11y) — programmatic label on the chip listbox (the
+           rendered chips alone carry no group name for AT). -->
       <mat-chip-listbox
         class="status-chips"
         multiple
+        aria-label="Filter jobs by status"
         (change)="onStatusFilterChange($event.value)">
         @for (option of statusOptions; track option.value) {
           <mat-chip-option
@@ -427,21 +439,42 @@
              ``job_id`` (Phase 2); expansion state for headers is
              keyed by group key (Phase 3, G1 panel port). -->
         @if (!showLoadingSkeleton() && !showEmptyState()) {
+          <!-- P6 (task 1) — the grouped list is a WAI-ARIA tree:
+               the viewport is ``role="tree"``; each group header is
+               ``role="treeitem"`` (level 1, ``aria-expanded``); rows
+               are ``role="button"`` activation targets. The
+               tree/section label is programmatic (not icon-only).
+               The chevron stays a REAL ``<button type="button">``
+               (P3) so native Enter/Space activation toggles the
+               group without a container-level key handler (which
+               would double-fire against the button's own
+               activation). -->
           <cdk-virtual-scroll-viewport
             class="job-list"
+            role="tree"
+            aria-label="Jobs grouped by conversation"
             [itemSize]="itemSize"
             minBufferPx="288"
-            maxBufferPx="576">
+            maxBufferPx="576"
+            (keydown)="onListKeydown($event)">
             <ng-container *cdkVirtualFor="let item of renderRows(); trackBy: trackByKey">
               @if (item.kind === 'header') {
-                <div class="group-header" [class.group-header-live]="item.isLive">
+                <div
+                  class="group-header"
+                  role="treeitem"
+                  aria-level="1"
+                  [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
+                  tabindex="0"
+                  [class.group-header-live]="item.isLive"
+                  [class.focused]="isFocusedItem(itemId(item))"
+                  (focus)="onWindowItemFocus(itemId(item))">
                   <button
                     type="button"
                     class="group-header-chevron"
                     [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
                     [attr.aria-label]="isGroupExpanded(item.groupKey) ? 'Collapse group' : 'Expand group'"
                     (click)="onChevronClick($event, item.groupKey); $event.stopPropagation()">
-                    <mat-icon>{{ isGroupExpanded(item.groupKey) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                    <mat-icon aria-hidden="true">{{ isGroupExpanded(item.groupKey) ? 'expand_less' : 'expand_more' }}</mat-icon>
                   </button>
                   <div class="group-header-text">
                     <span class="group-header-title">{{ item.title }}</span>
@@ -449,11 +482,25 @@
                   </div>
                 </div>
               } @else {
+                <!-- P6 (task 2) — row activation: Enter/Space open the
+                     detail drawer. The handler ignores events bubbled
+                     from the card's INNER buttons (target !==
+                     currentTarget) so Retry/Cancel/Delete keep their
+                     own single action; preventDefault swallows the
+                     Space page-scroll. Mouse users activate via the
+                     card's explicit Details button (unchanged). -->
                 <app-job-card
                   [job]="item.job"
+                  role="button"
+                  tabindex="0"
+                  [attr.aria-label]="'Job from ' + (item.job.agent_id || 'unknown agent') + ' — press Enter to view details'"
+                  [class.focused]="isFocusedItem(itemId(item))"
                   [projectPaused]="getProjectPaused(item.job.project_id || '')"
                   [queueMap]="queueNameMap()"
                   [expanded]="isCardExpanded(item)"
+                  (focus)="onWindowItemFocus(itemId(item))"
+                  (keydown.enter)="onRowActivate($event, item)"
+                  (keydown.space)="onRowActivate($event, item)"
                   (cancel)="onCancelJob(item.job)"
                   (retry)="onRetryJob(item.job)"
                   (delete)="onDeleteJob(item.job)"

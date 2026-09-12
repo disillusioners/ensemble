@@ -1,10 +1,14 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect, DOCUMENT } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, viewChild, DOCUMENT } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
-import { ScrollingModule } from '@angular/cdk/scrolling';
+// P6 (task 2) — the viewport reference is needed for the keyboard
+// recycling contract: focus moves scrollToIndex FIRST so the target
+// row is inside the rendered range, THEN real DOM focus is
+// re-resolved after the render tick.
+import { ScrollingModule, CdkVirtualScrollViewport } from '@angular/cdk/scrolling';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
@@ -65,6 +69,13 @@ import {
   toBoundedWindowItems,
   toWindowItems,
 } from './jobs-window.model';
+// P6 (task 2) — pure keyboard model: clamped arrow nav + WAI-ARIA
+// tree action resolution over the flattened WindowItem list.
+import {
+  isJobsActivateKey,
+  jobsWindowItemId,
+  resolveJobsKeyAction,
+} from './jobs-keyboard.model';
 import {
   JobsEmptyStateKind,
   classifyJobsEmptyState,
@@ -2044,6 +2055,179 @@ export class JobsComponent implements OnInit, OnDestroy {
    * headers), so the helper is identity on the key.
    */
   protected trackByKey = (_index: number, item: WindowItem): string => item.key;
+
+  // ── Phase 6 — keyboard model wiring (task 2) ───────────────────────
+  //
+  // Port of the panel's arrow-key model (job-queue-panel
+  // ``onTreeKeydown``) onto the VIRTUAL-SCROLL list, with the one
+  // behavioral difference the medium demands: rows recycle, so every
+  // focus move scrolls the target into the rendered range FIRST and
+  // re-resolves real DOM focus AFTER the render tick (see
+  // ``scheduleFocusAfterRender`` + the contract doc on
+  // ``jobs-keyboard.model.ts``).
+
+  /** The virtual viewport (conditional in the template — optional ref). */
+  private readonly virtualViewport = viewChild(CdkVirtualScrollViewport);
+
+  /**
+   * Id of the flattened item that currently owns keyboard focus
+   * (header OR row). SINGLE-WRITER: the item's own ``(focus)``
+   * binding is the only writer during real focus movement — arrow
+   * keys move REAL DOM focus and the resulting focus event mirrors
+   * the id back here (panel parity: ``focusedItemId``).
+   */
+  private readonly focusedItemId = signal<string | null>(null);
+
+  /** Stable DOM id for a flattened item (focus/class binding). */
+  protected itemId(item: WindowItem): string {
+    return jobsWindowItemId(item);
+  }
+
+  /** True iff the given item id owns keyboard focus (``.focused`` class). */
+  protected isFocusedItem(id: string): boolean {
+    return this.focusedItemId() === id;
+  }
+
+  /** ``(focus)`` handler on header + row items — the single writer. */
+  protected onWindowItemFocus(id: string): void {
+    this.focusedItemId.set(id);
+  }
+
+  /**
+   * Arrow-key handler bound to the virtual-scroll viewport (the
+   * ``role="tree"`` container). REAL DOM focus moves; the item's own
+   * ``(focus)`` binding mirrors it back into ``focusedItemId``.
+   *
+   *   * ArrowDown / ArrowUp → clamped ±1 move over the flattened
+   *     items (headers AND rows — one walk, DOM order == keyboard
+   *     order by construction).
+   *   * ArrowRight          → expand a collapsed group (no-op on an
+   *     expanded header or a row).
+   *   * ArrowLeft           → collapse an expanded group; on a ROW,
+   *     collapse the nearest ancestor group (WAI-ARIA tree pattern)
+   *     and move focus to its header — the row's DOM slot is
+   *     recycled away by the collapse.
+   *
+   * Enter / Space are NOT handled here — they stay on the row hosts
+   * (``onRowActivate``) and on the chevron's native button
+   * activation. A container-level Enter handler would double-fire
+   * against the button activation bubbling up from the chevron.
+   */
+  protected onListKeydown(event: KeyboardEvent): void {
+    const items = this.renderRows();
+    if (items.length === 0) return;
+    const key = event.key;
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowRight' && key !== 'ArrowLeft') {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    const currentId = this.focusedItemId();
+    const currentIndex = currentId
+      ? items.findIndex((it) => jobsWindowItemId(it) === currentId)
+      : -1;
+
+    const action = resolveJobsKeyAction(items, currentIndex, key, (groupKey) =>
+      this.isGroupExpanded(groupKey),
+    );
+
+    if (action.kind === 'focus') {
+      if (action.index < 0 || action.index >= items.length) return;
+      const nextId = jobsWindowItemId(items[action.index]);
+      this.focusedItemId.set(nextId);
+      this.scheduleFocusAfterRender(nextId, action.index);
+      return;
+    }
+
+    if (action.kind === 'expand') {
+      // Rows mount AFTER the header — focus stays put.
+      this.onToggleGroupExpansion(action.groupKey);
+      return;
+    }
+
+    if (action.kind === 'collapse') {
+      this.onToggleGroupExpansion(action.groupKey);
+      if (!action.refocusHeaderId) return;
+      // Re-resolve the header's index on the POST-toggle list — the
+      // collapsed group's rows were AFTER their header, so the
+      // header index is unchanged, but re-deriving it is immune to
+      // that ordering assumption.
+      const postItems = this.renderRows();
+      const headerIndex = postItems.findIndex(
+        (it) => it.kind === 'header' && it.groupKey === action.groupKey,
+      );
+      this.focusedItemId.set(action.refocusHeaderId);
+      if (headerIndex >= 0) {
+        this.scheduleFocusAfterRender(action.refocusHeaderId, headerIndex);
+      } else {
+        this.doc.getElementById(action.refocusHeaderId)?.focus();
+      }
+      return;
+    }
+    // action.kind === 'none' — nothing to do.
+  }
+
+  /**
+   * Row activation (task 2: Enter / Space ACTIVATE). Bound to the
+   * ``app-job-card`` host as ``(keydown.enter)`` /
+   * ``(keydown.space)``; activation opens the detail drawer — the
+   * row's deep-inspection action, same destination as the card's
+   * explicit Details button.
+   *
+   * The ``event.target === event.currentTarget`` guard is the
+   * inner-button shield: the card's Cancel / Retry / Delete /
+   * Details / expand-toggle buttons live INSIDE the host, and their
+   * key events bubble up — without the guard, pressing Enter on
+   * Retry would ALSO open the drawer. ``preventDefault`` swallows
+   * the Space page-scroll (F2-class trap kept off this page: rows
+   * here are not inside a mat-menu, but Enter defaults are still
+   * suppressed for determinism).
+   */
+  protected onRowActivate(event: Event, item: WindowItem): void {
+    if (!isJobsActivateKey((event as KeyboardEvent).key)) return;
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    if (item.kind !== 'row') return;
+    this.onViewJobDetails(item.job);
+  }
+
+  /**
+   * VIRTUAL-SCROLL RECYCLING CONTRACT (pinned in
+   * ``jobs-keyboard.model.spec.ts``): the viewport recycles row DOM,
+   * so the target item may not exist yet at press time. Sequence:
+   *
+   *   1. ``viewport.scrollToIndex(index)`` FIRST — bring the target
+   *      into (or near) the rendered range;
+   *   2. re-resolve ``document.getElementById(id)?.focus()`` AFTER
+   *      the render tick (``setTimeout`` macrotask — CDK renders the
+   *      new range on the scroll-driven tick, not synchronously);
+   *   3. VIEWPORT-CONTAINER FALLBACK: if the id is still not mounted,
+   *      focus the viewport element itself so keyboard focus stays
+   *      inside the list region (never falls to ``<body>``).
+   */
+  private scheduleFocusAfterRender(id: string, index: number): void {
+    const viewport = this.virtualViewport();
+    viewport?.scrollToIndex(index);
+    setTimeout(() => {
+      const el = this.doc.getElementById(id);
+      if (el) {
+        el.focus();
+        return;
+      }
+      // Viewport-container fallback — the id is not (yet) mounted.
+      viewport?.elementRef.nativeElement.focus();
+    });
+  }
+
+  /**
+   * P6 (task 8 / P5.3) — the disabled New Job button's explanatory
+   * copy: all-work rows carry no queue concept and task creation
+   * requires a queue, so the tooltip names the reason AND the
+   * remedy. Pinned via the bindings pins spec (grep the exact copy).
+   */
+  protected readonly newJobAllWorkTooltip =
+    'Task creation requires a queue — switch to Queues view';
 
   /**
    * Phase 2 — exposed reload accessible label. The plan calls for

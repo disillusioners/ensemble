@@ -603,6 +603,18 @@
     border-left: 3px solid var(--accent-cyan, #10a7f7);
   }
 
+  // P6 (task 2) — keyboard-focus affordance for the flattened items.
+  // The ``.focused`` class is driven by the single-writer ``(focus)``
+  // signal (``isFocusedItem``), NOT by ``:focus`` alone: with virtual
+  // recycling the focused row's element can be re-created, and the
+  // class must survive via the id signal until focus moves on.
+  .group-header.focused,
+  app-job-card.focused {
+    outline: 2px solid var(--accent-cyan, #10a7f7);
+    outline-offset: -2px;
+    border-radius: 6px;
+  }
+
   .group-header-chevron {
     display: inline-flex;
     align-items: center;

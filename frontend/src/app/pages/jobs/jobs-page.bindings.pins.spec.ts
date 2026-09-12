@@ -1176,3 +1176,134 @@ describe('P5 — URL binding + deep-link template↔component binding pins', () 
     );
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// P6 — Accessibility close-out (jobs-page-improvement Phase 6).
+//
+// Task 1: the grouped virtual list is a WAI-ARIA tree — role pins on
+// the REAL template text (F-5: template pins are PINS, never
+// behavioral proof; the behavior lives in the pure keyboard model
+// spec, jobs-keyboard.model.spec.ts).
+// Task 3: zero title-only icon controls (connection pills carry
+// programmatic labels; decorative glyphs are aria-hidden; the status
+// chip listbox carries a programmatic label; the defer panel's
+// action rows keep their per-holder aria-labels).
+// Task 8: the disabled New Job button EXPLAINS itself (P5.3 copy).
+// ─────────────────────────────────────────────────────────────────────
+
+// The defer-holders panel is IN a11y scope (plan task 3) — read its
+// real template too.
+const deferPanelTemplateSrc = readFileSync(
+  join(jobsDir, 'defer-holders-panel', 'defer-holders-panel.component.html'),
+  'utf-8',
+);
+
+describe('P6 — ARIA tree structure on the grouped list (task 1, template pins)', () => {
+  it('the virtual-scroll viewport is role="tree" with a programmatic section label', () => {
+    expect(templateSrc).toMatch(
+      /<cdk-virtual-scroll-viewport\s*\n\s*class="job-list"\s*\n\s*role="tree"\s*\n\s*aria-label="Jobs grouped by conversation"/,
+    );
+  });
+
+  it('group headers are role="treeitem" with aria-level and LIVE aria-expanded', () => {
+    expect(templateSrc).toMatch(/class="group-header"\s*\n\s*role="treeitem"\s*\n\s*aria-level="1"\s*\n\s*\[attr\.aria-expanded\]="isGroupExpanded\(item\.groupKey\)"/);
+  });
+
+  it('the chevron is STILL a real <button type="button"> with aria-expanded + stopPropagation (P3 pin preserved)', () => {
+    expect(templateSrc).toMatch(
+      /<button\s*\n\s*type="button"\s*\n\s*class="group-header-chevron"\s*\n\s*\[attr\.aria-expanded\]=[\s\S]*?\(click\)="onChevronClick\(\$event, item\.groupKey\); \$event\.stopPropagation\(\)"/,
+    );
+  });
+
+  it('rows are role="button" tabindex="0" activation targets with a programmatic label', () => {
+    expect(templateSrc).toMatch(
+      /<app-job-card\s*\n\s*\[job\]="item\.job"\s*\n\s*role="button"\s*\n\s*tabindex="0"/,
+    );
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="'Job from '/);
+  });
+
+  it('chevron tap NEVER toggles selection/expansion beyond the group: stopPropagation is the LAST statement in the binding', () => {
+    // Template-extraction audit: the click binding toggles the GROUP
+    // and stops propagation — no row-selection, no card-toggle, no
+    // navigation path from the chevron.
+    expect(templateSrc).toMatch(
+      /\(click\)="onChevronClick\(\$event, item\.groupKey\); \$event\.stopPropagation\(\)"/,
+    );
+    expect(componentSrc).toMatch(
+      /protected onChevronClick\(event: MouseEvent, groupKey: string\): void \{\s*\n\s*event\.stopPropagation\(\);\s*\n\s*this\.onToggleGroupExpansion\(groupKey\);\s*\n\s*\}/,
+    );
+  });
+
+  it('the keyboard handler rides the tree container; rows activate via their own Enter/Space bindings', () => {
+    expect(templateSrc).toMatch(/\(keydown\)="onListKeydown\(\$event\)"/);
+    expect(templateSrc).toMatch(/\(keydown\.enter\)="onRowActivate\(\$event, item\)"/);
+    expect(templateSrc).toMatch(/\(keydown\.space\)="onRowActivate\(\$event, item\)"/);
+    // The container handler MUST NOT handle Enter/Space (the chevron
+    // button's native activation would double-fire).
+    expect(componentSrc).toMatch(
+      /const key = event\.key;\s*\n\s*if \(key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowRight' && key !== 'ArrowLeft'\) \{\s*\n\s*return;/,
+    );
+  });
+
+  it('the single-writer (focus) binding + focused class are on BOTH item kinds', () => {
+    const focusBindings = (templateSrc.match(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/g) ?? []).length;
+    expect(focusBindings).toBe(2);
+    expect(templateSrc).toMatch(/\[class\.focused\]="isFocusedItem\(itemId\(item\)\)"/);
+  });
+});
+
+describe('P6 — icon-only semantics (task 3, zero title-only icon controls)', () => {
+  it('the connection pills carry programmatic aria-labels (title stays for sighted hover)', () => {
+    expect(templateSrc).toMatch(/class="connection-status connected"[^>]*aria-label="Real-time updates connected"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="'Reconnecting to server, attempt ' \+ retryAttempt\(\) \+ ' of 5'"/);
+    expect(templateSrc).toMatch(/class="connection-status disconnected"[^>]*aria-label="Real-time connection failed — click Refresh to retry"/);
+    expect(templateSrc).toMatch(/class="connection-status disconnected"[^>]*aria-label="Real-time updates disconnected"/);
+  });
+
+  it('the status chip listbox has a programmatic label (chips alone name no group)', () => {
+    expect(templateSrc).toMatch(/<mat-chip-listbox\s*\n\s*class="status-chips"\s*\n\s*multiple\s*\n\s*aria-label="Filter jobs by status"/);
+  });
+
+  it('decorative status glyphs are aria-hidden (wifi / sync / wifi_off pills)', () => {
+    expect(templateSrc).toMatch(/<mat-icon aria-hidden="true">wifi<\/mat-icon>/);
+    expect(templateSrc).toMatch(/<mat-icon class="spinning" aria-hidden="true">sync<\/mat-icon>/);
+    expect((templateSrc.match(/<mat-icon aria-hidden="true">wifi_off<\/mat-icon>/g) ?? []).length).toBe(2);
+  });
+
+  it('ZERO mat-icon on the page template carries a bare title (title-only icon control class)', () => {
+    expect(templateSrc).not.toMatch(/<mat-icon[^>]*\stitle=/);
+    expect(deferPanelTemplateSrc).not.toMatch(/<mat-icon[^>]*\stitle=/);
+  });
+
+  it('the defer-holders panel stays in a11y scope: banner region label + aria-live + labeled action rows', () => {
+    expect(deferPanelTemplateSrc).toMatch(/role="region"\s*\n\s*aria-label="Defer-blocked holders"/);
+    expect(deferPanelTemplateSrc).toMatch(/\[attr\.aria-label\]="\s*'Force-complete holder ' \+ holder\.instance_id \+ ' \(' \+ holder\.kind \+ '\)'/);
+    expect(deferPanelTemplateSrc).toMatch(/\[attr\.aria-label\]="\s*'Resend foreground for holder ' \+ holder\.instance_id \+ ' \(' \+ holder\.kind \+ '\)'/);
+    // The page-level defer banner is the aria-live region (task 3).
+    expect(templateSrc).toMatch(/class="defer-page-banner"\s*\n\s*role="status"\s*\n\s*aria-live="polite"/);
+  });
+});
+
+describe('P6 — New Job honest-disabled copy (task 8 / P5.3)', () => {
+  const NEW_JOB_ALL_WORK_TOOLTIP =
+    'Task creation requires a queue — switch to Queues view';
+
+  it('the component owns the exact copy', () => {
+    expect(componentSrc).toMatch(/protected readonly newJobAllWorkTooltip =\s*\n\s*'Task creation requires a queue — switch to Queues view';/);
+  });
+
+  it('the template binds the copy to the disabled New Job button', () => {
+    expect(templateSrc).toMatch(/\[matTooltip\]="newJobAllWorkTooltip"/);
+  });
+
+  it('the copy names BOTH the reason (requires a queue) and the remedy (switch to Queues view)', () => {
+    expect(NEW_JOB_ALL_WORK_TOOLTIP).toMatch(/requires a queue/);
+    expect(NEW_JOB_ALL_WORK_TOOLTIP).toMatch(/switch to Queues view/);
+  });
+
+  it('the button stays disabled in all-work (the gate is unchanged — copy only)', () => {
+    expect(templateSrc).toMatch(
+      /\[disabled\]="!filters\(\)\.project_id \|\| isAllWorkView\(\)"/,
+    );
+  });
+});
