@@ -104,3 +104,117 @@ describe('JobCardComponent Fix C mission/receipt chips (logic mirror)', () => {
     });
   });
 });
+
+// ── P3 vocabulary sweep (jobs-page-improvement) ─────────────────────────
+//
+// Plain-TS logic mirror of JobCardComponent's ``statusIcon`` and
+// ``statusLabel`` computeds. Pins the plan task 5 contract: settled
+// gets the receipt-style glyph (NOT help / default), completed gets
+// check_circle (green-work-done), live row statuses render UPPERCASE,
+// and the M3 prose rule never leaks into card copy.
+
+class MockJobCardVocabulary {
+  private readonly jobSignal = signal<Job>(createMockJob());
+
+  job = this.jobSignal.asReadonly();
+
+  // Logic-mirror of the real component's ``statusIcon`` computed.
+  statusIcon = computed(() => {
+    const status = this.job().status;
+    switch (status) {
+      case 'pending': return 'schedule';
+      case 'processing': return 'sync';
+      case 'paused': return 'pause_circle';
+      case 'completed': return 'check_circle';
+      case 'settled': return 'receipt_long';
+      case 'failed': return 'error';
+      case 'cancelled': return 'cancel';
+      case 'dead_letter': return 'report_problem';
+      default: return 'help';
+    }
+  });
+
+  // Logic-mirror of the real component's ``statusLabel`` computed
+  // (live-row UPPERCASE branch included).
+  statusLabel = computed(() => {
+    const status = this.job().status;
+    const title = status
+      .replace(/_/g, ' ')
+      .split(' ')
+      .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+    if (
+      status === 'pending' ||
+      status === 'processing' ||
+      status === 'paused'
+    ) {
+      return title.toUpperCase();
+    }
+    return title;
+  });
+
+  setJob(job: Job): void {
+    this.jobSignal.set(job);
+  }
+}
+
+describe('JobCardComponent P3 vocabulary sweep (logic mirror)', () => {
+  let card: MockJobCardVocabulary;
+
+  beforeEach(() => {
+    card = new MockJobCardVocabulary();
+  });
+
+  describe('statusIcon — settled gets receipt_long (transport-handled)', () => {
+    it('settled → receipt_long (NOT help / default; mirrors panel :611-630)', () => {
+      card.setJob(createMockJob({ status: 'settled' }));
+      expect(card.statusIcon()).toBe('receipt_long');
+    });
+
+    it('completed → check_circle (green-work-done stays distinct)', () => {
+      card.setJob(createMockJob({ status: 'completed' }));
+      expect(card.statusIcon()).toBe('check_circle');
+    });
+
+    it('settled and completed render with DIFFERENT glyphs (transport/work split)', () => {
+      card.setJob(createMockJob({ status: 'settled' }));
+      const settledIcon = card.statusIcon();
+      card.setJob(createMockJob({ status: 'completed' }));
+      const completedIcon = card.statusIcon();
+      expect(settledIcon).not.toBe(completedIcon);
+    });
+
+    it('pending / processing / paused keep their existing glyphs (no drift)', () => {
+      card.setJob(createMockJob({ status: 'pending' }));
+      expect(card.statusIcon()).toBe('schedule');
+      card.setJob(createMockJob({ status: 'processing' }));
+      expect(card.statusIcon()).toBe('sync');
+      card.setJob(createMockJob({ status: 'paused' }));
+      expect(card.statusIcon()).toBe('pause_circle');
+    });
+  });
+
+  describe('statusLabel — live rows UPPERCASE, terminals Title Case', () => {
+    it('live row labels (pending/processing/paused) render UPPERCASE', () => {
+      card.setJob(createMockJob({ status: 'pending' }));
+      expect(card.statusLabel()).toBe('PENDING');
+      card.setJob(createMockJob({ status: 'processing' }));
+      expect(card.statusLabel()).toBe('PROCESSING');
+      card.setJob(createMockJob({ status: 'paused' }));
+      expect(card.statusLabel()).toBe('PAUSED');
+    });
+
+    it('terminal labels stay Title Case (NOT uppercase)', () => {
+      card.setJob(createMockJob({ status: 'completed' }));
+      expect(card.statusLabel()).toBe('Completed');
+      card.setJob(createMockJob({ status: 'settled' }));
+      expect(card.statusLabel()).toBe('Settled');
+      card.setJob(createMockJob({ status: 'failed' }));
+      expect(card.statusLabel()).toBe('Failed');
+      card.setJob(createMockJob({ status: 'cancelled' }));
+      expect(card.statusLabel()).toBe('Cancelled');
+      card.setJob(createMockJob({ status: 'dead_letter' }));
+      expect(card.statusLabel()).toBe('Dead Letter');
+    });
+  });
+});

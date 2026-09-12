@@ -158,40 +158,103 @@ export function renderGuard<T>(
 }
 
 /**
- * Virtual-scroll source row. Phase 3 adds a ``kind: 'header'`` arm
- * for mission-grouped headers; Phase 2 only ships the ``row`` arm
- * (the union shape is reserved so Phase 3 is a list extension, not a
- * rewrite).
+ * Virtual-scroll source row. Phase 3 ships BOTH arms of the union:
  *
- * Pure data — the component projects the
- * ``store.filteredJobs()`` output into a ``WindowItem[]`` once per
- * render tick (cheap O(n) shape change). The track-by identity is
- * always ``job_id`` so virtual-recycle never confuses rows.
+ * * ``row``    — a single Job row from the grouped projection
+ *                (mapped under a header).
+ * * ``header`` — a grouping header (mission/conversation context)
+ *                from ``groupJobs``. Phase 3 ships the full shape
+ *                so the template can render the chevron, title, and
+ *                meta line without a separate signal.
+ *
+ * Both arms carry ``key`` so ``cdk-virtual-scroll`` can track-by a
+ * stable identity:
+ *
+ * * rows:    ``job.job_id`` (recycle-safe).
+ * * headers: the group key (``mission_id ?? instance_id ??
+ *            NO_MISSION_CONTEXT_KEY``) — stable across regroupings
+ *            (panel :367-378 invariant).
+ *
+ * The union is discriminated by ``kind``; the template's
+ * ``@if (item.kind === 'row')`` branch renders the card and the
+ * ``@else`` branch renders the header — no overlap, silent slicing
+ * is structurally impossible.
  */
 export type WindowItem =
   | { readonly kind: 'row'; readonly job: Job; readonly key: string }
   | {
       readonly kind: 'header';
       readonly key: string;
-      readonly missionId: string;
+      readonly groupKey: string;
       readonly title: string;
+      readonly metaLine: string;
+      readonly isLive: boolean;
+      readonly jobCount: number;
     };
 
 /**
- * Project a list of Jobs into the virtual-scroll ``WindowItem[]``.
+ * Project a flat job list into a flattened ``WindowItem[]`` —
+ * header rows for each group, with the group's rows nested
+ * underneath, and collapsed groups' rows OMITTED.
  *
- * The track key is ``job.job_id`` so ``cdkVirtualForOf`` keeps the
- * DOM-stable identity through recycle — expansion state keyed by
- * ``job_id`` in the store (NOT in the DOM) survives recycle.
+ * Rules:
  *
- * Returns a NEW array on every call (immutable); the component
- * memoizes by row-count + identity check (cheap O(n) compare) so
- * the projection does not fire on every change-detection pass.
+ * * Groups are returned in the order ``groupJobs`` produced them
+ *   (first-row-position; server-order preserved).
+ * * Header rows are ALWAYS included — collapsed groups still show
+ *   their header (the chevron is the only expand toggle).
+ * * Rows under a COLLAPSED group are OMITTED — keyboard order ==
+ *   DOM order (no off-screen rows for arrow keys to skip).
+ * * Each row's ``key`` is ``job.job_id`` (recycle-safe).
+ * * Each header's ``key`` is the group key (recycle-safe; same key
+ *   identity as ``expandedGroupIds.has(key)``).
+ *
+ * The ``title`` is the fallback from ``groupHeaderTitle``; the
+ * component wires the lazy ``GET /api/missions/{id}`` enrichment on
+ * top (see ``MissionService.getMission``).
+ *
+ * The ``metaLine`` is built by ``groupMetaLine`` and is what the
+ * template renders under the header title.
  */
-export function toWindowItems(jobs: readonly Job[]): readonly WindowItem[] {
-  return jobs.map((job) => ({
-    kind: 'row' as const,
-    job,
-    key: job.job_id,
-  }));
+export function toWindowItems(
+  groups: ReadonlyArray<{
+    readonly key: string;
+    readonly missionId: string | null;
+    readonly instanceId: string | null;
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+    readonly jobs: readonly Job[];
+    readonly isLive: boolean;
+  }>,
+  expandedGroupIds: ReadonlySet<string>,
+  titleFor: (group: {
+    readonly key: string;
+    readonly agentId: string | null;
+    readonly lastActivityAt: string | null;
+  }) => string,
+  metaLineFor: (group: {
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+  }) => string,
+): readonly WindowItem[] {
+  const items: WindowItem[] = [];
+  for (const group of groups) {
+    items.push({
+      kind: 'header',
+      key: group.key,
+      groupKey: group.key,
+      title: titleFor(group),
+      metaLine: metaLineFor(group),
+      isLive: group.isLive,
+      jobCount: group.jobCount,
+    });
+    if (expandedGroupIds.has(group.key)) {
+      for (const job of group.jobs) {
+        items.push({ kind: 'row', job, key: job.job_id });
+      }
+    }
+  }
+  return items;
 }

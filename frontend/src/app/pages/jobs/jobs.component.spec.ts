@@ -907,7 +907,16 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('showDeleted signal', () => {
+  // P3 (jobs-page-improvement) carry-over — the mock-fixture
+  // ``showDeleted`` is a HAND-ROLLED ``signal(false)`` (NOT the
+  // production component's ``computed(() => store.filterState()
+  // .include_deleted)``). The describe is renamed so the
+  // mock-fixture-vs-production distinction is obvious in the spec
+  // tree: this pin drives the MOCK's local signal, not the
+  // production derived computed. The production read path lives on
+  // the bindings.pins.spec.ts filter-binding table (P1 template
+  // enumeration pin).
+  describe('MockJobsComponent — showDeleted fixture signal', () => {
     it('should default to false', () => {
       const newComponent = new MockJobsComponent();
       expect(newComponent.showDeleted()).toBe(false);

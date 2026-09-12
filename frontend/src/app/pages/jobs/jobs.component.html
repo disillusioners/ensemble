@@ -319,13 +319,18 @@
           </div>
         }
 
-        <!-- Phase 2 — virtual-scroll list (BOTH view modes). The
-             scroll source is a flattened WindowItem[] (Phase 3
-             adds the ``header`` arm without re-plumbing).
-             ``track`` is keyed by ``job_id`` so the DOM-stable
-             identity survives virtual recycle. Expansion state is
-             keyed by ``job_id`` in the parent — see
-             ``isCardExpanded`` / ``onToggleExpansion``. -->
+        <!-- Phase 3 — grouped virtual-scroll list. Headers AND rows
+             are items in the SAME flattened WindowItem[] (no nested
+             scrollers — the arc's known fiddly bit is solved by
+             structure, not by a scroller trick). Headers render
+             even when the group is COLLAPSED (chevron is the
+             only expand toggle); collapsed groups' rows are
+             OMITTED from the list (keyboard order == DOM order).
+             The track-by identity is ``item.key`` (job_id for rows,
+             group key for headers) so DOM-stable identity survives
+             recycle. Expansion state for rows is keyed by
+             ``job_id`` (Phase 2); expansion state for headers is
+             keyed by group key (Phase 3, G1 panel port). -->
         @if (!showLoadingSkeleton() && !showEmptyState()) {
           <cdk-virtual-scroll-viewport
             class="job-list"
@@ -333,7 +338,22 @@
             minBufferPx="288"
             maxBufferPx="576">
             <ng-container *cdkVirtualFor="let item of renderRows(); trackBy: trackByKey">
-              @if (item.kind === 'row') {
+              @if (item.kind === 'header') {
+                <div class="group-header" [class.group-header-live]="item.isLive">
+                  <button
+                    type="button"
+                    class="group-header-chevron"
+                    [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
+                    [attr.aria-label]="isGroupExpanded(item.groupKey) ? 'Collapse group' : 'Expand group'"
+                    (click)="onChevronClick($event, item.groupKey); $event.stopPropagation()">
+                    <mat-icon>{{ isGroupExpanded(item.groupKey) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                  </button>
+                  <div class="group-header-text">
+                    <span class="group-header-title">{{ item.title }}</span>
+                    <span class="group-header-meta">{{ item.metaLine }}</span>
+                  </div>
+                </div>
+              } @else {
                 <app-job-card
                   [job]="item.job"
                   [projectPaused]="getProjectPaused(item.job.project_id || '')"

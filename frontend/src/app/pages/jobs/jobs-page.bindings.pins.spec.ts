@@ -474,4 +474,145 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
       }
     }
   });
+
+  // ── Phase 3 — grouping + titles + vocabulary (F-5 source-text anchors) ─
+  //
+  // P3 plan task 1-6 — every NEW write-path / binding / template
+  // hunk ships with a source-text pin AND a behavior spec (the
+  // lesson from P2: a source-text pin alone passed green against a
+  // buggy ``showEmptyState``). The behavior specs live in
+  // ``jobs-grouping.model.spec.ts`` (grouping property), the
+  // ``JobsPageStore`` spec (P2 store computeds), and the
+  // ``MissionService`` spec (URL pins). This describe is the
+  // SOURCE-TEXT anchor for the wiring.
+
+  it('P3 grouping projection is wired: groupJobs → toWindowItems in the REAL component', () => {
+    // The projection is a presentation layer over the store's
+    // filteredJobs; the page must NOT re-implement grouping inline.
+    expect(componentSrc).toMatch(/readonly jobGroups = computed<readonly JobGroup\[\]>\(\(\) => \{[\s\S]{0,500}?groupJobs\(this\.store\.filteredJobs\(\)\)/);
+    expect(componentSrc).toMatch(/toWindowItems\(\s*this\.jobGroups\(\),\s*this\.expandedGroupIds\(\)/);
+    // The windowItems computed MUST consume the new toWindowItems
+    // signature (groups + expandedGroupIds + helpers), NOT the
+    // pre-P3 flat-job signature.
+    expect(componentSrc).not.toMatch(/toWindowItems\(this\.store\.filteredJobs\(\)\)/);
+  });
+
+  it('P3 group-header expansion is keyed by group id (parent owns the set, G1 panel port)', () => {
+    expect(componentSrc).toMatch(/readonly expandedGroupIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/readonly userTouchedGroupIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/isGroupExpanded\(groupKey: string\): boolean/);
+    expect(componentSrc).toMatch(/onToggleGroupExpansion\(groupKey: string\): void/);
+    // G1 port: touched-wins merge — autoExpandGroupIds runs in an
+    // effect that filters out touched ids, the effect MUST touch
+    // the userTouchedGroupIds signal.
+    expect(componentSrc).toMatch(/autoExpandGroupIds\(this\.jobGroups\(\)\)/);
+  });
+
+  it('P3 chevron click is a real <button type="button"> with aria-expanded + stopPropagation', () => {
+    // Template-extraction audit (the plan's audit): chevron tap
+    // MUST be a real button (not a clickable div) with
+    // aria-expanded, an accessible label, and stopPropagation so
+    // the tap never bubbles to a card/navigate handler.
+    expect(templateSrc).toMatch(/<button[\s\S]*?type="button"[\s\S]*?class="group-header-chevron"[\s\S]*?\[attr\.aria-expanded\]="isGroupExpanded\(item\.groupKey\)"/);
+    expect(templateSrc).toMatch(/onChevronClick\(\$event, item\.groupKey\)/);
+    // stopPropagation on the chevron (template binding carries it).
+    expect(templateSrc).toMatch(/\$event\.stopPropagation\(\)/);
+    // The component handler exists and stops propagation too.
+    expect(componentSrc).toMatch(/protected onChevronClick\(event: MouseEvent, groupKey: string\): void/);
+    expect(componentSrc).toMatch(/event\.stopPropagation\(\)/);
+  });
+
+  it('P3 MissionService is the canonical home (component + indicator migrated, no JobService.listMissions)', () => {
+    expect(componentSrc).toMatch(/import\s+\{[^}]*MissionService[^}]*\}\s+from\s+['"][^'"]*services\/mission\.service['"]/);
+    expect(componentSrc).toMatch(/private readonly missionService = inject\(MissionService\)/);
+    // JobService no longer hosts listMissions (the F-5 pin in the
+    // mission.service.spec already asserts this; this is the
+    // cross-pin on the component side: no JobService.listMissions
+    // calls anywhere in the page).
+    expect(componentSrc).not.toMatch(/this\.jobService\.listMissions\(/);
+    // Component DOES use MissionService.getMission for enrichment.
+    expect(componentSrc).toMatch(/this\.missionService\.getMission\(/);
+  });
+
+  it('P3 lazy title enrichment is capped at MAX_TITLE_ENRICHMENT_FETCHES (named constant, not a magic number)', () => {
+    expect(componentSrc).toMatch(/MAX_TITLE_ENRICHMENT_FETCHES/);
+    // The cap is enforced in the targets picker (named-constant
+    // contract), and the grouping-model spec pins the value at 3.
+    expect(componentSrc).toMatch(/if \(targets\.length >= MAX_TITLE_ENRICHMENT_FETCHES\) break/);
+    // Retain-last-data: the failure handler keeps the fallback
+    // title — empty body, never a re-fetch.
+    expect(componentSrc).toMatch(/error: \(\) => \{[\s\S]{0,200}?Retain the fallback title/);
+  });
+
+  it('P3 header title uses the instanceDisplayTitle chain (NOT the job-row resolveTitle chain)', () => {
+    // The plan: title fallback via ``instanceDisplayTitle`` (NOT
+    // ``resolveTitle`` which stays on cards). The component wires
+    // the model helper into the projection.
+    expect(componentSrc).toMatch(/groupHeaderTitle\(group/);
+    // Anti-pin: the legacy ``resolveTitle`` chain is NOT used for
+    // group headers (it stays on cards / panel, never on the page).
+    expect(componentSrc).not.toMatch(/this\.resolveTitle\(group/);
+  });
+
+  it('P3 NO_MISSION_CONTEXT_TITLE is the explicit fallback copy (F-5 anchor)', () => {
+    // The template MUST render the pinned copy via the model helper
+    // — never an inline "settled" or other mission-side-prose
+    // violation. The component delegates the fallback to
+    // ``groupHeaderTitle`` (which reads ``NO_MISSION_CONTEXT_TITLE``).
+    expect(componentSrc).toMatch(/NO_MISSION_CONTEXT_KEY/);
+    // The pinned copy itself lives on the grouping model — the
+    // grouping-model spec is the behavioral pin; this pin is the
+    // production-source anchor.
+    const fs = require('fs');
+    const path = require('path');
+    const groupingModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/jobs-grouping.model.ts'),
+      'utf-8',
+    );
+    expect(groupingModelSrc).toMatch(/NO_MISSION_CONTEXT_TITLE\s*=\s*'No mission context'/);
+  });
+
+  it('P3 vocabulary sweep: settled → teal #14B8A6 + receipt_long (job-card pinned already)', () => {
+    // The job-card component renders settled with the panel's
+    // canonical glyph + colour. This pin anchors the production
+    // source-text so a drift in the job-card spec would surface.
+    const fs = require('fs');
+    const path = require('path');
+    const jobCardSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-card/job-card.component.ts'),
+      'utf-8',
+    );
+    // ``receipt_long`` icon for settled.
+    expect(jobCardSrc).toMatch(/'settled':[\s\S]{0,200}?return 'receipt_long'/);
+    // Teal color #14B8A6 for settled (NOT green completed).
+    const jobModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/job.model.ts'),
+      'utf-8',
+    );
+    expect(jobModelSrc).toMatch(/case 'settled':[\s\S]{0,80}?#14B8A6/);
+  });
+
+  it('P3 carry-over — dead-legacy aliases isEmptyState / isEmptyWorkState are removed from the component', () => {
+    // The P2 empty-state model + P2 ``showEmptyState`` computed
+    // REPLACED both aliases; the P3 carry-over checklist retires
+    // them so a future refactor cannot re-introduce silently-sliced
+    // dead code. A grep confirms ZERO production-text references.
+    expect(componentSrc).not.toMatch(/readonly isEmptyState\s*=\s*computed/);
+    expect(componentSrc).not.toMatch(/readonly isEmptyWorkState\s*=\s*computed/);
+    // The template never bound them either (the P2 source-text
+    // pin covers the new path).
+    expect(templateSrc).not.toMatch(/isEmptyState\(/);
+    expect(templateSrc).not.toMatch(/isEmptyWorkState\(/);
+  });
+
+  it('P3 carry-over — unused MatProgressSpinnerModule import is removed from the component', () => {
+    // The P2 empty-state model replaced the legacy spinner with a
+    // loading skeleton; the import had no template reference and
+    // no spec pin. The P3 carry-over removes it so the unused
+    // import cannot drift back into the bundle as a budget hit.
+    expect(componentSrc).not.toMatch(/import\s*\{[^}]*MatProgressSpinnerModule[^}]*\}\s*from\s*['"]@angular\/material\/progress-spinner['"]/);
+    // The component must NOT add the symbol to its ``imports`` array
+    // (the array entry would re-introduce it to the bundle).
+    expect(componentSrc).not.toMatch(/MatProgressSpinnerModule,\s*\n\s*MatChipsModule/);
+  });
 });

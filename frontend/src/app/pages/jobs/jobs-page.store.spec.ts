@@ -403,6 +403,149 @@ describe('JobsPageStore.updateJobFromSse — completed_at stamped for every wire
   });
 });
 
+// ── Phase 2 banner + poll-gate derived state (BEHAVIOR pins, P3 carryover) ─
+//
+// P2 review Finding #2 — these computeds were source-pinned ONLY
+// (the page binds them and the bindings.pins.spec pins the wiring).
+// Source-pins alone pass green against a buggy computed (the same
+// lesson as P2's hasRows short-circuit — a source-text pin passed
+// green against a buggy ``showEmptyState``). P3 pairs source-pins
+// with behavior specs: the truth tables below drive the REAL store
+// and pin the view-mode-aware split. A regression that flips a leg,
+// drops the degraded flag, or lies about in-flight status fails one
+// of these tests.
+
+describe('JobsPageStore — windowRowCount (Phase 2 behavior)', () => {
+  it('equals filteredJobs().length (post-filter, view-mode-aware)', () => {
+    const h = buildStore();
+    h.store.jobs.set([
+      createMockJob({ job_id: 'a', status: 'pending' }),
+      createMockJob({ job_id: 'b', status: 'completed' }),
+      createMockJob({ job_id: 'c', status: 'pending' }),
+    ]);
+    expect(h.store.windowRowCount()).toBe(3);
+    h.store.setFilters({ status: ['pending'] });
+    expect(h.store.windowRowCount()).toBe(2);
+  });
+
+  it('drops to 0 on an empty dataset (true zero, not a degraded impersonator)', () => {
+    const h = buildStore();
+    expect(h.store.windowRowCount()).toBe(0);
+    h.store.jobs.set([createMockJob({ job_id: 'x' })]);
+    expect(h.store.windowRowCount()).toBe(1);
+    h.store.jobs.set([]); // healthy empty 200 — replaces, NOT a degraded impersonator
+    expect(h.store.windowRowCount()).toBe(0);
+  });
+
+  it('reflects the all-work dataset when view_mode === "all-work"', () => {
+    const h = buildStore();
+    h.store.works.set([
+      makeWork({ work_id: 'w-1', status: 'pending' }),
+      makeWork({ work_id: 'w-2', status: 'completed' }),
+    ]);
+    h.store.setFilters({ view_mode: 'all-work' });
+    expect(h.store.windowRowCount()).toBe(2);
+  });
+});
+
+describe('JobsPageStore — windowBanner (Phase 2 behavior, banner policy truth table)', () => {
+  it('hidden when filteredJobs().length < DEFAULT_WINDOW_LIMIT (99 does NOT show)', () => {
+    const h = buildStore();
+    const rows = Array.from({ length: 99 }, (_, i) => createMockJob({ job_id: `j-${i}` }));
+    h.store.jobs.set(rows);
+    expect(h.store.windowBanner()).toBe('hidden');
+  });
+
+  it('visible when filteredJobs().length === DEFAULT_WINDOW_LIMIT (BOTH-WAYS edge)', () => {
+    // The exactly-at-cap edge — at 100 we cannot know whether the
+    // slice is complete or truncated. The banner shows.
+    const h = buildStore();
+    const rows = Array.from({ length: 100 }, (_, i) => createMockJob({ job_id: `j-${i}` }));
+    h.store.jobs.set(rows);
+    expect(h.store.windowBanner()).toBe('visible');
+  });
+
+  it('visible when filteredJobs().length > DEFAULT_WINDOW_LIMIT', () => {
+    const h = buildStore();
+    const rows = Array.from({ length: 250 }, (_, i) => createMockJob({ job_id: `j-${i}` }));
+    h.store.jobs.set(rows);
+    expect(h.store.windowBanner()).toBe('visible');
+  });
+});
+
+describe('JobsPageStore — windowDegraded (Phase 2 behavior, view-scoped)', () => {
+  it('reflects jobsDegraded when view_mode === "queues"', () => {
+    const h = buildStore();
+    h.store.fetchJobs();
+    h.jobsError(new Error('503'));
+    expect(h.store.windowDegraded()).toBe(true);
+    expect(h.store.jobsDegraded()).toBe(true);
+    expect(h.store.worksDegraded()).toBe(false);
+  });
+
+  it('reflects worksDegraded when view_mode === "all-work"', () => {
+    const h = buildStore();
+    h.store.setFilters({ view_mode: 'all-work' });
+    h.store.fetchWorks();
+    h.worksError(new Error('500'));
+    expect(h.store.windowDegraded()).toBe(true);
+    expect(h.store.worksDegraded()).toBe(true);
+    expect(h.store.jobsDegraded()).toBe(false);
+  });
+
+  it('a healthy poll on the ACTIVE leg clears the degraded flag (view-scoped reset)', () => {
+    const h = buildStore();
+    h.store.fetchJobs();
+    h.jobsError(new Error('503'));
+    expect(h.store.windowDegraded()).toBe(true);
+
+    h.store.fetchJobs();
+    h.jobsNext([createMockJob({ job_id: 'fresh' })]);
+    expect(h.store.windowDegraded()).toBe(false);
+  });
+
+  it('the INACTIVE leg\'s degraded flag does NOT bleed into windowDegraded', () => {
+    const h = buildStore();
+    h.store.setFilters({ view_mode: 'queues' });
+    h.store.fetchWorks();
+    h.worksError(new Error('500')); // inactive leg degraded — must not surface
+    expect(h.store.windowDegraded()).toBe(false);
+  });
+});
+
+describe('JobsPageStore — fetchInFlight (Phase 2 behavior, view-scoped gate)', () => {
+  it('true while the ACTIVE leg is loading, false when settled', () => {
+    const h = buildStore();
+    expect(h.store.fetchInFlight()).toBe(false);
+    h.store.fetchJobs();
+    expect(h.store.fetchInFlight()).toBe(true);
+    h.jobsNext([createMockJob({ job_id: 'j-1' })]);
+    expect(h.store.fetchInFlight()).toBe(false);
+  });
+
+  it('follows the all-work leg when view_mode === "all-work"', () => {
+    const h = buildStore();
+    h.store.setFilters({ view_mode: 'all-work' });
+    h.store.fetchWorks();
+    expect(h.store.fetchInFlight()).toBe(true);
+    // The JOBS leg loading at the same time MUST NOT bleed in.
+    h.store.fetchJobs();
+    expect(h.store.fetchInFlight()).toBe(true);
+    h.jobsNext([]);
+    expect(h.store.fetchInFlight()).toBe(true); // still works leg in flight
+    h.worksNext([]);
+    expect(h.store.fetchInFlight()).toBe(false);
+  });
+
+  it('errors clear in-flight (the gate must NOT stay stuck shut on failure)', () => {
+    const h = buildStore();
+    h.store.fetchJobs();
+    expect(h.store.fetchInFlight()).toBe(true);
+    h.jobsError(new Error('503'));
+    expect(h.store.fetchInFlight()).toBe(false); // a failed poll un-sticks the gate
+  });
+});
+
 // ── Local mutation seams ───────────────────────────────────────────────
 
 describe('JobsPageStore — local mutation seams (post-action corrections)', () => {

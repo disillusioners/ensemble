@@ -7,7 +7,10 @@ import { ScrollingModule } from '@angular/cdk/scrolling';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
-import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+// P3 carry-over — ``MatProgressSpinnerModule`` removed (unused).
+// The P2 empty-state model replaces the legacy spinner affordance
+// (a loading skeleton, not a spinner); the import had no template
+// reference and no test pin. Removed in the carry-over checklist.
 import { MatChipsModule } from '@angular/material/chips';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
@@ -16,6 +19,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { Subscription, switchMap, of, catchError, tap, firstValueFrom } from 'rxjs';
 import { JobService } from '../../services/job.service';
+import { MissionService } from '../../services/mission.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
@@ -60,6 +64,17 @@ import {
   emptyStateCopy,
   JobsEmptyStateCopy,
 } from './jobs-empty-state.model';
+import {
+  JobGroup,
+  MAX_TITLE_ENRICHMENT_FETCHES,
+  NO_MISSION_CONTEXT_KEY,
+  autoExpandGroupIds,
+  compareJobGroups,
+  defaultGroupTimeAgo,
+  groupHeaderTitle,
+  groupJobs,
+  groupMetaLine,
+} from '../../models/jobs-grouping.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -90,7 +105,7 @@ export type { JobsViewMode };
     MatButtonModule,
     MatButtonToggleModule,
     MatIconModule,
-    MatProgressSpinnerModule,
+    // P3 carry-over — ``MatProgressSpinnerModule`` removed (unused).
     MatChipsModule,
     MatSidenavModule,
     MatSnackBarModule,
@@ -108,6 +123,14 @@ export type { JobsViewMode };
 export class JobsComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly jobService = inject(JobService);
+  /**
+   * P3 (jobs-page-improvement) — MissionService is the canonical home
+   * for /api/missions calls. The page uses ``getMission(id)`` for
+   * lazy group-title enrichment (plan task 4). The indicator uses
+   * ``listMissions`` for its LEG A (the parallel-creation trap
+   * fix: one home per call).
+   */
+  private readonly missionService = inject(MissionService);
   private readonly jobSseService = inject(JobSseService);
   private readonly projectService = inject(ProjectService);
   private readonly tabStateService = inject(TabStateService);
@@ -179,20 +202,131 @@ export class JobsComponent implements OnInit, OnDestroy {
   // queues-view Refresh button kept both flags in sync. P2 collapses
   // both to the store. F-5 pin in jobs-page.bindings.pins.spec.)
 
-  // ── Phase 2 — virtual-scroll source + render guard ───────────────────
+  // ── Phase 3 — grouping projection (groupJobs → WindowItem[]) ─────────
   //
-  // ``windowItems`` is the flattened (header|row) scroll source the
-  // template renders. Phase 2 ships the ``row`` arm only; Phase 3
-  // extends the list with ``header`` items without re-plumbing.
-  //
-  // ``renderGuardOutcome`` enforces the 1000-row hard cap at RENDER
-  // time over the template-bound projected rows — the plan's
-  // acceptance that growth between fetch and render cannot slip
-  // through. The component's render tree branches on the discriminator
-  // so silent slicing is structurally impossible.
+  // Phase 2's flat-job projection is REPLACED by a grouping layer:
+  // store.filteredJobs() → groupJobs → toWindowItems(groups,
+  // expandedGroupIds, titleFor, metaLineFor). The grouping is a
+  // PRESENTATION layer over the store's projection — the store
+  // never sees groups, the store's filteredJobs stays order-
+  // preserving, and the cards never re-key (panel invariant).
 
+  /**
+   * Grouping projection: filteredJobs → ordered JobGroup[].
+   * Live-first sort port (panel :283-305) applied on top of the
+   * insertion-order groups so the user sees live groups first.
+   */
+  readonly jobGroups = computed<readonly JobGroup[]>(() => {
+    const grouped = groupJobs(this.store.filteredJobs());
+    // Sort a shallow copy so we don't mutate the grouped output.
+    return [...grouped].sort(compareJobGroups);
+  });
+
+  /**
+   * Expansion state — Set keyed by group key. Survives data
+   * refreshes (a poll that reorders the groups does NOT collapse
+   * the user's expanded group). The Phase-2 ``expandedJobIds`` set
+   * uses the same pattern but for row-level expansion.
+   */
+  readonly expandedGroupIds = signal<Set<string>>(new Set());
+
+  /**
+   * G1 port (panel :145-154) — group ids the user has MANUALLY
+   * toggled (chevron click, ArrowRight / ArrowLeft). The auto-seed
+   * effect only seeds UNTOUCHED first-2-live group ids; once an id
+   * is touched, the auto-seed NEVER un-toggles or re-expands it,
+   * regardless of how the live-group set drifts across polls. The
+   * user's choice wins.
+   */
+  readonly userTouchedGroupIds = signal<Set<string>>(new Set());
+
+  /**
+   * Lazy title enrichment — Map<GroupKey, string> of titles that
+   * arrived via ``MissionService.getMission(id)``. A missing entry
+   * means "use the fallback title" (the model ``groupHeaderTitle``).
+   * Failures keep the fallback title rendered (retain-last-data
+   * discipline — the panel pattern). Cleared on group-id change
+   * only when the BE row goes away (the effect is keyed on the
+   * group list, not the map).
+   */
+  private readonly titleOverrides = signal<Map<string, string>>(new Map());
+
+  /**
+   * Helper: pick the FIRST MAX_TITLE_ENRICHMENT_FETCHES group keys
+   * that are (a) eligible for enrichment (NOT the no-context
+   * fallback group) AND (b) not yet enriched. Returns the keys in
+   * display order so the cap is honored even when many groups are
+   * eligible.
+   */
+  private pickEnrichmentTargets(): readonly string[] {
+    const overrides = this.titleOverrides();
+    const targets: string[] = [];
+    for (const g of this.jobGroups()) {
+      if (g.key === NO_MISSION_CONTEXT_KEY) continue; // never enrich the fallback
+      if (overrides.has(g.key)) continue; // already enriched
+      // Need an id to enrich — group.missionId OR group.instanceId
+      // (the coalesced key).
+      if (!g.key) continue;
+      targets.push(g.key);
+      if (targets.length >= MAX_TITLE_ENRICHMENT_FETCHES) break;
+    }
+    return targets;
+  }
+
+  /**
+   * Header title for a group — the enrichment override wins, the
+   * fallback ``groupHeaderTitle`` (instanceDisplayTitle chain)
+   * otherwise. Pure data, used by ``toWindowItems`` via the
+   * ``titleFor`` callback below.
+   */
+  private titleForGroup = (group: {
+    readonly key: string;
+    readonly agentId: string | null;
+    readonly lastActivityAt: string | null;
+  }): string => {
+    const override = this.titleOverrides().get(group.key);
+    if (override) return override;
+    return groupHeaderTitle(group, (d) => this.formatTimeAgo(d));
+  };
+
+  /**
+   * Meta-line for a group header — ``agent · N jobs · timeAgo(last
+   * activity)``. Pure data; zero-count segments are dropped by the
+   * model. The page uses its own ``formatTimeAgo`` so the wording
+   * matches the rest of the page (panel ``timeAgo`` parity).
+   */
+  private metaLineForGroup = (group: {
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+  }): string => {
+    return groupMetaLine(group, (d) => this.formatTimeAgo(d));
+  };
+
+  /**
+   * Page-level timeAgo formatter. Mirrors the panel/legacy
+   * ``timeAgo`` so a job-card "just now" reads the same as a
+   * group-header "just now".
+   */
+  private formatTimeAgo(dateString: string | null | undefined): string {
+    return defaultGroupTimeAgo(dateString);
+  }
+
+  /**
+   * The flattened ``WindowItem[]`` the virtual scroll consumes —
+   * header + rows. The track-by identity is the union's ``key``
+   * field (job_id for rows; group key for headers). The projection
+   * is pure given the inputs; the component memoizes by reference
+   * equality on the underlying arrays so it doesn't fire on every
+   * change-detection pass.
+   */
   readonly windowItems = computed<readonly WindowItem[]>(() =>
-    toWindowItems(this.store.filteredJobs()),
+    toWindowItems(
+      this.jobGroups(),
+      this.expandedGroupIds(),
+      this.titleForGroup,
+      this.metaLineForGroup,
+    ),
   );
 
   readonly renderGuardOutcome = computed<RenderGuardOutcome<WindowItem>>(() =>
@@ -455,21 +589,17 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly displayedJobs = this.store.filteredJobs;
 
   readonly hasJobs = computed(() => this.store.filteredJobs().length > 0);
-  readonly isEmptyState = computed(
-    () => !this.loading() && this.store.filteredJobs().length === 0 && !this.error(),
-  );
 
-  /**
-   * Empty-state flag for the unified work view (Phase 4).
-   * P1: filter-aware — the projection is the truth, so an empty
-   * PROJECTION (not an empty raw dataset) is the empty state.
-   */
-  readonly isEmptyWorkState = computed(() => {
-    return this.viewMode() === 'all-work'
-      && !this.workLoading()
-      && this.store.filteredJobs().length === 0
-      && !this.workError();
-  });
+  // ── P3 carry-over — DEAD-LEGACY-ALIAS RETIREMENT ─────────────────
+  //
+  // ``isEmptyState`` and ``isEmptyWorkState`` were pre-P2 component
+  // booleans that the P2 empty-state model + P2 ``showEmptyState``
+  // computeds replaced. The P2 source-text pin in
+  // ``jobs-page.bindings.pins.spec`` already proved the new wiring
+  // owns the empty-state surface; a grep confirms zero template
+  // references. The aliases are removed in P3 (the carry-over
+  // checklist) so the legacy locals cannot drift back into a future
+  // refactor as silently-sliced dead code.
 
   /**
    * Convenience boolean — true while the page is in the all-work view.
@@ -543,6 +673,65 @@ export class JobsComponent implements OnInit, OnDestroy {
       const latestStatus = this.jobSseService.latestStatus();
       if (latestStatus && latestStatus.job_id) {
         this.store.updateJobFromSse(latestStatus);
+      }
+    });
+
+    // P3 (jobs-page-improvement) — G1 port: auto-seed the
+    // expansion set on every true change to the live-group key
+    // list. Only the FIRST 2 live groups auto-expand (user-locked:
+    // exactly 2). User-touched ids are NEVER un-toggled or
+    // re-expanded by the seed. The effect is keyed on a stable
+    // string of the live-group ids so unrelated input changes
+    // (e.g. a title-enrichment map mutation) do NOT re-fire it.
+    let seededForKey = '';
+    const liveGroupKey = computed(() =>
+      this.jobGroups()
+        .filter((g) => g.isLive)
+        .map((g) => g.key)
+        .slice()
+        .sort()
+        .join('|'),
+    );
+    effect(() => {
+      const key = liveGroupKey();
+      if (key === seededForKey) return;
+      seededForKey = key;
+      const liveIds = autoExpandGroupIds(this.jobGroups());
+      const touched = this.userTouchedGroupIds();
+      const toSeed = liveIds.filter((id) => !touched.has(id));
+      if (toSeed.length === 0) return;
+      this.expandedGroupIds.update((set) => {
+        const next = new Set(set);
+        for (const id of toSeed) next.add(id);
+        return next;
+      });
+    });
+
+    // P3 (jobs-page-improvement) — lazy title enrichment. Fires
+    // once per group-list change and tops up the
+    // ``titleOverrides`` map for the FIRST
+    // ``MAX_TITLE_ENRICHMENT_FETCHES`` groups that (a) are not the
+    // no-context fallback AND (b) don't already have an override.
+    // Errors retain the fallback title (retain-last-data — the
+    // panel pattern). The effect is idempotent — re-firing on a
+    // re-key only fetches what changed.
+    effect(() => {
+      const targets = this.pickEnrichmentTargets();
+      for (const id of targets) {
+        this.missionService.getMission(id).subscribe({
+          next: (resp) => {
+            const title = resp?.mission?.title;
+            if (!title) return;
+            this.titleOverrides.update((m) => {
+              const next = new Map(m);
+              next.set(id, title);
+              return next;
+            });
+          },
+          error: () => {
+            // Retain the fallback title (retain-last-data).
+          },
+        });
       }
     });
 
@@ -925,6 +1114,56 @@ export class JobsComponent implements OnInit, OnDestroy {
       }
       return next;
     });
+  }
+
+  // ── Phase 3 — group-header expansion (G1 port) ─────────────────────
+
+  /**
+   * True iff the group with this key is currently expanded.
+   * Header rows in the virtual-scroll viewport always render; the
+   * GROUP'S ROWS render only when this returns true (the
+   * collapsed-omission invariant).
+   */
+  protected isGroupExpanded(groupKey: string): boolean {
+    return this.expandedGroupIds().has(groupKey);
+  }
+
+  /**
+   * Toggle a group header — chevron-only, ``stopPropagation`` so the
+   * tap never bubbles to the card/navigate handler (template
+   * extraction audit: chevron tap never navigates).
+   *
+   * Marks the id as user-touched (G1): once an id is touched, the
+   * auto-seed effect NEVER un-toggles or re-expands it. The user's
+   * choice survives any subsequent live-set drift.
+   */
+  protected onToggleGroupExpansion(groupKey: string): void {
+    this.userTouchedGroupIds.update((set) => {
+      const next = new Set(set);
+      next.add(groupKey);
+      return next;
+    });
+    this.expandedGroupIds.update((set) => {
+      const next = new Set(set);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Chevron click is REAL `<button type="button">` with
+   * ``aria-expanded`` + ``stopPropagation`` (template-extraction
+   * audit). This handler delegates to ``onToggleGroupExpansion`` —
+   * the stopPropagation happens in the template binding
+   * ``(click)="onChevronClick($event, item.groupKey); $event.stopPropagation()"``.
+   */
+  protected onChevronClick(event: MouseEvent, groupKey: string): void {
+    event.stopPropagation();
+    this.onToggleGroupExpansion(groupKey);
   }
 
   /**

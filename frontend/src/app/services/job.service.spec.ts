@@ -301,78 +301,13 @@ class TestJobService {
   }
 
   /**
-   * Mission-tree panel (2026-09-07) — captures the URL and returns a
-   * deterministic MissionListResponse. Mirrors ``JobService.listMissions``.
+   * Mission-service split (jobs-page-improvement P3) — listMissions
+   * + listJobsByMission moved OUT to ``MissionService``. The URL
+   * pins and envelope-shape pins for those endpoints now live in
+   * ``mission.service.spec.ts``. JobService MUST NOT re-host them
+   * (parallel-creation trap: one home per call). The mirror here
+   * no longer carries the methods.
    */
-  listMissions(params?: { liveness?: string; limit?: number }) {
-    const search = new URLSearchParams();
-    if (params?.liveness) search.set('liveness', params.liveness);
-    if (params?.limit !== undefined) search.set('limit', params.limit.toString());
-    const queryString = search.toString();
-    const url = '/api/missions' + (queryString ? `?${queryString}` : '');
-    this.lastRequestUrl = url;
-
-    const mockResponse = {
-      missions: [
-        {
-          mission_id: 'm-1',
-          agent_id: 'leader',
-          parent_mission_id: null,
-          liveness: 'processing',
-          terminal_reason: null,
-          epoch: 1,
-          linked_jobs: ['j-1', 'j-2'],
-          started_at: '2026-09-07T10:00:00Z',
-          last_activity_at: '2026-09-07T10:30:00Z',
-          title: null,
-          initiative_preview: null,
-        },
-      ],
-      total: 1,
-      limit: params?.limit ?? 10,
-      offset: 0,
-      has_more: false,
-      degraded: false,
-    };
-
-    return {
-      pipe: () => ({
-        subscribe: (observer: any) => {
-          if (typeof observer === 'function') {
-            observer(mockResponse);
-          } else if (observer.next) {
-            observer.next(mockResponse);
-          }
-        }
-      })
-    };
-  }
-
-  /**
-   * Mission-tree panel — captures the URL and returns a deterministic
-   * job array. Mirrors ``JobService.listJobsByMission``.
-   */
-  listJobsByMission(missionId: string) {
-    const url = `/api/jobs?mission_id=${encodeURIComponent(missionId)}&include_deleted=false`;
-    this.lastRequestUrl = url;
-
-    const mockJobs: Job[] = [
-      createMockJob({ job_id: `mission-job-${missionId}-1`, status: 'processing', mission_id: missionId }),
-      createMockJob({ job_id: `mission-job-${missionId}-2`, status: 'settled', mission_id: missionId }),
-    ];
-
-    return {
-      pipe: () => ({
-        subscribe: (observer: any) => {
-          if (typeof observer === 'function') {
-            observer(mockJobs);
-          } else if (observer.next) {
-            observer.next(mockJobs);
-          }
-        }
-      })
-    };
-  }
 }
 
 describe('JobService', () => {
@@ -785,80 +720,11 @@ describe('JobService', () => {
     });
   });
 
-  // ── Mission-tree panel (2026-09-07, ``feature/job-queue-mission-tree``) ─
+  // ── Mission-service split (jobs-page-improvement P3) ─────────────
+  //
+  // ``listMissions`` + ``listJobsByMission`` moved OUT to
+  // ``MissionService`` (one home per call). Their URL pins + envelope
+  // pins now live in ``mission.service.spec.ts``. JobService MUST
+  // NOT re-host them — the migration is structural, not cosmetic.
 
-  describe('listMissions', () => {
-    it('should build GET /api/missions with no params (panel default)', () => {
-      let result: any = null;
-      service.listMissions().pipe().subscribe((r) => { result = r; });
-      expect(service.lastRequestUrl).toBe('/api/missions');
-      expect(result.missions).toHaveLength(1);
-      expect(result.total).toBe(1);
-    });
-
-    it('should pass liveness filter as comma-separated query param', () => {
-      service.listMissions({ liveness: 'processing,pending,paused' }).pipe().subscribe(() => {});
-      expect(service.lastRequestUrl).toContain('liveness=processing%2Cpending%2Cpaused');
-      expect(service.lastRequestUrl).toContain('/api/missions');
-    });
-
-    it('should pass limit query param', () => {
-      service.listMissions({ limit: 20 }).pipe().subscribe(() => {});
-      expect(service.lastRequestUrl).toContain('limit=20');
-    });
-
-    it('should pass both liveness and limit together', () => {
-      service.listMissions({ liveness: 'processing', limit: 20 }).pipe().subscribe(() => {});
-      expect(service.lastRequestUrl).toContain('liveness=processing');
-      expect(service.lastRequestUrl).toContain('limit=20');
-    });
-
-    it('returns the full MissionSummary[] + envelope (missions, total, degraded, has_more)', () => {
-      let result: any = null;
-      service.listMissions().pipe().subscribe((r) => { result = r; });
-      expect(result).toHaveProperty('missions');
-      expect(result).toHaveProperty('total');
-      expect(result).toHaveProperty('degraded');
-      expect(result).toHaveProperty('has_more');
-      const m = result.missions[0];
-      expect(m).toHaveProperty('mission_id');
-      expect(m).toHaveProperty('agent_id');
-      expect(m).toHaveProperty('parent_mission_id');
-      expect(m).toHaveProperty('liveness');
-      expect(m).toHaveProperty('terminal_reason');
-      expect(m).toHaveProperty('epoch');
-      expect(m).toHaveProperty('linked_jobs');
-      expect(m).toHaveProperty('started_at');
-      expect(m).toHaveProperty('last_activity_at');
-      expect(m).toHaveProperty('title');
-      expect(m).toHaveProperty('initiative_preview');
-    });
-  });
-
-  describe('listJobsByMission', () => {
-    it('should build GET /api/jobs with mission_id and include_deleted=false', () => {
-      let result: Job[] | null = null;
-      service.listJobsByMission('m-1').pipe().subscribe((r) => { result = r; });
-      expect(service.lastRequestUrl).toContain('/api/jobs');
-      expect(service.lastRequestUrl).toContain('mission_id=m-1');
-      expect(service.lastRequestUrl).toContain('include_deleted=false');
-      expect(result).not.toBeNull();
-      expect(result!.length).toBeGreaterThan(0);
-    });
-
-    it('should URL-encode mission id', () => {
-      service.listJobsByMission('mission/with/slashes').pipe().subscribe(() => {});
-      expect(service.lastRequestUrl).toContain('mission_id=mission%2Fwith%2Fslashes');
-    });
-
-    it('should return the .jobs array from the response (map response.jobs)', () => {
-      let result: Job[] | null = null;
-      service.listJobsByMission('m-1').pipe().subscribe((r) => { result = r; });
-      expect(Array.isArray(result)).toBe(true);
-      expect(result![0]).toHaveProperty('job_id');
-      expect(result![0]).toHaveProperty('mission_id');
-      // Should NOT have a top-level "total" — the wrapper, not the rows.
-      expect(result!).not.toHaveProperty('total');
-    });
-  });
 });

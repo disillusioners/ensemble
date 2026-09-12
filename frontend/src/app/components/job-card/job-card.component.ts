@@ -88,6 +88,14 @@ export class JobCardComponent {
       case 'processing': return 'sync';
       case 'paused': return 'pause_circle';
       case 'completed': return 'check_circle';
+      // P3 (jobs-page-improvement) — vocabulary sweep: ``settled``
+      // is a TRANSPORT-receipt terminal (mirror rows) and gets the
+      // receipt-style glyph, NOT a generic help icon. Mirrors the
+      // panel's ``getStatusIcon`` (:611-630) so a settled card
+      // reads as transport-handled (receipt) rather than work-done
+      // (completed's check_circle). Keeps the transport/work
+      // vocabulary split visible on every surface.
+      case 'settled': return 'receipt_long';
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
       case 'dead_letter': return 'report_problem';
@@ -97,8 +105,26 @@ export class JobCardComponent {
 
   statusLabel = computed(() => {
     const status = this.job().status;
-    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter')
-    return status.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter').
+    const title = status
+      .replace(/_/g, ' ')
+      .split(' ')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+    // P3 (jobs-page-improvement) — vocabulary sweep: UPPERCASE
+    // status text on LIVE rows (pending/processing/paused). The
+    // non-live terminals (completed/settled/failed/cancelled/
+    // dead_letter) stay Title Case — uppercase is reserved for
+    // "actively in flight" so the live state is glanceable on the
+    // card without scanning the status chip colour.
+    if (
+      status === 'pending' ||
+      status === 'processing' ||
+      status === 'paused'
+    ) {
+      return title.toUpperCase();
+    }
+    return title;
   });
 
   // Used to apply spinning animation to processing status icon

@@ -150,37 +150,136 @@ describe('jobs-window — WINDOW_BANNER_COPY (template F-5 pin)', () => {
 });
 
 describe('jobs-window — toWindowItems (virtual scroll source)', () => {
-  it('maps every Job to a row WindowItem with key=job_id', () => {
+  // Phase 3 — the projection now takes groups (NOT raw jobs) so
+  // the header arm can ship its full shape (chevron + title + meta
+  // line + live flag). The component wires the page-level helpers
+  // (``groupHeaderTitle`` / ``groupMetaLine``) — the model keeps
+  // its pure, injectable interface so the spec can drive it with
+  // simple stubs.
+
+  // Stable stubs for the helper functions — kept inside the
+  // describe so the spec reads as a self-contained fixture. The
+  // production component injects ``groupHeaderTitle`` and
+  // ``groupMetaLine`` from ``jobs-grouping.model``.
+  const identityTitle = (g: { key: string }): string => g.key;
+  const identityMeta = (): string => 'meta';
+
+  it('maps every Job in EVERY group to a row WindowItem with key=job_id (expanded by default)', () => {
     const jobs = [
-      createMockJob({ job_id: 'a' }),
-      createMockJob({ job_id: 'b' }),
-      createMockJob({ job_id: 'c' }),
+      createMockJob({ job_id: 'a', mission_id: 'm-1', instance_id: 'i-1' }),
+      createMockJob({ job_id: 'b', mission_id: 'm-1', instance_id: 'i-1' }),
+      createMockJob({ job_id: 'c', mission_id: 'm-2', instance_id: 'i-2' }),
     ];
-    const items = toWindowItems(jobs);
+    // groupJobs lives in the grouping model — replicate the simple
+    // shape the projection expects (the grouping model spec is the
+    // authoritative pin for groupJobs).
+    const groups = [
+      { key: 'm-1', missionId: 'm-1', instanceId: 'i-1', agentId: null, jobCount: 2, lastActivityAt: null, jobs: [jobs[0], jobs[1]], isLive: true },
+      { key: 'm-2', missionId: 'm-2', instanceId: 'i-2', agentId: null, jobCount: 1, lastActivityAt: null, jobs: [jobs[2]], isLive: true },
+    ];
+    // Empty expanded set ⇒ ALL groups treated as collapsed ⇒ headers
+    // only, NO rows.
+    const items = toWindowItems(groups, new Set(), identityTitle, identityMeta);
+    expect(items.length).toBe(2);
+    expect(items.map((i) => i.kind)).toEqual(['header', 'header']);
+
+    // ALL groups expanded ⇒ headers + every row in server order.
+    const expanded = toWindowItems(groups, new Set(['m-1', 'm-2']), identityTitle, identityMeta);
+    expect(expanded.length).toBe(5);
+    expect(expanded.map((i) => i.kind)).toEqual(['header', 'row', 'row', 'header', 'row']);
+    expect(expanded.filter((i) => i.kind === 'row').map((i) => (i as { job: { job_id: string } }).job.job_id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('preserves server order WITHIN each expanded group (no client-side sort)', () => {
+    const groups = [
+      {
+        key: 'm-1',
+        missionId: 'm-1',
+        instanceId: 'i-1',
+        agentId: null,
+        jobCount: 3,
+        lastActivityAt: null,
+        jobs: [
+          createMockJob({ job_id: 'first', priority: 9 }),
+          createMockJob({ job_id: 'mid', priority: 1 }),
+          createMockJob({ job_id: 'last', priority: 5 }),
+        ],
+        isLive: true,
+      },
+    ];
+    const items = toWindowItems(groups, new Set(['m-1']), identityTitle, identityMeta);
+    const rowKeys = items
+      .filter((i) => i.kind === 'row')
+      .map((i) => (i as { job: { job_id: string } }).job.job_id);
+    expect(rowKeys).toEqual(['first', 'mid', 'last']);
+  });
+
+  it('collapsed groups OMIT rows from the flattened list (keyboard order == DOM order)', () => {
+    const groups = [
+      {
+        key: 'm-1',
+        missionId: 'm-1',
+        instanceId: 'i-1',
+        agentId: null,
+        jobCount: 1,
+        lastActivityAt: null,
+        jobs: [createMockJob({ job_id: 'collapsed-row', mission_id: 'm-1' })],
+        isLive: true,
+      },
+      {
+        key: 'm-2',
+        missionId: 'm-2',
+        instanceId: 'i-2',
+        agentId: null,
+        jobCount: 1,
+        lastActivityAt: null,
+        jobs: [createMockJob({ job_id: 'expanded-row', mission_id: 'm-2' })],
+        isLive: true,
+      },
+    ];
+    const items = toWindowItems(groups, new Set(['m-2']), identityTitle, identityMeta);
+    // Two headers + ONE row (the expanded group's only row). The
+    // collapsed group's row is OMITTED — never silently sliced.
     expect(items.length).toBe(3);
-    expect(items.map((i) => i.kind)).toEqual(['row', 'row', 'row']);
-    expect(items.map((i) => i.key)).toEqual(['a', 'b', 'c']);
+    expect(items.map((i) => i.kind)).toEqual(['header', 'header', 'row']);
+    const row = items.find((i) => i.kind === 'row') as { job: { job_id: string } };
+    expect(row.job.job_id).toBe('expanded-row');
   });
 
-  it('preserves server order (no client-side sort)', () => {
-    const jobs = [
-      createMockJob({ job_id: 'first', priority: 9 }),
-      createMockJob({ job_id: 'mid', priority: 1 }),
-      createMockJob({ job_id: 'last', priority: 5 }),
-    ];
-    const items = toWindowItems(jobs);
-    expect(items.map((i) => i.key)).toEqual(['first', 'mid', 'last']);
-  });
-
-  it('handles an empty list without erroring', () => {
-    expect(toWindowItems([])).toEqual([]);
+  it('handles an empty input without erroring (returns [])', () => {
+    expect(toWindowItems([], new Set(), identityTitle, identityMeta)).toEqual([]);
   });
 
   it('returns a NEW array on every call (immutable projection)', () => {
-    const jobs = [createMockJob({ job_id: 'x' })];
-    const a = toWindowItems(jobs);
-    const b = toWindowItems(jobs);
+    const groups = [
+      { key: 'm-1', missionId: 'm-1', instanceId: 'i-1', agentId: null, jobCount: 1, lastActivityAt: null, jobs: [createMockJob({ job_id: 'x' })], isLive: true },
+    ];
+    const a = toWindowItems(groups, new Set(['m-1']), identityTitle, identityMeta);
+    const b = toWindowItems(groups, new Set(['m-1']), identityTitle, identityMeta);
     expect(a).not.toBe(b);
     expect(a).toEqual(b);
+  });
+
+  it('header key === group key (track-by identity)', () => {
+    const groups = [
+      { key: 'm-1', missionId: 'm-1', instanceId: 'i-1', agentId: null, jobCount: 0, lastActivityAt: null, jobs: [], isLive: false },
+    ];
+    const items = toWindowItems(groups, new Set(), identityTitle, identityMeta);
+    expect(items[0].kind).toBe('header');
+    const header = items[0] as Extract<typeof items[0], { kind: 'header' }>;
+    expect(header.key).toBe('m-1');
+    expect(header.groupKey).toBe('m-1');
+  });
+
+  it('header carries the live flag (drives chevron styling + auto-expand seed)', () => {
+    const groups = [
+      { key: 'live-1', missionId: 'live-1', instanceId: 'live-1', agentId: null, jobCount: 1, lastActivityAt: null, jobs: [createMockJob({ job_id: 'j-1' })], isLive: true },
+      { key: 'term-1', missionId: 'term-1', instanceId: 'term-1', agentId: null, jobCount: 1, lastActivityAt: null, jobs: [createMockJob({ job_id: 'j-2' })], isLive: false },
+    ];
+    const items = toWindowItems(groups, new Set(), identityTitle, identityMeta);
+    const liveHeader = items.find((i) => i.kind === 'header' && (i as { key: string }).key === 'live-1') as Extract<typeof items[0], { kind: 'header' }>;
+    const termHeader = items.find((i) => i.kind === 'header' && (i as { key: string }).key === 'term-1') as Extract<typeof items[0], { kind: 'header' }>;
+    expect(liveHeader.isLive).toBe(true);
+    expect(termHeader.isLive).toBe(false);
   });
 });

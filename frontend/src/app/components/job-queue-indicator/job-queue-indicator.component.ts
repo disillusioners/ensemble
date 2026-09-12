@@ -17,6 +17,7 @@ import { MatMenuModule, MatMenuTrigger } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { JobService } from '../../services/job.service';
+import { MissionService } from '../../services/mission.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
@@ -111,6 +112,13 @@ import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.compo
 })
 export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
   private readonly jobService = inject(JobService);
+  /**
+   * P3 (jobs-page-improvement) — listMissions migrated out of
+   * JobService into MissionService (one home per call, the
+   * parallel-creation trap). The forkJoin leg below calls
+   * ``this.missionService.listMissions(...)`` (not jobService).
+   */
+  private readonly missionService = inject(MissionService);
   private readonly projectService = inject(ProjectService);
   private readonly tabStateService = inject(TabStateService);
   private readonly instanceService = inject(InstanceService);
@@ -677,7 +685,12 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       // envelope), the envelope returns ``degraded:true`` +
       // ``total=null`` and the helper returns ``null`` (count
       // unavailable, retain last).
-      liveMissions: this.jobService.listMissions({
+      //
+      // P3 (jobs-page-improvement) — migrated from JobService to
+      // MissionService (the parallel-creation trap fix: one home per
+      // call). The wiring below MUST be the migration target, not a
+      // duplicate on JobService.
+      liveMissions: this.missionService.listMissions({
         liveness: 'processing,pending,paused',
         limit: 20,
       }).pipe(
