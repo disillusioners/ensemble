@@ -463,6 +463,7 @@ RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
     "internal_report:",
     "internal_error_report:",
     "internal_invoke_and_wait:",
+    "internal_chart_reuse:",
     "explore:",
     "experience:",
     "agent:",

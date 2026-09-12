@@ -17,7 +17,7 @@ Three sections:
   PART 2 — census re-derivation (READ-ONLY static grep):
     Enumerate every place a source/origin value is MINTED (written into
     durable state — message_queue rows, JobItem.source columns, etc.).
-    Diff the derived mint-set against the 17 RESERVED_SOURCE_PREFIXES
+    Diff the derived mint-set against the 18 RESERVED_SOURCE_PREFIXES
     members. Any daemon-minted durable origin NOT in the reserved set
     is a BLOCKER. Any reserved member with no mint site is over-reservation.
 
@@ -212,6 +212,11 @@ PART1_CASES: list[tuple[str, dict[str, Any], str]] = [
         {"agent_id": "developer", "message": "probe", "source": "experience:iid-1"},
         "gate_422",
     ),
+    (
+        "5i. source: internal_chart_reuse:i-1 (reserved prefix)",
+        {"agent_id": "developer", "message": "probe", "source": "internal_chart_reuse:i-1"},
+        "gate_422",
+    ),
 
     # ── Reserved exact (no colon) values ────────────────────────────────────
     (
@@ -396,13 +401,14 @@ def _verdict(expected: str, actual: str) -> str:
 
 # ── PART 2 — census re-derivation ───────────────────────────────────────────
 
-# The 17 members per daemon/constants.py:431-451 (the binding).
+# The 18 members per daemon/constants.py:431-451 (the binding).
 RESERVED_PREFIXES_FROZENSET = (
     "system:",
     "internal_agent:",
     "internal_report:",
     "internal_error_report:",
     "internal_invoke_and_wait:",
+    "internal_chart_reuse:",
     "explore:",
     "experience:",
     "agent:",
@@ -419,7 +425,7 @@ RESERVED_PREFIXES_FROZENSET = (
 
 
 def _read_constants_reserved() -> frozenset[str]:
-    """Read the real constant from daemon.constants to confirm 17 members."""
+    """Read the real constant from daemon.constants to confirm 18 members."""
     from daemon.constants import RESERVED_SOURCE_PREFIXES
     return RESERVED_SOURCE_PREFIXES
 
@@ -506,12 +512,12 @@ def _enumerate_observed_members(mint_sites: dict[str, list[tuple[str, int]]]) ->
 
 def run_part2() -> tuple[dict[str, list[tuple[str, int]]], list[str], list[str], list[str]]:
     """Returns (mint_sites, observed_members, missing_mint, over_reserved)."""
-    # Confirm the constant matches the 17-member contract.
+    # Confirm the constant matches the 18-member contract.
     actual_const = _read_constants_reserved()
-    if len(actual_const) != 17:
+    if len(actual_const) != 18:
         raise AssertionError(
             f"RESERVED_SOURCE_PREFIXES has {len(actual_const)} members, "
-            f"expected 17. Members: {sorted(actual_const)}"
+            f"expected 18. Members: {sorted(actual_const)}"
         )
 
     mint_sites = _grep_mint_sites()
@@ -636,7 +642,7 @@ def print_part2_table(
     over_reserved: list[str],
 ) -> bool:
     banner("PART 2 — Census re-derivation (daemon/ mint sites)")
-    print(f"17 reserved members per daemon/constants.py:431-451:")
+    print(f"18 reserved members per daemon/constants.py:431-451:")
     for i, m in enumerate(RESERVED_PREFIXES_FROZENSET, 1):
         observed_marker = "✓" if m in observed else "✗"
         sites = mint_sites.get(m, [])
@@ -670,7 +676,7 @@ def print_part2_table(
     print(f"TOTAL hits: {total_hits}")
     print()
     print(
-        f"PART 2 SUMMARY: 17 reserved members, "
+        f"PART 2 SUMMARY: 18 reserved members, "
         f"{len(observed)} observed mint sites, "
         f"{len(missing_mint)} missing (over-reserved)"
     )

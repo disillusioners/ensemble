@@ -1474,8 +1474,21 @@ class TestT6FacadeForwarding:
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
+            # LOUD-SKIP: emit a discoverable reason string naming the stale
+            # sha, the gate it disables (M11 facade-forwarding), and the
+            # remediation. A hard fail would break cherry-picks across
+            # rebases (the commit may not exist on a parent branch yet);
+            # a plain ``pytest.skip`` is the silent-disable class that
+            # e73af4fd killed. The ``LOUD-SKIP:`` prefix is greppable in
+            # ``pytest -ra`` output so the gate-staleness surfaces
+            # immediately in CI logs without blocking legitimate picks.
             pytest.skip(
-                f"git show {self.PHASE1_COMMIT} failed: {exc.stderr.strip()}"
+                f"LOUD-SKIP: Phase 1 facade-forwarding gate (M11) "
+                f"disabled — ``git show {self.PHASE1_COMMIT}`` failed "
+                f"(likely stale sha after rebase/history edit). "
+                f"stderr={exc.stderr.strip()!r}. "
+                f"Remediation: update PHASE1_COMMIT to the current "
+                f"sha of the per-caller charter reuse core commit."
             )
 
         # The diff is constrained to chart_tools.py, tests/test_chart_tools.py,

@@ -95,7 +95,9 @@ class TestReservedSourcePrefixesConstant:
         file:line citations). Any future addition/removal MUST edit
         this pin in the same commit — a silent membership change is
         exactly the fork this test exists to catch. 2026-08-30 gate
-        reverse-census added ``scheduler`` (17 members)."""
+        reverse-census added ``scheduler`` (17 members).
+        2026-09-12 review-fix pass added ``internal_chart_reuse:`` for
+        the generate_chart charter-reuse path (18 members)."""
         from daemon.constants import RESERVED_SOURCE_PREFIXES
 
         assert RESERVED_SOURCE_PREFIXES == frozenset({
@@ -105,6 +107,7 @@ class TestReservedSourcePrefixesConstant:
             "internal_report:",
             "internal_error_report:",
             "internal_invoke_and_wait:",
+            "internal_chart_reuse:",
             "explore:",
             "experience:",
             "agent:",
@@ -132,6 +135,7 @@ class TestReservedSourcePrefixesConstant:
         assert is_reserved_source("internal_report:abc:msg") is True
         assert is_reserved_source("internal_error_report:abc") is True
         assert is_reserved_source("internal_invoke_and_wait:p1") is True
+        assert is_reserved_source("internal_chart_reuse:foo") is True
 
         # Non-colon exact values (exact-matched).
         assert is_reserved_source("cascade_resume") is True
