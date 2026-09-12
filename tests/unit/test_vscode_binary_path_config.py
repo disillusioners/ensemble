@@ -202,3 +202,115 @@ class TestEnvNameContract:
     def test_model_reads_env_without_init_kwarg(self, monkeypatch) -> None:
         monkeypatch.setenv("VSCODE_BINARY_PATH", "/opt/code-server/bin/code-server")
         assert VSCodeConfig().binary_path == "/opt/code-server/bin/code-server"
+
+
+# =============================================================================
+# Section-less vscode section + ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX env override
+# (review-council follow-up MAJOR 2)
+# =============================================================================
+
+class TestSectionLessVscodeConfig:
+    """Review-council follow-up MAJOR 2 — the
+    ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env var MUST apply even when
+    the yaml omits the ``vscode:`` section.
+
+    Pre-fix bug: the env read sat inside the
+    ``if "vscode" in processed_config:`` guard in
+    ``daemon/config.py`` load_config. Pydantic natively binds only
+    ``VSCODE_WEBVIEW_CSP_FIX`` via ``env_prefix="VSCODE_"`` (it does
+    NOT bind the ``ENSEMBLE_*`` form), so a custom config that omits
+    the section silently ignored the kill-switch — breaking the
+    documented incident-revert path on every fresh ``uv sync`` +
+    ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=0`` operator.
+
+    The fix hoists the env read to the top of ``load_config`` so
+    the env value feeds into the resolver whether or not the
+    section exists; the section-less branch now also seeds
+    ``config_dict["vscode"]`` so pydantic's init path sees the
+    override.
+
+    Mirrors the section-less shape of
+    ``test_env_only_yaml_section_absent`` (above) — the
+    ``binary_path`` analogue — but pins the boolean kill-switch
+    semantics.
+    """
+
+    def test_section_less_env_off_resolves_false(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Section-less yaml + ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=0``
+        → resolved ``False``. Without the fix this resolves
+        ``True`` (default) because the env read was inside the
+        ``if "vscode" in processed_config:`` guard.
+        """
+        monkeypatch.setenv("ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX", "0")
+        path = _write_yaml(tmp_path, None)  # no vscode section
+        config = load_config(config_path=path)
+        assert config.vscode.webview_csp_fix is False, (
+            "section-less config + ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=0 "
+            "MUST resolve False (kill-switch active)"
+        )
+
+    def test_section_less_env_on_resolves_true(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Section-less yaml + ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=1``
+        → resolved ``True``. Mirror of the off case; both paths
+        must agree with the operator intent (not silently default).
+        """
+        monkeypatch.setenv("ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX", "1")
+        path = _write_yaml(tmp_path, None)
+        config = load_config(config_path=path)
+        assert config.vscode.webview_csp_fix is True
+
+    def test_section_less_env_unset_resolves_true(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Section-less yaml + env unset → resolved ``True``
+        (documented default ON).
+        """
+        monkeypatch.delenv("ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX", raising=False)
+        path = _write_yaml(tmp_path, None)
+        config = load_config(config_path=path)
+        assert config.vscode.webview_csp_fix is True
+
+    def test_section_present_env_off_still_resolves_false(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Regression pin: the section-present path (which was
+        always working) still honours the env override. Without
+        this pin, a future refactor could regress the section-
+        present path while fixing the section-less one.
+        """
+        monkeypatch.setenv("ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX", "0")
+        # ``webview_csp_fix: null`` in the yaml → resolver sees
+        # ``yaml_value=None`` → env wins.
+        path = _write_yaml(tmp_path, "  webview_csp_fix: null")
+        config = load_config(config_path=path)
+        assert config.vscode.webview_csp_fix is False
+
+    def test_invalid_env_value_raises_at_boot(self, tmp_path, monkeypatch) -> None:
+        """Section-less yaml + ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=purple``
+        → boot-time ValueError naming the flag (fail-loud on
+        operator typo, mirrors the Shape-A precedent).
+
+        The kv-ambient kill-switch runs FIRST in the boot path
+        (it has the same typo-surfacing contract); we don't
+        assert here on the kv-ambient's error to keep this test
+        scope-bounded to the vscode-webview flag. The fail-loud
+        contract itself is pinned by the existing
+        ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` typo
+        test (``TestKVAmbientEnvValue``) — the resolver chain
+        shares the same parsing vocabulary.
+        """
+        monkeypatch.setenv("ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX", "purple")
+        path = _write_yaml(tmp_path, None)
+        # We don't pin the exact exception class / message — the
+        # boot path has multiple ValueError gates (kv-ambient runs
+        # first), and which one trips depends on import-order. The
+        # contract is "ValueError on a purple env var at boot";
+        # the kv-ambient test pins the exact message-shape for its
+        # flag, and the Shape-A resolver for vscode-webview
+        # follows the same vocabulary.
+        with pytest.raises(ValueError):
+            load_config(config_path=path)

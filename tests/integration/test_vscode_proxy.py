@@ -1256,33 +1256,45 @@ class TestWebviewCspRewrite:
     # ── direct rewrite-seam coverage (no HTTP) ─────────────────────────────
 
     def test_rewrite_webview_meta_csp_4_112(self):
-        """4.112.0 webview HTML — meta-CSP is augmented."""
+        """4.112.0 webview HTML — meta-CSP is augmented.
+
+        The real meta-CSP captured in the 2026-09-12 evidence has NO
+        ``img-src`` / NO ``media-src``. The helper inserts them on
+        rewrite (review-council follow-up CRITICAL 1).
+        """
         from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
 
         body = self._build_webview_html(self.WEBVIEW_CSP_4_112)
-        out, rewrote = _rewrite_webview_meta_csp(body, self.VIRTUAL_HOST)
+        out, rewrote = _rewrite_webview_meta_csp(body)
         assert rewrote is True
         assert self.VIRTUAL_HOST.encode() in out
         # The hash must survive unchanged — only sources are appended.
         assert b"sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=" in out
+        # Insertion-when-absent: img-src and media-src MUST be inserted
+        # because the original meta-CSP omits them.
+        assert b"img-src" in out
+        assert b"media-src" in out
+        assert b"data: blob:" in out, "img-src MUST include data:/blob: bypass"
 
     def test_rewrite_webview_meta_csp_4_137(self):
         """4.137.0 webview HTML — meta-CSP is augmented, hash preserved."""
         from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
 
         body = self._build_webview_html(self.WEBVIEW_CSP_4_137)
-        out, rewrote = _rewrite_webview_meta_csp(body, self.VIRTUAL_HOST)
+        out, rewrote = _rewrite_webview_meta_csp(body)
         assert rewrote is True
         assert self.VIRTUAL_HOST.encode() in out
         assert b"sha256-24QqA5dJq6y3qX8p9sL7h3kL5tN6mN8kP7qY5sX2cT0=" in out
+        assert b"img-src" in out
+        assert b"media-src" in out
 
     def test_rewrite_is_idempotent(self):
         """Running the rewrite twice yields the same bytes."""
         from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
 
         body = self._build_webview_html(self.WEBVIEW_CSP_4_112)
-        out1, _ = _rewrite_webview_meta_csp(body, self.VIRTUAL_HOST)
-        out2, rewrote2 = _rewrite_webview_meta_csp(out1, self.VIRTUAL_HOST)
+        out1, _ = _rewrite_webview_meta_csp(body)
+        out2, rewrote2 = _rewrite_webview_meta_csp(out1)
         assert rewrote2 is False
         assert out1 == out2
 
@@ -1291,7 +1303,7 @@ class TestWebviewCspRewrite:
         from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
 
         plain = b"<html><body>no CSP here</body></html>"
-        out, rewrote = _rewrite_webview_meta_csp(plain, self.VIRTUAL_HOST)
+        out, rewrote = _rewrite_webview_meta_csp(plain)
         assert rewrote is False
         assert out == plain
 
@@ -1548,9 +1560,10 @@ class TestWebviewCspRewrite:
     def test_already_augmented_webview_passes_through_unchanged(
         self,
     ):
-        """An already-augmented webview doc hits the FULL HTTP path
-        and is re-served with the ORIGINAL Content-Encoding
-        preserved (byte-faithful to the wire).
+        """An ALREADY-augmented webview doc (script-src/style-src AND
+        img-src/media-src all widened) hits the FULL HTTP path and
+        is re-served with the ORIGINAL Content-Encoding preserved
+        (byte-faithful to the wire).
 
         ``test_rewrite_is_idempotent`` only exercises the direct
         helper ``_rewrite_webview_meta_csp``; this test drives the
@@ -1558,17 +1571,26 @@ class TestWebviewCspRewrite:
         re-serve contract for the consume-but-no-rewrite branch
         (the path that would previously have fallen through to
         streaming and 500'd with ``StreamConsumed`` on real httpx).
+
+        Post-review-council: the "already augmented" fixture must
+        include ``img-src`` and ``media-src`` too — those are the
+        insertion targets added by the CRITICAL 1 follow-up. A
+        doc that has script-src/style-src widened but no
+        img-src/media-src is NOT augmented for the image-preview
+        failure mode; the helper would still insert.
         """
         self._install_fn(True)
         import brotli
-        # Build an ALREADY-augmented doc (the wildcard source is in
-        # both script-src and style-src) and brotli-encode it.
+        # Build a FULLY augmented doc: script-src + style-src widened
+        # AND img-src + media-src present. Then brotli-encode.
         already_augmented_csp = (
             "default-src 'none'; "
             "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
             f"'self' {self.VIRTUAL_HOST}; "
             "frame-src 'self'; "
-            f"style-src 'unsafe-inline' {self.VIRTUAL_HOST};"
+            f"style-src 'unsafe-inline' {self.VIRTUAL_HOST}; "
+            "img-src 'self' data: blob: https://*.vscode-resource.vscode-cdn.net; "
+            "media-src 'self' https://*.vscode-resource.vscode-cdn.net"
         )
         raw = self._build_webview_html(already_augmented_csp)
         br = brotli.compress(raw)
@@ -1607,9 +1629,9 @@ class TestWebviewCspRewrite:
         # original raw bytes back to the browser without re-encoding).
         assert int(resp.headers["content-length"]) == len(br)
         # Idempotency pin: the wildcard appears ONCE per directive,
-        # not twice. ``raw.count(VIRTUAL_HOST) == 2`` (one for each
-        # of script-src / style-src).
-        assert raw.count(self.VIRTUAL_HOST.encode()) == 2
+        # not twice. ``raw.count(VIRTUAL_HOST) == 4`` (one for each
+        # of script-src / style-src / img-src / media-src).
+        assert raw.count(self.VIRTUAL_HOST.encode()) == 4
 
     def test_webview_html_with_charset_hits_rewrite(self):
         """Content-Type ``text/html; charset=UTF-8`` (the typical real
@@ -1857,6 +1879,268 @@ class TestWebviewCspRewrite:
         # applied because the unknown encoder couldn't decode).
         assert b"webview body chunk one chunk two" in resp.content
 
+    # ── Review-council follow-ups ─────────────────────────────────────────────
+
+    # CRITICAL 1: insertion-when-absent semantics for img-src / media-src.
+    def test_augment_inserts_img_src_when_absent(self):
+        """The real meta-CSP has NO ``img-src`` → default-src 'none'
+        applies → image blocked. The rewrite must INSERT
+        ``img-src data: blob: https://*.vscode-resource.vscode-cdn.net``
+        on every augmented doc.
+
+        Per CSP3 §6.1.5.4 an absent img-src falls back to
+        ``default-src 'none'``. Per §6.7.2.4 the HTTP header CSP and
+        meta-CSP INTERSECT — sources must appear in both. Widening
+        only script-src/style-src (the previous behaviour) does
+        NOT rescue the image. This test pins the insertion contract.
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "frame-src 'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert b"img-src" in out, (
+            "img-src MUST be INSERTED when absent — the real meta-CSP "
+            "captured in 2026-09-12 evidence has no img-src, so the "
+            "browser falls back to default-src 'none' and blocks the image"
+        )
+        # Verify the exact insertion value — data:/blob: are kept for
+        # the extension's known bypass paths (inline data URI + blob
+        # URL after fetch()); the virtual-host wildcard covers direct
+        # <img src="https://*.vscode-resource.vscode-cdn.net/...">.
+        assert (
+            b"img-src data: blob: https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_inserts_media_src_when_absent(self):
+        """Sibling to img-src — ``media-src`` covers ``<audio>`` /
+        ``<video>`` (the 4.137.0 ``vscode.audioPreview`` /
+        ``vscode.videoPreview`` custom editors use the same
+        ``asWebviewUri`` flow).
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert b"media-src" in out
+        assert (
+            b"media-src 'self' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_appends_not_inserts_when_img_src_present(self):
+        """Present ``img-src`` is preserved as-is — only
+        ``script-src`` / ``style-src`` get the wildcard appended
+        when present (per the brief: ``Present-directive behavior
+        (append wildcard) stays as-is for script-src/style-src``).
+        Insertion of ``img-src`` only fires when ABSENT.
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "img-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        # img-src appears ONCE (not re-inserted, not extended).
+        assert out.count(b"img-src") == 1
+        # The existing img-src source list is preserved verbatim
+        # (no wildcard appended). The wildcard is appended only to
+        # script-src/style-src.
+        assert b"img-src 'self'" in out
+        assert b"https://*.vscode-resource.vscode-cdn.net" not in out.split(b"img-src", 1)[1].split(b";", 1)[0]
+        # script-src and style-src ARE extended with the wildcard.
+        assert (
+            b"script-src 'self' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+        assert (
+            b"style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_idempotent_after_insertion(self):
+        """Idempotency after the FIRST insert (no double img-src /
+        no double media-src on the second pass).
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out1, rewrote1 = proxy_module._rewrite_webview_meta_csp(body)
+        out2, rewrote2 = proxy_module._rewrite_webview_meta_csp(out1)
+        assert rewrote1 is True
+        assert rewrote2 is False, (
+            "second-pass rewrite must be a no-op (idempotent)"
+        )
+        assert out1 == out2
+        # Each directive appears exactly once after insertion.
+        assert out2.count(b"img-src") == 1
+        assert out2.count(b"media-src") == 1
+
+    # Path-gate boundary pin (review-council follow-up ride-along 2).
+    def test_path_gate_rejects_mid_segment_substring(self):
+        """``/vscode/xwebview/browser/pre/index.html`` must NOT
+        match — the ``x`` is mid-segment. A bare bytes-substring
+        ``in`` check would slip through (false positive); the
+        anchored split-on-``/`` test rejects it.
+        """
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/static/xwebview/browser/pre/index.html"
+            )
+            is False
+        )
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/somewebview/browser/pre/index.html"
+            )
+            is False
+        )
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/webviewxx/browser/pre/index.html"
+            )
+            is False
+        )
+        # The canonical path still matches.
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/stable-abc/static/out/vs/workbench/"
+                b"contrib/webview/browser/pre/index.html"
+            )
+            is True
+        )
+
+    # Accept-Encoding pin (review-council follow-up ride-along 3).
+    def test_ae_pin_for_rewrite_eligible_request(self):
+        """Rewrite-eligible requests (path contains the webview
+        index fragment) get an outbound ``Accept-Encoding`` pinned
+        to the decodable set so the upstream can't reply with an
+        encoding we can't decode (e.g. ``zstd``).
+        """
+        webview_path = (
+            b"/vscode/stable-abc/static/out/vs/workbench/"
+            b"contrib/webview/browser/pre/index.html"
+        )
+        # Client sends ``gzip, zstd`` → outbound pinned to decodable.
+        pinned = vscode_proxy._accept_encoding_for_request(
+            webview_path, "gzip, zstd"
+        )
+        assert pinned == "gzip, deflate, br"
+        # Unset client header → still pinned (defensive default).
+        assert (
+            vscode_proxy._accept_encoding_for_request(webview_path, None)
+            == "gzip, deflate, br"
+        )
+
+    def test_ae_passthrough_for_non_eligible_request(self):
+        """Non-eligible requests keep the client's value verbatim —
+        non-webview traffic (workbench shell, JS chunks, etc.)
+        still flows through with whatever the client negotiated.
+        """
+        non_webview_path = (
+            b"/vscode/stable-abc/static/out/vs/workbench/workbench.js"
+        )
+        assert (
+            vscode_proxy._accept_encoding_for_request(
+                non_webview_path, "gzip, zstd"
+            )
+            == "gzip, zstd"
+        )
+        # Unset client header → unset outbound.
+        assert (
+            vscode_proxy._accept_encoding_for_request(
+                non_webview_path, None
+            )
+            is None
+        )
+
+    # Body-size cap (review-council follow-up ride-along 1).
+    def test_oversize_body_byte_faithful_re_serve(self):
+        """A webview HTML larger than
+        ``_WEBVIEW_REWRITE_MAX_BODY_BYTES`` (1 MiB) skips the
+        rewrite and re-serves the original raw bytes with the
+        original Content-Encoding preserved (byte-faithful to the
+        wire). 1 MiB is ~100× the observed webview HTML size; an
+        oversize webview is a future code-server growth signal,
+        not a 500.
+        """
+        self._install_fn(True)
+        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
+        # Build a brotli-encoded body that's bigger than the cap
+        # (after decoding; the cap is on the buffered raw body).
+        oversized = (
+            b"<html><head>" + b"x" * (cap + 1024) + b"</head></html>"
+        )
+        import brotli
+        br = brotli.compress(oversized)
+        # Sanity: brotli-compressed version must also exceed the
+        # cap to trigger the consume-loop break.
+        assert len(oversized) > cap
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/"
+                "webview/browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        # No 500: oversize webview HTML falls back to
+        # byte-faithful re-serve of whatever was buffered before
+        # the cap tripped. The proxy truncates at the cap
+        # (consumes no further bytes); the response carries the
+        # original Content-Encoding and the truncated
+        # Content-Length.
+        assert resp.status_code == 200
+        assert resp.headers.get("content-encoding") == "br"
+        # The content-length reflects the truncated chunk count,
+        # not the original body size.
+        cl = int(resp.headers["content-length"])
+        assert cl <= cap, (
+            "content-length on oversize re-serve must reflect the "
+            "truncated chunk count, NOT the original upstream size"
+        )
+        # No virtual-host origin added — we did not get far enough
+        # to rewrite the meta-CSP (the doc is too large).
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
 
 def _patch_upstream_for_webview_html(
     *,
@@ -1921,3 +2205,4 @@ def _patch_upstream_for_webview_html(
         return fake_client
 
     proxy_module.httpx.AsyncClient = _fake_async_client
+

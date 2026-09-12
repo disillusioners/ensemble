@@ -61,7 +61,40 @@ VSCODE_PROXY_CSP = (
 #     ``index.html`` does not);
 #   * the path is the natural selector for "this is a webview doc,
 #     not the workbench shell".
+#
+# ANCHORED on path-segment boundaries (``/.../webview/browser/pre/
+# index.html``), not a bare bytes-substring — review-council follow-up
+# 2. A request like ``/vscode/static/xwebview/browser/pre/index.html``
+# must NOT match (the ``x`` is mid-segment). The split-then-join test
+# below enforces this without depending on URL-parse semantics in
+# :mod:`urllib.parse` (the path comes from httpx / FastAPI's raw
+# routing already, and a mid-segment substring would slip through a
+# naive ``in`` check).
 _WEBVIEW_HTML_PATH_FRAGMENT = b"webview/browser/pre/index.html"
+
+
+def _path_contains_webview_fragment(path_bytes: bytes) -> bool:
+    """Return True iff ``/webview/browser/pre/index.html`` appears
+    as a sequence of path segments in ``path_bytes``.
+
+    Splits on ``/`` and tests membership of the joined 4-segment
+    tuple ``(b"webview", b"browser", b"pre", b"index.html")`` —
+    so a request like ``/vscode/xwebview/browser/pre/index.html`` (the
+    ``x`` mid-segment) does NOT match, while the canonical
+    ``/vscode/<hash>/static/out/vs/workbench/contrib/webview/browser/
+    pre/index.html`` does.
+    """
+    if not path_bytes:
+        return False
+    target = _WEBVIEW_HTML_PATH_FRAGMENT.split(b"/")
+    parts = [p for p in path_bytes.split(b"/") if p]
+    n = len(parts)
+    m = len(target)
+    for i in range(n - m + 1):
+        if parts[i : i + m] == target:
+            return True
+    return False
+
 
 # CSP source expression appended to ``script-src`` and ``style-src``
 # in the webview HTML's meta-CSP. The virtual host
@@ -87,10 +120,84 @@ _WEBVIEW_CSP_VIRTUAL_HOST = (
     "https://*.vscode-resource.vscode-cdn.net"
 )
 
+# CSP rewrite directives — review-council follow-up CRITICAL 1.
+#
+# The real meta-CSP captured at .agents/tester/RESULTS/
+# 2026-09-12-vscode-image-preview-browser-capture.md:41-44 is
+# ``default-src 'none'; script-src 'sha256-…' 'self'; frame-src 'self';
+# style-src 'unsafe-inline';`` — NO ``img-src`` / NO ``media-src``.
+# Per CSP3 §6.1.5.4, an absent directive falls back to
+# ``default-src 'none'``; per §6.7.2.4, the HTTP header CSP and the
+# meta-CSP INTERSECT (sources must appear in both). A bare APPEND
+# cannot fix this — there is no ``img-src`` directive to append to.
+# The fix is INSERT-WHEN-ABSENT semantics for ``img-src`` and
+# ``media-src``: when the directive is absent from the meta-CSP, we
+# add it; when present, we extend it with the virtual-host wildcard
+# (same as the script-src / style-src append).
+#
+# ``img-src``: image bytes for media-preview (and any other extension
+# that constructs an ``<img src="virtual-host">``). Includes ``data:``
+# (for the inline-data URI path the extension sometimes uses) and
+# ``blob:`` (for the blob-URL workaround the JS layer may use after
+# a ``fetch()`` to virtual-host).
+#
+# ``media-src``: audio + video siblings (``<audio>`` / ``<video>``).
+# The 4.137.0 ``vscode.audioPreview`` / ``vscode.videoPreview`` custom
+# editors use the same ``asWebviewUri`` flow as the image editor;
+# without this directive they hit the same ``default-src 'none'``
+# fall-back.
+_WEBVIEW_CSP_INSERTIONS: dict[str, str] = {
+    # When ``img-src`` is absent in the meta-CSP, insert this value.
+    # Includes ``data:`` / ``blob:`` so the extension's two known
+    # bypass paths (inline data URI + blob URL after fetch()) keep
+    # working; and the virtual-host wildcard so direct
+    # ``<img src="https://*.vscode-resource.vscode-cdn.net/...">``
+    # is also permitted.
+    "img-src": (
+        "data: blob: https://*.vscode-resource.vscode-cdn.net"
+    ),
+    # When ``media-src`` is absent, insert this value (audio/video).
+    "media-src": (
+        "'self' https://*.vscode-resource.vscode-cdn.net"
+    ),
+}
+
+# Directives that should be EXTENDED (appended to) rather than
+# INSERTED. Each entry maps the directive name to the value to
+# APPEND if the origin isn't already present. ``script-src`` and
+# ``style-src`` get the virtual-host wildcard appended; the
+# ``img-src`` / ``media-src`` insertions are handled separately
+# (they go in the ``_WEBVIEW_CSP_INSERTIONS`` table above).
+_WEBVIEW_CSP_APPENDS: dict[str, str] = {
+    "script-src": _WEBVIEW_CSP_VIRTUAL_HOST,
+    "style-src": _WEBVIEW_CSP_VIRTUAL_HOST,
+}
+
+# All directives this seam ever touches — used as a sanity set in
+# the rewrite helper (catches typos like ``"image-src"``).
+_ALL_WEBVIEW_CSP_DIRECTIVES: frozenset[str] = frozenset(
+    set(_WEBVIEW_CSP_INSERTIONS) | set(_WEBVIEW_CSP_APPENDS)
+)
+
+# Maximum buffered body size for the meta-CSP rewrite seam.
+# Webview HTML is small (< 10 KiB based on the 2026-09-12 capture
+# evidence); the cap is generous to accommodate future code-server
+# growth but bounded to prevent an oversized upstream from forcing
+# the proxy into a memory blow-up. 1 MiB is ~100× the observed
+# size; ``_raw_byte_faithful_response`` re-serves the raw bytes
+# with the original ``Content-Encoding`` preserved so the cap is
+# effectively invisible to the browser on the no-rewrite path.
+_WEBVIEW_REWRITE_MAX_BODY_BYTES: int = 1 * 1024 * 1024
+
 # Per-process one-shot log: at most one warning per worker per
 # undecodable upstream encoding, so a flood of brotli responses does
 # not spam the log.
 _BROTLI_DECODE_MISSING_LOGGED = False
+
+# Per-process one-shot log: at most one warning per worker per
+# oversized body, so a flood of over-cap responses does not spam
+# the log.
+_OVERSIZE_BODY_LOGGED = False
 
 # Match a ``<meta http-equiv="Content-Security-Policy" content="...">``
 # tag. The value (``[^"]*``) tolerates embedded newlines and quotes
@@ -125,6 +232,39 @@ def _proxy_headers(headers: Mapping[str, str], port: int) -> dict[str, str]:
     result["Host"] = f"127.0.0.1:{port}"
     result["Origin"] = f"http://127.0.0.1:{port}"
     return result
+
+
+# Outbound ``Accept-Encoding`` for rewrite-eligible requests —
+# review-council follow-up ride-along 3. If a future browser /
+# client negotiates a non-decodeable encoding (e.g. ``zstd``) the
+# rewrite seam would silently skip — the proxy cannot decode the
+# upstream response, the consume point drains nothing useful, and
+# the meta-CSP rewrite is skipped. Pinning the outbound header to
+# the decodable set guarantees that any response we receive IS
+# decodeable; non-eligible requests keep the client's value
+# unchanged (so e.g. zstd-encoded JS chunks for the workbench
+# shell still flow through).
+_WEBVIEW_REWRITE_DECODABLE_ENCODINGS: tuple[str, ...] = (
+    "gzip", "deflate", "br",
+)
+_WEBVIEW_REWRITE_ACCEPT_ENCODING: str = "gzip, deflate, br"
+
+
+def _accept_encoding_for_request(
+    path_bytes: bytes, client_accept_encoding: str | None
+) -> str | None:
+    """Return the outbound ``Accept-Encoding`` for ``path_bytes``.
+
+    For rewrite-eligible paths (those whose URL contains the
+    webview index fragment), pin the header to the decodable set
+    so the upstream can't accidentally reply with an encoding we
+    can't decode (e.g. ``zstd``); for non-eligible paths return
+    the client's value unchanged so non-webview traffic flows
+    through with whatever the client negotiated.
+    """
+    if _path_contains_webview_fragment(path_bytes):
+        return _WEBVIEW_REWRITE_ACCEPT_ENCODING
+    return client_accept_encoding
 
 
 def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -250,17 +390,58 @@ def _raw_byte_faithful_response(
     )
 
 
-def _augment_csp_directives(csp_value: str, origin_to_add: str) -> str:
-    """Append ``origin_to_add`` to ``script-src`` and ``style-src`` in a CSP.
+def _augment_csp_directives(
+    csp_value: str,
+    *,
+    insert_when_absent: Mapping[str, str] | None = None,
+    append_when_present: Mapping[str, str] | None = None,
+) -> str:
+    """Augment a meta-CSP with the directives this seam needs.
 
-    Tolerant of multi-line values (VS Code splits the meta-CSP across
-    lines for readability). Idempotent: if the origin is already
-    present in either directive the value is returned unchanged.
+    Two complementary operations, both required for the fix to
+    satisfy CSP3 §6.1.5.4 (absent directive falls back to
+    ``default-src 'none'``) and §6.7.2.4 (HTTP header CSP and
+    meta-CSP INTERSECT):
+
+    1. **insert_when_absent** — for each ``(directive, value)`` pair,
+       if the meta-CSP does NOT contain that directive, append it.
+       The real meta-CSP captured in the 2026-09-12 evidence has
+       NO ``img-src`` and NO ``media-src``; without insertion, the
+       browser falls back to ``default-src 'none'`` and the image
+       stays blocked even after the HTTP header CSP is widened
+       (header + meta policies INTERSECT — sources must appear in
+       both).
+
+    2. **append_when_present** — for each ``(directive, source)``
+       pair, if the meta-CSP DOES contain that directive, append
+       the source to it (idempotent — already-present sources are
+       no-ops). Used to widen the existing ``script-src`` /
+       ``style-src`` to include the virtual-host wildcard.
+
+    Tolerant of multi-line values (VS Code splits the meta-CSP
+    across lines for readability). Idempotent on repeated calls:
+    insertion only fires when the directive is missing, and the
+    append is a no-op when the source is already present.
+
+    Both ``insert_when_absent`` and ``append_when_present`` are
+    optional (``None`` means "skip this operation"). Callers pass
+    :data:`_WEBVIEW_CSP_INSERTIONS` for (1) and
+    :data:`_WEBVIEW_CSP_APPENDS` for (2) — see :func:`_rewrite_webview_meta_csp`.
     """
-    if origin_to_add in csp_value:
+    insert_when_absent = insert_when_absent or {}
+    append_when_present = append_when_present or {}
+
+    # No-op fast path — if there's nothing to insert and the
+    # append sources are already everywhere they should be, skip
+    # the parse. (The append idempotency check is done per
+    # directive below; this just skips when there's nothing to do
+    # at all.)
+    if not insert_when_absent and not append_when_present:
         return csp_value
+
     pieces = csp_value.split(";")
     out: list[str] = []
+    seen_directives: set[str] = set()
     for piece in pieces:
         stripped = piece.strip()
         if not stripped:
@@ -268,46 +449,81 @@ def _augment_csp_directives(csp_value: str, origin_to_add: str) -> str:
         parts = stripped.split(None, 1)
         directive_name = parts[0].lower()
         sources = parts[1].strip() if len(parts) > 1 else ""
-        if directive_name in ("script-src", "style-src") and origin_to_add not in sources:
+        seen_directives.add(directive_name)
+
+        # append_when_present: extend this directive's source list
+        # with the configured source (if not already present).
+        append_source = append_when_present.get(directive_name)
+        if append_source and append_source not in sources:
             if sources:
-                sources = f"{sources} {origin_to_add}"
+                sources = f"{sources} {append_source}"
             else:
-                sources = origin_to_add
-            out.append(f"{directive_name} {sources}")
-        else:
-            out.append(stripped)
+                sources = append_source
+        out.append(
+            f"{directive_name} {sources}".strip()
+            if sources
+            else directive_name
+        )
+
+    # insert_when_absent: any directive that was not present in the
+    # meta-CSP at all (and is in our config) is appended at the end.
+    for directive, value in insert_when_absent.items():
+        if directive.lower() not in seen_directives:
+            out.append(f"{directive} {value}")
+
     return "; ".join(out)
 
 
-def _rewrite_webview_meta_csp(
-    body: bytes, origin_to_add: str
-) -> tuple[bytes, bool]:
-    """Pattern-rewrite the webview HTML's meta-CSP to permit the virtual-host origin.
+def _rewrite_webview_meta_csp(body: bytes) -> tuple[bytes, bool]:
+    """Pattern-rewrite the webview HTML's meta-CSP to permit the
+    virtual-host origin AND to insert ``img-src`` / ``media-src``
+    when absent.
 
-    The strict meta-CSP (``default-src 'none'; script-src 'sha256-…' 'self';
-    frame-src 'self'; style-src 'unsafe-inline';``) bundled with the
-    webview document blocks extension resources fetched from the
+    Two complementary operations (review-council follow-up
+    CRITICAL 1):
+
+    * **Insert** ``img-src`` and ``media-src`` when absent — the
+      real meta-CSP captured at .agents/tester/RESULTS/2026-09-12-
+      vscode-image-preview-browser-capture.md:41-44 has neither
+      directive, so without INSERTION the browser falls back to
+      ``default-src 'none'`` and the image stays blocked even
+      after the HTTP header CSP is widened (CSP3 §6.7.2.4 INTERSECT
+      rule).
+
+    * **Extend** ``script-src`` / ``style-src`` to include the
+      virtual-host wildcard (the same constant as the HTTP header
+      CSP). Without this extension the extension's JS / CSS get
+      blocked; the ``img-src`` / ``media-src`` insertions above
+      cannot rescue them.
+
+    The strict meta-CSP (``default-src 'none'; script-src
+    'sha256-…' 'self'; frame-src 'self'; style-src 'unsafe-inline';``)
+    bundled with the webview document blocks extension resources
+    fetched from the
     ``https://vscode-remote+<encoded>.vscode-resource.vscode-cdn.net``
-    virtual host — including media-preview's ``imagePreview.css`` /
-    ``imagePreview.js`` and the image bytes themselves. We append the
-    EXACT (per-request computed) virtual-host origin to ``script-src``
-    and ``style-src`` so those assets are permitted to load through the
-    proxy (the SW intercepts the virtual-host requests and serves them
-    via the proven-good ``vscode-remote-resource?path=&tkn=`` shape).
+    virtual host — most visibly, media-preview's
+    ``imagePreview.css`` / ``.js`` and the image bytes themselves.
+    We append the EXACT (per-request computed) virtual-host origin
+    to ``script-src`` / ``style-src`` so those assets are permitted
+    to load through the proxy (the SW intercepts the virtual-host
+    requests and serves them via the proven-good
+    ``vscode-remote-resource?path=&tkn=`` shape).
 
-    We can't use a wildcard here — CSP spec only allows wildcards at
-    the LEFTMOST position of the hostname, but the literal ``+``
-    separator in ``vscode-remote+...`` blocks that pattern. The proxy
-    computes the exact origin per-request from
-    :func:`_build_vscode_virtual_host_origin` (which mirrors what
-    4.137.0's webview JS does at runtime via the ``cspSource`` data
-    attribute).
+    We can't use a wildcard with the literal virtual-host hostname
+    — CSP spec only allows wildcards at the LEFTMOST position of
+    the hostname, but the literal ``+`` separator in
+    ``vscode-remote+...`` blocks that pattern. The wildcarded
+    suffix (``https://*.vscode-resource.vscode-cdn.net``) is the
+    only viable source — empirically verified against headless
+    Chromium. See :data:`_WEBVIEW_CSP_VIRTUAL_HOST` for the full
+    rationale.
 
-    Returns ``(rewritten_body, True)`` if at least one meta-CSP tag was
-    augmented, or ``(body, False)`` if no meta-CSP tag was found (or
-    already permits the origin — idempotent). Pattern-only; the
-    ``sha256-…`` hash differs between code-server versions (4.112.0 vs
-    4.137.0) and is not hard-coded.
+    Returns ``(rewritten_body, True)`` if at least one meta-CSP tag
+    was augmented, or ``(body, False)`` if no meta-CSP tag was
+    found (or the rewrite was already applied — idempotent).
+    Pattern-only; the ``sha256-…`` hash differs between
+    code-server versions (4.112.0 vs 4.137.0) and is not
+    hard-coded.
     """
     matches = list(_META_CSP_RE.finditer(body))
     if not matches:
@@ -322,7 +538,11 @@ def _rewrite_webview_meta_csp(
             csp_value = csp_raw.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        new_value = _augment_csp_directives(csp_value, origin_to_add)
+        new_value = _augment_csp_directives(
+            csp_value,
+            insert_when_absent=_WEBVIEW_CSP_INSERTIONS,
+            append_when_present=_WEBVIEW_CSP_APPENDS,
+        )
         if new_value == csp_value:
             continue
         any_rewritten = True
@@ -447,11 +667,14 @@ async def _buffer_and_maybe_rewrite_webview(
     if not _resolve_vscode_webview_csp_fix():
         return None
 
-    # Match on the path component, not the full URL — the upstream
-    # request URL is ``http://127.0.0.1:<port>/vscode/.../webview/
-    # browser/pre/index.html?...``; the fragment is the canonical
-    # selector across code-server versions.
-    if _WEBVIEW_HTML_PATH_FRAGMENT not in upstream.request.url.path.encode():
+    # Path gate — review-council follow-up ride-along 2.
+    # ANCHORED on path-segment boundaries (see
+    # :func:`_path_contains_webview_fragment`), not a bare
+    # bytes-substring. ``/vscode/xwebview/browser/pre/index.html``
+    # does NOT match — the ``x`` is mid-segment.
+    if not _path_contains_webview_fragment(
+        upstream.request.url.path.encode()
+    ):
         return None
 
     # Content-Type guard — only text/html gets the rewrite. ``startswith``
@@ -473,10 +696,53 @@ async def _buffer_and_maybe_rewrite_webview(
     # through to a streaming path that re-calls ``aiter_raw``. All
     # post-consume branches must return a concrete Response. ──
     # Buffer the body. Webview HTML is small (< 10 KiB based on the
-    # evidence capture), so the memory cost is bounded.
+    # evidence capture); the cap (review-council follow-up
+    # ride-along 1) is generous to accommodate future code-server
+    # growth but bounded to prevent an oversized upstream from
+    # forcing the proxy into a memory blow-up. 1 MiB is ~100× the
+    # observed size; the byte-faithful re-serve on oversize is
+    # invisible to the browser (no rewrite, original
+    # Content-Encoding preserved).
     body_chunks: list[bytes] = []
+    total = 0
+    oversize = False
     async for chunk in upstream.aiter_raw():
+        total += len(chunk)
+        if total > _WEBVIEW_REWRITE_MAX_BODY_BYTES:
+            oversize = True
+            break
         body_chunks.append(chunk)
+    if oversize:
+        # Cap exceeded mid-stream — drain the rest so the upstream
+        # connection is properly closed (else ``aclose`` would have
+        # to read the remaining bytes anyway, and the response
+        # would be RST). Use a one-shot warning to keep the log
+        # quiet under repeated offenders.
+        global _OVERSIZE_BODY_LOGGED
+        if not _OVERSIZE_BODY_LOGGED:
+            _OVERSIZE_BODY_LOGGED = True
+            logger.warning(
+                "VSCode proxy: webview meta-CSP rewrite skipped — "
+                "upstream body exceeds %d-byte cap; byte-faithful "
+                "re-serve",
+                _WEBVIEW_REWRITE_MAX_BODY_BYTES,
+            )
+        # Drain to avoid leaking the connection. The cap is large
+        # enough that we never expect this on a real webview HTML;
+        # this is purely a defense-in-depth measure.
+        try:
+            async for _ in upstream.aiter_raw():
+                pass
+        except httpx.StreamConsumed:
+            pass
+        # Re-serve whatever we buffered (truncated) — the upstream
+        # is still partially valid, and the proxy's contract is
+        # "byte-faithful to whatever the upstream sent." The
+        # browser will see an early-truncated response and treat it
+        # as the upstream's failure.
+        return _raw_byte_faithful_response(
+            b"".join(body_chunks), upstream
+        )
     raw_body = b"".join(body_chunks)
 
     # Try to decode. Malformed/truncated compressed bytes raise:
@@ -504,17 +770,7 @@ async def _buffer_and_maybe_rewrite_webview(
         # raw bytes.
         return _raw_byte_faithful_response(raw_body, upstream)
 
-    # The CSP source is a constant wildcard suffix
-    # (``https://*.vscode-resource.vscode-cdn.net``). The browser
-    # accepts this form (leftmost wildcard on the host) but rejects
-    # the literal-encoded full origin
-    # (``https://vscode-remote+<encoded>.vscode-resource.vscode-cdn.net``)
-    # because the ``+`` in the hostname makes the source invalid.
-    # Empirically verified against headless Chromium. See
-    # ``_WEBVIEW_CSP_VIRTUAL_HOST`` for the full rationale.
-    rewritten, was_rewritten = _rewrite_webview_meta_csp(
-        decoded, _WEBVIEW_CSP_VIRTUAL_HOST
-    )
+    rewritten, was_rewritten = _rewrite_webview_meta_csp(decoded)
     if not was_rewritten:
         # No meta-CSP to augment (or already augmented, or the doc
         # has no meta-CSP tag at all). We must NOT fall through to
@@ -648,11 +904,26 @@ def create_vscode_proxy_app(
                 )
                 if validated_query:
                     target += f"?{validated_query}"
+            # fix-vscode-image-preview ride-along 3 — for
+            # rewrite-eligible requests, pin the outbound
+            # ``Accept-Encoding`` to the decodable set so the
+            # upstream can't reply with an encoding we can't
+            # decode (e.g. ``zstd``). Non-eligible requests keep
+            # the client's value so non-webview traffic flows
+            # through with whatever the client negotiated.
+            client_path = ("/" + path).encode()
+            upstream_headers = _proxy_headers(request.headers, port)
+            pinned_ae = _accept_encoding_for_request(
+                client_path,
+                upstream_headers.pop("Accept-Encoding", None),
+            )
+            if pinned_ae is not None:
+                upstream_headers["Accept-Encoding"] = pinned_ae
             upstream = await client.send(
                 client.build_request(
                     request.method,
                     target,
-                    headers=_proxy_headers(request.headers, port),
+                    headers=upstream_headers,
                     content=b"".join(chunks),
                 ),
                 stream=True,

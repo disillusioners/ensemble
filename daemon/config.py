@@ -2824,6 +2824,22 @@ def load_config(config_path: str | None = None) -> Config:
     # Build nested dict for Pydantic
     config_dict: Dict[str, Any] = {}
 
+    # Review-council follow-up MAJOR 2 — hoist the
+    # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env read to the top level
+    # so it applies whether or not the yaml has a ``vscode:``
+    # section. Pydantic natively binds ``VSCODE_WEBVIEW_CSP_FIX`` via
+    # ``VSCodeConfig.env_prefix="VSCODE_"`` — it does NOT bind the
+    # ``ENSEMBLE_*`` form — so a section-less custom config would
+    # silently ignore the documented kill-switch and break the
+    # incident-revert path. The hoisted value is consumed inside
+    # the ``if "vscode" in processed_config:`` guard below; we ALSO
+    # feed it through to the field default via
+    # ``VSCodeConfig.webview_csp_fix`` so section-less configs
+    # still honour the env override at pydantic-init time.
+    _resolved_vscode_webview_csp_fix_env_value: str | None = (
+        os.environ.get(ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+    )
+
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
     # precedence chain for ``llm.allowed_models``. The shipped
     # config.yaml now inlines the default in its interpolation
@@ -3017,10 +3033,20 @@ def load_config(config_path: str | None = None) -> Config:
         # ``KEY=`` in .env (empty string) to the documented default.
         # See ``_resolve_vscode_webview_csp_fix_from_sources`` for the
         # precedence + empty-string contract.
+        #
+        # Review-council follow-up MAJOR 2 — the env read sits at the
+        # TOP LEVEL (outside this guard) so section-less configs
+        # (``vscode:`` absent from yaml) still see the
+        # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env var. Pydantic
+        # natively binds only ``VSCODE_WEBVIEW_CSP_FIX`` via
+        # ``env_prefix="VSCODE_"`` (does NOT bind the
+        # ``ENSEMBLE_*`` form), so without this hoist, a
+        # custom-config that omits the ``vscode`` section would
+        # silently ignore the documented incident-revert kill-switch.
         vs_raw = processed_config["vscode"].copy()
         vs_raw["webview_csp_fix"] = _resolve_vscode_webview_csp_fix_from_sources(
             vs_raw.get("webview_csp_fix"),
-            ens_value=os.environ.get(ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX),
+            ens_value=_resolved_vscode_webview_csp_fix_env_value,
         )
         # fix-vscode-image-preview Step 2 — same inversion, string flavor:
         # the yaml ``binary_path`` passthrough (including the common
@@ -3036,6 +3062,29 @@ def load_config(config_path: str | None = None) -> Config:
             env_value=os.environ.get("VSCODE_BINARY_PATH"),
         )
         config_dict["vscode"] = vs_raw
+    elif _resolved_vscode_webview_csp_fix_env_value is not None:
+        # Review-council follow-up MAJOR 2 — section-less configs
+        # (``vscode:`` absent from yaml) MUST still see the
+        # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env override. Pydantic
+        # binds only ``VSCODE_WEBVIEW_CSP_FIX`` via
+        # ``env_prefix="VSCODE_"``, so we have to seed
+        # ``config_dict["vscode"]`` ourselves with at least the
+        # resolved bool. Without this branch the kill-switch env
+        # silently no-ops on custom configs that omit the section
+        # — the documented incident-revert path breaks.
+        #
+        # No import of ``VSCodeConfig`` here — the field defaults
+        # (``allow_remote=False``, ``binary_path=None``,
+        # ``user_data_dir=None``, ``extensions=[]``) are populated
+        # by ``VSCodeConfig``'s own default-factory on the
+        # pydantic-init pass below; we only need to inject the
+        # operator-overridable ``webview_csp_fix``.
+        config_dict["vscode"] = {
+            "webview_csp_fix": _resolve_vscode_webview_csp_fix_from_sources(
+                None,
+                ens_value=_resolved_vscode_webview_csp_fix_env_value,
+            ),
+        }
 
     # Create and validate config
     config = Config(**config_dict)
