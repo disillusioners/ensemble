@@ -91,8 +91,11 @@ def is_empty_llm_content(content: Any) -> bool:
       whitespace-only. An all-empty-text vision response is therefore
       EMPTY (a live defect today: the router's legacy predicate returned
       False for ANY list). ``[]`` is vacuously empty. Any unrecognized
-      block shape (non-dict entry, dict without a ``type`` key, unknown
-      ``type`` value) fails OPEN as non-empty.
+      block shape fails OPEN as non-empty: non-dict entry (``[None]``),
+      dict without a ``type`` key, unknown ``type`` value, and a
+      ``text``-typed block whose ``text`` payload is NOT a string
+      (``[{"type": "text", "text": None}]`` — a malformed text block
+      must never be read as an empty one).
     * any other shape (``int``, ``{}``, ...) → fail-open non-empty.
     * ``<think>...</think>``-only strings are deliberately NON-empty:
       the tag characters are non-whitespace. That degenerate class is
@@ -117,7 +120,14 @@ def is_empty_llm_content(content: Any) -> bool:
             if block_type is None:
                 return False  # fail-open: untyped block
             if block_type == "text":
-                if str(block.get("text") or "").strip():
+                block_text = block.get("text")
+                if not isinstance(block_text, str):
+                    # S1 follow-up (2026-09-12 review): a MALFORMED text
+                    # block (text=None / non-string) fails OPEN non-empty
+                    # — str(None or "") classified it toward EMPTY, a
+                    # C1-class false-positive edge.
+                    return False
+                if block_text.strip():
                     return False  # a non-whitespace text block → non-empty
             else:
                 has_non_text_block = True
@@ -147,8 +157,12 @@ def _is_nudge_human(message: Any) -> bool:
 
     Matches the dedicated ``empty_response_nudge`` marker stamped by
     ``nudge_node`` (graph.py) first; falls back to the exact
-    :data:`NUDGE_MESSAGE` text so checkpoints written BEFORE the marker
-    existed (restart-pending activation window) are still recognized.
+    :data:`NUDGE_MESSAGE` text CONJUNCT with ``injected_message=True``
+    so checkpoints written BEFORE the marker existed (restart-pending
+    activation window — ``nudge_node`` always stamped
+    ``injected_message``) are still recognized, while a user literally
+    typing the nudge sentence (bare kwargs) can never be
+    nudge-classified (W3 hardening, 2026-09-12 review).
     """
     if getattr(message, "type", None) != "human":
         return False
@@ -156,15 +170,23 @@ def _is_nudge_human(message: Any) -> bool:
     if kwargs.get(NUDGE_MARKER_KWARG) is True:
         return True
     content = getattr(message, "content", None)
-    return isinstance(content, str) and content == NUDGE_MESSAGE
+    return (
+        isinstance(content, str)
+        and content == NUDGE_MESSAGE
+        and bool(kwargs.get("injected_message"))
+    )
 
 
 def _is_server_injected_human(message: Any) -> bool:
     """Identify server-authored HumanMessages that are NOT user boundaries.
 
     Context blocks ([SYSTEM CONTEXT: ...], ``context_kind`` stamped),
-    language-check reminders, report injections and the nudge all carry
-    ``injected_message=True``. None of them is a real user turn, so the
+    language-check reminders and report injections all carry
+    ``injected_message=True``. The attestation-gate deny nudge carries
+    ``attestation_nudge=True`` (and — post empty-response-guard C1
+    follow-up, graph.py — also ``injected_message=True``; the bare
+    kwarg check stays for checkpoints written before that stamp,
+    retroactive heal). None of them is a real user turn, so the
     turn-window scan skips them when looking for the last real human
     boundary (L6: nudge/context humans must never be mistaken for user
     boundaries). Nudges are detected separately (they are load-bearing
@@ -172,7 +194,11 @@ def _is_server_injected_human(message: Any) -> bool:
     :func:`_is_nudge_human` BEFORE this predicate.
     """
     kwargs = getattr(message, "additional_kwargs", None) or {}
-    return bool(kwargs.get("injected_message")) or bool(kwargs.get("context_kind"))
+    return (
+        bool(kwargs.get("injected_message"))
+        or bool(kwargs.get("context_kind"))
+        or bool(kwargs.get("attestation_nudge"))
+    )
 
 
 def _scan_turn_window(

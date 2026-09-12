@@ -383,6 +383,8 @@ from daemon.response_validation import (
     empty_guard_disabled,
     install_empty_guard_config,
     is_empty_llm_content,
+    _is_nudge_human,
+    _is_server_injected_human,
     _reset_empty_guard_config_for_tests,
 )
 
@@ -454,6 +456,27 @@ class TestSharedEmptinessPredicate:
         content = ["just a string block"]
         assert is_empty_llm_content(content) is False
 
+    def test_list_with_none_text_value_fails_open(self):
+        # S1 (2026-09-12 review): a MALFORMED text block (text=None) must
+        # fail OPEN non-empty — str(None or "") read it toward EMPTY, a
+        # C1-class false-positive edge (guard would burn retry budget on
+        # a provider quirk).
+        assert is_empty_llm_content([{"type": "text", "text": None}]) is False
+
+    def test_list_with_none_entry_fails_open(self):
+        # S1 truth-table row: bare None entry — non-dict shape → fail open.
+        assert is_empty_llm_content([None]) is False
+
+    def test_list_with_non_string_text_values_fail_open(self):
+        # Non-string text payloads are malformed blocks, never "empty".
+        assert is_empty_llm_content([{"type": "text", "text": 123}]) is False
+
+    def test_explicit_empty_string_text_block_is_still_empty(self):
+        # Deliberate contrast: a WELL-FORMED text block carrying an
+        # explicit empty string is a legitimately empty text payload
+        # (whitespace-only rule), NOT malformed — stays EMPTY.
+        assert is_empty_llm_content([{"type": "text", "text": ""}]) is True
+
     def test_other_shapes_fail_open(self):
         assert is_empty_llm_content({}) is False
         assert is_empty_llm_content(123) is False
@@ -485,6 +508,19 @@ def _nudge_human(marker=True):
     if marker:
         kwargs["empty_response_nudge"] = True
     return HumanMessage(content=NUDGE_MESSAGE, additional_kwargs=kwargs)
+
+
+def _attestation_nudge_human(legacy=True):
+    """The attestation-gate deny nudge (daemon/graph.py deny path).
+
+    ``legacy=True`` builds the PRE-C1-follow-up shape (only the
+    ``attestation_nudge`` stamp) — the retroactive-heal pin; the
+    post-fix constructor additionally stamps ``injected_message=True``.
+    """
+    kwargs = {"attestation_nudge": True, "attestation_nudge_denied_count": 1}
+    if not legacy:
+        kwargs["injected_message"] = True
+    return HumanMessage(content="Please attest your completed work.", additional_kwargs=kwargs)
 
 
 def _context_human():
@@ -565,6 +601,33 @@ class TestEmptyResponseGuardRaiseGate:
         ]
         with pytest.raises(EmptyLLMResponseError):
             validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_attestation_nudge_not_a_user_boundary_report_already_spoken(self):
+        # C1 (2026-09-12 review, MERGE-BLOCKING): the attestation-gate
+        # deny nudge stamps no injected/context kwarg pre-fix, so the
+        # window walk mistook it for the REAL user boundary and broke
+        # there with prior_spoke=False → the guard RAISED on a turn
+        # whose report already exists in the transcript (legacy: silent
+        # END). Exact repro: [user, report_AI, attestation_nudge] +
+        # empty must NOT raise — the attestation nudge is skipped as
+        # server-injected, the walk continues to the spoke report AI
+        # and the real human boundary, done-speaking suppression holds.
+        messages = [
+            _real_human(),
+            AIMessage(content="Report: implemented the fix, all tests green."),
+            _attestation_nudge_human(legacy=True),  # retroactive-heal shape
+        ]
+        validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_attestation_nudge_stamped_shape_also_skipped(self):
+        # Post-fix constructor shape (graph.py stamps injected_message
+        # too): same no-raise outcome — both halves of the C1 fix.
+        messages = [
+            _real_human(),
+            AIMessage(content="Report: implemented the fix, all tests green."),
+            _attestation_nudge_human(legacy=False),
+        ]
+        validate_llm_response(make_ai_message(content=""), input_messages=messages)
 
     def test_tool_only_turn_response_exempt(self):
         # L5: a response carrying tool_calls is never empty-as-answer.
@@ -661,6 +724,71 @@ class TestEmptyResponseGuardRaiseGate:
     def test_non_list_input_fails_open(self):
         validate_llm_response(make_ai_message(content=""), input_messages=None)
         validate_llm_response(make_ai_message(content=""), input_messages="not-a-list")
+
+
+class TestServerInjectedAndNudgeDetectionPins:
+    """Predicate-level pins for the C1 follow-up + W3 hardening.
+
+    C1: the attestation-gate deny nudge must classify as SERVER-INJECTED
+    (skipped by the turn-window scan) in BOTH kwarg shapes — the bare
+    pre-fix shape (retroactive heal for in-flight checkpoints) and the
+    post-fix stamped shape — while NEVER matching ``_is_nudge_human``
+    (a different nudge; mistaking it for the empty-response nudge would
+    flip the §8.1 second-empty allowance to RAISE).
+
+    W3: the ``_is_nudge_human`` text-fallback is CONJUNCTIVE with
+    ``injected_message=True`` — pre-marker checkpoints (which always
+    carried the injected stamp) stay recognized, a user literally typing
+    the nudge sentence never becomes one.
+    """
+
+    def test_attestation_nudge_kwarg_is_server_injected(self):
+        from langchain_core.messages import HumanMessage as H
+
+        bare = H(content="Please attest.", additional_kwargs={"attestation_nudge": True})
+        stamped = H(
+            content="Please attest.",
+            additional_kwargs={"attestation_nudge": True, "injected_message": True},
+        )
+        assert _is_server_injected_human(bare) is True
+        assert _is_server_injected_human(stamped) is True
+
+    def test_attestation_nudge_is_not_the_empty_response_nudge(self):
+        from langchain_core.messages import HumanMessage as H
+
+        for kwargs in (
+            {"attestation_nudge": True},
+            {"attestation_nudge": True, "injected_message": True},
+        ):
+            msg = H(content="Please attest your completed work.", additional_kwargs=kwargs)
+            assert _is_nudge_human(msg) is False
+            assert _is_server_injected_human(msg) is True
+
+    def test_nudge_text_fallback_requires_marker_or_injected_stamp(self):
+        from langchain_core.messages import HumanMessage as H
+
+        # Dedicated marker (post-marker checkpoints).
+        assert _is_nudge_human(
+            H(content=NUDGE_MESSAGE, additional_kwargs={"empty_response_nudge": True})
+        ) is True
+        # W3: marker-absent pre-marker checkpoint — injected stamp present.
+        assert _is_nudge_human(
+            H(content=NUDGE_MESSAGE, additional_kwargs={"injected_message": True})
+        ) is True
+        # W3 hardening: bare user LITERALLY TYPING the nudge sentence —
+        # never nudge-classified (content match without the stamp).
+        bare_typing = H(content=NUDGE_MESSAGE)
+        assert _is_nudge_human(bare_typing) is False
+        assert _is_server_injected_human(bare_typing) is False
+
+    def test_nudge_text_fallback_rejects_other_injected_content(self):
+        # The conjunctive fallback keys on the EXACT nudge text — an
+        # unrelated injected message is not a nudge.
+        from langchain_core.messages import HumanMessage as H
+
+        assert _is_nudge_human(
+            H(content="Please respond again in English.", additional_kwargs={"injected_message": True})
+        ) is False
 
 
 class TestEmptyResponseGuardKillSwitch:

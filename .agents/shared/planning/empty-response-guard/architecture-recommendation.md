@@ -29,11 +29,11 @@ The protection lattice (22 mechanisms catalogued in `docs/hallucination-protecti
 
 `ChatFailoverBinding` (`daemon/services/llm_failover.py:490`) builds `classify_llm_errors`; every `wrap_langchain_failover` (`llm_failover.py:617`) site calls `invoke()` → `_run_with_classification` → **`validate_llm_response(result)` at `daemon/llm_error_classifier.py:911`, INSIDE the retry try-block** (docstring :893 states this explicitly).
 
-**Consequence:** one edit at the validator covers the primary agent path AND 6 of 7 secondary LLM surfaces for free (they all wrap through the facade):
+**Consequence:** one edit at the validator covers the primary agent path AND 5 of the 8 secondary surface classes for free (5 wrapped + 3 uncovered = 8; corrected arithmetic, 2026-09-12 review W2 — the earlier "6 of 7" admits no valid partition):
 
 | Surface | Wrap site (verified) | Post-exhaustion behavior (existing) |
 |---|---|---|
-| Compaction (×2 call sites) | `daemon/compaction.py:3352`, `:3364` | except-handler → truncation fallback (:3378-3380) |
+| Compaction (×2 call sites) | `daemon/compaction.py:3383`, `:3395` | except-handler → truncation fallback (:3378-3380) |
 | Title generation | `daemon/services/title_generation.py:114` | skips store |
 | Keyword extraction | `daemon/services/keyword_extraction.py:387` | heuristic fallback |
 | Child-report summarization (×2) | `daemon/services/child_reports.py:803`, `:1485` | existing except-path |
@@ -41,7 +41,7 @@ The protection lattice (22 mechanisms catalogued in `docs/hallucination-protecti
 
 **NOT covered by construction:** skill embedding (raw `openai` SDK — `skill_embedding_service.py:62 import openai`; call sites ~:153/:366/:481, has its own fallback), `WatchoverEvaluator` (graph.py:6244/:6594-6597 — fail-closed deny semantics by design, should stay untouched), `LoopRepairer` (~graph.py:1632/:1640 — static-truncation fallback).
 
-> ⚠️ **Doc correction required in the same change:** `docs/hallucination-protection.md` §7's claim that the secondary surfaces sit outside the classifier path is **wrong for 6 of 7 surfaces**. Correct it when closing the §7 gap.
+> ⚠️ **Doc correction required in the same change:** `docs/hallucination-protection.md` §7's claim that the secondary surfaces sit outside the classifier path is **wrong for 5 of the 8 secondary surface classes** (5 wrapped + 3 uncovered = 8). Correct it when closing the §7 gap.
 
 ### 3.1 Architect spot-verification (this doc's anchors)
 
@@ -110,7 +110,7 @@ The dropped check's rationale ("empty = model done speaking") was correct for ca
 | **2. Failure semantics** | Position-1 empties → retry → failover → loud ERROR (Option 1 ladder). Degenerate reasoning-only/think-tag re-invokes → capped at 3 → loud END + WARN + manager note (kills the ~100-call burn; assert ≤ cap+2 LLM calls vs ~100 today). Done-speaking untouched. |
 | **3. New state** | **Zero durable.** Spoke/cap/telemetry all derived from in-scope messages or manager RAM. |
 | **4. False positives** | Union of the L1-L13 flow analysis (§6). Residual: the spoke-rule variant choice (§8.1). |
-| **5. Scope** | Agent path + 6 facade surfaces (one edit) + rows 2-4. Known-uncovered by design: skill-embedding raw-SDK (own fallback), WatchoverEvaluator (**fail-closed deny on empties — independent semantics, leave untouched**), LoopRepairer (static-truncation fallback). |
+| **5. Scope** | Agent path + 5 wrapped secondary surface classes (one edit; 5 wrapped + 3 uncovered = 8). Known-uncovered by design: skill-embedding raw-SDK (own fallback), WatchoverEvaluator (**fail-closed deny on empties — independent semantics, leave untouched**), LoopRepairer (static-truncation fallback). |
 | **6. Knobs** | `ENSEMBLE_EMPTY_RESPONSE_GUARD` (master, default ON, restart-pending); `ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP` (default OFF — preserves compaction's truncation fallback against retry-burn on continuous-empty summaries); `limits.empty_degenerate_reinvoke_cap=3`. Invalid values → `ValueError` at boot per the `_resolve_*` convention. |
 | **7. Tests** | Option 1's suite + cap tests (3 trailing reasoning-only → END not re-invoke; think-tag/ghost variants) + burn-count assertion + **same-commit flip of `tests/unit/test_nudge_behavior.py:53`** (pins `_is_empty_content([]) is False`; under the shared predicate `[]` is vacuously empty — flip the pin in the same commit per grep-before-flip convention) + grep-pin test on the single-caller invariant (`_is_empty_content` exactly one prod caller, graph.py:2555). |
 
@@ -148,7 +148,7 @@ Union of both councilors' code traces; each row is how the **recommended Option 
 
 Both councilors' final recommendations converged on this architecture (labels differ; identical design). Rationale:
 
-1. **Coverage in one edit.** The facade chain (llm_failover.py:617 → llm_error_classifier.py:911) makes the chokepoint the only single-edit point covering the agent path + 6 secondary surfaces.
+1. **Coverage in one edit.** The facade chain (llm_failover.py:617 → llm_error_classifier.py:911) makes the chokepoint the only single-edit point covering the agent path + 5 wrapped secondary surface classes (of 8 total; 3 uncovered by design).
 2. **Zero new durable state.** Return-carried constraint and dual-DB compatibility are neutralized by construction — nothing to checkpoint, nothing to migrate.
 3. **The exemption set is load-bearing, not cosmetic.** Bare S1 is a *confirmed regression* (reasoning-only storm: validator fires pre-router with zero `reasoning_content` awareness → burns transient 10 + failover swap 3 on designed reasoning sequences → ERROR). The 3-exemption + turn-aware gate is what makes S1 safe. Predicate correctness, not placement, is the hard part — which is precisely why the original check was droppable-defective.
 4. **The terminal path is already loud** (agent_node catch :5343-5348 → re-raise → SSE → worker_pool retry/dead-letter :630-640 → `_send_error_report` manager.py:8469-8499 → guidance hint :873). Phase 1 adds no failure machinery beyond the predicate and caps.
@@ -191,7 +191,9 @@ The spoke-suppression rule variant:
 
 **(a) Streaming vs non-streaming at S1 — no shape change.** Streaming defaults ON (config.yaml:46; `default_streaming` graph.py:1986; injected by `clean_llm_config` :2332-2368) and `invoke()` aggregates streamed chunks into one final AIMessage — "callers see identical final results"; `validate_llm_response` runs after `invoke()` returns. Pin **both `None` and `""` → empty** (non-streaming may yield `None` where streaming yields `""`). No streaming-specific code paths. *(Verified at in-repo-comment level; implementer should confirm installed `langchain-openai` aggregation behavior.)*
 
-**(b) Multimodal list-block — yes, pin it; it's worse than "unpinned."** Two live defects today: the router's `_is_empty_content` returns False for ANY list (all-empty-text vision responses → silent success), and the legacy dropped check's `.strip()` would have crashed non-retryably on lists. **Shared predicate:** `None` → empty; `str` → whitespace-only ⇒ empty; `list` → empty iff NO non-text blocks (image/audio/file) present AND every text block whitespace-only; any other shape → fail-open non-empty; think-tag-only strings deliberately NON-empty (row 3 + S5 cap own that class). Kill-switch-gated (changes row-5 nudge eligibility for all-empty-text lists).
+**(b) Multimodal list-block — yes, pin it; it's worse than "unpinned."** Two live defects today: the router's `_is_empty_content` returns False for ANY list (all-empty-text vision responses → silent success), and the legacy dropped check's `.strip()` would have crashed non-retryably on lists. **Shared predicate:** `None` → empty; `str` → whitespace-only ⇒ empty; `list` → empty iff NO non-text blocks (image/audio/file) present AND every text block whitespace-only; any other shape → fail-open non-empty; think-tag-only strings deliberately NON-empty (row 3 + S5 cap own that class). Kill-switch-gated (changes row-5 nudge eligibility for all-empty-text lists). *(2026-09-12 review S1 follow-up: a MALFORMED text block — `text` payload not a string, e.g. `[{"type": "text", "text": None}]` — also fails OPEN non-empty; `[None]` fails open via the non-dict rule. `{"type": "text", "text": ""}` stays a legitimately EMPTY well-formed block.)*
+
+**(c) Streak telemetry vs the kill-switch — INTENTIONALLY exempt (W1, 2026-09-12 review; leader decision: KEEP).** The `[LLM-EMPTY]` streak telemetry (`agent_node` post-invoke → `InstanceManager.note_empty_response`, manager.py) is deliberately **NOT** gated by `ENSEMBLE_EMPTY_RESPONSE_GUARD`: with the master kill-switch OFF, passed empties still bump the streak and emit the `[LLM-EMPTY] provider=… streak=…` WARN. Observability is the point — Phase-2 needs the data even during an OFF soak, and an OFF-mode storm is exactly the signal worth seeing. Consequently the kill-switch OFF is **not** byte-identical on the telemetry leg (it remains byte-identical on both ROUTING legs: the S1 raise and the S5 caps). Pinned by `TestEmptyResponseStreakTelemetry.test_kill_switch_off_still_bumps_streak_and_warns`; code comment at the graph.py telemetry block.
 
 ## 12. Open Questions
 

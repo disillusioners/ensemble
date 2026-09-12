@@ -224,6 +224,34 @@ class TestDegenerateReinvokeCap:
             # think-only content fails the nudge gate → straight END.
             assert routes.count("nudge") == (1 if maker is _reasoning_only else 0)
 
+    def test_with_tool_degenerate_storm_route_sequence_pinned(self):
+        # W4 (2026-09-12 review): counts alone don't pin the
+        # cap→nudge→cycle-2 shape — assert the exact route sequence for
+        # the empty-content degenerate (cap=3): the window opens with
+        # one degenerate already present, so each cycle yields
+        # cap-1 agent re-invokes, then the cap fall-through lands on
+        # the row-5 nudge; the injected nudge HumanMessage breaks
+        # _has_recent_tool_result, cycle 2 re-fills the cap
+        # (cap-1 agents) and ENDs.
+        from langgraph.graph import END as LANGGRAPH_END
+
+        routes, llm_calls = self._simulate_with_tool_storm(_reasoning_only)
+        assert routes == ["agent", "agent", "nudge", "agent", "agent", LANGGRAPH_END]
+        assert routes == (
+            ["agent"] * (EMPTY_DEGENERATE_REINVOKE_CAP - 1)
+            + ["nudge"]
+            + ["agent"] * (EMPTY_DEGENERATE_REINVOKE_CAP - 1)
+            + [LANGGRAPH_END]
+        )
+        # The accurate worst-case burn for this shape is 2×cap.
+        assert llm_calls == 2 * EMPTY_DEGENERATE_REINVOKE_CAP
+        # Think-only degenerates carry non-empty content: no nudge rung —
+        # cap-1 agents then straight END.
+        think_routes, _ = self._simulate_with_tool_storm(_think_only)
+        assert think_routes == (
+            ["agent"] * (EMPTY_DEGENERATE_REINVOKE_CAP - 1) + [LANGGRAPH_END]
+        )
+
     def test_cap_below_loop_detector_threshold_would_not_bound(self):
         """Sanity: the module default is 3 (LoopDetector threshold parity)."""
         assert EMPTY_DEGENERATE_REINVOKE_CAP == 3
@@ -539,3 +567,20 @@ class TestEmptyResponseStreakTelemetry:
         manager.cancel_graph_task("inst-1")
         assert "inst-1" not in manager._graph_tasks
         assert manager.get_empty_response_streak("inst-1") == 0
+
+    def test_kill_switch_off_still_bumps_streak_and_warns(self, caplog):
+        # W1 (2026-09-12 review): the streak telemetry is deliberately
+        # UNGATED by the master kill-switch (doc §11(c) + graph.py
+        # telemetry comment) — OFF-mode storms must still bump the
+        # streak and emit the [LLM-EMPTY] WARN (the operator grep
+        # surface; Phase-2 needs the data during an OFF soak).
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        from daemon.response_validation import get_empty_response_guard_enabled
+
+        assert get_empty_response_guard_enabled() is False
+        manager = _make_stub_manager()
+        assert manager.note_empty_response("inst-1", "http://p") == 1
+        assert manager.note_empty_response("inst-1", "http://p") == 2
+        assert manager.get_empty_response_streak("inst-1") == 2
+        assert "[LLM-EMPTY]" in caplog.text
+        assert "streak=2" in caplog.text

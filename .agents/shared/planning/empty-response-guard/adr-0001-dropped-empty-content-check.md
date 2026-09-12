@@ -65,11 +65,18 @@ was the actual motive:
 ## Consequences
 
 - Empty-as-entire-answer is now a transient-class validation failure: retry →
-  failover → loud terminal ERROR, on the agent path and on all six facade-wrapped
-  secondary surfaces (see the corrected §7 of `docs/hallucination-protection.md`).
+  failover → loud terminal ERROR, on the agent path and on the 5 wrapped
+  secondary surface classes (5 wrapped + 3 uncovered = 8; see the corrected §7
+  of `docs/hallucination-protection.md`).
 - The kill-switch `ENSEMBLE_EMPTY_RESPONSE_GUARD` (default ON,
-  restart-pending) restores the pre-guard pass-through byte-identically; the
-  compaction-only opt-out is `ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP` (default OFF).
+  restart-pending) restores the pre-guard pass-through byte-identically on
+  both ROUTING legs (the S1 raise and the S5 caps); the compaction-only
+  opt-out is `ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP` (default OFF).
+- **Telemetry exemption (intentional, W1 2026-09-12 review — leader decision
+  KEEP):** the `[LLM-EMPTY]` streak telemetry is NOT gated by the
+  kill-switch — OFF-mode storms still bump the streak + WARN. The
+  kill-switch OFF is therefore byte-identical on routing only, not on
+  observability; Phase-2 needs the data during an OFF soak.
 - The unbounded re-invoke burn (~100 calls) is separately closed by the S5
   derived caps (`EMPTY_DEGENERATE_REINVOKE_CAP`, default 3).
 

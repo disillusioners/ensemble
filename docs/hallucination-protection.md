@@ -580,8 +580,9 @@ available excerpt (Seams 1 and 3 are as named by the report).*
 **Secondary LLM-call surfaces — coverage CORRECTED (empty-response-guard Phase 1, 2026-09-12).**
 This paragraph previously claimed the surfaces below "invoke the LLM outside the
 classifier-wrapped agent path, so even Seam 1 alone would not cover them." That claim was
-**wrong for 6 of 7 surface classes**: every one of the compaction summarizer
-(`daemon/compaction.py:3352/:3364`), title generation
+**wrong for 5 of the 8 secondary surface classes** (5 wrapped + 3 uncovered = 8;
+corrected arithmetic — the earlier "6 of 7" admits no valid partition): every one of the compaction summarizer
+(`daemon/compaction.py:3383/:3395`), title generation
 (`daemon/services/title_generation.py:114`), keyword extraction
 (`daemon/services/keyword_extraction.py:387`), child-report summarization
 (`daemon/services/child_reports.py:803/:1485`), and the attestation report judge

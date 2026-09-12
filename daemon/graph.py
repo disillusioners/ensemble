@@ -4048,6 +4048,16 @@ def create_attestation_gate_node(
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "attestation_nudge": True,
+                    # C1 (2026-09-12 review): stamp server-injected like
+                    # every other injection site — the S1 turn-window
+                    # scan must skip this nudge instead of reading it as
+                    # the real user boundary (an empty response after a
+                    # deny nudge on an already-spoken turn must END
+                    # silently, not raise). The scanner's classification
+                    # is unaffected: its attestation_nudge step returns
+                    # False BEFORE reading this flag (and would return
+                    # the same False at the injected_message step).
+                    "injected_message": True,
                     "attestation_nudge_denied_count": counted_denied_count,
                 },
             )
@@ -5530,6 +5540,12 @@ def create_agent_node(
         # line — those surface as validation-exhaustion errors instead.
         # The streak therefore measures PASSED empties (nudge flow,
         # kill-switch-OFF storms, degenerate reasoning-only tails).
+        # W1 (2026-09-12 review): this telemetry is INTENTIONALLY exempt
+        # from the master kill-switch — with the guard OFF, empties still
+        # bump the streak + WARN by design (observability is the point;
+        # Phase-2 needs the data even during an OFF soak). Pinned by
+        # TestEmptyResponseStreakTelemetry.test_kill_switch_off_still_
+        # bumps_streak_and_warns (tests/unit/test_empty_response_guard.py).
         _note_empty = getattr(empty_streak_manager, 'note_empty_response', None)
         _reset_empty = getattr(empty_streak_manager, 'reset_empty_response_streak', None)
         if callable(_note_empty) or callable(_reset_empty):
@@ -5538,7 +5554,13 @@ def create_agent_node(
             if not _resp_has_tool_calls and _resp_content_empty:
                 if callable(_note_empty):
                     try:
-                        _note_empty(
+                        # W1 (2026-09-12 review): telemetry is deliberately
+                        # UNGATED by the master kill-switch — OFF-mode
+                        # storms must still bump the streak + WARN (the
+                        # [LLM-EMPTY] line is the operator grep surface;
+                        # Phase-2 needs the data even during an OFF soak).
+                        # The return (new streak) is dead here on purpose.
+                        _ = _note_empty(
                             instance_id,
                             str(llm_config.get('base_url') or llm_config.get('model') or 'unknown'),
                         )
