@@ -1,5 +1,13 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-09-11 — wc-wake-resilience doc cosmetics (feature/fix-wc-wake-resilience @ d12288d4→55a76bb5), post-review cosmetics pass
+- Routing: task arrived as a TIDY PASS apply-edits dispatch; `developer` not spawnable from tidier team (allowed: worker/explorer/kb-writer/image-reader) → skill-free worker dispatch `wc-wake-doc-cosmetics` (b43a1ca1) under dispatcher verification gates. No tidier execution skill loaded (apply task, not review) → no skill_feedback attribution.
+- Applied in 1 commit 55a76bb5, docs-only, 3 files +33/−4 (4 items → 3 files: two items share waiting_children_watchdog.py): W-1 startup-sweep scope note (config.py:1390 — startup sweep hard-defaults 30s via DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS @ dependency_bus.py:1553; knob governs periodic sweep only); W-B citation line-number→symbol-name (waiting_children_watchdog.py:805 — api.py:718 is a comment fragment, actual task_repository= kwarg at :719; symbol cite drift-proof, leader-sanctioned option); W-D superset wording (instance/repository.py:3140 — names 5-status set {paused, completed, error, terminated, failed} + `_WAITING_CHILDREN_HUNG_TERMINAL_SET`, verified at :3194-3197); W-B known-residual comment (waiting_children_watchdog.py:1104-1110 — beating-heartbeat wedged turn suppresses B3 release indefinitely; base hang-notice preserves visibility).
+- Inert-proof: `uv run python -m pytest tests/unit/test_ensemble_config.py tests/unit/job_state/test_constitution_drift.py` = 27 passed / 0 failed, POSTGRES_* scrubbed. Glob substitutions (briefing globs were off): `test_config*.py` empty → `test_ensemble_config.py`; constitution drift lives under `tests/unit/job_state/`.
+- Close-out verified by dispatcher (read-only git): `log --oneline -3` + `diff d12288d4..HEAD --stat` match worker claims exactly; branch pin clean; not pushed.
+- Ledger (backlog, deliberately deferred per reviewer): per-probe try/except blast-radius narrowing (dependency_bus); pre-existing unbounded `list_pending_tasks_older_than`; NH1 symmetric-negative pin (test_kv_ambient_fresh_c3.py).
+- Non-doc issues found: none. Deferred to Reviewer: none.
+
 ## 2026-09-08 — explorer-shared-context-injection (feature/explorer-shared-context-injection @ fd582efd..d097a8a2), Iteration 001
 - Dispatch: 2 parallel workers (tidier-readable-code @fbd63a85, tidier-static-hygiene @83f8343e), worktree agents-ensemble-wt-explorer-ctx. Both reported fully; skill_feedback soft-failed on both (known load_skill-untracked pattern).
 - Verdict: NEEDS-FIX (light) — 1 High / 5 Medium / 7 Low; all mechanical (doc rewrite, 2 imports, comment dedup, test parametrize). No structural work, no merge-blocker class.
