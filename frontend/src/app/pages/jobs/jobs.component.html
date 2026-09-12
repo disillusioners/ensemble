@@ -465,6 +465,7 @@
                   aria-level="1"
                   [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
                   tabindex="0"
+                  [id]="itemId(item)"
                   [class.group-header-live]="item.isLive"
                   [class.focused]="isFocusedItem(itemId(item))"
                   (focus)="onWindowItemFocus(itemId(item))">
@@ -493,6 +494,7 @@
                   [job]="item.job"
                   role="button"
                   tabindex="0"
+                  [id]="itemId(item)"
                   [attr.aria-label]="'Job from ' + (item.job.agent_id || 'unknown agent') + ' — press Enter to view details'"
                   [class.focused]="isFocusedItem(itemId(item))"
                   [projectPaused]="getProjectPaused(item.job.project_id || '')"

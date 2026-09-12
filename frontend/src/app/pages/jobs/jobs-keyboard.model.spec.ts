@@ -290,4 +290,20 @@ describe('jobs-keyboard.model — recycling contract pinned on the REAL componen
   it('the single-writer (focus) binding is on BOTH item kinds in the template', () => {
     expect(templateSrc).toMatch(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/g);
   });
+
+  it('W1 prerequisite — the focus-target [id]="itemId(item)" binding exists on BOTH hosts; the cross-reference home lives in jobs-page.bindings.pins.spec.ts', () => {
+    // The id binding is the prerequisite for the recycling contract:
+    // scheduleFocusAfterRender calls document.getElementById(id) — a
+    // null result triggers the viewport-container fallback every arrow
+    // press and the (focus) single-writer never fires for arrow nav.
+    // This pin is the single cross-reference back to the binding home
+    // (jobs-page.bindings.pins.spec.ts) — the model spec documents the
+    // CONTRACT, the bindings spec asserts the wiring.
+    expect(templateSrc).toMatch(
+      /class="group-header"[^>]*\[id\]="itemId\(item\)"[^>]*>/,
+    );
+    expect(templateSrc).toMatch(
+      /<app-job-card[^>]*\[id\]="itemId\(item\)"[^>]*>/,
+    );
+  });
 });

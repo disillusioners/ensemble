@@ -1250,6 +1250,28 @@ describe('P6 — ARIA tree structure on the grouped list (task 1, template pins)
     expect(focusBindings).toBe(2);
     expect(templateSrc).toMatch(/\[class\.focused\]="isFocusedItem\(itemId\(item\)\)"/);
   });
+
+  it('W1 — the focus-target id is bound on the SAME element that carries (focus); arrow nav lands on a real DOM node', () => {
+    // scheduleFocusAfterRender resolves focus via
+    // document.getElementById(id)?.focus() after the recycling tick.
+    // Without [id] on the host, the lookup is always null and the
+    // viewport-container fallback fires every arrow press — the
+    // (focus) single-writer never fires for arrow nav. Revert-fail:
+    // drop the [id]="itemId(item)" line on either host and this
+    // regex stops matching (we capture the whole opening tag, so
+    // attribute reorder inside the tag is also covered).
+    const groupHeaderOpen = templateSrc.match(/class="group-header"[^>]*>/);
+    expect(groupHeaderOpen).not.toBeNull();
+    expect(groupHeaderOpen![0]).toMatch(/\[id\]="itemId\(item\)"/);
+    // The (focus) binding MUST be on the same element so the
+    // id→focusedItemId mirror is single-writer per node.
+    expect(groupHeaderOpen![0]).toMatch(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/);
+
+    const appJobCardOpen = templateSrc.match(/<app-job-card[^>]*>/);
+    expect(appJobCardOpen).not.toBeNull();
+    expect(appJobCardOpen![0]).toMatch(/\[id\]="itemId\(item\)"/);
+    expect(appJobCardOpen![0]).toMatch(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/);
+  });
 });
 
 describe('P6 — icon-only semantics (task 3, zero title-only icon controls)', () => {

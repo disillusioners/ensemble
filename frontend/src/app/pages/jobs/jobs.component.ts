@@ -2183,6 +2183,18 @@ export class JobsComponent implements OnInit, OnDestroy {
    * the Space page-scroll (F2-class trap kept off this page: rows
    * here are not inside a mat-menu, but Enter defaults are still
    * suppressed for determinism).
+   *
+   * ⚠️ W1 maintenance warning — the shield assumes the host element
+   * is the ONLY focusable ancestor of the card's action buttons.
+   * If a future template addition wraps the card or adds another
+   * focusable descendant (e.g. a focusable header chip, an inline
+   * edit field), re-evaluate the shield: any inner focusable that
+   * should NOT trigger drawer activation will get its Enter/Space
+   * swallowed if the host eats the bubble. The (focus) binding on
+   * the host (paired with [id]="itemId(item)") is the contract that
+   * makes ``focusedItemId`` mirror real DOM focus; if the host
+   * changes identity, the bindings pin in
+   * ``jobs-page.bindings.pins.spec.ts`` must move with it.
    */
   protected onRowActivate(event: Event, item: WindowItem): void {
     if (!isJobsActivateKey((event as KeyboardEvent).key)) return;
