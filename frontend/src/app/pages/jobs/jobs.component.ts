@@ -33,12 +33,13 @@ import { QueueListComponent } from '../../components/queue-list/queue-list.compo
 import { SearchableSelectComponent } from '../../components';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
+import { DeferHoldersPanelComponent } from './defer-holders-panel/defer-holders-panel.component';
 import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 import { CleanupPreflight } from '../../models/cleanup-preflight.model';
-import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
+import { DeferBlockHolder, deferBlockAction, deferPageBanner } from '../../models/defer-blocked.model';
 import { JobsPageStore } from './jobs-page.store';
 import {
   JobsViewMode,
@@ -117,7 +118,8 @@ export type { JobsViewMode };
     JobCardComponent,
     JobDetailDrawerComponent,
     QueueListComponent,
-    SearchableSelectComponent
+    SearchableSelectComponent,
+    DeferHoldersPanelComponent,
   ],
   templateUrl: './jobs.component.html',
   styleUrl: './jobs.component.scss'
@@ -165,12 +167,18 @@ export class JobsComponent implements OnInit, OnDestroy {
    * filters over the work dataset) is DELETED — every view mode is a
    * projection of this store.
    *
-   * The fetchers wire the store to the services; both legs propagate
+   * The fetchers wire the store to the services; every leg propagates
    * errors so the store's per-leg retain-last-data contract holds.
+   *
+   * P4 — added the ``fetchDeferBlocked`` leg (page-level defer banner
+   * + holders panel). The fetcher delegates to ``JobService.listDeferBlocked``
+   * which is the existing wrapped endpoint; the leg rides the same
+   * poll tick and shares the store's in-flight guard.
    */
   private readonly store = new JobsPageStore({
     fetchJobs: (filters) => this.jobService.listJobs(filters),
     fetchWorks: (filters) => this.workService.getWork(filters),
+    fetchDeferBlocked: () => this.jobService.listDeferBlocked(),
   });
 
   // Dataset + fetch-state aliases — the template keeps reading the
@@ -193,6 +201,24 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly fetchInFlight = this.store.fetchInFlight;
   /** The unified, view-mode-aware error string (first non-null leg error). */
   readonly unifiedError = this.store.error;
+
+  // ── P4 — defer leg aliases + page-banner state ─────────────────────
+  //
+  // The defer leg rides the same poll tick as the data legs; the
+  // store owns the in-flight guard + the retain-last-data discipline.
+  // The page banner derives from ``deferPageBanner`` (the model helper
+  // is the source of truth — the template does not re-derive the
+  // severity conjunction). ``deferPanelOpen`` is the local UI flag
+  // for the inline holders panel (driven by the banner's button).
+  readonly deferStatus = this.store.deferStatus;
+  readonly deferLoading = this.store.deferLoading;
+  readonly deferDegraded = this.store.deferDegraded;
+  /** Convenience computed — the page banner state (null ⇒ hidden). */
+  readonly deferPageBanner = computed(() => deferPageBanner(this.store.deferStatus()));
+  /** Inline panel open state (driven by the banner's "Review holders" button). */
+  readonly deferPanelOpen = signal<boolean>(false);
+  /** Per-holder action in-flight flag (set true while a service call is on the wire). */
+  readonly deferActionInFlight = signal<boolean>(false);
 
   // P1 review watch-item (a): the WorkService's own `loading` signal
   // is shadowed by the store's `worksLoading` — both can be true at
@@ -604,6 +630,15 @@ export class JobsComponent implements OnInit, OnDestroy {
   // type-completeness convenience only.
   readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
 
+  // P4 — preflight degradation flag (retain-last-data discipline).
+  // The legacy code silently swallowed preflight failures at :587-589;
+  // a flag is now flipped on error so the consumer can render an
+  // honest "last preflight failed" note instead of a stale red-glow.
+  // The retained counts above stay unchanged — clearing would be the
+  // false-healthy trap (retain-last-data is the same pattern the data
+  // legs use; see ``JobsPageStore.fetchJobs`` for the canonical shape).
+  readonly preflightDegraded = signal<boolean>(false);
+
   // Deleted jobs filter — derived from the single filter state.
   readonly showDeleted = computed(() => this.store.filterState().include_deleted);
 
@@ -936,6 +971,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Phase 4 — fetch the bad-state preflight so the red-glow + tooltip
     // appear on first paint when the system has stale rows.
     this.refreshBadStateCount();
+    // P4 — fetch the defer payload so the page banner + holders panel
+    // are populated on first paint when the system has defer pressure.
+    this.store.fetchDeferBlocked();
     // Phase 2 — seed tabVisible from the document state at mount
     // (SSR-safe: ``doc`` is the injected DOCUMENT token, which is
     // the platform's document — never ``window`` directly so tests
@@ -1046,40 +1084,44 @@ export class JobsComponent implements OnInit, OnDestroy {
    * (parallel to ``bad_state_count``) which the confirm dialog uses to
    * surface a separate instance-termination warning.
    *
-   * Errors are intentionally swallowed — the red-glow + tooltip are
-   * UX-only and a transient preflight failure should not surface as
-   * a snackbar to the operator.
+   * P4 — the legacy "Errors are intentionally swallowed" comment is
+   * OBSOLETE. The preflight fetch now uses retain-last-data discipline:
+   * a preflight failure flips the ``preflightDegraded`` flag instead of
+   * silently dropping the call. The defer fetch is delegated to
+   * ``JobsPageStore.fetchDeferBlocked`` (retain-last-data + degraded
+   * flag) — this method no longer touches the defer endpoint.
    */
   private refreshBadStateCount(): void {
-    const preflight = firstValueFrom(
-      this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight')
-    );
-    // The preflight intentionally exposes only the defer count. Read the
-    // existing defer-blocked surface as well so the dialog can preserve the
-    // holder-specific remediation without adding a daemon-only field.
-    const deferBlocked = firstValueFrom(
-      this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked')
-    ).catch(() => null);
-
-    Promise.all([preflight, deferBlocked])
-      .then(([result, deferStatus]) => {
+    // P4 — retain-last-data discipline replaces the silent swallow
+    // at the legacy :587-589 path. A preflight error flips the
+    // ``preflightDegraded`` flag instead of clearing the existing
+    // counts (clearing would be the false-healthy trap). The defer
+    // fetch is delegated to ``JobsPageStore.fetchDeferBlocked``
+    // (retain-last-data + degraded flag).
+    this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight').subscribe({
+      next: (result) => {
         this.badStateCount.set(result.bad_state_count);
-        this.zombieInstanceCount.set(
-          result.zombie_instance_count ?? 0
-        );
-        // WS4 — the live-vs-reap split + the separate defer count
-        // feed the confirm dialog ("will remain" listing + the
-        // by-design "deferred messages are not cancelled here" note).
+        this.zombieInstanceCount.set(result.zombie_instance_count ?? 0);
+        // WS4 — live-vs-reap split + separate defer count feed the
+        // confirm dialog (will-remain listing + the by-design
+        // "deferred messages are not cancelled here" note).
         this.liveInstanceCount.set(result.live_instance_count ?? 0);
         this.liveInstanceIds.set(result.live_instance_ids ?? []);
         this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
-        this.deferHolderKind.set(
-          deferBlockAction(deferStatus)?.holder.kind ?? null
-        );
-      })
-      .catch(() => {
-        // Fail silently — badge is UX-only.
-      });
+        // The defer holder kind is sourced from the SEPARATE defer
+        // fetch (the store owns it now); read it from the store alias.
+        const deferStatus = this.store.deferStatus();
+        this.deferHolderKind.set(deferBlockAction(deferStatus)?.holder.kind ?? null);
+        // Preflight succeeded — clear any prior degradation.
+        this.preflightDegraded.set(false);
+      },
+      error: () => {
+        // P4 — do NOT clear existing counts (retain-last-data). Flip
+        // the ``preflightDegraded`` flag so the consumer can render
+        // an honest "last preflight failed" note.
+        this.preflightDegraded.set(true);
+      },
+    });
   }
 
   /**
@@ -1111,6 +1153,12 @@ export class JobsComponent implements OnInit, OnDestroy {
    *
    * Cadence: ``POLL_INTERVAL_MS`` (30000) from jobs-poll.model.ts;
    * pin lives in jobs-poll.model.spec.ts.
+   *
+   * P4 — the defer leg rides the same tick (per-leg ``catchError``
+   * discipline port from ``job-queue-indicator.component.ts:657-735``).
+   * A failed defer fetch MUST NOT kill the data legs (the store's
+   * per-leg subscribe handles that); the drawer/modal pause applies
+   * to all legs uniformly via the gate.
    */
   private startAutoRefresh(): void {
     this.refreshInterval = setInterval(() => {
@@ -1123,6 +1171,9 @@ export class JobsComponent implements OnInit, OnDestroy {
         })
       ) {
         this.store.refreshActive();
+        // P4 — defer leg rides the same tick (retain-last-data on
+        // failure; the store's in-flight guard prevents double-fire).
+        this.store.fetchDeferBlocked();
       }
     }, POLL_INTERVAL_MS);
   }
@@ -1161,6 +1212,10 @@ export class JobsComponent implements OnInit, OnDestroy {
         })
       ) {
         this.store.refreshActive();
+        // P4 — refresh the defer leg on refocus so the page banner
+        // reflects post-refocus reality without waiting for the next
+        // tick (the gate's debounce window applies uniformly).
+        this.store.fetchDeferBlocked();
       }
     }, REFOCUS_DEBOUNCE_MS);
   };
@@ -1184,6 +1239,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Phase 4 — refresh the preflight count alongside the main list so
     // the red-glow + tooltip reflect post-refresh reality.
     this.refreshBadStateCount();
+    // P4 — refresh the defer leg so the page banner + holders panel
+    // reflect post-refresh reality (the store's in-flight guard
+    // prevents overlap with the data leg).
+    this.store.fetchDeferBlocked();
   }
 
   /**
@@ -1231,6 +1290,153 @@ export class JobsComponent implements OnInit, OnDestroy {
    */
   protected onClearFiltersForEmpty(): void {
     this.onClearFilters();
+  }
+
+  // ── P4 — defer banner + holders panel handlers ─────────────────────
+  //
+  // The page banner carries the severity-graded defer state. The
+  // "Review holders →" button toggles the inline panel (one click
+  // from page root). The per-holder action buttons (force-complete,
+  // resend-foreground) emit through the panel — the page owns the
+  // two-stage confirm dialog (the click is stage 1; the dialog is
+  // stage 2). The service call fires ONLY after ``afterClosed``
+  // resolves ``true`` — the cancel path fires nothing.
+
+  /**
+   * Toggle the inline holders panel. The banner's button is the
+   * single entry-point; clicking it a second time collapses the
+   * panel (closing does NOT reset the banner state).
+   */
+  protected onToggleDeferPanel(): void {
+    this.deferPanelOpen.update((open) => !open);
+  }
+
+  /**
+   * Two-stage confirm + ``POST /api/jobs/defer-holders/{id}/force-complete``.
+   *
+   * Stage 1 — the panel emits ``forceComplete`` with the holder.
+   * Stage 2 — this handler opens a ConfirmDialog naming the holder
+   * and stating irreversibility; the destructive call fires ONLY
+   * after the dialog resolves ``true``.
+   *
+   * Cancel path: dialog close with ``false`` / ``undefined`` ⇒
+   * the action is NOT dispatched. ``actionInFlight`` flips back to
+   * ``false`` unconditionally so a stale flag cannot deadlock the
+   * next attempt.
+   */
+  protected onHolderForceComplete(holder: DeferBlockHolder): void {
+    if (this.deferActionInFlight()) {
+      return;
+    }
+    this.modalOpen.set(true);
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean | undefined
+    >(ConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+      data: {
+        title: 'Force-complete defer holder?',
+        message:
+          `This will terminate the ${holder.kind} holder instance ` +
+          `${holder.instance_id} and reconcile its deferred message mirrors. ` +
+          `The action is irreversible.`,
+        confirmLabel: 'Force complete',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      },
+    });
+    ref.afterClosed().subscribe((confirmed) => {
+      this.modalOpen.set(false);
+      if (!confirmed) {
+        return;
+      }
+      this.deferActionInFlight.set(true);
+      this.jobService.forceCompleteDeferHolder(holder.instance_id).subscribe({
+        next: (result) => {
+          this.deferActionInFlight.set(false);
+          this.deferPanelOpen.set(false);
+          const verb = result.terminated ? 'Force-completed' : 'Force-complete refused';
+          this.snackBar.open(
+            `${verb} holder ${holder.instance_id}: ${result.message}`,
+            'Close',
+            { duration: 3500, panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar' },
+          );
+          // Refresh the defer leg so the panel re-renders without
+          // the resolved holder.
+          this.store.fetchDeferBlocked();
+        },
+        error: (err) => {
+          this.deferActionInFlight.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to force-complete holder',
+            'Dismiss',
+            { duration: 5000, panelClass: 'error-snackbar' },
+          );
+        },
+      });
+    });
+  }
+
+  /**
+   * Two-stage confirm + ``POST /api/jobs/defer-holders/{id}/resend-foreground``.
+   *
+   * Same confirm-flow as ``onHolderForceComplete`` — the dialog
+   * names the holder and states the side-effect; the service call
+   * fires ONLY after ``afterClosed`` resolves ``true``.
+   */
+  protected onHolderResendForeground(holder: DeferBlockHolder): void {
+    if (this.deferActionInFlight()) {
+      return;
+    }
+    this.modalOpen.set(true);
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean | undefined
+    >(ConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+      data: {
+        title: 'Resend deferred messages as foreground?',
+        message:
+          `This will cancel the ${holder.kind} holder ${holder.instance_id}'s ` +
+          `queued defer-lane jobs and re-send their message content as NEW ` +
+          `foreground message jobs. The action is irreversible.`,
+        confirmLabel: 'Resend foreground',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      },
+    });
+    ref.afterClosed().subscribe((confirmed) => {
+      this.modalOpen.set(false);
+      if (!confirmed) {
+        return;
+      }
+      this.deferActionInFlight.set(true);
+      this.jobService.resendDeferredForeground(holder.instance_id).subscribe({
+        next: (result) => {
+          this.deferActionInFlight.set(false);
+          this.deferPanelOpen.set(false);
+          this.snackBar.open(
+            `Resent foreground for ${holder.instance_id}: ${result.cancelled_defer_jobs} cancelled, ` +
+              `${result.skipped_empty_content} skipped`,
+            'Close',
+            { duration: 3500, panelClass: 'success-snackbar' },
+          );
+          this.store.fetchDeferBlocked();
+        },
+        error: (err) => {
+          this.deferActionInFlight.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to resend deferred messages',
+            'Dismiss',
+            { duration: 5000, panelClass: 'error-snackbar' },
+          );
+        },
+      });
+    });
   }
 
   /**
@@ -1818,9 +2024,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (!projectId) return;
 
     // Update local project state
-    this.projectService.projects.update(projects => 
-      projects.map(p => 
-        p.project_id === projectId 
+    this.projectService.projects.update(projects =>
+      projects.map(p =>
+        p.project_id === projectId
           ? { ...p, job_queue_paused: isPaused }
           : p
       )

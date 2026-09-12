@@ -1,4 +1,4 @@
-// JobsPageStore — jobs-page-improvement arc, Phase 1 + Phase 2.
+// JobsPageStore — jobs-page-improvement arc, Phase 1 + Phase 2 + Phase 4.
 //
 // THE single fetch + filter pipeline behind BOTH view modes of the
 // Jobs page. This replaces the pre-P1 dual path (component-local
@@ -21,11 +21,17 @@
 // store's source of truth WITHOUT re-deriving from ``filteredJobs``
 // in the template. The store stays a thin projection owner; the
 // banner POLICY lives in ``jobs-window.model.ts`` (pure).
+//
+// Phase 4 adds a parallel defer leg (``fetchDeferBlocked``) — the
+// page-level defer banner + holders panel ride this leg. Same
+// retain-last-data discipline as the jobs/works legs (a failed
+// fetch keeps the last good payload + flips the degraded flag).
 
 import { computed, signal } from '@angular/core';
 import { Observable } from 'rxjs';
 import { Job, JobEventPayload, JobFilters, isTerminalStatus } from '../../models/job.model';
 import { Work, WorkFilters, workToJob } from '../../models/work.model';
+import { DeferBlockedStatus } from '../../models/defer-blocked.model';
 import {
   JobsFilterState,
   applyJobsFilter,
@@ -41,17 +47,26 @@ import {
 } from './jobs-window.model';
 
 /**
- * The two fetch legs, injected so the store stays framework-free.
+ * The fetch legs, injected so the store stays framework-free.
  *
- * Both legs MUST propagate errors (the page's ``JobService.listJobs``
+ * Every leg MUST propagate errors (the page's ``JobService.listJobs``
  * was converted in P1 from its legacy swallow-to-``of([])`` contract
  * — an error that lands as a healthy-looking ``[]`` emission would
  * impersonate a successful empty poll and wipe the visible list, the
  * exact retain-last-data violation the indicator fixed for its legs).
+ *
+ * Phase 4 — adds ``fetchDeferBlocked`` for the page-level defer banner
+ * + holders panel. The leg rides the same poll tick; failures retain
+ * the last good payload + flip ``deferDegraded``.
  */
 export interface JobsPageFetchers {
   fetchJobs: (filters: JobFilters) => Observable<Job[]>;
   fetchWorks: (filters: WorkFilters) => Observable<Work[]>;
+  /**
+   * P4 — ``GET /api/queues/defer-blocked``. Failures propagate so
+   * the store's retain-last-data discipline can hold.
+   */
+  fetchDeferBlocked: () => Observable<DeferBlockedStatus>;
 }
 
 /**
@@ -86,6 +101,16 @@ export class JobsPageStore {
   readonly worksError = signal<string | null>(null);
   /** True when the LAST works leg failed (payload retained, stale). */
   readonly worksDegraded = signal(false);
+
+  // ── P4 — defer leg ─────────────────────────────────────────────────
+  // Parallel to the jobs/works legs: retain-last-data discipline on
+  // failure. The page banner + holders panel bind to ``deferStatus``
+  // (the last good payload) and ``deferDegraded`` (the freshness flag).
+  readonly deferStatus = signal<DeferBlockedStatus | null>(null);
+  readonly deferLoading = signal(false);
+  readonly deferError = signal<string | null>(null);
+  /** True when the LAST defer leg failed (payload retained, stale). */
+  readonly deferDegraded = signal(false);
 
   constructor(fetchers: JobsPageFetchers) {
     this.fetchers = fetchers;
@@ -172,6 +197,16 @@ export class JobsPageStore {
   readonly error = computed<string | null>(() => {
     return this.jobsError() ?? this.worksError() ?? null;
   });
+
+  // ── P4 — defer leg (parallel to the data legs) ─────────────────────
+  //
+  // The defer leg rides the same poll tick; failures retain the last
+  // good payload + flip the degraded flag (P4 task 4 — replaces the
+  // silent swallow at the legacy ``refreshBadStateCount`` defer
+  // fetch). The page banner reads ``deferDegraded`` directly; the
+  // banner state itself is derived in the template via
+  // ``deferPageBanner(deferStatus())`` so the canonical helper
+  // stays the single source of truth.
 
   // ── Filter mutation ─────────────────────────────────────────────────
 
@@ -276,6 +311,42 @@ export class JobsPageStore {
     } else {
       this.fetchJobs();
     }
+  }
+
+  // ── P4 — defer leg fetch (retain-last-data) ────────────────────────
+
+  /**
+   * P4 — Defer leg (``GET /api/queues/defer-blocked`` via the
+   * injected fetcher).
+   *
+   * Same retain-last-data discipline as the data legs:
+   *   * On error the payload is NOT touched (a failed poll must
+   *     never impersonate a healthy empty state).
+   *   * A healthy (possibly empty) 200 REPLACES the payload — an
+   *     empty payload is data (no defer pressure), not degradation.
+   *
+   * The in-flight guard prevents double-fire when the poll tick
+   * races the manual refresh.
+   */
+  fetchDeferBlocked(): void {
+    if (this.deferLoading()) {
+      return;
+    }
+    this.deferLoading.set(true);
+    this.deferError.set(null);
+    this.fetchers.fetchDeferBlocked().subscribe({
+      next: (status) => {
+        this.deferStatus.set(status);
+        this.deferDegraded.set(false);
+        this.deferLoading.set(false);
+      },
+      error: (err) => {
+        // Retain-last-data — do NOT touch ``this.deferStatus`` here.
+        this.deferError.set(err?.message || 'Failed to load defer-blocked status');
+        this.deferDegraded.set(true);
+        this.deferLoading.set(false);
+      },
+    });
   }
 
   // ── SSE patching (moved verbatim from the pre-P1 component) ────────

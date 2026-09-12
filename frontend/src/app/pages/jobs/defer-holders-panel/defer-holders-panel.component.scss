@@ -1,0 +1,125 @@
+// Defer-blocked holders panel — page-scoped surface (P4).
+//
+// Scope is intentionally narrow: a single block that follows the
+// banner's color family (amber for actionable, info for working-as-
+// designed) and respects the page's dark theme. No new SCSS
+// variables — the panel reuses the same palette tokens the
+// window-banner introduced so the two stay visually coherent.
+
+.defer-holders-panel {
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.06);
+  margin-top: 8px;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+}
+
+.defer-holders-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #fbbf24;
+  margin-bottom: 8px;
+}
+
+.defer-holders-header-icon {
+  font-size: 18px;
+  height: 18px;
+  width: 18px;
+  color: #f59e0b;
+}
+
+.defer-holders-degraded-note {
+  font-weight: 400;
+  color: #f43f5e;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.defer-holders-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.defer-holders-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(245, 158, 11, 0.18);
+  align-items: center;
+
+  &:first-child {
+    border-top: none;
+  }
+}
+
+.defer-holder-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  grid-column: 1 / 2;
+}
+
+.defer-holder-instance {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.defer-holder-agent {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.defer-holder-kind {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.18);
+
+  &[data-kind='paused'] {
+    background: rgba(244, 63, 94, 0.22);
+    color: #fda4af;
+  }
+  &[data-kind='stalled'] {
+    background: rgba(245, 158, 11, 0.22);
+    color: #fcd34d;
+  }
+  &[data-kind='live'] {
+    background: rgba(56, 189, 248, 0.18);
+    color: #7dd3fc;
+  }
+}
+
+.defer-holder-since {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.defer-holder-hint {
+  grid-column: 1 / 2;
+  font-size: 11px;
+  color: #cbd5e1;
+  font-style: italic;
+}
+
+.defer-holder-actions {
+  grid-column: 2 / 3;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}

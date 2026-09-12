@@ -181,6 +181,86 @@
 
   </div>
 
+  <!-- P4 — Defer-blocked page banner. Severity-graded (AMBER /
+       INFO / RED-anomaly) via the existing ``defer-blocked.model.ts``
+       conjunction; hidden when ``deferPageBanner`` returns null
+       (no pending defer pressure). Sits above the window banner
+       so the most actionable state (defer-blocked) is closest to
+       the action surface (filter bar). Degraded note surfaces
+       when the leg's last fetch failed and the visible payload is
+       retained (P4 task 4 — replaces the legacy silent-swallow at
+       :587-589). -->
+  @if (deferPageBanner(); as banner) {
+    <div
+      class="defer-page-banner"
+      role="status"
+      aria-live="polite"
+      [class.defer-page-banner-amber]="banner.severity === 'amber'"
+      [class.defer-page-banner-info]="banner.severity === 'info'"
+      [class.defer-page-banner-red]="banner.severity === 'red'"
+      [class.defer-page-banner-degraded]="deferDegraded()">
+      <mat-icon class="defer-page-banner-icon" aria-hidden="true">
+        {{ banner.severity === 'red' ? 'report' : 'warning_amber' }}
+      </mat-icon>
+      <div class="defer-page-banner-text">
+        <span class="defer-page-banner-title">
+          {{ banner.title }}
+          @if (deferDegraded()) {
+            <span class="defer-page-banner-degraded-tag">stale</span>
+          }
+        </span>
+        <span class="defer-page-banner-body">{{ banner.body }}</span>
+        @if (deferDegraded()) {
+          <span class="defer-page-banner-degraded-note">
+            Last check failed — showing retained state.
+          </span>
+        }
+      </div>
+      <div class="defer-page-banner-actions">
+        @if (banner.holders.length > 0) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="primary"
+            class="defer-page-banner-review-btn"
+            [attr.aria-expanded]="deferPanelOpen()"
+            [attr.aria-label]="deferPanelOpen() ? 'Hide defer holders' : 'Review defer holders'"
+            (click)="onToggleDeferPanel()">
+            <mat-icon>{{ deferPanelOpen() ? 'expand_less' : 'expand_more' }}</mat-icon>
+            {{ deferPanelOpen() ? 'Hide holders' : 'Review holders (' + banner.holders.length + ')' }}
+          </button>
+        }
+        @if (banner.isAnomaly) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="warn"
+            class="defer-page-banner-cleanup-btn"
+            [disabled]="cleanupInProgress()"
+            (click)="onSystemCleanup()">
+            <mat-icon>cleaning_services</mat-icon>
+            Open System Cleanup
+          </button>
+        }
+      </div>
+    </div>
+  }
+
+  <!-- P4 — Inline defer-holders panel. Page-scoped (no
+       ``@Input()`` wiring needed; the parent component owns the
+       store). The panel reads the SAME ``deferPageBanner`` helper
+       the banner uses so the holder list and the banner copy
+       cannot disagree on whose row is where (cross-seam
+       invariant — pinned in
+       ``defer-holders-panel.component.spec.ts``). -->
+  <app-defer-holders-panel
+    [status]="deferStatus()"
+    [degraded]="deferDegraded()"
+    [actionInFlight]="deferActionInFlight()"
+    (forceComplete)="onHolderForceComplete($event)"
+    (resendForeground)="onHolderResendForeground($event)">
+  </app-defer-holders-panel>
+
   <!-- Phase 2 — window-honesty banner (BOTH view modes). The
        banner is an exact function of the projected row count: it
        shows AT or ABOVE the wire cap (DEFAULT_WINDOW_LIMIT = 100),

@@ -668,3 +668,145 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(componentSrc).not.toMatch(/MatProgressSpinnerModule,\s*\n\s*MatChipsModule/);
   });
 });
+
+// ── P4 — defer banner + holders panel binding pins ────────────────────
+//
+// Plain-TS specs cannot verify DOM bindings; the F-5 pins below
+// pin every (template ↔ component) ↔ (handler ↔ store) wiring the
+// P4 plan introduced. The companion behavior specs in
+// ``jobs-page.store.spec.ts`` and ``defer-blocked.model.spec.ts``
+// prove the LOGIC; this spec proves the WIRING.
+
+describe('P4 — defer banner + holders panel template↔component binding pins', () => {
+  it('template renders the defer banner under the filter bar (visibility helper)', () => {
+    // P4 task 1: page-level banner under the filter bar; the
+    // ``@if (deferPageBanner(); as banner)`` template guard IS the
+    // visibility helper (matches ``deferBlockIndicator``'s null-
+    // hiding semantics).
+    expect(templateSrc).toMatch(/@if \(deferPageBanner\(\); as banner\)/);
+  });
+
+  it('template binds the severity classes to the banner (amber/info/red)', () => {
+    // The three severity classes are mutually exclusive (the model
+    // helper returns ONE severity per payload) — pinning them keeps
+    // a future SCSS refactor from collapsing two severities into
+    // one style.
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-amber\]="banner\.severity === 'amber'"/);
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-info\]="banner\.severity === 'info'"/);
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-red\]="banner\.severity === 'red'"/);
+  });
+
+  it('template binds the degraded flag (overlay class + note copy)', () => {
+    // P4 task 4: replaces the silent swallow at :587-589. The
+    // degraded overlay MUST surface in three places — the dashed
+    // border (visual), the "stale" tag (inline), and the
+    // "Last check failed — showing retained state." note (body).
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-degraded\]="deferDegraded\(\)"/);
+    expect(templateSrc).toMatch(/@if \(deferDegraded\(\)\)/);
+    expect(templateSrc).toMatch(/Last check failed — showing retained state/);
+  });
+
+  it('template mounts the inline holders panel with the four IO bindings', () => {
+    // P4 task 2: holders drill-down. The panel consumes the same
+    // store signals the banner does — the inputs are direct
+    // aliases, not re-derived.
+    expect(templateSrc).toMatch(/<app-defer-holders-panel/);
+    expect(templateSrc).toMatch(/\[status\]="deferStatus\(\)"/);
+    expect(templateSrc).toMatch(/\[degraded\]="deferDegraded\(\)"/);
+    expect(templateSrc).toMatch(/\[actionInFlight\]="deferActionInFlight\(\)"/);
+    expect(templateSrc).toMatch(/\(forceComplete\)="onHolderForceComplete\(\$event\)"/);
+    expect(templateSrc).toMatch(/\(resendForeground\)="onHolderResendForeground\(\$event\)"/);
+  });
+
+  it('template renders the "Review holders" toggle ONLY when holders are present', () => {
+    // P4 task 2: the banner button is gated on ``banner.holders.length > 0``.
+    // The anomaly branch (RED) hides the button — anomaly is banner-only
+    // with "Open System Cleanup" instead.
+    expect(templateSrc).toMatch(/@if \(banner\.holders\.length > 0\)/);
+    expect(templateSrc).toMatch(/\(click\)="onToggleDeferPanel\(\)"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-expanded\]="deferPanelOpen\(\)"/);
+  });
+
+  it('template renders the "Open System Cleanup" affordance ONLY in the anomaly branch', () => {
+    // P4 risk table: "RED-anomaly state nags without actionable
+    // remediation" ⇒ offer "Open System Cleanup" rather than a bare
+    // alarm. The button reuses the existing handler so the
+    // System-Cleanup dialog contract stays unchanged (task 6).
+    expect(templateSrc).toMatch(/@if \(banner\.isAnomaly\)/);
+    expect(templateSrc).toMatch(/\(click\)="onSystemCleanup\(\)"/);
+  });
+
+  it('component declares the defer leg wiring — fetcher + signals + aliases + handlers', () => {
+    // The fetcher wires the store to JobService.listDeferBlocked.
+    expect(componentSrc).toMatch(/fetchDeferBlocked: \(\) => this\.jobService\.listDeferBlocked\(\)/);
+    // The component aliases the store signals.
+    expect(componentSrc).toMatch(/readonly deferStatus = this\.store\.deferStatus/);
+    expect(componentSrc).toMatch(/readonly deferDegraded = this\.store\.deferDegraded/);
+    // The component declares the page-banner helper as a computed.
+    expect(componentSrc).toMatch(/readonly deferPageBanner = computed\(\(\) => deferPageBanner\(this\.store\.deferStatus\(\)\)\)/);
+    // The component declares the panel open/close + action-in-flight flags.
+    expect(componentSrc).toMatch(/readonly deferPanelOpen = signal<boolean>\(false\)/);
+    expect(componentSrc).toMatch(/readonly deferActionInFlight = signal<boolean>\(false\)/);
+  });
+
+  it('component fetches the defer leg on init + poll tick + refocus + onRefresh (P4 task 5)', () => {
+    // P4 task 5: defer leg joins the Phase-2 poll tick with per-leg
+    // catchError (the store's subscribe error handler is the
+    // catchError port from the indicator — ``forkJoin`` discipline
+    // for a single-tick poll). The regexes below allow a generous
+    // comment-blank window between the fetch and the next statement
+    // so the spec survives a future docstring touch-up.
+    expect(componentSrc).toMatch(/this\.store\.fetchDeferBlocked\(\);[\s\S]{0,400}?this\.tabVisible\.set\(this\.doc\.visibilityState/);
+    // Poll tick — the defer fetch is the second statement inside the
+    // tick callback (after ``refreshActive``).
+    expect(componentSrc).toMatch(/this\.store\.refreshActive\(\);[\s\S]{0,300}?this\.store\.fetchDeferBlocked\(\);[\s\S]{0,200}?\}, POLL_INTERVAL_MS\)/);
+    // Refocus debounce — same pattern, gated by the gate inputs.
+    expect(componentSrc).toMatch(/this\.store\.refreshActive\(\);[\s\S]{0,300}?this\.store\.fetchDeferBlocked\(\);[\s\S]{0,200}?\}, REFOCUS_DEBOUNCE_MS\)/);
+    // onRefresh — the manual refresh button path.
+    expect(componentSrc).toMatch(/protected onRefresh\(\): void \{[\s\S]{0,800}?this\.store\.fetchDeferBlocked\(\);/);
+  });
+
+  it('component action handlers gate the service call behind the confirm dialog (P4 task 3)', () => {
+    // Two-stage confirm: the action handler opens a ConfirmDialog;
+    // the service call fires ONLY inside the ``afterClosed``
+    // subscribe callback's confirm branch. The cancel path closes
+    // the dialog and returns without dispatching.
+    expect(componentSrc).toMatch(/protected onHolderForceComplete\(holder: DeferBlockHolder\): void/);
+    expect(componentSrc).toMatch(/protected onHolderResendForeground\(holder: DeferBlockHolder\): void/);
+    // Both handlers must reference ConfirmDialogComponent via dialog.open.
+    // The actual call uses generic type arguments (erased at build
+    // time, but visible in source) — match the prefix-then-arg shape.
+    expect(componentSrc).toMatch(/this\.dialog\.open<[\s\S]*?>\(ConfirmDialogComponent,/);
+    // Both handlers subscribe to ``afterClosed`` to gate the
+    // service call on the dialog result.
+    expect(componentSrc).toMatch(/afterClosed\(\)\.subscribe\(\(confirmed\)/);
+  });
+
+  it('component refreshes the defer leg after every successful action (banner/panel post-action refresh)', () => {
+    // P4 task 3 acceptance: "success refreshes holders leg". Both
+    // action handlers re-fetch the defer leg on success. The window
+    // covers the whole ``subscribe({...})`` callback (incl. the
+    // ``result`` handling, the snackbar open, etc.) up to the
+    // trailing ``fetchDeferBlocked`` call.
+    expect(componentSrc).toMatch(/this\.jobService\.forceCompleteDeferHolder\(holder\.instance_id\)\.subscribe\(\{[\s\S]{0,2000}?this\.store\.fetchDeferBlocked\(\)/);
+    expect(componentSrc).toMatch(/this\.jobService\.resendDeferredForeground\(holder\.instance_id\)\.subscribe\(\{[\s\S]{0,2000}?this\.store\.fetchDeferBlocked\(\)/);
+  });
+
+  it('refreshBadStateCount applies retain-last-data to the preflight too (P4 task 4)', () => {
+    // The preflight fetch error handler flips ``preflightDegraded``
+    // (the same flag pattern the store uses). The legacy silent
+    // swallow at the end of the Promise.all chain is GONE.
+    expect(componentSrc).toMatch(/this\.preflightDegraded\.set\(true\)/);
+    expect(componentSrc).not.toMatch(/\.catch\(\(\) => \{\s*\/\/ Fail silently/);
+  });
+
+  it('the page banner DOES NOT touch the cleanup dialog directly (P4 task 6 — dialog contract untouched)', () => {
+    // P4 task 6: the System Cleanup dialog keeps working unchanged.
+    // The banner's "Open System Cleanup" button reuses the page's
+    // existing ``onSystemCleanup`` handler — it does NOT open the
+    // dialog directly (the dialog's data contract is untouched).
+    expect(componentSrc).toMatch(/onSystemCleanup/);
+    // The page banner template handler is ``(click)="onSystemCleanup()"`` —
+    // confirmed by the template-source pin above.
+  });
+});

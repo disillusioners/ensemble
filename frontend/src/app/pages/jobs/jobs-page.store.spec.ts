@@ -10,6 +10,7 @@
 import { Observable } from 'rxjs';
 import { Job, JobEventPayload } from '../../models/job.model';
 import { Work } from '../../models/work.model';
+import { DeferBlockedStatus } from '../../models/defer-blocked.model';
 import { createMockJob } from '../../testing/job-test-helpers';
 import { JobsPageStore, JobsPageFetchers } from './jobs-page.store';
 import { JobFilters } from '../../models/job.model';
@@ -45,6 +46,9 @@ interface LegHarness {
   jobsError: (err: Error) => void;
   worksNext: (works: Work[]) => void;
   worksError: (err: Error) => void;
+  deferNext: (status: DeferBlockedStatus) => void;
+  deferError: (err: Error) => void;
+  deferFetcher: jest.Mock;
   jobsFetcher: jest.Mock;
   worksFetcher: jest.Mock;
 }
@@ -59,6 +63,8 @@ function buildStore(): LegHarness {
   let jobsFail: ((e: Error) => void) | null = null;
   let worksEmit: ((x: Work[]) => void) | null = null;
   let worksFail: ((e: Error) => void) | null = null;
+  let deferEmit: ((x: DeferBlockedStatus) => void) | null = null;
+  let deferFail: ((e: Error) => void) | null = null;
 
   const jobsFetcher = jest.fn(
     (_filters: JobFilters) =>
@@ -74,10 +80,18 @@ function buildStore(): LegHarness {
         worksFail = (e) => subscriber.error(e);
       }),
   );
+  const deferFetcher = jest.fn(
+    () =>
+      new Observable<DeferBlockedStatus>((subscriber) => {
+        deferEmit = (status) => subscriber.next(status);
+        deferFail = (e) => subscriber.error(e);
+      }),
+  );
 
   const fetchers: JobsPageFetchers = {
     fetchJobs: jobsFetcher,
     fetchWorks: worksFetcher,
+    fetchDeferBlocked: deferFetcher,
   };
   const store = new JobsPageStore(fetchers);
 
@@ -87,6 +101,9 @@ function buildStore(): LegHarness {
     jobsError: (e) => jobsFail?.(e),
     worksNext: (works) => worksEmit?.(works),
     worksError: (e) => worksFail?.(e),
+    deferNext: (status) => deferEmit?.(status),
+    deferError: (e) => deferFail?.(e),
+    deferFetcher,
     jobsFetcher,
     worksFetcher,
   };
@@ -569,5 +586,135 @@ describe('JobsPageStore — local mutation seams (post-action corrections)', () 
     h.store.jobs.set([createMockJob({ job_id: 'a' })]);
     expect(h.store.findJob('a')!.job_id).toBe('a');
     expect(h.store.findJob('missing')).toBeUndefined();
+  });
+});
+
+// ── P4 — defer leg (retain-last-data parallel to the data legs) ───────
+
+describe('JobsPageStore.fetchDeferBlocked (P4) — retain-last-data', () => {
+  const deferPayload = (
+    overrides?: Partial<DeferBlockedStatus>
+  ): DeferBlockedStatus => ({
+    defer_blocked: true,
+    pending_count: 3,
+    holders: [
+      {
+        instance_id: 'inst-1',
+        agent: 'leader',
+        status: 'processing',
+        since: '2026-09-04T15:33:24+00:00',
+        kind: 'stalled',
+      },
+    ],
+    ...(overrides ?? {}),
+  });
+
+  it('fetchDeferBlocked is called WITHOUT arguments (no filter state)', () => {
+    // The defer endpoint is project-agnostic — same payload shape
+    // for every caller. Pin the no-arg signature so a future refactor
+    // that forwards filters through this leg fails the spec.
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    expect(h.deferFetcher).toHaveBeenCalledWith();
+  });
+
+  it('an empty (zero-pending) payload REPLACES the prior payload — healthy 200 is data, not degradation', () => {
+    // The store MUST NOT treat a healthy empty 200 as degradation:
+    // "no defer pressure" is a real state (the indicator hides).
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    h.deferNext(
+      deferPayload({ pending_count: 5, holders: [{ instance_id: 'a', agent: 'x', status: 'processing', since: null, kind: 'live' }] })
+    );
+    expect(h.store.deferStatus()!.pending_count).toBe(5);
+    expect(h.store.deferDegraded()).toBe(false);
+
+    h.store.fetchDeferBlocked();
+    h.deferNext(deferPayload({ pending_count: 0, holders: [] }));
+    expect(h.store.deferStatus()!.pending_count).toBe(0);
+    expect(h.store.deferStatus()!.holders).toEqual([]);
+    expect(h.store.deferDegraded()).toBe(false);
+  });
+
+  it('on error the prior payload is RETAINED and deferDegraded flips true', () => {
+    // P4 task 4: replaces the silent swallow at :587-589. A
+    // failed defer fetch must NOT impersonate a healthy empty
+    // state — the prior payload stays, the degraded flag flips.
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    h.deferNext(deferPayload({ pending_count: 7 }));
+    expect(h.store.deferStatus()!.pending_count).toBe(7);
+    expect(h.store.deferDegraded()).toBe(false);
+
+    h.store.fetchDeferBlocked();
+    h.deferError(new Error('503 Service Unavailable'));
+    // Payload retained.
+    expect(h.store.deferStatus()!.pending_count).toBe(7);
+    // Degraded flipped.
+    expect(h.store.deferDegraded()).toBe(true);
+    expect(h.store.deferError()).toContain('503');
+  });
+
+  it('a subsequent healthy fetch clears the degraded flag (recovery)', () => {
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    h.deferNext(deferPayload());
+    h.store.fetchDeferBlocked();
+    h.deferError(new Error('boom'));
+    expect(h.store.deferDegraded()).toBe(true);
+
+    // Recovery: next healthy fetch clears it.
+    h.store.fetchDeferBlocked();
+    h.deferNext(deferPayload({ pending_count: 1 }));
+    expect(h.store.deferDegraded()).toBe(false);
+    expect(h.store.deferError()).toBeNull();
+  });
+
+  it('in-flight guard: a running fetch is never double-fired', () => {
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    expect(h.deferFetcher).toHaveBeenCalledTimes(1);
+    h.store.fetchDeferBlocked();
+    h.store.fetchDeferBlocked();
+    expect(h.deferFetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('in-flight flag clears on error (gate must not stay stuck shut on failure)', () => {
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    expect(h.store.deferLoading()).toBe(true);
+    h.deferError(new Error('500'));
+    expect(h.store.deferLoading()).toBe(false);
+  });
+
+  it('a healthy refresh sets the loading flag back to false', () => {
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    expect(h.store.deferLoading()).toBe(true);
+    h.deferNext(deferPayload());
+    expect(h.store.deferLoading()).toBe(false);
+  });
+
+  it('the defer leg does NOT bleed into windowDegraded (separate signal)', () => {
+    // The data legs' ``windowDegraded`` is view-scoped; the defer
+    // leg has its own ``deferDegraded`` flag. A defer failure must
+    // not flip the data legs' degraded signals.
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    h.deferError(new Error('503'));
+    expect(h.store.deferDegraded()).toBe(true);
+    expect(h.store.jobsDegraded()).toBe(false);
+    expect(h.store.worksDegraded()).toBe(false);
+    expect(h.store.degraded()).toBe(false); // windowDegraded unchanged
+  });
+
+  it('the defer leg does NOT bleed into fetchInFlight (the poll gate stays scoped to data legs)', () => {
+    // The poll gate (``shouldTick``) consults ``fetchInFlight``,
+    // which is view-scoped to the ACTIVE data leg. A defer fetch in
+    // flight must NOT pause the data poll — per-leg discipline
+    // means siblings survive a sibling's failure.
+    const h = buildStore();
+    h.store.fetchDeferBlocked();
+    expect(h.store.fetchInFlight()).toBe(false);
   });
 });

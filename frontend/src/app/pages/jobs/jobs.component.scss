@@ -366,6 +366,129 @@
   }
 }
 
+// P4 — Defer-blocked page banner. Severity-graded (AMBER / INFO /
+// RED-anomaly) via the same model helper the indicator uses; the
+// SCSS only carries the visual surface (color family per
+// severity + degraded overlay). Sits above the filter bar so the
+// most actionable state is closest to the action surface.
+.defer-page-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-color, #e0e0e0);
+  font-size: 14px;
+
+  .defer-page-banner-icon {
+    flex: 0 0 auto;
+    color: #f59e0b;
+  }
+
+  .defer-page-banner-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .defer-page-banner-title {
+    font-weight: 600;
+    color: #fbbf24;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .defer-page-banner-degraded-tag {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(244, 63, 94, 0.22);
+    color: #fda4af;
+  }
+
+  .defer-page-banner-body {
+    font-size: 13px;
+    color: #fef3c7;
+    line-height: 1.4;
+  }
+
+  .defer-page-banner-degraded-note {
+    font-size: 12px;
+    color: #fda4af;
+    font-weight: 500;
+    margin-top: 2px;
+  }
+
+  .defer-page-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+
+    button mat-icon {
+      margin-right: 6px;
+    }
+  }
+}
+
+// Severity variants — amber (paused / stalled), info (all live),
+// red (anomaly). Each variant is mutually exclusive (the model
+// helper returns ONE severity per payload).
+.defer-page-banner.defer-page-banner-amber {
+  background: rgba(245, 158, 11, 0.08);
+  border-bottom-color: rgba(245, 158, 11, 0.3);
+}
+
+.defer-page-banner.defer-page-banner-info {
+  background: rgba(56, 189, 248, 0.06);
+  border-bottom-color: rgba(56, 189, 248, 0.3);
+
+  .defer-page-banner-icon {
+    color: #38bdf8;
+  }
+
+  .defer-page-banner-title {
+    color: #7dd3fc;
+  }
+
+  .defer-page-banner-body {
+    color: #cbd5e1;
+  }
+}
+
+.defer-page-banner.defer-page-banner-red {
+  background: rgba(244, 63, 94, 0.08);
+  border-bottom-color: rgba(244, 63, 94, 0.35);
+
+  .defer-page-banner-icon {
+    color: #f43f5e;
+  }
+
+  .defer-page-banner-title {
+    color: #fda4af;
+  }
+
+  .defer-page-banner-body {
+    color: #fecdd3;
+  }
+}
+
+// Degraded overlay — the last fetch failed; the payload is
+// retained. The degraded-tag + the degraded-note copy both
+// surface; the severity color stays so the user can still read
+// the alert family.
+.defer-page-banner.defer-page-banner-degraded {
+  border-bottom-style: dashed;
+}
+
 // Phase 2 — render-guard truncation notice. Surfaces when the
 // all-work projection is at/above MAX_RENDER_ROWS = 1000. The
 // notice names the hidden count and offers a "switch to Queues

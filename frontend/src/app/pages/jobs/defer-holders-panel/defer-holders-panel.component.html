@@ -1,0 +1,86 @@
+<!--
+  P4 — Defer-blocked holders panel (page-scoped). Renders under the
+  page banner, surfaces the ordered holder list, and emits
+  stage-1 events for the destructive actions. The PARENT owns the
+  two-stage confirm dialog (the click here is stage 1; the parent's
+  ConfirmDialog is stage 2 — see JobsComponent.onHolderForceComplete
+  / onHolderResendForeground).
+
+  Visibility rule (mirrored from the component's ``isOpen`` getter):
+    * ``status`` is non-null AND
+    * the banner payload carries holders (anomaly = banner-only).
+-->
+@if (isOpen()) {
+  <section
+    class="defer-holders-panel"
+    role="region"
+    aria-label="Defer-blocked holders">
+    <header class="defer-holders-header">
+      <mat-icon class="defer-holders-header-icon" aria-hidden="true">groups</mat-icon>
+      <span class="defer-holders-header-text">
+        Defer-blocked holders ({{ orderedHolders().length }})
+      </span>
+      @if (degraded()) {
+        <span
+          class="defer-holders-degraded-note"
+          aria-live="polite">
+          Last check failed — showing retained state.
+        </span>
+      }
+    </header>
+
+    <ul class="defer-holders-list" role="list">
+      @for (holder of orderedHolders(); track holder.instance_id) {
+        <li class="defer-holders-row" role="listitem">
+          <div class="defer-holder-meta">
+            <span class="defer-holder-instance" [title]="holder.instance_id">
+              {{ holder.instance_id }}
+            </span>
+            <span class="defer-holder-agent" [title]="holder.agent">
+              {{ holder.agent }}
+            </span>
+            <span class="defer-holder-kind" [attr.data-kind]="holder.kind">
+              {{ holder.kind }}
+            </span>
+            <span class="defer-holder-since" [title]="holder.since ?? ''">
+              since {{ formatSince(holder.since) }}
+            </span>
+          </div>
+          @if (resumeHint(holder); as hint) {
+            <div class="defer-holder-hint">{{ hint }}</div>
+          }
+          <div class="defer-holder-actions">
+            <button
+              type="button"
+              mat-stroked-button
+              color="warn"
+              class="defer-holder-force-complete-btn"
+              [disabled]="!isForceCompleteEnabled(holder) || actionInFlight"
+              [attr.aria-label]="
+                'Force-complete holder ' + holder.instance_id + ' (' + holder.kind + ')'
+              "
+              [attr.data-instance-id]="holder.instance_id"
+              (click)="forceComplete.emit(holder)">
+              <mat-icon>check_circle</mat-icon>
+              Force complete
+            </button>
+            <button
+              type="button"
+              mat-stroked-button
+              color="primary"
+              class="defer-holder-resend-btn"
+              [disabled]="!isResendEnabled(holder) || actionInFlight"
+              [attr.aria-label]="
+                'Resend foreground for holder ' + holder.instance_id + ' (' + holder.kind + ')'
+              "
+              [attr.data-instance-id]="holder.instance_id"
+              (click)="resendForeground.emit(holder)">
+              <mat-icon>forward_to_inbox</mat-icon>
+              Resend foreground
+            </button>
+          </div>
+        </li>
+      }
+    </ul>
+  </section>
+}
