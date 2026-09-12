@@ -48,6 +48,12 @@ _inflight_reuse: set[str] = set()
 # and invisible to the agent-tool revive budget.
 _reuse_revive_attempts: dict[str, int] = {}
 
+# Busy-reject message — hoisted so the two return sites stay in lock-step.
+# Tests pin this string verbatim (``tests/test_chart_tools.py:_BUSY_STRING``);
+# any copy-edit must update both. The ``_full_doc_`` docstring mention
+# (~:558) is left literal as written.
+_BUSY_MSG = "Error: Charter busy; pass fresh=True for parallel charts."
+
 CATEGORY_NAME = "Chart"
 CATEGORY_DOC = """\
 Chart generation tools for producing validated Mermaid diagrams.
@@ -58,7 +64,7 @@ er, state, and gantt types.
 """
 
 
-def _find_reusable_charter(manager, caller_id: str) -> Instance | None:
+def _find_reusable_charter(manager: "InstanceManager", caller_id: str) -> Instance | None:
     """Find the caller's most recent charter child spawned as a tool.
 
     Pure query-discovery (adjudicated P2 — the sole tracking store): the
@@ -140,7 +146,7 @@ def _find_reusable_charter(manager, caller_id: str) -> Instance | None:
 
 
 async def _reuse_charter(
-    manager,
+    manager: "InstanceManager",
     charter_id: str,
     message: str,
     caller_id: str,
@@ -201,7 +207,7 @@ async def _reuse_charter(
             prior_status,
         )
         return (
-            "Error: Charter busy; pass fresh=True for parallel charts.",
+            _BUSY_MSG,
             charter_id,
         )
     if prior_status == InstanceStatus.PAUSED.value:
@@ -238,7 +244,7 @@ async def _reuse_charter(
             prior_status or "none",
         )
         return (
-            "Error: Charter busy; pass fresh=True for parallel charts.",
+            _BUSY_MSG,
             charter_id,
         )
 
@@ -540,6 +546,10 @@ Args:
         "flowchart".
     project_id: Optional project ID. Auto-detected from current instance
         context if not provided.
+    fresh: Skip discovery and ALWAYS spawn a new charter instance.
+        Defaults to False — successive calls refine the caller's most
+        recent charter child (reuse is the default). Pass True for a
+        parallel/independent chart or to start over.
 
 Returns:
     Charter agent's response containing a single ```` ```mermaid ```` fenced

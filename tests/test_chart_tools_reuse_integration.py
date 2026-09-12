@@ -1530,30 +1530,11 @@ class TestT6FacadeForwarding:
         # surface those lines, and we assert NONE of the kwargs listed
         # in the chart_tools.py hunks are NEW (i.e., added in the diff
         # but absent from the prior signature).
-        chart_tools_prior = subprocess.run(
-            [
-                "git",
-                "show",
-                f"{self.PHASE1_COMMIT}^:daemon/tools/chart_tools.py",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout if "daemon/tools/chart_tools.py" in subprocess.run(
-            ["git", "show", "--stat", self.PHASE1_COMMIT],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout else ""
-
-        # If chart_tools.py did not exist before this commit, the prior
-        # content is empty — Phase 1 CREATED the file. In that case the
-        # entire signature is "added", but the manager.enqueue_message
-        # call uses ONLY pre-existing kwargs from the manager facade
-        # (verified below via the chart_tools.py hunks grep).
-        # We therefore check: was manager.enqueue_message signature
-        # touched? NO — the file diff list does not include
-        # daemon/manager.py (it shows chart_tools.py only).
+        #
+        # Facade-forwarding holds: the assertion below proves
+        # manager.enqueue_message's signature was untouched in Phase 1
+        # (``daemon/manager.py`` is absent from the diff stat), so the
+        # reuse path passes ONLY pre-existing kwargs through the facade.
         assert "daemon/manager.py" not in stat_text, (
             "Phase 1 diff MUST NOT touch daemon/manager.py — facade-forwarding "
             "discipline holds only if the manager facade is unchanged"
