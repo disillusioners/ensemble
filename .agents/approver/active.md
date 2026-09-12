@@ -1,8 +1,9 @@
 # Approver Active State
 
-Plan: generate_chart Charter Reuse (Iterative Refinement)
-Slug: charter-reuse
-Iteration: 001
+Plan: WC wake/resilience fix program (branch feature/fix-wc-wake-resilience @ f4091734, base latest @ 8a30f75b, 29 commits)
+Slug: wc-wake-resilience
 Status: APPROVED
-Started: 2026-09-12T03:15:30Z
-Last Verdict: APPROVED (iteration 001, 2026-09-12 — 0 blocking, 19 notes across 2 plan-approval workers; see charter-reuse-tracking.md)
+Iteration: 001 (final)
+Started: 2026-09-11T21:00:50Z
+Last Verdict: APPROVED (iteration 001, 2026-09-11 — 2 workers, 0 blocking findings; see wc-wake-resilience-tracking.md)
+Note: previous active plan (leader-completion-attestation) closed ESCALATED 2026-09-05 — historical, tracking file preserved.
