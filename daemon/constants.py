@@ -377,6 +377,8 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 #                                          documented as non-user
 #                                          origin in
 #                                          ``daemon/tools/upgrade_journal.py:1070``).
+#   * ``"internal_chart_reuse:"``         — generate_chart charter-reuse
+#                                          enqueue (``daemon/tools/chart_tools.py``).
 #   * ``"cascade_resume"``                — answer-gate cascade resume
 #                                          (``daemon/manager.py:9285``,
 #                                          ``daemon/services/watchover_service.py:676,722``).
