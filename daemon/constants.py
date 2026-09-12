@@ -678,3 +678,17 @@ ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED: str = (
 # lands with fix(D1). Until then this name is bound to nothing: no
 # config field, no resolver, no read site outside this registry block.
 ENSEMBLE_AMBIENT_KV_FRESH: str = "ENSEMBLE_AMBIENT_KV_FRESH"
+
+# ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX — BOUND at fix-vscode-image-preview
+# (Step 1 of the two-step plan: make webview resources — image
+# preview — load through the daemon's /vscode proxy). Shape A binding
+# (config.py resolver + resolved-once cache behind
+# ``_resolve_vscode_webview_csp_fix``, mirroring the
+# ``ENSEMBLE_PROACTIVE_COMPACTION`` / ``ENSEMBLE_KV_AMBIENT_*`` family).
+# Default ON; ``=0`` + restart restores the exact pre-fix blocking
+# behavior (the meta-CSP stays strict, virtual-host assets are blocked
+# at the browser level — useful as an incident-revert path).
+# The literal must not appear anywhere else in ``daemon/`` until this
+# binding lands — B.S.8 registry discipline, same as the KV-ambient
+# names above.
+ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX: str = "ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX"

@@ -1,0 +1,10 @@
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] The web worker extension host is started in a same-origin iframe!
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[error] Connecting to 'https://open-vsx.org/vscode/gallery/extensionquery' violates the following Content Security Policy directive: "connect-src 'self' ws: wss:". The action has been blocked.
+[error] Fetch API cannot load https://open-vsx.org/vscode/gallery/extensionquery. Refused to connect because it violates the document's Content Security Policy.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[error] Loading the stylesheet 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css' violates the following Content Security Policy directive: "style-src 'self' 'unsafe-inline'". Note that 'style-src-elem' was not explicitly set, so 'style-src' is used as a fallback. The action has been blocked.
+[error] Loading the script 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js' violates the following Content Security Policy directive: "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.

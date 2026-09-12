@@ -1,0 +1,19 @@
+[log] %c INFO color: #33f Resolving connection token (localhost:8079)...
+[log] %c INFO color: #33f Resolved connection token (localhost:8079) after 2 ms
+[log] %c INFO color: #33f Creating a socket (renderer-Management-fa923562-9c9c-48d6-9e06-bc4c73434250)...
+[log] %c INFO color: #33f Creating a socket (renderer-Management-fa923562-9c9c-48d6-9e06-bc4c73434250) was successful after 46 ms.
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[log] %c INFO color: #33f [reconnection-grace-time] Client received grace time from server: 10800000ms (10800s)
+[warning] The web worker extension host is started in a same-origin iframe!
+[log] %c INFO color: #33f Updating additional builtin extensions cache
+[log] %c INFO color: #33f Creating a socket (renderer-ExtensionHost-a71b6079-9cf1-4721-a4e4-1c383ce89351)...
+[log] %c INFO color: #33f [Service Worker] registered
+[log] %c INFO color: #33f Creating a socket (renderer-ExtensionHost-a71b6079-9cf1-4721-a4e4-1c383ce89351) was successful after 45 ms.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[log] Found unexpected service worker controller. Found: http://localhost:8079/vscode/_static/out/browser/serviceWorker.js. Expected: service-worker.js?v=4&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&remoteAuthority=localhost:8079. Waiting for controllerchange.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.

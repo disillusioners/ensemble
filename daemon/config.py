@@ -30,6 +30,7 @@ from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
+    ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
     REPORT_REPAIR_EXCLUDED_AGENTS,
@@ -1987,6 +1988,23 @@ class VSCodeConfig(BaseSettings):
     user_data_dir: str | None = Field(default=None)  # null = data/vscode-user-data
     extensions: list[str] = Field(default_factory=list)  # extensions to pre-install
 
+    # fix-vscode-image-preview Step 1 — meta-CSP rewrite gate. When
+    # ON (default), the proxy rewrites the strict meta-CSP inside the
+    # webview HTML response so extension resources on the
+    # ``vscode-remote+<port>.vscode-resource.vscode-cdn.net`` virtual
+    # host (e.g. media-preview imagePreview.{css,js}, image bytes) are
+    # permitted to load through the daemon's /vscode proxy. The
+    # kill-switch ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` overrides this
+    # default at runtime; the env var is resolved EXPLICITLY in
+    # ``load_config`` (init-kwarg-beats-env inversion trap class —
+    # mirrors ``_resolve_kv_ambient_from_sources``). Restart-to-flip.
+    # ``=0`` + restart restores the exact pre-fix blocking behavior
+    # (incident-revert path). See ``daemon/routers/vscode_proxy.py``
+    # for the rewrite seam and the resolver in this module
+    # (``_resolve_vscode_webview_csp_fix_from_sources``) for the
+    # precedence + empty-string contract.
+    webview_csp_fix: bool = Field(default=True)
+
 
 class BlueprintConfig(EmbeddingConfig):
     """Configuration for the Project Blueprint matching system.
@@ -2546,6 +2564,175 @@ def _reset_kv_ambient_for_tests() -> None:
     _KV_AMBIENT_SYSTEM_DEFAULT_ENABLED = None
 
 
+# ── VSCode webview-CSP-rewrite kill-switch (Shape A) ────────────────────────
+#
+# Resolved-once cache (restart-to-flip; mirrors the
+# ``ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` / ``ENSEMBLE_WC_WAKE_ENQUEUE``
+# Shape-A precedent). ``load_config`` resolves the effective bool via
+# :func:`_resolve_vscode_webview_csp_fix_from_sources`, installs it here
+# via :func:`_install_vscode_webview_csp_fix`, and emits the one boot
+# INFO line naming the resolved state. The runtime gate
+# (``daemon/routers/vscode_proxy.py::_buffer_and_maybe_rewrite_webview``,
+# which reads :func:`_resolve_vscode_webview_csp_fix`) — flipping the
+# env mid-flight has no effect until restart.
+# flipping the env mid-flight has no effect until restart.
+#
+# Cache discipline: ``None`` = cold (no ``load_config`` yet in this
+# process — tests / programmatic boots). The cold path resolves ONCE
+# from the env var directly (same vocabulary as
+# :func:`_parse_kv_ambient_env_value`) so a direct accessor call without
+# a boot neither crashes nor logs. The boot INFO line is owned by
+# ``load_config``, NEVER by the per-call accessor (S13 reviewer gate).
+_VSCODE_WEBVIEW_CSP_FIX: bool | None = None
+
+
+def _resolve_vscode_webview_csp_fix_from_sources(
+    yaml_value: Any,
+    *,
+    ens_value: str | None,
+) -> bool:
+    """Pure resolver for the ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` kill-switch.
+
+    Mirrors :func:`_resolve_kv_ambient_from_sources` (Shape A; init-kwarg
+    beats env inversion is the same trap class — pydantic-settings treats
+    a passed-in init kwarg as taking priority over env vars, so a YAML
+    ``vscode.webview_csp_fix: true`` would silently defeat an operator
+    ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=0`` kill-switch and weaken the
+    incident-revert path). ``load_config`` reads the env once, calls this
+    function, and passes the resolved ``bool`` as an init kwarg so
+    pydantic-settings never re-reads the env itself.
+
+    Precedence (documented contract for the kill-switch):
+
+      1. ``ens_value`` (``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX``) — when SET
+         and NON-EMPTY (empty/whitespace treated as UNSET per
+         :func:`_clean_env_value`), wins outright.
+      2. ``yaml_value`` (``vscode.webview_csp_fix``) — when env is
+         unset/empty, used as-is if it's already a ``bool``; parsed via
+         :func:`_parse_kv_ambient_env_value` if it's a string.
+      3. Default ``True`` (documented ON) — only reached when env is
+         unset/empty AND yaml is absent or explicit ``None``.
+
+    Empty-string normalization (W-1 precedent): a bare ``KEY=`` line in
+    ``.env`` falls through to the yaml value (or the documented ON
+    default); an unrecognized NON-empty value raises here so the typo is
+    caught at startup with a flag-naming error.
+    """
+    ens_clean = _clean_env_value(ens_value)
+    if ens_clean is not None:
+        return _parse_kv_ambient_env_value(ens_clean)
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return True  # documented default ON
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            # Defensive — yaml shipped an empty string. Same as unset.
+            return True
+        return _parse_kv_ambient_env_value(yaml_value)
+    # Anything else (int, etc.) — coerce via truthiness, mirroring
+    # :func:`_resolve_kv_ambient_from_sources`.
+    return bool(yaml_value)
+
+
+def _resolve_vscode_binary_path(
+    yaml_value: str | None,
+    *,
+    env_value: str | None,
+) -> str | None:
+    """Pure resolver for ``VSCODE_BINARY_PATH`` (string Shape A).
+
+    Mirrors :func:`_resolve_compaction_model` /
+    :func:`_resolve_vscode_webview_csp_fix_from_sources`: pydantic-settings
+    gives a passed-in init kwarg priority over env vars, so the YAML
+    ``vscode.binary_path`` passthrough in ``load_config`` silently defeated
+    an operator ``VSCODE_BINARY_PATH`` (live-proven: a yaml
+    ``binary_path: null`` init kwarg dead the env knob, and the manager
+    fell back to ``shutil.which("code-server")`` — the deprecated brew
+    binary — even with the env pointing at a standalone code-server).
+
+    Precedence (documented contract):
+
+      1. ``env_value`` (``VSCODE_BINARY_PATH``) — when SET and NON-EMPTY
+         (empty/whitespace treated as UNSET per
+         :func:`_clean_env_value`), wins outright — ALWAYS, including
+         over a NON-null yaml value.
+      2. ``yaml_value`` (``vscode.binary_path``) — when env is
+         unset/empty, used as-is if non-blank.
+      3. ``None`` — env unset AND yaml null/absent/blank: the manager
+         (``vscode_server_manager._resolve_binary``) then PATH-looks-up
+         via ``shutil.which`` (pre-existing fallback, unchanged).
+
+    Pure function (no ``os.environ`` access): ``load_config`` reads the
+    env once and passes the resolved string-or-``None`` as the init
+    kwarg, so pydantic-settings never re-reads the env itself. String
+    resolver — deliberately NOT the bool parser
+    (:func:`_parse_kv_ambient_env_value`); only
+    :func:`_clean_env_value` empty-string normalization is shared.
+
+    The literal env name ``VSCODE_BINARY_PATH`` at the ``load_config``
+    call site MUST stay in sync with ``VSCodeConfig`` (``env_prefix=
+    "VSCODE_"`` + field ``binary_path``); the unit test pins both sides.
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        return env_clean
+    if yaml_value is None:
+        return None
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        # Defensive — yaml shipped an empty string. Same as unset.
+        return None
+    return yaml_value
+
+
+def _install_vscode_webview_csp_fix(value: bool) -> None:
+    """Install the resolved flag into the module cache (boot path).
+
+    Called by ``load_config`` — the installed value is the
+    post-validation field value, so the boot log and the runtime gate
+    can never disagree. Production callers only; tests use
+    :func:`_reset_vscode_webview_csp_fix_for_tests` to go back to cold.
+    """
+    global _VSCODE_WEBVIEW_CSP_FIX
+    _VSCODE_WEBVIEW_CSP_FIX = bool(value)
+
+
+def _resolve_vscode_webview_csp_fix() -> bool:
+    """Read the resolved webview-CSP-fix kill-switch (no-arg, cached).
+
+    This is the runtime gate's ONLY read path — the proxy imports it
+    from this module and calls it per request (cheap), so it must be
+    SILENT (the boot INFO line is owned by ``load_config``; this
+    accessor never logs).
+
+    Warm cache (``load_config`` already ran in this process): return
+    the installed value. Restart-to-flip semantics — env changes
+    mid-flight are invisible.
+
+    Cold cache (tests / programmatic boots that never call
+    ``load_config``): resolve ONCE from the env var directly — same
+    permissive vocabulary as :func:`_parse_kv_ambient_env_value` — and
+    cache the result. Unset / empty env → the documented ``True``
+    default; an unrecognized non-empty value raises.
+    """
+    global _VSCODE_WEBVIEW_CSP_FIX
+    if _VSCODE_WEBVIEW_CSP_FIX is None:
+        raw = os.environ.get(ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+        if raw is None or not raw.strip():
+            _VSCODE_WEBVIEW_CSP_FIX = True
+        else:
+            _VSCODE_WEBVIEW_CSP_FIX = _parse_kv_ambient_env_value(raw)
+    return _VSCODE_WEBVIEW_CSP_FIX
+
+
+def _reset_vscode_webview_csp_fix_for_tests() -> None:
+    """Clear the cached kill-switch state so tests can re-resolve after
+    mutating the env. Test-only — production code never invokes this
+    (mirror of ``_reset_kv_ambient_for_tests``)."""
+    global _VSCODE_WEBVIEW_CSP_FIX
+    _VSCODE_WEBVIEW_CSP_FIX = None
+
+
 def resolve_injected_notes_absorb() -> bool:
     """Resolve the ``ENSEMBLE_INJECTED_NOTES_ABSORB`` kill-switch.
 
@@ -2636,6 +2823,22 @@ def load_config(config_path: str | None = None) -> Config:
 
     # Build nested dict for Pydantic
     config_dict: Dict[str, Any] = {}
+
+    # Review-council follow-up MAJOR 2 — hoist the
+    # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env read to the top level
+    # so it applies whether or not the yaml has a ``vscode:``
+    # section. Pydantic natively binds ``VSCODE_WEBVIEW_CSP_FIX`` via
+    # ``VSCodeConfig.env_prefix="VSCODE_"`` — it does NOT bind the
+    # ``ENSEMBLE_*`` form — so a section-less custom config would
+    # silently ignore the documented kill-switch and break the
+    # incident-revert path. The hoisted value is consumed inside
+    # the ``if "vscode" in processed_config:`` guard below; we ALSO
+    # feed it through to the field default via
+    # ``VSCodeConfig.webview_csp_fix`` so section-less configs
+    # still honour the env override at pydantic-init time.
+    _resolved_vscode_webview_csp_fix_env_value: str | None = (
+        os.environ.get(ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+    )
 
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
     # precedence chain for ``llm.allowed_models``. The shipped
@@ -2818,7 +3021,70 @@ def load_config(config_path: str | None = None) -> Config:
             k: v for k, v in bp_raw.items() if v is not None
         }
     if "vscode" in processed_config:
-        config_dict["vscode"] = processed_config["vscode"]
+        # fix-vscode-image-preview Step 1 — explicit resolution for
+        # ``webview_csp_fix`` mirrors ``_resolve_proactive_enabled`` /
+        # ``_resolve_kv_ambient_from_sources`` (init-kwarg-beats-env
+        # inversion + empty-string normalization). A YAML
+        # ``vscode.webview_csp_fix: true`` would silently defeat an
+        # operator ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX=0`` kill-switch
+        # and weaken the incident-revert path. Resolving in load_config
+        # passes the effective bool as an init kwarg; pydantic-settings
+        # never re-reads the env. The resolver also normalizes a bare
+        # ``KEY=`` in .env (empty string) to the documented default.
+        # See ``_resolve_vscode_webview_csp_fix_from_sources`` for the
+        # precedence + empty-string contract.
+        #
+        # Review-council follow-up MAJOR 2 — the env read sits at the
+        # TOP LEVEL (outside this guard) so section-less configs
+        # (``vscode:`` absent from yaml) still see the
+        # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env var. Pydantic
+        # natively binds only ``VSCODE_WEBVIEW_CSP_FIX`` via
+        # ``env_prefix="VSCODE_"`` (does NOT bind the
+        # ``ENSEMBLE_*`` form), so without this hoist, a
+        # custom-config that omits the ``vscode`` section would
+        # silently ignore the documented incident-revert kill-switch.
+        vs_raw = processed_config["vscode"].copy()
+        vs_raw["webview_csp_fix"] = _resolve_vscode_webview_csp_fix_from_sources(
+            vs_raw.get("webview_csp_fix"),
+            ens_value=_resolved_vscode_webview_csp_fix_env_value,
+        )
+        # fix-vscode-image-preview Step 2 — same inversion, string flavor:
+        # the yaml ``binary_path`` passthrough (including the common
+        # ``binary_path: null``) would land as an init kwarg and beat an
+        # operator ``VSCODE_BINARY_PATH``. Resolved EXPLICITLY here so
+        # env > yaml > None (None → manager ``shutil.which`` PATH
+        # fallback, unchanged). Literal env name must stay in sync with
+        # ``VSCodeConfig`` (``env_prefix="VSCODE_"`` + field
+        # ``binary_path``) — pinned in
+        # ``tests/unit/test_vscode_binary_path_config.py``.
+        vs_raw["binary_path"] = _resolve_vscode_binary_path(
+            vs_raw.get("binary_path"),
+            env_value=os.environ.get("VSCODE_BINARY_PATH"),
+        )
+        config_dict["vscode"] = vs_raw
+    elif _resolved_vscode_webview_csp_fix_env_value is not None:
+        # Review-council follow-up MAJOR 2 — section-less configs
+        # (``vscode:`` absent from yaml) MUST still see the
+        # ``ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX`` env override. Pydantic
+        # binds only ``VSCODE_WEBVIEW_CSP_FIX`` via
+        # ``env_prefix="VSCODE_"``, so we have to seed
+        # ``config_dict["vscode"]`` ourselves with at least the
+        # resolved bool. Without this branch the kill-switch env
+        # silently no-ops on custom configs that omit the section
+        # — the documented incident-revert path breaks.
+        #
+        # No import of ``VSCodeConfig`` here — the field defaults
+        # (``allow_remote=False``, ``binary_path=None``,
+        # ``user_data_dir=None``, ``extensions=[]``) are populated
+        # by ``VSCodeConfig``'s own default-factory on the
+        # pydantic-init pass below; we only need to inject the
+        # operator-overridable ``webview_csp_fix``.
+        config_dict["vscode"] = {
+            "webview_csp_fix": _resolve_vscode_webview_csp_fix_from_sources(
+                None,
+                ens_value=_resolved_vscode_webview_csp_fix_env_value,
+            ),
+        }
 
     # Create and validate config
     config = Config(**config_dict)
@@ -2840,6 +3106,24 @@ def load_config(config_path: str | None = None) -> Config:
         "(env %s)",
         config.context_messages.kv_ambient_system_default_enabled,
         ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
+    )
+
+    # VSCode webview-CSP-rewrite kill-switch (fix-vscode-image-preview
+    # Step 1) — install the RESOLVED flag into the module cache and
+    # emit the boot INFO line HERE, at config-resolution time. Same
+    # S13 reviewer gate as the KV-ambient flag: this line MUST stay on
+    # the boot path; moving it into the per-call accessor would make a
+    # quiet-daemon boot-log grep false-fail (no traffic since restart
+    # → line never printed → operator misreads the flag as OFF).
+    # Operators verify the live state via: grep
+    # 'webview_csp_fix' data/logs/ensemble.log
+    _install_vscode_webview_csp_fix(
+        config.vscode.webview_csp_fix
+    )
+    logger.info(
+        "[VSCode] webview_csp_fix=%s (env %s)",
+        config.vscode.webview_csp_fix,
+        ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     )
 
     # Push the non-status transient-channel pattern lists into the

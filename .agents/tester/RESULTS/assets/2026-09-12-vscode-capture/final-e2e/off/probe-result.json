@@ -1,0 +1,30 @@
+{
+  "verdict": "timeout",
+  "verdict_evidence": null,
+  "depth2_probe": {
+    "url": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+    "tabs": [
+      {
+        "label": "Deepcode.png, preview",
+        "active": true
+      }
+    ],
+    "iframeCount": 2,
+    "iframes": [
+      {
+        "iframeSrc": "http://localhost:8079/vscode/stable-13ca0e47310505f4ab1ac59e891e9a3c5e5eec04/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=2605842d-287b-4a5b-b57e-5ec93d7ce84e",
+        "accessible": true,
+        "imgCount": 0,
+        "imgs": []
+      },
+      {
+        "iframeSrc": "http://localhost:8079/vscode/stable-13ca0e47310505f4ab1ac59e891e9a3c5e5eec04/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=3ce1d2a3-26bb-41d1-ba49-af3baebeda90&parentId=1&origin=d35cc2b3-9f0b-4be7-8e10-b64b6533be64&swVersion=4&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+        "accessible": true,
+        "imgCount": 0,
+        "imgs": []
+      }
+    ],
+    "treeitemCount": 34,
+    "bodyTextSnippet": "agents-ensemble\n54\nEXPLORER\nAGENTS-ENSEMBLE\n__pycache__\n.agents\n.hypothesis\n.inspiration-projects\nDeepCode\n.github\nassets\nicons\n625302d6ce6e8bd6be7c3e6969cdab4e.JPG\nDeepcode.png\nIMG_8098.jpeg\nIMG_8099.jpeg\nlogo.png\nnanobot.png\nNewUI.png\nresult_main.jpg\nresult_main02.jpg\ncli\nconfig\ndeepcode_docker\nnanobot\nnew_ui\nprompts\nschema\ntools\nui\nutils\nworkflows\n__init__.py\n.dockerignore\n.gitattributes\n.gitignore\n.pre-commit-config.yaml\nCHANGELOG.md\nOUTLINE\nTIMELINE\nDeepcode.png\n.inspiration-projects\nDeepCode\nassets\nDeepcode.png\nCHAT\nBuild with Agent\n\nAI responses may be inaccurate\n\nAuto\nLocal\nDefault Approvals\n feature/fix-vscode-image-preview*\n 0 \n 0\n 0\nLayout: U.S.\n1.46MB\n1456x816\nWhole Image\nexpanded"
+  }
+}

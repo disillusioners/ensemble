@@ -36,6 +36,7 @@ fires first.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -1147,3 +1148,1473 @@ class TestUpstreamToBrowserCrashResilience:
             websockets_module.connect = original_connect
 
         assert fake_upstream.closed is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. fix-vscode-image-preview Step 1 — meta-CSP rewrite seam
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Pins the webview-CSP rewrite behavior end-to-end through the
+# FastAPI proxy handler with a mocked upstream. The seam is the
+# minimal change that makes media-preview / image-preview extension
+# resources load through the daemon's /vscode proxy (the strict
+# meta-CSP inside the webview HTML blocks virtual-host assets; the
+# rewrite appends the wildcard virtual-host origin to script-src and
+# style-src). All other responses stay byte-faithful.
+#
+# Run only this section::
+#
+#     pytest tests/integration/test_vscode_proxy.py -v -k WebviewCspRewrite
+
+
+class TestWebviewCspRewrite:
+    """fix-vscode-image-preview Step 1 — meta-CSP rewrite seam."""
+
+    # ── fixtures ──────────────────────────────────────────────────────────
+
+    @pytest.fixture(autouse=True)
+    def _install_kill_switch(self):
+        """Pin the kill-switch cache to a known state per test.
+
+        The cache is process-global (Shape A — restart-to-flip).
+        Each test installs its own value and resets at teardown so
+        a mid-suite mutation cannot leak between tests.
+        """
+        from daemon import config as config_module
+
+        self._reset_fn = config_module._reset_vscode_webview_csp_fix_for_tests
+        self._install_fn = config_module._install_vscode_webview_csp_fix
+        self._reset_fn()
+        yield
+        self._reset_fn()
+
+    @pytest.fixture(autouse=True)
+    def _restore_async_client_patch(self):
+        """Restore ``httpx.AsyncClient`` after each test.
+
+        Tests in this class monkey-patch ``daemon.routers.vscode_proxy.
+        httpx.AsyncClient`` to inject a fake upstream. We restore the
+        original symbol at teardown so the patch cannot leak to other
+        test classes in the same run.
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        original = proxy_module.httpx.AsyncClient
+        yield
+        proxy_module.httpx.AsyncClient = original
+
+    @staticmethod
+    def _build_webview_html(body_csp: str) -> bytes:
+        """Build a minimal webview HTML doc with a multi-line meta-CSP.
+
+        The structure mirrors the real code-server 4.112.0 / 4.137.0
+        webview HTML: <html><head>...meta http-equiv=
+        "Content-Security-Policy" content="...">...</head><body></body>.
+        """
+        return (
+            b'<!DOCTYPE html>\n<html lang="en" style="width:100%;height:100%">\n'
+            b'<head>\n'
+            b'\t<meta charset="UTF-8">\n'
+            b'\n'
+            b'\t<meta http-equiv="Content-Security-Policy"\n'
+            b'\t\tcontent="' + body_csp.encode("utf-8") + b'">\n'
+            b'\n'
+            b'\t<!-- Disable pinch zooming -->\n'
+            b'\t<meta name="viewport" '
+            b'content="width=device-width,initial-scale=1.0">\n'
+            b'</head>\n'
+            b'<body style="margin:0;overflow:hidden"></body>\n'
+            b'</html>\n'
+        )
+
+    # 4.112.0 webview meta-CSP — exactly as observed in the network log
+    # (sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=).
+    WEBVIEW_CSP_4_112 = (
+        "default-src 'none'; "
+        "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+        "'self'; "
+        "frame-src 'self'; "
+        "style-src 'unsafe-inline';"
+    )
+
+    # 4.137.0 webview meta-CSP — same shape, different sha256 hash
+    # (sha256-24QqA5dJq6y3qX8p9sL7h3kL5tN6mN8kP7qY5sX2cT0=). The
+    # rewrite is hash-tolerant by design — this test pins that the
+    # hash difference does NOT cause a silent no-op.
+    WEBVIEW_CSP_4_137 = (
+        "default-src 'none'; "
+        "script-src 'sha256-24QqA5dJq6y3qX8p9sL7h3kL5tN6mN8kP7qY5sX2cT0=' "
+        "'self'; "
+        "frame-src 'self'; "
+        "style-src 'unsafe-inline';"
+    )
+
+    VIRTUAL_HOST = (
+        "https://*.vscode-resource.vscode-cdn.net"
+    )
+
+    # ── direct rewrite-seam coverage (no HTTP) ─────────────────────────────
+
+    def test_rewrite_webview_meta_csp_4_112(self):
+        """4.112.0 webview HTML — meta-CSP is augmented.
+
+        The real meta-CSP captured in the 2026-09-12 evidence has NO
+        ``img-src`` / NO ``media-src``. The helper inserts them on
+        rewrite (review-council follow-up CRITICAL 1).
+        """
+        from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
+
+        body = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        out, rewrote = _rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert self.VIRTUAL_HOST.encode() in out
+        # The hash must survive unchanged — only sources are appended.
+        assert b"sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=" in out
+        # Insertion-when-absent: img-src and media-src MUST be inserted
+        # because the original meta-CSP omits them.
+        assert b"img-src" in out
+        assert b"media-src" in out
+        assert b"data: blob:" in out, "img-src MUST include data:/blob: bypass"
+
+    def test_rewrite_webview_meta_csp_4_137(self):
+        """4.137.0 webview HTML — meta-CSP is augmented, hash preserved."""
+        from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
+
+        body = self._build_webview_html(self.WEBVIEW_CSP_4_137)
+        out, rewrote = _rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert self.VIRTUAL_HOST.encode() in out
+        assert b"sha256-24QqA5dJq6y3qX8p9sL7h3kL5tN6mN8kP7qY5sX2cT0=" in out
+        assert b"img-src" in out
+        assert b"media-src" in out
+
+    def test_rewrite_is_idempotent(self):
+        """Running the rewrite twice yields the same bytes."""
+        from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
+
+        body = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        out1, _ = _rewrite_webview_meta_csp(body)
+        out2, rewrote2 = _rewrite_webview_meta_csp(out1)
+        assert rewrote2 is False
+        assert out1 == out2
+
+    def test_rewrite_skips_doc_without_meta_csp(self):
+        """A non-webview doc with no meta-CSP tag is returned unchanged."""
+        from daemon.routers.vscode_proxy import _rewrite_webview_meta_csp
+
+        plain = b"<html><body>no CSP here</body></html>"
+        out, rewrote = _rewrite_webview_meta_csp(plain)
+        assert rewrote is False
+        assert out == plain
+
+    # ── kill-switch gate (default-ON, OFF = pass-through) ──────────────────
+
+    def test_kill_switch_on_rewrites_webview_html(self):
+        """Kill-switch ON (default) — webview HTML is rewritten."""
+        self._install_fn(True)
+
+        # Build a mock upstream httpx.Response that yields a brotli-encoded
+        # body. The proxy buffers via aiter_raw + decodes via
+        # _decode_response_body, so we hand it brotli bytes here to
+        # exercise the real decode path.
+        import brotli  # local import — only present in test env
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x&extensionId=vscode.media-preview",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        assert resp.headers.get("content-encoding") is None, (
+            "rewritten doc must NOT carry the original Content-Encoding"
+        )
+        assert "no-store" in resp.headers.get("cache-control", "")
+        assert resp.headers.get("etag") is None
+        assert int(resp.headers["content-length"]) == len(resp.content)
+        assert self.VIRTUAL_HOST.encode() in resp.content
+        assert (
+            b"sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM="
+            in resp.content
+        )
+
+    def test_kill_switch_off_returns_response_byte_untouched(self):
+        """Kill-switch OFF — webview HTML passes through untouched."""
+        self._install_fn(False)
+
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        import brotli
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x&extensionId=vscode.media-preview"
+            )
+        assert resp.status_code == 200
+        # Pass-through: original brotli-encoded body is forwarded with
+        # the proxy's CSP header replacement applied. TestClient
+        # auto-decodes the content-encoding for us, so ``resp.content``
+        # equals the decoded HTML — which is exactly the upstream's
+        # pre-encoding bytes. No virtual-host origin appended.
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+        assert resp.content == raw, (
+            "kill-switch OFF must leave the response byte-faithful"
+        )
+
+    def test_non_webview_html_path_not_rewritten(self):
+        """A different HTML path (workbench, manifest) is NOT rewritten.
+
+        The brief: match ONLY the webview document (path + content-type);
+        all other responses stay byte-identical. We pin that the
+        workbench HTML (different path) is untouched even when the
+        kill-switch is ON.
+        """
+        self._install_fn(True)
+
+        # Different path: workbench shell, not webview.
+        import brotli
+        workbench_html = (
+            b'<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" '
+            b'content="default-src \'none\'; script-src \'self\';">'
+            b'</head><body></body></html>'
+        )
+        br = brotli.compress(workbench_html)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path="/vscode/stable-abc/index.html",
+        )
+
+        with TestClient(app) as client:
+            resp = client.get("/vscode/stable-abc/index.html")
+        assert resp.status_code == 200
+        # Pass-through — the proxy does not buffer+rewrite for this path.
+        # TestClient auto-decodes the brotli body, so resp.content is
+        # the decoded HTML; the proxy never added the virtual-host origin.
+        assert resp.content == workbench_html
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    def test_non_html_response_not_rewritten(self):
+        """text/css / application/javascript responses stay untouched."""
+        self._install_fn(True)
+
+        import brotli
+        css = b"body { color: red; }"
+        br = brotli.compress(css)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/css",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/styles.css"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/styles.css"
+            )
+        assert resp.status_code == 200
+        # Pass-through — non-html Content-Type bypasses the rewrite seam.
+        assert resp.content == css
+
+    def test_gzip_encoded_webview_is_rewritten(self):
+        """gzip-encoded webview HTML is decoded + rewritten."""
+        self._install_fn(True)
+        import gzip
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        gz = gzip.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=gz,
+            content_type="text/html",
+            content_encoding="gzip",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        assert resp.headers.get("content-encoding") is None
+        assert self.VIRTUAL_HOST.encode() in resp.content
+
+    def test_undecodable_encoding_falls_back_to_streaming(self):
+        """Unknown Content-Encoding → streaming pass-through, no rewrite."""
+        self._install_fn(True)
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=raw,
+            content_type="text/html",
+            content_encoding="bizarre-unknown-encoding",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x"
+            )
+        # Streaming path returns the body with content-encoding still
+        # set; the rewrite was skipped because the encoder is unknown.
+        # The body bytes equal the upstream raw bytes.
+        assert resp.status_code == 200
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    # ── Follow-up edge cases (review follow-up) ────────────────────────────
+
+    def test_deflate_encoded_webview_is_rewritten(self):
+        """deflate-encoded webview HTML is decoded + rewritten.
+
+        Mirrors ``test_gzip_encoded_webview_is_rewritten`` for the
+        zlib (``deflate``) branch in ``_decode_response_body``
+        (vscode_proxy.py:164-167). Uses stdlib ``zlib`` so no extra
+        dep is required.
+        """
+        self._install_fn(True)
+        import zlib
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        df = zlib.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=df,
+            content_type="text/html",
+            content_encoding="deflate",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Rewritten path strips Content-Encoding so the new bytes match
+        # the recomputed Content-Length.
+        assert resp.headers.get("content-encoding") is None
+        assert self.VIRTUAL_HOST.encode() in resp.content
+        assert int(resp.headers["content-length"]) == len(resp.content)
+
+    def test_already_augmented_webview_passes_through_unchanged(
+        self,
+    ):
+        """An ALREADY-augmented webview doc (script-src/style-src AND
+        img-src/media-src all widened) hits the FULL HTTP path and
+        is re-served with the ORIGINAL Content-Encoding preserved
+        (byte-faithful to the wire).
+
+        ``test_rewrite_is_idempotent`` only exercises the direct
+        helper ``_rewrite_webview_meta_csp``; this test drives the
+        end-to-end FastAPI handler so we pin the byte-faithful
+        re-serve contract for the consume-but-no-rewrite branch
+        (the path that would previously have fallen through to
+        streaming and 500'd with ``StreamConsumed`` on real httpx).
+
+        Post-review-council: the "already augmented" fixture must
+        include ``img-src`` and ``media-src`` too — those are the
+        insertion targets added by the CRITICAL 1 follow-up. A
+        doc that has script-src/style-src widened but no
+        img-src/media-src is NOT augmented for the image-preview
+        failure mode; the helper would still insert.
+        """
+        self._install_fn(True)
+        import brotli
+        # Build a FULLY augmented doc: script-src + style-src widened
+        # AND img-src + media-src present. Then brotli-encode.
+        already_augmented_csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            f"'self' {self.VIRTUAL_HOST}; "
+            "frame-src 'self'; "
+            f"style-src 'unsafe-inline' {self.VIRTUAL_HOST}; "
+            "img-src 'self' data: blob: https://*.vscode-resource.vscode-cdn.net; "
+            "media-src 'self' https://*.vscode-resource.vscode-cdn.net"
+        )
+        raw = self._build_webview_html(already_augmented_csp)
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Original Content-Encoding MUST be preserved on the
+        # byte-faithful re-serve path — the wire bytes are the
+        # original brotli-compressed bytes, so the browser's
+        # decoder stays in sync with the body.
+        assert resp.headers.get("content-encoding") == "br"
+        # TestClient decodes the br body for us; the decoded bytes
+        # equal the upstream's pre-encoding bytes (i.e. the original
+        # HTML, already augmented — no DOUBLE augmentation).
+        assert resp.content == raw
+        # The Content-Length recompute must agree with the actual
+        # body length (the BROTLI body, since the proxy streams the
+        # original raw bytes back to the browser without re-encoding).
+        assert int(resp.headers["content-length"]) == len(br)
+        # Idempotency pin: the wildcard appears ONCE per directive,
+        # not twice. ``raw.count(VIRTUAL_HOST) == 4`` (one for each
+        # of script-src / style-src / img-src / media-src).
+        assert raw.count(self.VIRTUAL_HOST.encode()) == 4
+
+    def test_webview_html_with_charset_hits_rewrite(self):
+        """Content-Type ``text/html; charset=UTF-8`` (the typical real
+        upstream value) still triggers the rewrite.
+
+        The pre-consume content-type guard uses
+        ``startswith("text/html")`` so a ``charset=`` parameter
+        doesn't fool the gate. Pins the typical real upstream
+        Content-Type rather than the stripped ``text/html`` form.
+        """
+        self._install_fn(True)
+        import brotli
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html; charset=UTF-8",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Rewritten — strip + new Content-Length + virtual-host added.
+        assert resp.headers.get("content-encoding") is None
+        assert self.VIRTUAL_HOST.encode() in resp.content
+        assert int(resp.headers["content-length"]) == len(resp.content)
+
+    def test_malformed_gzip_body_returns_graceful_200(self):
+        """A truncated / malformed gzip body is a DOWNSTREAM BUG, not
+        a 500 — the proxy catches the decoder's exception and falls
+        back to byte-faithful re-serve of the original raw bytes.
+
+        Without the decode-error catch, ``gzip.decompress`` would
+        propagate ``EOFError`` (gzip raises ``EOFError`` — a direct
+        subclass of ``Exception``) out of the handler and FastAPI
+        would emit a 500. Pin the graceful fallback.
+
+        Note on TestClient auto-decoding: TestClient (httpx)
+        auto-decodes ``content-encoding: gzip`` on the response
+        and silently returns ``b""`` for invalid input, so we pin
+        the byte-faithful contract via the proxy's response
+        headers (which TestClient does NOT modify) rather than via
+        ``resp.content``. The headers carry the proxy's contract:
+        200 status (no 500), original ``content-encoding`` preserved,
+        ``content-length`` matching the buffered raw body.
+        """
+        self._install_fn(True)
+        # Truncated gzip header (only the gzip magic + first byte).
+        # ``gzip.decompress`` raises ``EOFError: Compressed file ended
+        # before the end-of-stream marker was reached`` on this input.
+        malformed = b"\x1f\x8b"
+        # Sanity check: confirm the input is actually malformed
+        # (raises) so a refactor that silently swallows the error
+        # doesn't sneak past the test.
+        import gzip
+        with pytest.raises(EOFError):
+            gzip.decompress(malformed)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=malformed,
+            content_type="text/html",
+            content_encoding="gzip",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        # No 500: the decoder exception is caught and the proxy
+        # re-serves the original raw bytes.
+        assert resp.status_code == 200, (
+            "malformed gzip body MUST NOT 500 — graceful 200 fallback "
+            "(byte-faithful re-serve) is the contract"
+        )
+        # Original Content-Encoding preserved on the re-serve path
+        # — the proxy did NOT strip / re-encode.
+        assert resp.headers.get("content-encoding") == "gzip"
+        # Content-Length matches the original raw body length
+        # (proxy recomputed from the buffered bytes; this is the
+        # canonical byte-faithful pin — the wire bytes are the
+        # proxy's response bytes).
+        assert int(resp.headers["content-length"]) == len(malformed)
+        # No virtual-host origin added — we did not get far enough
+        # to rewrite the meta-CSP.
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    def test_real_httpx_undecodable_encoding_streams_without_consumed(
+        self,
+    ):
+        """Pin the StreamConsumed fix end-to-end with a REAL httpx.
+
+        The existing tests use a fake upstream whose ``aiter_raw``
+        returns a fresh generator on each call — that masks the
+        real-httpx ``StreamConsumed`` bug. We construct a REAL
+        ``httpx.Response`` with a generator-backed ``AsyncByteStream``
+        body (the same shape ``httpx.AsyncClient.send(stream=True)``
+        returns) and verify the undecodable-encoding path does NOT
+        500 — i.e. the proxy does NOT consume the body before
+        deciding to fall through to streaming.
+
+        Why this matters: real httpx raises
+        ``httpx.StreamConsumed`` on the second call to
+        ``Response.aiter_raw`` (sets ``self.is_stream_consumed = True``
+        on first call — verified by inspection of
+        ``httpx/_models.py:Response.aiter_raw``). The previous
+        implementation consumed first and decided second, which
+        would 500 on real httpx. This test pins the fix.
+        """
+        import httpx as _httpx
+
+        self._install_fn(True)
+
+        # Build a SEPARATE real httpx.Response for the sanity
+        # check below (StreamConsumed-on-second-iteration). The
+        # proxy receives a DIFFERENT upstream — sharing would
+        # consume the body during the sanity check and 500 the
+        # proxy on its first aiter_raw.
+        class _Stream(_httpx.AsyncByteStream):
+            def __init__(self, chunks):
+                self._chunks = chunks
+
+            async def __aiter__(self):
+                for chunk in self._chunks:
+                    yield chunk
+
+            async def aclose(self):
+                pass
+
+        # Sanity-check Response: confirm aiter_raw() raises
+        # StreamConsumed on the second iteration. Without this
+        # guard, a future httpx change to fresh-iterator semantics
+        # would silently mask the bug we're fixing here.
+        sanity_upstream = _httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_Stream([b"sanity chunk"]),
+            request=_httpx.Request(
+                "GET",
+                "http://127.0.0.1:8081/sanity",
+            ),
+        )
+
+        async def _aiter_twice_should_raise():
+            async for _ in sanity_upstream.aiter_raw():
+                pass
+            async for _ in sanity_upstream.aiter_raw():
+                pass
+        with pytest.raises(_httpx.StreamConsumed):
+            asyncio.run(_aiter_twice_should_raise())
+
+        # Proxy-bound Response: a real httpx.Response with a
+        # generator-backed AsyncByteStream body. The proxy sees
+        # this exact object and ``aiter_raw()`` exhibits real
+        # ``StreamConsumed`` semantics on second iteration.
+        upstream = _httpx.Response(
+            200,
+            headers={
+                "content-type": "text/html",
+                # Unknown encoding — must trigger the no-consume path
+                "content-encoding": "bizarre-unknown-encoding",
+                "cache-control": "public, max-age=31536000",
+                "etag": '"deadbeef"',
+            },
+            content=_Stream(
+                [b"webview body chunk one ", b"chunk two"]
+            ),
+            request=_httpx.Request(
+                "GET",
+                "http://127.0.0.1:8081/vscode/stable-abc/static/out/"
+                "vs/workbench/contrib/webview/browser/pre/index.html"
+                "?id=x&extensionId=vscode.media-preview",
+            ),
+        )
+
+        # Now drive the proxy handler end-to-end. We patch
+        # ``httpx.AsyncClient.send`` on the proxy module so the
+        # handler receives our real httpx.Response.
+        from daemon.routers import vscode_proxy as proxy_module
+
+        fake_client = MagicMock()
+
+        async def _fake_send(*args, **kwargs):
+            return upstream
+
+        fake_client.send = _fake_send
+        fake_client.build_request = MagicMock(return_value=MagicMock())
+
+        async def _fake_aclose():
+            pass
+
+        fake_client.aclose = _fake_aclose
+
+        def _fake_async_client(*args, **kwargs):
+            return fake_client
+
+        proxy_module.httpx.AsyncClient = _fake_async_client
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+
+        try:
+            with TestClient(app) as client:
+                resp = client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/contrib/"
+                    "webview/browser/pre/index.html?id=x",
+                    headers={"Host": "localhost:8079"},
+                )
+        finally:
+            proxy_module.httpx.AsyncClient = _httpx.AsyncClient
+
+        # The undecodable-encoding path must fall through to
+        # streaming — NOT 500 with StreamConsumed. The streaming
+        # generator's aiter_raw() is the FIRST iteration of this
+        # body, so the proxy delivers the chunks.
+        assert resp.status_code == 200, (
+            "undecodable-encoding path MUST stream through on a "
+            "REAL httpx body — StreamConsumed on the second "
+            "iteration would 500 here"
+        )
+        # The streaming response delivers the body (TestClient
+        # accumulates chunks). No content-encoding → the proxy
+        # passed it through verbatim (no compression claimed /
+        # applied because the unknown encoder couldn't decode).
+        assert b"webview body chunk one chunk two" in resp.content
+
+    # ── Review-council follow-ups ─────────────────────────────────────────────
+
+    # CRITICAL 1: insertion-when-absent semantics for img-src / media-src.
+    def test_augment_inserts_img_src_when_absent(self):
+        """The real meta-CSP has NO ``img-src`` → default-src 'none'
+        applies → image blocked. The rewrite must INSERT
+        ``img-src data: blob: https://*.vscode-resource.vscode-cdn.net``
+        on every augmented doc.
+
+        Per CSP3 §6.1.5.4 an absent img-src falls back to
+        ``default-src 'none'``. Per §6.7.2.4 the HTTP header CSP and
+        meta-CSP INTERSECT — sources must appear in both. Widening
+        only script-src/style-src (the previous behaviour) does
+        NOT rescue the image. This test pins the insertion contract.
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "frame-src 'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert b"img-src" in out, (
+            "img-src MUST be INSERTED when absent — the real meta-CSP "
+            "captured in 2026-09-12 evidence has no img-src, so the "
+            "browser falls back to default-src 'none' and blocks the image"
+        )
+        # Verify the exact insertion value — data:/blob: are kept for
+        # the extension's known bypass paths (inline data URI + blob
+        # URL after fetch()); the virtual-host wildcard covers direct
+        # <img src="https://*.vscode-resource.vscode-cdn.net/...">.
+        assert (
+            b"img-src data: blob: https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_inserts_media_src_when_absent(self):
+        """Sibling to img-src — ``media-src`` covers ``<audio>`` /
+        ``<video>`` (the 4.137.0 ``vscode.audioPreview`` /
+        ``vscode.videoPreview`` custom editors use the same
+        ``asWebviewUri`` flow).
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        assert b"media-src" in out
+        assert (
+            b"media-src 'self' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_appends_not_inserts_when_img_src_present(self):
+        """Present ``img-src`` is preserved as-is — only
+        ``script-src`` / ``style-src`` get the wildcard appended
+        when present (per the brief: ``Present-directive behavior
+        (append wildcard) stays as-is for script-src/style-src``).
+        Insertion of ``img-src`` only fires when ABSENT.
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "img-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out, rewrote = proxy_module._rewrite_webview_meta_csp(body)
+        assert rewrote is True
+        # img-src appears ONCE (not re-inserted, not extended).
+        assert out.count(b"img-src") == 1
+        # The existing img-src source list is preserved verbatim
+        # (no wildcard appended). The wildcard is appended only to
+        # script-src/style-src.
+        assert b"img-src 'self'" in out
+        assert b"https://*.vscode-resource.vscode-cdn.net" not in out.split(b"img-src", 1)[1].split(b";", 1)[0]
+        # script-src and style-src ARE extended with the wildcard.
+        assert (
+            b"script-src 'self' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+        assert (
+            b"style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net"
+            in out
+        )
+
+    def test_augment_idempotent_after_insertion(self):
+        """Idempotency after the FIRST insert (no double img-src /
+        no double media-src on the second pass).
+        """
+        from daemon.routers import vscode_proxy as proxy_module
+
+        csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            "'self'; "
+            "style-src 'unsafe-inline';"
+        )
+        body = self._build_webview_html(csp)
+        out1, rewrote1 = proxy_module._rewrite_webview_meta_csp(body)
+        out2, rewrote2 = proxy_module._rewrite_webview_meta_csp(out1)
+        assert rewrote1 is True
+        assert rewrote2 is False, (
+            "second-pass rewrite must be a no-op (idempotent)"
+        )
+        assert out1 == out2
+        # Each directive appears exactly once after insertion.
+        assert out2.count(b"img-src") == 1
+        assert out2.count(b"media-src") == 1
+
+    # Path-gate boundary pin (review-council follow-up ride-along 2).
+    def test_path_gate_rejects_mid_segment_substring(self):
+        """``/vscode/xwebview/browser/pre/index.html`` must NOT
+        match — the ``x`` is mid-segment. A bare bytes-substring
+        ``in`` check would slip through (false positive); the
+        anchored split-on-``/`` test rejects it.
+        """
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/static/xwebview/browser/pre/index.html"
+            )
+            is False
+        )
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/somewebview/browser/pre/index.html"
+            )
+            is False
+        )
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/webviewxx/browser/pre/index.html"
+            )
+            is False
+        )
+        # The canonical path still matches.
+        assert (
+            vscode_proxy._path_contains_webview_fragment(
+                b"/vscode/stable-abc/static/out/vs/workbench/"
+                b"contrib/webview/browser/pre/index.html"
+            )
+            is True
+        )
+
+    # Accept-Encoding pin (review-council follow-up ride-along 3).
+    def test_ae_pin_for_rewrite_eligible_request(self):
+        """Rewrite-eligible requests (path contains the webview
+        index fragment) get an outbound ``Accept-Encoding`` pinned
+        to the decodable set so the upstream can't reply with an
+        encoding we can't decode (e.g. ``zstd``).
+        """
+        webview_path = (
+            b"/vscode/stable-abc/static/out/vs/workbench/"
+            b"contrib/webview/browser/pre/index.html"
+        )
+        # Client sends ``gzip, zstd`` → outbound pinned to decodable.
+        pinned = vscode_proxy._accept_encoding_for_request(
+            webview_path, "gzip, zstd"
+        )
+        assert pinned == "gzip, deflate, br"
+        # Unset client header → still pinned (defensive default).
+        assert (
+            vscode_proxy._accept_encoding_for_request(webview_path, None)
+            == "gzip, deflate, br"
+        )
+
+    def test_ae_passthrough_for_non_eligible_request(self):
+        """Non-eligible requests keep the client's value verbatim —
+        non-webview traffic (workbench shell, JS chunks, etc.)
+        still flows through with whatever the client negotiated.
+        """
+        non_webview_path = (
+            b"/vscode/stable-abc/static/out/vs/workbench/workbench.js"
+        )
+        assert (
+            vscode_proxy._accept_encoding_for_request(
+                non_webview_path, "gzip, zstd"
+            )
+            == "gzip, zstd"
+        )
+        # Unset client header → unset outbound.
+        assert (
+            vscode_proxy._accept_encoding_for_request(
+                non_webview_path, None
+            )
+            is None
+        )
+
+    # MAJOR 3 — AE-pin end-to-end: rewrite-eligible requests must
+    # send EXACTLY ONE accept-encoding header upstream, equal to the
+    # pin. Case-sensitive ``pop("Accept-Encoding", ...)`` would never
+    # match Starlette's lowercase key, so the client's
+    # ``accept-encoding`` would survive + a second pin would be set,
+    # yielding a duplicate AE header that node joins to
+    # ``gzip, zstd, gzip, deflate, br`` — defeating the pin (zstd
+    # negotiable, encoding pre-check silently skips rewrite).
+    def test_ae_pin_no_duplicate_header_for_eligible_request(
+        self,
+    ):
+        """End-to-end: the upstream sees EXACTLY ONE
+        ``accept-encoding`` header for a rewrite-eligible request,
+        and its value is the pin (NOT the client's value, NOT a
+        join of both).
+        """
+        self._install_fn(True)
+
+        # Real httpx-shaped request capture: ``client.build_request``
+        # returns an object that the proxy later passes to
+        # ``client.send(...)``. We use a small dataclass-like
+        # stub that records the headers at ``build_request`` time.
+        captured_headers: dict[str, str] = {}
+
+        from daemon.routers import vscode_proxy as proxy_module
+
+        class _CapturedRequest:
+            def __init__(self, headers, method, target):
+                # Starlette normalizes headers to lowercase; the
+                # proxy uses ``request.headers.items()`` which yields
+                # lowercase keys (we mirror that here).
+                self.headers = {k.lower(): v for k, v in headers.items()}
+                captured_headers.update(self.headers)
+                self.method = method
+                self.target = target
+
+        class _HeaderCapturingClient:
+            async def send(self, request, *args, **kwargs):
+                class _FakeResponse:
+                    status_code = 200
+                    request = SimpleNamespace(
+                        url=SimpleNamespace(
+                            path=(
+                                "/vscode/stable-abc/static/out/"
+                                "vs/workbench/contrib/webview/browser/"
+                                "pre/index.html?id=x"
+                            )
+                        )
+                    )
+                    headers = {
+                        "content-type": "text/html",
+                        "cache-control": "public, max-age=31536000",
+                    }
+
+                    async def aiter_raw(self, chunk_size=None):
+                        if False:
+                            yield
+
+                    async def aclose(self):
+                        pass
+
+                return _FakeResponse()
+
+            def build_request(self, method, target, **kwargs):
+                headers = kwargs.get("headers") or {}
+                return _CapturedRequest(headers, method, target)
+
+            async def aclose(self):
+                pass
+
+        class _HeaderCapturingFactory:
+            def __call__(self, *args, **kwargs):
+                return _HeaderCapturingClient()
+
+        original_async_client = vscode_proxy.httpx.AsyncClient
+        vscode_proxy.httpx.AsyncClient = _HeaderCapturingFactory()
+        try:
+            manager = _make_mock_manager(running=True, port=8081)
+            app = create_vscode_proxy_app(manager)
+            with TestClient(app) as client:
+                client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/"
+                    "contrib/webview/browser/pre/index.html?id=x",
+                    headers={
+                        "Host": "localhost:8079",
+                        "Accept-Encoding": "gzip, zstd",
+                    },
+                )
+        finally:
+            vscode_proxy.httpx.AsyncClient = original_async_client
+
+        # No duplicate accept-encoding: exactly ONE header
+        # key (lowercase — Starlette normalizes) with the pin
+        # value verbatim. If the fix regresses, the key would
+        # appear twice OR the value would be the client's
+        # ``gzip, zstd`` string (node-joined with the pin).
+        ae_values = [
+            v for k, v in captured_headers.items()
+            if k.lower() == "accept-encoding"
+        ]
+        assert len(ae_values) == 1, (
+            f"upstream must receive EXACTLY ONE accept-encoding "
+            f"header — found {len(ae_values)}: {ae_values!r}. "
+            f"A duplicate means the case-sensitive pop missed the "
+            f"lowercase key and the client's value survived + the "
+            f"pin added a second header."
+        )
+        assert ae_values[0] == vscode_proxy._WEBVIEW_REWRITE_ACCEPT_ENCODING, (
+            f"upstream accept-encoding must be the pin value "
+            f"({vscode_proxy._WEBVIEW_REWRITE_ACCEPT_ENCODING!r}); "
+            f"got {ae_values[0]!r}. A non-pin value means the "
+            f"client's ``gzip, zstd`` leaked through unmodified, "
+            f"or two headers were joined by node."
+        )
+
+    def test_ae_pin_client_value_preserved_for_non_eligible_request(
+        self,
+    ):
+        """End-to-end: non-eligible requests keep the client's
+        value verbatim. No pin overwrite (the pin is
+        rewrite-only), no header drop, no duplicate.
+        """
+        self._install_fn(True)
+
+        captured_headers: dict[str, str] = {}
+
+        from daemon.routers import vscode_proxy as proxy_module
+
+        class _CapturedRequest:
+            def __init__(self, headers, method, target):
+                self.headers = {k.lower(): v for k, v in headers.items()}
+                captured_headers.update(self.headers)
+                self.method = method
+                self.target = target
+
+        class _HeaderCapturingClient:
+            async def send(self, request, *args, **kwargs):
+                class _FakeResponse:
+                    status_code = 200
+                    request = SimpleNamespace(
+                        url=SimpleNamespace(
+                            path=(
+                                "/vscode/stable-abc/static/out/"
+                                "vs/workbench/workbench.js"
+                            )
+                        )
+                    )
+                    headers = {"content-type": "application/javascript"}
+
+                    async def aiter_raw(self, chunk_size=None):
+                        if False:
+                            yield
+
+                    async def aclose(self):
+                        pass
+
+                return _FakeResponse()
+
+            def build_request(self, method, target, **kwargs):
+                headers = kwargs.get("headers") or {}
+                return _CapturedRequest(headers, method, target)
+
+            async def aclose(self):
+                pass
+
+        class _Factory:
+            def __call__(self, *args, **kwargs):
+                return _HeaderCapturingClient()
+
+        original_async_client = vscode_proxy.httpx.AsyncClient
+        vscode_proxy.httpx.AsyncClient = _Factory()
+        try:
+            manager = _make_mock_manager(running=True, port=8081)
+            app = create_vscode_proxy_app(manager)
+            with TestClient(app) as client:
+                client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/"
+                    "workbench.js",
+                    headers={
+                        "Host": "localhost:8079",
+                        "Accept-Encoding": "gzip, zstd",
+                    },
+                )
+        finally:
+            vscode_proxy.httpx.AsyncClient = original_async_client
+
+        ae_values = [
+            v for k, v in captured_headers.items()
+            if k.lower() == "accept-encoding"
+        ]
+        assert len(ae_values) == 1, (
+            f"non-eligible request: must preserve the client's "
+            f"accept-encoding verbatim. Found {len(ae_values)} "
+            f"headers: {ae_values!r}."
+        )
+        assert ae_values[0] == "gzip, zstd", (
+            f"non-eligible request must NOT be pinned — the "
+            f"client's value must reach the upstream verbatim. "
+            f"Got {ae_values[0]!r}."
+        )
+
+    # Body-size cap (review-council follow-up ride-along 1).
+    def test_oversize_body_byte_faithful_re_serve(self):
+        """Mid-stream oversize path — the consume loop trips the
+        cap mid-body. The rewrite seam is skipped, and the
+        proxy must re-serve the FULL original upstream body
+        (prefix + remainder concatenated) with the original
+        Content-Encoding preserved.
+
+        Council corrective round on 92784e20 — the original
+        implementation ``break``-ed out of the consume loop
+        BEFORE appending the over-cap chunk, so the rewrite
+        buffer held only the ``≤cap`` prefix and the response
+        carried a truncated body (front-truncated compressed
+        stream — UNDECODEABLE on the browser side).
+
+        The current implementation drains the cap-crossing
+        chunk AND every subsequent chunk into the
+        ``oversize_chunks`` raw-re-serve accumulator; the
+        post-loop branch concatenates ``body_chunks + oversize_chunks``
+        to build the full original body. This test pins the
+        full-byte-equality contract.
+
+        Driving details:
+        - body is built of incompressible bytes (random via
+          ``os.urandom``) so the brotli-compressed wire size is
+          at least ~cap bytes — brotli's worst-case compression
+          ratio on random data is well over 1:1. This guarantees
+          ``len(br) > cap`` (the WIRE-size sanity the previous
+          test lacked).
+        - the fake upstream yields the body across TWO chunks
+          — chunk 1 fits in the cap (the prefix), chunk 2
+          straddles the cap (the cap-crossing chunk) and
+          overflows. The previous single-chunk fake hid the
+          cap-crossing boundary entirely (single chunk > cap
+          means the rewrite buffer is empty and ``oversize_chunks``
+          holds the whole body, which is the easier path to
+          get right; the real bug only shows up across chunks).
+        """
+        import os
+        self._install_fn(True)
+        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
+        # Body larger than the cap. Random bytes so brotli can't
+        # compress them below the cap (worst-case ratio ~1.0 on
+        # incompressible data; the wire size will exceed the cap
+        # by a comfortable margin).
+        oversized = os.urandom(cap + 500_000)
+        assert len(oversized) > cap
+
+        # Two-chunk split: chunk_1 fits UNDER the cap (so it goes
+        # to the rewrite-buffer prefix — NOT the post-cap
+        # accumulator). Chunk 2 pushes the running total OVER the
+        # cap (so the cap is crossed on chunk 2, not chunk 1).
+        # This is the precise shape that exposes the f1331082 bug:
+        # the bug dropped ``body_chunks`` (the prefix), so the
+        # served body was missing chunk_1. With chunk 1 alone
+        # being oversized the bug is hidden (chunk 1 goes to
+        # ``oversize_chunks`` regardless, so
+        # ``b"".join(oversize_chunks)`` happens to contain
+        # everything).
+        split_at = cap - 100_000   # chunk_1 fits UNDER cap
+        chunk_1 = oversized[:split_at]
+        chunk_2 = oversized[split_at:]
+        assert len(chunk_1) < cap
+        assert len(chunk_1) + len(chunk_2) > cap
+        assert len(chunk_2) > 0
+        assert len(chunk_1) + len(chunk_2) == len(oversized)
+
+        import brotli
+        br = brotli.compress(oversized)
+        # WIRE-size sanity (the previous test lacked this — it
+        # only asserted the DECODED size exceeded the cap, which
+        # is trivially true for any non-empty body. The fix
+        # triggers the mid-stream branch only when the WIRE
+        # body is larger than the cap).
+        assert len(br) > cap, (
+            f"wire-size sanity failed: brotli-compressed body "
+            f"is {len(br)} bytes, expected > {cap}. Use a larger "
+            f"oversize or incompressible data."
+        )
+        # The chunking is at the aiter_raw() generator level, not
+        # the encoding level — the body decoder sees the full
+        # stream after aiter_raw() returns. For brotli we have
+        # to keep the wire chunks together for the decoder;
+        # split the brotli bytes the same way for symmetry.
+        br_split = len(br) * split_at // len(oversized)
+        br_chunks = [br[:br_split], br[br_split:]]
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        # NOTE: NO ``content-length`` header — this exercises the
+        # MID-STREAM path (pre-consume gate cannot pre-decide).
+        _patch_upstream_multi_chunk(
+            chunks=br_chunks,
+            content_type="text/html",
+            content_encoding="br",
+            content_length=None,
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/"
+                "webview/browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        # No 500: oversize webview HTML falls back to byte-faithful
+        # re-serve of the FULL upstream body (no truncation).
+        assert resp.status_code == 200
+        assert resp.headers.get("content-encoding") == "br", (
+            "original Content-Encoding MUST be preserved on the "
+            "raw-re-serve path — the wire bytes are still brotli "
+            "and the browser's decoder must stay in sync."
+        )
+        # The Content-Length MUST equal the ORIGINAL upstream
+        # body size — proof of byte-fidelity (no truncation). The
+        # f1331082 implementation re-served only ``oversize_chunks``
+        # (post-cap), so the Content-Length was the post-cap
+        # chunk size instead of the full upstream body size.
+        assert int(resp.headers["content-length"]) == len(br), (
+            "Content-Length on oversize re-serve MUST match the "
+            "ORIGINAL upstream body length (byte-faithful, no "
+            "truncation). If this assertion fails the proxy is "
+            "re-serving only the post-cap accumulator (prefix "
+            "dropped) — that's CRITICAL 1 from the review."
+        )
+        # The full original body — verbatim — must reach the
+        # browser. TestClient auto-decodes brotli; the decoded
+        # bytes equal the upstream's pre-encoding bytes.
+        assert resp.content == oversized, (
+            "oversize re-serve MUST deliver the FULL original "
+            "body — prefix + remainder concatenated. Truncation "
+            "would be a broken page."
+        )
+        # No virtual-host origin added — we did not get far enough
+        # to rewrite the meta-CSP (the doc is too large).
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    def test_oversize_body_content_length_gate_streams_through(self):
+        """The PRE-CONSUME gate (Content-Length advertised > cap)
+        refuses to consume at all and returns ``None`` so the
+        caller streams the upstream body through verbatim. Zero
+        memory cost on the proxy side — the upstream connection
+        itself is what carries the body; the rewrite seam is
+        skipped cleanly.
+
+        Council corrective round on 92784e20 — this is path (a)
+        in the design; the test for path (b) (mid-stream
+        unknown-length) is ``test_oversize_body_byte_faithful_re_serve``
+        above.
+        """
+        self._install_fn(True)
+        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
+        # ``Content-Length`` larger than the cap → gate fires,
+        # no consume.
+        oversized = (
+            b"<html><body>" + b"x" * (cap + 1024) + b"</body></html>"
+        )
+        cl_header_value = str(len(oversized))
+
+        # Use the multi-chunk helper so we exercise a real
+        # ``aiter_raw`` stream consumption path (not a single-yield
+        # fake that would mask any future regression where the gate
+        # consumes once and the streaming path consumes again).
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_multi_chunk(
+            # Two chunks, both below cap individually but the
+            # total exceeds cap — the gate must trigger on
+            # Content-Length BEFORE the first chunk is consumed.
+            chunks=[oversized[: len(oversized) // 2], oversized[len(oversized) // 2 :]],
+            content_type="text/html",
+            content_encoding=None,
+            content_length=cl_header_value,
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+
+        # The proxy streamed the upstream body through verbatim.
+        # Status 200; the FULL body is delivered (no truncation,
+        # no rewriting — the seam was skipped).
+        assert resp.status_code == 200
+        assert resp.content == oversized, (
+            "Content-Length-gate path MUST stream the FULL "
+            "upstream body through verbatim. Truncation or "
+            "rewriting would defeat the gate's purpose."
+        )
+        # No meta-CSP rewrite happened — we never consumed.
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+
+def _patch_upstream_for_webview_html(
+    *,
+    body: bytes,
+    content_type: str,
+    content_encoding: str | None,
+    status_code: int,
+    path: str,
+) -> None:
+    """Patch ``httpx.AsyncClient`` on ``daemon.routers.vscode_proxy``
+    so the proxy receives the supplied response.
+
+    Replaces the real upstream with a fake object whose body yields
+    ``body`` via ``aiter_raw`` and whose headers carry the supplied
+    ``Content-Type`` / ``Content-Encoding``. The proxy only reads
+    ``upstream.request.url.path`` (for path matching),
+    ``upstream.headers`` (for content-type / content-encoding),
+    ``upstream.aiter_raw`` (for body streaming), and
+    ``upstream.status_code``. The
+    ``_restore_async_client_patch`` autouse fixture in
+    :class:`TestWebviewCspRewrite` restores the original symbol
+    after each test.
+    """
+    from daemon.routers import vscode_proxy as proxy_module
+
+    class _FakeUpstream:
+        def __init__(self):
+            self.status_code = status_code
+            self.request = SimpleNamespace(
+                url=SimpleNamespace(path=path),
+            )
+            self.headers = {
+                "content-type": content_type,
+            }
+            if content_encoding:
+                self.headers["content-encoding"] = content_encoding
+            self.headers["cache-control"] = "public, max-age=31536000"
+            self.headers["etag"] = '"deadbeef"'
+            self._body = body
+
+        async def aiter_raw(self, chunk_size: int | None = None):
+            yield self._body
+
+        async def aclose(self):
+            pass
+
+    fake_client = MagicMock()
+    fake_response = _FakeUpstream()
+
+    async def _fake_send(*args, **kwargs):
+        return fake_response
+
+    fake_client.send = _fake_send
+    fake_client.build_request = MagicMock(return_value=MagicMock())
+
+    async def _fake_aclose():
+        pass
+
+    fake_client.aclose = _fake_aclose
+
+    def _fake_async_client(*args, **kwargs):
+        return fake_client
+
+    proxy_module.httpx.AsyncClient = _fake_async_client
+
+
+def _patch_upstream_multi_chunk(
+    *,
+    chunks: list[bytes],
+    content_type: str,
+    content_encoding: str | None,
+    content_length: str | None,
+    status_code: int,
+    path: str,
+    headers_extra: Mapping[str, str] | None = None,
+) -> None:
+    """Multi-chunk variant of :func:`_patch_upstream_for_webview_html`.
+
+    Used by the size-cap oversize tests where the body MUST be
+    streamed across MULTIPLE chunks (a single-chunk fake would
+    hide the cap-crossing boundary — the rewrite-buffer prefix
+    and the post-cap accumulator would both be empty).
+    """
+    from daemon.routers import vscode_proxy as proxy_module
+
+    class _MultiChunkUpstream:
+        def __init__(self):
+            self.status_code = status_code
+            self.request = SimpleNamespace(
+                url=SimpleNamespace(path=path),
+            )
+            self.headers = {"content-type": content_type}
+            if content_encoding:
+                self.headers["content-encoding"] = content_encoding
+            if content_length is not None:
+                self.headers["content-length"] = content_length
+            self.headers["cache-control"] = "public, max-age=31536000"
+            self.headers["etag"] = '"deadbeef"'
+            if headers_extra:
+                self.headers.update(headers_extra)
+            self._chunks = chunks
+            self._stream_consumed = False
+
+        async def aiter_raw(self, chunk_size: int | None = None):
+            if self._stream_consumed:
+                raise httpx.StreamConsumed(
+                    "stream has been consumed"
+                )
+            self._stream_consumed = True
+            for chunk in self._chunks:
+                yield chunk
+
+        async def aclose(self):
+            pass
+
+    fake_client = MagicMock()
+    fake_response = _MultiChunkUpstream()
+
+    async def _fake_send(*args, **kwargs):
+        return fake_response
+
+    fake_client.send = _fake_send
+    fake_client.build_request = MagicMock(return_value=MagicMock())
+
+    async def _fake_aclose():
+        pass
+
+    fake_client.aclose = _fake_aclose
+
+    def _fake_async_client(*args, **kwargs):
+        return fake_client
+
+    proxy_module.httpx.AsyncClient = _fake_async_client
+

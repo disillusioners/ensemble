@@ -34,6 +34,19 @@ dependencies = [
     "langgraph-checkpoint-postgres>=2.0.0",
     "websockets>=13.0",
     "discord-py>=2.4.0",
+    # fix-vscode-image-preview Step 1: meta-CSP rewrite seam. The
+    # /vscode proxy must be able to decode code-server's
+    # brotli-compressed webview HTML responses to augment the
+    # strict meta-CSP; without this dep, the default-ON rewrite
+    # path silently no-ops on every webview response (the one-shot
+    # WARNING in `_decode_response_body` would log instead of
+    # rewriting, leaving the image-preview broken on a fresh venv).
+    # Mirrors the runtime requirement that powers
+    # `httpx[brotli]`'s response-content decoding — code-server
+    # serves most responses as `content-encoding: br`, and the
+    # `Accept-Encoding: br, gzip` round-trip is the canonical
+    # browser→proxy→upstream wire form.
+    "brotli>=1.0",
 ]
 
 [project.scripts]

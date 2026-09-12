@@ -1,0 +1,399 @@
+[
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+    "method": "GET",
+    "rtype": "document"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+    "method": "GET",
+    "rtype": "document",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+    "method": "GET",
+    "rtype": "stylesheet"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+    "method": "GET",
+    "rtype": "stylesheet",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 404
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 404
+  },
+  {
+    "kind": "requestfailed",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+    "method": "GET",
+    "rtype": "script",
+    "failure_text": "net::ERR_ABORTED"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg",
+    "method": "GET",
+    "rtype": "image"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=f9a7158f-9a2e-4f31-a7e6-7d6488313f4a",
+    "method": "GET",
+    "rtype": "document"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=f9a7158f-9a2e-4f31-a7e6-7d6488313f4a",
+    "method": "GET",
+    "rtype": "document",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg",
+    "method": "GET",
+    "rtype": "image",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf",
+    "method": "GET",
+    "rtype": "font"
+  },
+  {
+    "kind": "request",
+    "url": "blob:http://127.0.0.1:18080/172ff5b4-9e30-485f-bf81-7d18efb2c7a9",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "blob:http://127.0.0.1:18080/172ff5b4-9e30-485f-bf81-7d18efb2c7a9",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "blob:http://127.0.0.1:18080/0487117a-9804-437c-8f01-7dcef39c8c75",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "blob:http://127.0.0.1:18080/0487117a-9804-437c-8f01-7dcef39c8c75",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/_static/src/browser/media/templates.png",
+    "method": "GET",
+    "rtype": "image"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf",
+    "method": "GET",
+    "rtype": "font",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/_static/src/browser/media/templates.png",
+    "method": "GET",
+    "rtype": "image",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg",
+    "method": "GET",
+    "rtype": "image"
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=",
+    "method": "GET",
+    "rtype": "font"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg",
+    "method": "GET",
+    "rtype": "image",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=",
+    "method": "GET",
+    "rtype": "font",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-sbs-work%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=",
+    "method": "GET",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "https://open-vsx.org/vscode/gallery/extensionquery",
+    "method": "POST",
+    "rtype": "fetch"
+  },
+  {
+    "kind": "request",
+    "url": "blob:http://127.0.0.1:18080/8b813b28-470c-4cfe-9ce7-eaf10db0a190",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "blob:http://127.0.0.1:18080/8b813b28-470c-4cfe-9ce7-eaf10db0a190",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "https://open-vsx.org/vscode/gallery/extensionquery",
+    "method": "POST",
+    "rtype": "fetch",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=ebdd4d9b-ad05-4f80-a4bb-80fa8abe4e8b&parentId=1&origin=d4509f20-b03a-46ac-8927-919c51614cf3&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2F127.0.0.1%3A18080&remoteAuthority=127.0.0.1%3A18080",
+    "method": "GET",
+    "rtype": "document"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=ebdd4d9b-ad05-4f80-a4bb-80fa8abe4e8b&parentId=1&origin=d4509f20-b03a-46ac-8927-919c51614cf3&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2F127.0.0.1%3A18080&remoteAuthority=127.0.0.1%3A18080",
+    "method": "GET",
+    "rtype": "document",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html?id=ebdd4d9b-ad05-4f80-a4bb-80fa8abe4e8b",
+    "method": "GET",
+    "rtype": "document"
+  },
+  {
+    "kind": "response",
+    "url": "http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html?id=ebdd4d9b-ad05-4f80-a4bb-80fa8abe4e8b",
+    "method": "GET",
+    "rtype": "document",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css",
+    "method": "GET",
+    "rtype": "stylesheet"
+  },
+  {
+    "kind": "request",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js",
+    "method": "GET",
+    "rtype": "script"
+  },
+  {
+    "kind": "response",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css",
+    "method": "GET",
+    "rtype": "stylesheet",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js",
+    "method": "GET",
+    "rtype": "script",
+    "status": 200
+  },
+  {
+    "kind": "request",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/.inspiration-projects/DeepCode/assets/Deepcode.png?version%3D1789186390489",
+    "method": "GET",
+    "rtype": "image"
+  },
+  {
+    "kind": "request",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/loading.svg",
+    "method": "GET",
+    "rtype": "image"
+  },
+  {
+    "kind": "response",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/.inspiration-projects/DeepCode/assets/Deepcode.png?version%3D1789186390489",
+    "method": "GET",
+    "rtype": "image",
+    "status": 200
+  },
+  {
+    "kind": "response",
+    "url": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/loading.svg",
+    "method": "GET",
+    "rtype": "image",
+    "status": 200
+  }
+]

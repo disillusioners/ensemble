@@ -1,0 +1,69 @@
+=== ATTEMPT 2: PATH-SHIM ROUTE — VERDICT BLOCKED ===
+
+The PATH-shim route WORKED: spawned code-server IS 4.137.0 tarball binary.
+  - PUT /api/settings/editor: "binary_path":"/tmp/vscode-proxy-4137/shim/code-server"
+  - ps -o pid,command -p 92082: 
+    /tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/node
+    /tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64
+    --bind-addr 127.0.0.1:0 --auth none ...
+  - The 4.137.0 webview pre/index.html is served (proven by stable-b11dabdaca0d3369986975be285db92c8795cea5 hash in URLs)
+  - The 4.137.0 internal node binary is the process image
+  - vscode-remote-resource requests target /private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/... (not /opt/homebrew)
+
+Despite the correct version, image preview is BLOCKED with the EXACT same CSP-blocked
+pattern as 4.112.0 via proxy. This rules out "old version" as the root cause.
+
+=== EXACT CSP VIOLATION (verbatim from console.log) ===
+
+[error] Loading the stylesheet 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css' violates the following Content Security Policy directive: "style-src 'self' 'unsafe-inline'". Note that 'style-src-elem' was not explicitly set, so 'style-src' is used as a fallback. The action has been blocked.
+
+[error] Loading the script 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js' violates the following Content Security Policy directive: "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.
+
+=== EFFECTIVE META-CSP (4.137.0 webview HTML body) ===
+default-src 'none';
+script-src 'sha256-24QqbpzqcqSyIGvg/ZwFRy5pPlhmVBa8CkUREEIUnBw=' 'self';
+frame-src 'self';
+style-src 'unsafe-inline';
+
+=== EFFECTIVE HTTP CSP HEADER (4.137.0 webview) ===
+default-src 'self';
+script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:;
+style-src 'self' 'unsafe-inline';
+img-src 'self' data: blob:;
+font-src 'self' data:;
+connect-src 'self' ws: wss:;
+worker-src 'self' blob:;
+
+=== HEADER vs META split ===
+- HTTP CSP header: allows 'self' for scripts/styles — but only 'self', not virtual hosts
+- Meta CSP: only allows ONE specific sha256 OR 'self' for scripts
+- Virtual host 'vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net' is NOT 'self'
+  from either CSP's perspective
+- Both layers block the extension's CSS/JS
+
+=== COMPARISON: 4.112.0 vs 4.137.0 meta-CSP ===
+4.112.0: script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' 'self'
+4.137.0: script-src 'sha256-24QqbpzqcqSyIGvg/ZwFRy5pPlhmVBa8CkUREEIUnBw=' 'self'
+Both versions ship a restrictive meta-CSP that only allows 'self' + one sha256.
+Both versions use the same virtual-host URL pattern (vscode-resource.vscode-cdn.net).
+Both versions fail with the same CSP-blocked error.
+The bug is structural, not version-specific.
+
+=== VIRTUAL-HOST URL SHAPE ===
+URL pattern: https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/{absolute-path}
+- "localhost-003a8079" encodes port 8079 (the proxy), not the loopback
+- The virtual host is supposed to be a rewrite target for /vscode-remote-resource?path=...&tkn=
+- But CSP treats this origin as different from 'self' (which is the proxy http://localhost:8079)
+- Result: extension's CSS/JS are blocked
+
+=== IN-IFRAME naturalWidth check ===
+Result: TIMEOUT (no rendered image, no in-iframe img elements with naturalWidth>0)
+- The extension's JS never loads, so it never creates the <img> element in the iframe
+- No error dialog appears either (extension JS would normally display it)
+- Bug is silent at UI level
+
+=== ROOT CAUSE IMPLICATION ===
+The bug is NOT fixed by upgrading code-server. Both 4.112.0 and 4.137.0 have the same
+restrictive meta-CSP that doesn't trust the vscode-resource virtual host. The proxy
+might or might not be involved; the structural issue is that code-server's webview
+CSP doesn't include the virtual host in 'self'.

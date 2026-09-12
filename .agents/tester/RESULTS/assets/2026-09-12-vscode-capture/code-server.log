@@ -1,0 +1,40 @@
+[2026-09-12T04:11:37.655Z] info  code-server 4.137.0 b11dabdaca0d3369986975be285db92c8795cea5
+[2026-09-12T04:11:37.658Z] info  Using user-data-dir /tmp/vscode-sbs-work/data/code-server
+[2026-09-12T04:11:37.665Z] info  Using config file /tmp/vscode-sbs-work/config.yaml
+[2026-09-12T04:11:37.666Z] info  HTTP server listening on http://127.0.0.1:18080/
+[2026-09-12T04:11:37.666Z] info    - Authentication is disabled
+[2026-09-12T04:11:37.666Z] info    - Not serving HTTPS
+[2026-09-12T04:11:37.666Z] info  Session server listening on /tmp/vscode-sbs-work/data/code-server/code-server-ipc.sock
+[11:11:44] 
+
+
+
+
+[reconnection-grace-time] No CLI argument provided, using default: 10800000ms (10800s)
+[11:11:44] [AgentHostChannel] Registered lazy IPC channel 'agentHostProxy' (upstream: /var/folders/3m/p68dltbj1xv7hjkdxr_gqnc00000gn/T/vscode-ipc-17b0f2e1-6da4-487b-8890-7f5f8d6eecc8.sock)
+[11:11:44] Extension host agent started.
+File not found: /private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/node_modules/vsda/rust/web/vsda_bg.wasm
+File not found: /private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/node_modules/vsda/rust/web/vsda.js
+[11:13:01] [127.0.0.1][6fead765][ManagementConnection] New connection established.
+[11:13:01] [AgentHostChannel] Renderer ctx=[object Object] requested connect to upstream
+[11:13:01] [127.0.0.1][cf49ccd9][ExtensionHostConnection] New connection established.
+[11:13:01] [127.0.0.1][cf49ccd9][ExtensionHostConnection] Starting extension host process...
+[11:13:03] [127.0.0.1][cf49ccd9][ExtensionHostConnection] <86610> Launched Extension Host Process.
+[11:13:03] [127.0.0.1][cf49ccd9][ExtensionHostConnection] <86610> [reconnection-grace-time] Extension host: read VSCODE_RECONNECTION_GRACE_TIME=10800000ms (10800s)
+
+[IPC Library: Agent Host] Agent host server listening on /var/folders/3m/p68dltbj1xv7hjkdxr_gqnc00000gn/T/vscode-ipc-17b0f2e1-6da4-487b-8890-7f5f8d6eecc8.sock
+[11:13:03] ServerAgentHostManager: agent host started
+[11:13:03] [AgentHostChannel] Opening upstream to /var/folders/3m/p68dltbj1xv7hjkdxr_gqnc00000gn/T/vscode-ipc-17b0f2e1-6da4-487b-8890-7f5f8d6eecc8.sock
+[11:13:43] [127.0.0.1][6fead765][ManagementConnection] The client has disconnected, will wait for reconnection 3h before disposing...
+File not found: /private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/node_modules/vsda/rust/web/vsda_bg.wasm
+File not found: /private/tmp/vscode-sbs-work/code-server-4.137.0-macos-arm64/lib/vscode/node_modules/vsda/rust/web/vsda.js
+[11:14:27] [127.0.0.1][6fead765][ManagementConnection] Another client has connected, will shorten the wait for reconnection 5m before disposing...
+[11:14:27] [127.0.0.1][eb3c8c0f][ManagementConnection] New connection established.
+[11:14:27] [AgentHostChannel] Renderer ctx=[object Object] requested connect to upstream
+[11:14:27] [AgentHostChannel] Opening upstream to /var/folders/3m/p68dltbj1xv7hjkdxr_gqnc00000gn/T/vscode-ipc-17b0f2e1-6da4-487b-8890-7f5f8d6eecc8.sock
+[11:14:27] [127.0.0.1][084d008f][ExtensionHostConnection] New connection established.
+[11:14:27] [127.0.0.1][084d008f][ExtensionHostConnection] Starting extension host process...
+[11:14:27] [127.0.0.1][084d008f][ExtensionHostConnection] <87034> Launched Extension Host Process.
+[11:14:28] [127.0.0.1][084d008f][ExtensionHostConnection] <87034> [reconnection-grace-time] Extension host: read VSCODE_RECONNECTION_GRACE_TIME=10800000ms (10800s)
+
+[11:15:14] [127.0.0.1][eb3c8c0f][ManagementConnection] The client has disconnected, will wait for reconnection 3h before disposing...

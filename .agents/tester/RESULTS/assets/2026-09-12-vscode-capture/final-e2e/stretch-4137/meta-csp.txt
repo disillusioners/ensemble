@@ -1,0 +1,4 @@
+# media-preview [4.137.0 stable hash]
+# URL: http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=4b7c139f-5744-43d4-88a2-93893aea4680&parentId=1&origin=b6c25671-dc6e-4dc1-ba59-a01034011940&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079
+default-src 'none'; script-src 'sha256-24QqbpzqcqSyIGvg/ZwFRy5pPlhmVBa8CkUREEIUnBw=' 'self' https://*.vscode-resource.vscode-cdn.net; frame-src 'self'; style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net; img-src data: blob: https://*.vscode-resource.vscode-cdn.net; media-src 'self' https://*.vscode-resource.vscode-cdn.net
+

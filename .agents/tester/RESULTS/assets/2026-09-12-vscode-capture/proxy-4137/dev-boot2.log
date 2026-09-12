@@ -1,0 +1,449 @@
+[0;32mStarting Ensemble Daemon (Development Mode)...[0m
+[0;32mLoading environment from .env...[0m
+[0;32mStarting server with auto-reload...[0m
+[0;32mAPI Documentation: http://localhost:8079/docs[0m
+
+INFO:     Will watch for changes in these directories: ['/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble']
+INFO:     Uvicorn running on http://127.0.0.1:8079 (Press CTRL+C to quit)
+INFO:     Started reloader process [92042] using WatchFiles
+11:41:32 - daemon.api - INFO - Starting Ensemble v0.12.6
+INFO:     Started server process [92044]
+INFO:     Waiting for application startup.
+11:41:32 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+11:41:32 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+11:41:32 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+11:41:32 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+11:41:32 - daemon - INFO - [Config] default_request_gzip=True (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+11:41:32 - daemon.rag.config - INFO - Running RAG auto-test...
+11:41:35 - daemon.rag.config - INFO - RAG auto-test passed: LightRAG is reachable
+11:41:35 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+11:41:35 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: localhost:5432/ensemble_dev
+11:41:35 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' A
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processi
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+11:41:35 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter'
+11:41:35 - daemon.manager - DEBUG - Legacy `error_message` column already dropped (Phase 5+); skipping terminal_reason backfill statement: UPDATE job_queue_items SET terminal_reason = 'failed' WHERE admission_state = 'd
+11:41:35 - daemon.manager - DEBUG - Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL
+11:41:35 - daemon.manager - DEBUG - Phase 5 column drop: seven legacy job_queue_items columns removed (or absent) on PostgreSQL
+11:41:35 - daemon.manager - INFO - Cleared 0 backlog message(s) (discard_on_startup=backlog-clear; in-flight/paused preserved)
+11:41:35 - daemon.manager - INFO - Cleared 0 backlog task(s) (discard_on_startup=backlog-clear; running/paused preserved)
+11:41:35 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+11:41:35 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+11:41:35 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+11:41:35 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: DISABLED (default — log-only mode: the [ReportIntegrityGuard] soak log still fires at completion stamps; no notice is ever injected) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+11:41:35 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+11:41:35 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=25.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+11:41:35 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+11:41:35 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+11:41:36 - daemon.manager - INFO - OpenCode session registry initialized at data_dev/opencode_sessions.db
+11:41:36 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+11:41:36 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+11:41:36 - daemon.repositories.mcp_server.repository - INFO - Updated MCP server: id=4702da16-8458-4335-9a70-de9c202db881
+11:41:36 - daemon.manager - INFO - Built-in MCP server 'webfetch' disabled (MCP_DISABLE_BUILT_IN_WEBFETCH), deactivated existing record
+11:41:36 - daemon.manager - DEBUG - Built-in MCP server already exists: context7
+11:41:36 - daemon.manager - DEBUG - Built-in MCP server already exists: plane
+11:41:36 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+11:41:36 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 0 new, 9 updated
+11:41:36 - daemon.manager - DEBUG - Infra asset types already registered: 9 total, 9 updated
+11:41:36 - daemon.manager - INFO - MCP server 'webfetch' disabled (env var), skipping warmup pool registration
+11:41:36 - daemon.mcp.warmup_pool - DEBUG - Registered server 'context7' with pool_size=1
+11:41:36 - daemon.manager - INFO - MCP warm-up pool initialized: 1 server(s) registered, warmup running in background
+11:41:36 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for localhost:5432/ensemble_test
+11:41:36 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver, pool=asyncpg.Pool)
+11:41:36 - daemon.services.maintenance - DEBUG - Registered maintenance job: checkpoint_cleanup (interval=24h)
+11:41:36 - daemon.manager - INFO - Skill trigger seed (Phase 4): 0 new default triggers inserted
+11:41:36 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_metric_scan (interval=24.0h)
+11:41:36 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_orphan_sweep (interval=24.0h)
+11:41:36 - daemon.services.maintenance - DEBUG - Registered maintenance job: blueprint_daily_scan (interval=5.0h)
+11:41:36 - daemon.services.maintenance - INFO - Maintenance service started
+11:41:36 - daemon.manager - DEBUG - Eager-warmed tool metadata + tiktoken encoder
+11:41:36 - daemon.services.skill_seed_service - INFO - Skill seeding complete: 0 new, 0 updated, 61 unchanged, 0 errors
+11:41:36 - daemon.manager - DEBUG - Skill bank seeding (Phase 3): {'new': 0, 'updated': 0, 'unchanged': 61, 'errors': 0}
+11:41:36 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (localhost:5432/ensemble_test)
+11:41:36 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+11:41:36 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+11:41:36 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+11:41:36 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+11:41:36 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True]
+11:41:36 - daemon.services.worker_pool - INFO - Starting WorkerPool with 4 workers...
+11:41:36 - daemon.services.worker_pool - INFO - Worker worker-0 started
+11:41:36 - daemon.services.worker_pool - INFO - Worker worker-1 started
+11:41:36 - daemon.services.worker_pool - INFO - Worker worker-2 started
+11:41:36 - daemon.services.worker_pool - INFO - Worker worker-3 started
+11:41:36 - daemon.services.worker_pool - INFO - WorkerPool started: 4 workers
+11:41:36 - daemon.manager - INFO - Worker pool started with 4 workers (timeout=125.0min)
+11:41:37 - daemon.api - INFO - WorkResolverService constructed and wired to InstanceManager
+11:41:37 - daemon.api - INFO - Phase 2 Batch 2: watcher_repo + work_resolver wired to TaskProcessor / WorkerPool / StaleTaskRecovery
+11:41:37 - daemon.api - INFO - RetryScheduler disabled (job_retry_scheduler_enabled is not set)
+11:41:37 - daemon.manager - INFO - JobQueueService wired into SourceRegistry for scheduler routing
+11:41:37 - daemon.manager - INFO - SkillJobDispatcher wired to manager
+11:41:37 - daemon.manager - INFO - JobQueueService connected to SessionManager
+11:41:37 - daemon.manager - INFO - JobQueueMgmtService connected to SessionManager
+11:41:37 - daemon.services.job_recovery_service - INFO - Starting job recovery — checking PROCESSING jobs...
+11:41:37 - daemon.services.job_recovery_service - INFO - Job recovery complete: 0 recovered, 0 alive, 0 total
+11:41:37 - daemon.api - INFO - Job recovery: {'recovered': 0, 'alive': 0, 'total': 0}
+11:41:37 - daemon.services.job_recovery_service - INFO - Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED (default; set ENSEMBLE_ORPHAN_F1_ENABLED=0 to disable — restart required to flip)
+11:41:37 - daemon.services.job_recovery_service - INFO - Pattern-g defer-self-witness autopromote ENABLED (default; ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED unset or set to a truthy value) — matched deferred PENDING tasks in the self-witness blind-spot will be unstuck by flipping task.is_deferred=false on the drift cadence. Set ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0 (or 00/-0/0./0x0/false/no/off) + restart to disable the bounded unstick
+11:41:37 - daemon.api - INFO - Drift reconciler started: interval=300s, min_pending_age=300s, min_orphan_age=900s, f1_tree_activity_max_age=900s
+11:41:37 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService started: interval=90s, min_pending_age=60s
+11:41:37 - daemon.api - INFO - EligiblePendingSweepService started: interval=90s (default 90s), min_pending_age=60s (default 60s)
+11:41:37 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+11:41:37 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+11:41:37 - daemon.api - INFO - Waiting-children watchdog started: interval=3600s, hang_threshold=3600s
+11:41:37 - daemon.manager - INFO - DeadLetterService connected to InstanceManager
+11:41:37 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver started
+11:41:37 - daemon.api - INFO - JobFeedbackObserver started
+11:41:37 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 1, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+11:41:37 - daemon.services.waiting_children_watchdog - INFO - [Watchdog] Starting periodic loop: interval=3600s, hang_threshold=3600s
+11:41:37 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+11:41:37 - daemon.services.dependency_bus - INFO - bus start: warmed=0 pending watchers, recovered=0 fired-but-unsent watchers, swept=0 orphan pending watcher(s)
+11:41:37 - daemon.services.dependency_bus - INFO - DependencyBus registered
+11:41:37 - daemon.api - INFO - DependencyBus started (recovered=0 FIRED-but-unsent watchers)
+11:41:37 - daemon.api - INFO - System default project bootstrapped: 71931ae0-0f25-5fbf-853b-2a78cc978d7e
+11:41:37 - daemon.services.job_processor - INFO - JobProcessor started
+11:41:37 - daemon.api - INFO - JobProcessor started
+11:41:37 - daemon.services.job_processor - INFO - JobProcessor: JobFeedbackObserver wired (MESSAGE jobs route through observer — sole dispatch path post-Phase-D)
+11:41:37 - daemon.api - INFO - JobFeedbackObserver wired into JobProcessor
+11:41:37 - daemon.manager - INFO - JobFeedbackObserver wired into InstanceManager
+11:41:37 - daemon.api - INFO - JobFeedbackObserver wired into InstanceManager (report_lane=ON)
+11:41:37 - daemon.manager - INFO - NotificationBroadcaster connected to InstanceManager
+11:41:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: started
+11:41:37 - daemon.api - INFO - Auto-provisioned system queues for 100 projects
+11:41:37 - daemon.sources.cleanup - INFO - SourceCleanup started (interval: 21600s)
+11:41:37 - daemon.sources.dispatcher - INFO - Starting ResponseDispatcher
+11:41:37 - daemon.sources.registry - INFO - Loading and scheduling auto-start for enabled adapters...
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002999
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002998
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002997
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002996
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002995
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002994
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002993
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002992
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002991
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002990
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002989
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002988
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002987
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002986
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002985
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002984
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002983
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002982
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002981
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002980
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002979
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002978
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002977
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002976
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002975
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002974
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002973
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002972
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002971
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002970
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002969
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002968
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002967
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002966
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002965
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002964
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002963
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002962
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002961
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002960
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002959
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002958
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002957
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002956
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002955
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002954
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002953
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002952
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002951
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002950
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002949
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002948
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002947
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002946
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002945
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002944
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002943
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002942
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002941
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002940
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002939
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002938
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002937
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002936
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002935
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002934
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002933
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002932
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002931
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002930
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002929
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002928
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002927
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002926
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002925
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002924
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002923
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002922
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002921
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002920
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002919
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002918
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002917
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002916
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002915
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002914
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002913
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002912
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002911
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002910
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002909
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002908
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002907
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002906
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002905
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002904
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002903
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002902
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002901
+11:41:37 - daemon.sources.registry - DEBUG - Skipping stopped source: cancel-002900
+11:41:37 - daemon.sources.registry - INFO - Scheduled auto-start for 0 adapters (delayed 60.0s)
+11:41:37 - daemon.manager - INFO - Message sources system started
+11:41:37 - daemon - INFO - [Readiness] Refresher started: interval=10s, queue_freshness_threshold=120s
+11:41:37 - daemon.api - INFO - VS Code proxy mounted at /vscode
+11:41:37 - daemon.api - INFO - Editor preference is 'vscode' — auto-starting code-server at boot
+11:41:37 - daemon.services.vscode_server_manager - INFO - VSCode allow_remote=false; code-server will bind 127.0.0.1 only.
+11:41:38 - daemon.services.vscode_server_manager - INFO - code-server started: pid=92082 port=58934 workdir=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble
+11:41:38 - daemon.api - INFO - code-server auto-started on port 58934
+11:41:38 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True
+11:41:38 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager started
+INFO:     Application startup complete.
+Context7 Documentation MCP Server v4.1.0 running on stdio
+11:41:38 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: resolve-library-id -> mcp_context7_resolve-library-id
+11:41:38 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: query-docs -> mcp_context7_query-docs
+11:41:38 - daemon.mcp.warmup_pool - INFO - Warmed up pool for 'context7' (1/1 connections)
+11:41:38 - daemon.mcp.warmup_pool - INFO - MCP warmup complete: 1 server(s) ready
+11:41:38 - daemon.manager - INFO - MCP warm-up pool ready: {'context7': {'available': 1, 'pool_size': 1, 'healthy': True}}
+11:41:38 - daemon.mcp.warmup_pool - INFO - Started MCP health check loop (interval=60s)
+11:41:39 - mcp.client.streamable_http - INFO - Negotiated protocol version: 2025-11-25
+11:41:40 - daemon.api - INFO - [1m127.0.0.1:58947[0m [92mGET[0m /docs [92m200[0m
+11:41:40 - daemon.services.mcp_service - INFO - eager_warm_schemas: primed 2/2 MCP server schema(s) (plane: 177 tool(s), context7: 2 tool(s))
+11:41:46 - daemon.api - INFO - [1m127.0.0.1:58983[0m [93mPUT[0m /api/settings/editor [92m200[0m
+11:41:53 - daemon.api - INFO - [1m127.0.0.1:59022[0m [92mGET[0m /vscode/healthz [92m200[0m
+11:42:07 - daemon.repositories.job_queue.repository - DEBUG - reap_legacy_mirror_zombies: no legacy candidates (created_at < 2026-09-02T00:00:00+00:00); self-extinguishing
+11:42:07 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+11:42:07 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+11:42:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=1)
+11:42:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:42:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:42:20 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/ [92m200[0m
+11:42:20 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css [92m200[0m
+11:42:20 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js [92m200[0m
+11:42:20 - daemon.api - INFO - [1m127.0.0.1:59168[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js [92m200[0m
+INFO:     127.0.0.1:59185 - "WebSocket /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5?reconnectionToken=443e4622-4559-4a7f-a973-03e6b2728630&reconnection=false&skipWebSocketFrames=false" [accepted]
+INFO:     connection open
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js [93m404[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59168[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm [93m404[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59168[0m [92mGET[0m /vscode/update/check [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [92m200[0m
+INFO:     127.0.0.1:59198 - "WebSocket /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5?reconnectionToken=b6a0968a-3b66-4024-8226-212d263fda71&reconnection=false&skipWebSocketFrames=false" [accepted]
+INFO:     connection open
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59210[0m [92mGET[0m /vscode/_static/src/browser/media/templates.png [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59168[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf [92m200[0m
+11:42:22 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59167[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59168[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:23 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:42:24 - daemon.api - INFO - [1m127.0.0.1:59162[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [94m304[0m
+11:42:36 - daemon.services.maintenance - INFO - Starting checkpoint cleanup job
+11:42:36 - daemon.services.maintenance - INFO - pinned_subtree_terminal_count=0 (sum of terminal descendants under pinned roots; P1 polarity change now visible)
+11:42:36 - daemon.services.maintenance - DEBUG - No orphaned checkpoint threads found
+11:42:36 - daemon.services.maintenance - DEBUG - No expired terminal instances found
+11:42:36 - daemon.services.maintenance - DEBUG - Terminal instance history within cap: 30/1000
+11:42:36 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune threads=0 deleted=0 duration_ms=0 (no excess threads)
+11:42:36 - daemon.services.maintenance - DEBUG - No threads with excessive checkpoints found
+11:42:36 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune-exit threads=0 deleted=0 duration_ms=3
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=20cda307 dry_run=1 deleted=0 bytes=0 refs_seen=62 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=21276fb7 dry_run=1 deleted=0 bytes=0 refs_seen=61 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=24931842 dry_run=1 deleted=29 bytes=822071 refs_seen=172 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=2571c8e4 dry_run=1 deleted=0 bytes=0 refs_seen=32 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=2d3f8860 dry_run=1 deleted=0 bytes=0 refs_seen=21 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=42f6b690 dry_run=1 deleted=0 bytes=0 refs_seen=32 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=48115c3c dry_run=1 deleted=0 bytes=0 refs_seen=129 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=49d6fbc1 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=507acb66 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=539fb4ac dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=56338335 dry_run=1 deleted=0 bytes=0 refs_seen=21 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=589a98a9 dry_run=1 deleted=0 bytes=0 refs_seen=78 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=5ad0a32c dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=60b2c666 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=6e35a4a4 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=784bc8c4 dry_run=1 deleted=0 bytes=0 refs_seen=21 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=9ba0be0b dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=a1aaaf59 dry_run=1 deleted=15 bytes=292406 refs_seen=168 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=a9f57148 dry_run=1 deleted=0 bytes=0 refs_seen=21 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=b18e418a dry_run=1 deleted=0 bytes=0 refs_seen=81 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=b6f013e6 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=bb5a1c99 dry_run=1 deleted=0 bytes=0 refs_seen=40 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=ce37691e dry_run=1 deleted=0 bytes=0 refs_seen=21 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=ce70a28c dry_run=1 deleted=0 bytes=0 refs_seen=56 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=e56d6fa2 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=e78d0a39 dry_run=1 deleted=7 bytes=48711 refs_seen=166 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=e93cd86a dry_run=1 deleted=0 bytes=0 refs_seen=98 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=eb7d55fe dry_run=1 deleted=0 bytes=0 refs_seen=111 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=f1560e19 dry_run=1 deleted=0 bytes=0 refs_seen=79 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=f1864631 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=f47b6475 dry_run=1 deleted=0 bytes=0 refs_seen=11 observed_blob_count=0
+11:42:36 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=fbccf21d dry_run=1 deleted=5 bytes=22613 refs_seen=170 observed_blob_count=0
+11:42:36 - daemon.services.checkpoint_prune - INFO - [CheckpointPerf] op=blob_prune_summary threads=32 deleted=0 bytes=0 dry_run=1 duration_ms=67 scanned_pairs=32 skipped=0 backend=postgres
+11:42:36 - daemon.services.maintenance - INFO - Checkpoint cleanup job completed
+11:42:36 - daemon.services.maintenance - INFO - Maintenance job 'checkpoint_cleanup' completed successfully
+11:42:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=2)
+11:42:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:42:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:42:37 - daemon.services.maintenance - INFO - Maintenance job 'skill_metric_scan' completed successfully
+11:42:37 - daemon.services.maintenance - INFO - Maintenance job 'skill_orphan_sweep' completed successfully
+11:42:41 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html [92m200[0m
+11:42:41 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:42:41 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:42:41 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html [92m200[0m
+11:42:43 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [94m304[0m
+11:42:43 - daemon.api - INFO - [1m127.0.0.1:59424[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:43:07 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 2, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+11:43:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=3)
+11:43:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:43:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:43:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=4)
+11:43:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:43:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+INFO:     connection closed
+INFO:     connection closed
+11:44:02 - daemon.api - INFO - [1m127.0.0.1:59835[0m [92mGET[0m /vscode/ [92m200[0m
+11:44:02 - daemon.api - INFO - [1m127.0.0.1:59835[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css [92m200[0m
+11:44:02 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js [92m200[0m
+11:44:03 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js [92m200[0m
+INFO:     127.0.0.1:59853 - "WebSocket /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5?reconnectionToken=af2a6e30-0d05-4155-b299-38f8f26a182f&reconnection=false&skipWebSocketFrames=false" [accepted]
+INFO:     connection open
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm [93m404[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js [93m404[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/update/check [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [92m200[0m
+INFO:     127.0.0.1:59862 - "WebSocket /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5?reconnectionToken=230e0738-d2ea-4a5b-add0-f80818d4dfdb&reconnection=false&skipWebSocketFrames=false" [accepted]
+INFO:     connection open
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js [92m200[0m
+11:44:04 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/_static/src/browser/media/templates.png [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59835[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59835[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59844[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59835[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:05 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource [92m200[0m
+11:44:06 - daemon.api - INFO - [1m127.0.0.1:59843[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [94m304[0m
+11:44:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=5)
+11:44:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:44:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:44:21 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html [92m200[0m
+11:44:21 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:44:21 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:44:21 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html [92m200[0m
+11:44:22 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/_static/out/browser/serviceWorker.js [94m304[0m
+11:44:22 - daemon.api - INFO - [1m127.0.0.1:60099[0m [92mGET[0m /vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js [92m200[0m
+11:44:37 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 3, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+11:44:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=6)
+11:44:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:44:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:45:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=7)
+11:45:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:45:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+INFO:     connection closed
+INFO:     connection closed
+11:45:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=8)
+11:45:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:45:37 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+11:46:07 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 4, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+11:46:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=9)
+11:46:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+11:46:07 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 4 queue(s) with admittable work
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+11:46:22 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager shutting down
+11:46:22 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped after processing 0 events
+11:46:22 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped
+11:46:22 - daemon.services.dependency_bus - INFO - bus stop: cleared 0 cached watchers
+11:46:22 - daemon.services.dependency_bus - INFO - DependencyBus unregistered
+11:46:22 - daemon.services.job_processor - INFO - JobProcessor stopped
+11:46:22 - daemon.services.live_event_hub - INFO - LiveEventHub shutdown complete
+11:46:22 - daemon.services.notification_broadcaster - INFO - NotificationBroadcaster shutdown complete
+11:46:22 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService stopped
+11:46:22 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService stopped
+11:46:22 - daemon.services.vscode_server_manager - INFO - code-server stopped: pid=92082 exit_code=0
+11:46:22 - daemon.manager - INFO - Starting graceful shutdown...
+11:46:22 - daemon.sources.dispatcher - INFO - Stopping ResponseDispatcher
+11:46:22 - daemon.sources.registry - INFO - Stopping all adapters...
+11:46:22 - daemon.sources.registry - INFO - All adapters stopped
+11:46:22 - daemon.sources.cleanup - INFO - SourceCleanup stopped
+11:46:22 - daemon.manager - INFO - Message sources system stopped
+11:46:22 - daemon.services.cancellation - DEBUG - All requests completed, proceeding with shutdown
+11:46:22 - daemon.services.worker_pool - INFO - Stopping WorkerPool (4 workers)...
+11:46:22 - daemon.services.worker_pool - DEBUG - Stopping worker worker-0...
+11:46:22 - daemon.services.worker_pool - WARNING - Worker worker-0 did not stop within 0s
+11:46:22 - daemon.services.worker_pool - DEBUG - Stopping worker worker-1...
+11:46:22 - daemon.services.worker_pool - WARNING - Worker worker-1 did not stop within 0s
+11:46:22 - daemon.services.worker_pool - DEBUG - Stopping worker worker-2...
+11:46:22 - daemon.services.worker_pool - WARNING - Worker worker-2 did not stop within 0s
+11:46:22 - daemon.services.worker_pool - DEBUG - Stopping worker worker-3...
+11:46:22 - daemon.services.worker_pool - WARNING - Worker worker-3 did not stop within 0s
+11:46:22 - daemon.services.worker_pool - INFO - Worker worker-1 stopped: claimed=0, completed=0, failed=0
+11:46:22 - daemon.services.worker_pool - INFO - Worker worker-0 stopped: claimed=0, completed=0, failed=0
+11:46:22 - daemon.services.worker_pool - INFO - Worker worker-2 stopped: claimed=0, completed=0, failed=0
+11:46:22 - daemon.services.worker_pool - INFO - Worker worker-3 stopped: claimed=0, completed=0, failed=0
+11:46:22 - daemon.services.worker_pool - INFO - WorkerPool stopped
+11:46:22 - daemon.manager - INFO - Worker pool stopped
+11:46:22 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery stopped
+11:46:22 - daemon.manager - INFO - Stale task recovery stopped
+11:46:22 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService stopped
+11:46:22 - daemon.manager - INFO - Report delivery recovery stopped
+11:46:22 - daemon.services.event_bus - INFO - Shutting down EventBus
+11:46:22 - daemon.services.event_bus - INFO - EventBus shutdown complete
+11:46:22 - daemon.services.maintenance - INFO - Maintenance service stopped
+11:46:22 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer asyncpg pool closed
+11:46:22 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer saver connection closed
+11:46:22 - daemon.manager - INFO - Checkpointer adapter closed
+11:46:22 - daemon.mcp.warmup_pool - INFO - MCP warm-up pool drained
+11:46:22 - daemon.manager - INFO - Cleaning up resources...
+11:46:22 - daemon.manager - INFO - Database engine disposed
+11:46:22 - daemon.manager - INFO - Graceful shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [92044]
+INFO:     Stopping reloader process [92042]

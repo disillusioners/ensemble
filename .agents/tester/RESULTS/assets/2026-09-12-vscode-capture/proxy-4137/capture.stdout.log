@@ -1,0 +1,55 @@
+Image: Deepcode.png
+[11:44:02] PHASE -> NAVIGATE
+[11:44:06] PHASE -> SETTLE
+[1.2s] Explorer settled (i=0)
+[11:44:13] PHASE -> EXPAND_PATH
+[0.0s] expanding path: ('.inspiration-projects', 'DeepCode', 'assets')
+[0.1s] '.inspiration-projects' clicked
+[2.2s] 'DeepCode' clicked
+[4.2s] 'assets' clicked
+[11:44:21] PHASE -> FIRST_CLICK
+[11:44:26] PHASE -> OBSERVE
+[11:45:27] PHASE -> FINAL
+[0.1s] screenshot saved
+[0.1s] network.json + console.log saved (79 events, 10 console)
+
+=== ALL FAILING/MEDIA-PREVIEW/VSCODE-REMOTE-RESOURCE EVENTS ===
+[NAVIGATE       /requestfailed  ] [net::ERR_ABORTED] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=
+[SETTLE         /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=
+[EXPAND_PATH    /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=
+[OBSERVE        /request        ] [] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vsc
+[OBSERVE        /request        ] [] https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css
+[OBSERVE        /requestfailed  ] [csp] https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css
+[OBSERVE        /request        ] [] https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js
+[OBSERVE        /requestfailed  ] [csp] https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js
+[OBSERVE        /response       ] [200] http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vsc
+
+=== WEBVIEW HTML + CSP ===
+
+URL: .../webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1e...
+CSP HEADER: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;
+META CSP:    default-src 'none'; script-src 'sha256-24QqbpzqcqSyIGvg/ZwFRy5pPlhmVBa8CkUREEIUnBw=' 'self'; frame-src 'self'; style-src 'unsafe-inline';
+
+=== CONSOLE (errors/warnings) ===
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] The web worker extension host is started in a same-origin iframe!
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[error] Connecting to 'https://open-vsx.org/vscode/gallery/extensionquery' violates the following Content Security Policy directive: "connect-src 'self' ws: wss:". The action has been blocked.
+[error] Fetch API cannot load https://open-vsx.org/vscode/gallery/extensionquery. Refused to connect because it violates the document's Content Security Policy.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[error] Loading the stylesheet 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css' violates the following Content Security Policy directive: "style-src 'self
+[error] Loading the script 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js' violates the following Content Security Policy directive: "script-src 'self' 'u
+
+=== VERDICT: timeout ===
