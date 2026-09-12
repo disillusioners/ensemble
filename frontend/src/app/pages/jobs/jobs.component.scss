@@ -848,6 +848,30 @@
   }
 }
 
+// P4 — preflight staleness surface on the System Cleanup button.
+// Mirrors the ``defer-page-banner-degraded-tag`` + tag-class shape so
+// operators learn ONE visual idiom = "the count you're looking at
+// may not match reality". The button border picks up a softer
+// warning tint while degraded (the harder ``#f43f5e`` red is owned
+// by ``has-bad-state`` — they can coexist when both flags fire, the
+// red wins).
+.cleanup-btn.cleanup-btn-degraded {
+  border-color: rgba(253, 164, 175, 0.7) !important;
+  color: #fda4af !important;
+}
+
+.cleanup-btn-degraded-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(244, 63, 94, 0.22);
+  color: #fda4af;
+  margin-left: 6px;
+}
+
 // Button Styles
 .refresh-btn,
 .create-btn {

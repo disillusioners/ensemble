@@ -75,11 +75,26 @@
         [disabled]="cleanupInProgress()"
         class="cleanup-btn"
         [class.has-bad-state]="hasBadState()"
+        [class.cleanup-btn-degraded]="preflightDegraded()"
         [matTooltip]="hasBadState()
-          ? '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.'
-          : 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects'">
+          ? (preflightDegraded()
+              ? '⚠ ' + badStateCount() + ' bad-state items detected (preflight stale — count may be out of date). Click to fix.'
+              : '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.')
+          : (preflightDegraded()
+              ? 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects — preflight stale'
+              : 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects')">
         <mat-icon [class.spinning]="cleanupInProgress()">cleaning_services</mat-icon>
         System Cleanup
+        <!-- P4 — preflight staleness tag. Same shape as the
+             ``defer-page-banner-degraded-tag`` and
+             ``window-banner-degraded-tag`` chips so the operator's
+             eye learns one tag = "the count you're looking at may
+             not match reality". The flag flips on
+             ``/api/jobs/cleanup/preflight`` failure and clears on
+             the next successful poll. -->
+        @if (preflightDegraded()) {
+          <span class="cleanup-btn-degraded-tag" aria-label="preflight stale">stale</span>
+        }
       </button>
       <button
         mat-flat-button

@@ -6,6 +6,7 @@ import {
   DeferBlockHolder,
   DeferBlockedStatus,
   deferPageBanner,
+  formatDeferHoldSince,
   orderDeferHolders,
 } from '../../../models/defer-blocked.model';
 
@@ -124,7 +125,7 @@ export class DeferHoldersPanelComponent {
   });
 
   /**
-   * The animate copy for the "Resume or terminate to unblock"
+   * The template copy for the "Resume or terminate to unblock"
    * paused-only row — does NOT render for stalled/live because the
    * recovery path differs (pause ⇒ resume/terminate the holder;
    * stalled ⇒ force-complete; live ⇒ no action).
@@ -160,13 +161,16 @@ export class DeferHoldersPanelComponent {
   }
 
   /**
-   * Template-friendly format helper — the model exposes the pure
-   * function and the template stays thin.
+   * Template-friendly alias for ``formatDeferHoldSince`` — the
+   * canonical helper lives in ``defer-blocked.model.ts`` and the
+   * panel calls it directly through this one-line delegate so the
+   * template stays type-stable on the holder's ``since`` field
+   * (which can be ``null``). P4 — the previous private copy that
+   * duplicated the helper body byte-for-byte is deleted; any drift
+   * between the panel and the banner is now impossible because both
+   * call the same function.
    */
   protected formatSince(since: string | null): string {
-    if (!since) {
-      return 'unknown time';
-    }
-    return `${since.replace('T', ' ').slice(0, 16)} UTC`;
+    return formatDeferHoldSince(since);
   }
 }

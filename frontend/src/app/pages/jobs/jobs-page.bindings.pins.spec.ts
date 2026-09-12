@@ -782,6 +782,39 @@ describe('P4 — defer banner + holders panel template↔component binding pins'
     expect(componentSrc).toMatch(/afterClosed\(\)\.subscribe\(\(confirmed\)/);
   });
 
+  it('component action handlers keep the service call INSIDE the afterClosed callback (P4 F-5 structural pin)', () => {
+    // P4 REVIEW FIX — the previous regex
+    // (``afterClosed().subscribe((confirmed)``) only proved the
+    // shape existed; it did NOT prove the service call sat inside
+    // the callback. A hoisted call (dispatching BEFORE the dialog
+    // resolves) would still pass. The structural pin below anchors
+    // on the start of the ``afterClosed().subscribe((confirmed)``
+    // callback and requires the service call to appear within a
+    // bounded window — the window is set wide enough to cover
+    // comment-blank lines + the ``deferActionInFlight.set(true)``
+    // flag toggle, but tight enough that a ``});`` from a hoisted
+    // handler would fall outside it.
+    //
+    // Stated regex:
+    //   ``ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{
+    //     [\s\S]{0,600}?this\.jobService\.<method>\(holder\.instance_id\)``
+    //
+    // Hoist failure mode: if a future refactor moves the
+    // ``forceCompleteDeferHolder`` / ``resendDeferredForeground``
+    // call ABOVE the ``ref.afterClosed().subscribe(...)`` open, the
+    // regex's anchor would be AFTER the call and the match would
+    // fail. The behavioral specs in ``jobs.component.spec.ts``
+    // (``Holder action two-stage confirm``) provide the
+    // corroborating assertion; the structural pin is the cheap
+    // source-text guard that survives any TestBed-free mock drift.
+    expect(componentSrc).toMatch(
+      /ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{[\s\S]{0,600}?this\.jobService\.forceCompleteDeferHolder\(holder\.instance_id\)/,
+    );
+    expect(componentSrc).toMatch(
+      /ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{[\s\S]{0,600}?this\.jobService\.resendDeferredForeground\(holder\.instance_id\)/,
+    );
+  });
+
   it('component refreshes the defer leg after every successful action (banner/panel post-action refresh)', () => {
     // P4 task 3 acceptance: "success refreshes holders leg". Both
     // action handlers re-fetch the defer leg on success. The window
@@ -798,6 +831,98 @@ describe('P4 — defer banner + holders panel template↔component binding pins'
     // swallow at the end of the Promise.all chain is GONE.
     expect(componentSrc).toMatch(/this\.preflightDegraded\.set\(true\)/);
     expect(componentSrc).not.toMatch(/\.catch\(\(\) => \{\s*\/\/ Fail silently/);
+  });
+
+  it('P4 REVIEW FIX — preflightDegraded staleness marker is rendered on the System Cleanup button (🟡2 pin pair)', () => {
+    // The dead-flag review finding: ``preflightDegraded`` was set on
+    // failure but NEVER rendered — the operator saw a stale red-glow
+    // as if it were healthy. The fix renders BOTH a visible "stale"
+    // tag AND adjusts the tooltip copy so the badge number no longer
+    // reads as ground-truth. Placement decision (chosen from the
+    // review's three options — tooltip only, glow only, banner
+    // banner area):
+    //
+    //   * The "stale" tag sits INSIDE the System Cleanup button,
+    //     mirroring the existing ``defer-page-banner-degraded-tag``
+    //     and ``window-banner-degraded-tag`` chips so the operator's
+    //     eye learns ONE visual idiom = "the count you're looking
+    //     at may not match reality".
+    //   * The tooltip ALSO picks up a stale suffix in either branch
+    //     (has-bad-state OR neutral) so the explanatory text stays
+    //     honest regardless of which tooltip branch fires.
+    //   * The button picks up a softer warning tint via
+    //     ``cleanup-btn-degraded`` so the visual cue is also
+    //     hover-persistent (the tag itself is purely static).
+    //
+    // Pin pair: behavior — the template renders the marker iff
+    // ``preflightDegraded()`` (the @if gate proves the marker is
+    // not unconditionally visible); source — the component
+    // declares the flag as the ``signal`` the template reads.
+    expect(templateSrc).toMatch(/\[class\.cleanup-btn-degraded\]="preflightDegraded\(\)"/);
+    expect(templateSrc).toMatch(/@if \(preflightDegraded\(\)\) \{[\s\S]*?class="cleanup-btn-degraded-tag"/);
+    expect(templateSrc).toMatch(/preflight stale — count may be out of date/);
+    expect(componentSrc).toMatch(/readonly preflightDegraded = signal<boolean>\(false\)/);
+  });
+
+  it('P4 REVIEW FIX — deferHolderKind is a computed over store.deferStatus() (🟡3 race-spec source pin)', () => {
+    // The dead-flag-style race review finding: the legacy code
+    // read ``store.deferStatus()`` synchronously when the
+    // preflight resolved. If preflight landed BEFORE the defer
+    // leg, ``deferHolderKind`` was set to ``null`` despite a
+    // paused holder; nothing re-derived it (the poll does not
+    // refresh preflight). The signal→computed refactor closes
+    // the race because the computed re-evaluates the moment
+    // ``store.deferStatus()`` changes.
+    //
+    // Source pin: the field is declared as a ``computed`` (not a
+    // ``signal``) and its body calls ``deferBlockAction`` on
+    // ``store.deferStatus()``. The corresponding ``.set`` from
+    // the legacy ``refreshBadStateCount`` body must be GONE.
+    expect(componentSrc).toMatch(
+      /readonly deferHolderKind = computed<[\s\S]*?>\(\s*\(\) => deferBlockAction\(this\.store\.deferStatus\(\)\)/,
+    );
+    // The legacy setter is dead — ``deferHolderKind.set`` must
+    // not appear in the production source. (The mock component
+    // in ``jobs.component.spec.ts`` still uses ``.set`` freely,
+    // so this assertion is scoped to ``componentSrc`` only.)
+    expect(componentSrc).not.toMatch(/this\.deferHolderKind\.set\(/);
+    // The defer-block payload arriving AFTER preflight still
+    // yields the correct kind — the computed re-evaluates
+    // reactively. The behavioral race spec lives in
+    // ``jobs.component.spec.ts`` (``Holder action deferred kind
+    // race`` describe block): a placeholder
+    // ``store.deferStatus() = null`` followed by setting the
+    // paused holder proves the computed returns ``'paused'``,
+    // not the legacy null.
+  });
+
+  it('P4 REVIEW FIX — defer-holders panel delegates formatSince to formatDeferHoldSince (🟡4 anti-duplication pin)', () => {
+    // The duplication review finding: the panel's private
+    // ``formatSince`` was byte-identical to the model helper
+    // ``formatDeferHoldSince`` (incl. the ``'unknown time'``
+    // fallback branch). The fix imports the helper and reduces
+    // the panel method to a one-line delegate — any drift
+    // between the panel and the banner is now impossible because
+    // both call the same function.
+    //
+    // Pin (source-only): the panel source contains BOTH the
+    // import AND a delegate body — and does NOT carry the
+    // duplicated ``'unknown time'`` branch shape (the
+    // pre-fix body had ``if (!since) return 'unknown time'``).
+    const fs = require('fs');
+    const path = require('path');
+    const panelSource = fs.readFileSync(
+      path.join(__dirname, 'defer-holders-panel/defer-holders-panel.component.ts'),
+      'utf-8',
+    );
+    // Import present.
+    expect(panelSource).toMatch(/import \{[\s\S]*?formatDeferHoldSince[\s\S]*?\} from/);
+    // Delegate body present (one-line return).
+    expect(panelSource).toMatch(/return formatDeferHoldSince\(since\);/);
+    // Duplicated branch shape GONE — the pre-fix ``if (!since)
+    // { return 'unknown time' }`` body would surface here if
+    // re-introduced.
+    expect(panelSource).not.toMatch(/if \(!since\) \{\s*return 'unknown time'/);
   });
 
   it('the page banner DOES NOT touch the cleanup dialog directly (P4 task 6 — dialog contract untouched)', () => {

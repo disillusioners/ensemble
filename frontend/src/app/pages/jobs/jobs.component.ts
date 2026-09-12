@@ -17,7 +17,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
-import { Subscription, switchMap, of, catchError, tap, firstValueFrom } from 'rxjs';
+import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { MissionService } from '../../services/mission.service';
 import { JobSseService } from '../../services/job-sse.service';
@@ -622,13 +622,17 @@ export class JobsComponent implements OnInit, OnDestroy {
   // NOT on the preflight wire — the preflight endpoint
   // ``GET /api/jobs/cleanup/preflight`` does NOT emit it. The
   // field is sourced from the SEPARATE
-  // ``GET /api/queues/defer-blocked`` endpoint and populated by
-  // this component when the JS snapshot is wired (see the
-  // setter below — populated via ``deferBlockAction(deferStatus)``
-  // composition). The TS interface in
+  // ``GET /api/queues/defer-blocked`` endpoint via
+  // ``JobsPageStore.fetchDeferBlocked``. P4 — derived as a
+  // ``computed`` over ``store.deferStatus()`` so it stays in
+  // sync no matter which leg lands first (the legacy
+  // ``signal.set`` inside ``refreshBadStateCount`` raced when
+  // preflight resolved before the defer leg). The TS interface in
   // ``cleanup-preflight.model.ts`` annotates the field as a
   // type-completeness convenience only.
-  readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
+  readonly deferHolderKind = computed<CleanupPreflight['defer_holder_kind']>(
+    () => deferBlockAction(this.store.deferStatus())?.holder.kind ?? null,
+  );
 
   // P4 — preflight degradation flag (retain-last-data discipline).
   // The legacy code silently swallowed preflight failures at :587-589;
@@ -1108,10 +1112,11 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.liveInstanceCount.set(result.live_instance_count ?? 0);
         this.liveInstanceIds.set(result.live_instance_ids ?? []);
         this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
-        // The defer holder kind is sourced from the SEPARATE defer
-        // fetch (the store owns it now); read it from the store alias.
-        const deferStatus = this.store.deferStatus();
-        this.deferHolderKind.set(deferBlockAction(deferStatus)?.holder.kind ?? null);
+        // P4 — ``deferHolderKind`` is now a ``computed`` over the
+        // store's defer status (the signal→computed refactor that
+        // closed the first-load race when preflight resolved before
+        // the defer leg). Itself therefore re-derives the moment
+        // ``store.deferStatus()`` changes — no manual ``set`` needed.
         // Preflight succeeded — clear any prior degradation.
         this.preflightDegraded.set(false);
       },

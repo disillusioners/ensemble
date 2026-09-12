@@ -4,8 +4,9 @@ import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.mo
 import type { Work } from '../../models/work.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
-import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
+import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
+import { DeferBlockHolder, DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
 import {
   JobsEmptyStateKind,
   classifyJobsEmptyState,
@@ -1720,6 +1721,461 @@ describe('JobsComponent Logic', () => {
         expect(cleanupService.cleanupAllJobs).not.toHaveBeenCalled();
         expect(mockSnackBar.openCalls).toHaveLength(0);
       });
+    });
+  });
+
+  // ── P4 HOLDERS ACTION GATE (jobs-page-improvement) — behavioral specs ─
+  //
+  // Review finding: the existing two-stage-confirm pins in
+  // ``jobs-page.bindings.pins.spec.ts`` (``afterClosed().subscribe`` +
+  // ``this.dialog.open<…>(ConfirmDialogComponent, …)``) were TAUTOLOGICAL —
+  // they matched shapes that pre-existed on the cleanup dialog handler
+  // (which they were copied from), so an unguarded action would still
+  // pass the regex. The IMPLEMENTATION is correct (production handler
+  // gates the service call on ``confirmed``); the safety net was not.
+  //
+  // The fix: a CONTROLLABLE dialog mock (``mockDialog.nextResult``)
+  // drives both ``false`` and ``true`` paths and asserts the service
+  // call count is exactly 0 / exactly 1. The mirror component below
+  // copies the production ``onHolderForceComplete`` and
+  // ``onHolderResendForeground`` bodies faithfully — if the mirror
+  // drifts, the behavior pins become meaningless (mirror-parity duty,
+  // same convention as ``BadStateAwareJobsComponent`` above).
+  //
+  // The structural F-5 pin lives in
+  // ``jobs-page.bindings.pins.spec.ts`` (the regex the original task
+  // accepted): it pins the service-call text to live INSIDE the
+  // ``afterClosed().subscribe`` callback so a hoist above ``ref.open()``
+  // would break the pin.
+  describe('Holder action two-stage confirm — behavioral gate (P4 review fix)', () => {
+    /**
+     * Mirror of the production ``JobsComponent`` holders actions.
+     * Faithfully copies both ``onHolderForceComplete`` and
+     * ``onHolderResendForeground`` bodies (incl. the
+     * ``modalOpen`` / ``deferActionInFlight`` flag toggles + the
+     * dialog config) so the behavior pins below prove the REAL
+     * gate. If the production body changes, this mirror MUST be
+     * updated in lockstep — drift = meaningless test (mirror-parity
+     * duty, F-2 in the F-5 pin).
+     */
+    class HolderActionJobsComponent {
+      readonly deferActionInFlight = signal<boolean>(false);
+      readonly deferPanelOpen = signal<boolean>(false);
+      readonly modalOpen = signal<boolean>(false);
+
+      constructor(
+        private readonly jobService: {
+          forceCompleteDeferHolder: jest.Mock;
+          resendDeferredForeground: jest.Mock;
+        },
+        private readonly store: {
+          fetchDeferBlocked: jest.Mock;
+        },
+        private readonly snackBar: {
+          openCalls: Array<{ message: string; action: string; config?: any }>;
+          open: (message: string, action: string, config?: any) => unknown;
+        },
+      ) {}
+
+      onHolderForceComplete(holder: DeferBlockHolder): void {
+        if (this.deferActionInFlight()) {
+          return;
+        }
+        this.modalOpen.set(true);
+        const ref = mockDialog.open<
+          ConfirmDialogComponent,
+          ConfirmDialogData,
+          boolean | undefined
+        >(ConfirmDialogComponent, {
+          width: '420px',
+          panelClass: 'dark-modal-panel',
+          data: {
+            title: 'Force-complete defer holder?',
+            message:
+              `This will terminate the ${holder.kind} holder instance ` +
+              `${holder.instance_id} and reconcile its deferred message mirrors. ` +
+              `The action is irreversible.`,
+            confirmLabel: 'Force complete',
+            cancelLabel: 'Cancel',
+            destructive: true,
+          },
+        });
+        ref.afterClosed().subscribe((confirmed) => {
+          this.modalOpen.set(false);
+          if (!confirmed) {
+            return;
+          }
+          this.deferActionInFlight.set(true);
+          this.jobService.forceCompleteDeferHolder(holder.instance_id).subscribe({
+            next: (result: { terminated: boolean; message: string }) => {
+              this.deferActionInFlight.set(false);
+              this.deferPanelOpen.set(false);
+              const verb = result.terminated ? 'Force-completed' : 'Force-complete refused';
+              this.snackBar.open(
+                `${verb} holder ${holder.instance_id}: ${result.message}`,
+                'Close',
+                { duration: 3500, panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar' },
+              );
+              this.store.fetchDeferBlocked();
+            },
+            error: (err: { message?: string }) => {
+              this.deferActionInFlight.set(false);
+              this.snackBar.open(
+                err?.message || 'Failed to force-complete holder',
+                'Dismiss',
+                { duration: 5000, panelClass: 'error-snackbar' },
+              );
+            },
+          });
+        });
+      }
+
+      onHolderResendForeground(holder: DeferBlockHolder): void {
+        if (this.deferActionInFlight()) {
+          return;
+        }
+        this.modalOpen.set(true);
+        const ref = mockDialog.open<
+          ConfirmDialogComponent,
+          ConfirmDialogData,
+          boolean | undefined
+        >(ConfirmDialogComponent, {
+          width: '420px',
+          panelClass: 'dark-modal-panel',
+          data: {
+            title: 'Resend deferred messages as foreground?',
+            message:
+              `This will cancel the ${holder.kind} holder ${holder.instance_id}'s ` +
+              `queued defer-lane jobs and re-send their message content as NEW ` +
+              `foreground message jobs. The action is irreversible.`,
+            confirmLabel: 'Resend foreground',
+            cancelLabel: 'Cancel',
+            destructive: true,
+          },
+        });
+        ref.afterClosed().subscribe((confirmed) => {
+          this.modalOpen.set(false);
+          if (!confirmed) {
+            return;
+          }
+          this.deferActionInFlight.set(true);
+          this.jobService.resendDeferredForeground(holder.instance_id).subscribe({
+            next: (result: { cancelled_defer_jobs: number; skipped_empty_content: number }) => {
+              this.deferActionInFlight.set(false);
+              this.deferPanelOpen.set(false);
+              this.snackBar.open(
+                `Resent foreground for ${holder.instance_id}: ${result.cancelled_defer_jobs} cancelled, ` +
+                  `${result.skipped_empty_content} skipped`,
+                'Close',
+                { duration: 3500, panelClass: 'success-snackbar' },
+              );
+              this.store.fetchDeferBlocked();
+            },
+            error: (err: { message?: string }) => {
+              this.deferActionInFlight.set(false);
+              this.snackBar.open(
+                err?.message || 'Failed to resend deferred messages',
+                'Dismiss',
+                { duration: 5000, panelClass: 'error-snackbar' },
+              );
+            },
+          });
+        });
+      }
+    }
+
+    /**
+     * Build a noop Observable that captures ``next`` / ``error``
+     * callbacks so the test can drive the post-confirm subscribe
+     * synchronously. Same shape as ``buildCleanupMock`` above.
+     */
+    const buildActionMock = () => {
+      let nextFn: ((r: any) => void) | null = null;
+      let errorFn: ((e: any) => void) | null = null;
+      const obs: any = {
+        pipe: () => obs,
+        subscribe: (observer: any) => {
+          if (typeof observer === 'function') {
+            nextFn = observer;
+          } else {
+            nextFn = observer.next;
+            errorFn = observer.error;
+          }
+          return { unsubscribe: () => {} };
+        },
+      };
+      return {
+        obs,
+        invokeNext: (r: any) => nextFn && nextFn(r),
+        invokeError: (e: any) => errorFn && errorFn(e),
+      };
+    };
+
+    let component: HolderActionJobsComponent;
+    let jobService: {
+      forceCompleteDeferHolder: jest.Mock;
+      resendDeferredForeground: jest.Mock;
+    };
+    let store: { fetchDeferBlocked: jest.Mock };
+    const snackBar = {
+      openCalls: [] as Array<{ message: string; action: string; config?: any }>,
+      open(message: string, action: string, config?: any) {
+        this.openCalls.push({ message, action, config });
+        return { afterDismissed: () => new Observable<void>(() => {}) };
+      },
+    };
+
+    const holder: DeferBlockHolder = {
+      instance_id: 'inst-1',
+      agent: 'agent-1',
+      status: 'paused',
+      since: '2026-09-10T12:00:00Z',
+      kind: 'paused',
+    };
+
+    beforeEach(() => {
+      jobService = {
+        forceCompleteDeferHolder: jest.fn(),
+        resendDeferredForeground: jest.fn(),
+      };
+      store = { fetchDeferBlocked: jest.fn() };
+      component = new HolderActionJobsComponent(jobService, store, snackBar);
+      mockDialog.reset();
+      snackBar.openCalls.length = 0;
+      // Each action returns a noop observable by default — tests that
+      // need synchronous next/error control overwrite per-call.
+      const noop = buildActionMock().obs;
+      jobService.forceCompleteDeferHolder.mockReturnValue(noop);
+      jobService.resendDeferredForeground.mockReturnValue(noop);
+    });
+
+    // ── onHolderForceComplete ──────────────────────────────────────────
+
+    describe('onHolderForceComplete', () => {
+      it('dialog dismissed (nextResult=false) ⇒ service NOT called, no snackbar', () => {
+        mockDialog.nextResult = false;
+
+        component.onHolderForceComplete(holder);
+
+        // CORE BEHAVIORAL PIN — the gate is real. Pre-fix this was
+        // a tautology (regex match on the dialog shape, not on the
+        // dispatch count).
+        expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
+        expect(mockDialog.openCalls).toHaveLength(1);
+        // The dialog IS the correct component with the destructive
+        // config (this part was already covered by the source-pin).
+        expect(mockDialog.openCalls[0].component).toBe(ConfirmDialogComponent);
+        expect((mockDialog.openCalls[0].data as ConfirmDialogData).destructive).toBe(true);
+        expect(snackBar.openCalls).toHaveLength(0);
+      });
+
+      it('dialog dismissed (nextResult=undefined — backdrop) ⇒ service NOT called', () => {
+        // Backdrop / Esc dismiss emits ``undefined``, which the
+        // handler treats as NOT confirmed (same ``!confirmed``
+        // branch). Pin the equality so a future refactor that
+        // converts ``undefined`` to ``true`` fails this gate.
+        mockDialog.nextResult = undefined;
+
+        component.onHolderForceComplete(holder);
+
+        expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
+        expect(snackBar.openCalls).toHaveLength(0);
+      });
+
+      it('dialog confirmed (nextResult=true) ⇒ service called EXACTLY once with the holder instance_id', () => {
+        mockDialog.nextResult = true;
+        const { obs } = buildActionMock();
+        jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+        component.onHolderForceComplete(holder);
+
+        // CORE BEHAVIORAL PIN — the dispatch fires, and ONLY once.
+        // The ``toHaveBeenCalledTimes(1)`` catches any double-fire
+        // from a duplicate handler registration or a hoist above
+        // the dialog.
+        expect(jobService.forceCompleteDeferHolder).toHaveBeenCalledTimes(1);
+        expect(jobService.forceCompleteDeferHolder).toHaveBeenCalledWith('inst-1');
+      });
+
+      it('dialog confirmed → success callback refreshes the defer leg (post-action refresh)', () => {
+        // Pins the success-path fetchDeferBlocked call (P4 task 3
+        // acceptance: "success refreshes holders leg"). Confirmed
+        // path ⇒ next fires ⇒ store.fetchDeferBlocked runs.
+        mockDialog.nextResult = true;
+        const { obs, invokeNext } = buildActionMock();
+        jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+        component.onHolderForceComplete(holder);
+        invokeNext({ terminated: true, message: 'OK' });
+
+        expect(store.fetchDeferBlocked).toHaveBeenCalledTimes(1);
+        expect(snackBar.openCalls).toHaveLength(1);
+        expect(snackBar.openCalls[0].message).toContain('Force-completed');
+      });
+    });
+
+    // ── onHolderResendForeground ──────────────────────────────────────
+
+    describe('onHolderResendForeground', () => {
+      it('dialog dismissed (nextResult=false) ⇒ service NOT called, no snackbar', () => {
+        mockDialog.nextResult = false;
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).not.toHaveBeenCalled();
+        expect(mockDialog.openCalls).toHaveLength(1);
+        expect(mockDialog.openCalls[0].component).toBe(ConfirmDialogComponent);
+        expect((mockDialog.openCalls[0].data as ConfirmDialogData).destructive).toBe(true);
+        expect(snackBar.openCalls).toHaveLength(0);
+      });
+
+      it('dialog dismissed (nextResult=undefined) ⇒ service NOT called', () => {
+        mockDialog.nextResult = undefined;
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).not.toHaveBeenCalled();
+      });
+
+      it('dialog confirmed (nextResult=true) ⇒ service called EXACTLY once with the holder instance_id', () => {
+        mockDialog.nextResult = true;
+        const { obs } = buildActionMock();
+        jobService.resendDeferredForeground.mockReturnValue(obs);
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).toHaveBeenCalledTimes(1);
+        expect(jobService.resendDeferredForeground).toHaveBeenCalledWith('inst-1');
+      });
+
+      it('dialog confirmed → success callback refreshes the defer leg', () => {
+        mockDialog.nextResult = true;
+        const { obs, invokeNext } = buildActionMock();
+        jobService.resendDeferredForeground.mockReturnValue(obs);
+
+        component.onHolderResendForeground(holder);
+        invokeNext({ cancelled_defer_jobs: 3, skipped_empty_content: 1 });
+
+        expect(store.fetchDeferBlocked).toHaveBeenCalledTimes(1);
+        expect(snackBar.openCalls).toHaveLength(1);
+        expect(snackBar.openCalls[0].message).toContain('Resent foreground');
+        expect(snackBar.openCalls[0].message).toContain('3 cancelled');
+      });
+    });
+
+    // ── Guard rails shared by both handlers ────────────────────────────
+
+    it('handler is a no-op while deferActionInFlight=true (re-entry guard)', () => {
+      // The action-in-flight flag is set inside the confirm branch.
+      // The handler returns early on re-entry so a double-click on
+      // the action button cannot dispatch two POSTs. This pins the
+      // guard so a future refactor that drops it surfaces here.
+      component.deferActionInFlight.set(true);
+      mockDialog.nextResult = true;
+      const { obs } = buildActionMock();
+      jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+      component.onHolderForceComplete(holder);
+
+      expect(mockDialog.openCalls).toHaveLength(0);
+      expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── P4 deferHolderKind RACE-SPEC (jobs-page-improvement) ──────────────
+  //
+  // Review finding: the legacy ``deferHolderKind`` was a ``signal``
+  // populated by a ``.set(...)`` inside ``refreshBadStateCount``. When
+  // preflight resolved BEFORE the defer leg, ``deferHolderKind`` was
+  // null despite a paused holder; the poll does not re-fire the
+  // preflight, so the dialog surfaced ``defer_holder_kind: null``
+  // for the lifetime of the page session. The signal→computed
+  // refactor re-derives the kind reactively.
+  //
+  // The spec below uses Angular's ``computed`` directly (no mirror
+  // component needed — the contract is the pure helper call). It
+  // proves the race-spec invariant: defer payload arriving AFTER
+  // preflight still yields the correct kind.
+  describe('deferHolderKind computed — defer-late race spec (P4 review fix)', () => {
+    it('preflight lands first (deferStatus=null) ⇒ deferHolderKind=null; defer leg arrival re-derives to the correct kind', () => {
+      // The race: the preflight fetch resolves before the defer leg
+      // fetch. Under the legacy signal-set, this set ``deferHolderKind``
+      // to null and it STAYED null until the next preflight fetch.
+      // Under the computed, the field re-derives the moment
+      // ``deferStatus()`` changes.
+      const deferStatus = signal<DeferBlockedStatus | null>(null);
+      const deferHolderKind = computed(() =>
+        deferBlockAction(deferStatus())?.holder.kind ?? null,
+      );
+
+      // Phase 1 — preflight only; defer leg still pending.
+      expect(deferHolderKind()).toBeNull();
+
+      // Phase 2 — defer leg resolves with a paused holder. The
+      // computed MUST reactively return the new kind. The legacy
+      // ``.set`` would still be null because nothing re-fires the
+      // preflight on the defer leg's success.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          {
+            instance_id: 'inst-1',
+            agent: 'agent-1',
+            status: 'paused',
+            since: '2026-09-10T00:00:00Z',
+            kind: 'paused',
+          },
+        ],
+      });
+
+      expect(deferHolderKind()).toBe('paused');
+    });
+
+    it('stalled holder wins over live (deferBlockAction priority) — computed tracks priority too', () => {
+      // deferBlockAction's priority is paused > stalled > null;
+      // the computed inherits that priority because it calls the
+      // helper directly. Pins the priority so a future refactor
+      // that "optimizes" the computed to skip the helper call
+      // (and reads status.holders directly) surfaces here.
+      const deferStatus = signal<DeferBlockedStatus | null>(null);
+      const deferHolderKind = computed(() =>
+        deferBlockAction(deferStatus())?.holder.kind ?? null,
+      );
+
+      // Multiple holders: paused is highest priority.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+          { instance_id: 'i-paused', agent: 'a', status: 'paused', since: null, kind: 'paused' },
+          { instance_id: 'i-stalled', agent: 'a', status: 'stalled', since: null, kind: 'stalled' },
+        ],
+      });
+      expect(deferHolderKind()).toBe('paused');
+
+      // Drop the paused holder — stalled wins.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+          { instance_id: 'i-stalled', agent: 'a', status: 'stalled', since: null, kind: 'stalled' },
+        ],
+      });
+      expect(deferHolderKind()).toBe('stalled');
+
+      // Drop stalled too — null (live has no action; the dialog
+      // does not surface a kind when only live holders remain).
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+        ],
+      });
+      expect(deferHolderKind()).toBeNull();
     });
   });
 
