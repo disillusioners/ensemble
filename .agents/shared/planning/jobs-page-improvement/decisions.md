@@ -51,6 +51,8 @@ Each entry: Decision / Rationale / Alternatives considered / Open-question bindi
 
 **OQ binding:** OQ-8 default (inline, cleanup-dialog gravity).
 
+**2026-09-12 as-built reconciliation (P4 two-stage RAB).** The two-stage confirm ships as: **stage 1 = the holders panel's per-holder action button** (the row emits `forceComplete` / `resendForeground` to the page); **stage 2 = a generic `ConfirmDialogComponent`** opened by `onHolderForceComplete` / `onHolderResendForeground` (`jobs.component.ts` lines 1860 / 1922) — the dialog names the holder instance + states irreversibility (destructive copy), `data.destructive: true`. **Cancel = no-op** (verified by the behavioral mirror in `jobs.component.spec.ts`: `nextResult=false` and `nextResult=undefined` ⇒ `expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled()`). Structural pin in `jobs-page.bindings.pins.spec.ts` anchors the dispatch INSIDE `ref.afterClosed().subscribe((confirmed) => {[\s\S]{0,600}?this.jobService.<method>(holder.instance_id)`, discriminating a hoisted dispatch that bypasses the dialog. The panel-click stage 1 + generic-ConfirmDialog stage 2 split is the pinned surface — no link-out, no per-button confirm UI.
+
 ---
 
 ## D5 — Filter-set redesign: dead filters resolved per OQ-3 default; structural single-pipeline enforcement
@@ -113,6 +115,8 @@ Each entry: Decision / Rationale / Alternatives considered / Open-question bindi
 
 **OQ binding:** OQ-7 default (sheet). Only meaningful while OQ-1 keeps queues.
 
+**2026-09-12 as-built reconciliation (leader-deferred).** OQ-7 default (sheet collapse on ≤768px) and D9 as a Phase-6 task are **SKIPPED in this arc** per the leader's scope call. The mobile-collapse sheet, the queue-list mobile-crud spec, and the global `panelClass` width override (`styles.scss:75-96`) are **seeded for a later arc** — they pair as a single UX chunk and ship together. The Phase-6 close-out criterion still holds (ARIA, keyboard, three new spec suites, warning corpus); task 4 in `phase6-plan.md` is closed by deferral, not completion. The decision text above stands as the forward-binding design intent for the later arc.
+
 ---
 
 ## D10 — Test strategy: plain-TS logic-mirror only; cross-seam invariants; honesty-shaped fixtures; template audit per phase
@@ -134,10 +138,10 @@ Each entry: Decision / Rationale / Alternatives considered / Open-question bindi
 | D1 | Phase 1 (store), all | — (dispatch-fixed direction) |
 | D2 | Phase 2 | OQ-2 |
 | D3 | Phase 2 (+ Phase 4 defer leg) | OQ-5 |
-| D4 | Phase 4 | OQ-8 |
+| D4 | Phase 4 (two-stage RAB 2026-09-12; see as-built reconciliation note above) | OQ-8 (RATIFIED-AS-BUILT) |
 | D5 | Phase 1 | OQ-3 |
 | D6 | Phase 5 | OQ-6 |
 | D7 | Phase 1 | — (constitutes D1 groundwork) |
 | D8 | Phase 3 | OQ-4 |
-| D9 | Phase 6 | OQ-7 |
+| D9 | Phase 6 | OQ-7 (deferred — see 2026-09-12 as-built reconciliation note above; SKIPPED in this arc, seeded for a later arc) |
 | D10 | All phases (convention) | — |

@@ -70,3 +70,7 @@ npm run build
 ## Exit Criterion
 
 With a defer-blocked fleet, the banner is visible on page load with correct severity; holders drill-down is one click away; force-complete/resend execute only behind two-stage confirm; a failed preflight shows retained data + degraded note instead of a stale glow.
+
+## 2026-09-12 as-built reconciliation — P4 two-stage confirm surfaced
+
+The two-stage confirm landed as: **(1) stage 1 = the holders panel's per-holder button** (the row emits `forceComplete` / `resendForeground` upward to the page); **(2) stage 2 = generic `ConfirmDialogComponent`** invoked by the page's `onHolderForceComplete` / `onHolderResendForeground` handlers, with the dialog naming the holder instance and stating irreversibility (`data.destructive: true`). **Cancel = no-op** — behavioral mirror in `jobs.component.spec.ts` pins `nextResult=false` and `nextResult=undefined` ⇒ service NOT called. The structural pin in `jobs-page.bindings.pins.spec.ts` anchors the dispatch INSIDE the `ref.afterClosed().subscribe((confirmed) => { ... }` body (within 600 chars), excluding any hoisted-dispatch regression where the destructive call fires before the dialog resolves. **RATIFIED-AS-BUILT.**

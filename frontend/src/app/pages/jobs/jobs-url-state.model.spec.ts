@@ -64,7 +64,13 @@ describe('parseJobsUrlState — round-trip', () => {
     expect(parsed).toEqual(createEmptyJobsUrlState());
   });
 
-  it('view_mode is ALWAYS emitted so the URL is explicit about the active projection', () => {
+  it('serializer always emits view_mode so a full-state serialization is explicit about the active projection', () => {
+    // Serializer contract: a full-state serialization NEVER drops
+    // ``view_mode`` — the wire shape is self-describing. Two-halved
+    // pin: (1) THIS test pins the serializer (always emits); (2)
+    // see ``diffJobsUrlState — view_mode is diff-driven below, NOT
+    // re-emitted on every toggle`` for the wire half (a bare-URL
+    // diff does NOT write view_mode when unchanged).
     const serialized = serializeJobsUrlState(createEmptyJobsUrlState());
     expect(serialized['view_mode']).toBe('queues');
     // Round-trip is stable.
@@ -162,6 +168,31 @@ describe('diffJobsUrlState — minimal URL-write patch', () => {
       job: null,
     };
     expect(diffJobsUrlState(prev, next)).toEqual({ view_mode: 'all-work' });
+  });
+
+  it('view_mode is diff-driven below, NOT re-emitted on every toggle — a bare-URL diff does NOT write view_mode (two-halved pin)', () => {
+    // Complementary half of the view_mode pin (see the serializer
+    // assertion above for the first half). The wire path is
+    // diff-driven: when ``view_mode`` is unchanged across the
+    // prev→next transition (e.g. user toggled a status chip while
+    // staying in queues), the diff is the changed key ONLY — the
+    // diff MUST NOT include ``view_mode`` because the wire side
+    // already carries the previous view_mode and re-writing it would
+    // (a) bloat every toggle and (b) trigger a needless router
+    // navigate. A refactor that adds ``view_mode`` to every diff
+    // would break this gate.
+    const prev: JobsUrlState = {
+      filter: createEmptyJobsFilterState(), // view_mode: 'queues' (default)
+      job: null,
+    };
+    const next: JobsUrlState = {
+      filter: normalizeJobsFilterState({ status: ['pending'] }),
+      job: null,
+    };
+    expect(diffJobsUrlState(prev, next)).toEqual({ status: 'pending' });
+    // And the opposite direction (status cleared) — view_mode still
+    // stays out of the diff.
+    expect(diffJobsUrlState(next, prev)).toEqual({ status: null });
   });
 
   it('a removed key emits `null` so router.navigate strips it', () => {
