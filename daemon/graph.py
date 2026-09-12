@@ -115,6 +115,7 @@ from .response_validation import (
     # HumanMessages without importing daemon.graph — the re-export keeps
     # ``from daemon.graph import NUDGE_MESSAGE`` working).
     NUDGE_MESSAGE,
+    get_empty_response_guard_enabled,
     is_empty_llm_content,
 )
 from .language_detection import detect_wrong_language
@@ -2516,14 +2517,32 @@ def should_continue(state: MessagesState) -> str:
     # ~100 LLM calls until GraphRecursionError (GRAPH_RECURSION_LIMIT).
     # The cap counts the TRAILING degenerate AIMessages already present
     # in state.messages (derived — zero new state) and, at the cap,
-    # refuses the re-invoke so the turn falls through to the
-    # nudge/END rows below (loud WARN + bounded burn: ≤ cap+2 LLM calls).
+    # refuses the re-invoke so the turn falls through to the nudge/END
+    # rows below (loud WARN + bounded burn). Accurate worst-case LLM-call
+    # bounds (corrected — the old "≤ cap+2" claim ignored the with-tool
+    # shape, where the cap fall-through lands on the row-5 nudge, the
+    # recovery rung, producing a SECOND degenerate cycle):
+    #   * no-tool storm ≤ cap+2 LLM calls (cap fall-through lands on END
+    #     via the human boundary — row-5's _has_recent_tool_result is
+    #     False);
+    #   * with-tool shape ≤ 2×cap LLM calls (cap fall-through → row-5
+    #     nudge → the injected nudge HumanMessage breaks
+    #     _has_recent_tool_result → the second degenerate cycle re-fills
+    #     the cap → END). Bounded either way, never the ~100 legacy burn.
     # Threshold 3 matches LoopDetector's repetition threshold.
+    # Kill-switch (doc §11b): with ENSEMBLE_EMPTY_RESPONSE_GUARD=0 the
+    # router half is INERT — trailing_degenerate stays 0, so the
+    # re-invoke rows run unbounded and the WARN never fires (legacy
+    # router behavior, pinned by tests).
     # Row 4 (ghost-promise) is deliberately NOT capped: its content is
     # truthy real text under the shared predicate (not a degenerate
     # empty), and the doc's L4 row owns it via S1 truthiness, not S5
     # (planning doc §6 — only the EMPTY re-invoke branches carry caps).
-    trailing_degenerate = _count_trailing_degenerate_ai_messages(messages)
+    trailing_degenerate = (
+        _count_trailing_degenerate_ai_messages(messages)
+        if get_empty_response_guard_enabled()
+        else 0
+    )
     if trailing_degenerate >= EMPTY_DEGENERATE_REINVOKE_CAP:
         logger.warning(
             f"[LLM-EMPTY] degenerate re-invoke cap hit: trailing={trailing_degenerate} "
@@ -2646,16 +2665,36 @@ def _count_trailing_degenerate_ai_messages(messages: list) -> int:
 def _is_empty_content(content) -> bool:
     """Check if content is empty or whitespace-only.
 
-    Thin delegate to the shared multimodal-safe predicate
-    (``response_validation.is_empty_llm_content`` — empty-response-guard
-    Phase 1): ``None``/whitespace str → empty; list blocks empty iff no
-    non-text blocks and every text block whitespace-only (``[]`` vacuously
-    empty); every other shape fails open as non-empty; think-tag-only
-    strings deliberately NON-empty (rows 2-3 + the S5 cap own that
-    class). Kept as a named router function because the router's nudge
-    gate reads it — the SINGLE prod caller (grep-pinned by tests).
+    Kill-switch-aware emptiness test for the router's nudge gate (the
+    SINGLE prod caller — grep-pinned by tests):
+
+    * Master switch ON (default) → shared multimodal-safe predicate
+      (``response_validation.is_empty_llm_content`` — empty-response-
+      guard Phase 1): ``None``/whitespace str → empty; list blocks empty
+      iff no non-text blocks and every text block whitespace-only
+      (``[]`` vacuously empty); every other shape fails open as
+      non-empty; think-tag-only strings deliberately NON-empty (rows
+      2-3 + the S5 cap own that class).
+    * Master switch OFF (``ENSEMBLE_EMPTY_RESPONSE_GUARD=0``, doc
+      §11(b)) → the EXACT pre-guard legacy semantics, byte-identical:
+      ``None`` → True; whitespace-only ``str`` → True; ANY list (even
+      all-whitespace text blocks) → False; every other shape (``{}``,
+      ``123``, …) → False. Pinned by tests.
+
+    The flag is the same boot-installed source of truth the S1
+    validator gates on (``response_validation.
+    get_empty_response_guard_enabled`` — installed once at boot by
+    ``load_config``; no second env read here). Kept as a named router
+    function because the router's nudge gate reads it.
     """
-    return is_empty_llm_content(content)
+    if get_empty_response_guard_enabled():
+        return is_empty_llm_content(content)
+    # Legacy body (pre-empty-response-guard), restored verbatim when OFF.
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return content.strip() == ""
+    return False
 
 
 def _has_recent_tool_result(messages: list) -> bool:

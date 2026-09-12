@@ -5,8 +5,15 @@ Covers the §10 test strategy of
 ``.agents/shared/planning/empty-response-guard/architecture-recommendation.md``:
 
 * S5 derived caps on the router's degenerate re-invoke branches
-  (reasoning-only / <think>-tag-only), with the burn assertion
-  (≤ cap+2 LLM calls vs ~100 today) and the ghost-promise UNCAPPED pin.
+  (reasoning-only / <think>-tag-only), with the burn assertion for both
+  shapes (no-tool storm ≤ cap+2 LLM calls; with-tool shape ≤ 2×cap —
+  the cap fall-through lands on the row-5 nudge recovery rung, then the
+  nudge HumanMessage breaks ``_has_recent_tool_result`` → END) vs ~100
+  legacy-burn calls, and the ghost-promise UNCAPPED pin.
+* The kill-switch (doc §11(b)) disabling the ROUTER half too: with
+  ``ENSEMBLE_EMPTY_RESPONSE_GUARD=0`` the cap never fires and
+  ``_is_empty_content`` restores the exact legacy semantics, while ON
+  keeps the shared-predicate results.
 * The grep-pin single-caller invariant for ``_is_empty_content``.
 * The S1 raise riding the existing retry → failover ladder: transient
   budget consumption, swap-to-backup at the primary transient cap, and
@@ -27,6 +34,7 @@ from daemon.graph import (
     EMPTY_DEGENERATE_REINVOKE_CAP,
     NUDGE_MESSAGE,
     _count_trailing_degenerate_ai_messages,
+    _is_empty_content,
     should_continue,
 )
 from daemon.llm_error_classifier import (
@@ -37,6 +45,7 @@ from daemon.llm_error_classifier import (
 from daemon.response_validation import (
     EmptyLLMResponseError,
     _reset_empty_guard_config_for_tests,
+    install_empty_guard_config,
 )
 
 
@@ -160,9 +169,150 @@ class TestDegenerateReinvokeCap:
         route = should_continue({"messages": messages})
         assert route == "nudge"
 
+    def _simulate_with_tool_storm(self, make_degenerate, turns=12):
+        """Drive should_continue through the WITH-TOOL degenerate shape.
+
+        Mirrors the real graph cycle after a tool result: degenerate
+        responses route ``"agent"`` until the cap; the cap fall-through
+        routes ``"nudge"`` (the row-5 recovery rung — nudge_node
+        injects the nudge HumanMessage and the graph re-invokes the
+        LLM); the post-nudge degenerate cycle re-fills the cap and then
+        ends at END because the injected nudge HumanMessage breaks
+        ``_has_recent_tool_result``. Returns ``(routes, llm_calls)``.
+        """
+        messages = [
+            _real_human(),
+            _tool_calling_ai(),
+            _tool_result(),
+            make_degenerate(),
+        ]
+        routes = []
+        llm_calls = 1
+        for _ in range(turns):
+            route = should_continue({"messages": messages})
+            routes.append(route)
+            if route == "agent":
+                messages.append(make_degenerate())
+                llm_calls += 1
+            elif route == "nudge":
+                # nudge_node injects the HumanMessage, then the graph
+                # re-invokes the LLM (one more call) before re-routing.
+                messages.append(HumanMessage(content=NUDGE_MESSAGE))
+                messages.append(make_degenerate())
+                llm_calls += 1
+            else:  # END
+                break
+        return routes, llm_calls
+
+    def test_with_tool_degenerate_storm_bounded(self):
+        """With-tool shape: the accurate worst case is ≤ 2×cap LLM calls.
+
+        The old "≤ cap+2" claim ignored this shape: for EMPTY-content
+        degenerates the cap fall-through routes to the row-5 nudge
+        (recovery rung — deliberately kept), producing a second
+        degenerate cycle before the nudge HumanMessage breaks
+        ``_has_recent_tool_result`` → END (2×cap). Think-only
+        degenerates carry non-empty content under the shared predicate,
+        so their fall-through hits END directly (≤ cap+1). Bounded
+        either way, never the ~100 legacy burn.
+        """
+        for maker in (_reasoning_only, _think_only):
+            routes, llm_calls = self._simulate_with_tool_storm(maker)
+            assert llm_calls <= 2 * EMPTY_DEGENERATE_REINVOKE_CAP
+            assert routes[-1] != "agent"
+            # Only empty-content degenerates reach the row-5 nudge;
+            # think-only content fails the nudge gate → straight END.
+            assert routes.count("nudge") == (1 if maker is _reasoning_only else 0)
+
     def test_cap_below_loop_detector_threshold_would_not_bound(self):
         """Sanity: the module default is 3 (LoopDetector threshold parity)."""
         assert EMPTY_DEGENERATE_REINVOKE_CAP == 3
+
+
+# ---------------------------------------------------------------------------
+# Kill-switch disables the ROUTER half too (doc §11(b) — follow-up pins)
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchDisablesRouterHalf:
+    """``ENSEMBLE_EMPTY_RESPONSE_GUARD=0`` must disable BOTH halves.
+
+    The validator half (S1 Check 3) is pinned in
+    ``test_response_validation.py::TestEmptyResponseGuardKillSwitch``;
+    these pins close the router half (review follow-up): with OFF the
+    S5 cap never fires (legacy unbounded re-invoke, WARN path included)
+    and ``_is_empty_content`` restores its EXACT pre-guard legacy truth
+    table. ON keeps the shared-predicate results unchanged. Flag
+    flipping uses the same boot-installed source of truth via
+    ``install_empty_guard_config`` (no second env read in the router).
+    """
+
+    def test_guard_off_cap_never_fires_no_tool_storm(self):
+        """OFF: degenerate storms proceed UNBOUNDED at the router level."""
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        for maker in (_reasoning_only, _think_only):
+            routes, _ = TestDegenerateReinvokeCap()._simulate_storm(
+                maker, turns=EMPTY_DEGENERATE_REINVOKE_CAP + 3
+            )
+            assert all(route == "agent" for route in routes), (
+                f"cap fired with the kill-switch OFF ({maker.__name__})"
+            )
+
+    def test_guard_off_cap_never_fires_with_tool_storm(self):
+        """OFF: even the with-tool degenerate shape stays unbounded —
+        no cap fall-through, so the row-5 nudge is never reached for
+        the degenerate class (exact legacy routing)."""
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        for maker in (_reasoning_only, _think_only):
+            routes, _ = TestDegenerateReinvokeCap()._simulate_with_tool_storm(
+                maker, turns=2 * EMPTY_DEGENERATE_REINVOKE_CAP + 2
+            )
+            assert all(route == "agent" for route in routes), (
+                f"cap/nudge fired with the kill-switch OFF ({maker.__name__})"
+            )
+
+    def test_guard_off_is_empty_content_legacy_truth_table(self):
+        """OFF: ``_is_empty_content`` returns the pre-guard legacy results."""
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        # Legacy table (pre-abc226c7 body, restored byte-identically):
+        assert _is_empty_content(None) is True
+        assert _is_empty_content("") is True
+        assert _is_empty_content("   \n\t ") is True
+        assert _is_empty_content("text") is False
+        # Previously-flipped pins — legacy: ANY list → False; every
+        # other shape → False.
+        assert _is_empty_content([]) is False
+        assert _is_empty_content({}) is False
+        assert _is_empty_content(123) is False
+        assert _is_empty_content(
+            [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                {"type": "text", "text": " "},
+            ]
+        ) is False
+        assert _is_empty_content(
+            [{"type": "text", "text": "  "}, {"type": "text", "text": "\n"}]
+        ) is False
+
+    def test_guard_on_keeps_shared_predicate_results(self):
+        """ON (default): the same shapes keep the new predicate results."""
+        install_empty_guard_config(enabled=True, compaction_skip=False)
+        assert _is_empty_content(None) is True
+        assert _is_empty_content("") is True
+        assert _is_empty_content("   \n\t ") is True
+        assert _is_empty_content("text") is False
+        assert _is_empty_content([]) is True
+        assert _is_empty_content(
+            [{"type": "text", "text": "  "}, {"type": "text", "text": "\n"}]
+        ) is True
+        assert _is_empty_content(
+            [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                {"type": "text", "text": " "},
+            ]
+        ) is False
+        assert _is_empty_content({}) is False
+        assert _is_empty_content(123) is False
 
 
 # ---------------------------------------------------------------------------

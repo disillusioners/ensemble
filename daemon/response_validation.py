@@ -237,7 +237,12 @@ def _scan_turn_window(
 # ``ENSEMBLE_EMPTY_RESPONSE_GUARD`` env value. Defaults mirror the
 # documented defaults so a config-less boot (unit tests) behaves as the
 # documented default ON. Kill-switch OFF restores the pre-guard
-# pass-through byte-identically (pinned by tests).
+# pass-through byte-identically on BOTH halves — the S1 validator
+# (``validate_llm_response``) AND the router half (the S5 degenerate
+# re-invoke caps + ``_is_empty_content`` legacy semantics in
+# ``daemon/graph.py``, which read the SAME installed flag via
+# :func:`get_empty_response_guard_enabled` — no second env read).
+# Both halves pinned by tests.
 _EMPTY_RESPONSE_GUARD_ENABLED: bool = True
 
 # Installed by ``load_config`` from ``ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP``.
