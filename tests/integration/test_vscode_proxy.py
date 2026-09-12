@@ -2080,50 +2080,303 @@ class TestWebviewCspRewrite:
             is None
         )
 
-    # Body-size cap (review-council follow-up ride-along 1).
-    def test_oversize_body_byte_faithful_re_serve(self):
-        """A webview HTML larger than
-        ``_WEBVIEW_REWRITE_MAX_BODY_BYTES`` (1 MiB) skips the
-        rewrite and re-serves the FULL original raw bytes with the
-        original Content-Encoding preserved (byte-faithful to the
-        wire). 1 MiB is ~100× the observed webview HTML size; an
-        oversize webview is a future code-server growth signal,
-        not a 500.
-
-        Council corrective round on 92784e20 — the previous
-        implementation broke the consume loop BEFORE appending
-        the over-cap chunk, so the response carried the truncated
-        ``≤1 MiB`` prefix. A truncated webview doc is a broken
-        page — worse than the skip the cap replaces. The fixed
-        implementation (mid-stream path) drains the remainder
-        INTO the re-serve accumulator so the FULL upstream body
-        is re-served (prefix + remainder = original bytes).
-
-        This test drives the MID-STREAM path: the fake
-        ``_FakeUpstream.aiter_raw()`` is a single-yield generator
-        (no ``Content-Length`` header), so the pre-consume gate
-        can't pre-decide — we MUST consume and the cap-exceed
-        must trip mid-stream.
+    # MAJOR 3 — AE-pin end-to-end: rewrite-eligible requests must
+    # send EXACTLY ONE accept-encoding header upstream, equal to the
+    # pin. Case-sensitive ``pop("Accept-Encoding", ...)`` would never
+    # match Starlette's lowercase key, so the client's
+    # ``accept-encoding`` would survive + a second pin would be set,
+    # yielding a duplicate AE header that node joins to
+    # ``gzip, zstd, gzip, deflate, br`` — defeating the pin (zstd
+    # negotiable, encoding pre-check silently skips rewrite).
+    def test_ae_pin_no_duplicate_header_for_eligible_request(
+        self,
+    ):
+        """End-to-end: the upstream sees EXACTLY ONE
+        ``accept-encoding`` header for a rewrite-eligible request,
+        and its value is the pin (NOT the client's value, NOT a
+        join of both).
         """
         self._install_fn(True)
-        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
-        # Build a brotli-encoded body that's bigger than the cap
-        # (after decoding; the cap is on the buffered raw body).
-        oversized = (
-            b"<html><head>" + b"x" * (cap + 1024) + b"</head></html>"
+
+        # Real httpx-shaped request capture: ``client.build_request``
+        # returns an object that the proxy later passes to
+        # ``client.send(...)``. We use a small dataclass-like
+        # stub that records the headers at ``build_request`` time.
+        captured_headers: dict[str, str] = {}
+
+        from daemon.routers import vscode_proxy as proxy_module
+
+        class _CapturedRequest:
+            def __init__(self, headers, method, target):
+                # Starlette normalizes headers to lowercase; the
+                # proxy uses ``request.headers.items()`` which yields
+                # lowercase keys (we mirror that here).
+                self.headers = {k.lower(): v for k, v in headers.items()}
+                captured_headers.update(self.headers)
+                self.method = method
+                self.target = target
+
+        class _HeaderCapturingClient:
+            async def send(self, request, *args, **kwargs):
+                class _FakeResponse:
+                    status_code = 200
+                    request = SimpleNamespace(
+                        url=SimpleNamespace(
+                            path=(
+                                "/vscode/stable-abc/static/out/"
+                                "vs/workbench/contrib/webview/browser/"
+                                "pre/index.html?id=x"
+                            )
+                        )
+                    )
+                    headers = {
+                        "content-type": "text/html",
+                        "cache-control": "public, max-age=31536000",
+                    }
+
+                    async def aiter_raw(self, chunk_size=None):
+                        if False:
+                            yield
+
+                    async def aclose(self):
+                        pass
+
+                return _FakeResponse()
+
+            def build_request(self, method, target, **kwargs):
+                headers = kwargs.get("headers") or {}
+                return _CapturedRequest(headers, method, target)
+
+            async def aclose(self):
+                pass
+
+        class _HeaderCapturingFactory:
+            def __call__(self, *args, **kwargs):
+                return _HeaderCapturingClient()
+
+        original_async_client = vscode_proxy.httpx.AsyncClient
+        vscode_proxy.httpx.AsyncClient = _HeaderCapturingFactory()
+        try:
+            manager = _make_mock_manager(running=True, port=8081)
+            app = create_vscode_proxy_app(manager)
+            with TestClient(app) as client:
+                client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/"
+                    "contrib/webview/browser/pre/index.html?id=x",
+                    headers={
+                        "Host": "localhost:8079",
+                        "Accept-Encoding": "gzip, zstd",
+                    },
+                )
+        finally:
+            vscode_proxy.httpx.AsyncClient = original_async_client
+
+        # No duplicate accept-encoding: exactly ONE header
+        # key (lowercase — Starlette normalizes) with the pin
+        # value verbatim. If the fix regresses, the key would
+        # appear twice OR the value would be the client's
+        # ``gzip, zstd`` string (node-joined with the pin).
+        ae_values = [
+            v for k, v in captured_headers.items()
+            if k.lower() == "accept-encoding"
+        ]
+        assert len(ae_values) == 1, (
+            f"upstream must receive EXACTLY ONE accept-encoding "
+            f"header — found {len(ae_values)}: {ae_values!r}. "
+            f"A duplicate means the case-sensitive pop missed the "
+            f"lowercase key and the client's value survived + the "
+            f"pin added a second header."
         )
+        assert ae_values[0] == vscode_proxy._WEBVIEW_REWRITE_ACCEPT_ENCODING, (
+            f"upstream accept-encoding must be the pin value "
+            f"({vscode_proxy._WEBVIEW_REWRITE_ACCEPT_ENCODING!r}); "
+            f"got {ae_values[0]!r}. A non-pin value means the "
+            f"client's ``gzip, zstd`` leaked through unmodified, "
+            f"or two headers were joined by node."
+        )
+
+    def test_ae_pin_client_value_preserved_for_non_eligible_request(
+        self,
+    ):
+        """End-to-end: non-eligible requests keep the client's
+        value verbatim. No pin overwrite (the pin is
+        rewrite-only), no header drop, no duplicate.
+        """
+        self._install_fn(True)
+
+        captured_headers: dict[str, str] = {}
+
+        from daemon.routers import vscode_proxy as proxy_module
+
+        class _CapturedRequest:
+            def __init__(self, headers, method, target):
+                self.headers = {k.lower(): v for k, v in headers.items()}
+                captured_headers.update(self.headers)
+                self.method = method
+                self.target = target
+
+        class _HeaderCapturingClient:
+            async def send(self, request, *args, **kwargs):
+                class _FakeResponse:
+                    status_code = 200
+                    request = SimpleNamespace(
+                        url=SimpleNamespace(
+                            path=(
+                                "/vscode/stable-abc/static/out/"
+                                "vs/workbench/workbench.js"
+                            )
+                        )
+                    )
+                    headers = {"content-type": "application/javascript"}
+
+                    async def aiter_raw(self, chunk_size=None):
+                        if False:
+                            yield
+
+                    async def aclose(self):
+                        pass
+
+                return _FakeResponse()
+
+            def build_request(self, method, target, **kwargs):
+                headers = kwargs.get("headers") or {}
+                return _CapturedRequest(headers, method, target)
+
+            async def aclose(self):
+                pass
+
+        class _Factory:
+            def __call__(self, *args, **kwargs):
+                return _HeaderCapturingClient()
+
+        original_async_client = vscode_proxy.httpx.AsyncClient
+        vscode_proxy.httpx.AsyncClient = _Factory()
+        try:
+            manager = _make_mock_manager(running=True, port=8081)
+            app = create_vscode_proxy_app(manager)
+            with TestClient(app) as client:
+                client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/"
+                    "workbench.js",
+                    headers={
+                        "Host": "localhost:8079",
+                        "Accept-Encoding": "gzip, zstd",
+                    },
+                )
+        finally:
+            vscode_proxy.httpx.AsyncClient = original_async_client
+
+        ae_values = [
+            v for k, v in captured_headers.items()
+            if k.lower() == "accept-encoding"
+        ]
+        assert len(ae_values) == 1, (
+            f"non-eligible request: must preserve the client's "
+            f"accept-encoding verbatim. Found {len(ae_values)} "
+            f"headers: {ae_values!r}."
+        )
+        assert ae_values[0] == "gzip, zstd", (
+            f"non-eligible request must NOT be pinned — the "
+            f"client's value must reach the upstream verbatim. "
+            f"Got {ae_values[0]!r}."
+        )
+
+    # Body-size cap (review-council follow-up ride-along 1).
+    def test_oversize_body_byte_faithful_re_serve(self):
+        """Mid-stream oversize path — the consume loop trips the
+        cap mid-body. The rewrite seam is skipped, and the
+        proxy must re-serve the FULL original upstream body
+        (prefix + remainder concatenated) with the original
+        Content-Encoding preserved.
+
+        Council corrective round on 92784e20 — the original
+        implementation ``break``-ed out of the consume loop
+        BEFORE appending the over-cap chunk, so the rewrite
+        buffer held only the ``≤cap`` prefix and the response
+        carried a truncated body (front-truncated compressed
+        stream — UNDECODEABLE on the browser side).
+
+        The current implementation drains the cap-crossing
+        chunk AND every subsequent chunk into the
+        ``oversize_chunks`` raw-re-serve accumulator; the
+        post-loop branch concatenates ``body_chunks + oversize_chunks``
+        to build the full original body. This test pins the
+        full-byte-equality contract.
+
+        Driving details:
+        - body is built of incompressible bytes (random via
+          ``os.urandom``) so the brotli-compressed wire size is
+          at least ~cap bytes — brotli's worst-case compression
+          ratio on random data is well over 1:1. This guarantees
+          ``len(br) > cap`` (the WIRE-size sanity the previous
+          test lacked).
+        - the fake upstream yields the body across TWO chunks
+          — chunk 1 fits in the cap (the prefix), chunk 2
+          straddles the cap (the cap-crossing chunk) and
+          overflows. The previous single-chunk fake hid the
+          cap-crossing boundary entirely (single chunk > cap
+          means the rewrite buffer is empty and ``oversize_chunks``
+          holds the whole body, which is the easier path to
+          get right; the real bug only shows up across chunks).
+        """
+        import os
+        self._install_fn(True)
+        cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
+        # Body larger than the cap. Random bytes so brotli can't
+        # compress them below the cap (worst-case ratio ~1.0 on
+        # incompressible data; the wire size will exceed the cap
+        # by a comfortable margin).
+        oversized = os.urandom(cap + 500_000)
+        assert len(oversized) > cap
+
+        # Two-chunk split: chunk_1 fits UNDER the cap (so it goes
+        # to the rewrite-buffer prefix — NOT the post-cap
+        # accumulator). Chunk 2 pushes the running total OVER the
+        # cap (so the cap is crossed on chunk 2, not chunk 1).
+        # This is the precise shape that exposes the f1331082 bug:
+        # the bug dropped ``body_chunks`` (the prefix), so the
+        # served body was missing chunk_1. With chunk 1 alone
+        # being oversized the bug is hidden (chunk 1 goes to
+        # ``oversize_chunks`` regardless, so
+        # ``b"".join(oversize_chunks)`` happens to contain
+        # everything).
+        split_at = cap - 100_000   # chunk_1 fits UNDER cap
+        chunk_1 = oversized[:split_at]
+        chunk_2 = oversized[split_at:]
+        assert len(chunk_1) < cap
+        assert len(chunk_1) + len(chunk_2) > cap
+        assert len(chunk_2) > 0
+        assert len(chunk_1) + len(chunk_2) == len(oversized)
+
         import brotli
         br = brotli.compress(oversized)
-        # Sanity: brotli-compressed version must also exceed the
-        # cap to trigger the consume-loop break.
-        assert len(oversized) > cap
+        # WIRE-size sanity (the previous test lacked this — it
+        # only asserted the DECODED size exceeded the cap, which
+        # is trivially true for any non-empty body. The fix
+        # triggers the mid-stream branch only when the WIRE
+        # body is larger than the cap).
+        assert len(br) > cap, (
+            f"wire-size sanity failed: brotli-compressed body "
+            f"is {len(br)} bytes, expected > {cap}. Use a larger "
+            f"oversize or incompressible data."
+        )
+        # The chunking is at the aiter_raw() generator level, not
+        # the encoding level — the body decoder sees the full
+        # stream after aiter_raw() returns. For brotli we have
+        # to keep the wire chunks together for the decoder;
+        # split the brotli bytes the same way for symmetry.
+        br_split = len(br) * split_at // len(oversized)
+        br_chunks = [br[:br_split], br[br_split:]]
 
         manager = _make_mock_manager(running=True, port=8081)
         app = create_vscode_proxy_app(manager)
-        _patch_upstream_for_webview_html(
-            body=br,
+        # NOTE: NO ``content-length`` header — this exercises the
+        # MID-STREAM path (pre-consume gate cannot pre-decide).
+        _patch_upstream_multi_chunk(
+            chunks=br_chunks,
             content_type="text/html",
             content_encoding="br",
+            content_length=None,
             status_code=200,
             path=(
                 "/vscode/stable-abc/static/out/vs/workbench/"
@@ -2140,16 +2393,22 @@ class TestWebviewCspRewrite:
         # No 500: oversize webview HTML falls back to byte-faithful
         # re-serve of the FULL upstream body (no truncation).
         assert resp.status_code == 200
-        assert resp.headers.get("content-encoding") == "br"
-        # The Content-Length on the re-serve MUST match the
-        # ORIGINAL upstream body size — proof of byte-fidelity
-        # (no truncation). TestClient decodes the br body for us;
-        # the decoded length equals the original raw length.
+        assert resp.headers.get("content-encoding") == "br", (
+            "original Content-Encoding MUST be preserved on the "
+            "raw-re-serve path — the wire bytes are still brotli "
+            "and the browser's decoder must stay in sync."
+        )
+        # The Content-Length MUST equal the ORIGINAL upstream
+        # body size — proof of byte-fidelity (no truncation). The
+        # f1331082 implementation re-served only ``oversize_chunks``
+        # (post-cap), so the Content-Length was the post-cap
+        # chunk size instead of the full upstream body size.
         assert int(resp.headers["content-length"]) == len(br), (
             "Content-Length on oversize re-serve MUST match the "
             "ORIGINAL upstream body length (byte-faithful, no "
-            "truncation). The previous implementation broke the "
-            "consume loop BEFORE appending the over-cap chunk."
+            "truncation). If this assertion fails the proxy is "
+            "re-serving only the post-cap accumulator (prefix "
+            "dropped) — that's CRITICAL 1 from the review."
         )
         # The full original body — verbatim — must reach the
         # browser. TestClient auto-decodes brotli; the decoded
@@ -2180,84 +2439,38 @@ class TestWebviewCspRewrite:
         cap = vscode_proxy._WEBVIEW_REWRITE_MAX_BODY_BYTES
         # ``Content-Length`` larger than the cap → gate fires,
         # no consume.
-        oversized = b"<html><body>" + b"x" * (cap + 1024) + b"</body></html>"
+        oversized = (
+            b"<html><body>" + b"x" * (cap + 1024) + b"</body></html>"
+        )
         cl_header_value = str(len(oversized))
 
+        # Use the multi-chunk helper so we exercise a real
+        # ``aiter_raw`` stream consumption path (not a single-yield
+        # fake that would mask any future regression where the gate
+        # consumes once and the streaming path consumes again).
         manager = _make_mock_manager(running=True, port=8081)
         app = create_vscode_proxy_app(manager)
-        # ``content_encoding=None`` so the pre-consume gate path
-        # is exercised without the brotli-encoding complication —
-        # the test pins the gate, not the body.
-        _patch_upstream_for_webview_html(
-            body=oversized,
+        _patch_upstream_multi_chunk(
+            # Two chunks, both below cap individually but the
+            # total exceeds cap — the gate must trigger on
+            # Content-Length BEFORE the first chunk is consumed.
+            chunks=[oversized[: len(oversized) // 2], oversized[len(oversized) // 2 :]],
             content_type="text/html",
             content_encoding=None,
+            content_length=cl_header_value,
             status_code=200,
             path=(
                 "/vscode/stable-abc/static/out/vs/workbench/"
                 "contrib/webview/browser/pre/index.html"
             ),
         )
-        # Force Content-Length on the response so the gate sees it.
-        # Patch the upstream class to also include content-length.
-        original_async_client = vscode_proxy.httpx.AsyncClient
 
-        class _SizedUpstream:
-            status_code = 200
-            request = SimpleNamespace(
-                url=SimpleNamespace(
-                    path=(
-                        "/vscode/stable-abc/static/out/vs/workbench/"
-                        "contrib/webview/browser/pre/index.html"
-                    )
-                )
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
             )
-            headers = {
-                "content-type": "text/html",
-                "content-length": cl_header_value,
-                "cache-control": "public, max-age=31536000",
-                "etag": '"deadbeef"',
-            }
-            _consumed = False
-
-            async def aiter_raw(self, chunk_size=None):
-                # Verify the gate worked: ``aiter_raw`` must be
-                # callable ONCE (the streaming path) without
-                # raising ``StreamConsumed``.
-                assert not self._consumed, (
-                    "pre-consume gate FAILED — second aiter_raw() "
-                    "call. The proxy consumed then tried to "
-                    "re-consume; real httpx would StreamConsumed."
-                )
-                self._consumed = True
-                yield oversized
-
-            async def aclose(self):
-                pass
-
-        class _FakeClient:
-            async def send(self, *args, **kwargs):
-                return _SizedUpstream()
-
-            def build_request(self, *args, **kwargs):
-                return MagicMock()
-
-            async def aclose(self):
-                pass
-
-        def _factory(*args, **kwargs):
-            return _FakeClient()
-
-        vscode_proxy.httpx.AsyncClient = _factory
-        try:
-            with TestClient(app) as client:
-                resp = client.get(
-                    "/vscode/stable-abc/static/out/vs/workbench/"
-                    "contrib/webview/browser/pre/index.html?id=x",
-                    headers={"Host": "localhost:8079"},
-                )
-        finally:
-            vscode_proxy.httpx.AsyncClient = original_async_client
 
         # The proxy streamed the upstream body through verbatim.
         # Status 200; the FULL body is delivered (no truncation,
@@ -2319,6 +2532,75 @@ def _patch_upstream_for_webview_html(
 
     fake_client = MagicMock()
     fake_response = _FakeUpstream()
+
+    async def _fake_send(*args, **kwargs):
+        return fake_response
+
+    fake_client.send = _fake_send
+    fake_client.build_request = MagicMock(return_value=MagicMock())
+
+    async def _fake_aclose():
+        pass
+
+    fake_client.aclose = _fake_aclose
+
+    def _fake_async_client(*args, **kwargs):
+        return fake_client
+
+    proxy_module.httpx.AsyncClient = _fake_async_client
+
+
+def _patch_upstream_multi_chunk(
+    *,
+    chunks: list[bytes],
+    content_type: str,
+    content_encoding: str | None,
+    content_length: str | None,
+    status_code: int,
+    path: str,
+    headers_extra: Mapping[str, str] | None = None,
+) -> None:
+    """Multi-chunk variant of :func:`_patch_upstream_for_webview_html`.
+
+    Used by the size-cap oversize tests where the body MUST be
+    streamed across MULTIPLE chunks (a single-chunk fake would
+    hide the cap-crossing boundary — the rewrite-buffer prefix
+    and the post-cap accumulator would both be empty).
+    """
+    from daemon.routers import vscode_proxy as proxy_module
+
+    class _MultiChunkUpstream:
+        def __init__(self):
+            self.status_code = status_code
+            self.request = SimpleNamespace(
+                url=SimpleNamespace(path=path),
+            )
+            self.headers = {"content-type": content_type}
+            if content_encoding:
+                self.headers["content-encoding"] = content_encoding
+            if content_length is not None:
+                self.headers["content-length"] = content_length
+            self.headers["cache-control"] = "public, max-age=31536000"
+            self.headers["etag"] = '"deadbeef"'
+            if headers_extra:
+                self.headers.update(headers_extra)
+            self._chunks = chunks
+            self._stream_consumed = False
+
+        async def aiter_raw(self, chunk_size: int | None = None):
+            if self._stream_consumed:
+                raise httpx.StreamConsumed(
+                    "stream has been consumed"
+                )
+            self._stream_consumed = True
+            for chunk in self._chunks:
+                yield chunk
+
+        async def aclose(self):
+            pass
+
+    fake_client = MagicMock()
+    fake_response = _MultiChunkUpstream()
 
     async def _fake_send(*args, **kwargs):
         return fake_response

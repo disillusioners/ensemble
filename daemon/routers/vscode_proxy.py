@@ -173,12 +173,6 @@ _WEBVIEW_CSP_APPENDS: dict[str, str] = {
     "style-src": _WEBVIEW_CSP_VIRTUAL_HOST,
 }
 
-# All directives this seam ever touches — used as a sanity set in
-# the rewrite helper (catches typos like ``"image-src"``).
-_ALL_WEBVIEW_CSP_DIRECTIVES: frozenset[str] = frozenset(
-    set(_WEBVIEW_CSP_INSERTIONS) | set(_WEBVIEW_CSP_APPENDS)
-)
-
 # Maximum buffered body size for the meta-CSP rewrite seam.
 # Webview HTML is small (< 10 KiB based on the 2026-09-12 capture
 # evidence); the cap is generous to accommodate future code-server
@@ -265,7 +259,13 @@ def _proxy_headers(headers: Mapping[str, str], port: int) -> dict[str, str]:
 _WEBVIEW_REWRITE_DECODABLE_ENCODINGS: tuple[str, ...] = (
     "gzip", "deflate", "br",
 )
-_WEBVIEW_REWRITE_ACCEPT_ENCODING: str = "gzip, deflate, br"
+# Derived from the tuple — keep these two in sync. The tuple is
+# the source of truth (also exported via ``_can_decode_encoding``);
+# the string is the outbound ``Accept-Encoding`` header value for
+# rewrite-eligible requests.
+_WEBVIEW_REWRITE_ACCEPT_ENCODING: str = ", ".join(
+    _WEBVIEW_REWRITE_DECODABLE_ENCODINGS
+)
 
 
 def _accept_encoding_for_request(
@@ -718,11 +718,13 @@ async def _buffer_and_maybe_rewrite_webview(
     # ride-along 1) is generous to accommodate future code-server
     # growth but bounded to prevent an oversized upstream from
     # forcing the proxy into a memory blow-up. 1 MiB is ~100× the
-    # observed size; the byte-faithful re-serve on oversize is
-    # invisible to the browser (no rewrite, original
+    # observed size; the byte-faithful re-serve on oversize
+    # concatenates the rewrite-buffer prefix (≤cap) with the
+    # post-cap accumulator so the wire is identical to the
+    # upstream body (no truncation, no rewrite — original
     # Content-Encoding preserved).
     # Buffer the body, but with TWO distinct size-cap paths
-    # (council corrective round on 92784e20):
+    # (council corrective rounds on 92784e20 + f1331082):
     #
     # (a) ``Content-Length`` advertised > cap — pre-consume gate.
     #     We refuse to consume at all and return ``None`` so the
@@ -732,12 +734,15 @@ async def _buffer_and_maybe_rewrite_webview(
     #
     # (b) ``Content-Length`` absent or chunked — we consume
     #     chunk-by-chunk. The prefix up to the cap goes to the
-    #     rewrite buffer; everything after the cap (and the cap's
-    #     final chunk) goes to a SEPARATE raw-re-serve accumulator.
-    #     Both buffers concatenated hold the FULL original body;
-    #     we raw-re-serve every byte with the original
-    #     ``Content-Encoding`` preserved. Truncation would be a
-    #     broken page — worse than the skip the cap replaces.
+    #     REWRITE buffer (``body_chunks``); everything after the
+    #     cap (and the cap's final chunk) goes to a SEPARATE
+    #     RAW-RE-SERVE accumulator (``oversize_chunks``). Both
+    #     buffers concatenated in the post-loop branch hold the
+    #     FULL original body; we raw-re-serve every byte with
+    #     the original ``Content-Encoding`` preserved. Truncation
+    #     would be a broken page (the compressed stream would be
+    #     front-truncated and the browser's decoder would refuse
+    #     it) — worse than the skip the cap replaces.
     advertised_length = upstream.headers.get("content-length")
     if advertised_length is not None:
         try:
@@ -757,13 +762,17 @@ async def _buffer_and_maybe_rewrite_webview(
     body_chunks: list[bytes] = []
     oversize_chunks: list[bytes] = []
     oversize = False
+    # Running prefix size — O(1) update per chunk instead of
+    # re-summing ``body_chunks`` on every iteration (O(n²) at scale;
+    # webview HTML is small but the cap allows up to 1 MiB).
+    total = 0
     async for chunk in upstream.aiter_raw():
         if not oversize:
             # Still under the cap — accumulate to the rewrite
             # buffer. ``total`` is the running prefix size; the
             # moment it crosses the cap, this branch becomes
             # False for the rest of the iteration.
-            total = sum(len(c) for c in body_chunks) + len(chunk)
+            total += len(chunk)
             if total > _WEBVIEW_REWRITE_MAX_BODY_BYTES:
                 oversize = True
                 # The current chunk straddles the cap boundary;
@@ -780,25 +789,38 @@ async def _buffer_and_maybe_rewrite_webview(
                     logger.warning(
                         "VSCode proxy: webview meta-CSP rewrite skipped "
                         "— mid-stream body exceeded %d-byte cap; "
-                        "byte-faithful raw re-serve of FULL body",
+                        "rewriting disabled, byte-faithful raw "
+                        "re-serve of FULL upstream body "
+                        "(prefix + post-cap accumulator)",
                         _WEBVIEW_REWRITE_MAX_BODY_BYTES,
                     )
             else:
                 body_chunks.append(chunk)
         else:
             # Already over the cap — every subsequent chunk goes
-            # to the raw-re-serve accumulator so the eventual
-            # re-serve is byte-faithful to the wire (prefix +
-            # remainder = FULL original bytes).
+            # to the raw-re-serve accumulator. Concatenated with
+            # the rewrite-buffer prefix in the post-loop branch,
+            # the combined body is byte-faithful to the wire
+            # (prefix + remainder = FULL original bytes).
             oversize_chunks.append(chunk)
 
     if oversize:
         # Mid-stream path — we consumed past the cap, but kept
-        # accumulating into the raw-re-serve accumulator so the
-        # wire is byte-faithful. The rewrite buffer's prefix is
-        # discarded; the FULL upstream body goes to the browser
-        # via the raw re-serve.
-        full_body = b"".join(oversize_chunks)
+        # accumulating into the raw-re-serve accumulator. The
+        # rewrite buffer's prefix (≤cap) is concatenated with
+        # the post-cap accumulator so the wire is byte-faithful
+        # — the FULL upstream body goes to the browser via the
+        # raw re-serve. Concatenating both halves is what makes
+        # the re-serve byte-faithful; the prefix alone would
+        # produce a front-truncated compressed stream that the
+        # browser's decoder would refuse (corrupt page, worse
+        # than plain truncation).
+        # Concatenating both halves is what makes
+        # the re-serve byte-faithful; the prefix alone would
+        # produce a front-truncated compressed stream that the
+        # browser's decoder would refuse (corrupt page, worse
+        # than plain truncation).
+        full_body = b"".join(body_chunks) + b"".join(oversize_chunks)
         return _raw_byte_faithful_response(full_body, upstream)
     raw_body = b"".join(body_chunks)
 
@@ -841,8 +863,22 @@ async def _buffer_and_maybe_rewrite_webview(
     # + framing-policy replacement semantics from
     # ``_response_headers`` (so X-Frame-Options / CSP header still
     # apply), then override the freshness metadata so the browser
-    # cannot pin a stale variant.
+    # cannot pin a stale variant of the rewritten doc.
+    #
+    # Case-insensitive pops: ``upstream.headers.items()`` may yield
+    # mixed-case keys (Starlette's ``Headers`` preserves whatever
+    # case the upstream sent — typically lowercase from the
+    # upstream's ``Headers`` but not guaranteed). A bare
+    # ``out_headers.pop("Cache-Control", None)`` only matches the
+    # exact-case key — if the upstream sent ``cache-control: ...``
+    # (lowercase), the dict would carry both ``Cache-Control:
+    # no-store`` (just set) and ``cache-control: max-age=...``
+    # (upstream's original) — duplicate headers. Same for the
+    # ETag / If-None-Match pair. Pop the lowercase keys BEFORE the
+    # override so the rewritten response carries EXACTLY ONE
+    # freshness header per name.
     out_headers = _response_headers(upstream.headers)
+    out_headers.pop("cache-control", None)
     out_headers.pop("etag", None)
     out_headers.pop("if-none-match", None)
     out_headers["Cache-Control"] = "no-store"
@@ -968,14 +1004,28 @@ def create_vscode_proxy_app(
             # decode (e.g. ``zstd``). Non-eligible requests keep
             # the client's value so non-webview traffic flows
             # through with whatever the client negotiated.
+            #
+            # Case-insensitive pop: ``_proxy_headers`` builds from
+            # Starlette ``Headers.items()`` which yields LOWERCASE
+            # keys (ASGI delivers headers as lowercase bytes), so
+            # ``upstream_headers`` keys are lowercase here. A bare
+            # ``pop("Accept-Encoding", None)`` never matches and the
+            # client's ``accept-encoding`` would survive — adding
+            # a SECOND ``Accept-Encoding`` header upstream (node
+            # joins them; e.g. ``gzip, zstd, gzip, deflate, br``),
+            # re-introducing the very risk the pin is meant to
+            # close.
             client_path = ("/" + path).encode()
             upstream_headers = _proxy_headers(request.headers, port)
-            pinned_ae = _accept_encoding_for_request(
-                client_path,
-                upstream_headers.pop("Accept-Encoding", None),
-            )
+            client_ae = upstream_headers.pop("accept-encoding", None)
+            pinned_ae = _accept_encoding_for_request(client_path, client_ae)
             if pinned_ae is not None:
                 upstream_headers["Accept-Encoding"] = pinned_ae
+            elif client_ae is not None:
+                # Non-eligible path: the pop above left the
+                # header absent (the pop succeeded) — re-add the
+                # client's value so the upstream still sees it.
+                upstream_headers["Accept-Encoding"] = client_ae
             upstream = await client.send(
                 client.build_request(
                     request.method,
