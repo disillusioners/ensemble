@@ -670,7 +670,9 @@ class TestClassifyLLErrors:
             classified = classify_llm_errors(mock_llm)
             result = classified.invoke([])
 
-            mock_validate.assert_called_once_with(expected_response)
+            mock_validate.assert_called_once_with(
+                expected_response, input_messages=[]
+            )
             assert result == expected_response
 
     def test_validation_error_caught_inside_classifier(self):

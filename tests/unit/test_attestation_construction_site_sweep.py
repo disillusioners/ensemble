@@ -90,7 +90,13 @@ class TestNudgeNodeConstructorSweep:
         msg = result["messages"][0]
         assert isinstance(msg, HumanMessage)
         assert msg.content == NUDGE_MESSAGE
-        assert msg.additional_kwargs == {"injected_message": True}
+        assert msg.additional_kwargs == {
+            "injected_message": True,
+            # Empty-response-guard Phase 1: dedicated nudge marker the S1
+            # validator's §8.1 nudge allowance keys on (injected_message
+            # alone is shared with context blocks and reminders).
+            "empty_response_nudge": True,
+        }
         assert is_real_user_message(msg) is False
 
 

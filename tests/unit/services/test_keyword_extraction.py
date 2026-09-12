@@ -381,17 +381,28 @@ class TestExtractKeywords:
 
     @pytest.mark.asyncio
     async def test_empty_response_returns_empty(self) -> None:
+        # Empty-response-guard Phase 1: an empty LLM response now RAISES
+        # EmptyLLMResponseError inside the facade's retry scope → bounded
+        # retries → exhaustion → the never-raises fallback returns [].
+        # ``timeout_s`` bounds the facade wall-clock cap so the test does
+        # not sit through the full retry budget (the retry-then-fallback
+        # ladder itself is pinned in tests/unit/test_empty_response_guard.py).
         with patch(
             "daemon.graph.ThinkingChatOpenAI",
         ) as mock_llm_cls:
             mock_llm = MagicMock()
             mock_llm.invoke = MagicMock(return_value=_FakeResponse(""))
             mock_llm_cls.return_value = mock_llm
-            result = await extract_keywords("Do thing", config=_make_config())
+            result = await extract_keywords(
+                "Do thing", config=_make_config(), timeout_s=0.1
+            )
         assert result == []
 
     @pytest.mark.asyncio
     async def test_unparseable_response_returns_empty(self) -> None:
+        # Whitespace-only content is empty under the shared predicate →
+        # same S1 raise → bounded retry → fallback (see the empty test
+        # above); timeout_s keeps the retry ladder wall-clock bounded.
         with patch(
             "daemon.graph.ThinkingChatOpenAI",
         ) as mock_llm_cls:
@@ -400,7 +411,9 @@ class TestExtractKeywords:
                 return_value=_FakeResponse("   \n  "),
             )
             mock_llm_cls.return_value = mock_llm
-            result = await extract_keywords("Do thing", config=_make_config())
+            result = await extract_keywords(
+                "Do thing", config=_make_config(), timeout_s=0.1
+            )
         assert result == []
 
     @pytest.mark.asyncio

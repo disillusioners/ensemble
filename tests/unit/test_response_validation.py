@@ -368,3 +368,343 @@ class TestFailOpenBehavior:
             delattr(response, "tool_calls")
         # Should NOT raise (fail-open)
         validate_llm_response(response)
+
+
+# =============================================================================
+# Empty-response-guard Phase 1 — shared predicate truth table (doc §11b)
+# =============================================================================
+
+
+from langchain_core.messages import HumanMessage, ToolMessage
+
+from daemon.response_validation import (
+    NUDGE_MESSAGE,
+    EmptyLLMResponseError,
+    empty_guard_disabled,
+    install_empty_guard_config,
+    is_empty_llm_content,
+    _reset_empty_guard_config_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_empty_guard_defaults():
+    """Every test in this module starts and ends on the documented defaults."""
+    _reset_empty_guard_config_for_tests()
+    yield
+    _reset_empty_guard_config_for_tests()
+
+
+class TestSharedEmptinessPredicate:
+    """Truth table for ``is_empty_llm_content`` (empty-response-guard §11b)."""
+
+    def test_none_is_empty(self):
+        assert is_empty_llm_content(None) is True
+
+    def test_empty_string_is_empty(self):
+        # Streaming aggregation yields "" for all-empty chunk streams
+        # (langchain-openai coerces None → "" before concatenation).
+        assert is_empty_llm_content("") is True
+
+    def test_whitespace_only_string_is_empty(self):
+        assert is_empty_llm_content("   \n\t ") is True
+
+    def test_non_empty_string_is_not_empty(self):
+        assert is_empty_llm_content("hello") is False
+
+    def test_think_tag_only_string_is_deliberately_not_empty(self):
+        # L3: tag chars are non-whitespace → the S1 guard must NOT own
+        # this class; router rows 2-3 + the S5 cap do.
+        assert is_empty_llm_content("<think>reasoning</think>") is False
+
+    def test_empty_list_is_vacuously_empty(self):
+        # The deliberate flip of the legacy router pin (doc §10): the
+        # legacy `_is_empty_content` returned False for ANY list.
+        assert is_empty_llm_content([]) is True
+
+    def test_list_all_whitespace_text_blocks_is_empty(self):
+        content = [{"type": "text", "text": "  "}, {"type": "text", "text": "\n"}]
+        assert is_empty_llm_content(content) is True
+
+    def test_list_with_non_whitespace_text_block_is_not_empty(self):
+        content = [{"type": "text", "text": "answer"}]
+        assert is_empty_llm_content(content) is False
+
+    def test_list_with_image_block_is_not_empty(self):
+        # L13: a vision response carrying a non-text block is never empty.
+        content = [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            {"type": "text", "text": " "},
+        ]
+        assert is_empty_llm_content(content) is False
+
+    def test_list_with_audio_block_is_not_empty(self):
+        content = [{"type": "audio", "audio": {"data": "x"}}]
+        assert is_empty_llm_content(content) is False
+
+    def test_list_with_unknown_block_type_fails_open(self):
+        content = [{"type": "mystery_block", "payload": "x"}]
+        assert is_empty_llm_content(content) is False
+
+    def test_list_with_untyped_block_fails_open(self):
+        content = [{"data": "no type key"}]
+        assert is_empty_llm_content(content) is False
+
+    def test_list_with_non_dict_entry_fails_open(self):
+        content = ["just a string block"]
+        assert is_empty_llm_content(content) is False
+
+    def test_other_shapes_fail_open(self):
+        assert is_empty_llm_content({}) is False
+        assert is_empty_llm_content(123) is False
+        assert is_empty_llm_content(0.0) is False
+
+
+# =============================================================================
+# Empty-response-guard Phase 1 — S1 turn-aware raise (doc §5 Option 4)
+# =============================================================================
+
+
+def _tool_calling_ai():
+    return AIMessage(
+        content="",
+        tool_calls=[ToolCall(id="call_1", name="test_tool", args={})],
+    )
+
+
+def _real_human(text="Do the thing"):
+    return HumanMessage(content=text)
+
+
+def _tool_result():
+    return ToolMessage(content="tool output", tool_call_id="call_1")
+
+
+def _nudge_human(marker=True):
+    kwargs = {"injected_message": True}
+    if marker:
+        kwargs["empty_response_nudge"] = True
+    return HumanMessage(content=NUDGE_MESSAGE, additional_kwargs=kwargs)
+
+
+def _context_human():
+    return HumanMessage(
+        content="[SYSTEM CONTEXT: Blueprint]\ncontext body",
+        additional_kwargs={"injected_message": True, "context_kind": "blueprint"},
+    )
+
+
+def _language_reminder():
+    return HumanMessage(
+        content="Please respond again in English.",
+        additional_kwargs={"injected_message": True, "language_check_reminder": True},
+    )
+
+
+class TestEmptyLLMResponseErrorSubclass:
+    """The typed error must sit inside the existing validation hierarchy."""
+
+    def test_subclass_of_llm_response_validation_error(self):
+        assert issubclass(EmptyLLMResponseError, LLMResponseValidationError)
+
+    def test_carries_response(self):
+        response = make_ai_message(content="")
+        error = EmptyLLMResponseError("empty", response=response)
+        assert error.response is response
+        assert isinstance(error, LLMResponseValidationError)
+
+    def test_transient_membership_inherited(self):
+        # Retry/failover budget consumption is inherited via
+        # TRANSIENT_EXCEPTIONS membership of the parent class — the
+        # subclass must not break that chain.
+        from daemon.llm_error_classifier import TRANSIENT_EXCEPTIONS
+
+        assert LLMResponseValidationError in TRANSIENT_EXCEPTIONS
+        assert any(
+            isinstance(EmptyLLMResponseError, type) and issubclass(EmptyLLMResponseError, exc)
+            for exc in TRANSIENT_EXCEPTIONS
+        )
+
+
+class TestEmptyResponseGuardRaiseGate:
+    """Turn-aware raise matrix — the L1-L13 exemption contract (doc §6)."""
+
+    def test_empty_as_entire_answer_raises(self):
+        # Row 6 incident class: empty directly after a real human turn.
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(
+                make_ai_message(content=""), input_messages=[_real_human()]
+            )
+
+    def test_first_empty_after_tool_result_passes_router_nudge_owns_it(self):
+        # L1 rung 1: the router's row-5 nudge is the cheap first rung.
+        messages = [_real_human(), _tool_calling_ai(), _tool_result()]
+        validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_second_empty_after_nudge_raises(self):
+        # §8.1 synthesis: empty → nudge → second empty RAISES (no longer
+        # a silent END).
+        messages = [
+            _real_human(),
+            _tool_calling_ai(),
+            _tool_result(),
+            _nudge_human(),
+        ]
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_second_empty_after_legacy_nudge_text_still_raises(self):
+        # Checkpoints written before the dedicated marker: the exact
+        # nudge text (with only the injected_message stamp) is still
+        # recognized.
+        messages = [
+            _real_human(),
+            _tool_calling_ai(),
+            _tool_result(),
+            _nudge_human(marker=False),
+        ]
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_tool_only_turn_response_exempt(self):
+        # L5: a response carrying tool_calls is never empty-as-answer.
+        messages = [_real_human()]
+        validate_llm_response(
+            make_ai_message(content="", tool_calls=[
+                ToolCall(id="c2", name="t", args={})
+            ]),
+            input_messages=messages,
+        )
+
+    def test_reasoning_only_response_exempt(self):
+        # L2: designed reasoning sequences must not burn retry budget.
+        messages = [_real_human()]
+        validate_llm_response(
+            make_ai_message(
+                content="", additional_kwargs={"reasoning_content": "thinking..."}
+            ),
+            input_messages=messages,
+        )
+
+    def test_think_tag_only_response_exempt(self):
+        # L3: deliberately non-empty under the shared predicate.
+        messages = [_real_human()]
+        validate_llm_response(
+            make_ai_message(content="<think>reasoning</think>"),
+            input_messages=messages,
+        )
+
+    def test_ghost_promise_response_exempt(self):
+        # L4: truthy content ending with ':' — router row 4 owns it.
+        messages = [_real_human()]
+        validate_llm_response(
+            make_ai_message(content="Now let me write the document:"),
+            input_messages=messages,
+        )
+
+    def test_done_speaking_spoke_suppression_passes(self):
+        # L1: trailing empty after the assistant already spoke this turn.
+        messages = [_real_human(), AIMessage(content="Here is the answer.")]
+        validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_language_check_reminder_is_not_a_boundary_and_spoke_suppresses(self):
+        # L9: wrong-language reminder → re-invoke → empty passes because
+        # the assistant already produced (wrong-language) content.
+        messages = [
+            _real_human(),
+            AIMessage(content="Bonjour, voici la réponse."),
+            _language_reminder(),
+        ]
+        validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_context_human_is_not_a_user_boundary(self):
+        # L6: context blocks are skipped; the real human below governs.
+        messages = [_context_human(), _real_human()]
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(make_ai_message(content=""), input_messages=messages)
+
+    def test_context_only_window_with_no_marker_and_no_spoke_raises(self):
+        # No real boundary found at all: empty-as-entire-answer still
+        # raises (fail-loud default of the window scan).
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(
+                make_ai_message(content=""), input_messages=[_context_human()]
+            )
+
+    def test_multimodal_image_bearing_content_never_raises(self):
+        # L13: image-bearing content is non-empty under the predicate.
+        messages = [_real_human()]
+        validate_llm_response(
+            make_ai_message(
+                content=[
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                    {"type": "text", "text": " "},
+                ]
+            ),
+            input_messages=messages,
+        )
+
+    def test_all_whitespace_text_blocks_empty_after_human_raises(self):
+        # L13 flip side: an all-empty-text vision response IS empty.
+        messages = [_real_human()]
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(
+                make_ai_message(content=[{"type": "text", "text": "  "}]),
+                input_messages=messages,
+            )
+
+    def test_bare_signature_fails_open(self):
+        # Legacy direct callers (no input_messages) keep the historical
+        # pass-through for empty content.
+        validate_llm_response(make_ai_message(content=""))
+
+    def test_non_list_input_fails_open(self):
+        validate_llm_response(make_ai_message(content=""), input_messages=None)
+        validate_llm_response(make_ai_message(content=""), input_messages="not-a-list")
+
+
+class TestEmptyResponseGuardKillSwitch:
+    """Kill-switch OFF restores the legacy pass-through (doc §10 pins)."""
+
+    def test_guard_off_disables_the_raise(self):
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        # Raise-shaped input passes through.
+        validate_llm_response(
+            make_ai_message(content=""), input_messages=[_real_human()]
+        )
+
+    def test_guard_off_keeps_checks_1_and_2(self):
+        # "Byte-identical legacy": only the empty check is disabled —
+        # truncation and malformed tool-call validation still fire.
+        install_empty_guard_config(enabled=False, compaction_skip=False)
+        truncated = make_ai_message(content="")
+        truncated.response_metadata = {"finish_reason": "length"}
+        with pytest.raises(LLMResponseValidationError):
+            validate_llm_response(truncated, input_messages=[_real_human()])
+        malformed = make_ai_message(
+            content="x",
+            tool_calls=[ToolCall(id="c9", name="", args={})],
+        )
+        with pytest.raises(LLMResponseValidationError):
+            validate_llm_response(malformed, input_messages=[_real_human()])
+
+    def test_scope_disable_only_affects_the_scope(self):
+        with empty_guard_disabled():
+            validate_llm_response(
+                make_ai_message(content=""), input_messages=[_real_human()]
+            )
+        # After the scope exits, the raise is live again.
+        with pytest.raises(EmptyLLMResponseError):
+            validate_llm_response(
+                make_ai_message(content=""), input_messages=[_real_human()]
+            )
+
+    def test_install_roundtrip(self):
+        install_empty_guard_config(enabled=False, compaction_skip=True)
+        from daemon.response_validation import (
+            get_empty_guard_compaction_skip,
+            get_empty_response_guard_enabled,
+        )
+
+        assert get_empty_response_guard_enabled() is False
+        assert get_empty_guard_compaction_skip() is True

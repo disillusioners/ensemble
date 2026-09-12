@@ -907,8 +907,13 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
     def _run_with_classification(messages: list, **kwargs: Any) -> Any:
         try:
             result = llm_with_tools.invoke(messages, **kwargs)
-            # Phase 1's validation runs INSIDE the retry scope
-            validate_llm_response(result)
+            # Phase 1's validation runs INSIDE the retry scope.
+            # ``input_messages`` (empty-response-guard Phase 1): the
+            # turn-aware empty check (Check 3 / S1) scans THIS list for
+            # the real human boundary, prior assistant output, and the
+            # empty-response nudge — the raise inherits the retry →
+            # failover → loud-ERROR ladder from this scope.
+            validate_llm_response(result, input_messages=messages)
             return result
         except openai.BadRequestError as e:
             # MUST come FIRST — BadRequestError is a subclass of APIStatusError
