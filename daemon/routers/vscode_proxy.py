@@ -153,6 +153,12 @@ def _decode_response_body(
     ``deflate`` (stdlib zlib), ``br`` (optional brotli). Any unknown
     encoding also returns ``None`` so the caller can fall back to
     pass-through streaming.
+
+    NOTE: malformed/truncated compressed bytes still raise
+    (OSError / zlib.error / brotli.error). The caller
+    (:func:`_buffer_and_maybe_rewrite_webview`) catches those and
+    falls back to byte-faithful re-serve of the original raw bytes
+    — a 500 is never the right answer for a downstream bug.
     """
     if not content_encoding:
         return body
@@ -166,6 +172,9 @@ def _decode_response_body(
 
         return zlib.decompress(body)
     if enc == "br":
+        # brotli is a declared runtime dep (pyproject.toml) so this
+        # import should always succeed. We still guard to keep the
+        # kill-switch path safe if a future dep prune removes it.
         global _BROTLI_DECODE_MISSING_LOGGED
         try:
             import brotli  # type: ignore[import-not-found]
@@ -175,14 +184,70 @@ def _decode_response_body(
                 logger.warning(
                     "VSCode proxy: skipping webview meta-CSP rewrite for "
                     "brotli-compressed response — 'brotli' package not "
-                    "installed. Install with `uv pip install brotli` (or "
-                    "`uv pip install httpx[brotli]`) to enable rewrite for "
-                    "br-encoded webview HTML."
+                    "installed. Add `brotli>=1.0` to "
+                    "[project].dependencies in pyproject.toml."
                 )
             return None
         return brotli.decompress(body)
     # Unknown encoding — pass through to streaming unchanged.
     return None
+
+
+# Recognised Content-Encoding values that this proxy can decode in
+# the meta-CSP rewrite path. Anything outside this set (including the
+# empty ``identity`` string and ``identity`` itself) is either a
+# no-op decode or an explicit skip — callers must check this BEFORE
+# consuming the upstream body to avoid
+# ``httpx.Response.aiter_raw`` raising ``StreamConsumed`` on the
+# second iteration (the streaming fall-through path).
+_DECODEABLE_ENCODINGS: frozenset[str] = frozenset(
+    {"", "identity", "gzip", "deflate", "br"}
+)
+
+
+def _can_decode_encoding(encoding: str | None) -> bool:
+    """Return True iff the encoding is in the recognised decode set.
+
+    Mirrors :func:`_decode_response_body`'s recognised values. For
+    ``br``, additionally requires the ``brotli`` package to be
+    importable (declared runtime dep, but kept guard so the
+    kill-switch path stays safe if a future dep prune removes it).
+    """
+    if encoding is None:
+        return True
+    enc = encoding.strip().lower()
+    if enc not in _DECODEABLE_ENCODINGS:
+        return False
+    if enc == "br":
+        try:
+            import brotli  # noqa: F401  type: ignore[import-not-found]
+        except ImportError:
+            return False
+    return True
+
+
+def _raw_byte_faithful_response(
+    body: bytes, upstream: httpx.Response
+) -> Response:
+    """Re-serve the original raw bytes with proxy-default headers.
+
+    Used after we consume the upstream body but decide NOT to rewrite
+    (either no meta-CSP to augment, or decode failed on a malformed
+    payload). Preserves the original ``Content-Encoding`` so the
+    browser's decoder stays in sync with the wire bytes — this is the
+    only path that keeps the upstream's pre-encoded bytes intact end
+    to end. Recomputes ``Content-Length`` so the new header agrees
+    with the actual body length (which equals the buffered body
+    length).
+    """
+    out_headers = _response_headers(upstream.headers)
+    out_headers["Content-Length"] = str(len(body))
+    return Response(
+        content=body,
+        status_code=upstream.status_code,
+        headers=out_headers,
+        media_type=None,
+    )
 
 
 def _augment_csp_directives(csp_value: str, origin_to_add: str) -> str:
@@ -351,11 +416,12 @@ async def _buffer_and_maybe_rewrite_webview(
     """Buffer the upstream response, attempt the meta-CSP rewrite.
 
     Returns ``None`` if the response is not eligible (kill-switch OFF,
-    not a webview HTML, body unreadable) — the caller should fall
-    through to the streaming pass-through. Returns a :class:`Response`
+    not a webview HTML, body unreadable, encoding not decode-able) —
+    the caller falls through to the streaming pass-through WITHOUT
+    having consumed the upstream body. Returns a :class:`Response`
     with the rewritten bytes when the meta-CSP was successfully
-    augmented; the response headers carry the new
-    ``Content-Length`` and have ``ETag`` / ``Cache-Control`` / original
+    augmented; the response headers carry the new ``Content-Length``
+    and have ``ETag`` / ``Cache-Control`` / original
     ``Content-Encoding`` stripped so the browser cannot pin a stale
     variant of the rewritten doc.
 
@@ -365,7 +431,19 @@ async def _buffer_and_maybe_rewrite_webview(
     determines the encoded host (e.g. ``localhost:8079`` →
     ``localhost-003a8079``); a different port would yield a
     different encoded host that the browser cannot match.
+
+    Stream-consumption discipline: every pre-check that returns
+    ``None`` MUST run BEFORE :meth:`httpx.Response.aiter_raw` is
+    called. Real httpx raises :class:`httpx.StreamConsumed` on the
+    second iteration of a streamed body — verified by inspection of
+    ``httpx/Response.aiter_raw`` (sets ``self.is_stream_consumed =
+    True`` on first call) — so a fall-through that re-iterates
+    after a pre-check consumed the body would 500. We pin this with
+    a unit test that uses a real :class:`httpx.Response` with a
+    generator-backed body.
     """
+    # ── Pre-consume gates (each must return None without consuming
+    # the upstream body). ──
     if not _resolve_vscode_webview_csp_fix():
         return None
 
@@ -382,21 +460,49 @@ async def _buffer_and_maybe_rewrite_webview(
     if not content_type.lower().startswith("text/html"):
         return None
 
+    # Encoding pre-check — decide BEFORE consuming. If the encoding
+    # is unknown OR the package is missing for a recognised
+    # encoding (e.g. brotli without the brotli package), return None
+    # so the caller streams through the original bytes without ever
+    # touching ``upstream.aiter_raw``.
+    encoding = upstream.headers.get("content-encoding", "").strip().lower()
+    if not _can_decode_encoding(encoding):
+        return None
+
+    # ── Consume point — past here we own the body and cannot fall
+    # through to a streaming path that re-calls ``aiter_raw``. All
+    # post-consume branches must return a concrete Response. ──
     # Buffer the body. Webview HTML is small (< 10 KiB based on the
     # evidence capture), so the memory cost is bounded.
     body_chunks: list[bytes] = []
     async for chunk in upstream.aiter_raw():
         body_chunks.append(chunk)
-    body = b"".join(body_chunks)
+    raw_body = b"".join(body_chunks)
 
-    decoded = _decode_response_body(
-        body, upstream.headers.get("content-encoding")
-    )
+    # Try to decode. Malformed/truncated compressed bytes raise:
+    # ``EOFError`` (gzip — truncated header / missing stream
+    # terminator), ``zlib.error`` (deflate), ``brotli.error``
+    # (``br``), or any other ``Exception`` from a third-party
+    # decoder. We catch the broad ``Exception`` class because the
+    # body is a small, well-known artifact (< 10 KiB); anything
+    # thrown from a decode call here is a downstream bug, not a
+    # caller-side error, and the right answer is never a 500. The
+    # catch is documented + log-warned for forensic value.
+    try:
+        decoded = _decode_response_body(raw_body, encoding or None)
+    except Exception as exc:  # noqa: BLE001 — see docstring above.
+        logger.warning(
+            "VSCode proxy: webview meta-CSP rewrite skipped — "
+            "decoding %s body failed (%s: %s); byte-faithful re-serve",
+            encoding or "identity", type(exc).__name__, exc,
+        )
+        return _raw_byte_faithful_response(raw_body, upstream)
+
     if decoded is None:
-        # Undecodable — fall back to streaming the original bytes.
-        # The one-shot ``_BROTLI_DECODE_MISSING_LOGGED`` keeps the log
-        # quiet for repeat offenders.
-        return None
+        # _can_decode_encoding said yes but _decode_response_body
+        # said no — should not happen, but defend anyway. Re-serve
+        # raw bytes.
+        return _raw_byte_faithful_response(raw_body, upstream)
 
     # The CSP source is a constant wildcard suffix
     # (``https://*.vscode-resource.vscode-cdn.net``). The browser
@@ -410,13 +516,13 @@ async def _buffer_and_maybe_rewrite_webview(
         decoded, _WEBVIEW_CSP_VIRTUAL_HOST
     )
     if not was_rewritten:
-        # No meta-CSP to augment (or already augmented) — preserve
-        # byte-faithfulness for this path. Fall through to streaming
-        # by returning None; the caller rebuilds the streaming
-        # response from the already-buffered body bytes via the
-        # streaming path. We still close the upstream to avoid
-        # leak — the caller's ``finally`` handles that.
-        return None
+        # No meta-CSP to augment (or already augmented, or the doc
+        # has no meta-CSP tag at all). We must NOT fall through to
+        # streaming — we already consumed the upstream body and
+        # would 500 with ``StreamConsumed`` on the re-iteration.
+        # Instead, re-serve the original encoded bytes with the
+        # original Content-Encoding (byte-faithful to the wire).
+        return _raw_byte_faithful_response(raw_body, upstream)
 
     # Build the rewritten response. Headers: keep hop-by-hop filtering
     # + framing-policy replacement semantics from

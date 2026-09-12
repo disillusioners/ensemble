@@ -2572,8 +2572,9 @@ def _reset_kv_ambient_for_tests() -> None:
 # :func:`_resolve_vscode_webview_csp_fix_from_sources`, installs it here
 # via :func:`_install_vscode_webview_csp_fix`, and emits the one boot
 # INFO line naming the resolved state. The runtime gate
-# (``daemon/routers/vscode_proxy.py::_is_webview_csp_fix_enabled``)
-# reads the cache via :func:`_resolve_vscode_webview_csp_fix` —
+# (``daemon/routers/vscode_proxy.py::_buffer_and_maybe_rewrite_webview``,
+# which reads :func:`_resolve_vscode_webview_csp_fix`) — flipping the
+# env mid-flight has no effect until restart.
 # flipping the env mid-flight has no effect until restart.
 #
 # Cache discipline: ``None`` = cold (no ``load_config`` yet in this

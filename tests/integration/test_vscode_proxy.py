@@ -36,6 +36,7 @@ fires first.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -1502,6 +1503,359 @@ class TestWebviewCspRewrite:
         # The body bytes equal the upstream raw bytes.
         assert resp.status_code == 200
         assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    # ── Follow-up edge cases (review follow-up) ────────────────────────────
+
+    def test_deflate_encoded_webview_is_rewritten(self):
+        """deflate-encoded webview HTML is decoded + rewritten.
+
+        Mirrors ``test_gzip_encoded_webview_is_rewritten`` for the
+        zlib (``deflate``) branch in ``_decode_response_body``
+        (vscode_proxy.py:164-167). Uses stdlib ``zlib`` so no extra
+        dep is required.
+        """
+        self._install_fn(True)
+        import zlib
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        df = zlib.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=df,
+            content_type="text/html",
+            content_encoding="deflate",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Rewritten path strips Content-Encoding so the new bytes match
+        # the recomputed Content-Length.
+        assert resp.headers.get("content-encoding") is None
+        assert self.VIRTUAL_HOST.encode() in resp.content
+        assert int(resp.headers["content-length"]) == len(resp.content)
+
+    def test_already_augmented_webview_passes_through_unchanged(
+        self,
+    ):
+        """An already-augmented webview doc hits the FULL HTTP path
+        and is re-served with the ORIGINAL Content-Encoding
+        preserved (byte-faithful to the wire).
+
+        ``test_rewrite_is_idempotent`` only exercises the direct
+        helper ``_rewrite_webview_meta_csp``; this test drives the
+        end-to-end FastAPI handler so we pin the byte-faithful
+        re-serve contract for the consume-but-no-rewrite branch
+        (the path that would previously have fallen through to
+        streaming and 500'd with ``StreamConsumed`` on real httpx).
+        """
+        self._install_fn(True)
+        import brotli
+        # Build an ALREADY-augmented doc (the wildcard source is in
+        # both script-src and style-src) and brotli-encode it.
+        already_augmented_csp = (
+            "default-src 'none'; "
+            "script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' "
+            f"'self' {self.VIRTUAL_HOST}; "
+            "frame-src 'self'; "
+            f"style-src 'unsafe-inline' {self.VIRTUAL_HOST};"
+        )
+        raw = self._build_webview_html(already_augmented_csp)
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Original Content-Encoding MUST be preserved on the
+        # byte-faithful re-serve path — the wire bytes are the
+        # original brotli-compressed bytes, so the browser's
+        # decoder stays in sync with the body.
+        assert resp.headers.get("content-encoding") == "br"
+        # TestClient decodes the br body for us; the decoded bytes
+        # equal the upstream's pre-encoding bytes (i.e. the original
+        # HTML, already augmented — no DOUBLE augmentation).
+        assert resp.content == raw
+        # The Content-Length recompute must agree with the actual
+        # body length (the BROTLI body, since the proxy streams the
+        # original raw bytes back to the browser without re-encoding).
+        assert int(resp.headers["content-length"]) == len(br)
+        # Idempotency pin: the wildcard appears ONCE per directive,
+        # not twice. ``raw.count(VIRTUAL_HOST) == 2`` (one for each
+        # of script-src / style-src).
+        assert raw.count(self.VIRTUAL_HOST.encode()) == 2
+
+    def test_webview_html_with_charset_hits_rewrite(self):
+        """Content-Type ``text/html; charset=UTF-8`` (the typical real
+        upstream value) still triggers the rewrite.
+
+        The pre-consume content-type guard uses
+        ``startswith("text/html")`` so a ``charset=`` parameter
+        doesn't fool the gate. Pins the typical real upstream
+        Content-Type rather than the stripped ``text/html`` form.
+        """
+        self._install_fn(True)
+        import brotli
+        raw = self._build_webview_html(self.WEBVIEW_CSP_4_112)
+        br = brotli.compress(raw)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=br,
+            content_type="text/html; charset=UTF-8",
+            content_encoding="br",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        assert resp.status_code == 200
+        # Rewritten — strip + new Content-Length + virtual-host added.
+        assert resp.headers.get("content-encoding") is None
+        assert self.VIRTUAL_HOST.encode() in resp.content
+        assert int(resp.headers["content-length"]) == len(resp.content)
+
+    def test_malformed_gzip_body_returns_graceful_200(self):
+        """A truncated / malformed gzip body is a DOWNSTREAM BUG, not
+        a 500 — the proxy catches the decoder's exception and falls
+        back to byte-faithful re-serve of the original raw bytes.
+
+        Without the decode-error catch, ``gzip.decompress`` would
+        propagate ``EOFError`` (gzip raises ``EOFError`` — a direct
+        subclass of ``Exception``) out of the handler and FastAPI
+        would emit a 500. Pin the graceful fallback.
+
+        Note on TestClient auto-decoding: TestClient (httpx)
+        auto-decodes ``content-encoding: gzip`` on the response
+        and silently returns ``b""`` for invalid input, so we pin
+        the byte-faithful contract via the proxy's response
+        headers (which TestClient does NOT modify) rather than via
+        ``resp.content``. The headers carry the proxy's contract:
+        200 status (no 500), original ``content-encoding`` preserved,
+        ``content-length`` matching the buffered raw body.
+        """
+        self._install_fn(True)
+        # Truncated gzip header (only the gzip magic + first byte).
+        # ``gzip.decompress`` raises ``EOFError: Compressed file ended
+        # before the end-of-stream marker was reached`` on this input.
+        malformed = b"\x1f\x8b"
+        # Sanity check: confirm the input is actually malformed
+        # (raises) so a refactor that silently swallows the error
+        # doesn't sneak past the test.
+        import gzip
+        with pytest.raises(EOFError):
+            gzip.decompress(malformed)
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+        _patch_upstream_for_webview_html(
+            body=malformed,
+            content_type="text/html",
+            content_encoding="gzip",
+            status_code=200,
+            path=(
+                "/vscode/stable-abc/static/out/vs/workbench/"
+                "contrib/webview/browser/pre/index.html"
+            ),
+        )
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
+                "browser/pre/index.html?id=x",
+                headers={"Host": "localhost:8079"},
+            )
+        # No 500: the decoder exception is caught and the proxy
+        # re-serves the original raw bytes.
+        assert resp.status_code == 200, (
+            "malformed gzip body MUST NOT 500 — graceful 200 fallback "
+            "(byte-faithful re-serve) is the contract"
+        )
+        # Original Content-Encoding preserved on the re-serve path
+        # — the proxy did NOT strip / re-encode.
+        assert resp.headers.get("content-encoding") == "gzip"
+        # Content-Length matches the original raw body length
+        # (proxy recomputed from the buffered bytes; this is the
+        # canonical byte-faithful pin — the wire bytes are the
+        # proxy's response bytes).
+        assert int(resp.headers["content-length"]) == len(malformed)
+        # No virtual-host origin added — we did not get far enough
+        # to rewrite the meta-CSP.
+        assert self.VIRTUAL_HOST.encode() not in resp.content
+
+    def test_real_httpx_undecodable_encoding_streams_without_consumed(
+        self,
+    ):
+        """Pin the StreamConsumed fix end-to-end with a REAL httpx.
+
+        The existing tests use a fake upstream whose ``aiter_raw``
+        returns a fresh generator on each call — that masks the
+        real-httpx ``StreamConsumed`` bug. We construct a REAL
+        ``httpx.Response`` with a generator-backed ``AsyncByteStream``
+        body (the same shape ``httpx.AsyncClient.send(stream=True)``
+        returns) and verify the undecodable-encoding path does NOT
+        500 — i.e. the proxy does NOT consume the body before
+        deciding to fall through to streaming.
+
+        Why this matters: real httpx raises
+        ``httpx.StreamConsumed`` on the second call to
+        ``Response.aiter_raw`` (sets ``self.is_stream_consumed = True``
+        on first call — verified by inspection of
+        ``httpx/_models.py:Response.aiter_raw``). The previous
+        implementation consumed first and decided second, which
+        would 500 on real httpx. This test pins the fix.
+        """
+        import httpx as _httpx
+
+        self._install_fn(True)
+
+        # Build a SEPARATE real httpx.Response for the sanity
+        # check below (StreamConsumed-on-second-iteration). The
+        # proxy receives a DIFFERENT upstream — sharing would
+        # consume the body during the sanity check and 500 the
+        # proxy on its first aiter_raw.
+        class _Stream(_httpx.AsyncByteStream):
+            def __init__(self, chunks):
+                self._chunks = chunks
+
+            async def __aiter__(self):
+                for chunk in self._chunks:
+                    yield chunk
+
+            async def aclose(self):
+                pass
+
+        # Sanity-check Response: confirm aiter_raw() raises
+        # StreamConsumed on the second iteration. Without this
+        # guard, a future httpx change to fresh-iterator semantics
+        # would silently mask the bug we're fixing here.
+        sanity_upstream = _httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_Stream([b"sanity chunk"]),
+            request=_httpx.Request(
+                "GET",
+                "http://127.0.0.1:8081/sanity",
+            ),
+        )
+
+        async def _aiter_twice_should_raise():
+            async for _ in sanity_upstream.aiter_raw():
+                pass
+            async for _ in sanity_upstream.aiter_raw():
+                pass
+        with pytest.raises(_httpx.StreamConsumed):
+            asyncio.run(_aiter_twice_should_raise())
+
+        # Proxy-bound Response: a real httpx.Response with a
+        # generator-backed AsyncByteStream body. The proxy sees
+        # this exact object and ``aiter_raw()`` exhibits real
+        # ``StreamConsumed`` semantics on second iteration.
+        upstream = _httpx.Response(
+            200,
+            headers={
+                "content-type": "text/html",
+                # Unknown encoding — must trigger the no-consume path
+                "content-encoding": "bizarre-unknown-encoding",
+                "cache-control": "public, max-age=31536000",
+                "etag": '"deadbeef"',
+            },
+            content=_Stream(
+                [b"webview body chunk one ", b"chunk two"]
+            ),
+            request=_httpx.Request(
+                "GET",
+                "http://127.0.0.1:8081/vscode/stable-abc/static/out/"
+                "vs/workbench/contrib/webview/browser/pre/index.html"
+                "?id=x&extensionId=vscode.media-preview",
+            ),
+        )
+
+        # Now drive the proxy handler end-to-end. We patch
+        # ``httpx.AsyncClient.send`` on the proxy module so the
+        # handler receives our real httpx.Response.
+        from daemon.routers import vscode_proxy as proxy_module
+
+        fake_client = MagicMock()
+
+        async def _fake_send(*args, **kwargs):
+            return upstream
+
+        fake_client.send = _fake_send
+        fake_client.build_request = MagicMock(return_value=MagicMock())
+
+        async def _fake_aclose():
+            pass
+
+        fake_client.aclose = _fake_aclose
+
+        def _fake_async_client(*args, **kwargs):
+            return fake_client
+
+        proxy_module.httpx.AsyncClient = _fake_async_client
+
+        manager = _make_mock_manager(running=True, port=8081)
+        app = create_vscode_proxy_app(manager)
+
+        try:
+            with TestClient(app) as client:
+                resp = client.get(
+                    "/vscode/stable-abc/static/out/vs/workbench/contrib/"
+                    "webview/browser/pre/index.html?id=x",
+                    headers={"Host": "localhost:8079"},
+                )
+        finally:
+            proxy_module.httpx.AsyncClient = _httpx.AsyncClient
+
+        # The undecodable-encoding path must fall through to
+        # streaming — NOT 500 with StreamConsumed. The streaming
+        # generator's aiter_raw() is the FIRST iteration of this
+        # body, so the proxy delivers the chunks.
+        assert resp.status_code == 200, (
+            "undecodable-encoding path MUST stream through on a "
+            "REAL httpx body — StreamConsumed on the second "
+            "iteration would 500 here"
+        )
+        # The streaming response delivers the body (TestClient
+        # accumulates chunks). No content-encoding → the proxy
+        # passed it through verbatim (no compression claimed /
+        # applied because the unknown encoder couldn't decode).
+        assert b"webview body chunk one chunk two" in resp.content
 
 
 def _patch_upstream_for_webview_html(
