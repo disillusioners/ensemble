@@ -1,0 +1,8 @@
+# no-ext
+# URL: http://localhost:8079/vscode/stable-13ca0e47310505f4ab1ac59e891e9a3c5e5eec04/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=4ecf193d-2401-442c-ae02-f20d393c1d3c&parentId=1&origin=4ecf193d-2401-442c-ae02-f20d393c1d3c&swVersion=4&extensionId=&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079
+default-src 'none'; script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' 'self' https://*.vscode-resource.vscode-cdn.net; frame-src 'self'; style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net; img-src data: blob: https://*.vscode-resource.vscode-cdn.net; media-src 'self' https://*.vscode-resource.vscode-cdn.net
+
+# media-preview
+# URL: http://localhost:8079/vscode/stable-13ca0e47310505f4ab1ac59e891e9a3c5e5eec04/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=f97a3fa6-ca6a-49c8-9d36-4f2da3e43c74&parentId=1&origin=23b8b0a0-7958-45f9-847f-7b8f744e288f&swVersion=4&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079
+default-src 'none'; script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' 'self' https://*.vscode-resource.vscode-cdn.net; frame-src 'self'; style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net; img-src data: blob: https://*.vscode-resource.vscode-cdn.net; media-src 'self' https://*.vscode-resource.vscode-cdn.net
+

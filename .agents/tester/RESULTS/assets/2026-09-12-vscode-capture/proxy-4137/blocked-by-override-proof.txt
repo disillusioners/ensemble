@@ -1,0 +1,85 @@
+=== BLOCKED-BY-OVERRIDE PROOF ===
+
+Env var set in daemon process:
+VSCODE_BINARY_PATH in uvicorn master (PID 91315) env:
+VSCODE_BINARY_PATH=/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/bin/code-server
+
+Spawned code-server cmdline (verbatim from ps):
+  PID COMMAND
+91354 /opt/homebrew/opt/node@22/bin/node /opt/homebrew/bin/code-server --bind-addr 127.0.0.1:0 --auth none --disable-workspace-trust --user-data-dir data_dev/vscode-user-data /Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble
+
+PUT /api/settings/editor response:
+{"editor":"vscode","vscode":{"available":true,"binary_path":"/opt/homebrew/bin/code-server","status":"running","allow_remote":false,"last_error":null,"exit_code":null}}
+Daemon log line (post-baseline):
+11:35:51 - daemon.api - INFO - Editor preference is 'vscode' — auto-starting code-server at boot
+11:35:51 - daemon.services.vscode_server_manager - INFO - code-server started: pid=91354 port=57097 workdir=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble
+
+CODE CITATIONS — root cause:
+  daemon/config.py:1980-1988
+class VSCodeConfig(BaseSettings):
+    """Configuration for the VS Code Server editor integration."""
+
+    model_config = SettingsConfigDict(env_prefix="VSCODE_")
+
+    allow_remote: bool = Field(default=False)  # C1: default to localhost-only binding
+    binary_path: str | None = Field(default=None)  # null = use PATH lookup (shutil.which)
+    user_data_dir: str | None = Field(default=None)  # null = data/vscode-user-data
+    extensions: list[str] = Field(default_factory=list)  # extensions to pre-install
+
+
+
+  daemon/config.py:2820-2824  — the smoking gun:
+    load_config passes yaml dict directly as init kwarg; pydantic-settings
+    gives init kwargs priority over env vars. The vscode section lacks
+    the explicit _resolve_* pattern that compaction/context_messages use
+    to fix this exact inversion. See docstring at line 2334 for context.
+    if "vscode" in processed_config:
+        config_dict["vscode"] = processed_config["vscode"]
+
+    # Create and validate config
+    config = Config(**config_dict)
+
+
+  config.yaml: vscode section:
+vscode:
+  allow_remote: false        # C1: default to localhost-only (code-server binds 127.0.0.1)
+  binary_path: null           # null = auto-detect via PATH lookup (shutil.which)
+  user_data_dir: null         # null = uses data/vscode-user-data
+  extensions: []              # list of extension IDs to pre-install (e.g. ms-python.python)
+
+
+  daemon/services/vscode_server_manager.py:719-755 — _resolve_binary:
+    Uses config.binary_path. If None, falls back to shutil.which('code-server')
+    which finds /opt/homebrew/bin/code-server.
+    def _resolve_binary(self) -> str:
+        """Resolve the code-server binary path.
+
+        Order:
+            1. ``config.binary_path`` if set (must exist and be executable).
+            2. ``shutil.which("code-server")`` (PATH lookup).
+            3. Fallback common install locations (Homebrew, system, user-local).
+            4. Raise :class:`VSCodeServerNotInstalledError`.
+
+        Returns:
+            Absolute path to the code-server binary.
+
+        Raises:
+            VSCodeServerNotInstalledError: binary not found.
+        """
+        if self.config.binary_path:
+            if os.path.isfile(self.config.binary_path) and os.access(
+                self.config.binary_path, os.X_OK
+            ):
+                return self.config.binary_path
+            raise VSCodeServerNotInstalledError(
+                "Configured code-server binary not found or not "
+                f"executable: {self.config.binary_path}"
+            )
+        found = shutil.which("code-server")
+        if found:
+            return found
+        # Fallback: daemon process PATH may miss common install locations
+        # (e.g. Homebrew on Apple Silicon). Probe well-known paths before
+        # giving up so a real install is not misreported as missing.
+        fallback_paths = [
+            "/opt/homebrew/bin/code-server",

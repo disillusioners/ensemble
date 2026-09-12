@@ -1,0 +1,1 @@
+default-src 'none'; script-src 'sha256-nQZh+9dHKZP2cHbhYlCbWDtqxxJtGjRGBx57zNP2DZM=' 'self' https://*.vscode-resource.vscode-cdn.net; frame-src 'self'; style-src 'unsafe-inline' https://*.vscode-resource.vscode-cdn.net; img-src data: blob: https://*.vscode-resource.vscode-cdn.net; media-src 'self' https://*.vscode-resource.vscode-cdn.net

@@ -1,0 +1,14 @@
+{
+  "verdict": "RENDERED",
+  "details": {
+    "frame:http://127.0.0.1:18080/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/ou": [
+      {
+        "src": "https://vscode-remote+127-002e0-002e0-002e1-003a18080.vscode-resource.vscode-cdn.net/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/.inspiration-projects/DeepCode/assets/Deepcode.png?version%3D178918647",
+        "nw": 1456,
+        "nh": 816,
+        "vis": true
+      }
+    ],
+    "tab": "Deepcode.png"
+  }
+}

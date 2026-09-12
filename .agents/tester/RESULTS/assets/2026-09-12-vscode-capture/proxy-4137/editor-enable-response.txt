@@ -1,0 +1,1 @@
+{"editor":"vscode","vscode":{"available":true,"binary_path":"/opt/homebrew/bin/code-server","status":"running","allow_remote":false,"last_error":null,"exit_code":null}}

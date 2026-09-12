@@ -1,0 +1,1114 @@
+{
+  "events": [
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "NAVIGATE"
+    },
+    {
+      "t": 0.008,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+      "method": "GET",
+      "resourceType": "document",
+      "headers": {
+        "upgrade-insecure-requests": "1",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"macOS\""
+      }
+    },
+    {
+      "t": 0.164,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+      "method": "GET",
+      "resourceType": "stylesheet",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 0.164,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "origin": "http://localhost:8079",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 0.164,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "origin": "http://localhost:8079",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 0.171,
+      "kind": "response",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+      "status": 200,
+      "headers": {
+        "content-encoding": "br",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-type": "text/html",
+        "date": "Sat, 12 Sep 2026 04:44:02 GMT\nSat, 12 Sep 2026 04:44:02 GMT",
+        "server": "uvicorn",
+        "transfer-encoding": "chunked",
+        "vary": "Accept-Encoding",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<!-- Copyright (C) Microsoft Corporation. All rights reserved. -->\n<!DOCTYPE html>\n<html>\n\t<head>\n\t\t<script nonce=\"VTaCAVW0WdFvlB9UUT3aVQ\">\n\t\t\tperformance.mark('code/didStartRenderer');\n\t\t</script>\n\t\t<meta charset=\"utf-8\" />\n\n\t\t<!-- Mobile tweaks -->\n\t\t<meta name=\"mobile-web-app-capable\" content=\"yes\" />\n\t\t<meta name=\"apple-mobile-web-app-capable\" content=\"yes\" />\n\t\t<meta name=\"apple-mobile-web-app-title\" content=\"Code\">\n\t\t<link rel=\"apple-touch-icon\" sizes=\"192x192\" href=\"./_static/src/browser/"
+    },
+    {
+      "t": 0.293,
+      "kind": "response",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "date": "Sat, 12 Sep 2026 04:44:02 GMT, Sat, 12 Sep 2026 04:44:02 GMT",
+        "content-type": "text/css",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*!--------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\n.monaco-aria-container{position:absolute;left:-999em}::-ms-clear{display:none}.monaco-editor .editor-widget input{color:inherit}.monaco-editor{position:relative;overflow:visible;-webkit-text-size-adjust:100%;text-spacing-trim:space-all;color:var(--vscode-editor-foreground);background-color:var(--vscode-editor-backgro"
+    },
+    {
+      "t": 0.33,
+      "kind": "response",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/nls.messages.js",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:02 GMT, Sat, 12 Sep 2026 04:44:02 GMT",
+        "content-type": "text/javascript",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*---------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\nglobalThis._VSCODE_NLS_MESSAGES=[\"{0} ({1})\",\"More Actions...\",\"Close Dialog\",\"Error\",\"Info\",\"In Progress\",\"Warning\",\"OK\",\"More Actions...\",\"input\",\"Match Case\",\"Use Regular Expression\",\"Match Whole Word\",\"input\",\"Preserve Case\",\"Inspect this in the accessible view with {0}.\",\"Inspect this in the accessible view via "
+    },
+    {
+      "t": 4.197,
+      "kind": "response",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:02 GMT, Sat, 12 Sep 2026 04:44:02 GMT",
+        "content-type": "text/javascript",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*!--------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\n/******************************************************************************\r\nCopyright (c) Microsoft Corporation.\r\n\r\nPermission to use, copy, modify, and/or distribute this software for any\r\npurpose with or without fee is hereby granted.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES "
+    },
+    {
+      "t": 4.198,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.199,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.199,
+      "kind": "console",
+      "phase": "NAVIGATE",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "t": 4.2,
+      "kind": "console",
+      "phase": "NAVIGATE",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "t": 4.201,
+      "kind": "requestfailed",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+      "method": "GET",
+      "resourceType": "script",
+      "failureText": "net::ERR_ABORTED"
+    },
+    {
+      "t": 4.202,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "origin": "http://localhost:8079",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.js",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.204,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg",
+      "method": "GET",
+      "resourceType": "image",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.204,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/update/check",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "accept": "application/json",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.205,
+      "kind": "console",
+      "phase": "NAVIGATE",
+      "type": "warning",
+      "text": "The web worker extension host is started in a same-origin iframe!"
+    },
+    {
+      "t": 4.205,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=25e11814-d897-4450-8ab1-a4b9a96e91ee",
+      "method": "GET",
+      "resourceType": "document",
+      "headers": {
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "upgrade-insecure-requests": "1",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"macOS\""
+      }
+    },
+    {
+      "t": 4.207,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf",
+      "method": "GET",
+      "resourceType": "font",
+      "headers": {
+        "origin": "http://localhost:8079",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 4.208,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "blob:http://localhost:8079/9b4b8b44-3cb8-4b5c-aa70-3bda49815b12",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "accept": "*/*"
+      }
+    },
+    {
+      "t": 4.209,
+      "kind": "console",
+      "phase": "NAVIGATE",
+      "type": "warning",
+      "text": "An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing."
+    },
+    {
+      "t": 4.21,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "blob:http://localhost:8079/afe8856d-a950-48e2-94db-4ba4006c94bd",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "accept": "*/*"
+      }
+    },
+    {
+      "t": 4.211,
+      "kind": "request",
+      "phase": "NAVIGATE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "origin": "http://localhost:8079",
+        "referer": ""
+      }
+    },
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "SETTLE"
+    },
+    {
+      "t": 1.005,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "origin": "http://localhost:8079",
+        "referer": ""
+      }
+    },
+    {
+      "t": 1.012,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/_static/src/browser/media/templates.png",
+      "method": "GET",
+      "resourceType": "image",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.121,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.121,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.135,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.141,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg",
+      "method": "GET",
+      "resourceType": "image",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/code/browser/workbench/workbench.css",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.141,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=",
+      "method": "GET",
+      "resourceType": "font",
+      "headers": {
+        "origin": "http://localhost:8079",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.143,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.144,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=",
+      "method": "GET",
+      "resourceType": "fetch",
+      "headers": {
+        "sec-ch-ua-platform": "\"macOS\"",
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0"
+      }
+    },
+    {
+      "t": 1.159,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda_bg.wasm",
+      "status": 404,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "date": "Sat, 12 Sep 2026 04:44:03 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/plain",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "Not found"
+    },
+    {
+      "t": 1.159,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/node_modules/vsda/rust/web/vsda.js",
+      "status": 404,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "date": "Sat, 12 Sep 2026 04:44:03 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/plain",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<err: Response.body: Protocol error (Network.getResponseBody): No data found for resource with given identifier\nResponse body is not available for a response that was navigated away from. Read response.body() before triggering any navigation.>"
+    },
+    {
+      "t": 1.159,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/letterpress-light.svg",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "image/svg+xml",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<svg width=\"260\" height=\"260\" viewBox=\"0 0 260 260\" opacity=\"0.1\" xmlns=\"http://www.w3.org/2000/svg\">\n<path d=\"M220 16H40C17.909 16 0 33.909 0 56V204C0 226.091 17.909 244 40 244H220C242.091 244 260 226.091 260 204V56C260 33.909 242.091 16 220 16ZM12 204V56C12 40.561 24.561 28 40 28H75V232H40C24.561 232 12 219.439 12 204ZM248 204C248 219.439 235.439 232 220 232H87V28H220C235.439 28 248 40.561 248 56V204ZM112 58C112 54.686 114.686 52 118 52H187C190.314 52 193 54.686 193 58C193 61.314 190.314 64 18"
+    },
+    {
+      "t": 1.159,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/keybinding/browser/keyboardLayouts/layout.contribution.darwin.js",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/javascript",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*!--------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\n/******************************************************************************\r\nCopyright (c) Microsoft Corporation.\r\n\r\nPermission to use, copy, modify, and/or distribute this software for any\r\npurpose with or without fee is hereby granted.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES "
+    },
+    {
+      "t": 1.159,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/update/check",
+      "status": 200,
+      "headers": {
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "etag": "W/\"50-WMT9zm33obrWNixD6o6UZDxD7Ms\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-length": "80",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "application/json; charset=utf-8",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"checked\":1789186107349,\"latest\":\"4.137.0\",\"current\":\"4.137.0\",\"isLatest\":true}"
+    },
+    {
+      "t": 1.16,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=25e11814-d897-4450-8ab1-a4b9a96e91ee",
+      "status": 200,
+      "headers": {
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-type": "text/html",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT\nSat, 12 Sep 2026 04:44:04 GMT",
+        "server": "uvicorn",
+        "transfer-encoding": "chunked",
+        "vary": "Accept-Encoding",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<!DOCTYPE html>\n<html>\n\t<head>\n\t\t<meta http-equiv=\"Content-Security-Policy\" content=\"\n\t\t\tdefault-src 'none';\n\t\t\tchild-src 'self' data: blob:;\n\t\t\tscript-src 'self' 'unsafe-eval' 'sha256-gfjiOVjAlxqrivZAfTq2d83mOaz0fnAxbGaFpj5IjD8=' https: http://localhost:* blob:;\n\t\t\tconnect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;\"/>\n\t</head>\n\t<body>\n\t<script>\n(function () {\n\tconst searchParams = new URL(document.location.href).searchParams;\n\tconst vscodeWeb"
+    },
+    {
+      "t": 1.168,
+      "kind": "response",
+      "phase": "SETTLE",
+      "url": "blob:http://localhost:8079/9b4b8b44-3cb8-4b5c-aa70-3bda49815b12",
+      "status": 200,
+      "headers": {
+        "content-type": "application/javascript",
+        "content-length": "1057863"
+      },
+      "bodySnippet": "/*editorWorkerService*/globalThis._VSCODE_NLS_MESSAGES = [\"{0} ({1})\",\"More Actions...\",\"Close Dialog\",\"Error\",\"Info\",\"In Progress\",\"Warning\",\"OK\",\"More Actions...\",\"input\",\"Match Case\",\"Use Regular Expression\",\"Match Whole Word\",\"input\",\"Preserve Case\",\"Inspect this in the accessible view with {0}.\",\"Inspect this in the accessible view via the command Open Accessible View which is currently not triggerable via keybinding.\",\"No results\",\"Search icons\",\"Error: {0}\",\"Info: {0}\",\"Warning: {0}\",\"Cle"
+    },
+    {
+      "t": 1.17,
+      "kind": "console",
+      "phase": "SETTLE",
+      "type": "error",
+      "text": "Connecting to 'https://open-vsx.org/vscode/gallery/extensionquery' violates the following Content Security Policy directive: \"connect-src 'self' ws: wss:\". The action has been blocked."
+    },
+    {
+      "t": 1.17,
+      "kind": "console",
+      "phase": "SETTLE",
+      "type": "error",
+      "text": "Fetch API cannot load https://open-vsx.org/vscode/gallery/extensionquery. Refused to connect because it violates the document's Content Security Policy."
+    },
+    {
+      "t": 1.18,
+      "kind": "request",
+      "phase": "SETTLE",
+      "url": "blob:http://localhost:8079/a97d8541-b17c-4ee9-a5fd-e21df022659b",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "accept": "*/*"
+      }
+    },
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "EXPAND_PATH"
+    },
+    {
+      "t": 0.011,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/editor/common/services/editorWebWorkerMain.js",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/javascript",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*!--------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\n/******************************************************************************\r\nCopyright (c) Microsoft Corporation.\r\n\r\nPermission to use, copy, modify, and/or distribute this software for any\r\npurpose with or without fee is hereby granted.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES "
+    },
+    {
+      "t": 0.012,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/codicon.ttf",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/plain",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "\u0000\u0001\u0000\u0000\u0000\u000b\u0000\ufffd\u0000\u0003\u00000GSUB \ufffd%z\u0000\u0000\u00018\u0000\u0000\u0000TOS/27SG!\u0000\u0000\u0001\ufffd\u0000\u0000\u0000`cmap\u0004\u05a9\ufffd\u0000\u0000\f\u0000\u0000\u0000%Pglyf\u0012\ufffd\u0710\u0000\u00006\\\u0000\u0001\ufffd\ufffdheadX\ufffd\ufffdP\u0000\u0000\u0000\ufffd\u0000\u0000\u00006hhea\u0002W\u0003\ufffd\u0000\u0000\u0000\ufffd\u0000\u0000\u0000$hmtx\ufffd\ufffd\ufffd\u0000\u0000\u0001\ufffd\u0000\u0000\n\u0014locam\u0019\ufffd\ufffd\u0000\u00001P\u0000\u0000\u0005\fmaxp\u0003\ufffd\u0001\ufffd\u0000\u0000\u0001\u0018\u0000\u0000\u0000 name\ufffd\ufffd\ufffdO\u0000\u0002,\ufffd\u0000\u0000\u0001\ufffdpost\ufffd:\u0006\u0000\u0002.\ufffd\u0000\u0000%\ufffd\u0000\u0001\u0000\u0000\u0001,\u0000\u0000\u0000\u0000\u0001,\ufffd\ufffd\ufffd\ufffd\u0001/\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002\ufffd\u0000\u0001\u0000\u0000\u0000\u0001\u0000\u0000\ufffd\ufffdAS_\u000f<\ufffd\u0000\u000b\u0001,\u0000\u0000\u0000\u0000|%\ufffd\ufffd\u0000\u0000\u0000\u0000|%\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u0001/\u0001.\u0000\u0000\u0000\b\u0000\u0002\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0002\ufffd\u0001|\u0000\u000f\u0000\u0000\u0000\u0000\u0000\u0002\u0000\u0000\u0000\n\u0000\n\u0000\u0000\u0000\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0000\n\u00000\u0000>\u0000\u0002DFLT\u0000\u000elatn\u0000\u001a\u0000\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0001liga\u0000\b\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0001\u0000\u0004\u0000\u0004\u0000\u0000\u0000\u0001\u0000\b\u0000\u0001\u0000\u0006\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0004\u0001+\u0001\ufffd\u0000\u0005\u0000\u0000\u0000\ufffd\u0000\ufffd\u0000\u0000\u0000*\u0000\ufffd\u0000\ufffd\u0000\u0000\u0000\ufffd\u0000\u000e\u0000M\u0000\u0000\u0002\u0000\u0005\u0003\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000PfEd\u0000\ufffd\ufffd`\ufffd\ufffd\u0001,\u0000\u0000\u0000\u001b\u0001G\u0000\u0007\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0002\u0000\u0000\u0000\u0000\u0001,\u0000\u0000"
+    },
+    {
+      "t": 0.012,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/_static/src/browser/media/templates.png",
+      "status": 200,
+      "headers": {
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=0",
+        "etag": "W/\"b69c-1a08d0b34c8\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "accept-ranges": "bytes",
+        "content-length": "46748",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "last-modified": "Thu, 10 Sep 2026 20:38:37 GMT",
+        "content-type": "image/png",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "\ufffdPNG\r\n\u001a\n\u0000\u0000\u0000\rIHDR\u0000\u0000\u00030\u0000\u0000\u0001\ufffd\b\u0003\u0000\u0000\u0000\ufffdQ%\u0000\u0000\u0002\ufffdPLTE\u0000\u0000\u0000\u0019\u001c3\u0016\u0018.\u0005\u0002\u000f\n\n\n\n\n\u0017\u0005\u0002\u0010\t\t\u0016\u0018\u001a0\t\t\u0013\u0005\u0002\u0011\b\b\u000f\u0006\u0002\u0012\u0005\u0005\u000b\u0004\u0004\f\u0003\u0003\u000e\u0004\u0004\u0011\b\u0003\r\u0005\u0003\u000b\u0004\u0002\u0011\u0007\u0002\u000f\u0007\u0002\u000e\u0006\u0002\r\b\u0003\u0011\u0006\u0001\u000e\u0007\u0003\u000f\n\u0003\u0013\b\u0005\u0012\u0006\u0002\u0011\u001b\u001e8\u0015\u0017+\u001c\u001f:\u0015\u0018,\u0014\u0016*\u001a\u001d674Y63X41U51V84Z-(G74[%\"=\u0016\u0018,\u0018\u001a1\u0019\u001b2\u001d\u001f8\u0017\u00190\u001a\u001d5\u001d :\u001a\u001c4\u001b\u001d6\u001c\u001f9\u001c\u001e8\u001d ;\u0015\u0017+\u0016\u0018.\u001b\u001d7\u001e 9\ufffd\ufffd\ufffd\u001e!;96]85[73X\u001d\u001e6,+K52V\ufffd\ufffd\ufffd1/Q41U2l\ufffd\u0000\ufffd\ufffd\u000f\u0011!\ufffd\ufffd\ufffd\u000e\u0010\u001f\ufffd\ufffd\ufffd\u0014\u0017*PQd\u0000\ufffd\ufffd\u0012\u0014'\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd>?V\bL\ufffd\u0011\u0013$ !<rs\ufffd\ufffd\ufffd\ufffdqr\ufffd{{\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdUWk_`s+.E#$>%'<\ufffd\ufffd\ufffd)+B\ufffd\ufffd\ufffd0.Q79N\ufffd\ufffd\ufffdSUg35I\ufffd\ufffd\ufffd-/B))HWYlsu\ufffd\ufffd\ufffd\ufffd`au57L~\u007f\ufffd\ufffd\ufffd\ufffd8;R((FacvGI^%&B\u0149\ufffdhi|'&E;=Q\ufffd\ufffd\ufffd!#9\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdno\u007f^_q\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdDFX-/G\ufffd\ufffd\ufffd\\^l\u000fQxNOb\ufffd\ufffd\ufffdACVEGZ*-E\ufffd\ufffd\ufffdpT\ufffdqT\ufffd6\u03db\ufffd\ufffd\ufffd0\u02a2;\u0513A\u060cQ@w"
+    },
+    {
+      "t": 0.021,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "blob:http://localhost:8079/afe8856d-a950-48e2-94db-4ba4006c94bd",
+      "status": 200,
+      "headers": {
+        "content-type": "application/javascript",
+        "content-length": "1057403"
+      },
+      "bodySnippet": "/*extensionHostWorker*/globalThis._VSCODE_NLS_MESSAGES = [\"{0} ({1})\",\"More Actions...\",\"Close Dialog\",\"Error\",\"Info\",\"In Progress\",\"Warning\",\"OK\",\"More Actions...\",\"input\",\"Match Case\",\"Use Regular Expression\",\"Match Whole Word\",\"input\",\"Preserve Case\",\"Inspect this in the accessible view with {0}.\",\"Inspect this in the accessible view via the command Open Accessible View which is currently not triggerable via keybinding.\",\"No results\",\"Search icons\",\"Error: {0}\",\"Info: {0}\",\"Warning: {0}\",\"Cle"
+    },
+    {
+      "t": 0.041,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/api/worker/extensionHostWorkerMain.js",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:04 GMT, Sat, 12 Sep 2026 04:44:04 GMT",
+        "content-type": "text/javascript",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "/*!--------------------------------------------------------\n * Copyright (C) Microsoft Corporation. All rights reserved.\n *--------------------------------------------------------*/\n/******************************************************************************\r\nCopyright (c) Microsoft Corporation.\r\n\r\nPermission to use, copy, modify, and/or distribute this software for any\r\npurpose with or without fee is hereby granted.\r\n\r\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES "
+    },
+    {
+      "t": 0.042,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2F2026-light.json&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "etag": "W/\"373350692-16785-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-content-type-options": "nosniff",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/json",
+        "vary": "Origin, Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"$schema\":\"vscode://schemas/color-theme\",\"name\":\"2026 Light\",\"include\":\"./light_modern.json\",\"type\":\"light\",\"colors\":{\"foreground\":\"#202020\",\"disabledForeground\":\"#BBBBBB\",\"errorForeground\":\"#ad0707\",\"descriptionForeground\":\"#606060\",\"icon.foreground\":\"#606060\",\"focusBorder\":\"#0069CCFF\",\"textBlockQuote.background\":\"#EAEAEA\",\"textBlockQuote.border\":\"#F0F1F2FF\",\"textCodeBlock.background\":\"#EAEAEA\",\"textLink.foreground\":\"#0069CC\",\"textLink.activeForeground\":\"#0069CC\",\"textPreformat.foreground\":\"#6"
+    },
+    {
+      "t": 0.042,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fvs-seti-icon-theme.json&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "etag": "W/\"373351735-44303-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-content-type-options": "nosniff",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/json",
+        "vary": "Origin, Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"information_for_contributors\":[\"This file has been generated from data in https://github.com/jesseweed/seti-ui\",\"- icon definitions: https://github.com/jesseweed/seti-ui/blob/master/styles/_fonts/seti.less\",\"- icon colors: https://github.com/jesseweed/seti-ui/blob/master/styles/ui-variables.less\",\"- file associations: https://github.com/jesseweed/seti-ui/blob/master/styles/components/icons/mapping.less\",\"If you want to provide a fix or improvement, please create a pull request against the jess"
+    },
+    {
+      "t": 0.042,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/media/code-icon.svg",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "image/svg+xml",
+        "vary": "Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<svg id=\"Layer_1\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1024 1024\"><style>.st0{fill:#f6f6f6;fill-opacity:0}.st1{fill:#fff}.st2{fill:#167abf}</style><path class=\"st0\" d=\"M1024 1024H0V0h1024v1024z\"/><path class=\"st1\" d=\"M1024 85.333v853.333H0V85.333h1024z\"/><path class=\"st2\" d=\"M0 85.333h298.667v853.333H0V85.333zm1024 0v853.333H384V85.333h640zm-554.667 160h341.333v-64H469.333v64zm341.334 533.334H469.333v64h341.333l.001-64zm128-149.334H597.333v64h341.333l.001-64zm0-149.333H597.333v64h341."
+    },
+    {
+      "t": 0.042,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_modern.json&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "etag": "W/\"373350690-5765-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-content-type-options": "nosniff",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/json",
+        "vary": "Origin, Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"$schema\":\"vscode://schemas/color-theme\",\"name\":\"Light Modern\",\"include\":\"./light_plus.json\",\"colors\":{\"activityBar.activeBorder\":\"#005FB8\",\"activityBar.background\":\"#F8F8F8\",\"activityBar.border\":\"#E5E5E5\",\"activityBar.foreground\":\"#1F1F1F\",\"activityBar.inactiveForeground\":\"#616161\",\"activityBarBadge.background\":\"#005FB8\",\"activityBarBadge.foreground\":\"#FFFFFF\",\"badge.background\":\"#CCCCCC\",\"badge.foreground\":\"#3B3B3B\",\"button.background\":\"#005FB8\",\"button.border\":\"#0000001a\",\"button.foreground\""
+    },
+    {
+      "t": 0.042,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-seti%2Ficons%2Fseti.woff&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "etag": "W/\"373351734-37284-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "access-control-allow-credentials": "true",
+        "x-content-type-options": "nosniff",
+        "access-control-allow-origin": "*",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/font-woff",
+        "vary": "Origin",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "wOFF\u0000\u0001\u0000\u0000\u0000\u0000\ufffd\ufffd\u0000\u000b\u0000\u0000\u0000\u0000\ufffd\u0010\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000GSUB\u0000\u0000\u0001\b\u0000\u0000\u0000;\u0000\u0000\u0000T \ufffd%zOS/2\u0000\u0000\u0001D\u0000\u0000\u0000>\u0000\u0000\u0000V6 DQcmap\u0000\u0000\u0001\ufffd\u0000\u0000\u0003r\u0000\u0000\n\ufffd\ufffdNp\ufffdglyf\u0000\u0000\u0004\ufffd\u0000\u0000\ufffd\ufffd\u0000\u0000\ufffd \ufffd\ufffd\ufffdLhead\u0000\u0000\ufffd\ufffd\u0000\u0000\u0000.\u0000\u0000\u00006-C\ufffd\u001ehhea\u0000\u0000\ufffd\ufffd\u0000\u0000\u0000\u001c\u0000\u0000\u0000$\u0007\ufffd\u0005Shmtx\u0000\u0000\ufffd\ufffd\u0000\u0000\u00000\u0000\u0000\u0002\ufffd}E\u0000\u0000loca\u0000\u0000\ufffd,\u0000\u0000\u0001F\u0000\u0000\u0001F}KKTmaxp\u0000\u0000\ufffdt\u0000\u0000\u0000\u001f\u0000\u0000\u0000 \u0002{\n\u0010name\u0000\u0000\ufffd\ufffd\u0000\u0000\u0001\u001e\u0000\u0000\u0001\ufffd\ufffdJ\u0019\ufffdpost\u0000\u0000\ufffd\ufffd\u0000\u0000\u0003\ufffd\u0000\u0000\u0005\ufffd\ufffd\ufffd\ufffdx\ufffdc`d``\ufffdb0`\ufffdc`rq\ufffd\ta\ufffd\ufffdI,\ufffdc\ufffdb`a\ufffd\u0000\ufffd<2\ufffd1'3=\ufffd\ufffd\u0003\ufffd\u0003\u02b1\ufffdi\u000e f\ufffd\ufffd\u0002\u0000&;\u0005H\u0000x\ufffdc`d~\ufffd8\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd'\ufffd\u001e\u0006\u0006\ufffd\u001e\b\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\t(\ufffd\ufffd\ufffd\u0300\u0015\u0004\ufffd\ufffd\ufffd08<`|\ufffd\ufffd\ufffd\u0005\ufffd\u001b\u0005&\ufffd\u001aA\u0004\u0000Sp\f\ufffd\u0000\u0000x\ufffd\ufffd\u0545\ufffdTW\u0014F\ufffd500\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd$Dx\ufffd~\ufffdT\ufffd\ufffd\u07d5\ufffd\b\ufffd\u05e7\ufffdw\ufffdu\ufffd\ufffd\u0006\ufffd:@\ufffd\u00a0B5\ufffd\ufffdAU\ufffd/\u016bU\ufffd\ufffdiP\ufffd^]u\ufffd|Ou^\ufffd\ufffd\ufffd\ufffd\ufffdx\ufffd\ufffdc\ufffduu\ufffdX\ufffdxouQ\ufffdK\r\ufffd\ufffd_\ufffd5\ufffd\u0011"
+    },
+    {
+      "t": 0.043,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_plus.json&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "etag": "W/\"373350693-3725-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-content-type-options": "nosniff",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/json",
+        "vary": "Origin, Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"$schema\":\"vscode://schemas/color-theme\",\"name\":\"Light+\",\"include\":\"./light_vs.json\",\"tokenColors\":[{\"name\":\"Function declarations\",\"scope\":[\"entity.name.function\",\"support.function\",\"support.constant.handlebars\",\"source.powershell variable.other.member\",\"entity.name.operator.custom-literal\"],\"settings\":{\"foreground\":\"#795E26\"}},{\"name\":\"Types declaration and references\",\"scope\":[\"support.class\",\"support.type\",\"entity.name.type\",\"entity.name.namespace\",\"entity.other.attribute\",\"entity.name.scop"
+    },
+    {
+      "t": 0.043,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/vscode-remote-resource?path=%2Fprivate%2Ftmp%2Fvscode-proxy-4137%2Fcode-server-4.137.0-macos-arm64%2Flib%2Fvscode%2Fextensions%2Ftheme-defaults%2Fthemes%2Flight_vs.json&tkn=",
+      "status": 200,
+      "headers": {
+        "transfer-encoding": "chunked",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "etag": "W/\"373350687-7407-1789072729000\"",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-content-type-options": "nosniff",
+        "date": "Sat, 12 Sep 2026 04:44:05 GMT, Sat, 12 Sep 2026 04:44:05 GMT",
+        "content-type": "application/json",
+        "vary": "Origin, Accept-Encoding",
+        "server": "uvicorn",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "{\"$schema\":\"vscode://schemas/color-theme\",\"name\":\"Light (Visual Studio)\",\"colors\":{\"checkbox.border\":\"#919191\",\"editor.background\":\"#FFFFFF\",\"editor.foreground\":\"#000000\",\"editor.inactiveSelectionBackground\":\"#E5EBF1\",\"editorIndentGuide.background1\":\"#D3D3D3\",\"editorIndentGuide.activeBackground1\":\"#939393\",\"editor.selectionHighlightBackground\":\"#ADD6FF80\",\"editorSuggestWidget.background\":\"#F3F3F3\",\"activityBarBadge.background\":\"#007ACC\",\"sideBarTitle.foreground\":\"#6F6F6F\",\"list.hoverBackground\":"
+    },
+    {
+      "t": 0.043,
+      "kind": "response",
+      "phase": "EXPAND_PATH",
+      "url": "blob:http://localhost:8079/a97d8541-b17c-4ee9-a5fd-e21df022659b",
+      "status": 200,
+      "headers": {
+        "content-type": "application/javascript",
+        "content-length": "207"
+      },
+      "bodySnippet": "<err: Response.body: Response body is unavailable>"
+    },
+    {
+      "t": 6.225,
+      "kind": "expand-result",
+      "phase": "EXPAND_PATH",
+      "ok": true
+    },
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "FIRST_CLICK"
+    },
+    {
+      "t": 0.071,
+      "kind": "single-click",
+      "phase": "FIRST_CLICK",
+      "ok": true
+    },
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "OBSERVE"
+    },
+    {
+      "t": 1.015,
+      "kind": "console",
+      "phase": "OBSERVE",
+      "type": "warning",
+      "text": "An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing."
+    },
+    {
+      "t": 1.016,
+      "kind": "request",
+      "phase": "OBSERVE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+      "method": "GET",
+      "resourceType": "document",
+      "headers": {
+        "referer": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+        "upgrade-insecure-requests": "1",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"macOS\""
+      }
+    },
+    {
+      "t": 1.019,
+      "kind": "console",
+      "phase": "OBSERVE",
+      "type": "warning",
+      "text": "An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing."
+    },
+    {
+      "t": 1.02,
+      "kind": "request",
+      "phase": "OBSERVE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29",
+      "method": "GET",
+      "resourceType": "document",
+      "headers": {
+        "referer": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+        "upgrade-insecure-requests": "1",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36",
+        "sec-ch-ua": "\"Not=A?Brand\";v=\"99\", \"HeadlessChrome\";v=\"151\", \"Chromium\";v=\"151\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"macOS\""
+      }
+    },
+    {
+      "t": 1.023,
+      "kind": "console",
+      "phase": "OBSERVE",
+      "type": "error",
+      "text": "Loading the stylesheet 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css' violates the following Content Security Policy directive: \"style-src 'self' 'unsafe-inline'\". Note that 'style-src-elem' was not explicitly set, so 'style-src' is used as a fallback. The action has been blocked."
+    },
+    {
+      "t": 1.023,
+      "kind": "request",
+      "phase": "OBSERVE",
+      "url": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css",
+      "method": "GET",
+      "resourceType": "stylesheet",
+      "headers": {
+        "referer": "http://localhost:8079/"
+      }
+    },
+    {
+      "t": 1.023,
+      "kind": "requestfailed",
+      "phase": "OBSERVE",
+      "url": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.css",
+      "method": "GET",
+      "resourceType": "stylesheet",
+      "failureText": "csp"
+    },
+    {
+      "t": 1.023,
+      "kind": "console",
+      "phase": "OBSERVE",
+      "type": "error",
+      "text": "Loading the script 'https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js' violates the following Content Security Policy directive: \"script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:\". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked."
+    },
+    {
+      "t": 1.023,
+      "kind": "request",
+      "phase": "OBSERVE",
+      "url": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js",
+      "method": "GET",
+      "resourceType": "script",
+      "headers": {
+        "referer": "http://localhost:8079/"
+      }
+    },
+    {
+      "t": 1.023,
+      "kind": "requestfailed",
+      "phase": "OBSERVE",
+      "url": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/private/tmp/vscode-proxy-4137/code-server-4.137.0-macos-arm64/lib/vscode/extensions/media-preview/media/imagePreview.js",
+      "method": "GET",
+      "resourceType": "script",
+      "failureText": "csp"
+    },
+    {
+      "t": 1.029,
+      "kind": "response",
+      "phase": "OBSERVE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+      "status": 200,
+      "headers": {
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-type": "text/html",
+        "date": "Sat, 12 Sep 2026 04:44:20 GMT\nSat, 12 Sep 2026 04:44:21 GMT",
+        "server": "uvicorn",
+        "transfer-encoding": "chunked",
+        "vary": "Accept-Encoding",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<!DOCTYPE html>\n<html lang=\"en\" style=\"width: 100%; height: 100%;\">\n\n<head>\n\t<meta charset=\"UTF-8\">\n\n\t<meta http-equiv=\"Content-Security-Policy\"\n\t\tcontent=\"default-src 'none'; script-src 'sha256-24QqbpzqcqSyIGvg/ZwFRy5pPlhmVBa8CkUREEIUnBw=' 'self'; frame-src 'self'; style-src 'unsafe-inline';\">\n\n\t<!-- Disable pinch zooming -->\n\t<meta name=\"viewport\"\n\t\tcontent=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no\">\n</head>\n\n<body style=\"margin: 0; overflow"
+    },
+    {
+      "t": 1.029,
+      "kind": "response",
+      "phase": "OBSERVE",
+      "url": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/fake.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29",
+      "status": 200,
+      "headers": {
+        "cache-control": "public, max-age=31536000",
+        "content-encoding": "br",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "content-type": "text/html",
+        "date": "Sat, 12 Sep 2026 04:44:20 GMT\nSat, 12 Sep 2026 04:44:21 GMT",
+        "server": "uvicorn",
+        "transfer-encoding": "chunked",
+        "vary": "Accept-Encoding",
+        "x-content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:;",
+        "x-frame-options": "SAMEORIGIN"
+      },
+      "bodySnippet": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n\t<meta charset=\"UTF-8\">\n\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\t<title>Fake</title>\n</head>\n<body>\n</body>\n</html>\n"
+    },
+    {
+      "t": 60.928,
+      "kind": "outcome-detect",
+      "phase": "OBSERVE",
+      "result": "timeout"
+    },
+    {
+      "t": 0.0,
+      "kind": "PHASE",
+      "phase": "FINAL"
+    },
+    {
+      "t": 0.001,
+      "kind": "outcome",
+      "phase": "FINAL",
+      "result": "timeout"
+    },
+    {
+      "t": 0.002,
+      "kind": "final-dom",
+      "phase": "FINAL",
+      "tabs": [
+        {
+          "label": "Deepcode.png, preview",
+          "active": true
+        }
+      ],
+      "iframeCount": 2,
+      "iframeInfo": [
+        {
+          "idx": 0,
+          "src": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=25e11814-d897-4450-8ab1-a4b9a96e91ee",
+          "accessible": true,
+          "imgCount": 0,
+          "imgs": []
+        },
+        {
+          "idx": 1,
+          "src": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=d75ea39c-978a-4439-aeaf-7e1d8d47ea29&parentId=1&origin=1ea4a06d-ca48-4250-ae5b-e43b2e61e28f&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+          "accessible": true,
+          "imgCount": 0,
+          "imgs": []
+        }
+      ],
+      "imgs": [],
+      "bodyTextSnippet": "agents-ensemble\n24\nEXPLORER\nAGENTS-ENSEMBLE\n__pycache__\n.agents\n.hypothesis\n.inspiration-projects\nDeepCode\n.github\nassets\nicons\n625302d6ce6e8bd6be7c3e6969cdab4e.JPG\nDeepcode.png\nIMG_8098.jpeg\nIMG_8099.jpeg\nlogo.png\nnanobot.png\nNewUI.png\nresult_main.jpg\nresult_main02.jpg\ncli\nconfig\ndeepcode_docker\nnanobot\nnew_ui\nprompts\nschema\ntools\nui\nutils\nworkflows\n__init__.py\n.dockerignore\n.gitattributes\n.gitignore\n.pre-commit-config.yaml\nCHANGELOG.md\nOUTLINE\nTIMELINE\nDeepcode.png\n.inspiration-projects\nDeepCode\nassets\nDeepcode.png\nImage Preview\nCHAT\nBuild with Agent\n\nAI responses may be inaccurate\n\nAgent\nModels\nLocal\nDefault permissions\n feature/fix-vscode-image-preview*\n 0 \n 0\n 0\nLayout: U.S.\n1.46MB\nWhole Image\nexpanded"
+    },
+    {
+      "t": 0.074,
+      "kind": "dump-summary",
+      "phase": "FINAL",
+      "totalEvents": 78
+    }
+  ]
+}

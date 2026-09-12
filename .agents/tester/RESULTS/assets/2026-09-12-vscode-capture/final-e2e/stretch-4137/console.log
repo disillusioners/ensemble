@@ -1,0 +1,40 @@
+[log] %c INFO color: #33f Resolving connection token (localhost:8079)...
+[log] %c INFO color: #33f Resolved connection token (localhost:8079) after 3 ms
+[log] %c INFO color: #33f Creating a socket (renderer-Management-f863ddc9-abfe-4dc6-be18-f753c91b35f5)...
+[log] %c INFO color: #33f Creating a socket (renderer-Management-f863ddc9-abfe-4dc6-be18-f753c91b35f5) was successful after 272 ms.
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[log] %c INFO color: #33f [reconnection-grace-time] Client received grace time from server: 10800000ms (10800s)
+[log] %c INFO color: #33f [AgentHost:remote] Initializing (remoteAuthority=localhost:8079)
+[log] %c INFO color: #33f [AgentHost:remote] Connecting to remote agent host...
+[log] %c INFO color: #33f [ChatModelSelection] event=no-model-at-toolbar-build surface="workbench" sessionKey=undefined conversationKey=undefined modelTarget=undefined storageKey="chat.currentLanguageModel.panel" widgetViewKind="view"
+[warning] The web worker extension host is started in a same-origin iframe!
+[log] %c INFO color: #33f Updating additional builtin extensions cache
+[log] %c INFO color: #33f Creating a socket (renderer-ExtensionHost-e8c19dc3-89ad-4eb6-a868-157a5604080f)...
+[log] %c INFO color: #33f [Service Worker] registered
+[log] %c INFO color: #33f Creating a socket (renderer-ExtensionHost-e8c19dc3-89ad-4eb6-a868-157a5604080f) was successful after 54 ms.
+[log] %c INFO color: #33f [ChatModelSelection] event=no-model-at-toolbar-build surface="workbench" sessionKey="local" conversationKey="vscode-chat-session://local/MWRmMWQ3NDYtNDA2Zi00ZWZiLTlmODEtYmMzNThjNmQyMjlm" modelTarget=undefined storageKey="chat.currentLanguageModel.panel" widgetViewKind="view"
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[log] %c INFO color: #33f [AccountPolicyGate] apply: state=inactive, reason=undefined, isRestricted=false
+[log] %c INFO color: #33f [ChatModelSelection] event=no-model-at-toolbar-build surface="workbench" sessionKey="local" conversationKey="vscode-chat-session://local/MWRmMWQ3NDYtNDA2Zi00ZWZiLTlmODEtYmMzNThjNmQyMjlm" modelTarget=undefined storageKey="chat.currentLanguageModel.panel" widgetViewKind="view"
+[log] %c INFO color: #33f [AgentHost:remote] Connected; clientId=8462206a-9b23-470d-939a-e2c7c7a2b509
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[log] %c INFO color: #33f [AgentHost] No signed-in session resolved for resource: https://api.github.com/repos
+[error] Connecting to 'https://open-vsx.org/vscode/gallery/extensionquery' violates the following Content Security Policy directive: "connect-src 'self' ws: wss:". The action has been blocked.
+[error] Fetch API cannot load https://open-vsx.org/vscode/gallery/extensionquery. Refused to connect because it violates the document's Content Security Policy.
+[log] %c INFO color: #33f [AccountPolicyGate] apply: state=inactive, reason=undefined, isRestricted=false
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[warning] An iframe which has both allow-scripts and allow-same-origin for its sandbox attribute can escape its sandboxing.
+[log] %c INFO color: #33f [ChatModelSelection] event=no-model-at-toolbar-build surface="workbench" sessionKey="local" conversationKey="vscode-chat-session://local/MWRmMWQ3NDYtNDA2Zi00ZWZiLTlmODEtYmMzNThjNmQyMjlm" modelTarget=undefined storageKey="chat.currentLanguageModel.panel" widgetViewKind="view"

@@ -1,0 +1,33 @@
+=== CLEANUP LOG ===
+Pre-cleanup MY tree (snapshot at ~11:22):
+  PID    PPID  COMMAND
+  83132  1     /bin/bash ./dev.sh
+  83138  83132 .venv/bin/python -m uvicorn daemon.api:app --host 127.0.0.1 --port 8079 ...
+  83139  83138 python -c from multiprocessing.resource_tracker import main;main(4)
+  83140  83138 python -c from multiprocessing.spawn import spawn_main; ...  --multiprocessing-fork
+  83196  83140 npm exec @upstash/context7-mcp
+  83206  83140 code-server --bind-addr 127.0.0.1:0 --auth none --disable-workspace-trust --user-data-dir data_dev/vscode-user-data ...
+  83207  83206 node entry  (listening 127.0.0.1:62682)
+
+Cleanup sequence:
+  T+0   kill -TERM 83132 (dev.sh) — bash subshell + uvicorn master stayed up (graceful)
+  T+8s  kill -KILL 83138 (uvicorn master) — survived worker 83140
+  T+9s  kill -KILL 83206 (code-server root) — cascade killed 83207
+  T+10s kill -KILL 83196 (npm exec MCP)
+  T+11s kill -KILL 83132 (dev.sh wrapper)
+  T+13s kill -KILL 83140 (uvicorn worker — reparented to 1, holding port 8079)
+  T+15s kill -KILL 83139 (resource_tracker — reparented to 1)
+
+Post-cleanup:
+  All MY PIDs GONE: 83132, 83138, 83139, 83140, 83196, 83206, 83207
+  Port 8079 free (lsof -nP -iTCP:8079 -sTCP:LISTEN → no listener)
+  Port 62682 free (lsof -nP -iTCP:62682 -sTCP:LISTEN → no listener)
+
+Never-touch PIDs verified untouched:
+  PID 48426 (./ensemble-prod) ALIVE throughout
+  Ports 8088, 9797 (prod), 18080 (parallel worker) left alone
+
+Note: After my cleanup, parallel workers created:
+  PID 88674 (code-server, data_dev user-data-dir, listening 53279) — NOT mine, NOT touched
+  PID 88677/88678 (under prod 48426, listening 53280) — NOT mine, NOT touched
+

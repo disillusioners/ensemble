@@ -1,0 +1,63 @@
+{
+  "verdict": "image-rendered-in-iframe",
+  "verdict_evidence": {
+    "i": 0,
+    "depth": 2,
+    "iframeSrc": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=4b7c139f-5744-43d4-88a2-93893aea4680&parentId=1&origin=b6c25671-dc6e-4dc1-ba59-a01034011940&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+    "img": {
+      "src": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/.inspiration-projects/DeepCode/assets/Deepcode.png?version%3D1789203031790",
+      "naturalWidth": 1456,
+      "naturalHeight": 816,
+      "clientWidth": 732,
+      "clientHeight": 410,
+      "complete": true,
+      "alt": ""
+    }
+  },
+  "depth2_probe": {
+    "url": "http://localhost:8079/vscode/?folder=/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble",
+    "tabs": [
+      {
+        "label": "Deepcode.png, preview",
+        "active": true
+      }
+    ],
+    "iframeCount": 2,
+    "iframes": [
+      {
+        "iframeSrc": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html?&vscodeWebWorkerExtHostId=0bce57bf-ec0e-4f3f-af3d-34e3e000a3e2",
+        "probe": {
+          "depth": 1,
+          "imgs": [],
+          "iframes": []
+        }
+      },
+      {
+        "iframeSrc": "http://localhost:8079/vscode/stable-b11dabdaca0d3369986975be285db92c8795cea5/static/out/vs/workbench/contrib/webview/browser/pre/index.html?id=4b7c139f-5744-43d4-88a2-93893aea4680&parentId=1&origin=b6c25671-dc6e-4dc1-ba59-a01034011940&swVersion=6&extensionId=vscode.media-preview&platform=browser&vscode-resource-base-authority=vscode-resource.vscode-cdn.net&parentOrigin=http%3A%2F%2Flocalhost%3A8079&remoteAuthority=localhost%3A8079",
+        "probe": {
+          "depth": 1,
+          "imgs": [],
+          "iframes": [
+            {
+              "depth": 2,
+              "imgs": [
+                {
+                  "src": "https://vscode-remote+localhost-003a8079.vscode-resource.vscode-cdn.net/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble/.inspiration-projects/DeepCode/assets/Deepcode.png?version%3D1789203031790",
+                  "naturalWidth": 1456,
+                  "naturalHeight": 816,
+                  "clientWidth": 732,
+                  "clientHeight": 410,
+                  "complete": true,
+                  "alt": ""
+                }
+              ],
+              "iframes": []
+            }
+          ]
+        }
+      }
+    ],
+    "treeitemCount": 34,
+    "bodyTextSnippet": "agents-ensemble\n55\nEXPLORER\nAGENTS-ENSEMBLE\n__pycache__\n.agents\n.hypothesis\n.inspiration-projects\nDeepCode\n.github\nassets\nicons\n625302d6ce6e8bd6be7c3e6969cdab4e.JPG\nDeepcode.png\nIMG_8098.jpeg\nIMG_8099.jpeg\nlogo.png\nnanobot.png\nNewUI.png\nresult_main.jpg\nresult_main02.jpg\ncli\nconfig\ndeepcode_docker\nnanobot\nnew_ui\nprompts\nschema\ntools\nui\nutils\nworkflows\n__init__.py\n.dockerignore\n.gitattributes\n.gitignore\n.pre-commit-config.yaml\nCHANGELOG.md\nOUTLINE\nTIMELINE\nDeepcode.png\n.inspiration-projects\nDeepCode\nassets\nDeepcode.png\nImage Preview\nCHAT\nBuild with Agent\n\nAI responses may be inaccurate\n\nAgent\nModels\nLocal\nDefault permissions\n feature/fix-vscode-image-preview*\n 0 \n 0\n 0\nLayout: U.S.\n1.46MB\n1456x816\nWhole Image\nexpanded"
+  }
+}
