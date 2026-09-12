@@ -148,12 +148,36 @@ def test_quick_question_mission_allows_without_attest():
 
     # No delegation — the AI produces a plain prose answer; no
     # tool calls. Real user message; no attestation in tail.
+    # Use a long detailed completion report (>= 150 words, no
+    # marker phrases) so the 2026-09-12 length trigger does NOT
+    # fire either — the cheap allow path is preserved end-to-end.
+    long_answer = (
+        "The answer is 42; explanation follows in the sections "
+        "below. Nothing pending, all shipped. Patch 1 fixed the "
+        "off-by-one in the cache TTL calculator; the unit tests now "
+        "exercise both the elapsed-second and wall-clock-second "
+        "boundaries at the second and minute granularity. Patch 2 "
+        "cleaned up the dead imports in the worker pool module "
+        "after the migration, removing the legacy compatibility shim "
+        "and the related test scaffolding. Patch 3 refactored the "
+        "error-reporting decorator so the stack-frame metadata is "
+        "consistent across all four call sites in the graph node "
+        "and the manager facade. Patch 4 added the missing "
+        "operator-boot log line for the new resolver module so "
+        "operators can grep the boot summary for the resolved "
+        "effective values. All four patches passed their respective "
+        "suites on the first run with no flake; the integration "
+        "matrix is green end-to-end across all environments we "
+        "maintain. No follow-ups outstanding; the mission is "
+        "complete and ready for review by the next teammate in the "
+        "chain."
+    )
     result = asyncio.run(
         node(
             {
                 "messages": [
                     HumanMessage(content="what's the answer to X?"),
-                    AIMessage(content="The answer is …"),
+                    AIMessage(content=long_answer),
                 ]
             },
             config={"configurable": {"thread_id": "quick-unit"}},
@@ -161,7 +185,10 @@ def test_quick_question_mission_allows_without_attest():
     )
 
     # CRUCIAL: the gate ALLOWS — no nudge, no counter increment,
-    # no attestation demanded. The conditional gate is OFF.
+    # no attestation demanded. The conditional gate is OFF AND
+    # the 2026-09-12 length trigger does NOT fire (the report is
+    # >= 150 words and has no marker phrases). The cheap allow
+    # path is preserved end-to-end.
     assert "messages" not in result
     assert result["attestation_route"] is None
     # Ledger untouched — counter NEVER incremented when the gate

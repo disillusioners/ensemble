@@ -808,12 +808,15 @@ def test_marker_kill_switch_config_off_no_judge_call(monkeypatch):
 
 
 def test_no_markers_no_judge_call(monkeypatch, caplog):
-    """No markers in the message tail → no judge call, plain ALLOW.
+    """No markers AND no length trigger in the message tail → no judge
+    call, plain ALLOW.
 
-    The marker scan is the TRIGGER; no marker ⇒ no judge. This is
-    the cost-control guard — the cheap scan saves the expensive
+    The marker scan is the TRIGGER; no marker ⇒ no judge. The length
+    trigger (2026-09-12) is the OR-composed second half — no length
+    trigger (the AIMessage is ≥150 words) ⇒ no judge either. This is
+    the cost-control guard — the cheap scans save the expensive
     judge call for ~all completion turns that don't include mid-work
-    phrasing.
+    phrasing AND are sufficiently detailed.
     """
     calls = []
 
@@ -823,16 +826,38 @@ def test_no_markers_no_judge_call(monkeypatch, caplog):
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
+    # Long, detailed completion report — no marker phrases AND >= 150
+    # words so the length trigger does NOT fire either. The cheap
+    # allow path is taken end-to-end.
+    long_report = (
+        "The answer is 42; explanation follows in the sections below. "
+        "Nothing pending, all shipped. Patch 1 fixed the off-by-one in "
+        "the cache TTL calculator; the unit tests now exercise both the "
+        "elapsed-second and wall-clock-second boundaries at the second "
+        "and minute granularity. Patch 2 cleaned up the dead imports in "
+        "the worker pool module after the migration, removing the legacy "
+        "compatibility shim and the related test scaffolding. Patch 3 "
+        "refactored the error-reporting decorator so the stack-frame "
+        "metadata is consistent across all four call sites in the graph "
+        "node and the manager facade. Patch 4 added the missing "
+        "operator-boot log line for the new resolver module so operators "
+        "can grep the boot summary for the resolved effective values. "
+        "All four patches passed their respective suites on the first "
+        "run with no flake; the integration matrix is green end-to-end "
+        "across all environments we maintain. No follow-ups outstanding; "
+        "the mission is complete and ready for review by the next "
+        "teammate in the chain. The release notes draft is staged on "
+        "the docs branch with the per-patch rationale paragraphs and "
+        "the cross-references to the upstream incident reports."
+    )
+
     node, manager, ledger = _make_node(instance_id="marker-none-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
-                    "The answer is 42; explanation follows. "
-                    "Nothing pending, all shipped."
-                ),
+                _quick_question_with_marker(long_report),
                 config={"configurable": {"thread_id": "marker-none-it"}},
             )
         )
@@ -845,9 +870,12 @@ def test_no_markers_no_judge_call(monkeypatch, caplog):
     ledger.increment.assert_not_called()
     ledger.reset.assert_not_called()
 
-    # marker_hit is False in the canonical gate log row.
+    # marker_hit AND length_trigger both False in the canonical gate
+    # log row — NEITHER trigger half fired.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=False" in log_text
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=<none>" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -938,27 +966,60 @@ def test_log_marker_fields_present_on_marker_a_path(monkeypatch, caplog):
 
 
 def test_log_marker_fields_present_on_no_marker_path(monkeypatch, caplog):
-    """No markers → marker_hit=False, marker_terms=<none>,
-    marker_path=<none> — no judge row."""
+    """No markers AND no length trigger → marker_hit=False,
+    marker_terms=<none>, marker_path=<none>, length_trigger=False,
+    final_word_count>=150, trigger_source=<none> — no judge row.
+
+    The cheap allow path: NEITHER trigger half fires, so NO judge call
+    fires (cost control preserved). The 2026-09-12 length trigger
+    requires the LAST AIMessage to be < SHORT_REPORT_WORD_THRESHOLD
+    (150) words — we use a long, detailed completion report so the
+    brevity signal does NOT fire either.
+    """
+    # A long, detailed completion report — explicitly avoids the
+    # marker catalog (no "ending turn", "awaiting", etc.) and is
+    # ≥150 words so the length trigger doesn't fire.
+    long_report = (
+        "All four patches landed and shipped to the integration branch. "
+        "Patch 1 fixed the off-by-one in the cache TTL calculator; the "
+        "unit tests now exercise both the elapsed-second and "
+        "wall-clock-second boundaries. Patch 2 cleaned up the dead "
+        "imports in the worker pool module after the migration. Patch 3 "
+        "refactored the error-reporting decorator so the stack-frame "
+        "metadata is consistent across all four call sites. Patch 4 "
+        "added the missing operator-boot log line for the new resolver "
+        "module so operators can grep the boot summary for the "
+        "resolved effective values. All four patches passed their "
+        "respective suites on the first run with no flake; the "
+        "integration matrix is green end-to-end. No follow-ups "
+        "outstanding; the mission is complete and ready for review. "
+        "The release notes draft is staged on the docs branch with the "
+        "per-patch rationale paragraphs and the cross-references to "
+        "the upstream incident reports; the FE mirror was verified "
+        "and the build artifact attached to the rollout ticket. "
+        "Nothing pending on my end — I am closing out."
+    )
     node, manager, ledger = _make_node(instance_id="marker-log-none-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
     ):
         asyncio.run(
             node(
-                _quick_question_with_marker(
-                    "All work shipped. Done. Nothing pending."
-                ),
+                _quick_question_with_marker(long_report),
                 config={"configurable": {"thread_id": "marker-log-none-it"}},
             )
         )
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
 
-    # Additive marker fields on the canonical row.
+    # Additive marker fields on the canonical row — NEITHER trigger
+    # half fires so the cheap allow path is taken.
     assert "marker_hit=False" in log_text
     assert "marker_terms=<none>" in log_text
     assert "marker_path=<none>" in log_text
+    # Length trigger fields: long report (>= 150 words) ⇒ no trigger.
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=<none>" in log_text
 
     # No judge row.
     assert "event=leader_completion_gate_marker_judge" not in log_text
@@ -1496,4 +1557,476 @@ def test_marker_scanner_module_no_re_import():
     assert not hasattr(scanner_mod, "re"), (
         "green #3: the unused ``re`` import MUST be removed from "
         "attestation_marker_scanner.py (substring match, not regex)"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Length trigger wiring tests (2026-09-12, user request)
+#
+# Word-count signal on the LAST AIMessage composes with the marker
+# substring scan via ``OR`` on the gate's ALLOW paths. Below the
+# threshold (150 words) ⇒ trigger fires ⇒ judge runs (or skip on
+# kill-switch OFF / dry mode). The marker-only and length-only
+# halves are independent — both halves firing drives
+# ``trigger_source="markers+length"`` (additive log field).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Helper: build a long detailed completion report (≥150 words) so the
+# length trigger DOES NOT fire on it. Used by tests that need the
+# marker scan to be the sole trigger.
+
+
+def _long_completion_report() -> str:
+    """A >= 150 word detailed completion report — no marker phrases."""
+    return (
+        "All four patches landed and shipped to the integration branch. "
+        "Patch 1 fixed the off-by-one in the cache TTL calculator; the "
+        "unit tests now exercise both the elapsed-second and "
+        "wall-clock-second boundaries. Patch 2 cleaned up the dead "
+        "imports in the worker pool module after the migration. Patch 3 "
+        "refactored the error-reporting decorator so the stack-frame "
+        "metadata is consistent across all four call sites. Patch 4 "
+        "added the missing operator-boot log line for the new resolver "
+        "module so operators can grep the boot summary for the "
+        "resolved effective values. All four patches passed their "
+        "respective suites on the first run with no flake; the "
+        "integration matrix is green end-to-end. No follow-ups "
+        "outstanding; the mission is complete and ready for review. "
+        "The release notes draft is staged on the docs branch with the "
+        "per-patch rationale paragraphs and the cross-references to "
+        "the upstream incident reports; the FE mirror was verified "
+        "and the build artifact attached to the rollout ticket. "
+        "Nothing pending on my end — I am closing out."
+    )
+
+
+def test_length_short_no_marker_judge_fires(monkeypatch, caplog):
+    """Short AIMessage + no markers → length trigger fires → judge runs.
+
+    The brevity-only trigger path (no marker phrases, just short prose):
+    "Understood, continuing." (2 words) — well under 150 — the judge
+    is the verdict. With nothing pending, judge-no → path (a) → DENY.
+    """
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
+
+    node, manager, ledger = _make_node(instance_id="length-a-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Understood, continuing."
+                ),
+                config={"configurable": {"thread_id": "length-a-it"}},
+            )
+        )
+
+    # DENIED via path (a) — marker_path="a" on the routing log line;
+    # judge-no + nothing pending.
+    assert "messages" in result
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+
+    # Log row carries the length-trigger fields — neither marker
+    # fired (no marker phrases in the prose) but length did.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "marker_hit=False" in log_text
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=length" in log_text
+    assert "marker-path a" in log_text
+    assert "verdict=no" in log_text
+
+
+def test_length_long_no_marker_no_judge_cost_control(monkeypatch, caplog):
+    """Long AIMessage + no markers → NO trigger → NO judge call.
+
+    Cost-control contract: a detailed completion report (>= 150
+    words) is exactly the shape the leader SHOULD be producing on a
+    legitimate completion — neither trigger fires and the cheap
+    allow path runs.
+    """
+    calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        calls.append(True)
+        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+
+    node, manager, ledger = _make_node(instance_id="length-cost-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(_long_completion_report()),
+                config={"configurable": {"thread_id": "length-cost-it"}},
+            )
+        )
+
+    # Judge never called (cost control preserved).
+    assert calls == []
+    # Plain ALLOW.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "marker_hit=False" in log_text
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=<none>" in log_text
+    assert "event=leader_completion_gate_marker_judge" not in log_text
+
+
+def test_length_short_complete_artifact_judge_yes_allows(
+    monkeypatch, caplog
+):
+    """Short AIMessage containing a quick-answer artifact → judge fires,
+    judge says yes → ALLOW normally.
+
+    A short-but-complete quick answer (e.g., "Here is the chart you
+    asked for. <chart>" under 150 words, content includes the
+    artifact). The brevity class is real here, but the judge confirms
+    the artifact IS the deliverable. Verdict=yes → path (c) → ALLOW.
+    """
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_yes)
+
+    short_with_artifact = (
+        "Here is the chart you asked for.\n\n```mermaid\n"
+        "flowchart TD\n    A[Start] --> B[End]\n```\n"
+    )
+    node, manager, ledger = _make_node(instance_id="length-c-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(short_with_artifact),
+                config={"configurable": {"thread_id": "length-c-it"}},
+            )
+        )
+
+    # ALLOWED normally — no nudge, no counter, no hint.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # Length trigger fired (short text); judge said yes; allow.
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=length" in log_text
+    assert "verdict=yes" in log_text
+    assert "[AttestationGate] marker-path judge-yes" in log_text
+
+
+def test_length_short_real_pending_hint(monkeypatch, caplog):
+    """Short AIMessage + real pending work → length trigger fires →
+    judge fires, judge-no → (b) ALLOW + checkpoint-durable hint.
+
+    The wake-up is en route (pending_children > 0); the brevity
+    trigger fires (short text, no marker phrases); the judge says
+    the report is mid-work; gate allows + injects hint so the
+    wake-up can still arrive.
+    """
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
+
+    manager = MagicMock()
+    manager.count_pending_children.return_value = 1  # REAL pending
+    manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 0
+    manager.enqueue_message = MagicMock()
+    manager.revive = MagicMock()
+    manager.send_message = MagicMock()
+
+    ledger = MagicMock()
+    ledger.increment.return_value = 1
+    ledger.reset.return_value = True
+    ledger.set_escalated_and_reset.return_value = True
+    ledger.get.return_value = 0
+
+    config = build_gate_config(
+        "length-b-it", GateSettings("enforce", 3, 3),
+        llm_judge_enabled=True,
+    )
+    node = create_attestation_gate_node(
+        config,
+        GateSettings("enforce", 3, 3),
+        manager,
+        "length-b-it",
+        denied_count_getter=lambda: 0,
+        ledger=ledger,
+    )
+
+    # Short text WITHOUT marker phrases — length trigger fires,
+    # marker trigger does not. trigger_source must be "length".
+    short_no_marker = "Understood, continuing — child reply coming."
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(short_no_marker),
+                config={"configurable": {"thread_id": "length-b-it"}},
+            )
+        )
+
+    # ALLOWED + hint — NO counter, NO deny, NO re-route.
+    assert "messages" in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    hint = result["messages"][0]
+    assert hint.content == COMPLETION_CHECK_NOTE_TEXT
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "length_trigger=True" in log_text
+    assert "marker_hit=False" in log_text
+    assert "trigger_source=length" in log_text
+    assert "verdict=no" in log_text
+    assert "marker-path b" in log_text
+
+
+def test_length_short_markers_judge_combined_trigger_source(
+    monkeypatch, caplog
+):
+    """Short AIMessage WITH marker phrases → BOTH triggers fire →
+    trigger_source="markers+length", judge runs.
+
+    The combined-trigger path — a quick answer like "Understood,
+    continuing. Ending turn." is BOTH a brevity-class AND a marker
+    phrase. The OR-composition flips trigger_source to the combined
+    literal; the judge runs.
+    """
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
+
+    node, manager, ledger = _make_node(instance_id="length-combined-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Understood, continuing. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "length-combined-it"}},
+            )
+        )
+
+    # DENIED via path (a) — both triggers fire.
+    assert "messages" in result
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # BOTH halves fire — trigger_source is the combined literal.
+    assert "marker_hit=True" in log_text
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=markers+length" in log_text
+    assert "marker-path a" in log_text
+    assert "verdict=no" in log_text
+
+
+def test_length_trigger_source_markers_only(monkeypatch, caplog):
+    """Long AIMessage WITH marker phrases → only markers fire →
+    trigger_source="markers", judge runs."""
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
+
+    # Take the long completion report and append a marker phrase;
+    # total word count stays well above 150.
+    long_with_marker = (
+        _long_completion_report() + " Ending turn."
+    )
+    node, manager, ledger = _make_node(instance_id="length-m-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(long_with_marker),
+                config={"configurable": {"thread_id": "length-m-it"}},
+            )
+        )
+
+    # DENIED via path (a) — markers fired.
+    assert "messages" in result
+    assert result["attestation_route"] == "agent"
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "marker_hit=True" in log_text
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=markers" in log_text
+    assert "marker-path a" in log_text
+
+
+def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
+    """Dry mode + length trigger → log-only, NO judge call.
+
+    Side-effect-free exactly like the marker path: the dry-mode
+    ``allow unconditionally`` posture is preserved. The canonical
+    log row carries length_trigger=True + trigger_source=length
+    so operators see the signal in ``decision=dry_log`` soak rows.
+    """
+    calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        calls.append(True)
+        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+
+    manager = MagicMock()
+    manager.count_pending_children.return_value = 0
+    manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 0
+    manager.enqueue_message = MagicMock()
+    manager.revive = MagicMock()
+    manager.send_message = MagicMock()
+
+    ledger = MagicMock()
+    ledger.increment.return_value = 1
+    ledger.reset.return_value = True
+    ledger.set_escalated_and_reset.return_value = True
+    ledger.get.return_value = 0
+
+    config = build_gate_config(
+        "length-dry-it", GateSettings("dry", 3, 3),
+        llm_judge_enabled=True,
+    )
+    node = create_attestation_gate_node(
+        config,
+        GateSettings("dry", 3, 3),
+        manager,
+        "length-dry-it",
+        denied_count_getter=lambda: 0,
+        ledger=ledger,
+    )
+
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Understood, continuing."
+                ),
+                config={"configurable": {"thread_id": "length-dry-it"}},
+            )
+        )
+
+    # Judge never called — DRY mode is a passive observer; the
+    # marker-path judge wiring in graph.py early-outs for DRY_LOG
+    # before any judge call (mirrors the marker dry-mode contract).
+    assert calls == []
+    # Plain allow.
+    assert "messages" not in result
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # Canonical gate row carries the length-trigger signal.
+    assert "decision=dry_log" in log_text
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=length" in log_text
+    assert "marker_path=<pending>" in log_text
+    # No judge log row.
+    assert "event=leader_completion_gate_marker_judge" not in log_text
+
+
+def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
+    """Kill-switch OFF + length trigger → log-only, NO judge call.
+
+    The kill-switch contract: ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
+    ENABLED=0 disables the marker-path judge. The length trigger
+    rides the same kill-switch — same rationale (length-only signal
+    is too weak to deny without the LLM verdict). Logged, no judge.
+    """
+    calls = []
+
+    async def must_not_be_called(config, user_payload, *, timeout_s):
+        calls.append(True)
+        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
+    monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "0")
+    judge_resolver_mod.reset_llm_judge_resolver_for_tests()
+    assert judge_resolver_mod.is_llm_judge_enabled() is False
+
+    node, manager, ledger = _make_node(instance_id="length-ks-off-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Understood, continuing."
+                ),
+                config={"configurable": {"thread_id": "length-ks-off-it"}},
+            )
+        )
+
+    # Judge never called.
+    assert calls == []
+    # Plain ALLOW.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # Length-trigger signal still surfaces on the canonical row.
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=length" in log_text
+    # Distinct kill-switch OFF log row is emitted with verdict=<skipped>.
+    assert (
+        "event=leader_completion_gate_marker_judge_disabled" in log_text
+    )
+    assert "verdict=<skipped>" in log_text
+    # No live-judge log row.
+    assert (
+        "event=leader_completion_gate_marker_judge " not in log_text
+        and "event=leader_completion_gate_marker_judge\n" not in log_text
+    )
+
+
+def test_length_log_placeholder_count_is_31():
+    """The canonical ``event=leader_completion_gate`` log format
+    string has exactly 31 placeholders (28 → 31 with the three new
+    length-trigger fields). Pinned by source grep — drift pin so
+    log-row format-string changes surface in code review (a
+    regression to 28 placeholders breaks grep-based soak tooling
+    silently)."""
+    from daemon.services import attestation_gate as gate_mod
+    import inspect
+
+    source = inspect.getsource(gate_mod)
+    # Locate the format-string block for the leader_completion_gate row.
+    # Pin: the format string starts with the canonical event= prefix.
+    marker_prefix = "event=leader_completion_gate decision=%s"
+    assert marker_prefix in source, (
+        "canonical gate log format string not found — drift in "
+        "attestation_gate.py"
+    )
+    # Count the %s occurrences on the format string up to the
+    # newline after the LAST %s — by reading the source lines
+    # directly.
+    lines = source.splitlines()
+    in_format_block = False
+    format_string_lines: list[str] = []
+    for line in lines:
+        if marker_prefix in line:
+            in_format_block = True
+        if in_format_block:
+            format_string_lines.append(line)
+            # The format block ends when the close paren after the
+            # format-string arguments closes — heuristically, the
+            # log call ends at 'extra=meta,' followed by ')'. Stop
+            # when we see the trailing ')' at line start.
+            if line.strip() == ")":
+                break
+    format_text = "\n".join(format_string_lines)
+    placeholder_count = format_text.count("%s")
+    assert placeholder_count == 31, (
+        f"canonical gate log format string placeholder count drifted: "
+        f"expected 31 (28 + length_trigger + final_word_count + "
+        f"trigger_source), got {placeholder_count}. Update the drift "
+        f"pin if the placeholder count is correct for the new schema."
     )

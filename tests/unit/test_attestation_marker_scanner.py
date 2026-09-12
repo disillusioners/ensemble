@@ -32,8 +32,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from daemon.services.attestation_marker_scanner import (
     MARKER_TERMS_LIST_CAP,
     MID_WORK_MARKERS,
+    SHORT_REPORT_WORD_THRESHOLD,
+    LengthScanResult,
     MarkerScanResult,
+    count_words,
     scan_for_mid_work_markers,
+    scan_for_short_final_ai,
 )
 
 
@@ -417,3 +421,206 @@ def test_scan_walks_backward_through_messages():
 def test_catalog_marker_pin(marker: str):
     """The full catalog is pinned — guards against silent drift."""
     assert marker in MID_WORK_MARKERS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Length-trigger scanner (2026-09-12, user request) — word-count signal on
+# the LAST AIMessage. Threshold 150 words; below the threshold ⇒ trigger
+# fires. Composed with the marker scan via ``OR`` on the gate's ALLOW
+# paths. Independent trigger half — orthogonal to the marker catalog.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_length_threshold_is_pinned_at_150():
+    """SHORT_REPORT_WORD_THRESHOLD is pinned at 150 (NOT env-tunable by
+    design — one knob fewer; revisit at soak)."""
+    assert SHORT_REPORT_WORD_THRESHOLD == 150
+
+
+def test_length_result_default_is_no_trigger():
+    """Default LengthScanResult fields are pin-able."""
+    result = LengthScanResult(
+        length_trigger=False,
+        final_word_count=0,
+        messages_scanned=0,
+    )
+    assert result.length_trigger is False
+    assert result.final_word_count == 0
+    assert result.messages_scanned == 0
+
+
+def test_count_words_helper_basics():
+    """count_words is whitespace-split (the contract)."""
+    assert count_words("") == 0
+    assert count_words("   ") == 0
+    assert count_words(None) == 0  # type: ignore[arg-type]
+    assert count_words("hello") == 1
+    assert count_words("hello world") == 2
+    assert count_words("  hello   world  ") == 2
+    # Multiple whitespace runs collapse to one split.
+    assert count_words("a\nb\tc d") == 4
+
+
+def test_count_words_boundary_149_150_151():
+    """count_words on the boundary cases 149 / 150 / 151 is exact."""
+    text_149 = " ".join(["w"] * 149)
+    text_150 = " ".join(["w"] * 150)
+    text_151 = " ".join(["w"] * 151)
+    assert count_words(text_149) == 149
+    assert count_words(text_150) == 150
+    assert count_words(text_151) == 151
+
+
+def test_length_scan_short_below_threshold_fires():
+    """A short last AIMessage (< 150 words) fires the length trigger."""
+    short_text = "Understood, continuing."  # 2 words
+    result = scan_for_short_final_ai(
+        [AIMessage(content=short_text)], window=3
+    )
+    assert result.length_trigger is True
+    assert result.final_word_count == 2
+    assert result.messages_scanned == 1
+
+
+def test_length_scan_long_at_or_above_threshold_does_not_fire():
+    """A long last AIMessage (>= 150 words) does NOT fire the trigger."""
+    long_text = " ".join(["word"] * 150)
+    result = scan_for_short_final_ai(
+        [AIMessage(content=long_text)], window=3
+    )
+    assert result.length_trigger is False
+    assert result.final_word_count == 150
+    assert result.messages_scanned == 1
+
+
+def test_length_scan_only_counts_last_ai_message():
+    """The length trigger counts ONLY the LAST (newest) AIMessage — the
+    marker walk inspects up to ``window`` AIMessages, but the length
+    trigger is a single-message signal, not an aggregate."""
+    old_long = " ".join(["x"] * 200)  # 200 words — old
+    last_short = "OK, waiting on the tester."  # 5 words — last
+    messages = [
+        AIMessage(content=old_long),
+        AIMessage(content=last_short),
+    ]
+    result = scan_for_short_final_ai(messages, window=3)
+    assert result.length_trigger is True
+    # LAST message word count, NOT aggregate.
+    assert result.final_word_count == 5
+    assert result.messages_scanned == 1
+
+
+def test_length_scan_returns_no_trigger_on_empty_message_list():
+    """An empty message list yields length_trigger=False,
+    final_word_count=0, messages_scanned=0 (no AIMessage to count)."""
+    result = scan_for_short_final_ai([], window=3)
+    assert result.length_trigger is False
+    assert result.final_word_count == 0
+    assert result.messages_scanned == 0
+
+
+def test_length_scan_returns_no_trigger_on_only_non_ai_messages():
+    """A tail of only HumanMessages / ToolMessages yields no trigger."""
+    messages = [
+        HumanMessage(content="hello world"),  # 2 words — would fire IF scanned
+        ToolMessage(content="foo bar", tool_call_id="t1"),
+    ]
+    result = scan_for_short_final_ai(messages, window=3)
+    assert result.length_trigger is False
+    assert result.final_word_count == 0
+    assert result.messages_scanned == 0
+
+
+def test_length_scan_handles_empty_content_gracefully():
+    """An AIMessage with empty content returns final_word_count=0
+    (defensive floor) and length_trigger=True (0 < 150)."""
+    result = scan_for_short_final_ai(
+        [AIMessage(content="")], window=3
+    )
+    assert result.final_word_count == 0
+    assert result.length_trigger is True
+    assert result.messages_scanned == 1
+
+
+def test_length_scan_flattens_list_of_blocks_content():
+    """A list-of-blocks content (LangChain text + reasoning) is
+    flattened to plain text BEFORE the word count is taken."""
+    blocks = [
+        {"type": "text", "text": "Here is the chart you asked for."},
+        {"type": "reasoning", "text": "internal thinking"},
+        {"type": "text", "text": "Mermaid body follows."},
+    ]
+    result = scan_for_short_final_ai(
+        [AIMessage(content=blocks)], window=3
+    )
+    # All three blocks joined → "Here is the chart you asked for.
+    # internal thinking. Mermaid body follows." — well under 150.
+    assert result.length_trigger is True
+    assert result.messages_scanned == 1
+    assert result.final_word_count > 0
+
+
+def test_length_scan_uses_last_ai_in_tail_with_non_ai_padding():
+    """Non-AI messages (HumanMessage / ToolMessage) are skipped when
+    locating the LAST AIMessage — the scan walks backward and counts
+    the first AIMessage encountered in the tail."""
+    messages = [
+        HumanMessage(content="user prompt"),
+        AIMessage(content="short ai tail"),  # 3 words — the last AIMessage
+        HumanMessage(content="post-ai user prompt"),
+    ]
+    result = scan_for_short_final_ai(messages, window=3)
+    # The LAST AIMessage in the message list IS the second message
+    # (the trailing HumanMessage is NOT an AIMessage; the scan finds
+    # the last AIMessage in tail-order).
+    assert result.length_trigger is True
+    assert result.final_word_count == 3
+
+
+def test_length_scan_window_clamped_to_at_least_one():
+    """window<1 is clamped to 1 (degenerate defensive floor, mirrors
+    the marker scanner's clamp)."""
+    short_ai = AIMessage(content="hello world")
+    result = scan_for_short_final_ai([short_ai], window=0)
+    assert result.messages_scanned == 1
+    assert result.final_word_count == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Length-trigger boundary pins (149 / 150 / 151) — exact word count
+# behavior at the threshold edge. Pins the < 150 contract; 150 is
+# ALLOWED (the threshold is strict less-than).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_length_scan_boundary_149_words_fires():
+    """149 words (just below the threshold) FIRES the length trigger."""
+    text_149 = " ".join(["w"] * 149)
+    result = scan_for_short_final_ai(
+        [AIMessage(content=text_149)], window=3
+    )
+    assert result.length_trigger is True
+    assert result.final_word_count == 149
+
+
+def test_length_scan_boundary_150_words_does_not_fire():
+    """150 words (exactly at the threshold) does NOT fire — the
+    contract is ``final_word_count < SHORT_REPORT_WORD_THRESHOLD``
+    (strict less-than; 150 itself is the boundary case on the
+    allowed side)."""
+    text_150 = " ".join(["w"] * 150)
+    result = scan_for_short_final_ai(
+        [AIMessage(content=text_150)], window=3
+    )
+    assert result.length_trigger is False
+    assert result.final_word_count == 150
+
+
+def test_length_scan_boundary_151_words_does_not_fire():
+    """151 words (just above the threshold) does NOT fire."""
+    text_151 = " ".join(["w"] * 151)
+    result = scan_for_short_final_ai(
+        [AIMessage(content=text_151)], window=3
+    )
+    assert result.length_trigger is False
+    assert result.final_word_count == 151
