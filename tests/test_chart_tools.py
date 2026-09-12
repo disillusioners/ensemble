@@ -398,7 +398,11 @@ class TestGenerateChartReuse:
         mock_invoke.assert_not_awaited()
         # register → wait → unregister in finally.
         mock_registry.register.assert_called_once_with("charter-1")
-        mock_registry.unregister.assert_called_once_with("charter-1")
+        # W1 fix: ``unregister`` fires TWICE now (step-3 stale-buffer
+        # drain + step-7 finally cleanup) — pin the target id without
+        # constraining the count.
+        mock_registry.unregister.assert_called_with("charter-1")
+        assert mock_registry.unregister.call_count == 2
 
         records = _mode_records(caplog)
         assert len(records) == 1
@@ -643,8 +647,11 @@ class TestGenerateChartReuse:
         assert "may still be running" in result
         # Shared/durable charter is NEVER terminated on the reuse path.
         manager.terminate_instance.assert_not_awaited()
-        # finally-cleanup still ran.
-        mock_registry.unregister.assert_called_once_with("charter-1")
+        # finally-cleanup still ran. W1 fix: ``unregister`` fires TWICE
+        # now (step-3 stale-buffer drain + step-7 finally cleanup) — pin
+        # the target id without constraining the count.
+        mock_registry.unregister.assert_called_with("charter-1")
+        assert mock_registry.unregister.call_count == 2
         assert "charter-1" not in chart_tools_module._inflight_reuse
 
     # ── T8.8 ──────────────────────────────────────────────────────────────
@@ -906,3 +913,112 @@ class TestGenerateChartReuse:
         assert len(records) == 1
         assert "mode=reuse" in records[0].getMessage()
         assert "prior_status=terminated" in records[0].getMessage()
+    # ── T8.14 (W1 unit pin) ───────────────────────────────────────────────
+    async def test_stale_buffered_completion_is_drained_before_register(self):
+        """W1 unit pin: a buffered completion from a PRIOR turn must NOT
+        be consumed by the next ``_reuse_charter`` call.
+
+        Scenario: the registry is pre-seeded with a stale buffered
+        completion for the charter id (no waiter was parked when it
+        landed — e.g. fresh-path 600s-timeout unregister, or an external
+        message completing the charter). Without the W1 fix, the next
+        ``register()`` would consume that stale entry, set the event
+        immediately (``completion_registry.py:79-85``), and ``wait_for``
+        would return the OLD content. With the fix, ``unregister`` clears
+        ``_buffered`` first so the new turn starts clean, and the
+        side-task's NEW completion is what ``wait_for`` returns.
+
+        Asserts:
+          * Returned content == NEW (the OLD content would have leaked
+            without the W1 fix).
+          * ``register`` fires AFTER the drain — exactly twice (step-3
+            + post-enqueue re-register).
+          * ``unregister`` fires at least twice (step-3 drain + step-7
+            finally cleanup).
+        """
+        from daemon.services.completion_registry import CompletionRegistry
+        from daemon.tools.chart_tools import create_chart_tools
+
+        charter_id = "charter-w1-stale"
+        old_content = "```mermaid\nOLD\n```\nStale."
+        new_content = "```mermaid\nNEW\n```\nFresh."
+
+        completed = _charter_row(instance_id=charter_id, status="completed")
+        manager = _make_manager()
+        manager._instance_repository.get_children = MagicMock(
+            return_value=[completed]
+        )
+        manager._instance_repository.get = MagicMock(return_value=completed)
+
+        class _CountingRegistry(CompletionRegistry):
+            """Real registry + register/unregister call recording."""
+
+            def __init__(self):
+                super().__init__()
+                self.register_calls: list[str] = []
+                self.unregister_calls: list[str] = []
+
+            def register(self, instance_id):
+                self.register_calls.append(instance_id)
+                return super().register(instance_id)
+
+            def unregister(self, instance_id):
+                self.unregister_calls.append(instance_id)
+                return super().unregister(instance_id)
+
+        registry = _CountingRegistry()
+
+        # Pre-seed the registry with a stale buffered completion for the
+        # same charter id, with NO waiter parked. ``CompletionRegistry.
+        # complete`` writes to ``_buffered`` when no event exists
+        # (``completion_registry.py:139-142``).
+        registry.complete(charter_id, result=old_content, is_error=False)
+        # Sanity: the stale entry is buffered, not yet consumed.
+        assert charter_id in registry._buffered
+        assert not registry.is_registered(charter_id)
+
+        with patch(
+            "daemon.services.completion_registry.get_completion_registry",
+            return_value=registry,
+        ):
+            tools = create_chart_tools(manager, "test-instance-id")
+
+            # Side task: complete the registry AFTER the enqueue fires so
+            # the new turn has a completion to capture. Without the W1
+            # fix, ``register`` would have drained the OLD entry first,
+            # so this side-task complete would be a duplicate no-op.
+            async def _side_complete():
+                await asyncio.sleep(0.02)
+                registry.complete(charter_id, result=new_content, is_error=False)
+
+            side = asyncio.create_task(_side_complete())
+            result = await tools[0].coroutine(description="Refine after stale")
+            await side
+
+        # The returned content is the NEW turn's completion — NOT the
+        # stale buffered OLD entry.
+        assert result == new_content, (
+            f"W1 fix regression: stale buffered completion leaked; "
+            f"got {result!r}, expected {new_content!r}"
+        )
+
+        # The OLD content is gone from the registry (drained by the
+        # step-3 unregister, not consumed).
+        assert charter_id not in registry._buffered
+        assert charter_id not in registry._results
+
+        # register fires exactly once (step-3). The post-enqueue
+        # re-register is CONDITIONAL on ``is_registered`` being False;
+        # in this test the side task is sleeping (0.02s) when the
+        # re-register check runs, so the event is still registered and
+        # the re-register is skipped.
+        assert registry.register_calls == [charter_id], (
+            f"register call sequence: {registry.register_calls}"
+        )
+        # unregister fires exactly twice (step-3 drain + step-7 finally).
+        assert registry.unregister_calls == [charter_id, charter_id], (
+            f"unregister call sequence: {registry.unregister_calls}"
+        )
+        # Cleanup is clean post-call.
+        assert charter_id not in chart_tools_module._inflight_reuse
+        assert not registry.is_registered(charter_id)

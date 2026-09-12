@@ -102,6 +102,19 @@ def _find_reusable_charter(manager, caller_id: str) -> Instance | None:
             # Direction-uniform string key so ONE max() implements the spec:
             # ``last_activity_at`` desc (ISO strings compare chronologically;
             # NULL → "" sorts oldest), then ``created_at`` desc, then row id.
+            # S8: ``created_at`` may arrive as either an ISO string (SQLite/JSON
+            # origin) or a ``datetime`` (in-memory row origin) depending on the
+            # repository path; normalize to a comparable ISO string with the
+            # same NULL/empty → oldest treatment as ``last_activity_at`` so a
+            # mixed-type compare never raises TypeError inside the discovery
+            # ``try`` (silent fresh-spawn degradation hazard).
+            def _iso_or_empty(value):
+                if value is None or value == "":
+                    return ""
+                if isinstance(value, str):
+                    return value
+                return value.isoformat()
+
             activity = row.last_activity_at
             if activity is None:
                 activity_key = ""
@@ -112,7 +125,7 @@ def _find_reusable_charter(manager, caller_id: str) -> Instance | None:
             return (
                 activity_key != "",  # NULL-activity rows never win
                 activity_key,
-                row.created_at or "",
+                _iso_or_empty(row.created_at),
                 row.instance_id or "",
             )
 
@@ -131,7 +144,6 @@ async def _reuse_charter(
     charter_id: str,
     message: str,
     caller_id: str,
-    pid: str | None,
     timeout: float = 600.0,
 ) -> tuple[str, str]:
     """Register → enqueue → wait on the caller's EXISTING charter instance.
@@ -154,9 +166,6 @@ async def _reuse_charter(
         charter_id: The discovered charter instance to reuse.
         message: The refinement request for the charter agent.
         caller_id: The calling instance id (drives the enqueue source tag).
-        pid: Project id context of the calling tool call. Carried for
-            signature parity with the fresh-spawn path; the reuse enqueue
-            itself takes no project id.
         timeout: Maximum seconds to wait for the charter's completion.
 
     Returns:
@@ -209,8 +218,17 @@ async def _reuse_charter(
             charter_id,
         )
 
-    # 2. Busy guard (T5) — check BEFORE register, no await between the check
-    #    and the set-add (F10).
+    # 2. Busy guard (T5) — check BEFORE add, no await between the membership
+    #    check and the set-add (F10 / S4 busy-guard atomicity invariant):
+    #    a single asyncio event loop is assumed, and only sync code
+    #    (``logger.warning`` + ``get_completion_registry``) sits between
+    #    the check and the add inside the ``try`` below — a yield in
+    #    between would let a second caller observe the same empty slot
+    #    and slip a second waiter in. S6 — the guard is keyed by charter
+    #    instance id only; caller identity is NOT part of the key (two
+    #    callers targeting the same charter id share the busy bit, which
+    #    matches the single-event coalescing contract documented in the
+    #    module-level comment on ``_inflight_reuse``).
     if charter_id in _inflight_reuse:
         logger.warning(
             "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
@@ -223,20 +241,14 @@ async def _reuse_charter(
             "Error: Charter busy; pass fresh=True for parallel charts.",
             charter_id,
         )
-    _inflight_reuse.add(charter_id)
 
     registry = get_completion_registry()
     try:
-        if prior_status in (
-            InstanceStatus.ERROR.value,
-            InstanceStatus.FAILED.value,
-        ):
-            # ERROR/FAILED revive consumes the one-shot budget (T6). This
-            # counter is SEPARATE from the agent-tool ReviveGuard — see the
-            # module-level comment on ``_reuse_revive_attempts``.
-            _reuse_revive_attempts[charter_id] = (
-                _reuse_revive_attempts.get(charter_id, 0) + 1
-            )
+        # S2 — set-add INSIDE the ``try`` so the ``finally`` cleanup
+        # always discards the in-flight entry, even if the add itself
+        # raises (defensive: a raise between add and try entry would
+        # otherwise leak the entry until the next caller observed it).
+        _inflight_reuse.add(charter_id)
 
         logger.info(
             "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
@@ -246,24 +258,91 @@ async def _reuse_charter(
             prior_status or "none",
         )
 
-        # 3. Register BEFORE enqueue — buffered completion covers the race
-        #    where the charter finishes before we start waiting.
+        # 3. Unregister-then-register — W1 stale-buffered completion fix.
+        #    A buffered completion from a PREVIOUS turn (e.g. fresh-path
+        #    600s-timeout unregister, or an external message completing
+        #    the charter while no waiter is parked) sits in
+        #    ``registry._buffered`` keyed by charter id. The next
+        #    ``register()`` would consume that stale entry and set the
+        #    event immediately (``completion_registry.py:79-85``), so
+        #    ``wait_for`` below would return the OLD content instead of
+        #    the NEW turn's result. ``unregister`` clears ``_buffered``
+        #    (``completion_registry.py:188-202``), giving the new turn
+        #    a clean slate. Safe under the T5 busy-guard invariant — one
+        #    waiter per charter id at a time, so no other consumer is
+        #    racing for the buffer slot.
+        registry.unregister(charter_id)
         registry.register(charter_id)
 
         # 4. Enqueue on the EXISTING instance (ONLY existing kwargs — no
         #    facade change, M11).
-        await manager.enqueue_message(
-            instance_id=charter_id,
-            message=message,
-            source=f"internal_chart_reuse:{caller_id}",
-            metadata={"chart_reuse": True},
-        )
+        try:
+            await manager.enqueue_message(
+                instance_id=charter_id,
+                message=message,
+                source=f"internal_chart_reuse:{caller_id}",
+                metadata={"chart_reuse": True},
+            )
+        except Exception as enqueue_err:
+            # S7 — mirror the fresh-path never-raise contract
+            # (``daemon/utils.py:706-735``): wrap the enqueue in a
+            # catch-all so the LLM never sees a raw ``enqueue_message``
+            # stack trace on the reuse path. Brief exception class +
+            # message, paired with the ``charter_id`` so the caller can
+            # still identify the instance.
+            return (
+                f"Error: {type(enqueue_err).__name__}: {enqueue_err}",
+                charter_id,
+            )
 
-        # 5. Re-register if consumed (child may have completed meanwhile).
+        # S1 — counter increment AFTER successful ``enqueue_message``
+        # (aligns with the vetted post-enqueue precedent at
+        # ``daemon/tools/instance.py:3009-3012``). A transient
+        # ``enqueue_message`` exception above leaves the child eligible
+        # for a future revive attempt — the one-shot budget is only
+        # consumed when the dispatch actually happened.
+        if prior_status in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
+            # ERROR/FAILED revive consumes the one-shot budget (T6). This
+            # counter is SEPARATE from the agent-tool ReviveGuard — see the
+            # module-level comment on ``_reuse_revive_attempts``. S5 —
+            # growth is daemon-restart-bounded: this dict is in-memory,
+            # lost on restart, and accepted (mirrors the precedent at
+            # ``daemon/manager.py:773`` ``_agent_tool_revive_counts``).
+            _reuse_revive_attempts[charter_id] = (
+                _reuse_revive_attempts.get(charter_id, 0) + 1
+            )
+
+        # 5. Re-register if consumed — S3 comment fix. The re-register
+        #    guards the post-enqueue consumption race: the enqueue above
+        #    can flip terminal→RUNNING and the charter's existing
+        #    completion (e.g. from a side channel) may have drained the
+        #    event the step-3 register just set. Re-registering restores
+        #    the wait surface for the ``wait_for`` below so a subsequent
+        #    completion is captured. (The step-3 buffered-drain
+        #    misattribution hazard is closed separately; this block only
+        #    covers the mid-flight drain after enqueue.)
         if not registry.is_registered(charter_id):
             registry.register(charter_id)
 
         # 6. Wait for completion (success or error).
+        #
+        # W2 — accepted interleaving. ``CompletionRegistry`` keys one
+        # ``asyncio.Event`` per instance id; two completions landing on
+        # the same id share the event (one event set is binary). When an
+        # external message completes the same charter while we are
+        # parked here, the resulting event.set() wakes THIS waiter with
+        # THAT other message's completion result — bounded by the T5
+        # busy guard to same-charter turns (one reuse waiter per
+        # charter at a time, so cross-waiter mixing is impossible). The
+        # full fix is a work-id-scoped wait: key the event by
+        # (instance_id, work_id) so the wake can be matched to the
+        # originating dispatch. Deferred — see W2 in
+        # ``.agents/shared/planning/generate-chart-charter-reuse/
+        # decisions.md`` (post-wake staleness check would need plumbing
+        # through ``completion_registry.complete`` / chart-local stub).
         result = await registry.wait_for(charter_id, timeout=timeout)
 
         if result is None:
@@ -396,7 +475,6 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
                         charter_id=charter_id,
                         message=chart_message,
                         caller_id=current_instance_id,
-                        pid=pid,
                         timeout=600.0,
                     )
                     return content

@@ -1326,6 +1326,12 @@ class TestT5FanOutScoping:
         mgr_a = build_harness_manager(engine)
         mgr_b = build_harness_manager(engine)
 
+        # Anchor ``side_a`` to caller A's start; ``side_b`` is created
+        # only AFTER ``result_a`` returns so its 0.01s sleep reliably
+        # outlives caller B's register (W1 fix: unregister-before-register
+        # drains any stale buffered completion that arrived before
+        # register, so the side task must fire AFTER register for the
+        # completion to be captured by wait_for).
         side_a = asyncio.create_task(
             _complete_charter_after_enqueue(
                 registry=fresh_registry,
@@ -1335,6 +1341,15 @@ class TestT5FanOutScoping:
                 content="chart-A",
             )
         )
+
+        # Each tool closes over its own ``current_instance_id``; that's how
+        # per-caller scoping is enforced (chart_tools.py:_find_reusable_charter
+        # uses ``current_instance_id`` as the get_children arg).
+        tools_a = create_chart_tools(mgr_a, caller_a)
+        tools_b = create_chart_tools(mgr_b, caller_b)
+        result_a = await tools_a[0].coroutine(description="a")
+        await side_a
+
         side_b = asyncio.create_task(
             _complete_charter_after_enqueue(
                 registry=fresh_registry,
@@ -1344,15 +1359,7 @@ class TestT5FanOutScoping:
                 content="chart-B",
             )
         )
-
-        # Each tool closes over its own ``current_instance_id``; that's how
-        # per-caller scoping is enforced (chart_tools.py:_find_reusable_charter
-        # uses ``current_instance_id`` as the get_children arg).
-        tools_a = create_chart_tools(mgr_a, caller_a)
-        tools_b = create_chart_tools(mgr_b, caller_b)
-        result_a = await tools_a[0].coroutine(description="a")
         result_b = await tools_b[0].coroutine(description="b")
-        await side_a
         await side_b
 
         assert result_a == "chart-A"
