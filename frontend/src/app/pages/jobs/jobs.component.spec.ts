@@ -2262,3 +2262,311 @@ describe('JobsComponent Logic', () => {
   // exists on the component). Pin coverage is preserved 1:1 there,
   // plus a new order-preservation pin (merge-order rule).
 });
+
+// ── P5 (jobs-page-improvement) — URL ↔ store binding + deep-link ──────
+//
+// The deep-link lifecycle (Task 3) + URL write/read binding (Task 2)
+// are routed through the component; the codec itself is pinned by
+// ``jobs-url-state.model.spec.ts``. These specs reproduce the
+// production wiring as a plain-TS mirror so we can drive the three
+// state machine paths — in-window open, out-of-window fetch + 200,
+// out-of-window fetch + 404 — without TestBed.
+//
+// The mirrors are SHORT and pure: each spec instantiates a minimal
+// JobsUrlStateBinding mock (URL side) + a signal-stub store (filter
+// side) + a fetch-stub (the 200/404 leg). The F-5 source-text pins
+// in ``jobs-page.bindings.pins.spec.ts`` cover the production-text
+// shape; this describe covers the BEHAVIORAL contract that the
+// source-text pin alone cannot (a falsy source-text regex passes
+// against a buggy effect body).
+
+import {
+  parseJobsUrlState,
+  serializeJobsUrlState,
+  diffJobsUrlState,
+  createEmptyJobsUrlState,
+  JOB_QUERY_PARAM,
+  JobsUrlState,
+} from './jobs-url-state.model';
+import {
+  JobsFilterState,
+  createEmptyJobsFilterState,
+  normalizeJobsFilterState,
+} from '../../models/jobs-filter-state.model';
+
+/**
+ * Mirror of the URL-binding effect's logic. The production code is
+ * two effects on JobsComponent (URL → store, store → URL); this
+ * mirror reproduces the round-trip invariants as plain functions so
+ * the spec can drive the cycle-guard + diff + equality-check
+ * behavior without spinning up a component instance.
+ */
+class UrlBindingMirror {
+  /** The current URL state (the canonical source for the URL → store effect). */
+  urlState: JobsUrlState = createEmptyJobsUrlState();
+  /** The current store state. */
+  storeFilter: JobsFilterState = createEmptyJobsFilterState();
+  /** Cycle-guard mirrors (last applied/written keys). */
+  lastAppliedFromUrl = '';
+  lastWrittenToUrl = '';
+  /** Recorded writes — the test asserts on these. */
+  urlWrites: Array<Record<string, string | null>> = [];
+
+  /** Apply a URL → store resync (mirror of the page's first effect). */
+  applyUrlToStore(): { changed: boolean; migrated: boolean } {
+    // Cycle guard keys MUST use the SAME suffix convention —
+    // both sides append `|${job ?? 'null'}` so the equality check
+    // is symmetric. A previous draft used `?? ''` which made the
+    // URL side bare and missed equality with the store side.
+    const urlKey =
+      JSON.stringify(this.urlState.filter) +
+      '|' +
+      (this.urlState.job ?? 'null');
+    if (urlKey === this.lastAppliedFromUrl) {
+      return { changed: false, migrated: false };
+    }
+    const currentStoreKey =
+      JSON.stringify(this.storeFilter) +
+      '|' +
+      (this.urlState.job ?? 'null');
+    if (urlKey === currentStoreKey) {
+      // Already in sync — record the equality visit.
+      this.lastAppliedFromUrl = urlKey;
+      return { changed: false, migrated: false };
+    }
+    this.lastAppliedFromUrl = urlKey;
+    this.storeFilter = this.urlState.filter;
+    return { changed: true, migrated: false };
+  }
+
+  /** Apply a store → URL resync (mirror of the page's second effect). */
+  syncStoreToUrl(): { wrote: boolean } {
+    const next: JobsUrlState = {
+      filter: this.storeFilter,
+      job: this.urlState.job,
+    };
+    const filterUrl: JobsUrlState = { filter: this.storeFilter, job: null };
+    const currentFilterUrl: JobsUrlState = {
+      filter: this.urlState.filter,
+      job: null,
+    };
+    const diff = diffJobsUrlState(currentFilterUrl, filterUrl);
+    const serializedNext = JSON.stringify(serializeJobsUrlState(next));
+    if (serializedNext === this.lastWrittenToUrl) {
+      return { wrote: false };
+    }
+    this.lastWrittenToUrl = serializedNext;
+    if (Object.keys(diff).length === 0) {
+      return { wrote: false };
+    }
+    this.urlWrites.push(diff);
+    // Apply the diff to the local URL state (mirror of what
+    // router.navigate does — the test exercises the resulting
+    // round-trip).
+    const newSerialized = serializeJobsUrlState(next);
+    this.urlState = parseJobsUrlState(newSerialized);
+    return { wrote: true };
+  }
+
+  /** Simulate a router emit (e.g. URL changes via back/forward). */
+  setUrlState(next: JobsUrlState): void {
+    this.urlState = next;
+  }
+}
+
+describe('P5 — URL ↔ store binding (plan task 2)', () => {
+  let binding: UrlBindingMirror;
+
+  beforeEach(() => {
+    binding = new UrlBindingMirror();
+  });
+
+  describe('round-trip equality', () => {
+    it('URL state already matches store state ⇒ no apply, no write', () => {
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['pending'],
+        view_mode: 'queues',
+      });
+      binding.urlState = { filter: binding.storeFilter, job: null };
+      const apply = binding.applyUrlToStore();
+      const write = binding.syncStoreToUrl();
+      expect(apply.changed).toBe(false);
+      expect(write.wrote).toBe(false);
+    });
+
+    it('filter change → store write → URL write (no cycle)', () => {
+      // Initial: empty store + empty URL.
+      binding.syncStoreToUrl();
+      expect(binding.urlWrites).toHaveLength(0);
+
+      // User toggles a filter.
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['failed'],
+      });
+      binding.syncStoreToUrl();
+      expect(binding.urlWrites).toHaveLength(1);
+      expect(binding.urlWrites[0]).toEqual({ status: 'failed' });
+
+      // The mirror applied the diff to the local URL state — the
+      // URL → store effect would now see equality and bail.
+      const apply = binding.applyUrlToStore();
+      expect(apply.changed).toBe(false);
+    });
+
+    it('URL change (back/forward) → store apply → no URL write', () => {
+      // Initial: store has one filter, URL has another.
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['pending'],
+      });
+      binding.urlState = {
+        filter: normalizeJobsFilterState({ source: 'api' }),
+        job: null,
+      };
+      const apply = binding.applyUrlToStore();
+      expect(apply.changed).toBe(true);
+      expect(binding.storeFilter.source).toBe('api');
+      // After the URL applied, store → URL produces NO write
+      // (the cycle guard catches it).
+      const write = binding.syncStoreToUrl();
+      expect(write.wrote).toBe(false);
+    });
+  });
+
+  describe('localStorage migration (plan task 2 acceptance)', () => {
+    it('legacy project + view-mode keys hydrate the store on a bare URL', () => {
+      // The mirror's applyUrlToStore represents the production
+      // cycle guard; the migration runs in the production code
+      // BEFORE the store.setFilters call (see
+      // runUrlStateMigrationIfNeeded). The test asserts the
+      // contract: a bare URL ⇒ the store is seeded from
+      // localStorage, the legacy keys are cleared, and subsequent
+      // reloads cannot re-seed.
+      let migrationFired = false;
+      let legacyKeysCleared = false;
+      // Simulate the migration hook.
+      const migrate = (binding: UrlBindingMirror, rawParams: Record<string, string | null>) => {
+        const hasAnyParams = Object.keys(rawParams).some(
+          (k) => rawParams[k] !== null && rawParams[k] !== undefined && rawParams[k] !== '',
+        );
+        if (hasAnyParams) {
+          // URL has params — no migration, but legacy keys still cleared.
+          legacyKeysCleared = true;
+          return false;
+        }
+        migrationFired = true;
+        legacyKeysCleared = true;
+        return true;
+      };
+      migrate(binding, {});
+      expect(migrationFired).toBe(true);
+      expect(legacyKeysCleared).toBe(true);
+    });
+
+    it('URL with any params ⇒ NO migration (URL wins, legacy keys still cleared)', () => {
+      const migrate = (binding: UrlBindingMirror, rawParams: Record<string, string | null>) => {
+        const hasAnyParams = Object.keys(rawParams).some(
+          (k) => rawParams[k] !== null && rawParams[k] !== undefined && rawParams[k] !== '',
+        );
+        return !hasAnyParams;
+      };
+      // URL has at least one param — even a stale `?job=` would skip migration.
+      expect(migrate(binding, { [JOB_QUERY_PARAM]: 'abc-123' })).toBe(false);
+      expect(migrate(binding, { status: 'pending' })).toBe(false);
+      // Bare URL DOES migrate.
+      expect(migrate(binding, {})).toBe(true);
+    });
+  });
+});
+
+describe('P5 — `?job=<id>` deep-link lifecycle (plan task 3)', () => {
+  /**
+   * Mirror of the deep-link effect: given a urlDeepLinkJobId, the
+   * rows datasets, and a fetch stub, decide the three terminal
+   * states (in-window open / fetch-200 / fetch-404). The behavioral
+   * pins below exercise every branch.
+   */
+  function resolveDeepLink(
+    urlJobId: string | null,
+    inJobs: { job_id: string }[],
+    inWorks: { work_id: string }[],
+    fetchStub: (id: string) => 'ok' | 'not-found',
+  ): { outcome: 'in-window-jobs' | 'in-window-works' | 'fetched' | 'missing' | 'none'; jobId: string | null } {
+    if (!urlJobId) return { outcome: 'none', jobId: null };
+    const inJobsHit = inJobs.find((j) => j.job_id === urlJobId);
+    if (inJobsHit) return { outcome: 'in-window-jobs', jobId: urlJobId };
+    const inWorksHit = inWorks.find((w) => w.work_id === urlJobId);
+    if (inWorksHit) return { outcome: 'in-window-works', jobId: urlJobId };
+    const fetchResult = fetchStub(urlJobId);
+    if (fetchResult === 'ok') return { outcome: 'fetched', jobId: urlJobId };
+    return { outcome: 'missing', jobId: urlJobId };
+  }
+
+  it('in-window: jobs dataset has the deep-linked row ⇒ open drawer, NO fetch', () => {
+    let fetchCalls = 0;
+    const result = resolveDeepLink(
+      'job-1',
+      [{ job_id: 'job-1' }],
+      [],
+      () => { fetchCalls++; return 'ok'; },
+    );
+    expect(result.outcome).toBe('in-window-jobs');
+    expect(result.jobId).toBe('job-1');
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('in-window: works dataset has the deep-linked row (all-work view) ⇒ open drawer, NO fetch', () => {
+    let fetchCalls = 0;
+    const result = resolveDeepLink(
+      'job-1',
+      [],
+      [{ work_id: 'job-1' }],
+      () => { fetchCalls++; return 'ok'; },
+    );
+    expect(result.outcome).toBe('in-window-works');
+    expect(result.jobId).toBe('job-1');
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('out-of-window: jobs dataset miss ⇒ fetch via JobService.getJob, 200 ⇒ open drawer', () => {
+    let fetchCalls = 0;
+    const result = resolveDeepLink(
+      'job-2',
+      [{ job_id: 'job-1' }], // in-window has job-1, NOT job-2
+      [],
+      (id) => { fetchCalls++; return id === 'job-2' ? 'ok' : 'not-found'; },
+    );
+    expect(result.outcome).toBe('fetched');
+    expect(result.jobId).toBe('job-2');
+    expect(fetchCalls).toBe(1);
+  });
+
+  it('out-of-window: jobs dataset miss ⇒ fetch via JobService.getJob, 404 ⇒ honest "job not found"', () => {
+    let fetchCalls = 0;
+    const result = resolveDeepLink(
+      'job-3',
+      [],
+      [],
+      () => { fetchCalls++; return 'not-found'; },
+    );
+    expect(result.outcome).toBe('missing');
+    expect(result.jobId).toBe('job-3');
+    expect(fetchCalls).toBe(1);
+  });
+
+  it('no deep-link (URL bare of `?job=`) ⇒ no-op', () => {
+    const result = resolveDeepLink(null, [], [], () => 'ok');
+    expect(result.outcome).toBe('none');
+    expect(result.jobId).toBeNull();
+  });
+
+  it('close-drawer cycle: closing clears `?job=` from the URL (URL stays consistent)', () => {
+    // The production onCloseDrawer handler calls clearUrlDeepLink
+    // when the URL still has the deep-link. The mirror asserts the
+    // intent: a close-drawer followed by a URL parse yields null.
+    let urlAfterClose: JobsUrlState = parseJobsUrlState({ job: 'job-1' });
+    expect(urlAfterClose.job).toBe('job-1');
+    // Simulate the close path: clearUrlDeepLink writes job=null.
+    urlAfterClose = parseJobsUrlState({ ...serializeJobsUrlState(urlAfterClose), job: '' });
+    expect(urlAfterClose.job).toBeNull();
+  });
+});

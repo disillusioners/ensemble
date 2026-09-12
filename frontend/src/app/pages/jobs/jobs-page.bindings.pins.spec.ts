@@ -935,3 +935,233 @@ describe('P4 — defer banner + holders panel template↔component binding pins'
     // confirmed by the template-source pin above.
   });
 });
+
+// ── P5 (jobs-page-improvement) — URL binding + deep-link F-5 pins ──────
+//
+// Every NEW write-path / binding / template hunk that ships in
+// Phase 5 ships with a source-text pin AND a behavior spec (the
+// house convention: a source-text pin alone passed green against
+// the pre-P2 ``showEmptyState`` regression). The codec + binding
+// behavior specs live in ``jobs-url-state.model.spec.ts`` and
+// ``jobs.component.spec.ts`` (P5 describe); this describe is the
+// SOURCE-TEXT anchor for the wiring.
+
+describe('P5 — URL binding + deep-link template↔component binding pins', () => {
+  // Helper — re-read the file text on every test (the binding pin
+  // file IS the production referent; caching would mask a
+  // cross-phase regression that touches the same files).
+  const fs = require('fs');
+  const path = require('path');
+
+  it('URL ↔ store binding imports the codec + the navigation primitives', () => {
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?parseJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?serializeJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?diffJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    // ActivatedRoute injection — the URL source.
+    expect(componentSrc).toMatch(
+      /import\s*\{[^}]*ActivatedRoute[^}]*\}\s*from\s+['"]@angular\/router['"]/,
+    );
+    // toSignal from rxjs-interop — the Angular helper that
+    // converts the route's queryParamMap into a signal.
+    expect(componentSrc).toMatch(
+      /import\s*\{[^}]*toSignal[^}]*\}\s*from\s+['"]@angular\/core\/rxjs-interop['"]/,
+    );
+  });
+
+  it('URL ↔ store binding: route is injected and queryParamMap drives urlStateRaw', () => {
+    expect(componentSrc).toMatch(/private readonly route = inject\(ActivatedRoute\)/);
+    expect(componentSrc).toMatch(
+      /private readonly urlStateRaw = toSignal\(\s*this\.route\.queryParamMap\.pipe\(/,
+    );
+    // distinctUntilChanged collapse — the production-side dedup
+    // is required so a duplicate emit (the router sometimes
+    // double-emits on the same nav) does not re-fire the binding.
+    expect(componentSrc).toMatch(/distinctUntilChanged\(/);
+    // Parsed URL state — the canonical view consumed by the
+    // URL → store effect + the deep-link effect.
+    expect(componentSrc).toMatch(
+      /readonly urlState = computed<JobsUrlState>\(\(\) =>\s*parseJobsUrlState\(this\.urlStateRaw\(\)\)/,
+    );
+    // Convenience — the deep-link effect reads this.
+    expect(componentSrc).toMatch(
+      /readonly urlDeepLinkJobId = computed<string \| null>\(\(\) => this\.urlState\(\)\.job\)/,
+    );
+  });
+
+  it('URL → store effect applies parsed filter via setFilters + migration hook', () => {
+    // The URL → store effect reads urlState + storeFilterStateKey,
+    // bails on equality, otherwise applies the filter.
+    expect(componentSrc).toMatch(/this\.store\.setFilters\(url\.filter\)/);
+    // Migration hook — runs on the first non-matching URL emit.
+    expect(componentSrc).toMatch(/this\.runUrlStateMigrationIfNeeded\(\)/);
+    // Active-leg fetch — the store's setFilters is filter-only;
+    // the URL restore path triggers the wire fetch.
+    expect(componentSrc).toMatch(/this\.refreshActiveLegsForFilter\(url\.filter\)/);
+  });
+
+  it('store → URL effect navigates with diff + merge + replaceUrl (no history pollution)', () => {
+    expect(componentSrc).toMatch(
+      /this\.router\.navigate\(\[\],\s*\{[\s\S]*?queryParams: diff,[\s\S]*?queryParamsHandling: 'merge',[\s\S]*?replaceUrl: true,[\s\S]*?\}\)/,
+    );
+  });
+
+  it('migration: legacy localStorage keys are cleared by URL presence OR seed', () => {
+    // Both keys are cleared by the helper (one-time cleanup).
+    expect(componentSrc).toMatch(
+      /private clearLegacyLocalStorageKeys\(\): void \{[\s\S]*?localStorage\.removeItem\(this\.STORAGE_KEY\)/,
+    );
+    expect(componentSrc).toMatch(
+      /localStorage\.removeItem\(this\.VIEW_MODE_KEY\)/,
+    );
+    // The bare-URL branch in runUrlStateMigrationIfNeeded seeds
+    // the store from localStorage AND marks migration done.
+    expect(componentSrc).toMatch(/this\.store\.setFilters\(patch\)/);
+    expect(componentSrc).toMatch(/this\.markUrlMigrationDone\(\)/);
+  });
+
+  it('deep-link: openDrawerForDeepLink is the resolver entry point (in-window + fetch-200 paths)', () => {
+    expect(componentSrc).toMatch(/private openDrawerForDeepLink\(job: Job\): void/);
+    // SSE wiring on non-terminal jobs.
+    expect(componentSrc).toMatch(/streamJobEvents\(job\.job_id\)/);
+    // deepLinkMissingJobId reset on a healthy open.
+    expect(componentSrc).toMatch(/this\.deepLinkMissingJobId\.set\(null\)/);
+  });
+
+  it('deep-link: 404 / network error flips deepLinkMissingJobId (honest "job not found")', () => {
+    // The 404 path keeps the drawer open (NOT a silent failure)
+    // and flips the missing flag so the template renders the
+    // honest empty card. The error branch lives inside the
+    // ``jobService.getJob`` subscribe callback (window set wide
+    // enough to cover the status-conditional block).
+    expect(componentSrc).toMatch(
+      /error: \(err\) => \{[\s\S]{0,800}?this\.deepLinkMissingJobId\.set\(jobId\)[\s\S]{0,200}?this\.drawerOpen\.set\(true\)/,
+    );
+    // In-flight flag flips on entry (the fetch guard) + clears on
+    // completion (both success + error branches).
+    expect(componentSrc).toMatch(/this\.deepLinkFetchInFlight\.set\(true\)/);
+    expect(componentSrc).toMatch(/this\.deepLinkFetchInFlight\.set\(false\)/);
+  });
+
+  it('deep-link: clearUrlDeepLink is the close-path URL strip', () => {
+    expect(componentSrc).toMatch(/private clearUrlDeepLink\(\): void/);
+    expect(componentSrc).toMatch(
+      /this\.router\.navigate\(\[\],\s*\{[\s\S]*?queryParams:\s*\{\s*job:\s*null\s*\}/,
+    );
+    // onCloseDrawer guards on the URL still having the link.
+    expect(componentSrc).toMatch(
+      /onCloseDrawer\(\): void \{[\s\S]{0,800}?if \(this\.urlDeepLinkJobId\(\) !== null\) \{[\s\S]{0,200}?this\.clearUrlDeepLink\(\)/,
+    );
+  });
+
+  it('template: deep-link missing + loading cards mount inside the drawer', () => {
+    expect(templateSrc).toMatch(
+      /@else if \(deepLinkMissingJobId\(\); as missingId\)/,
+    );
+    expect(templateSrc).toMatch(
+      /class="job-detail-drawer deep-link-missing"/,
+    );
+    expect(templateSrc).toMatch(/@else if \(deepLinkFetchInFlight\(\)\)/);
+    expect(templateSrc).toMatch(
+      /class="job-detail-drawer deep-link-loading"/,
+    );
+    // Honest copy (the user-facing text MUST match the spec verbatim).
+    expect(templateSrc).toMatch(/Job not found/);
+    expect(templateSrc).toMatch(/We could not load the job/);
+    // The drawer template carries the report-row Message copy
+    // (different file; the jobs.component.html never renders the
+    // drawer body — it mounts <app-job-detail-drawer> instead).
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).toMatch(/Report rows do not carry message content\./);
+  });
+
+  it('drawer template: Result gate no longer requires status==="completed"', () => {
+    // P5 task 4 — the @if guard was relaxed to ``result_summary
+    // present`` (no status gate). The pin anchors on the drawer
+    // template's ABSENCE of the legacy gate AND the presence of
+    // the relaxed guard.
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).not.toMatch(
+      /@if \(job\(\)\.status === 'completed' && job\(\)\.result_summary\)/,
+    );
+    expect(drawerHtmlSrc).toMatch(/@if \(job\(\)\.result_summary\)/);
+    // The "Result" section title still renders (sanity).
+    expect(drawerHtmlSrc).toMatch(/<h3 class="section-title">Result<\/h3>/);
+  });
+
+  it('drawer template: Message honest-empty copy on report rows', () => {
+    // P5 task 6 — the @else if branch surfaces the gap-e6 copy
+    // when the row is a report kind AND has no message.
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).toMatch(
+      /@else if \(job\(\)\.kind === 'report'\)/,
+    );
+    expect(drawerHtmlSrc).toMatch(/Report rows do not carry message content\./);
+    expect(drawerHtmlSrc).toMatch(/class="message-empty-copy"/);
+  });
+
+  it('P5 task 7 (SSE re-pin) — order-preserving + in-place patch lives in the store', () => {
+    // The store's updateJobFromSse uses ``.map`` (in-place)
+    // and never re-sorts. The companion behavioral pin lives in
+    // ``jobs-page.store.spec.ts``; this pin is the source-text
+    // anchor that catches a future refactor that drifts to a
+    // sort/replace implementation.
+    const storeSrc = fs.readFileSync(
+      path.join(__dirname, 'jobs-page.store.ts'),
+      'utf-8',
+    );
+    expect(storeSrc).toMatch(
+      /this\.jobs\.update\(jobs =>\s*jobs\.map\(job =>/,
+    );
+    expect(storeSrc).toMatch(
+      /this\.works\.update\(works =>\s*works\.map\(work =>/,
+    );
+    // The pre-Phase-2 anti-patterns are gone (no ``this.jobs = [...]``,
+    // no spread-then-sort).
+    expect(storeSrc).not.toMatch(/this\.jobs\s*=\s*\[\.\.\.this\.jobs/);
+    expect(storeSrc).not.toMatch(/this\.works\s*=\s*\[\.\.\.this\.works/);
+  });
+
+  it('P5 task 7 (SSE re-pin) — per-job stream only opens on non-terminal jobs + drawer-open', () => {
+    // The component's onViewJobDetails + openDrawerForDeepLink paths
+    // both guard on isTerminalStatus(job.status) before subscribing.
+    // A future refactor that drops the guard would re-introduce the
+    // pre-P2 SSE-on-terminal bug class. The early `return` for
+    // terminal jobs means the regex window is wider on the
+    // streamJobEvents match (skips past the return).
+    expect(componentSrc).toMatch(
+      /protected onViewJobDetails\(job: Job\): void \{[\s\S]*?isTerminalStatus\(job\.status\)[\s\S]*?return;[\s\S]*?streamJobEvents\(job\.job_id\)/,
+    );
+    expect(componentSrc).toMatch(
+      /private openDrawerForDeepLink\(job: Job\): void \{[\s\S]*?isTerminalStatus\(job\.status\)[\s\S]*?streamJobEvents\(job\.job_id\)/,
+    );
+    // The drawer close disconnects — Phase 2 modal-pause gate
+    // preserved (no SSE resource leak across deep-link opens).
+    expect(componentSrc).toMatch(
+      /protected onCloseDrawer\(\): void \{[\s\S]*?this\.jobSseService\.disconnect\(\)/,
+    );
+  });
+});

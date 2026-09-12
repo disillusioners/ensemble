@@ -1,5 +1,6 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy, effect, DOCUMENT } from '@angular/core';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
@@ -17,7 +18,10 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
-import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
+// P5 (jobs-page-improvement) — ``MatDividerModule`` for the deep-link
+// honest-empty / loading cards (the drawer body uses ``<mat-divider>``).
+import { MatDividerModule } from '@angular/material/divider';
+import { Subscription, switchMap, of, catchError, tap, distinctUntilChanged, map } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { MissionService } from '../../services/mission.service';
 import { JobSseService } from '../../services/job-sse.service';
@@ -35,6 +39,7 @@ import { SystemCleanupConfirmDialogComponent } from '../../components/system-cle
 import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
 import { DeferHoldersPanelComponent } from './defer-holders-panel/defer-holders-panel.component';
 import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.model';
+import { workToJob } from '../../models/work.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
@@ -66,6 +71,13 @@ import {
   emptyStateCopy,
   JobsEmptyStateCopy,
 } from './jobs-empty-state.model';
+import {
+  JobsUrlState,
+  createEmptyJobsUrlState,
+  diffJobsUrlState,
+  parseJobsUrlState,
+  serializeJobsUrlState,
+} from './jobs-url-state.model';
 import {
   JobGroup,
   MAX_TITLE_ENRICHMENT_FETCHES,
@@ -115,6 +127,7 @@ export type { JobsViewMode };
     MatDialogModule,
     MatTooltipModule,
     MatCheckboxModule,
+    MatDividerModule,
     JobCardComponent,
     JobDetailDrawerComponent,
     QueueListComponent,
@@ -126,6 +139,14 @@ export type { JobsViewMode };
 })
 export class JobsComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
+  /**
+   * P5 (jobs-page-improvement) — ActivatedRoute is the source of
+   * truth for the URL ↔ filter-state binding (plan tasks 2 + 3).
+   * `queryParamMap` is converted to a signal via `toSignal` so the
+   * rest of the binding (URL → store, store → URL, deep-link) can
+   * use the plain-signal pipeline already established in P1-P4.
+   */
+  private readonly route = inject(ActivatedRoute);
   private readonly jobService = inject(JobService);
   /**
    * P3 (jobs-page-improvement) — MissionService is the canonical home
@@ -561,6 +582,101 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly drawerOpen = signal(false);
   readonly projects = this.projectService.projects;
 
+  // ── P5 (jobs-page-improvement) — URL ↔ filter-state binding ───────
+  //
+  // The plan task 2 contract: URL is the SOLE authority for filter
+  // state after the one-time migration from localStorage. The
+  // component owns the parsing + write-back; the codec lives in
+  // ``jobs-url-state.model.ts`` (pure, spec-driven). The signals
+  // below are the three layers:
+  //
+  // * ``urlStateRaw`` — the raw queryParamMap converted to a plain
+  //   object. Drives the URL → store effect via ``parseJobsUrlState``.
+  // * ``urlState`` — the parsed JobsUrlState (the canonical view of
+  //   what the URL currently says). The deep-link handler reads it
+  //   directly; the URL → store effect compares it against the
+  //   store state to break the bidirectional sync loop.
+  // * ``urlDeepLinkJobId`` — convenience signal = ``urlState().job``;
+  //   the deep-link effect subscribes here so a URL-only navigation
+  //   triggers the drawer-open path even if the rest of the URL
+  //   (filter state) is unchanged.
+  //
+  // ``urlMigrationDone`` flips true after the one-time localStorage
+  // seed + cleanup. Re-running the seed on every reload would be
+  // the duplicate-migration trap; the flag is the guard.
+
+  /**
+   * Raw queryParamMap → plain object conversion. ``distinctUntilChanged``
+   * on the serialized JSON collapses router-emit duplicates (the
+   * router emits a new paramMap on every navigation; distinct-equal
+   * emissions would otherwise re-fire the binding effect).
+   */
+  private readonly urlStateRaw = toSignal(
+    this.route.queryParamMap.pipe(
+      map((params) => {
+        const out: Record<string, string | null> = {};
+        for (const key of params.keys) {
+          out[key] = params.get(key);
+        }
+        return out;
+      }),
+      distinctUntilChanged(
+        (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      ),
+    ),
+    { initialValue: {} as Record<string, string | null> },
+  );
+
+  /** Parsed URL state (the canonical view of what the URL says). */
+  readonly urlState = computed<JobsUrlState>(() =>
+    parseJobsUrlState(this.urlStateRaw()),
+  );
+
+  /** Convenience — the deep-link job id from the URL (null = no link). */
+  readonly urlDeepLinkJobId = computed<string | null>(() => this.urlState().job);
+
+  /** One-time migration guard — flips true after the localStorage seed. */
+  private readonly urlMigrationDone = signal<boolean>(false);
+
+  // P5 (jobs-page-improvement) — deep-link "job not found" overlay.
+  // Set when ``?job=<id>`` is present AND the GET 404s. The drawer
+  // renders the honest empty-card instead of an empty drawer body.
+  // The signal is null on a healthy open (the row itself is the
+  // visible content) and carries the missing job_id otherwise.
+  readonly deepLinkMissingJobId = signal<string | null>(null);
+
+  /**
+   * True while a single-job GET is in flight for the deep-link.
+   * Distinct from the data-leg fetches so the drawer can render
+   * a skeleton / spinner without flashing the empty card.
+   */
+  readonly deepLinkFetchInFlight = signal<boolean>(false);
+
+  // ── P5 cycle-guard fields (plan task 2 + 3) ──────────────────────
+  //
+  // These are plain class fields (not signals) so writes do NOT
+  // re-trigger the URL ↔ store effects. Each effect reads the
+  // relevant guard on entry and bails when the guard indicates
+  // "this emit is from the OTHER side of the loop".
+
+  /** JSON-serialized view of the store filterState — for equality checks. */
+  private readonly storeFilterStateKey = computed(() =>
+    JSON.stringify(this.store.filterState()),
+  );
+
+  /** Last serialized store state we applied from the URL (cycle guard). */
+  private lastAppliedFromUrl = '';
+
+  /** Last serialized URL state we wrote to the router (cycle guard). */
+  private lastWrittenToUrl = '';
+
+  /** P5 — last deep-link job id we tried to resolve (cycle guard). */
+  private lastDeepLinkResolved: string | null = null;
+
+  /** P5 — last deep-link job id we in-flight-fetched (cycle guard). */
+  private lastDeepLinkFetched: string | null = null;
+
+
   // Queue sidebar selection — derived from the single filter state
   // (pre-P1 this was a component-local signal MIRRORED into the
   // filters object; the mirror is gone, the state is the store's).
@@ -961,6 +1077,218 @@ export class JobsComponent implements OnInit, OnDestroy {
       this.viewModeRestored = true;
       this.tryRestoreViewMode();
     });
+
+    // ── P5 — URL ↔ store filter-state binding (plan task 2) ─────────
+    //
+    // Bidirectional sync between `urlState()` (parsed query params)
+    // and `store.filterState` (the filter pipeline). The two effects
+    // are intentionally symmetric: each one checks equality BEFORE
+    // writing, so a round-trip URL→store→URL produces an empty diff
+    // and bails out cleanly. No "ignore next emit" flag needed.
+    //
+    // URL → store (restore / back / forward):
+    //   1. Read `urlState()`.
+    //   2. Compare with the serialized store state.
+    //   3. If equal — bail (avoids re-applying the URL on every
+    //      router emit).
+    //   4. Apply via `setFilters` (the store's normalize-tolerance
+    //      keeps hostile inputs from breaking the state).
+    //
+    // Store → URL (filter handler / view-mode toggle):
+    //   1. Read `store.filterState()`.
+    //   2. Compute `diffJobsUrlState(prevUrlState, newUrlState)`.
+    //   3. If empty — bail (the URL is already in sync).
+    //   4. `router.navigate` with the minimal patch using
+    //      `queryParamsHandling: 'merge'` + `replaceUrl: true` so
+    //      every filter tweak does NOT push a new history entry.
+
+    effect(() => {
+      // Touch urlState() + storeFilterStateKey() — both must be read
+      // for the effect to re-fire on EITHER side.
+      const url = this.urlState();
+      const currentStoreKey = this.storeFilterStateKey();
+      // Cycle guard — the suffix MUST be the same on both sides
+      // ('|null' when job is unset). The previous draft used `?? ''`
+      // which made the URL side bare and missed equality with the
+      // store side; the F-5 spec in jobs.component.spec.ts pins
+      // both keys verbatim.
+      const urlKey =
+        JSON.stringify(url.filter) + '|' + (url.job ?? 'null');
+      if (urlKey === this.lastAppliedFromUrl) {
+        return;
+      }
+      // URL state (filter+job) matches the store state exactly —
+      // nothing to apply. The cycle guard breaks here (the
+      // subsequent store → URL write would re-fire the same
+      // effect with equal keys; the equality guard bails).
+      if (urlKey === currentStoreKey + '|null') {
+        this.lastAppliedFromUrl = urlKey;
+        return;
+      }
+      this.lastAppliedFromUrl = urlKey;
+      // Snapshot the localStorage reads BEFORE applying (the
+      // migration runs ONCE on the first URL emit that differs
+      // from the store; once `urlMigrationDone` flips true, the
+      // store's defaults match the URL and we never re-seed).
+      this.runUrlStateMigrationIfNeeded();
+      this.store.setFilters(url.filter);
+      // Status / agent_id / project / view-mode changes that
+      // affect the wire fetch — fetch the active leg so the page
+      // reflects the URL state immediately. The setFilters call
+      // alone does NOT trigger a fetch (the store is filter-only;
+      // handlers own the fetch trigger — see P1 review).
+      this.refreshActiveLegsForFilter(url.filter);
+    });
+
+    effect(() => {
+      const storeState = this.store.filterState();
+      const currentUrl = this.urlState();
+      const next: JobsUrlState = {
+        filter: storeState,
+        job: currentUrl.job,
+      };
+      // Diff against the CURRENT URL — if the filter matches, no
+      // write needed. (The deep-link side is never written from
+      // this effect: the drawer open/close paths own that flip.)
+      const filterUrl: JobsUrlState = { filter: storeState, job: null };
+      const currentFilterUrl: JobsUrlState = {
+        filter: currentUrl.filter,
+        job: null,
+      };
+      const diff = diffJobsUrlState(currentFilterUrl, filterUrl);
+      const serializedNext = JSON.stringify(serializeJobsUrlState(next));
+      if (serializedNext === this.lastWrittenToUrl) {
+        return;
+      }
+      this.lastWrittenToUrl = serializedNext;
+      if (Object.keys(diff).length === 0) {
+        return;
+      }
+      // Fire-and-forget — the router will emit a new queryParamMap,
+      // which re-runs the URL → store effect; that effect's equality
+      // guard then bails out (this write IS the source of truth).
+      this.router.navigate([], {
+        relativeTo: this.route,
+        queryParams: diff,
+        queryParamsHandling: 'merge',
+        replaceUrl: true,
+      });
+    });
+
+    // ── P5 — `?job=<id>` deep-link (plan task 3) ────────────────────
+    //
+    // The deep-link effect watches BOTH the URL job id AND the
+    // currently-filtered rows (jobs dataset + work dataset). When a
+    // deep-link is present:
+    //
+    //   1. If the job is already in the current window — open the
+    //      drawer immediately (no extra GET).
+    //   2. If the job is not in the window — fetch via
+    //      ``JobService.getJob(id)`` (the BE ``GET /api/jobs/{id}``
+    //      endpoint already exists; no new BE work).
+    //   3. On 404 (or any error) — flip ``deepLinkMissingJobId``
+    //      and keep the drawer OPEN with the honest "job not found"
+    //      state. The banner stays in place; the drawer renders an
+    //      honest empty card (NOT a blank drawer body).
+    //
+    // The effect re-runs when:
+    //   * the URL job id changes (a new deep-link or close),
+    //   * the dataset changes (a fetch brought the job into the
+    //     window — in-window open path),
+    //   * the deep-link fetch state changes (404 → 200 → missing).
+    //
+    // Focus management (P5 task 3 acceptance): when the drawer
+    // opens from the deep-link, focus moves INTO the drawer on
+    // open (the drawer's first focusable element); on close,
+    // focus returns to the page heading (the fallback when the
+    // page was opened cold from a bookmark with no invoking row).
+    // The focus side is a small DOM effect tied to ``drawerOpen``
+    // + ``selectedJob`` + the deep-link state — see
+    // ``focusDrawerOnDeepLink``.
+
+    effect(() => {
+      const jobId = this.urlDeepLinkJobId();
+      // Clear cycle: the URL was stripped to no deep-link; nothing
+      // to resolve (the drawer close path handled the cleanup).
+      if (!jobId) {
+        return;
+      }
+      // Already resolved — no-op (the drawer-open path owns the
+      // dedup so a dataset refresh doesn't re-fire the fetch).
+      if (this.lastDeepLinkResolved === jobId && this.drawerOpen()) {
+        return;
+      }
+      // Already fetched — no-op.
+      if (this.lastDeepLinkFetched === jobId) {
+        return;
+      }
+      // In-window search — both datasets (the all-work view projects
+      // ``Work`` rows through ``workToJob`` and the search must cover
+      // the projected shape; the page-side dataset uses job_id).
+      const inJobs = this.store.jobs().find((j) => j.job_id === jobId);
+      if (inJobs) {
+        this.lastDeepLinkResolved = jobId;
+        this.openDrawerForDeepLink(inJobs);
+        return;
+      }
+      const inWorks = this.store.works().find((w) => w.work_id === jobId);
+      if (inWorks) {
+        const mapped = workToJob(inWorks);
+        this.lastDeepLinkResolved = jobId;
+        this.openDrawerForDeepLink(mapped);
+        return;
+      }
+      // In-flight guard: if a previous emit already kicked the
+      // GET, the response will land in the same draw (the next
+      // emit re-runs this effect, but ``lastDeepLinkFetched`` is
+      // set below before the subscribe so the dedup is exact).
+      this.lastDeepLinkFetched = jobId;
+      this.deepLinkFetchInFlight.set(true);
+      this.deepLinkMissingJobId.set(null);
+      this.jobService.getJob(jobId).subscribe({
+        next: (job) => {
+          this.deepLinkFetchInFlight.set(false);
+          this.lastDeepLinkResolved = jobId;
+          this.openDrawerForDeepLink(job);
+        },
+        error: (err) => {
+          this.deepLinkFetchInFlight.set(false);
+          // 404 is the canonical "missing"; other errors (500,
+          // network) are also surfaced honestly because the
+          // drawer would be empty otherwise. The honest card
+          // tells the user we COULD NOT load the job.
+          const status = err?.status ?? null;
+          if (status === 404 || status === null) {
+            this.deepLinkMissingJobId.set(jobId);
+          } else {
+            this.deepLinkMissingJobId.set(jobId);
+          }
+          // Open the drawer in its empty-card state so the user
+          // sees the honest message (NOT a silent failure).
+          this.drawerOpen.set(true);
+        },
+      });
+    });
+  }
+
+  /**
+   * P5 — open the drawer with a resolved job. Wraps the
+   * ``onViewJobDetails`` path so the deep-link + card-click share
+   * the same drawer-open contract (SSE subscription, missing-flag
+   * reset, URL-write if the URL differs from the clicked job).
+   */
+  private openDrawerForDeepLink(job: Job): void {
+    this.selectedJob.set(job);
+    this.drawerOpen.set(true);
+    this.deepLinkMissingJobId.set(null);
+    // Non-terminal jobs need SSE so live updates flow.
+    if (!isTerminalStatus(job.status)) {
+      this.jobSseService.disconnect();
+      this.jobSseService.clearEvents();
+      this.sseSubscription = this.jobSseService
+        .streamJobEvents(job.job_id)
+        .subscribe();
+    }
   }
 
   ngOnInit(): void {
@@ -992,6 +1320,18 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
     this.projectRestored = true;
 
+    // P5 (jobs-page-improvement) — URL is the SOLE authority for
+    // filter state after the one-time migration. If the URL already
+    // pins a project, skip the localStorage seed — the URL wins.
+    const urlProjectId = this.urlState().filter.project_id;
+    if (urlProjectId) {
+      // URL wins — clear the legacy localStorage key (the one-time
+      // migration cleanup also runs from the URL→store effect, but
+      // a double-clear is safe).
+      this.clearLegacyLocalStorageKeys();
+      return;
+    }
+
     let savedProjectId: string | null = null;
     try {
       savedProjectId = localStorage.getItem(this.STORAGE_KEY);
@@ -1009,6 +1349,10 @@ export class JobsComponent implements OnInit, OnDestroy {
       // fetched (the restored scope applies from the next refresh on;
       // pre-existing restore/fetch ordering is unchanged by P1).
       this.store.setFilters({ project_id: savedProjectId });
+      // P5 — migration cleanup runs unconditionally once the
+      // user-typed seed path fires (the URL → store effect will
+      // then pick it up and write the URL via `replaceUrl`).
+      this.markUrlMigrationDone();
     } else {
       // Clear stale entry
       try {
@@ -1023,8 +1367,21 @@ export class JobsComponent implements OnInit, OnDestroy {
    * Restore the persisted view mode ('queues' vs 'all-work') from
    * localStorage. Wrapped in try/catch for private-browsing safety
    * — matches the pattern used by ``tryRestoreProject``.
+   *
+   * P5 (jobs-page-improvement) — if the URL already pins a
+   * ``view_mode``, the URL wins (consistent with tryRestoreProject).
+   * The legacy ``job-page-view-mode`` key is cleared once the seed
+   * fires so subsequent reloads cannot drift back.
    */
   private tryRestoreViewMode(): void {
+    // P5 — URL wins. The bare-URL case (`view_mode=queues` is the
+    // codec's default emission) is handled by the URL → store
+    // effect; this method only seeds from localStorage when the
+    // URL is bare AND no URL filter has been applied.
+    const urlViewMode = this.urlState().filter.view_mode;
+    if (urlViewMode) {
+      return;
+    }
     let saved: string | null = null;
     try {
       saved = localStorage.getItem(this.VIEW_MODE_KEY);
@@ -1039,7 +1396,121 @@ export class JobsComponent implements OnInit, OnDestroy {
       if (saved === 'all-work' && this.store.works().length === 0) {
         this.store.fetchWorks();
       }
+      // P5 — mark the migration done (the URL → store effect will
+      // turn around and write the URL via `replaceUrl`).
+      this.markUrlMigrationDone();
     }
+  }
+
+  // ── P5 — URL migration helpers (plan task 2) ───────────────────────
+  //
+  // The one-time migration: bare URL ⇒ hydrate from localStorage +
+  // `replaceUrl`. After that, the URL is the SOLE authority and the
+  // legacy keys are removed. The cleanup runs from multiple sites
+  // (``tryRestoreProject``, ``tryRestoreViewMode``, and the bare-URL
+  // branch of the URL → store effect) so the legacy keys never
+  // outlive a single page session.
+
+  /** Mark the migration done — flips the guard + clears legacy keys. */
+  private markUrlMigrationDone(): void {
+    this.urlMigrationDone.set(true);
+    this.clearLegacyLocalStorageKeys();
+  }
+
+  /**
+   * Remove the legacy localStorage keys. Idempotent — safe to call
+   * multiple times; the `removeItem` swallows missing keys.
+   */
+  private clearLegacyLocalStorageKeys(): void {
+    try {
+      localStorage.removeItem(this.STORAGE_KEY);
+    } catch {
+      // privately ignore (private-browsing safety)
+    }
+    try {
+      localStorage.removeItem(this.VIEW_MODE_KEY);
+    } catch {
+      // privately ignore
+    }
+  }
+
+  /**
+   * One-time seed from localStorage when the URL is BARE (no query
+   * params at all). Called from the URL → store effect on the
+   * first non-matching emit. After the seed, the URL → store
+   * effect re-fires (the store state changed) but the cycle guard
+   * bails — and the store → URL effect writes the seeded state to
+   * the URL via ``replaceUrl``. The legacy keys are then cleared.
+   */
+  private runUrlStateMigrationIfNeeded(): void {
+    if (this.urlMigrationDone()) {
+      return;
+    }
+    const raw = this.urlStateRaw();
+    const hasAnyParams = Object.keys(raw).some(
+      (k) => raw[k] !== null && raw[k] !== undefined && raw[k] !== '',
+    );
+    if (hasAnyParams) {
+      // URL has params — no migration seed; the URL is authoritative.
+      this.markUrlMigrationDone();
+      return;
+    }
+    // Bare URL — seed from localStorage once.
+    let savedProjectId: string | null = null;
+    let savedViewMode: string | null = null;
+    try {
+      savedProjectId = localStorage.getItem(this.STORAGE_KEY);
+    } catch {
+      // privately ignore
+    }
+    try {
+      savedViewMode = localStorage.getItem(this.VIEW_MODE_KEY);
+    } catch {
+      // privately ignore
+    }
+    const patch: Partial<{ project_id: string | null; view_mode: 'queues' | 'all-work' }> = {};
+    if (savedProjectId) {
+      const projectExists = this.projects().some(
+        (p) => p.project_id === savedProjectId,
+      );
+      if (projectExists) {
+        patch.project_id = savedProjectId;
+      }
+    }
+    if (savedViewMode === 'queues' || savedViewMode === 'all-work') {
+      patch.view_mode = savedViewMode;
+    }
+    if (patch.project_id !== undefined || patch.view_mode !== undefined) {
+      this.store.setFilters(patch);
+    }
+    this.markUrlMigrationDone();
+  }
+
+  /**
+   * When the URL → store effect applies a filter (e.g. on
+   * back/forward), refresh the active legs so the page reflects
+   * the new filter immediately. The store's `setFilters` does NOT
+   * fetch — that's by design (filter handlers own the fetch).
+   */
+  private refreshActiveLegsForFilter(
+    filter: ReturnType<typeof this.store.filterState>,
+  ): void {
+    const beforeViewMode = this.viewMode();
+    // Filter changes that affect the wire:
+    // * status — both legs (jobs + works)
+    // * source — queues view only (work rows have no source)
+    // * agent_id — both legs (works rows carry agent_id)
+    // * project_id — both legs
+    // * queue_id — queues view only (work rows have no queue_id)
+    // * include_deleted — queues view only (work resolver hides
+    //   soft-deleted unconditionally)
+    // * view_mode — switches the active leg
+    if (filter.view_mode !== beforeViewMode) {
+      this.store.refreshActive();
+      return;
+    }
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
   ngOnDestroy(): void {
@@ -1967,6 +2438,19 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onViewJobDetails(job: Job): void {
     this.selectedJob.set(job);
     this.drawerOpen.set(true);
+    // P5 — opening the drawer from a card click clears the
+    // deep-link "missing" state (the user is now interacting
+    // with a real row, not the empty card).
+    this.deepLinkMissingJobId.set(null);
+    // If the URL still carries a ?job=<id> that does NOT match
+    // this row (e.g. the user clicked a different row after a
+    // deep-link), clear the URL so the deep-link target stays
+    // consistent. The single-row click is the user's current
+    // intent; the URL reflects it.
+    const urlJob = this.urlDeepLinkJobId();
+    if (urlJob && urlJob !== job.job_id) {
+      this.clearUrlDeepLink();
+    }
 
     // Don't connect to SSE for terminal jobs - no live updates needed
     if (isTerminalStatus(job.status)) {
@@ -1982,11 +2466,34 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onCloseDrawer(): void {
     this.drawerOpen.set(false);
     this.selectedJob.set(null);
+    this.deepLinkMissingJobId.set(null);
     this.jobSseService.disconnect();
     if (this.sseSubscription) {
       this.sseSubscription.unsubscribe();
       this.sseSubscription = null;
     }
+    // P5 — closing the drawer while a deep-link is active
+    // strips ``?job=`` from the URL (the URL must stay consistent
+    // with the visible state). The store → URL effect will see
+    // no diff on the filter side and skip its own write.
+    if (this.urlDeepLinkJobId() !== null) {
+      this.clearUrlDeepLink();
+    }
+  }
+
+  /**
+   * P5 — strip ``?job=`` from the URL via ``router.navigate`` with
+   * the key removed. ``queryParams: { job: null }`` deletes the key
+   * while ``queryParamsHandling: 'merge'`` preserves every other
+   * filter param.
+   */
+  private clearUrlDeepLink(): void {
+    this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { job: null },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
+    });
   }
 
   protected onDrawerCancelJob(jobId: string): void {

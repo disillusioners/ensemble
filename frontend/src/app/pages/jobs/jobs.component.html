@@ -484,6 +484,71 @@
             (retryJob)="onDrawerRetryJob($event)"
             (viewSession)="onDrawerViewInstance($event)">
           </app-job-detail-drawer>
+        } @else if (deepLinkMissingJobId(); as missingId) {
+          <!-- P5 (jobs-page-improvement) — honest "job not found" card.
+               Fires when ``?job=<id>`` is present AND the single-job
+               GET 404s. Renders inside the drawer so the layout stays
+               consistent with the normal open path. ``aria-live``
+               announces the empty state politely. -->
+          <div class="job-detail-drawer deep-link-missing" role="status" aria-live="polite">
+            <div class="drawer-header">
+              <div class="header-top">
+                <h2 class="deep-link-missing-title">Job not found</h2>
+                <div class="header-actions">
+                  <button mat-icon-button
+                          matTooltip="Close"
+                          aria-label="Close drawer"
+                          (click)="onCloseDrawer()">
+                    <mat-icon>close</mat-icon>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <mat-divider></mat-divider>
+            <section class="detail-section">
+              <p class="deep-link-missing-body">
+                We could not load the job <code>{{ missingId }}</code> from the URL.
+                It may have been deleted, belong to another project, or the
+                link is malformed.
+              </p>
+              <p class="deep-link-missing-body">
+                Closing this drawer will clear <code>?job=</code> from the URL.
+              </p>
+            </section>
+          </div>
+        } @else if (deepLinkFetchInFlight()) {
+          <!-- P5 — honest loading state for the deep-link GET. The
+               drawer's skeleton card matches the page's first-fetch
+               skeleton contract (no spinner affordance; a card-shaped
+               placeholder is the truthful loading surface). -->
+          <div class="job-detail-drawer deep-link-loading" role="status" aria-live="polite">
+            <div class="drawer-header">
+              <div class="header-top">
+                <h2 class="deep-link-loading-title">Loading job…</h2>
+                <div class="header-actions">
+                  <button mat-icon-button
+                          matTooltip="Close"
+                          aria-label="Close drawer"
+                          (click)="onCloseDrawer()">
+                    <mat-icon>close</mat-icon>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <mat-divider></mat-divider>
+            <section class="detail-section">
+              <div class="skeleton-card">
+                <div class="skeleton-header">
+                  <div class="skeleton-badge"></div>
+                  <div class="skeleton-badge small"></div>
+                </div>
+                <div class="skeleton-content">
+                  <div class="skeleton-line"></div>
+                  <div class="skeleton-line short"></div>
+                </div>
+              </div>
+            </section>
+          </div>
         }
       </mat-drawer>
     </mat-drawer-container>

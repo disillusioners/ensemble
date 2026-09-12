@@ -151,17 +151,34 @@
 
   <mat-divider></mat-divider>
 
-  <!-- Message Section -->
+  <!-- P5 (jobs-page-improvement) — Message section.
+       A Job row carries `message` (the user input); a report/all-work
+       row's `workToJob` mapper pins `message: undefined` (the BE wire
+       carries no report message content — gap-e6, by design). The
+       drawer MUST surface that honestly: hiding-with-copy is the
+       gap-e6 contract. The card-preview fallback in the list is
+       unchanged. -->
   @if (job().message) {
     <section class="detail-section">
       <h3 class="section-title">Message</h3>
       <pre class="code-block">{{ job().message }}</pre>
     </section>
     <mat-divider></mat-divider>
+  } @else if (job().kind === 'report') {
+    <section class="detail-section detail-section-message-empty">
+      <h3 class="section-title">Message</h3>
+      <p class="message-empty-copy">Report rows do not carry message content.</p>
+    </section>
+    <mat-divider></mat-divider>
   }
 
-  <!-- Result Section (if completed) -->
-  @if (job().status === 'completed' && job().result_summary) {
+  <!-- P5 (jobs-page-improvement) — Result section.
+       The pre-P5 gate ``status === 'completed'`` was a bug: settled
+       rows AND report/all-work rows carry `result_summary` but never
+       rendered it. The new gate is ``result_summary present`` —
+       covers settled + completed + report rows uniformly. Empty
+       result (status terminal but no summary) still hides. -->
+  @if (job().result_summary) {
     <section class="detail-section">
       <h3 class="section-title">Result</h3>
       <div class="result-summary">
