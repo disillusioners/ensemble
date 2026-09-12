@@ -289,7 +289,11 @@ def _count_hierarchy_rows(engine, parent_id: str | None = None) -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _build_enqueue_message(engine: object, write_guard: WritePauseGuard):
+def _build_enqueue_message(
+    engine: object,
+    write_guard: WritePauseGuard,
+    revive_flips: list | None = None,
+):
     """Build an ``enqueue_message`` coroutine that does the REAL revive seam.
 
     Mirrors the status-flip half of ``InstanceMessagingService.
@@ -301,6 +305,12 @@ def _build_enqueue_message(engine: object, write_guard: WritePauseGuard):
     intentional and faithful to the reuse seam: the discovery/revive path
     under test is the COMPLETED→RUNNING→terminal flip, not the worker-
     pool dispatch tail.
+
+    ``revive_flips`` (optional) is a list that, when provided, gets
+    appended ``(instance_id, prev_status, "running")`` for every flip
+    the stub actually performs. Tests use this to pin the mid-flight
+    terminal→RUNNING transition (it is recorded inside ``_do_revive``
+    before the side task re-flips the row terminal).
     """
 
     from daemon.repositories.instance.models import InstanceStatus
@@ -348,6 +358,14 @@ def _build_enqueue_message(engine: object, write_guard: WritePauseGuard):
                     row.last_activity_at = datetime.now(timezone.utc)
                     session.add(row)
                     session.commit()
+                    # Record the mid-flight flip on the harness-exposed list
+                    # BEFORE returning, so tests can pin the terminal→RUNNING
+                    # transition at enqueue time (not just the final terminal
+                    # state). This is the seam that makes the T1 mid-flight
+                    # pin non-vacuous: if the stub never reached this point,
+                    # the list stays empty and the assertion fails.
+                    if revive_flips is not None:
+                        revive_flips.append((instance_id, prev, "running"))
                 return prev
 
         prev_status = await asyncio.to_thread(_do_revive)
@@ -416,13 +434,39 @@ def build_harness_manager(
     mgr._shutting_down = False
     mgr.spawn_instance = MagicMock()  # tripwire: reuse MUST NOT call this
     mgr.spawn_instance_with_mcp = AsyncMock(return_value=("unused", None))
-    # REAL-dispatch enqueue_message (the load-bearing seam).
-    enqueue = _build_enqueue_message(engine, mgr.write_guard)
-    mgr.enqueue_message = AsyncMock(side_effect=enqueue)
     # Agent-tool ReviveGuard — must be inert for charter reuse (T2 assert).
-    mgr.get_agent_tool_revive_count = MagicMock(return_value=0)
-    mgr.note_agent_tool_revive = MagicMock()
+    # REAL callables (NOT MagicMock) backed by the ``_agent_tool_revive_counts``
+    # dict. If the production chart path ever starts calling
+    # ``manager.note_agent_tool_revive``, the dict bumps and every existing
+    # ``== 0`` pin (T2 ×4, T3 ×1) FAILS — that's what makes the pins
+    # non-vacuous. The previous MagicMock was hard-wired to return 0 and
+    # could not detect a regression.
     mgr._agent_tool_revive_counts = {}
+
+    def _note_agent_tool_revive(instance_id: str, prior_status: str | None = None) -> int:
+        # Semantic mirror of manager.py:2816-2895 (consume only when
+        # ``prior_status`` is None or in {ERROR, FAILED}; non-consuming for
+        # COMPLETED/TERMINATED). The chart-reuse path MUST never call this
+        # — that's the T2 pin — so any future call is a regression signal.
+        if prior_status is None or prior_status in ("error", "failed"):
+            mgr._agent_tool_revive_counts[instance_id] = (
+                mgr._agent_tool_revive_counts.get(instance_id, 0) + 1
+            )
+        return mgr._agent_tool_revive_counts[instance_id]
+
+    def _get_agent_tool_revive_count(instance_id: str) -> int:
+        return mgr._agent_tool_revive_counts.get(instance_id, 0)
+
+    mgr.note_agent_tool_revive = _note_agent_tool_revive
+    mgr.get_agent_tool_revive_count = _get_agent_tool_revive_count
+    # Mid-flight flip recorder — ``_build_enqueue_message`` appends
+    # ``(instance_id, prev, "running")`` for every terminal→RUNNING flip
+    # the stub actually performs. T1 pins this list to prove the flip
+    # happened at enqueue time (not just implied by wait_for resolving).
+    mgr.revive_flips = []
+    # REAL-dispatch enqueue_message (the load-bearing seam).
+    enqueue = _build_enqueue_message(engine, mgr.write_guard, mgr.revive_flips)
+    mgr.enqueue_message = AsyncMock(side_effect=enqueue)
     return mgr
 
 
@@ -554,6 +598,16 @@ class TestT1RealDispatchReviveWalk:
                 result = await tools[0].coroutine(
                     description="Refine the auth flow",
                     diagram_type="sequence",
+                )
+                # Mid-flight flip pinned: the enqueue flipped
+                # terminal→RUNNING at enqueue time (recorded in
+                # ``revive_flips`` inside ``_do_revive`` BEFORE the side
+                # task re-flips the row terminal). This directly observes
+                # the RUNNING moment, not just the final terminal state
+                # — what the plan's T1 acceptance requires.
+                assert (charter_id, "completed", "running") in mgr.revive_flips, (
+                    f"enqueue should flip charter terminal→RUNNING at "
+                    f"enqueue time; got {mgr.revive_flips}"
                 )
                 await side_task
 
@@ -952,6 +1006,21 @@ class TestT2BudgetLifecycleNonInteraction:
 
         # Tripwire never fired — REUSE engaged every time.
         assert tripwire["called"] == 0
+
+        # Non-vacuity proof: the harness's REAL dict-backed counter
+        # mechanism stayed empty through the whole COMPLETED → ERROR →
+        # TERMINATED cycle. The previous MagicMock was hard-wired to
+        # return 0 and could not detect a regression; with the dict
+        # backing, IF production chart code ever started calling
+        # ``manager.note_agent_tool_revive``, this dict would gain
+        # entries (consuming for ERROR/FAILED, non-consuming for
+        # COMPLETED/TERMINATED per the production mirror) and this
+        # assertion would FAIL — that's what makes the ``== 0`` pins
+        # above non-vacuous.
+        assert mgr._agent_tool_revive_counts == {}, (
+            "agent-tool ReviveGuard counter dict MUST stay empty across "
+            "the whole cycle; non-vacuity proof for the ==0 pins above"
+        )
 
     async def test_reuse_does_not_consume_spawn_cap_headroom(
         self, engine, fresh_registry
