@@ -496,16 +496,24 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
         # Invoke charter agent synchronously — the tool waits for the
         # validated Mermaid output. Always returns ``(content, instance_id)``
         # tuple when ``return_instance_id=True``.
-        result, child_instance_id = await invoke_agent_and_wait(
-            manager=manager,
-            agent_id="charter",
-            message=chart_message,
-            project_id=pid,
-            parent_id=current_instance_id,
-            instance_name=f"chart-{description[:30]}",
-            timeout=600.0,
-            return_instance_id=True,
-        )
+        #
+        # Never-raise contract: a raise from ``invoke_agent_and_wait``
+        # (transport error, internal failure) must not escape the tool
+        # coroutine into the LLM tool loop — collapse it to an ``Error:``
+        # string, mirroring the ``None``-content branch below.
+        try:
+            result, child_instance_id = await invoke_agent_and_wait(
+                manager=manager,
+                agent_id="charter",
+                message=chart_message,
+                project_id=pid,
+                parent_id=current_instance_id,
+                instance_name=f"chart-{description[:30]}",
+                timeout=600.0,
+                return_instance_id=True,
+            )
+        except Exception as exc:
+            return f"Error: Charter agent invocation failed: {exc}"
 
         # Handle error results — ``invoke_agent_and_wait`` returns
         # ``"Error: ..."`` on failure / timeout when ``return_instance_id`` is
