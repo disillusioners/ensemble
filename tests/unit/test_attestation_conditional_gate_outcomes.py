@@ -451,7 +451,13 @@ class TestConditionalGateRealGraphLevel:
         completes without injecting a nudge and without calling
         ``attest_completion``. The point of the test: the gate
         allows END on its first evaluation and the graph returns
-        control without an endless attestation loop."""
+        control without an endless attestation loop.
+
+        2026-09-12 length trigger: a long detailed completion
+        report (>= 150 words, no marker phrases) is used so the
+        length trigger does NOT fire either — the cheap allow path
+        is preserved end-to-end.
+        """
         manager = make_manager()
         ledger = MagicMock()
         ledger.increment.return_value = 1
@@ -465,12 +471,38 @@ class TestConditionalGateRealGraphLevel:
             denied_count_getter=lambda: 0,
             ledger=ledger,
         )
+        long_answer = (
+            "The answer is Y; explanation follows in the sections "
+            "below. Nothing pending, all shipped. Patch 1 fixed the "
+            "off-by-one in the cache TTL calculator; the unit tests "
+            "now exercise both the elapsed-second and wall-clock-"
+            "second boundaries at the second and minute granularity "
+            "across both elapsed and wall-clock semantics. Patch 2 "
+            "cleaned up the dead imports in the worker pool module "
+            "after the migration, removing the legacy compatibility "
+            "shim and the related test scaffolding that had been "
+            "lingering since the original module split. Patch 3 "
+            "refactored the error-reporting decorator so the "
+            "stack-frame metadata is consistent across all four call "
+            "sites in the graph node and the manager facade and the "
+            "downstream monitoring hook. Patch 4 added the missing "
+            "operator-boot log line for the new resolver module so "
+            "operators can grep the boot summary for the resolved "
+            "effective values including the mode, window, bound and "
+            "the gate locations active at the time. All four patches "
+            "passed their respective suites on the first run with "
+            "no flake; the integration matrix is green end-to-end "
+            "across all environments we maintain including the "
+            "disposable PostgreSQL bring-up. No follow-ups "
+            "outstanding; the mission is complete and ready for "
+            "review by the next teammate in the chain."
+        )
         result = asyncio.run(
             node(
                 {
                     "messages": [
                         real("what's the answer to X?"),
-                        plain_ai("The answer is Y."),
+                        plain_ai(long_answer),
                     ]
                 },
                 config={"configurable": {"thread_id": "inst-quick-fg"}},
@@ -493,7 +525,13 @@ class TestConditionalGateRealGraphLevel:
     ) -> None:
         """End-to-end: a chart mission with ``generate_chart`` but
         NO ``send_message`` completes normally — the conditional
-        gate stays OFF for non-delegating turns."""
+        gate stays OFF for non-delegating turns.
+
+        2026-09-12 length trigger: a long detailed completion
+        report (>= 150 words, no marker phrases) is used so the
+        length trigger does NOT fire either — the cheap allow path
+        is preserved end-to-end.
+        """
         manager = make_manager()
         ledger = MagicMock()
         ledger.increment.return_value = 1
@@ -506,6 +544,27 @@ class TestConditionalGateRealGraphLevel:
             "inst-chart-fg",
             denied_count_getter=lambda: 0,
             ledger=ledger,
+        )
+        long_chart_text = (
+            "Here is the chart you requested. The flow has four "
+            "nodes and three edges as the user asked for in the "
+            "spec. Patch 1 fixed the off-by-one in the cache TTL "
+            "calculator; the unit tests now exercise both the "
+            "elapsed-second and wall-clock-second boundaries at "
+            "the second and minute granularity. Patch 2 cleaned up "
+            "the dead imports in the worker pool module after the "
+            "migration, removing the legacy compatibility shim and "
+            "the related test scaffolding. Patch 3 refactored the "
+            "error-reporting decorator so the stack-frame metadata "
+            "is consistent across all four call sites in the graph "
+            "node and the manager facade. Patch 4 added the "
+            "missing operator-boot log line for the new resolver "
+            "module so operators can grep the boot summary for the "
+            "resolved effective values. All four patches passed "
+            "their respective suites on the first run with no "
+            "flake; the integration matrix is green end-to-end. "
+            "Nothing pending; ready for review by the next "
+            "teammate in the chain."
         )
         result = asyncio.run(
             node(
@@ -522,7 +581,7 @@ class TestConditionalGateRealGraphLevel:
                                 }
                             ],
                         ),
-                        plain_ai("here's the chart"),
+                        plain_ai(long_chart_text),
                     ]
                 },
                 config={"configurable": {"thread_id": "inst-chart-fg"}},

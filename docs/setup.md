@@ -979,11 +979,36 @@ The hint carries a **stable id per instance** minted via `_stable_id_for("comple
 
 The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths. The kill-switch OFF path emits `event=leader_completion_gate_marker_judge_disabled` (grep-disjoint event name — distinct from the existing judge/event family so operators can pinpoint the operator-disabled case). All three events live alongside each other in the same daemon log; operators `grep event=leader_completion_gate_marker_judge` to see the live judge calls, `grep event=leader_completion_gate_marker_judge_disabled` to see the kill-switch OFF soak signal, and `grep event=leader_completion_gate_marker_judge_error` to see the wrapper-fault class.
 
+### Length trigger (2026-09-12, user request)
+
+The completion gate's ALLOW branches also fire a word-count trigger on the LAST AIMessage. Mid-work ACKs are often SHORT with no marker words ("Understood, continuing." / "OK, waiting on the tester.") — brevity is an INDEPENDENT signal that the marker-only catalog misses. Real completion reports are normally detailed (hundreds of words); very-short prose on an ALLOW path is suspicious. The length trigger is the SECOND half of the two-stage disambiguator — orthogonal to the marker scan; the two halves compose via `OR` (`marker_hit OR length_trigger` → judge fires).
+
+**Threshold:** 150 words (module-level constant `SHORT_REPORT_WORD_THRESHOLD` in `daemon/services/attestation_marker_scanner.py`). Below the threshold ⇒ trigger fires. The threshold is **NOT env-tunable by design** (one knob fewer; revisit at soak). Operators wanting to disable this trigger set `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` (the existing judge kill-switch) and accept the marker-only signal as the trigger.
+
+**Word count:** whitespace-split on the flattened LAST AIMessage content (mirrors `_flatten_ai_content` for list-of-blocks content). Pure function; no I/O.
+
+**Hook scope:** identical to the marker scan — `Decision.ALLOWED` (not-attested) + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` + `Decision.DRY_LOG`, with `attestation_present=False`. Attested allows still skip entirely. Cost control: NEITHER trigger fires ⇒ NO judge call.
+
+**Interplay with markers:** markers catch phrasing ("ending turn", "awaiting"); length catches brevity. Both halves firing ⇒ `trigger_source="markers+length"` (combined trigger). Operators can grep the additive `trigger_source` log field to see the trigger-class distribution in soak data.
+
+**Dry-mode:** length trigger is logged side-effect-free exactly like markers — no judge call, no hint, no deny, no counter (the dry-mode `allow unconditionally` posture is preserved end-to-end).
+
+**Kill-switch:** the length trigger respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`. With the judge disabled, length triggers are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: length-only signal is too weak to deny — without the LLM verdict, plain allow + log is the safer default. The existing `event=leader_completion_gate_marker_judge_disabled` row covers the length-trigger case (`verdict=<skipped>`); no new event name is introduced.
+
+**Log schema (additive, three new fields):**
+
+* `length_trigger` (bool) — True when the LAST AIMessage word count is < `SHORT_REPORT_WORD_THRESHOLD`. False on degenerate empty / no-AI tail.
+* `final_word_count` (int, ≥0) — word count of the flattened LAST AIMessage content. `0` on degenerate empty / no-AI tail.
+* `trigger_source` ∈ `{"markers" | "length" | "markers+length" | ""}` — which trigger half fired (both = combined; neither = empty `<none>`).
+
+Format-string placeholder count grows 28 → 31 (drift pin in `test_length_log_placeholder_count_is_31`). Tuple-discipline: the three new fields ride alongside the canonical tuple in the SAME format-string log line (same shape as the supplementary conditional-attestation and marker fields).
+
 ### References
 
-- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (this feature); F1 amendment 2026-09-12 (Shape A landed)
-- `daemon/services/attestation_marker_scanner.py` — pure-function scanner
-- `daemon/services/attestation_gate.py` — gate integration + additive log fields
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (marker scan); D-ENTRY 2026-09-12 (length trigger); F1 amendment 2026-09-12 (Shape A landed)
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-M1..AC-M16 (marker scan acceptance); AC-L1..AC-L19 (length trigger acceptance)
+- `daemon/services/attestation_marker_scanner.py` — pure-function scanners (marker substring + length word-count) + `SHORT_REPORT_WORD_THRESHOLD` constant
+- `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 placeholders)
 - `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
-- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring
-- `tests/unit/test_attestation_marker_scanner.py` (38 tests) + `tests/unit/test_attestation_marker_wiring.py` (23 tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring (extended to `decision.marker_hit or decision.length_trigger` for the OR-composition)
+- `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (32 tests; +9 length-trigger tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)

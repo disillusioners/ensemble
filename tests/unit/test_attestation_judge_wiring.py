@@ -109,9 +109,46 @@ def _make_node(
 
 
 def _delegated_mission_without_attest(
-    final_text: str = "I am done without attesting"
+    final_text: str = None,
 ) -> dict:
-    """Standard delegated mission: real user → AI send_message → AI done."""
+    """Standard delegated mission: real user → AI send_message → AI done.
+
+    Default final_text is a long detailed completion report (>= 150
+    words, no marker phrases) — the legacy default "I am done without
+    attesting" (5 words) trips the 2026-09-12 length trigger and
+    would route through the marker/length judge; this default avoids
+    the trigger so the test exercises the would-be-deny judge path
+    without spuriously activating the marker-path judge. Tests that
+    want to exercise the marker/length judge should pass an explicit
+    short or marker-bearing ``final_text``.
+    """
+    if final_text is None:
+        final_text = (
+            "All four patches landed and shipped to the integration "
+            "branch. Patch 1 fixed the off-by-one in the cache TTL "
+            "calculator; the unit tests now exercise both the "
+            "elapsed-second and wall-clock-second boundaries at "
+            "the second and minute granularity. Patch 2 cleaned up "
+            "the dead imports in the worker pool module after the "
+            "migration, removing the legacy compatibility shim and "
+            "the related test scaffolding. Patch 3 refactored the "
+            "error-reporting decorator so the stack-frame metadata "
+            "is consistent across all four call sites in the graph "
+            "node and the manager facade. Patch 4 added the missing "
+            "operator-boot log line for the new resolver module so "
+            "operators can grep the boot summary for the resolved "
+            "effective values including the mode, window, bound, and "
+            "gate locations active at the time. All four patches "
+            "passed their respective suites on the first run with "
+            "no flake; the integration matrix is green end-to-end "
+            "across all environments we maintain. No follow-ups "
+            "outstanding; the mission is complete and ready for "
+            "review. The release notes draft is staged on the docs "
+            "branch with the per-patch rationale paragraphs and the "
+            "cross-references to the upstream incident reports; the "
+            "FE mirror was verified and the build artifact attached "
+            "to the rollout ticket for traceability."
+        )
     delegation_ai = AIMessage(
         content="",
         tool_calls=[
@@ -553,7 +590,17 @@ def test_judge_not_called_on_attested_path(monkeypatch):
 
 
 def test_judge_not_called_on_unrequired_path(monkeypatch):
-    """No delegation since last user msg → judge never invoked (gate OFF)."""
+    """No delegation since last user msg → judge never invoked (gate OFF).
+
+    The 2026-09-12 length trigger would otherwise fire on a short
+    ``AIMessage`` like the legacy "The answer is …" (3 words). We
+    use a long detailed completion report (>= 150 words, no marker
+    phrases) so the cheap allow path is taken end-to-end and NEITHER
+    trigger half (markers OR length) fires — the judge is never
+    invoked. The legacy assertion ("judge never invoked on the
+    would-be-deny OFF path") is preserved with the long-report
+    wording.
+    """
     calls = []
 
     async def must_not_be_called(config, user_payload, *, timeout_s):
@@ -562,13 +609,41 @@ def test_judge_not_called_on_unrequired_path(monkeypatch):
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
+    # Long, detailed completion report — >= 150 words, no marker
+    # phrases. The length trigger does NOT fire (>= 150 words); the
+    # marker trigger does NOT fire (no marker phrases). The cheap
+    # allow path runs end-to-end.
+    long_report = (
+        "The answer is 42; explanation follows in the sections "
+        "below. Nothing pending, all shipped. Patch 1 fixed the "
+        "off-by-one in the cache TTL calculator; the unit tests now "
+        "exercise both the elapsed-second and wall-clock-second "
+        "boundaries at the second and minute granularity. Patch 2 "
+        "cleaned up the dead imports in the worker pool module "
+        "after the migration, removing the legacy compatibility shim "
+        "and the related test scaffolding. Patch 3 refactored the "
+        "error-reporting decorator so the stack-frame metadata is "
+        "consistent across all four call sites in the graph node "
+        "and the manager facade. Patch 4 added the missing "
+        "operator-boot log line for the new resolver module so "
+        "operators can grep the boot summary for the resolved "
+        "effective values. All four patches passed their respective "
+        "suites on the first run with no flake; the integration "
+        "matrix is green end-to-end across all environments we "
+        "maintain. No follow-ups outstanding; the mission is "
+        "complete and ready for review by the next teammate in the "
+        "chain. The release notes draft is staged on the docs "
+        "branch with the per-patch rationale paragraphs and the "
+        "cross-references to the upstream incident reports."
+    )
+
     node, manager, ledger = _make_node(instance_id="judge-unr-it")
     result = asyncio.run(
         node(
             {
                 "messages": [
                     HumanMessage(content="what's the answer?"),
-                    AIMessage(content="The answer is …"),
+                    AIMessage(content=long_report),
                 ]
             },
             config={"configurable": {"thread_id": "judge-unr-it"}},

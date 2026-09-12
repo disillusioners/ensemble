@@ -97,11 +97,18 @@ from .attestation_scanner import (
 # TRIGGER half of a two-stage disambiguator on the gate's ALLOW
 # paths. The judge verdict (the existing inline-LLM judge service at
 # :mod:`daemon.services.attestation_report_judge`) is the VERDICT half.
+#
+# Length trigger (2026-09-12, user request) — word-count signal on the
+# LAST AIMessage. Orthogonal to the marker scan: markers catch phrasing,
+# length catches brevity. The two are composed via ``OR`` on the gate's
+# ALLOW paths (``marker_hit OR length_trigger`` → judge fires).
 from .attestation_marker_scanner import (
     MID_WORK_MARKERS,
     MARKER_TERMS_LIST_CAP,
+    SHORT_REPORT_WORD_THRESHOLD,
     MarkerScanResult,
     scan_for_mid_work_markers,
+    scan_for_short_final_ai,
 )
 
 # Phase 4 — canonical resolver lives in its own module (Pattern C, single
@@ -363,6 +370,23 @@ class GateDecision:
     #: time ``id`` invariant is upheld (the ``_make_context_message``
     #: factory mints a fresh ``uuid4`` when no explicit id is passed).
     marker_hint_message: "BaseMessage | None" = None
+    #: 2026-09-12 length trigger — True when the LAST AIMessage word
+    #: count is strictly less than :data:`SHORT_REPORT_WORD_THRESHOLD`
+    #: (i.e. brevity-class). Logged alongside the marker fields;
+    #: additive to the canonical 17-field tuple.
+    length_trigger: bool = False
+    #: 2026-09-12 length trigger — word count of the flattened LAST
+    #: AIMessage content. ``0`` on degenerate empty message lists or
+    #: when the last AIMessage has empty content. Logged alongside the
+    #: marker fields; additive to the canonical 17-field tuple.
+    final_word_count: int = 0
+    #: 2026-09-12 trigger_source derivation — ``"markers"`` when only
+    #: the marker substring scan fired, ``"length"`` when only the
+    #: word-count threshold fired, ``"markers+length"`` when both
+    #: fired, and the empty string ``""`` when neither fired (the
+    #: cheap allow path with no trigger). Logged alongside the
+    #: marker fields; additive to the canonical 17-field tuple.
+    trigger_source: str = ""
 
 
 #: Marker-path enum constants — the canonical strings the gate emits on
@@ -951,11 +975,43 @@ def evaluate(
             )
             and not result.attestation_present
         ):
+            # (iii.c.1) — Mid-work marker scan (2026-09-11, incident
+            # b08f40fe). The marker scan is the TRIGGER half of a
+            # two-stage disambiguator on the gate's ALLOW paths.
+            #
+            # (iii.c.2) — Length trigger (2026-09-12, user request).
+            # Word-count signal on the LAST AIMessage; orthogonal to
+            # the marker scan (markers catch phrasing, length catches
+            # brevity). The two halves compose via ``OR`` — either
+            # half firing flips the would-be allow into a judge call.
+            #
+            # Cost control (decision tree e): NEITHER trigger ⇒ NO
+            # judge call (the judge is best-effort + costly; the
+            # cheap scan is the gate). NO judge call ⇒ no behavioral
+            # change vs baseline.
             marker_result = scan_for_mid_work_markers(
                 messages, mode_resolver.window
             )
-            if marker_result.marker_hit:
-                # The marker scan is a TRIGGER only. The judge is the
+            length_result = scan_for_short_final_ai(
+                messages, mode_resolver.window
+            )
+            # Derive trigger_source from the two halves. The empty
+            # string ``""`` means neither fired (cheap allow path).
+            # Both halves firing ⇒ "markers+length"; one firing ⇒
+            # its single name; neither ⇒ "".
+            if marker_result.marker_hit and length_result.length_trigger:
+                trigger_source = "markers+length"
+            elif marker_result.marker_hit:
+                trigger_source = "markers"
+            elif length_result.length_trigger:
+                trigger_source = "length"
+            else:
+                trigger_source = ""
+            trigger_fires = bool(
+                marker_result.marker_hit or length_result.length_trigger
+            )
+            if trigger_fires:
+                # The trigger scan is a TRIGGER only. The judge is the
                 # VERDICT. The actual (a)/(b)/(c)/(d) routing happens
                 # in the graph node (async context — the judge is an
                 # async LLM call). ``evaluate()`` marks the gate
@@ -969,12 +1025,15 @@ def evaluate(
                 # marker_path on the dry-log row (log-only).
                 result = replace(
                     result,
-                    marker_hit=True,
+                    marker_hit=marker_result.marker_hit,
                     marker_terms=marker_result.marker_terms,
                     marker_path="<pending>",
                     marker_judge_verdict="<pending>",
                     marker_judge_latency_ms=0,
                     marker_judge_error_class=None,
+                    length_trigger=length_result.length_trigger,
+                    final_word_count=length_result.final_word_count,
+                    trigger_source=trigger_source,
                 )
 
         # (iv) canonical structured log entry (Phase 4 task 4.5 schema —
@@ -1000,7 +1059,8 @@ def evaluate(
             "scanner_summary_seen=%s should_inject_nudge=%s "
             "marker_hit=%s marker_terms=%s marker_path=%s "
             "marker_judge_verdict=%s marker_judge_latency_ms=%s "
-            "marker_judge_error_class=%s",
+            "marker_judge_error_class=%s "
+            "length_trigger=%s final_word_count=%s trigger_source=%s",
             result.decision.value,
             instance_id,
             gate_location,
@@ -1029,6 +1089,9 @@ def evaluate(
             result.marker_judge_verdict or "<none>",
             result.marker_judge_latency_ms,
             result.marker_judge_error_class if result.marker_judge_error_class is not None else "<none>",
+            result.length_trigger,
+            result.final_word_count,
+            result.trigger_source or "<none>",
             extra=meta,
         )
 

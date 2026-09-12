@@ -896,3 +896,47 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 * **AC-M14**: canonical `event=leader_completion_gate` log row carries the additive marker fields (marker_hit, marker_terms, marker_path, marker_judge_verdict, marker_judge_latency_ms, marker_judge_error_class). Marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line.
 * **AC-M15**: existing would-be-deny judge (`event=leader_completion_gate_judge` on `Decision.DENIED`) is SKIPPED when `decision.marker_path in {"a", "d"}` — the marker-path judge IS the disambiguator; double-judge must not fire.
 * **AC-M16**: `Completion Check Note` text is a single-source-of-truth constant in `daemon/graph.py` (canonical home; NFR-6 parity with `ATTESTATION_NUDGE_TEXT`). The header `[SYSTEM CONTEXT: Completion Check Note]` reuses the existing prefix convention so the `is_real_user_message` predicate in `attestation_scanner.py` recognizes it as not-a-real-user-message.
+
+---
+
+## Requirement (user 2026-09-12) — Word-count trigger (< 150 words) for the allow-path judge (length trigger)
+
+**Context:** User observation 2026-09-12 — mid-work ACKs are often SHORT with no marker words ("Understood, continuing." / "OK, waiting on the tester."). The marker catalog (AC-M1) catches phrasing ("ending turn", "awaiting"); the brevity class is INDEPENDENT signal that the marker-only catalog misses. Real completion reports the leader would put through this gate are normally detailed (hundreds of words); very-short prose on an ALLOW path is suspicious. This requirement adds the word-count trigger as the second half of the two-stage disambiguator.
+
+**Requirement:** the gate MUST detect brevity-class prose on ALLOW paths and route through the existing inline-LLM judge. The length trigger composes with the marker scan via ``OR`` (`marker_hit OR length_trigger` → judge fires). Length trigger fires when the flattened LAST AIMessage word count is strictly less than `SHORT_REPORT_WORD_THRESHOLD` (150 words; module-level constant, NOT env-tunable). Attested allows still skip entirely. Cost control: NEITHER trigger fires ⇒ NO judge call. Same (a)/(b)/(c)/(d) routing as the marker path (judge verdict drives routing).
+
+**Acceptance criteria:**
+
+* **AC-L1**: `SHORT_REPORT_WORD_THRESHOLD = 150` is a module-level constant in `daemon/services/attestation_marker_scanner.py` (NOT env-tunable by design; one knob fewer; revisit at soak).
+* **AC-L2**: word count is whitespace-split on the flattened LAST AIMessage content (mirrors `_flatten_ai_content` for list-of-blocks content). Pure function; no I/O.
+* **AC-L3**: boundary pins — 149 words ⇒ trigger fires; 150 words ⇒ trigger does NOT fire (strict less-than); 151 words ⇒ trigger does NOT fire.
+* **AC-L4**: a short AIMessage with no marker phrases ("Understood, continuing." — 2 words) triggers the length path → judge fires.
+* **AC-L5**: a long detailed completion report (≥150 words) does NOT trigger the length path → no judge call (cost control preserved end-to-end).
+* **AC-L6**: a short AIMessage with a marker phrase ("Understood, continuing. Ending turn." — both triggers fire) — `trigger_source="markers+length"` (the combined literal).
+* **AC-L7**: a long AIMessage with a marker phrase (e.g., long report + "Ending turn." tail) — `trigger_source="markers"` (only markers fire).
+* **AC-L8**: a long AIMessage with no marker phrases — `trigger_source=""` (cheap allow path; `marker_hit=False` and `length_trigger=False`; no judge call).
+* **AC-L9**: degenerate empty / non-AI message tail — `length_trigger=False`, `final_word_count=0`, `messages_scanned=0` (no AIMessage to measure; mirrors the marker scanner's degenerate-tail contract).
+* **AC-L10**: list-of-blocks content (LangChain text + reasoning blocks) is flattened to plain text BEFORE the word count is taken.
+* **AC-L11**: only the LAST (newest) AIMessage is counted — the length trigger is a single-message signal, not an aggregate over the window.
+* **AC-L12**: short AIMessage with real pending work → judge fires, judge-no → path (b) → ALLOW + checkpoint-durable Completion Check Note (no counter, no deny, no re-route; the turn still ends).
+* **AC-L13**: short AIMessage containing a quick-answer artifact (e.g., "Here is the chart you asked for. <mermaid>" under 150 words) → judge fires, judge-yes → path (c) → ALLOW normally.
+* **AC-L14**: dry mode + length trigger → log-only, NO judge call, plain ALLOW (side-effect-free; dry-mode `allow unconditionally` posture preserved end-to-end).
+* **AC-L15**: kill-switch OFF (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` or `llm_judge_enabled=False` in gate-config) + length trigger → length signal logged, NO judge call, plain ALLOW. The existing `event=leader_completion_gate_marker_judge_disabled` row is emitted with `verdict=<skipped>` (the length trigger rides the same kill-switch as markers — single judge disable surface).
+* **AC-L16**: canonical `event=leader_completion_gate` log row carries the three additive length-trigger fields (`length_trigger`, `final_word_count`, `trigger_source`). Format-string placeholder count grows 28 → 31 (drift pin in `test_length_log_placeholder_count_is_31`).
+* **AC-L17**: graph-node marker-path judge wiring reads `decision.marker_hit or decision.length_trigger` (the OR-composition at the gate-node). The judge call is gated by the same kill-switch (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`); the same `(a)/(b)/(c)/(d)` routing applies. NO new event name is introduced — the existing `event=leader_completion_gate_marker_judge` and `event=leader_completion_gate_marker_judge_disabled` rows cover the length-trigger case.
+* **AC-L18**: `trigger_source` derivation — `"markers+length"` when both halves fire, `"markers"` when only markers fire, `"length"` when only length fires, `""` when neither fires (logged as `<none>` for grep-disjointness with the canonical log format).
+* **AC-L19**: unit test matrix covers: threshold pin, helper basics (whitespace-split semantics), 149/150/151 boundary pins, short-no-marker judge fires, long-no-marker no-judge cost control, short+complete artifact judge-yes allows, short real-pending hint, short+markers combined trigger_source, markers-only on long-with-marker, dry-mode log-only, kill-switch OFF log-only, log-row placeholder count 28→31 drift pin.
+
+**DO NOT TOUCH (this requirement):**
+
+* The 5-value canonical decision enum — unchanged.
+* The marker catalog (16 patterns; 12-18 balance).
+* The marker-path judge — unchanged, REUSED.
+* The would-be-deny judge — unchanged, REUSED.
+* The R2 inputs — unchanged.
+* The counter-reset semantics — unchanged.
+* The nudge/hint texts — unchanged.
+* The bound/escalation semantics — unchanged.
+* The idle-orphan two-set semantics — unchanged.
+
+**Files (this requirement):** `daemon/services/attestation_marker_scanner.py` (length-trigger scanner + threshold constant); `daemon/services/attestation_gate.py` (`GateDecision` extended with three additive fields; trigger-site OR-composition; log format string 28→31); `daemon/graph.py` (gate-node judge wiring extended to read `decision.marker_hit or decision.length_trigger`); `tests/unit/test_attestation_marker_scanner.py` (16 new tests); `tests/unit/test_attestation_marker_wiring.py` (9 new tests + updated existing tests to use long completion reports so the cheap allow path stays green); `tests/unit/test_attestation_judge_wiring.py` (default final_text updated); `tests/unit/test_attestation_nudge_inject.py` (AIMessage updated); `tests/unit/test_attestation_conditional_gate_outcomes.py` (two AIMessages updated); `tests/integration/test_attestation_marker_routing_lca.py` (`_no_marker_mission` updated); `requirements.md` (this entry); `docs/setup.md` (runbook note).

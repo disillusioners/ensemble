@@ -3343,6 +3343,18 @@ def create_attestation_gate_node(
         # deny — allow + log; DECIDED, do not relitigate, see
         # decisions.md D-ENTRY 2026-09-11).
         #
+        # Length trigger (2026-09-12, user request) — word-count signal
+        # on the LAST AIMessage. Orthogonal to the marker scan: the
+        # two halves compose via ``OR`` (``marker_hit OR length_
+        # trigger`` → judge fires). Markers catch phrasing ("ending
+        # turn", "awaiting"); length catches brevity ("Understood,
+        # continuing.") — the latter is independent signal that
+        # mid-work ACKs often lack marker phrases. The same routing
+        # machinery (a)/(b)/(c)/(d) and the same kill-switch apply —
+        # the gate integrates via ``trigger_source`` so operators see
+        # which half fired (``markers`` / ``length`` / ``markers+
+        # length``).
+        #
         # DRY-mode early-out (2026-09-12, review W1 fix). The tuple
         # check below deliberately EXCLUDES ``Decision.DRY_LOG`` so
         # the marker-path judge/hint/deny/counter wiring NEVER fires
@@ -3359,7 +3371,7 @@ def create_attestation_gate_node(
                 Decision.ALLOWED,
                 Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             )
-            and decision.marker_hit
+            and (decision.marker_hit or decision.length_trigger)
         ):
             try:
                 from .services.attestation_judge_resolver import (

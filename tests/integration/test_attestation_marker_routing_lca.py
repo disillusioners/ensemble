@@ -313,19 +313,42 @@ def _delegated_mission_attested() -> dict:
 
 
 def _no_marker_mission() -> dict:
-    """A clean completion mission — no markers in the tail.
+    """A clean completion mission — no markers in the tail, ≥150 words.
 
     Used by the (h) scenario: the natural decision is ALLOWED via the
     conditional arm; the marker scan MUST short-circuit at the
-    ``marker_hit=False`` check and the judge MUST NOT be called (cost
-    control).
+    ``marker_hit=False`` check AND the length trigger MUST short-
+    circuit at ``length_trigger=False`` (the AIMessage is ≥150
+    words) — the judge MUST NOT be called (cost control). The
+    canonical log row carries the additive diagnostic fields
+    (marker_hit=False, length_trigger=False, trigger_source=<none>).
     """
     return {
         "messages": [
             HumanMessage(content="please finish X"),
             AIMessage(
                 content="All work shipped. Done. Nothing pending, "
-                "results in the per-task report above."
+                "results in the per-task report above. Patch 1 fixed "
+                "the off-by-one in the cache TTL calculator; the unit "
+                "tests now exercise both the elapsed-second and "
+                "wall-clock-second boundaries at the second and "
+                "minute granularity. Patch 2 cleaned up the dead "
+                "imports in the worker pool module after the "
+                "migration, removing the legacy compatibility shim "
+                "and the related test scaffolding. Patch 3 "
+                "refactored the error-reporting decorator so the "
+                "stack-frame metadata is consistent across all four "
+                "call sites in the graph node and the manager "
+                "facade. Patch 4 added the missing operator-boot log "
+                "line for the new resolver module so operators can "
+                "grep the boot summary for the resolved effective "
+                "values including the mode, window, bound, and gate "
+                "locations active at the time. All four patches "
+                "passed their respective suites on the first run "
+                "with no flake; the integration matrix is green "
+                "end-to-end. No follow-ups outstanding; the mission "
+                "is complete and ready for review by the next "
+                "teammate in the chain."
             ),
         ]
     }

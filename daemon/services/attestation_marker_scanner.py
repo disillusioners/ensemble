@@ -157,6 +157,61 @@ class MarkerScanResult(NamedTuple):
     messages_scanned: int
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Length trigger — word-count signal on the LAST AIMessage content (2026-09-12)
+#
+# Mid-work ACKs are often SHORT ("Understood, continuing.", "OK, waiting on
+# the tester.") — brevity is an INDEPENDENT signal that the turn is not a
+# real completion report. Real completion reports are normally detailed
+# (hundreds of words). The markers catch phrasing ("ending turn",
+# "awaiting"); the length trigger catches brevity — orthogonal signals that
+# the gate composes via ``OR``.
+#
+# Threshold rationale (user 2026-09-12):
+# * < 150 words ⇒ trigger fires (the brevity class). Real completion
+#   reports that the leader would put through this gate are routinely
+#   detailed; very-short prose on an ALLOW path is suspicious.
+# * The 150 word threshold is a MODULE-LEVEL CONSTANT — deliberately NOT
+#   env-tunable. One knob fewer; revisit at soak. Operators wanting to
+#   disable this trigger set ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
+#   ENABLED=0`` (the existing judge kill-switch) and accept the
+#   marker-only signal as the trigger.
+#
+# Word count is whitespace-split on the flattened text (mirrors
+# ``_flatten_ai_content`` for list-of-blocks content). Pure function; no
+# I/O.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Word-count threshold below which the last AIMessage is treated as a
+#: brevity-class trigger on the gate's ALLOW paths. Module-level constant
+#: (NOT env-tunable by design; see module-level length-trigger block).
+SHORT_REPORT_WORD_THRESHOLD: int = 150
+
+
+class LengthScanResult(NamedTuple):
+    """The length-trigger scanner's verdict + log-ready diagnostics.
+
+    Attributes:
+        length_trigger: True when the flattened last-AIMessage word
+            count is strictly less than
+            :data:`SHORT_REPORT_WORD_THRESHOLD` (i.e. brevity-class).
+        final_word_count: Word count of the flattened LAST AIMessage
+            content (whitespace-split on the flattened string).
+            ``0`` when the message list is empty or the last AIMessage
+            has empty/None content (defensive floor — a 0-word last
+            AIMessage is treated as brevity and would fire; the gate's
+            ``messages_scanned`` already gates that surface).
+        messages_scanned: Number of AIMessages actually inspected
+            (≤ window). Mirrors :class:`MarkerScanResult` so the
+            operator log row carries the same shape from both halves
+            of the trigger.
+    """
+
+    length_trigger: bool
+    final_word_count: int
+    messages_scanned: int
+
+
 def _flatten_ai_content(content: object) -> str:
     """Normalize an AIMessage's content into a plain string.
 
@@ -254,6 +309,90 @@ def scan_for_mid_work_markers(
     )
 
 
+def count_words(text: str) -> int:
+    """Count whitespace-separated words in ``text``.
+
+    Pure helper. The length-trigger scanner counts words on the
+    FLATTENED last-AIMessage content (the same shape the marker
+    scanner substring-matches against). Whitespace-split is the
+    contract: ``text.split()`` with no args collapses any run of
+    whitespace and strips leading/trailing whitespace. Empty / None
+    inputs return ``0`` (defensive floor).
+
+    Args:
+        text: The flattened AIMessage content.
+
+    Returns:
+        int word count (≥0).
+    """
+    if not text:
+        return 0
+    return len(text.split())
+
+
+def scan_for_short_final_ai(
+    messages: list[BaseMessage],
+    window: int,
+) -> LengthScanResult:
+    """Scan the last AIMessage for brevity (< SHORT_REPORT_WORD_THRESHOLD words).
+
+    Pure function; no I/O. Walks BACKWARD through ``messages`` and
+    inspects up to ``window`` AIMessages (mirroring the marker
+    scanner's bounded-walk semantics), but only the FIRST AIMessage
+    encountered (the newest in the tail) contributes its word count
+    to the verdict — the length trigger is a single-message signal,
+    not an aggregate. The walk is bounded so the function returns
+    deterministically and ``messages_scanned`` matches the marker
+    scanner's surface.
+
+    Args:
+        messages: The in-node message list (``state["messages"]``).
+        window: How many tail AIMessages to inspect when locating the
+            last AIMessage. Values < 1 are clamped to 1.
+
+    Returns:
+        :class:`LengthScanResult` — length_trigger (True when the
+        last AIMessage word count is < :data:`SHORT_REPORT_WORD_
+        THRESHOLD`), final_word_count (int, ≥0), messages_scanned.
+    """
+    bounded_window = max(1, int(window) if window is not None else 1)
+    final_word_count: int = 0
+    scanned: int = 0
+    found_ai: bool = False
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        flat_content = _flatten_ai_content(getattr(message, "content", ""))
+        final_word_count = count_words(flat_content)
+        scanned += 1
+        found_ai = True
+        # The LAST (newest) AIMessage in the tail is the only one we
+        # count. Break immediately after the first AIMessage hit —
+        # the walk bound just protects against degenerate empty
+        # message lists (where there's nothing to scan).
+        break
+    # Degenerate tail (no AIMessage at all — empty list or only
+    # non-AI messages): length_trigger is False. The marker scanner
+    # returns marker_hit=False on the same degenerate state; the
+    # length trigger mirrors that contract. Without an AIMessage to
+    # inspect there's nothing to measure — treating "no message" as
+    # "0 words = brevity" would spuriously fire the judge on the
+    # gate's most degenerate paths.
+    if not found_ai:
+        return LengthScanResult(
+            length_trigger=False,
+            final_word_count=0,
+            messages_scanned=0,
+        )
+    length_trigger = final_word_count < SHORT_REPORT_WORD_THRESHOLD
+    return LengthScanResult(
+        length_trigger=length_trigger,
+        final_word_count=final_word_count,
+        messages_scanned=scanned,
+    )
+
+
 #: Re-export the catalog so tests and the gate can pin the literal
 #: list from one source of truth. Re-exports avoid duplicating the
 #: constant across modules.
@@ -266,6 +405,10 @@ __all__ = [
     "MarkerScanResult",
     "scan_for_mid_work_markers",
     "ALL_MARKERS",
+    "SHORT_REPORT_WORD_THRESHOLD",
+    "LengthScanResult",
+    "count_words",
+    "scan_for_short_final_ai",
 ]
 
 
