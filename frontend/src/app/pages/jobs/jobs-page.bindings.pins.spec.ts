@@ -161,11 +161,28 @@ describe('Template-source enumeration pin — filter bindings ↔ JobsFilterStat
   });
 
   it('the template list renders EXACTLY ONE projection (no view-mode branch in the loop)', () => {
-    const loop = templateSrc.match(/@for \(job of (\w+)\(\); track job\.job_id\)/);
+    // Phase 2 — the list moved from ``@for (job of ...)`` to
+    // ``cdk-virtual-scroll-viewport`` + ``*cdkVirtualFor`` over the
+    // flattened ``renderRows()`` (WindowItem[]). The projection
+    // source is ONE (the store's ``filteredJobs`` projected through
+    // ``renderRows``), not two view-mode branches. Pin anchors on
+    // the REAL production text.
+    const loop = templateSrc.match(/\*cdkVirtualFor="let item of (\w+)\(\); trackBy: trackByKey"/);
     expect(loop).not.toBeNull();
-    expect(loop![1]).toBe('displayedJobs');
-    // Exactly one @for over the list, no second branch.
-    expect(templateSrc.match(/@for \(job of /g)).toHaveLength(1);
+    expect(loop![1]).toBe('renderRows');
+    // Exactly one ``*cdkVirtualFor`` over the list, no second
+    // branch — same invariant the pre-Phase-2 ``@for`` pin held.
+    expect(templateSrc.match(/\*cdkVirtualFor=/g)).toHaveLength(1);
+  });
+
+  it('virtual-scroll track-by keys on item.key (job_id for rows; Phase 3 missionId for headers)', () => {
+    // Plan task 4 — track by job_id. The page-level trackBy
+    // helper returns ``item.key`` (which IS ``job.job_id`` for
+    // rows, and which Phase 3 will set to the missionId for
+    // header items). The bind is the page's trackByKey, not
+    // Angular's default identity.
+    expect(componentSrc).toMatch(/protected trackByKey = \(_index: number, item: WindowItem\): string => item\.key/);
+    expect(templateSrc).toMatch(/trackBy: trackByKey/);
   });
 });
 
@@ -259,5 +276,160 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     // in the template; the LIST itself renders from one projection.
     expect(templateSrc).not.toMatch(/@for[\s\S]*worksAsJobs/);
     expect(templateSrc).not.toMatch(/workToJob/);
+  });
+
+  // ── Phase 2 — banner + render-guard + poll-gate + expansion ─────
+  //
+  // F-5 class pins: every NEW write-path / binding that ships in
+  // Phase 2 must be pinned against the REAL production source. The
+  // behavior pins (truth tables, fixtures AT/PAST caps) live in the
+  // pure-model specs; THIS describe is the source-text anchor that
+  // prevents drift between the spec and the production.
+
+  it('window-honesty banner is mounted in BOTH view modes (banner region + aria-live + Reload)', () => {
+    // Plan task 2 — banner region is ``aria-live="polite"`` and the
+    // Reload button carries an explicit accessible label.
+    expect(templateSrc).toMatch(/<div[\s\S]*?class="window-banner"[\s\S]*?aria-live="polite"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="reloadAccessibleLabel"/);
+    expect(templateSrc).toMatch(/\(click\)="onReloadBanner\(\)"/);
+  });
+
+  it('banner state is driven by the pure window model + store degraded flag', () => {
+    // The banner mount condition is ``windowBanner() === 'visible'
+    // || windowDegraded()`` — the template binds both. The policy
+    // (``windowIsFull``) lives in the model.
+    expect(templateSrc).toMatch(/windowBanner\(\) === 'visible'/);
+    expect(templateSrc).toMatch(/windowDegraded\(\)/);
+    expect(componentSrc).toMatch(/readonly windowBanner = this\.store\.windowBanner/);
+    expect(componentSrc).toMatch(/readonly windowDegraded = this\.store\.windowDegraded/);
+  });
+
+  it('render-guard truncation notice wires the pure renderGuard + the "switch to Queues" affordance', () => {
+    // Plan task 3 — guard fires at RENDER time over the template-bound
+    // projected rows (not the fetch payload); the notice carries a
+    // "switch to Queues view" affordance.
+    expect(templateSrc).toMatch(/@if \(truncationNotice\(\); as notice\)/);
+    expect(templateSrc).toMatch(/class="render-guard-notice"/);
+    expect(templateSrc).toMatch(/\(click\)="onSwitchToQueuesView\(\)"/);
+    expect(componentSrc).toMatch(/readonly renderGuardOutcome = computed/);
+    expect(componentSrc).toMatch(/renderGuard\(this\.windowItems\(\)\)/);
+  });
+
+  it('expansion state is keyed by job_id in the parent (survives virtual recycle)', () => {
+    // Plan task 4 — DOM-local state would reset on recycle. The
+    // parent owns a Set<job_id>; the card's ``expanded`` input
+    // + ``expandToggle`` output wire it.
+    expect(componentSrc).toMatch(/readonly expandedJobIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/onToggleExpansion\(jobId: string\)/);
+    expect(componentSrc).toMatch(/isCardExpanded\(item: WindowItem\)/);
+    expect(templateSrc).toMatch(/\[expanded\]="isCardExpanded\(item\)"/);
+    expect(templateSrc).toMatch(/\(expandToggle\)="onToggleExpansion\(item\.job\.job_id\)"/);
+  });
+
+  it('poll gate is wired through shouldTick (visibility + drawer + modal + fetchInFlight)', () => {
+    // Plan task 5 — the 30s tick consults shouldTick BEFORE making
+    // the HTTP call. The four gate inputs are the four pause
+    // conditions.
+    expect(componentSrc).toMatch(/POLL_INTERVAL_MS/);
+    expect(componentSrc).toMatch(/shouldTick\(\{/);
+    expect(componentSrc).toMatch(/tabVisible: this\.tabVisible\(\)/);
+    expect(componentSrc).toMatch(/drawerOpen: this\.drawerOpen\(\)/);
+    expect(componentSrc).toMatch(/modalOpen: this\.modalOpen\(\)/);
+    expect(componentSrc).toMatch(/fetchInFlight: this\.fetchInFlight\(\)/);
+  });
+
+  it('visibilitychange listener is attached in ngOnInit and detached in ngOnDestroy (no leak)', () => {
+    // The listener MUST be removed on destroy; without the
+    // ``removeEventListener`` the listener survives and fires after
+    // the component is gone (memory + correctness leak).
+    expect(componentSrc).toMatch(/this\.doc\.addEventListener\('visibilitychange', this\.onVisibilityChange\)/);
+    expect(componentSrc).toMatch(/this\.doc\.removeEventListener\('visibilitychange', this\.onVisibilityChange\)/);
+  });
+
+  it('refocus-immediate refresh is debounced (storm mitigation)', () => {
+    // Plan task 5 risk — rapid tab switching would storm the BE.
+    // The refocus path goes through a setTimeout(REFOCUS_DEBOUNCE_MS)
+    // and a new focus cancels the pending timer.
+    expect(componentSrc).toMatch(/REFOCUS_DEBOUNCE_MS/);
+    expect(componentSrc).toMatch(/clearTimeout\(this\.refocusTimer\)/);
+    expect(componentSrc).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,300}?shouldTick/);
+  });
+
+  it('modal-open gate tracks the page-owned dialogs (create / cleanup / cancel confirm)', () => {
+    // Each dialog open sets ``modalOpen = true`` BEFORE the open
+    // call and clears it in ``afterClosed`` — belt + braces against
+    // dialog leaks (if afterClosed fails to fire, the gate stays
+    // shut — a safer failure mode than staying open).
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(JobCreateDialogComponent/);
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(SystemCleanupConfirmDialogComponent/);
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open<ConfirmDialogComponent/);
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)/);
+  });
+
+  it('empty-state classifier is wired (loading/dataEmpty/filterEmpty/errored)', () => {
+    // Plan task 8 — skeleton ONLY for first fetch; the classifier
+    // is the single source of empty-state truth.
+    expect(componentSrc).toMatch(/readonly emptyStateKind = computed<JobsEmptyStateKind>/);
+    expect(componentSrc).toMatch(/classifyJobsEmptyState\(/);
+    expect(templateSrc).toMatch(/@if \(showLoadingSkeleton\(\)\)/);
+    expect(templateSrc).toMatch(/@if \(showEmptyState\(\)\)/);
+    expect(templateSrc).toMatch(/\{\{ emptyStateCopy\(\)\.title \}\}/);
+  });
+
+  it('WorkService retain-last-data fix is live (errors propagate, no swallow-to-empty)', () => {
+    // Plan task 6 — pre-Phase-2 swallowed errors via
+    // ``catchError → of([])``, which the store's ``.next`` arm
+    // treated as honest empty data and wiped the previous payload.
+    // The real service now propagates via ``throwError`` so the
+    // store's ``.error`` arm flips ``worksDegraded`` and retains
+    // the last good list. The mirror parity pin in
+    // ``work.service.spec.ts`` anchors this contract; THIS pin is
+    // the production-source cross-check from the page's
+    // perspective.
+    const workServiceSrc = readFileSync(
+      join(__dirname, '../../services/work.service.ts'),
+      'utf-8',
+    );
+    expect(workServiceSrc).toMatch(/return throwError\(\(\) => err\)/);
+    expect(workServiceSrc).not.toMatch(/return of\(\[\] as Work\[\]\)/);
+  });
+
+  it('panel + indicator surfaces stay untouched (Plan non-goal #1)', () => {
+    // Plan non-goal #1 — the header panel/indicator owns the
+    // glanceable/live-status role. Phase 2 must NOT touch it. The
+    // components are referenced by selector; this grep proves no
+    // P2 write-path snuck into them.
+    const componentDir = join(__dirname, '../../components');
+    // Re-read the component directory in case the test runner has
+    // cached the file content (Node caches are per-process).
+    const fs = require('fs');
+    const path = require('path');
+    const indicatorDir = path.join(componentDir, 'job-queue-indicator');
+    const panelDir = path.join(componentDir, 'job-queue-panel');
+    // Defensive: if the dirs don't exist (e.g. renamed), skip — the
+    // plan explicitly bans edits and a missing dir is a stronger
+    // invariant than a non-match.
+    if (fs.existsSync(indicatorDir)) {
+      const indicatorFiles = fs.readdirSync(indicatorDir);
+      expect(indicatorFiles.length).toBeGreaterThan(0);
+      // No Phase 2 addons — the indicator's exports list is the
+      // legacy set (the file's existence IS the cross-seam
+      // guarantee).
+      for (const file of indicatorFiles) {
+        if (file.endsWith('.ts')) {
+          const src = fs.readFileSync(path.join(indicatorDir, file), 'utf-8');
+          expect(src).not.toMatch(/window-banner|cdk-virtual-scroll|jobs-window|jobs-poll|jobs-empty-state/);
+        }
+      }
+    }
+    if (fs.existsSync(panelDir)) {
+      const panelFiles = fs.readdirSync(panelDir);
+      for (const file of panelFiles) {
+        if (file.endsWith('.ts')) {
+          const src = fs.readFileSync(path.join(panelDir, file), 'utf-8');
+          expect(src).not.toMatch(/window-banner|cdk-virtual-scroll|jobs-window|jobs-poll|jobs-empty-state/);
+        }
+      }
+    }
   });
 });

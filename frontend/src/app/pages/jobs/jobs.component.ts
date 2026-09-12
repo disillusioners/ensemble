@@ -1,8 +1,9 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, DOCUMENT } from '@angular/core';
 import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
+import { ScrollingModule } from '@angular/cdk/scrolling';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
@@ -39,6 +40,26 @@ import {
   JobsViewMode,
   hasActiveJobsFilter,
 } from '../../models/jobs-filter-state.model';
+import {
+  POLL_INTERVAL_MS,
+  REFOCUS_DEBOUNCE_MS,
+  PollGateInputs,
+  shouldTick,
+} from './jobs-poll.model';
+import {
+  MAX_RENDER_ROWS,
+  WINDOW_BANNER_COPY,
+  RenderGuardOutcome,
+  WindowItem,
+  renderGuard,
+  toWindowItems,
+} from './jobs-window.model';
+import {
+  JobsEmptyStateKind,
+  classifyJobsEmptyState,
+  emptyStateCopy,
+  JobsEmptyStateCopy,
+} from './jobs-empty-state.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -65,6 +86,7 @@ export type { JobsViewMode };
   imports: [
     CommonModule,
     FormsModule,
+    ScrollingModule,
     MatButtonModule,
     MatButtonToggleModule,
     MatIconModule,
@@ -106,6 +128,8 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly STORAGE_KEY = 'job-page-selected-project';
   private readonly VIEW_MODE_KEY = 'job-page-view-mode';
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
+  /** Phase 2 — pending refocus-refresh timer id (debounce storm mitigation). */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
   private sseSubscription: Subscription | null = null;
   private projectRestored = false;
 
@@ -133,6 +157,138 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly error = this.store.jobsError;
   readonly workLoading = this.store.worksLoading;
   readonly workError = this.store.worksError;
+
+  // ── Phase 2 — banner + poll-gate derived state (aliases over the
+  // store). Kept here as component-level computeds so the template
+  // reads them like pre-Phase-2 locals; the policy (windowIsFull,
+  // shouldTick) lives in the pure models.
+  readonly windowRowCount = this.store.windowRowCount;
+  readonly windowBanner = this.store.windowBanner;
+  readonly windowDegraded = this.store.windowDegraded;
+  readonly fetchInFlight = this.store.fetchInFlight;
+  /** The unified, view-mode-aware error string (first non-null leg error). */
+  readonly unifiedError = this.store.error;
+
+  // P1 review watch-item (a): the WorkService's own `loading` signal
+  // is shadowed by the store's `worksLoading` — both can be true at
+  // once. P2 ties them to one source: the template binds ONLY to the
+  // store's flag (above) so the two cannot surface contradictory
+  // spinner states. The page never reads `WorkService.loading`
+  // directly — the `workLoading` alias here goes to the store.
+  // (Pre-Phase-2: `loading()` returned `jobsLoading()`; the
+  // queues-view Refresh button kept both flags in sync. P2 collapses
+  // both to the store. F-5 pin in jobs-page.bindings.pins.spec.)
+
+  // ── Phase 2 — virtual-scroll source + render guard ───────────────────
+  //
+  // ``windowItems`` is the flattened (header|row) scroll source the
+  // template renders. Phase 2 ships the ``row`` arm only; Phase 3
+  // extends the list with ``header`` items without re-plumbing.
+  //
+  // ``renderGuardOutcome`` enforces the 1000-row hard cap at RENDER
+  // time over the template-bound projected rows — the plan's
+  // acceptance that growth between fetch and render cannot slip
+  // through. The component's render tree branches on the discriminator
+  // so silent slicing is structurally impossible.
+
+  readonly windowItems = computed<readonly WindowItem[]>(() =>
+    toWindowItems(this.store.filteredJobs()),
+  );
+
+  readonly renderGuardOutcome = computed<RenderGuardOutcome<WindowItem>>(() =>
+    renderGuard(this.windowItems()),
+  );
+
+  /**
+   * Rows to render — either the full windowItems list (ok branch) or
+   * the kept slice (guarded branch). The template binds here so the
+   * cap is enforced consistently.
+   */
+  readonly renderRows = computed<readonly WindowItem[]>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'ok' ? out.rows : out.kept;
+  });
+
+  /**
+   * Render-guard truncation notice — non-null only when the
+   * projection is at/above the cap. The template renders an explicit
+   * affordance above the virtual scroll list with this copy + a
+   * "switch to Queues view" link.
+   */
+  readonly truncationNotice = computed<string | null>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'guarded' ? out.notice : null;
+  });
+
+  readonly truncationHiddenCount = computed<number | null>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'guarded' ? out.hidden : null;
+  });
+
+  // ── Phase 2 — empty-state classifier ──────────────────────────────────
+  //
+  // ``classifyJobsEmptyState`` is pure; the component just wires the
+  // inputs (loading / degraded / hasRows / hasActiveFilters / viewMode).
+  // The plan's skeleton rule: skeleton ONLY for the first fetch — a
+  // background refresh during ``dataEmpty``/``filterEmpty``/``errored``
+  // RETAINS the last good list, never flashes a skeleton.
+
+  readonly emptyStateKind = computed<JobsEmptyStateKind>(() =>
+    classifyJobsEmptyState({
+      loading: this.fetchInFlight(),
+      degraded: this.windowDegraded(),
+      hasRows: this.store.filteredJobs().length > 0,
+      hasActiveFilters: hasActiveJobsFilter(this.store.filterState()),
+      viewMode: this.viewMode(),
+    }),
+  );
+
+  readonly emptyStateCopy = computed<JobsEmptyStateCopy>(() =>
+    emptyStateCopy(this.emptyStateKind(), this.viewMode()),
+  );
+
+  /** Skeleton fires ONLY for the first fetch (no data to retain). */
+  readonly showLoadingSkeleton = computed<boolean>(
+    () => this.emptyStateKind() === 'loading',
+  );
+
+  /** Empty-state card fires when the projection is empty. */
+  readonly showEmptyState = computed<boolean>(() => {
+    const kind = this.emptyStateKind();
+    return (
+      kind === 'dataEmpty' ||
+      kind === 'filterEmpty' ||
+      kind === 'errored'
+    );
+  });
+
+  // ── Phase 2 — poll-gate + visibility state ───────────────────────────
+  //
+  // ``tabVisible`` mirrors ``document.visibilityState``. The poll tick
+  // consults ``shouldTick(tabVisible, drawerOpen, modalOpen,
+  // fetchInFlight)`` and skips the HTTP call when any pause condition
+  // is set. ``tabVisible`` starts TRUE (the spec-friendly default;
+  // the listener updates it on mount).
+
+  private readonly doc = inject(DOCUMENT);
+  readonly tabVisible = signal<boolean>(true);
+
+  /** True while a page-owned modal dialog (create / cleanup / confirm) is open. */
+  readonly modalOpen = signal<boolean>(false);
+
+  // ── Phase 2 — expansion state keyed by job_id (survives recycle) ─────
+
+  /**
+   * Expansion state for ``cdk-virtual-scroll``-rendered cards. The
+   * plan calls this out explicitly: a DOM-local ``signal(false)`` in
+   * the card would reset on every virtual recycle, so the parent
+   * owns the source of truth keyed by ``job_id``. The card's
+   * ``expanded`` input + ``expandToggle`` output wire this through.
+   */
+  readonly expandedJobIds = signal<Set<string>>(new Set());
+
+  /** Phase 2 — virtual-scroll item size in px (card min-height tuned). */
+  protected readonly itemSize = 144;
 
   readonly agents = signal<Agent[]>([]);
   readonly selectedJob = signal<Job | null>(null);
@@ -428,6 +584,12 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Phase 4 — fetch the bad-state preflight so the red-glow + tooltip
     // appear on first paint when the system has stale rows.
     this.refreshBadStateCount();
+    // Phase 2 — seed tabVisible from the document state at mount
+    // (SSR-safe: ``doc`` is the injected DOCUMENT token, which is
+    // the platform's document — never ``window`` directly so tests
+    // can stub it). Wire the visibilitychange listener.
+    this.tabVisible.set(this.doc.visibilityState === 'visible');
+    this.doc.addEventListener('visibilitychange', this.onVisibilityChange);
   }
 
   private tryRestoreProject(): void {
@@ -488,6 +650,14 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopAutoRefresh();
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+    // Phase 2 — detach the visibilitychange listener (the cleanup
+    // pin in jobs-page.bindings.pins.spec.ts). Without this the
+    // listener survives the component and re-fires after destroy.
+    this.doc.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.jobSseService.disconnect();
     this.jobSseService.clearEvents();
     if (this.sseSubscription) {
@@ -578,13 +748,70 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Phase 2 — the 30s poll ticks through ``shouldTick`` BEFORE
+   * making the HTTP call. The gate is a pure function over four
+   * inputs (``tabVisible``, ``drawerOpen``, ``modalOpen``,
+   * ``fetchInFlight``) so a paused tick is structurally a no-op —
+   * the timer keeps firing, the gate decides. The store's in-flight
+   * guard also prevents double-fire when the gate accidentally
+   * passes during a long request (belt + braces).
+   *
+   * Cadence: ``POLL_INTERVAL_MS`` (30000) from jobs-poll.model.ts;
+   * pin lives in jobs-poll.model.spec.ts.
+   */
   private startAutoRefresh(): void {
     this.refreshInterval = setInterval(() => {
-      // P1 — refresh the ACTIVE view's leg via the store; the store's
-      // in-flight guards prevent double-firing.
-      this.store.refreshActive();
-    }, 30000); // 30 seconds
+      if (
+        shouldTick({
+          tabVisible: this.tabVisible(),
+          drawerOpen: this.drawerOpen(),
+          modalOpen: this.modalOpen(),
+          fetchInFlight: this.fetchInFlight(),
+        })
+      ) {
+        this.store.refreshActive();
+      }
+    }, POLL_INTERVAL_MS);
   }
+
+  /**
+   * Phase 2 — ``document.visibilitychange`` listener. Pauses the poll
+   * while the tab is hidden (the gate above) and fires an immediate
+   * refresh on refocus, debounced by ``REFOCUS_DEBOUNCE_MS`` so rapid
+   * tab-switching does not storm the BE.
+   *
+   * The listener is added in ``ngOnInit`` and torn down in
+   * ``ngOnDestroy`` (the ``removeEventListener`` call is the
+   * cleanup pin in jobs-page.bindings.pins.spec.ts).
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = this.doc.visibilityState === 'visible';
+    this.tabVisible.set(visible);
+    if (!visible) {
+      return;
+    }
+    // Refocus: schedule an immediate refresh if the gate is open
+    // and the debounce window has elapsed. The pending timer id is
+    // stored so a rapid second focus cancels the previous and
+    // extends the debounce (the storm-mitigation rule).
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (
+        shouldTick({
+          tabVisible: true,
+          drawerOpen: this.drawerOpen(),
+          modalOpen: this.modalOpen(),
+          fetchInFlight: this.fetchInFlight(),
+        })
+      ) {
+        this.store.refreshActive();
+      }
+    }, REFOCUS_DEBOUNCE_MS);
+  };
 
   private stopAutoRefresh(): void {
     if (this.refreshInterval) {
@@ -606,6 +833,94 @@ export class JobsComponent implements OnInit, OnDestroy {
     // the red-glow + tooltip reflect post-refresh reality.
     this.refreshBadStateCount();
   }
+
+  /**
+   * Phase 2 — manual reload wired to the honesty banner. The banner
+   * surfaces when the row count is at or above the wire cap so the
+   * operator can ask for a fresh fetch without scrolling to the
+   * page-level Refresh button. Calls the same store path as
+   * ``onRefresh`` (the store's in-flight guard prevents overlap).
+   */
+  protected onReloadBanner(): void {
+    this.onRefresh();
+  }
+
+  /**
+   * Phase 2 — render-guard truncation affordance: switch to the
+   * Queues view (the bounded window surface backed by
+   * ``/api/jobs``'s clamp-100 wire) so the operator sees every row
+   * the BE will return for this filter scope.
+   *
+   * No-op when the user is already in the Queues view (the
+   * guard would not have fired here, but defensive).
+   */
+  protected onSwitchToQueuesView(): void {
+    if (this.viewMode() === 'queues') {
+      return;
+    }
+    this.onViewModeChange('queues');
+  }
+
+  /**
+   * Phase 2 — retry from the errored empty-state card. The
+   * banner above the list already shows the "Last refresh failed"
+   * copy during a degraded render; this fires when the projection
+   * itself is empty AND the last fetch failed (the errored
+   * empty-state branch).
+   */
+  protected onRetryEmpty(): void {
+    this.onRefresh();
+  }
+
+  /**
+   * Phase 2 — clear-filters from the filterEmpty empty-state card.
+   * Reuses the same store path as ``onClearFilters`` so the view
+   * mode is preserved.
+   */
+  protected onClearFiltersForEmpty(): void {
+    this.onClearFilters();
+  }
+
+  /**
+   * Phase 2 — expansion-state helpers for ``cdk-virtual-scroll``.
+   * The set is keyed by ``job_id`` so a card's expansion survives
+   * virtual recycle (the card re-mounts; the input binding picks up
+   * the same membership).
+   */
+  protected isCardExpanded(item: WindowItem): boolean {
+    if (item.kind !== 'row') {
+      return false;
+    }
+    return this.expandedJobIds().has(item.job.job_id);
+  }
+
+  protected onToggleExpansion(jobId: string): void {
+    this.expandedJobIds.update((set) => {
+      const next = new Set(set);
+      if (next.has(jobId)) {
+        next.delete(jobId);
+      } else {
+        next.add(jobId);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Phase 2 — ``cdkVirtualFor`` track-by. The plan calls for
+   * track-by-``job_id`` so DOM-stable identity survives recycle.
+   * The ``WindowItem.key`` already encodes the right identity
+   * (``job.job_id`` for rows; Phase 3 will set ``missionId`` for
+   * headers), so the helper is identity on the key.
+   */
+  protected trackByKey = (_index: number, item: WindowItem): string => item.key;
+
+  /**
+   * Phase 2 — exposed reload accessible label. The plan calls for
+   * an explicit accessible label on the banner Reload button (never
+   * icon-only). Pinned via ``WINDOW_BANNER_COPY.reloadAccessibleLabel``.
+   */
+  protected readonly reloadAccessibleLabel = WINDOW_BANNER_COPY.reloadAccessibleLabel;
 
   /**
    * Phase 4 — switch between 'queues' (legacy) and 'all-work'
@@ -722,6 +1037,12 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onOpenCreateDialog(): void {
+    // Phase 2 — flip the poll gate's ``modalOpen`` so the 30s tick
+    // pauses while the create dialog is up. The previous snackbar
+    // spam during long dialog sessions came from the poll replacing
+    // the list mid-dialog; the gate + retain-last-data discipline
+    // kill both surfaces.
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open(JobCreateDialogComponent, {
       width: '500px',
       panelClass: 'dark-modal-panel',
@@ -732,6 +1053,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
 
     dialogRef.afterClosed().subscribe((result: JobCreateDialogResult | undefined) => {
+      this.modalOpen.set(false);
       if (result) {
         this.createJob(result);
       }
@@ -788,6 +1110,9 @@ export class JobsComponent implements OnInit, OnDestroy {
    *     the snackbar.
    */
   protected onCancelJob(job: Job): void {
+    // Phase 2 — flip the poll gate's ``modalOpen`` (the cancel
+    // confirm IS a modal from the gate's perspective).
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
       ConfirmDialogComponent,
       {
@@ -804,6 +1129,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     );
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      this.modalOpen.set(false);
       if (!confirmed) {
         return;
       }
@@ -956,6 +1282,9 @@ export class JobsComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // Phase 2 — flip the poll gate's ``modalOpen`` (the confirm
+    // dialog IS a modal from the gate's perspective).
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
       width: '420px',
       panelClass: 'dark-modal-panel',
@@ -978,6 +1307,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      this.modalOpen.set(false);
       if (!confirmed) {
         return;
       }

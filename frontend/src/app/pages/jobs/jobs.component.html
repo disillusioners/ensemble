@@ -181,6 +181,51 @@
 
   </div>
 
+  <!-- Phase 2 — window-honesty banner (BOTH view modes). The
+       banner is an exact function of the projected row count: it
+       shows AT or ABOVE the wire cap (DEFAULT_WINDOW_LIMIT = 100),
+       where we cannot tell whether the slice is complete or
+       truncated. The copy is the BOTH-WAYS variant — never
+       "Showing first 100" (the plan rejects completeness claims).
+       The ``aria-live="polite"`` region announces updates without
+       interrupting the user; the manual Reload button carries an
+       explicit accessible label (never icon-only). Degraded copies
+       layer on top so a failed refresh always tells the user. -->
+  @if (windowBanner() === 'visible' || windowDegraded()) {
+    <div
+      class="window-banner"
+      role="status"
+      aria-live="polite"
+      [class.window-banner-degraded]="windowDegraded()">
+      <mat-icon class="banner-icon">
+        {{ windowDegraded() ? 'cloud_off' : 'info_outline' }}
+      </mat-icon>
+      <div class="banner-text">
+        @if (windowDegraded()) {
+          <span class="banner-title">Last refresh failed — showing retained data</span>
+        } @else {
+          <span class="banner-title">Showing newest 100</span>
+        }
+        <span class="banner-body">
+          @if (windowDegraded()) {
+            The previously loaded jobs are still shown. Click Reload to try again.
+          } @else {
+            The list may continue or may be complete — refine filters to narrow.
+          }
+        </span>
+      </div>
+      <button
+        mat-stroked-button
+        color="primary"
+        class="banner-reload-btn"
+        (click)="onReloadBanner()"
+        [attr.aria-label]="reloadAccessibleLabel">
+        <mat-icon>refresh</mat-icon>
+        Reload
+      </button>
+    </div>
+  }
+
   <!-- Main Content with Queue Sidebar and Drawer -->
   <div class="jobs-main-layout">
     <!-- Queue Sidebar — only active in the 'queues' view. -->
@@ -200,8 +245,10 @@
       <!-- Job List Content -->
       <mat-drawer-content class="jobs-content">
 
-        <!-- Loading State -->
-        @if ((loading() || workLoading()) && jobs().length === 0 && works().length === 0) {
+        <!-- Phase 2 — loading skeleton fires ONLY for the first
+             fetch (no data to retain). Background refreshes keep
+             the last good list and never flash a skeleton. -->
+        @if (showLoadingSkeleton()) {
           <div class="loading-container">
             @for (i of [1, 2, 3]; track i) {
               <div class="skeleton-card">
@@ -219,79 +266,89 @@
           </div>
         }
 
-        <!-- Error State — only surface the legacy JobService error in
-             the queues view; in the all-work view we show the
-             WorkService error specifically. -->
-        @if (error() && !isAllWorkView()) {
-          <div class="error-container">
-            <mat-icon class="error-icon">error_outline</mat-icon>
-            <h3>Failed to load jobs</h3>
-            <p>{{ error() }}</p>
-            <button mat-stroked-button color="primary" (click)="onRefresh()">
-              <mat-icon>refresh</mat-icon>
-              Try Again
-            </button>
-          </div>
-        }
-
-        @if (workError() && isAllWorkView()) {
-          <div class="error-container">
-            <mat-icon class="error-icon">error_outline</mat-icon>
-            <h3>Failed to load work</h3>
-            <p>{{ workError() }}</p>
-            <button mat-stroked-button color="primary" (click)="onRefresh()">
-              <mat-icon>refresh</mat-icon>
-              Try Again
-            </button>
-          </div>
-        }
-
-        <!-- Empty State — queues view (legacy) -->
-        @if (isEmptyState() && !isAllWorkView()) {
+        <!-- Phase 2 — empty-state card (dataEmpty / filterEmpty /
+             errored). View-mode-aware copy comes from
+             ``jobs-empty-state.model``. Skeleton is mutually
+             exclusive — the classifier guarantees exactly one
+             branch fires. -->
+        @if (showEmptyState()) {
           <div class="empty-container">
-            <mat-icon class="empty-icon">inbox</mat-icon>
-            <h3>No jobs found</h3>
-            @if (hasActiveFilters()) {
-              <p>Try adjusting your filters or
-                <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
-              </p>
-            } @else {
-              <p>Get started by creating your first job</p>
-            }
-            <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
-              <mat-icon>add</mat-icon>
-              Create Job
-            </button>
-          </div>
-        }
-
-        <!-- Empty State — All Work view (Phase 4) -->
-        @if (isEmptyWorkState()) {
-          <div class="empty-container">
-            <mat-icon class="empty-icon">workspaces</mat-icon>
-            <h3>No work records yet</h3>
-            <p>No jobs, turns, or reports have been recorded for this project.</p>
-          </div>
-        }
-
-        <!-- Job List — feeds both views through ``displayedJobs``.
-             In the All Work view the same cards render but each
-             carries its ``kind`` chip. -->
-        @if (!loading() || jobs().length > 0 || works().length > 0) {
-          <div class="job-list">
-            @for (job of displayedJobs(); track job.job_id) {
-              <app-job-card
-                [job]="job"
-                [projectPaused]="getProjectPaused(job.project_id || '')"
-                [queueMap]="queueNameMap()"
-                (cancel)="onCancelJob(job)"
-                (retry)="onRetryJob(job)"
-                (delete)="onDeleteJob(job)"
-                (restore)="onRestoreJob(job)"
-                (viewDetails)="onViewJobDetails(job)">
-              </app-job-card>
+            <mat-icon class="empty-icon">{{ emptyStateCopy().icon }}</mat-icon>
+            <h3>{{ emptyStateCopy().title }}</h3>
+            <p>{{ emptyStateCopy().body }}</p>
+            @if (emptyStateKind() === 'errored') {
+              <button mat-flat-button color="primary" (click)="onRetryEmpty()">
+                <mat-icon>refresh</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
+            } @else if (emptyStateKind() === 'filterEmpty') {
+              <button mat-flat-button color="primary" (click)="onClearFiltersForEmpty()">
+                <mat-icon>filter_alt_off</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
+            } @else if (emptyStateCopy().ctaLabel) {
+              <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
+                <mat-icon>add</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
             }
           </div>
+        }
+
+        <!-- Phase 2 — render-guard truncation notice. Fires when
+             the all-work projection is at or above the hard cap
+             (MAX_RENDER_ROWS = 1000). The notice names the hidden
+             count and offers a "switch to Queues view" affordance
+             (Queues is the bounded window surface). -->
+        @if (truncationNotice(); as notice) {
+          <div class="render-guard-notice" role="status" aria-live="polite">
+            <mat-icon class="guard-icon">visibility_off</mat-icon>
+            <div class="guard-text">
+              <span class="guard-title">
+                {{ truncationHiddenCount() }} hidden rows
+              </span>
+              <span class="guard-body">{{ notice }}</span>
+            </div>
+            <button
+              mat-stroked-button
+              color="primary"
+              class="guard-switch-btn"
+              (click)="onSwitchToQueuesView()">
+              Switch to Queues view
+            </button>
+          </div>
+        }
+
+        <!-- Phase 2 — virtual-scroll list (BOTH view modes). The
+             scroll source is a flattened WindowItem[] (Phase 3
+             adds the ``header`` arm without re-plumbing).
+             ``track`` is keyed by ``job_id`` so the DOM-stable
+             identity survives virtual recycle. Expansion state is
+             keyed by ``job_id`` in the parent — see
+             ``isCardExpanded`` / ``onToggleExpansion``. -->
+        @if (!showLoadingSkeleton() && !showEmptyState()) {
+          <cdk-virtual-scroll-viewport
+            class="job-list"
+            [itemSize]="itemSize"
+            minBufferPx="288"
+            maxBufferPx="576">
+            <ng-container *cdkVirtualFor="let item of renderRows(); trackBy: trackByKey">
+              @if (item.kind === 'row') {
+                <app-job-card
+                  [job]="item.job"
+                  [projectPaused]="getProjectPaused(item.job.project_id || '')"
+                  [queueMap]="queueNameMap()"
+                  [expanded]="isCardExpanded(item)"
+                  (cancel)="onCancelJob(item.job)"
+                  (retry)="onRetryJob(item.job)"
+                  (delete)="onDeleteJob(item.job)"
+                  (restore)="onRestoreJob(item.job)"
+                  (viewDetails)="onViewJobDetails(item.job)"
+                  (expandToggle)="onToggleExpansion(item.job.job_id)">
+                </app-job-card>
+              }
+            </ng-container>
+          </cdk-virtual-scroll-viewport>
         }
 
       </mat-drawer-content>

@@ -1,4 +1,4 @@
-// JobsPageStore — jobs-page-improvement arc, Phase 1.
+// JobsPageStore — jobs-page-improvement arc, Phase 1 + Phase 2.
 //
 // THE single fetch + filter pipeline behind BOTH view modes of the
 // Jobs page. This replaces the pre-P1 dual path (component-local
@@ -14,6 +14,13 @@
 // initializers, which is safe outside an injection context for
 // ``signal``/``computed`` (no ``effect`` lives in the store — the
 // page keeps service-wiring effects).
+//
+// Phase 2 adds banner-relevant computeds (``windowRowCount``,
+// ``windowBanner``, ``degraded``, ``windowDegraded``, ``fetchInFlight``)
+// so the page can drive the honesty banner + the poll gate from the
+// store's source of truth WITHOUT re-deriving from ``filteredJobs``
+// in the template. The store stays a thin projection owner; the
+// banner POLICY lives in ``jobs-window.model.ts`` (pure).
 
 import { computed, signal } from '@angular/core';
 import { Observable } from 'rxjs';
@@ -27,6 +34,11 @@ import {
   toJobFilters,
   toWorkFilters,
 } from '../../models/jobs-filter-state.model';
+import {
+  DEFAULT_WINDOW_LIMIT,
+  WindowBannerState,
+  windowIsFull,
+} from './jobs-window.model';
 
 /**
  * The two fetch legs, injected so the store stays framework-free.
@@ -98,6 +110,67 @@ export class JobsPageStore {
         ? this.works().map(workToJob)
         : this.jobs();
     return applyJobsFilter(dataset, state);
+  });
+
+  // ── Phase 2: banner + poll-gate derived state ───────────────────────
+  //
+  // The window POLICY lives in ``jobs-window.model.ts`` (pure); the
+  // store only derives the data inputs the template + the poll-gate
+  // consume. Keeping the policy outside the store is the same split
+  // the deferred-block model uses — the model is spec-able in
+  // isolation, the store is the data source of truth.
+
+  /** Projected row count (post-filter). Drives the banner state. */
+  readonly windowRowCount = computed<number>(() => this.filteredJobs().length);
+
+  /**
+   * Banner state — at or above ``DEFAULT_WINDOW_LIMIT`` (100) the
+   * page MUST surface the honesty banner. The exactly-100 case is
+   * included (BOTH-WAYS copy pinned in the window model).
+   */
+  readonly windowBanner = computed<WindowBannerState>(() =>
+    windowIsFull(this.windowRowCount(), DEFAULT_WINDOW_LIMIT),
+  );
+
+  /**
+   * ``true`` iff EITHER leg's last fetch failed and the payload is
+   * retained but stale. Drives the degraded banner + the errored
+   * empty-state branch.
+   */
+  readonly degraded = computed<boolean>(
+    () => this.jobsDegraded() || this.worksDegraded(),
+  );
+
+  /**
+   * View-mode-aware degraded flag — the ACTIVE leg's degraded bit.
+   * The page uses this to gate the banner copy ("last refresh
+   * failed" wording), which is view-scoped (jobs leg vs work leg).
+   */
+  readonly windowDegraded = computed<boolean>(() => {
+    return this.filterState().view_mode === 'all-work'
+      ? this.worksDegraded()
+      : this.jobsDegraded();
+  });
+
+  /**
+   * ``true`` while the ACTIVE leg's fetch is in flight. Drives the
+   * poll gate (the ``fetchInFlight`` pause branch) so the spec can
+   * pin the gate WITHOUT a separate "is the store loading?"
+   * computation.
+   */
+  readonly fetchInFlight = computed<boolean>(() => {
+    return this.filterState().view_mode === 'all-work'
+      ? this.worksLoading()
+      : this.jobsLoading();
+  });
+
+  /**
+   * First non-null error across both legs — the legacy store
+   * exposes ``jobsError`` / ``worksError`` directly; this surfaces
+   * the unified error string the degraded banner consumes.
+   */
+  readonly error = computed<string | null>(() => {
+    return this.jobsError() ?? this.worksError() ?? null;
   });
 
   // ── Filter mutation ─────────────────────────────────────────────────

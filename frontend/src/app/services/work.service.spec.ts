@@ -319,9 +319,25 @@ describe('WorkService.getWork — real-construction mirror parity (P1)', () => {
     );
   });
 
-  it('the real getWork still toggles loading and degrades errors to of([]) (mirror contract unchanged)', () => {
+  it('the real getWork still toggles loading and PROPAGATES errors (Phase 2 retain-last-data fix)', () => {
+    // Phase 2 (jobs-page-improvement) — the pre-Phase-2 swallow
+    // ``return of([] as Work[])`` collapsed a failed poll into a
+    // healthy-looking empty list, which the store's ``.next`` arm
+    // treated as honest empty data and wiped the previous payload.
+    // The contract is now: ERRORS PROPAGATE via ``throwError``. The
+    // store's ``.error`` arm flips ``worksDegraded`` and retains the
+    // last good list (the same retain-last-data discipline the
+    // jobs leg already had). This pin is the source-text anchor
+    // for the Phase 2 fix; mirror-parity for the observable shape
+    // lives in the TestableWorkService above (the mirror keeps the
+    // pre-Phase-2 swallow so legacy direct subscribers that DO
+    // expect ``[]`` on failure keep working — the mirror's failure
+    // path is a test convenience only, the real service propagates).
     expect(realSource).toMatch(/this\.loading\.set\(true\)/);
     expect(realSource).toMatch(/catchError\(\(err\) => \{/);
-    expect(realSource).toMatch(/return of\(\[\] as Work\[\]\)/);
+    expect(realSource).toMatch(/return throwError\(\(\) => err\)/);
+    // Belt-and-braces: the swallow-to-empty is GONE from the real
+    // file.
+    expect(realSource).not.toMatch(/return of\(\[\] as Work\[\]\)/);
   });
 });

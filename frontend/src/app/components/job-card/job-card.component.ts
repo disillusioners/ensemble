@@ -1,4 +1,4 @@
-import { Component, input, output, computed, signal } from '@angular/core';
+import { Component, input, output, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -43,8 +43,23 @@ export class JobCardComponent {
   restore = output<void>();
   viewDetails = output<void>();
 
-  // Internal state
-  expanded = signal(false);
+  /**
+   * Phase 2 — external expansion state. Phase 2's `cdk-virtual-scroll`
+   * (jobs-page-improvement) recycles the card DOM when it scrolls
+   * off-screen — a DOM-local ``signal(false)`` would reset on every
+   * recycle, which is the bug the plan explicitly calls out. The
+   * parent (JobsComponent) holds a ``Set<job_id>`` keyed by job
+   * identity and binds the membership via this input. The card is
+   * read-only here; the parent updates the set on ``expandToggle``.
+   *
+   * Default ``false`` — without a binding the card collapses. Every
+   * consumer (today: only the Jobs page) MUST pass ``[expanded]``
+   * or no expansion state will survive a virtual recycle.
+   */
+  expanded = input<boolean>(false);
+
+  /** Phase 2 — emit on user toggle so the parent can flip the set. */
+  expandToggle = output<void>();
 
   // Computed values
   priorityColor = computed(() => getPriorityColor(this.job().priority));
@@ -237,8 +252,15 @@ export class JobCardComponent {
     this.viewDetails.emit();
   }
 
-  protected toggleExpanded(): void {
-    this.expanded.update(v => !v);
+  /**
+   * Phase 2 — the expand-toggle button emits ``expandToggle`` for the
+   * parent to handle. The parent (JobsComponent) flips the
+   * ``job_id`` membership in its ``expandedJobIds`` Set, then the
+   * card re-renders with the new ``expanded`` input. There is no
+   * DOM-local state here (see the input comment above).
+   */
+  protected onExpandToggle(): void {
+    this.expandToggle.emit();
   }
 
   protected getRelativeTime(date: Date): string {

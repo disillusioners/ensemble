@@ -71,10 +71,10 @@
 
     <p class="message-preview">{{ messagePreview() }}</p>
 
-    <button 
-      mat-button 
+    <button
+      mat-button
       class="expand-toggle"
-      (click)="toggleExpanded()">
+      (click)="onExpandToggle()">
       <mat-icon>{{ expanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
       {{ expanded() ? 'Hide Details' : 'Show Details' }}
     </button>
