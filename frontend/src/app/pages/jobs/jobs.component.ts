@@ -252,9 +252,30 @@ export class JobsComponent implements OnInit, OnDestroy {
     () => this.emptyStateKind() === 'loading',
   );
 
-  /** Empty-state card fires when the projection is empty. */
+  /**
+   * Empty-state card fires when the projection is empty.
+   *
+   * P2 fix (jobs-page-improvement) — hasRows short-circuit. Without
+   * this gate, a steady-state page with rows renders the empty card
+   * AND the virtual list's `!showEmptyState()` branch hides the list
+   * — the page is broken on every settled fetch and every background
+   * refresh of a non-empty dataset. The classifier defensively
+   * returns ``dataEmpty`` whenever ``hasRows=true && !degraded`` (see
+   * ``jobs-empty-state.model.ts``); the COMPONENT must override that
+   * to keep the list visible. ``errored`` is the only exception — the
+   * banner card must stay visible even with retained rows so the
+   * user can retry.
+   *
+   * Invariant: **rows present → list visible; empty card ONLY when
+   * NO rows** (filterEmpty / dataEmpty / errored-with-no-rows).
+   */
   readonly showEmptyState = computed<boolean>(() => {
     const kind = this.emptyStateKind();
+    // hasRows short-circuit — the only safe way to keep the virtual
+    // list visible while a non-empty dataset is in flight.
+    if (this.store.filteredJobs().length > 0) {
+      return kind === 'errored';
+    }
     return (
       kind === 'dataEmpty' ||
       kind === 'filterEmpty' ||

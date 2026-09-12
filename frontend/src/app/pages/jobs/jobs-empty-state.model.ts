@@ -83,9 +83,12 @@ export function classifyJobsEmptyState(
     return 'errored';
   }
   if (inputs.hasRows) {
-    // hasRows but classified as "empty" is impossible — the caller
-    // branches away from the empty tree entirely. Defensive return
-    // for type-completeness; not a real branch.
+    // hasRows + non-degraded is the COMPONENT's responsibility — the
+    // COMPONENT now short-circuits ``showEmptyState`` on rows so the
+    // virtual list stays visible (P2 fix). The classifier STILL
+    // returns ``dataEmpty`` here as a defensive type-completeness
+    // arm; the template never renders it (empty card → list hidden;
+    // with rows present the list must stay visible).
     return 'dataEmpty';
   }
   // No rows to show. Distinguish "first fetch in flight" from
@@ -165,7 +168,7 @@ export const JOBS_EMPTY_STATE_COPY: {
   },
   errored: {
     title: 'Last refresh failed',
-    body: 'Showing the previously loaded jobs — click Retry to try again',
+    body: 'Last refresh failed — click Retry to try again',
     ctaLabel: 'Retry',
     icon: 'cloud_off',
   },

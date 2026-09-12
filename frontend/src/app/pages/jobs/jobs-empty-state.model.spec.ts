@@ -72,10 +72,12 @@ describe('jobs-empty-state — classifyJobsEmptyState (state table)', () => {
     ).toBe('filterEmpty');
   });
 
-  it('background refresh never flashes the skeleton (hasRows TRUE → not in the empty tree)', () => {
-    // The component branches AWAY from the empty tree entirely
-    // when hasRows is true; the classifier still returns dataEmpty
-    // (defensive), but the template does not render it.
+  it('background refresh never flashes the skeleton (hasRows TRUE → list stays visible)', () => {
+    // The COMPONENT (jobs.component.ts ``showEmptyState``) now
+    // short-circuits on ``hasRows`` so the virtual list stays
+    // visible. The classifier still returns ``dataEmpty`` here as a
+    // defensive type-completeness arm — the production template
+    // branches away via the component-level gate.
     expect(
       classifyJobsEmptyState(
         inputs({ loading: true, hasRows: true, hasActiveFilters: false }),
@@ -124,10 +126,14 @@ describe('jobs-empty-state — copy variants (F-5 anchor)', () => {
     expect(c.body).toMatch(/filter/i);
   });
 
-  it('errored copy: never claims zero data — explicit "previously loaded" framing', () => {
+  it('errored copy: never claims previously-loaded data — the refresh may have been the FIRST fetch', () => {
     const c = JOBS_EMPTY_STATE_COPY.errored;
     expect(c.title).toBe('Last refresh failed');
-    expect(c.body).toContain('previously loaded');
+    // P2 fix — the previous body claimed "Showing the previously
+    // loaded jobs", but errored also fires when hasRows=false (the
+    // first fetch failed). Drop the previously-loaded claim.
+    expect(c.body).not.toMatch(/previously/i);
+    expect(c.body).toMatch(/Retry/i);
     expect(c.ctaLabel).toBe('Retry');
     expect(c.icon).toBe('cloud_off');
   });

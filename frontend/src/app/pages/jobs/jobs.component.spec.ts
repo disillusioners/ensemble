@@ -6,6 +6,15 @@ import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
 import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
+import {
+  JobsEmptyStateKind,
+  classifyJobsEmptyState,
+} from './jobs-empty-state.model';
+import {
+  JobsFilterState,
+  hasActiveJobsFilter,
+  normalizeJobsFilterState,
+} from '../../models/jobs-filter-state.model';
 
 // Storage key matching the component
 const STORAGE_KEY = 'job-page-selected-project';
@@ -183,6 +192,47 @@ class MockJobsComponent {
 
   // System cleanup signal
   readonly cleanupInProgress = signal(false);
+
+  // ── P2 mirror (jobs-page-improvement) — empty-state classifier ────────
+  // Mirror of the production ``JobsComponent.emptyStateKind`` and
+  // ``JobsComponent.showEmptyState`` computeds. The mirror MUST
+  // faithfully copy the FIXED computed (the F-5 source-pin in
+  // jobs-page.bindings.pins.spec.ts proves the production text
+  // carries the hasRows gate; this mirror makes the BUG testable
+  // as a behavior pin — if the production gate is reverted, the
+  // mirror breaks on the steady-state assertion below).
+  readonly viewMode = signal<'queues' | 'all-work'>('queues');
+  readonly fetchInFlight = signal<boolean>(false);
+  readonly windowDegraded = signal<boolean>(false);
+
+  readonly emptyStateKind = computed<JobsEmptyStateKind>(() =>
+    classifyJobsEmptyState({
+      loading: this.fetchInFlight(),
+      degraded: this.windowDegraded(),
+      hasRows: this.jobs().length > 0,
+      hasActiveFilters: hasActiveJobsFilter(
+        normalizeJobsFilterState(this.filters()) as JobsFilterState,
+      ),
+      viewMode: this.viewMode(),
+    }),
+  );
+
+  readonly showEmptyState = computed<boolean>(() => {
+    // P2 fix mirror — hasRows short-circuit. DO NOT remove: this
+    // mirror reproduces the production gate so the steady-state
+    // behavior pin below proves the fix survives in code, not
+    // just in source text. See F-5 source-pin in
+    // jobs-page.bindings.pins.spec.ts.
+    const kind = this.emptyStateKind();
+    if (this.jobs().length > 0) {
+      return kind === 'errored';
+    }
+    return (
+      kind === 'dataEmpty' ||
+      kind === 'filterEmpty' ||
+      kind === 'errored'
+    );
+  });
   
   // SSE connection status
   readonly isConnected = mockJobSseService.isConnected;
@@ -1661,6 +1711,79 @@ describe('JobsComponent Logic', () => {
         expect(cleanupService.cleanupAllJobs).not.toHaveBeenCalled();
         expect(mockSnackBar.openCalls).toHaveLength(0);
       });
+    });
+  });
+
+  // ── P2 FIX (jobs-page-improvement) — empty-state hasRows gate ────────
+  // Behavior pins for the FIXED ``showEmptyState`` computed. The
+  // mirror above (``MockJobsComponent.showEmptyState``) faithfully
+  // copies the production logic; the F-5 source-pin in
+  // jobs-page.bindings.pins.spec.ts proves the production text
+  // carries the hasRows gate. Together: if the gate is reverted,
+  // EITHER the source-pin fails OR these behavior pins fail — the
+  // bug class is double-pinned.
+  describe('showEmptyState hasRows short-circuit (P2 fix)', () => {
+    beforeEach(() => {
+      // Steady state baseline: 5 rows, not loading, not degraded,
+      // no filters active. Pre-fix this returned TRUE (empty card
+      // rendered, virtual list hidden).
+      component.jobs.set(createMockJobList(5));
+      component.fetchInFlight.set(false);
+      component.windowDegraded.set(false);
+    });
+
+    it('steady state (hasRows=true, degraded=false, not loading) → showEmptyState FALSE', () => {
+      // The bug: pre-fix the classifier returned 'dataEmpty' for
+      // hasRows=true (defensive branch in the model), showEmptyState
+      // matched 'dataEmpty' in the list, and the empty card
+      // rendered — hiding the virtual list. Post-fix the hasRows
+      // gate returns FALSE so the list stays visible.
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(false);
+    });
+
+    it('background refresh (loading=true, hasRows=true) → no skeleton flash, no empty card', () => {
+      // The skeleton ONLY fires for the first fetch (no data to
+      // retain); showEmptyState must stay FALSE so the list is
+      // visible. The classifier returns 'dataEmpty' defensively;
+      // the COMPONENT overrides via the hasRows gate.
+      component.fetchInFlight.set(true);
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(false);
+    });
+
+    it('errored WITH rows → showEmptyState TRUE (banner card with retry, list hidden)', () => {
+      // The ONLY legitimate showEmptyState===true path with rows
+      // retained: errored. The user MUST be able to click Retry;
+      // the banner card is the affordance.
+      component.windowDegraded.set(true);
+      expect(component.emptyStateKind()).toBe('errored');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('dataEmpty (no rows, not loading, no filters) → showEmptyState TRUE', () => {
+      component.jobs.set([]);
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('filterEmpty (no rows, hasActiveFilters) → showEmptyState TRUE', () => {
+      component.jobs.set([]);
+      // Cast to JobsFilterState — the mock's ``filters`` signal has
+      // a partial shape (singular status); passing the proper array
+      // shape exercises the classifier's ``hasActiveFilters`` branch.
+      component.filters.set({ status: ['failed'] } as unknown as JobsFilterState);
+      expect(component.emptyStateKind()).toBe('filterEmpty');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('loading skeleton (no rows, loading=true, no filters) → showEmptyState FALSE', () => {
+      // The skeleton branch — empty card MUST NOT render; the
+      // skeleton IS the affordance.
+      component.jobs.set([]);
+      component.fetchInFlight.set(true);
+      expect(component.emptyStateKind()).toBe('loading');
+      expect(component.showEmptyState()).toBe(false);
     });
   });
 

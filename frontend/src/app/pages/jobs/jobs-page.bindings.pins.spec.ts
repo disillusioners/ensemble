@@ -363,7 +363,24 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(JobCreateDialogComponent/);
     expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(SystemCleanupConfirmDialogComponent/);
     expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open<ConfirmDialogComponent/);
-    expect(componentSrc).toMatch(/this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)/);
+    // P2 fix (jobs-page-improvement) — the previous single pin
+    // ``modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)`` only
+    // matched the JobCreateDialog close site (the two
+    // ConfirmDialog branches use ``if (!confirmed)``). Split into
+    // three expects, one per dialog site, anchored to the dialog's
+    // OWN open call so each close is provably bound to its dialog.
+    // 1500-char windows are safe: each dialog's close sits within
+    // ~1100 chars of its open call (well below 1500), so the
+    // anchors can't span across dialog sites.
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open\(JobCreateDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)/,
+    );
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open<ConfirmDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(!confirmed\)/,
+    );
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open\(SystemCleanupConfirmDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(!confirmed\)/,
+    );
   });
 
   it('empty-state classifier is wired (loading/dataEmpty/filterEmpty/errored)', () => {
@@ -374,6 +391,31 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
     expect(templateSrc).toMatch(/@if \(showLoadingSkeleton\(\)\)/);
     expect(templateSrc).toMatch(/@if \(showEmptyState\(\)\)/);
     expect(templateSrc).toMatch(/\{\{ emptyStateCopy\(\)\.title \}\}/);
+  });
+
+  it('showEmptyState has the hasRows short-circuit (P2 fix — list visible with rows)', () => {
+    // P2 fix (jobs-page-improvement) — the COMPONENT must override
+    // the classifier's defensive ``dataEmpty`` return for
+    // hasRows=true so the virtual list stays visible. Without this
+    // gate, a steady-state page with rows renders the empty card
+    // AND the virtual list's ``!showEmptyState()`` branch hides the
+    // list. The pin anchors on the REAL production text — it MUST
+    // fail if the hasRows check is reverted (the pre-fix pin only
+    // asserted ``showEmptyState = computed`` existed, which passed
+    // green against the buggy source).
+    const showEmptyStateBlock = componentSrc.match(
+      /readonly showEmptyState = computed<boolean>\(\(\) => \{[\s\S]{0,800}?\}\)/,
+    );
+    expect(showEmptyStateBlock).not.toBeNull();
+    expect(showEmptyStateBlock![0]).toMatch(
+      /this\.store\.filteredJobs\(\)\.length > 0/,
+    );
+    // The errored-with-rows branch is the only legitimate
+    // ``showEmptyState === true`` path with rows retained (the user
+    // must be able to retry).
+    expect(showEmptyStateBlock![0]).toMatch(
+      /if \([\s\S]{0,200}?\.length > 0\) \{[\s\S]{0,200}?return kind === 'errored'/,
+    );
   });
 
   it('WorkService retain-last-data fix is live (errors propagate, no swallow-to-empty)', () => {
