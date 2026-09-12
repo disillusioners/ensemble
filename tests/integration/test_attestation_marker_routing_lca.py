@@ -763,6 +763,271 @@ def test_scenario_d3_wrapper_fault_routes_conservatively(monkeypatch, caplog):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Config-less manager regression (2026-09-12, demo-testcase findings) —
+# ``daemon/graph.py`` resolved the judge fallback config with
+# ``from ..config import load_config`` (two dots → ImportError:
+# attempted relative import beyond top-level package) at BOTH judge
+# seams. Masked in production (InstanceManager.__init__ always sets
+# ``manager.config``) and in test embeddings (MagicMock auto-attrs
+# ``.config``): with a manager that genuinely lacks ``.config`` the
+# ImportError was swallowed by the wrapper-fault ``except`` and the
+# judge SILENTLY degraded to the fail-safe route (d). These scenarios
+# pin: (1) the fallback path is HEALTHY (judge runs with the real
+# loaded Config), and (2) the fail-safe route (d) contract still
+# holds — observably — for a GENUINE config-load failure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ConfigLessManagerStub:
+    """Manager handle that deliberately LACKS ``.config``.
+
+    A bare ``MagicMock()`` auto-creates ``.config``, which is exactly
+    why the ``from ..config`` typo was invisible to the existing
+    embeddings — ``getattr(manager, "config", None)`` returned a child
+    mock and the buggy else-branch never ran. This stub exposes only
+    the R2-count + dispatch facade used by the gate, so
+    ``getattr(manager, "config", None)`` returns ``None`` and the
+    fallback ``load_config()`` else-branch is genuinely exercised.
+    """
+
+    def __init__(self) -> None:
+        self.count_pending_children = MagicMock(return_value=0)
+        self.get_queued_or_expected_wakeups = MagicMock(return_value=0)
+        self.count_live_descendants = MagicMock(return_value=0)
+        self.enqueue_message = MagicMock()
+        self.revive = MagicMock()
+        self.send_message = MagicMock()
+
+
+def test_configless_manager_marker_judge_fallback_config_is_healthy(
+    monkeypatch, caplog
+):
+    """Config-less manager → fallback ``load_config()`` runs the judge.
+
+    Regression for the ``from ..config import load_config`` typo at
+    the marker-path judge seam: pre-fix, a manager without ``.config``
+    raised ImportError INSIDE the wrapper ``try``, the broad ``except``
+    swallowed it, and the judge was silently SKIPPED via the fail-safe
+    route (d) log row (``event=leader_completion_gate_marker_judge_
+    error ... decision=fail_safe_marker_d``). Post-fix, the fallback
+    must reach ``daemon.config.load_config`` and the judge must RUN
+    with the real loaded :class:`~daemon.config.Config` — the routing
+    is then judge-driven (marker-path a), NOT the fail-safe (d).
+    Asserts the ROUTE in the log row, not just the outcome.
+    """
+    seen_configs: list = []
+
+    async def _recording_judge_no(config, user_payload, *, timeout_s):
+        seen_configs.append(config)
+        return (
+            '{"is_complete_report": false, "reason": "mid-work"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _recording_judge_no)
+
+    node, _manager, ledger = _make_node(
+        instance_id="lca-cfgless-a-it", manager=_ConfigLessManagerStub()
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        # Completing without an exception IS the (i) NO-raise assertion.
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Awaiting your reply. Ending turn, "
+                    "will continue after your reply."
+                ),
+                config={"configurable": {"thread_id": "lca-cfgless-a-it"}},
+            )
+        )
+
+    from daemon.config import Config as _Config
+
+    # The fallback config path reached the judge with a REAL Config.
+    assert len(seen_configs) == 1, (
+        "config-less manager: judge MUST run exactly once via the "
+        "fallback load_config() (pre-fix the ImportError skipped it)"
+    )
+    assert isinstance(seen_configs[0], _Config), (
+        "config-less manager: the judge config MUST be the real "
+        "load_config() product, not a mock stand-in"
+    )
+    # Judge-driven outcome (a): judge-no + nothing pending → DENY +
+    # nudge + counter — same outcome shape, but reached via the judge.
+    assert "messages" in result
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+    # ROUTE assertion — the silent-degradation markers must be GONE.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_marker_judge_error" not in log_text, (
+        "config-less manager: the ImportError fail-safe log row MUST be "
+        "gone — its presence means the judge was silently skipped (the "
+        "pre-fix defect this test exists to catch)"
+    )
+    assert "marker-path d" not in log_text, (
+        "config-less manager: routing MUST NOT degrade to fail-safe (d)"
+    )
+    assert "marker-path a" in log_text, (
+        "config-less manager: routing MUST be the judge-driven route (a)"
+    )
+    assert "event=leader_completion_gate_marker_judge " in log_text, (
+        "config-less manager: the canonical judge log row must be present"
+    )
+
+
+def test_configless_manager_config_load_failure_still_failsafe_route_d(
+    monkeypatch, caplog
+):
+    """GENUINE config-load failure → observable fail-safe route (d).
+
+    Pins the documented fail-safe contract that the typo used to feed
+    accidentally: when the fallback ``load_config()`` itself fails,
+    the gate must (i) NOT raise, (ii) degrade to the conservative
+    fail-safe ROUTE (d), (iii) SKIP the judge, and (iv) carry the
+    route in the LOG ROW (``decision=fail_safe_marker_d`` +
+    ``marker-path d``) — assert the route, not just the outcome.
+    Nothing-pending → the (d) arm converts ALLOW to DENY via the
+    existing nudge machinery + counter.
+    """
+    seen_configs: list = []
+
+    async def _recording_judge_no(config, user_payload, *, timeout_s):
+        seen_configs.append(config)
+        return (
+            '{"is_complete_report": false, "reason": "mid-work"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _recording_judge_no)
+
+    import daemon.config as config_mod
+
+    def _boom():
+        raise RuntimeError("simulated config source unavailable")
+
+    monkeypatch.setattr(config_mod, "load_config", _boom)
+
+    node, _manager, ledger = _make_node(
+        instance_id="lca-cfgless-d-it", manager=_ConfigLessManagerStub()
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        # (i) NO raise — asyncio.run completing is the assertion.
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Awaiting your reply. Ending turn, "
+                    "will continue after your reply."
+                ),
+                config={"configurable": {"thread_id": "lca-cfgless-d-it"}},
+            )
+        )
+
+    # (iii) judge SKIPPED.
+    assert seen_configs == [], (
+        "genuine config-load failure: judge MUST be skipped (fail-safe)"
+    )
+    # (ii) conservative outcome — nothing pending → DENY + nudge + counter.
+    assert "messages" in result, (
+        "(d)-nothing-pending MUST convert ALLOW to DENY via the nudge"
+    )
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+    # (iv) ROUTE in the LOG ROW.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_marker_judge_error" in log_text, (
+        "the fail-safe degradation MUST emit its dedicated log row"
+    )
+    assert "decision=fail_safe_marker_d" in log_text, (
+        "the log row MUST carry the route marker (fail_safe_marker_d), "
+        "not just the outcome"
+    )
+    assert "marker-path d" in log_text, (
+        "routing MUST show the conservative fail-safe route (d)"
+    )
+    assert "event=leader_completion_gate_marker_judge " not in log_text, (
+        "no canonical judge row — the judge never ran"
+    )
+
+
+def test_configless_manager_would_be_deny_judge_fallback_config_is_healthy(
+    monkeypatch, caplog
+):
+    """Second typo seam (would-be-deny judge) — fallback config healthy.
+
+    The same ``from ..config`` typo existed at the WOULD-BE-DENY judge
+    seam: with a config-less manager, a natural DENIED decision never
+    reached the judge (silent ``event=leader_completion_gate_judge_
+    error ... decision=fail_safe_deny``), so a legitimate completion
+    report in the tail could never flip the deny to an allow. Post-fix
+    the judge must run with the real loaded Config and a judge-yes
+    verdict MUST override the deny WITHOUT a counter increment.
+    """
+    seen_configs: list = []
+
+    async def _recording_judge_yes(config, user_payload, *, timeout_s):
+        seen_configs.append(config)
+        return (
+            '{"is_complete_report": true, "reason": "genuine report"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _recording_judge_yes)
+
+    node, _manager, ledger = _make_node(
+        instance_id="lca-cfgless-deny-it", manager=_ConfigLessManagerStub()
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        # NO raise — asyncio.run completing is the assertion. Delegated
+        # mission without attestation → natural DENIED → would-be-deny
+        # judge seam.
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting child. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "lca-cfgless-deny-it"}},
+            )
+        )
+
+    from daemon.config import Config as _Config
+
+    # The fallback config path reached the judge with a REAL Config.
+    assert len(seen_configs) == 1, (
+        "would-be-deny seam: judge MUST run exactly once via the "
+        "fallback load_config() (pre-fix the ImportError skipped it)"
+    )
+    assert isinstance(seen_configs[0], _Config), (
+        "would-be-deny seam: the judge config MUST be the real "
+        "load_config() product"
+    )
+    # Judge-yes overrides the deny: ALLOW, NO counter increment.
+    assert result["attestation_route"] is None, (
+        "judge-yes MUST allow END without attestation (deny override)"
+    )
+    ledger.increment.assert_not_called()
+    assert "messages" not in result or not any(
+        "Completion Check Nudge" in str(m.content)
+        for m in result.get("messages", [])
+    ), "judge-yes override MUST NOT inject a nudge"
+    # The silent-degradation row must be GONE; the canonical row present.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate_judge_error" not in log_text, (
+        "would-be-deny seam: the ImportError fail-safe log row MUST be "
+        "gone — its presence means the judge was silently skipped"
+    )
+    assert "event=leader_completion_gate_judge " in log_text, (
+        "would-be-deny seam: the canonical judge log row must be present"
+    )
+    assert "verdict=yes" in log_text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Scenario (e) — kill-switch OFF → no judge call, marker_judge_verdict=<skipped>
 # ─────────────────────────────────────────────────────────────────────────────
 
