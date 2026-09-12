@@ -2834,7 +2834,8 @@ def create_should_continue(language_check_enabled: bool):
 ATTESTATION_NUDGE_TEXT = (
     "[SYSTEM CONTEXT: Completion Check Nudge]\n\n"
     "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue.\n\n"
+    "(tasks/children status) and continue (send_message to "
+    "children/revive as needed).\n\n"
     "This gate is CONDITIONAL on delegation: it fires ONLY when a "
     "child was dispatched (a send_message tool call happened) since "
     "the last real user message. Plain questions, chart requests, "
@@ -2889,7 +2890,9 @@ COMPLETION_CHECK_NOTE_TEXT = (
     "real pending work is still outstanding (children, wakeups, or "
     "live descendants remained). The gate allowed the turn to end so "
     "the wake-up you expected can still arrive, but please confirm on "
-    "your next turn that the wake-up actually comes — if the pending "
+    "your next turn that the wake-up actually comes (check your "
+    "children's status and continue or revive their work via "
+    "send_message if needed) — if the pending "
     "work was orphaned or already idle, clean it up or call "
     "attest_completion once the work is truly done. Reminder: when "
     "you do finish, FIRST deliver your full detailed final report as "
@@ -3426,7 +3429,7 @@ def create_attestation_gate_node(
                     if manager_config is not None:
                         marker_judge_config = manager_config
                     else:
-                        from ..config import load_config
+                        from .config import load_config
                         marker_judge_config = load_config()
                     try:
                         marker_judge_resolved_model = resolve_judge_model(
@@ -3700,7 +3703,7 @@ def create_attestation_gate_node(
                     if manager_config is not None:
                         judge_config = manager_config
                     else:
-                        from ..config import load_config
+                        from .config import load_config
                         judge_config = load_config()
                     # Best-effort — only stamp the resolved model when
                     # ``resolve_judge_model`` actually succeeds; on a

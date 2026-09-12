@@ -260,7 +260,8 @@ def test_attested_allow_only_resets_and_dry_skip_writes_are_not_denial_delivery(
 EXPECTED_NUDGE_TEXT_CANONICAL = (
     "[SYSTEM CONTEXT: Completion Check Nudge]\n\n"
     "The work is not yet finished — check current progress "
-    "(tasks/children status) and continue.\n\n"
+    "(tasks/children status) and continue (send_message to "
+    "children/revive as needed).\n\n"
     "This gate is CONDITIONAL on delegation: it fires ONLY when a "
     "child was dispatched (a send_message tool call happened) since "
     "the last real user message. Plain questions, chart requests, "
