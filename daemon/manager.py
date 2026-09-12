@@ -2988,7 +2988,11 @@ class InstanceManager:
         return streak
 
     def get_empty_response_streak(self, instance_id: str) -> int:
-        """Return the current consecutive-empty streak (0 if unset)."""
+        """Return the current consecutive-empty streak (0 if unset).
+
+        Currently consumed by tests only; Phase-2 observability will
+        read this.
+        """
         return self._empty_response_streaks.get(instance_id, 0)
 
     def reset_empty_response_streak(self, instance_id: str) -> None:

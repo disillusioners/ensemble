@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ def is_empty_llm_content(content: Any) -> bool:
     return False
 
 
-def _assistant_spoke(message: Any) -> bool:
+def _assistant_spoke(message: BaseMessage) -> bool:
     """Turn-window spoke test: did this assistant message carry output?
 
     ``coding``-variant spoke rule (doc §8.1): an AIMessage counts as
@@ -152,16 +152,20 @@ def _assistant_spoke(message: Any) -> bool:
     return not is_empty_llm_content(getattr(message, "content", None))
 
 
-def _is_nudge_human(message: Any) -> bool:
+def _is_nudge_human(message: BaseMessage) -> bool:
     """Identify the empty-response nudge HumanMessage in history.
 
     Matches the dedicated ``empty_response_nudge`` marker stamped by
     ``nudge_node`` (graph.py) first; falls back to the exact
     :data:`NUDGE_MESSAGE` text CONJUNCT with ``injected_message=True``
-    so checkpoints written BEFORE the marker existed (restart-pending
-    activation window — ``nudge_node`` always stamped
-    ``injected_message``) are still recognized, while a user literally
-    typing the nudge sentence (bare kwargs) can never be
+    so checkpoints written BEFORE the marker existed are still
+    recognized. True boundary: the nudge's ``injected_message`` stamp
+    exists only since e321bdb3 (2026-09-07); the kwargs-less era spans
+    7d2cd0d2 (2026-04-08) → e321bdb3 (2026-09-07). The behavioral
+    consequence is bounded — done-speaking windows in that era hit
+    silent END, and only an empty-FIRST-response on a pre-09-07
+    revived checkpoint could spuriously transient-raise. A user
+    literally typing the nudge sentence (bare kwargs) can never be
     nudge-classified (W3 hardening, 2026-09-12 review).
     """
     if getattr(message, "type", None) != "human":
@@ -177,7 +181,7 @@ def _is_nudge_human(message: Any) -> bool:
     )
 
 
-def _is_server_injected_human(message: Any) -> bool:
+def _is_server_injected_human(message: BaseMessage) -> bool:
     """Identify server-authored HumanMessages that are NOT user boundaries.
 
     Context blocks ([SYSTEM CONTEXT: ...], ``context_kind`` stamped),
@@ -415,9 +419,9 @@ def validate_llm_response(
        legacy pass-through when disabled.
 
     Note (updated by empty-response-guard): the blanket "empty content is
-    intentionally NOT validated" rule below was the one hole in the
-    protection lattice — a provider returning continuous empty AI
-    messages completed turns as silent empty "successes". Empty content
+    intentionally NOT validated" rule this guard replaces was the one
+    hole in the protection lattice — a provider returning continuous
+    empty AI messages completed turns as silent empty "successes". Empty content
     is still valid when the assistant already spoke this turn, or after
     a tool result (nudge rung); it is a DEFECT when it is the turn's
     entire visible output, and Check 3 raises for exactly that class.

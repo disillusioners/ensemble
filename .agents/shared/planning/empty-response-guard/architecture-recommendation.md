@@ -33,7 +33,7 @@ The protection lattice (22 mechanisms catalogued in `docs/hallucination-protecti
 
 | Surface | Wrap site (verified) | Post-exhaustion behavior (existing) |
 |---|---|---|
-| Compaction (×2 call sites) | `daemon/compaction.py:3383`, `:3395` | except-handler → truncation fallback (:3378-3380) |
+| Compaction (×2 call sites) | `daemon/compaction.py:3383`, `:3395` | except-handler → truncation fallback daemon/compaction.py:2644-2659 (call site `:2650`; `_truncate_fallback` def `:3686`) |
 | Title generation | `daemon/services/title_generation.py:114` | skips store |
 | Keyword extraction | `daemon/services/keyword_extraction.py:387` | heuristic fallback |
 | Child-report summarization (×2) | `daemon/services/child_reports.py:803`, `:1485` | existing except-path |
@@ -130,7 +130,7 @@ Union of both councilors' code traces; each row is how the **recommended Option 
 | L8 | Watchover terminate/denial | fail-closed :6156-6158, :6592-6598 | Outside classifier path; own deny semantics |
 | L9 | Language-check empty passthrough | graph.py:2648-2798 | Runs post-router; already handles empty |
 | L10 | Completion-gate warn-and-proceed | child_reports.py:1811-1815 | ⚠ Open Question 1 — vestigial vs intentional |
-| L11 | Compaction truncation fallback | compaction.py:3378-3380 | Preserved via retries→except-handler; `COMPACTION_SKIP` knob as belt-and-braces |
+| L11 | Compaction truncation fallback | daemon/compaction.py:2644-2659 (call site `:2650`; `_truncate_fallback` def `:3686`) | Preserved via retries→except-handler; `COMPACTION_SKIP` knob as belt-and-braces |
 | L12 | Report-excluded / text-only agents | child_reports.py:1314, :1647-1670 | Empty finals become retries/errors — **improvement**, not regression (an empty report is a defect today) |
 | L13 | Multimodal list-block | graph.py:2566-2568 | Shared predicate pins it (§11b) — kill-switch-gated behavior change |
 

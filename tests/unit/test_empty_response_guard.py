@@ -26,7 +26,7 @@ import pathlib
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from tenacity import Retrying, stop_after_attempt
 
 import daemon.graph as graph_module
@@ -44,25 +44,18 @@ from daemon.llm_error_classifier import (
 )
 from daemon.response_validation import (
     EmptyLLMResponseError,
-    _reset_empty_guard_config_for_tests,
     install_empty_guard_config,
 )
-
-
-@pytest.fixture(autouse=True)
-def _restore_empty_guard_defaults():
-    _reset_empty_guard_config_for_tests()
-    yield
-    _reset_empty_guard_config_for_tests()
+from tests.unit.empty_guard_test_helpers import (
+    _real_human,
+    _restore_empty_guard_defaults,  # noqa: F401  (pytest fixture, import-collected)
+    _tool_result,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _real_human(text="Do the thing"):
-    return HumanMessage(content=text)
 
 
 def _reasoning_only():
@@ -84,45 +77,78 @@ def _tool_calling_ai():
     )
 
 
-def _tool_result():
-    return ToolMessage(content="tool output", tool_call_id="call_1")
-
-
 # ---------------------------------------------------------------------------
 # S5 caps — router rows 2-3 (derived trailing-degenerate count)
 # ---------------------------------------------------------------------------
 
 
+def _simulate_storm(make_degenerate, turns=8):
+    """Drive should_continue over an accumulating degenerate tail.
+
+    Mirrors the real graph cycle: the LLM keeps returning degenerate
+    AIMessages; each ``"agent"`` route appends one (one LLM call) and
+    re-routes. Returns (routes, llm_calls).
+    """
+    messages = [_real_human(), make_degenerate()]
+    routes = []
+    llm_calls = 1
+    for _ in range(turns):
+        route = should_continue({"messages": messages})
+        routes.append(route)
+        if route != "agent":
+            break
+        messages.append(make_degenerate())
+        llm_calls += 1
+    return routes, llm_calls
+
+
+def _simulate_with_tool_storm(make_degenerate, turns=12):
+    """Drive should_continue through the WITH-TOOL degenerate shape.
+
+    Mirrors the real graph cycle after a tool result: degenerate
+    responses route ``"agent"`` until the cap; the cap fall-through
+    routes ``"nudge"`` (the row-5 recovery rung — nudge_node
+    injects the nudge HumanMessage and the graph re-invokes the
+    LLM); the post-nudge degenerate cycle re-fills the cap and then
+    ends at END because the injected nudge HumanMessage breaks
+    ``_has_recent_tool_result``. Returns ``(routes, llm_calls)``.
+    """
+    messages = [
+        _real_human(),
+        _tool_calling_ai(),
+        _tool_result(),
+        make_degenerate(),
+    ]
+    routes = []
+    llm_calls = 1
+    for _ in range(turns):
+        route = should_continue({"messages": messages})
+        routes.append(route)
+        if route == "agent":
+            messages.append(make_degenerate())
+            llm_calls += 1
+        elif route == "nudge":
+            # nudge_node injects the HumanMessage, then the graph
+            # re-invokes the LLM (one more call) before re-routing.
+            messages.append(HumanMessage(content=NUDGE_MESSAGE))
+            messages.append(make_degenerate())
+            llm_calls += 1
+        else:  # END
+            break
+    return routes, llm_calls
+
+
 class TestDegenerateReinvokeCap:
     """Cap on the unbounded reasoning-only / think-only re-invoke loops."""
 
-    def _simulate_storm(self, make_degenerate, turns=8):
-        """Drive should_continue over an accumulating degenerate tail.
-
-        Mirrors the real graph cycle: the LLM keeps returning degenerate
-        AIMessages; each ``"agent"`` route appends one (one LLM call) and
-        re-routes. Returns (routes, llm_calls).
-        """
-        messages = [_real_human(), make_degenerate()]
-        routes = []
-        llm_calls = 1
-        for _ in range(turns):
-            route = should_continue({"messages": messages})
-            routes.append(route)
-            if route != "agent":
-                break
-            messages.append(make_degenerate())
-            llm_calls += 1
-        return routes, llm_calls
-
     def test_reasoning_only_storm_bounded(self):
-        routes, llm_calls = self._simulate_storm(_reasoning_only)
+        routes, llm_calls = _simulate_storm(_reasoning_only)
         assert "agent" not in routes[EMPTY_DEGENERATE_REINVOKE_CAP - 1:]
         # Burn assertion: ≤ cap+2 LLM calls vs ~100 (GraphRecursionError) today.
         assert llm_calls <= EMPTY_DEGENERATE_REINVOKE_CAP + 2
 
     def test_think_tag_only_storm_bounded(self):
-        routes, llm_calls = self._simulate_storm(_think_only)
+        routes, llm_calls = _simulate_storm(_think_only)
         assert "agent" not in routes[EMPTY_DEGENERATE_REINVOKE_CAP - 1:]
         assert llm_calls <= EMPTY_DEGENERATE_REINVOKE_CAP + 2
 
@@ -143,7 +169,7 @@ class TestDegenerateReinvokeCap:
         # Doc L4: ghost-promise content is truthy real text under the
         # shared predicate — the S5 cap owns the EMPTY re-invoke classes
         # only. The ghost row keeps its pre-guard behavior.
-        routes, _ = self._simulate_storm(_ghost_promise, turns=6)
+        routes, _ = _simulate_storm(_ghost_promise, turns=6)
         assert all(route == "agent" for route in routes)
 
     def test_cap_counting_helper(self):
@@ -169,41 +195,6 @@ class TestDegenerateReinvokeCap:
         route = should_continue({"messages": messages})
         assert route == "nudge"
 
-    def _simulate_with_tool_storm(self, make_degenerate, turns=12):
-        """Drive should_continue through the WITH-TOOL degenerate shape.
-
-        Mirrors the real graph cycle after a tool result: degenerate
-        responses route ``"agent"`` until the cap; the cap fall-through
-        routes ``"nudge"`` (the row-5 recovery rung — nudge_node
-        injects the nudge HumanMessage and the graph re-invokes the
-        LLM); the post-nudge degenerate cycle re-fills the cap and then
-        ends at END because the injected nudge HumanMessage breaks
-        ``_has_recent_tool_result``. Returns ``(routes, llm_calls)``.
-        """
-        messages = [
-            _real_human(),
-            _tool_calling_ai(),
-            _tool_result(),
-            make_degenerate(),
-        ]
-        routes = []
-        llm_calls = 1
-        for _ in range(turns):
-            route = should_continue({"messages": messages})
-            routes.append(route)
-            if route == "agent":
-                messages.append(make_degenerate())
-                llm_calls += 1
-            elif route == "nudge":
-                # nudge_node injects the HumanMessage, then the graph
-                # re-invokes the LLM (one more call) before re-routing.
-                messages.append(HumanMessage(content=NUDGE_MESSAGE))
-                messages.append(make_degenerate())
-                llm_calls += 1
-            else:  # END
-                break
-        return routes, llm_calls
-
     def test_with_tool_degenerate_storm_bounded(self):
         """With-tool shape: the accurate worst case is ≤ 2×cap LLM calls.
 
@@ -217,7 +208,7 @@ class TestDegenerateReinvokeCap:
         either way, never the ~100 legacy burn.
         """
         for maker in (_reasoning_only, _think_only):
-            routes, llm_calls = self._simulate_with_tool_storm(maker)
+            routes, llm_calls = _simulate_with_tool_storm(maker)
             assert llm_calls <= 2 * EMPTY_DEGENERATE_REINVOKE_CAP
             assert routes[-1] != "agent"
             # Only empty-content degenerates reach the row-5 nudge;
@@ -235,7 +226,7 @@ class TestDegenerateReinvokeCap:
         # (cap-1 agents) and ENDs.
         from langgraph.graph import END as LANGGRAPH_END
 
-        routes, llm_calls = self._simulate_with_tool_storm(_reasoning_only)
+        routes, llm_calls = _simulate_with_tool_storm(_reasoning_only)
         assert routes == ["agent", "agent", "nudge", "agent", "agent", LANGGRAPH_END]
         assert routes == (
             ["agent"] * (EMPTY_DEGENERATE_REINVOKE_CAP - 1)
@@ -247,12 +238,12 @@ class TestDegenerateReinvokeCap:
         assert llm_calls == 2 * EMPTY_DEGENERATE_REINVOKE_CAP
         # Think-only degenerates carry non-empty content: no nudge rung —
         # cap-1 agents then straight END.
-        think_routes, _ = self._simulate_with_tool_storm(_think_only)
+        think_routes, _ = _simulate_with_tool_storm(_think_only)
         assert think_routes == (
             ["agent"] * (EMPTY_DEGENERATE_REINVOKE_CAP - 1) + [LANGGRAPH_END]
         )
 
-    def test_cap_below_loop_detector_threshold_would_not_bound(self):
+    def test_default_cap_matches_loop_detector_threshold(self):
         """Sanity: the module default is 3 (LoopDetector threshold parity)."""
         assert EMPTY_DEGENERATE_REINVOKE_CAP == 3
 
@@ -279,7 +270,7 @@ class TestKillSwitchDisablesRouterHalf:
         """OFF: degenerate storms proceed UNBOUNDED at the router level."""
         install_empty_guard_config(enabled=False, compaction_skip=False)
         for maker in (_reasoning_only, _think_only):
-            routes, _ = TestDegenerateReinvokeCap()._simulate_storm(
+            routes, _ = _simulate_storm(
                 maker, turns=EMPTY_DEGENERATE_REINVOKE_CAP + 3
             )
             assert all(route == "agent" for route in routes), (
@@ -292,7 +283,7 @@ class TestKillSwitchDisablesRouterHalf:
         the degenerate class (exact legacy routing)."""
         install_empty_guard_config(enabled=False, compaction_skip=False)
         for maker in (_reasoning_only, _think_only):
-            routes, _ = TestDegenerateReinvokeCap()._simulate_with_tool_storm(
+            routes, _ = _simulate_with_tool_storm(
                 maker, turns=2 * EMPTY_DEGENERATE_REINVOKE_CAP + 2
             )
             assert all(route == "agent" for route in routes), (

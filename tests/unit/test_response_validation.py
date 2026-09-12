@@ -3,12 +3,24 @@
 import pytest
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.tool import ToolCall
 
 from daemon.response_validation import (
     LLMResponseValidationError,
+    NUDGE_MESSAGE,
+    EmptyLLMResponseError,
+    empty_guard_disabled,
+    install_empty_guard_config,
+    is_empty_llm_content,
+    _is_nudge_human,
+    _is_server_injected_human,
     validate_llm_response,
+)
+from tests.unit.empty_guard_test_helpers import (
+    _real_human,
+    _restore_empty_guard_defaults,  # noqa: F401  (pytest fixture, import-collected)
+    _tool_result,
 )
 
 
@@ -375,28 +387,6 @@ class TestFailOpenBehavior:
 # =============================================================================
 
 
-from langchain_core.messages import HumanMessage, ToolMessage
-
-from daemon.response_validation import (
-    NUDGE_MESSAGE,
-    EmptyLLMResponseError,
-    empty_guard_disabled,
-    install_empty_guard_config,
-    is_empty_llm_content,
-    _is_nudge_human,
-    _is_server_injected_human,
-    _reset_empty_guard_config_for_tests,
-)
-
-
-@pytest.fixture(autouse=True)
-def _restore_empty_guard_defaults():
-    """Every test in this module starts and ends on the documented defaults."""
-    _reset_empty_guard_config_for_tests()
-    yield
-    _reset_empty_guard_config_for_tests()
-
-
 class TestSharedEmptinessPredicate:
     """Truth table for ``is_empty_llm_content`` (empty-response-guard §11b)."""
 
@@ -493,14 +483,6 @@ def _tool_calling_ai():
         content="",
         tool_calls=[ToolCall(id="call_1", name="test_tool", args={})],
     )
-
-
-def _real_human(text="Do the thing"):
-    return HumanMessage(content=text)
-
-
-def _tool_result():
-    return ToolMessage(content="tool output", tool_call_id="call_1")
 
 
 def _nudge_human(marker=True):
@@ -743,10 +725,8 @@ class TestServerInjectedAndNudgeDetectionPins:
     """
 
     def test_attestation_nudge_kwarg_is_server_injected(self):
-        from langchain_core.messages import HumanMessage as H
-
-        bare = H(content="Please attest.", additional_kwargs={"attestation_nudge": True})
-        stamped = H(
+        bare = HumanMessage(content="Please attest.", additional_kwargs={"attestation_nudge": True})
+        stamped = HumanMessage(
             content="Please attest.",
             additional_kwargs={"attestation_nudge": True, "injected_message": True},
         )
@@ -754,40 +734,34 @@ class TestServerInjectedAndNudgeDetectionPins:
         assert _is_server_injected_human(stamped) is True
 
     def test_attestation_nudge_is_not_the_empty_response_nudge(self):
-        from langchain_core.messages import HumanMessage as H
-
         for kwargs in (
             {"attestation_nudge": True},
             {"attestation_nudge": True, "injected_message": True},
         ):
-            msg = H(content="Please attest your completed work.", additional_kwargs=kwargs)
+            msg = HumanMessage(content="Please attest your completed work.", additional_kwargs=kwargs)
             assert _is_nudge_human(msg) is False
             assert _is_server_injected_human(msg) is True
 
     def test_nudge_text_fallback_requires_marker_or_injected_stamp(self):
-        from langchain_core.messages import HumanMessage as H
-
         # Dedicated marker (post-marker checkpoints).
         assert _is_nudge_human(
-            H(content=NUDGE_MESSAGE, additional_kwargs={"empty_response_nudge": True})
+            HumanMessage(content=NUDGE_MESSAGE, additional_kwargs={"empty_response_nudge": True})
         ) is True
         # W3: marker-absent pre-marker checkpoint — injected stamp present.
         assert _is_nudge_human(
-            H(content=NUDGE_MESSAGE, additional_kwargs={"injected_message": True})
+            HumanMessage(content=NUDGE_MESSAGE, additional_kwargs={"injected_message": True})
         ) is True
         # W3 hardening: bare user LITERALLY TYPING the nudge sentence —
         # never nudge-classified (content match without the stamp).
-        bare_typing = H(content=NUDGE_MESSAGE)
+        bare_typing = HumanMessage(content=NUDGE_MESSAGE)
         assert _is_nudge_human(bare_typing) is False
         assert _is_server_injected_human(bare_typing) is False
 
     def test_nudge_text_fallback_rejects_other_injected_content(self):
         # The conjunctive fallback keys on the EXACT nudge text — an
         # unrelated injected message is not a nudge.
-        from langchain_core.messages import HumanMessage as H
-
         assert _is_nudge_human(
-            H(content="Please respond again in English.", additional_kwargs={"injected_message": True})
+            HumanMessage(content="Please respond again in English.", additional_kwargs={"injected_message": True})
         ) is False
 
 

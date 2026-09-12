@@ -15,6 +15,8 @@ lives in ``daemon.response_validation`` (mirrors the
 exercised end-to-end in the install test below via monkeypatched env.
 """
 
+from pathlib import Path
+
 import pytest
 
 import daemon.config as config_module
@@ -24,17 +26,10 @@ from daemon.config import (
     _resolve_empty_response_guard_enabled,
 )
 from daemon.response_validation import (
-    _reset_empty_guard_config_for_tests,
     get_empty_guard_compaction_skip,
     get_empty_response_guard_enabled,
 )
-
-
-@pytest.fixture(autouse=True)
-def _restore_defaults():
-    _reset_empty_guard_config_for_tests()
-    yield
-    _reset_empty_guard_config_for_tests()
+from tests.unit.empty_guard_test_helpers import _restore_empty_guard_defaults  # noqa: F401  (pytest fixture, import-collected)
 
 
 class TestResolveEmptyResponseGuardEnabled:
@@ -84,7 +79,7 @@ class TestLimitsDegenerateCap:
         assert LimitsConfig().empty_degenerate_reinvoke_cap == 5
 
     def test_zero_rejected(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="empty_degenerate_reinvoke_cap"):
             LimitsConfig(empty_degenerate_reinvoke_cap=0)
 
 
@@ -112,7 +107,7 @@ class TestLoadConfigInstallsGuardFlags:
             config_module.load_config()
 
     @staticmethod
-    def _write_config(tmp_path) -> "Path":
+    def _write_config(tmp_path) -> Path:
         """Minimal valid config.yaml (the sections load_config requires)."""
         import yaml
 

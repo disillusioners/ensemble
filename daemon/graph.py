@@ -114,6 +114,7 @@ from .response_validation import (
     # response_validation so the validator can recognize nudge
     # HumanMessages without importing daemon.graph — the re-export keeps
     # ``from daemon.graph import NUDGE_MESSAGE`` working).
+    NUDGE_MARKER_KWARG,
     NUDGE_MESSAGE,
     get_empty_response_guard_enabled,
     is_empty_llm_content,
@@ -2637,6 +2638,9 @@ def _is_degenerate_ai_message(message: Any) -> bool:
     if kwargs.get('reasoning_content') and is_empty_llm_content(content):
         return True
     if isinstance(content, str) and content.strip():
+        # Local import: the check only runs when content is a non-empty string
+        # (not on the hot path), and a lazy import keeps graph.py's module-load
+        # imports untouched.
         from .utils import parse_think_tags
         cleaned, _thinking = parse_think_tags(content)
         if not cleaned.strip():
@@ -2748,7 +2752,7 @@ def nudge_node(state):
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "injected_message": True,
-                    "empty_response_nudge": True,
+                    NUDGE_MARKER_KWARG: True,
                 },
             )
         ]
@@ -5564,13 +5568,13 @@ def create_agent_node(
                             instance_id,
                             str(llm_config.get('base_url') or llm_config.get('model') or 'unknown'),
                         )
-                    except Exception:  # telemetry must never break the turn
-                        logger.debug('[LLM-EMPTY] streak note failed', exc_info=True)
+                    except Exception:  # noqa: BLE001 — telemetry must never break the turn
+                        logger.debug("[LLM-EMPTY] streak note failed", exc_info=True)
             elif callable(_reset_empty):
                 try:
                     _reset_empty(instance_id)
-                except Exception:  # telemetry must never break the turn
-                    logger.debug('[LLM-EMPTY] streak reset failed', exc_info=True)
+                except Exception:  # noqa: BLE001 — telemetry must never break the turn
+                    logger.debug("[LLM-EMPTY] streak reset failed", exc_info=True)
 
         # C2: Persist the injected HumanMessages AND the LLM response
         # so the ``add_messages`` reducer writes them to the checkpoint
