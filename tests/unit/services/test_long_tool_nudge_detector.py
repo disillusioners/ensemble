@@ -129,13 +129,21 @@ async def test_heartbeat_fresh_child_still_fires(registry, fake_clock):
     import daemon.services.long_tool_nudge as lt_module
 
     source = inspect.getsource(lt_module)
-    # Strip docstrings (single- and triple-quoted) before searching —
-    # the module's docstring mentions TaskHeartbeat by name to
-    # document the invariant; we forbid references in CODE only.
+    # Strip docstrings (single- and triple-quoted) AND ``#`` full-line
+    # comments before searching — the module's docstring AND the
+    # in-code ``# TaskHeartbeat …`` references that document the
+    # invariant both name TaskHeartbeat for narrative purposes; the
+    # pin forbids the reference in EXECUTABLE code only (council
+    # fix-cycle 2, optional). Trailing comments after code on the
+    # same line are NOT stripped (regex / tokenization trade-off —
+    # a future engineer who adds ``x = 1  # TaskHeartbeat`` will
+    # trip the pin and can either inline the call or extend the
+    # comment-strip pattern with intent).
     import re
 
     code_only = re.sub(r'"""[\s\S]*?"""', "", source)
     code_only = re.sub(r"'''[\s\S]*?'''", "", code_only)
+    code_only = re.sub(r"^\s*#[^\n]*", "", code_only, flags=re.MULTILINE)
     assert "TaskHeartbeat" not in code_only, (
         "scanner must remain heartbeat-independent — a "
         "TaskHeartbeat reference outside docstrings means the "

@@ -119,7 +119,7 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, TypedDict
+from typing import Any, Awaitable, Callable, Optional, TypedDict, Union
 
 from langchain_core.runnables import RunnableConfig
 
@@ -239,17 +239,23 @@ class LongToolNudgeRegistry:
         ] = None
         self._threshold_resolver: Optional[Callable[[str], int]] = None
         self._parent_lookup: Optional[
-            Callable[[str], Optional[str]]
+            Callable[..., Union[Awaitable[Optional[str]], Optional[str]]]
         ] = None
-        # Per-batch threshold cache (council fix-cycle 1, W1): the
-        # wrapper stamps at batch entry and clears at batch exit.
-        # Resolving the threshold ONCE at entry (RAM-only on the
-        # asyncio loop — the repo read happens inside the sync
-        # resolver and is the read that previously hit the hot path
-        # on the wrapper's finally) eliminates the per-batch
-        # ``resolve_threshold_for`` repo hit entirely. Cleared when
-        # the per-instance bucket is emptied so a stale value never
-        # leaks across batches.
+        # Per-batch threshold cache (council fix-cycle 1, W1; refined
+        # in cycle 2): the wrapper stamps at batch entry and clears
+        # at batch exit. The wrapper's ``finally`` path (and the
+        # scanner's per-tick read) pull the resolved value from this
+        # cache — no repo hit on the asyncio loop. The FIRST stamp of
+        # a batch still has to resolve once: the attached sync
+        # resolver (``_resolve_threshold`` → ``repo.get_metadata_value``)
+        # runs via ``asyncio.to_thread`` BEFORE the module singleton
+        # lock is acquired, so a slow PG read no longer stalls every
+        # other instance's stamp / clear / snapshot. Steady state is
+        # exactly ONE off-thread DB read per batch (cache populated
+        # on the first stamp, evicted when the bucket empties on
+        # the final clear of that batch). Cleared alongside the
+        # per-instance bucket so a stale value never leaks across
+        # batches.
         self._batch_threshold_cache: dict[str, int] = {}
 
     # ── Attach points (lifespan-init only) ──
@@ -267,9 +273,20 @@ class LongToolNudgeRegistry:
         self._threshold_resolver = resolver
 
     def attach_parent_lookup(
-        self, lookup: Callable[[str], Optional[str]]
+        self,
+        lookup: Callable[..., Union[Awaitable[Optional[str]], Optional[str]]],
     ) -> None:
-        """Attach the ``child_id -> parent_id`` reader for record_start."""
+        """Attach the ``child_id -> parent_id`` reader for record_start.
+
+        Accepts either a sync callable (run via ``asyncio.to_thread``
+        so a slow repo hit never blocks the event loop) or an async
+        callable (awaited directly — ``asyncio.to_thread`` on a
+        coroutine function returns the unawaited coroutine object,
+        which would stamp ``parent_id=<coroutine>`` and silently
+        break every fire path). Production attaches the scanner's
+        ``_read_parent_id`` (async); legacy sync test doubles stay
+        on the to_thread path.
+        """
         self._parent_lookup = lookup
 
     # ── Stamp writes (wrapper) ──
@@ -288,10 +305,43 @@ class LongToolNudgeRegistry:
         first-stamp-wins preserves the original ``started_at``.
 
         Side effect: resolves and caches the per-batch threshold
-        for ``instance_id`` (council fix-cycle 1, W1) so the
-        wrapper's ``finally`` reads from RAM only — no sync repo
-        hit per batch on the asyncio hot path.
+        for ``instance_id`` (council fix-cycle 1, W1; refined
+        cycle 2) so the wrapper's ``finally`` reads from RAM only
+        — no sync repo hit on the wrapper's finally hot path.
+
+        Cycle-2 wedge fix: the first-stamp resolver call is moved
+        OFF the module singleton lock. The attached resolver is
+        sync and may run a slow PG read; running it under the lock
+        blocks every other instance's stamp / clear / snapshot for
+        the duration of the read. We pre-resolve in
+        ``asyncio.to_thread`` before acquiring the lock — the
+        lock-held region only does in-memory dict ops.
         """
+        # Cycle-2 pre-lock resolve (only on cache miss). The dict
+        # check here is racy against concurrent stamp writers, but
+        # the race is benign: both threads will resolve to the
+        # same value (resolver is deterministic on the DB row)
+        # and the cache stores one of them. No resolver call is
+        # made when the resolver is unattached or the cache is
+        # already warm.
+        pre_resolved: Optional[int] = None
+        if (
+            self._threshold_resolver is not None
+            and instance_id not in self._batch_threshold_cache
+        ):
+            try:
+                pre_resolved = int(
+                    await asyncio.to_thread(
+                        self._threshold_resolver, instance_id
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "[LongToolNudge] record_start threshold resolver "
+                    "raised for %s — no cache entry",
+                    (instance_id or "")[:8],
+                )
+
         async with self._lock:
             stamps = self._stamps.get(instance_id)
             if stamps is not None and tool_call_id in stamps:
@@ -315,24 +365,15 @@ class LongToolNudgeRegistry:
                 started_at=time.monotonic(),
                 parent_id=parent_id,
             )
-            # Per-batch threshold cache (W1): resolve ONCE at entry
-            # while we hold the lock (the resolver is sync; under
-            # the lock it's atomic and never blocks other awaits).
-            # The finally path's ``resolve_threshold_for`` reads
-            # from this cache — RAM only.
-            if instance_id not in self._batch_threshold_cache:
-                resolver = self._threshold_resolver
-                if resolver is not None:
-                    try:
-                        self._batch_threshold_cache[instance_id] = int(
-                            resolver(instance_id)
-                        )
-                    except Exception:  # pragma: no cover - defensive
-                        logger.exception(
-                            "[LongToolNudge] record_start threshold "
-                            "resolver raised for %s — no cache entry",
-                            (instance_id or "")[:8],
-                        )
+            # Per-batch threshold cache: store the pre-resolved
+            # value under the lock (pure dict write — no DB).
+            # Cycle-1 comment ("resolve ONCE at entry while we hold
+            # the lock … never blocks other awaits") was wrong on
+            # the "never blocks" half — a sync PG read under the
+            # lock DOES stall every other instance. Cycle 2 moves
+            # the resolver off-lock; this branch is RAM-only.
+            if pre_resolved is not None:
+                self._batch_threshold_cache[instance_id] = pre_resolved
 
     async def clear(
         self, instance_id: str, tool_call_id: str
@@ -424,17 +465,29 @@ class LongToolNudgeRegistry:
     async def lookup_parent_for(self, child_id: str) -> Optional[str]:
         """``child_id -> parent_id`` via the attached lookup (or ``None``).
 
-        Council fix-cycle 1, W1: the attached sync lookup is run in
-        ``asyncio.to_thread`` so the wrapper's batch-entry path does
-        NOT block the event loop on the repo. The daemon's documented
-        wedge history at this exact seam (enqueue_message was moved to
-        to_thread for the same reason) makes the wrap mandatory.
+        Council fix-cycle 2 — shape-aware dispatch: an async lookup
+        is awaited directly (production attaches the scanner's
+        ``_read_parent_id``, an ``async def``); a sync lookup is
+        wrapped in ``asyncio.to_thread`` so the wrapper's batch-
+        entry path does NOT block the event loop on the repo. The
+        pre-fix implementation always used ``asyncio.to_thread`` —
+        on an async callable ``to_thread`` returns the coroutine
+        OBJECT unawaited (truthy), so every stamp carried
+        ``parent_id=<coroutine>``, the fire-path ``repo.get``
+        raised, per-instance error isolation swallowed it, and
+        zero nudges fired in production. The daemon's documented
+        wedge history at this exact seam (enqueue_message was
+        moved to to_thread for the same reason) makes the
+        sync-wrap still mandatory for the sync shape.
         """
         lookup = self._parent_lookup
         if lookup is None:
             return None
         try:
-            parent_id = await asyncio.to_thread(lookup, child_id)
+            if inspect.iscoroutinefunction(lookup):
+                parent_id = await lookup(child_id)
+            else:
+                parent_id = await asyncio.to_thread(lookup, child_id)
             return parent_id if parent_id else None
         except Exception:  # pragma: no cover - defensive
             logger.exception(
@@ -1180,6 +1233,14 @@ class LongToolNudgeScanner:
                 # bd4b36ef incident class: weak-model LLM gaps can
                 # exceed the scan interval) therefore cannot discard
                 # the OPEN episode.
+                # Deliberately INSIDE the try: a per-instance tick
+                # error means the episode was NOT observed this tick,
+                # so the anchor MUST stay stale — the next successful
+                # tick will refresh it, and only the second stale
+                # tick past ``STALE_STAMP_TTL_SECONDS`` orphans the
+                # episode. Hoisting outside the try would mask
+                # failures and break C1's "two consecutive
+                # observations of no-progress" semantics.
                 for entry in list(self._active_episodes):
                     _parent_id, child_id = entry
                     if child_id == instance_id:

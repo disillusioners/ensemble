@@ -144,3 +144,55 @@ async def test_snapshot_is_shallow_copy_not_live(registry):
     # The earlier snapshot still observes the stamp object.
     assert "call-1" in snap.get("inst-1", {})
     assert await registry.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_lookup_parent_for_awaits_async_callable(registry):
+    """SURGICAL PIN: ``lookup_parent_for`` MUST await an async callable.
+
+    Council fix-cycle 2 — production attaches ``_read_parent_id`` (an
+    ``async def``) at ``api.py:811-812``; the previous implementation
+    wrapped any attached lookup in ``asyncio.to_thread`` and returned
+    the coroutine object unawaited (truthy → stamped as
+    ``parent_id=<coroutine>`` → fire-path ``repo.get(coroutine)``
+    raised → per-instance error isolation swallowed it → 0 nudges
+    + RuntimeWarning spam). This test pins the shape-aware dispatch:
+    an async lookup is awaited directly; a sync lookup is wrapped in
+    ``asyncio.to_thread`` (preserved for existing sync callers).
+    """
+    captured: list[str] = []
+
+    async def async_lookup(child_id: str) -> Optional[str]:
+        captured.append(child_id)
+        return f"parent-of-{child_id}"
+
+    registry.attach_parent_lookup(async_lookup)
+    result = await registry.lookup_parent_for("child-42")
+    # Plain string, not a coroutine, not None.
+    assert result == "parent-of-child-42"
+    assert isinstance(result, str)
+    # The async lookup ran exactly once and saw the right child_id.
+    assert captured == ["child-42"]
+
+
+@pytest.mark.asyncio
+async def test_lookup_parent_for_to_thread_sync_callable(registry):
+    """Sync lookup stays on the ``asyncio.to_thread`` path.
+
+    Council fix-cycle 2 — the shape-aware dispatch must preserve the
+    pre-existing sync-wrap behavior so the W1 wedge history (the
+    sync repo read was moved off the event loop for the same
+    reason) does not regress. Pins the original contract for sync
+    callers.
+    """
+    sync_calls: list[str] = []
+
+    def sync_lookup(child_id: str) -> Optional[str]:
+        sync_calls.append(child_id)
+        return f"sync-parent-{child_id}"
+
+    registry.attach_parent_lookup(sync_lookup)
+    result = await registry.lookup_parent_for("child-sync")
+    assert result == "sync-parent-child-sync"
+    assert isinstance(result, str)
+    assert sync_calls == ["child-sync"]

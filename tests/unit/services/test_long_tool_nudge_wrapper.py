@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from typing import Any, TypedDict
+from typing import Any, Optional, TypedDict
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -463,6 +463,80 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
         node = lt_real._wrapped_tools_node([sample_tool], registry)
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert closes == []
+
+
+class TestWrappedToolsNodeAsyncParentLookupAttach:
+    """Council fix-cycle 2 — async parent-lookup attach pin.
+
+    Production attaches ``scanner._read_parent_id`` (an ``async def``)
+    at ``daemon/api.py:811-812``. The pre-fix implementation wrapped
+    any attached lookup in ``asyncio.to_thread`` and returned the
+    coroutine object unawaited (truthy → stamped as
+    ``parent_id=<coroutine>`` → fire-path ``repo.get(coroutine)``
+    raised → per-instance error isolation swallowed it → 0 nudges
+    + RuntimeWarning spam in production). The wrapper-level pin:
+    drive a healthy-completion batch through the real graph with an
+    async parent lookup attached, and assert the close handler
+    receives a plain STRING parent_id (not a coroutine, not ``None``,
+    not anything else).
+    """
+
+    @pytest.mark.asyncio
+    async def test_async_parent_lookup_resolves_to_string_in_stamp(
+        self, lt_real
+    ):
+        closes: list[tuple[str, str]] = []
+
+        async def close(parent_id: str, child_id: str) -> None:
+            closes.append((parent_id, child_id))
+
+        async def async_lookup(child_id: str) -> Optional[str]:
+            return f"async-parent-{child_id}"
+
+        registry = lt_real.LongToolNudgeRegistry()
+        registry.attach_close_handler(close)
+        registry.attach_threshold_resolver(lambda iid: 900)
+        registry.attach_parent_lookup(async_lookup)
+        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        # Healthy completion: the close handler MUST fire.
+        await _run_through_real_graph(lt_real, node, _state(), _config())
+        assert len(closes) == 1
+        parent_id, child_id = closes[0]
+        # The bug manifests as ``parent_id`` being a coroutine object.
+        # Pin the type — a string is the only correct shape.
+        assert isinstance(parent_id, str), (
+            f"parent_id must be a plain string (async-attach shape), "
+            f"got {type(parent_id).__name__}: {parent_id!r}"
+        )
+        assert parent_id == "async-parent-inst-1"
+        assert child_id == "inst-1"
+
+    @pytest.mark.asyncio
+    async def test_async_parent_lookup_returning_none_skips_close(
+        self, lt_real
+    ):
+        """Async lookup returning falsy → parent_id None → no close.
+
+        Mirrors the existing sync ``test_no_close_when_parent_unknown``
+        pin at the async-attach surface. Pinned to guarantee the
+        shape-aware dispatch preserves the falsy-suppresses-close
+        semantics.
+        """
+        closes: list[tuple[str, str]] = []
+
+        async def close(parent_id: str, child_id: str) -> None:
+            closes.append((parent_id, child_id))
+
+        async def async_lookup_none(child_id: str) -> Optional[str]:
+            return None  # no parent for this child
+
+        registry = lt_real.LongToolNudgeRegistry()
+        registry.attach_close_handler(close)
+        registry.attach_threshold_resolver(lambda iid: 900)
+        registry.attach_parent_lookup(async_lookup_none)
+        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        await _run_through_real_graph(lt_real, node, _state(), _config())
+        assert closes == []  # parent_id None suppresses close
 
 
 class TestWrappedToolsNodeNoToolCalls:
