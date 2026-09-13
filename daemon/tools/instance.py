@@ -1897,17 +1897,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # same rationale.
 
         # ─── Feature #1 — spawn-time intelligence override resolver block ──
-        # Sits AFTER the auth gate and BEFORE the ``try:`` at :1897 (B2 plan
-        # ordering — load-bearing). The block is a config-only read
+        # Sits AFTER the auth gate and BEFORE the ``try:`` immediately
+        # below this block (B2 plan ordering — load-bearing). The block
+        # is a config-only read
         # (``manager.config.llm.allowed_models`` + the pure
         # ``_resolve_intelligence_tier`` resolver; no DB, no project/version
         # dependency), so there is NO ordering hazard with the project-id
         # inheritance or the ``_resolve_default_version_tag`` await that
         # happen inside the try. Placing it INSIDE the try is FORBIDDEN:
-        # the ``except ValueError`` at :1960 and the catch-all
-        # ``except Exception`` at :1997 convert any raise into soft
-        # ``ERROR: ...`` return strings — defeating the owner-FIXED loud
-        # semantics (D2) and making Pin H unpassable.
+        # the ``except ValueError`` that follows that ``try:`` — and the
+        # catch-all ``except Exception`` after it — convert any raise
+        # into soft ``ERROR: ...`` return strings — defeating the
+        # owner-FIXED loud semantics (D2) and making Pin H unpassable.
         #
         # ASYMMETRY: ``model_tier`` is a *tier-capability* expression
         # (parent wants the configured high-intelligence model), NOT a

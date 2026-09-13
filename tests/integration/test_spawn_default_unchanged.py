@@ -301,11 +301,16 @@ class TestPersistedOverrideReadsBack:
 
 class TestPoolSourceSanity:
     def test_resolved_source_logged_as_llm_models_on_no_param_spawn(self, caplog):
-        """Pin W (A8 replacement, 2026-09-14): the lifecycle log
-        seam at ``daemon/services/instance_lifecycle.py:1647-1652``
-        logs ``resolved_source`` and ``pool_size`` on the no-param
-        spawn. We capture the log and assert the resolution path is
-        the weighted-pool branch (``resolved_source == "llm_models"``).
+        """Pin W (A8 replacement, 2026-09-14): the no-``model_tier``
+        spawn path reaches the manager facade with ``model=None`` —
+        i.e. the pool route is selected and no override is forced.
+        Assertion scope: facade contract only (``spawn_instance``
+        called with ``model=None``). The facade stub does NOT reach
+        the lifecycle log seam, so ``resolved_source`` is NOT
+        asserted here — that invariant (``resolved_source ==
+        "llm_models"``) is enforced by the pre-existing
+        ``test_source_llm_models_logged`` at
+        ``tests/test_llm_load_balance_integration.py:431-448``.
         The original RNG-distinctness pin (5-draw ≥2 distinct) was
         dropped — unseeded ``random.uniform`` at
         ``llm_load_balancer.py:14, :158`` made it a real flake.
