@@ -47,6 +47,27 @@ from daemon.graph import (
     LoopRepairer,
     RepairResult,
 )
+from daemon.config import _reset_symptom_repair_ladder_for_tests
+from tests.helpers.symptom_repair import ladder_off_setup
+
+
+@pytest.fixture(autouse=True)
+def _ladder_off(monkeypatch):
+    """Pin BOTH ladder kill-switches OFF for this entire module.
+
+    Hallucination-recovery ladder phase 1 (T-8 golden-routing pin): this
+    file pins the SHIPPED agent_node ↔ ``LoopRepairer`` wiring — the
+    transient in-memory repair, the injected-mock repairer contract, and
+    the WARN+continue exhaustion. With the ladder ON (the documented
+    default), ``_maybe_durable_loop_repair`` OWNS the loop class instead
+    (return-carried surgery + engine + loud terminal). The tests here are
+    therefore explicitly OFF-mode pins; the ON-mode contract is covered
+    by ``tests/unit/test_symptom_repair_ladder.py`` and
+    ``tests/test_ladder_loop_x_empty_guard_integration.py``.
+    """
+    _teardown = ladder_off_setup(monkeypatch, _reset=_reset_symptom_repair_ladder_for_tests)
+    yield
+    _teardown()
 
 
 # ---------------------------------------------------------------------------

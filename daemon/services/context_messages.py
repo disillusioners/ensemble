@@ -87,6 +87,14 @@ CONTEXT_KIND_PROJECT_SCOPE_GUIDE = "project_scope_guide"
 # filters) key on — phase3-plan.md Risk 4: consumers filter by
 # ``context_kind``, never by index or title.
 CONTEXT_KIND_SHARED_META_KV = "shared_meta_kv"
+# Hallucination-recovery ladder phase 1 (A-4/T-11): the durable loop
+# repair doc ("what was attempted" summary emitted by
+# ``daemon/services/symptom_repair_engine.py``). Stamping the doc with
+# this kind puts it in the permanently non-selectable / hoisted bucket
+# of the compaction three-bucket partition — the doc survives every
+# later compaction verbatim (mirrors how compaction docs and system
+# context blocks are treated) instead of being summarizable history.
+CONTEXT_KIND_SYMPTOM_REPAIR = "symptom_repair"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 

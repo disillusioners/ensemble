@@ -69,7 +69,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from daemon.config import LoopBreakerConfig
+from daemon.config import LoopBreakerConfig, _reset_symptom_repair_ladder_for_tests
 from daemon.graph import (
     LOOP_BREAKER_REPAIR_PREFIX,
     LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS,
@@ -78,6 +78,26 @@ from daemon.graph import (
     RepairContext,
     RepairResult,
 )
+
+
+from tests.helpers.symptom_repair import ladder_off_setup
+
+
+@pytest.fixture(autouse=True)
+def _ladder_off(monkeypatch):
+    """Pin BOTH ladder kill-switches OFF for this entire module.
+
+    Hallucination-recovery ladder phase 1 (T-8 golden-routing pin): the
+    max-repairs test below pins the SHIPPED WARN+continue exhaustion —
+    with the ladder ON (documented default), the durable rung owns the
+    loop class and escalates to the loud terminal instead (D-1). The
+    ON-mode exhaustion contract is pinned in
+    ``tests/unit/test_symptom_repair_ladder.py``.
+    """
+    from daemon.config import _reset_symptom_repair_ladder_for_tests
+    _teardown = ladder_off_setup(monkeypatch, _reset=_reset_symptom_repair_ladder_for_tests)
+    yield
+    _teardown()
 
 
 # ---------------------------------------------------------------------------

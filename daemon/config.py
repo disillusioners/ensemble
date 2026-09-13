@@ -2406,6 +2406,112 @@ def _resolve_empty_guard_compaction_skip(env_value: str | None) -> bool:
     return _parse_bool_switch(cleaned, setting="ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP")
 
 
+# ── Hallucination-recovery ladder kill-switches (phase 1) ───────────────────
+#
+# ADR-0008 convention: master + per-class sub-flags; OFF = byte-identical
+# ROUTING with telemetry intentionally KEPT (W1 precedent — OFF-mode storms
+# must stay visible during an OFF soak). Resolver contract mirrors
+# :func:`_resolve_empty_response_guard_enabled`: pure env-first resolver,
+# empty/whitespace normalizes to the documented default (a bare ``KEY=``
+# line in .env must never brick boot), any other unrecognized value raises
+# :class:`ValueError` naming the knob (boot fails loud — kill-switch
+# convention). The RESOLVED values are installed once at config-resolution
+# time (``load_config``) so the runtime gates and the boot log can never
+# disagree; restart-required to flip (install happens at boot only).
+#
+# * Master ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` — default ON,
+#   restart-pending. OFF ⇒ every new branch is gated BEFORE behavior:
+#   the durable repair path is a no-op pass-through, the shipped
+#   ``LoopRepairer`` transient routing + WARN+continue exhaustion are
+#   preserved byte-identically (P-11 / T-8 golden routing pins).
+# * Sub ``ENSEMBLE_REPAIR_LOOP_DURABLE`` — phase-1 enrollment granularity
+#   for the loop class (ADR-0002), default ON. Surgical disable of the
+#   durable carrier without killing the whole ladder surface.
+
+_SYMPTOM_REPAIR_LADDER_ENABLED: bool | None = None
+_REPAIR_LOOP_DURABLE_ENABLED: bool | None = None
+
+
+def _resolve_symptom_repair_ladder(env_value: str | None) -> bool:
+    """Pure resolver for the ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` master kill-switch.
+
+    Hallucination-recovery ladder phase 1 (F-1). Mirrors
+    :func:`_resolve_empty_response_guard_enabled` (env-only knob — no
+    config section exists for it; documented default ON, restart-pending).
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return True  # documented default ON (restart-pending activation)
+    return _parse_bool_switch(cleaned, setting="ENSEMBLE_SYMPTOM_REPAIR_LADDER")
+
+
+def _resolve_repair_loop_durable(env_value: str | None) -> bool:
+    """Pure resolver for the ``ENSEMBLE_REPAIR_LOOP_DURABLE`` sub kill-switch.
+
+    Phase-1 loop-class enrollment granularity (ADR-0008). Same contract
+    as :func:`_resolve_symptom_repair_ladder`; default ON.
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return True  # documented default ON (restart-pending activation)
+    return _parse_bool_switch(cleaned, setting="ENSEMBLE_REPAIR_LOOP_DURABLE")
+
+
+def get_symptom_repair_ladder_enabled() -> bool:
+    """Read the resolved master ladder kill-switch (no-arg, cached).
+
+    Warm cache (``load_config`` already ran): return the installed value.
+    Cold cache (tests / programmatic boots that never call
+    ``load_config``): resolve ONCE from the env directly and cache —
+    an unrecognized non-empty value raises (fail loud, never silently
+    defaulted). SILENT either way — the boot INFO line is owned by
+    ``load_config``.
+    """
+    global _SYMPTOM_REPAIR_LADDER_ENABLED
+    if _SYMPTOM_REPAIR_LADDER_ENABLED is None:
+        raw = _clean_env_value(os.environ.get("ENSEMBLE_SYMPTOM_REPAIR_LADDER"))
+        _SYMPTOM_REPAIR_LADDER_ENABLED = (
+            True
+            if raw is None
+            else _parse_bool_switch(raw, setting="ENSEMBLE_SYMPTOM_REPAIR_LADDER")
+        )
+    return _SYMPTOM_REPAIR_LADDER_ENABLED
+
+
+def get_repair_loop_durable_enabled() -> bool:
+    """Read the resolved loop-durable sub kill-switch (no-arg, cached)."""
+    global _REPAIR_LOOP_DURABLE_ENABLED
+    if _REPAIR_LOOP_DURABLE_ENABLED is None:
+        raw = _clean_env_value(os.environ.get("ENSEMBLE_REPAIR_LOOP_DURABLE"))
+        _REPAIR_LOOP_DURABLE_ENABLED = (
+            True
+            if raw is None
+            else _parse_bool_switch(raw, setting="ENSEMBLE_REPAIR_LOOP_DURABLE")
+        )
+    return _REPAIR_LOOP_DURABLE_ENABLED
+
+
+def _install_symptom_repair_ladder_config(
+    *, ladder_enabled: bool, loop_durable_enabled: bool
+) -> None:
+    """Install the resolved ladder knobs (boot path — called by load_config).
+
+    Mirrors ``install_empty_guard_config``: the RESOLVED values are
+    installed once at config-resolution time so the runtime gates and the
+    boot log can never disagree. Restart-required to pick up an env flip.
+    """
+    global _SYMPTOM_REPAIR_LADDER_ENABLED, _REPAIR_LOOP_DURABLE_ENABLED
+    _SYMPTOM_REPAIR_LADDER_ENABLED = bool(ladder_enabled)
+    _REPAIR_LOOP_DURABLE_ENABLED = bool(loop_durable_enabled)
+
+
+def _reset_symptom_repair_ladder_for_tests() -> None:
+    """Clear the cached kill-switch state (unit-test isolation only)."""
+    global _SYMPTOM_REPAIR_LADDER_ENABLED, _REPAIR_LOOP_DURABLE_ENABLED
+    _SYMPTOM_REPAIR_LADDER_ENABLED = None
+    _REPAIR_LOOP_DURABLE_ENABLED = None
+
+
 def _resolve_proactive_enabled(
     yaml_value: Any,
     *,
@@ -3221,6 +3327,32 @@ def load_config(config_path: str | None = None) -> Config:
         "empty_guard_compaction_skip=%s (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)",
         _empty_guard_enabled,
         _empty_guard_compaction_skip,
+    )
+
+    # Hallucination-recovery ladder phase 1 (F-1/F-2 boot probe) — resolve
+    # + install the ladder kill-switches and emit the boot INFO line HERE,
+    # at config-resolution time (same S13 reviewer-gate rationale as the
+    # empty-guard / KV-ambient / vscode-CSP installs: the line MUST stay
+    # on the boot path so a quiet-daemon grep never false-fails).
+    # Kill-switch contract (ADR-0008): both default ON restart-pending;
+    # OFF = byte-identical routing (shipped transient repair + WARN+continue
+    # exhaustion preserved), telemetry stays (W1 KEEP).
+    _symptom_ladder_enabled = _resolve_symptom_repair_ladder(
+        os.environ.get("ENSEMBLE_SYMPTOM_REPAIR_LADDER")
+    )
+    _repair_loop_durable_enabled = _resolve_repair_loop_durable(
+        os.environ.get("ENSEMBLE_REPAIR_LOOP_DURABLE")
+    )
+    _install_symptom_repair_ladder_config(
+        ladder_enabled=_symptom_ladder_enabled,
+        loop_durable_enabled=_repair_loop_durable_enabled,
+    )
+    logger.info(
+        "[SymptomRepair] symptom_repair_ladder=%s "
+        "(env ENSEMBLE_SYMPTOM_REPAIR_LADDER), "
+        "repair_loop_durable=%s (env ENSEMBLE_REPAIR_LOOP_DURABLE)",
+        _symptom_ladder_enabled,
+        _repair_loop_durable_enabled,
     )
 
     # Push the non-status transient-channel pattern lists into the
