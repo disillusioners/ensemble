@@ -518,6 +518,110 @@ async def deliver_long_tool_nudge(
     return True
 
 
+# ─── Delivery constants + notice builder (phase 2) ───────────────────────────
+
+#: Parent status that defers (never consumes) a nudge — AM-7.
+_PARENT_STATUS_PAUSED = "paused"  # InstanceStatus.PAUSED.value
+
+#: Terminal parents NEVER receive a nudge on this feature (AD-40): no
+#: revive path, skip + WARN. The orphan-child terminal class is owned
+#: by existing machinery (terminate_instance / cascade-resume /
+#: instance_lifecycle).
+_TERMINAL_PARENT_STATUSES = frozenset(
+    {"completed", "terminated", "error", "failed"}
+)
+
+
+def _format_age_human(age_seconds: float) -> str:
+    """Format an age-in-seconds float as a short, human-friendly string.
+
+    Local copy of the watchdog's formatter (``waiting_children_watchdog``
+    ``_format_age_human``) — deliberately NOT imported so the two
+    modules stay independently refactorable.
+
+    Examples::
+
+        >>> _format_age_human(45.0)
+        '45s'
+        >>> _format_age_human(125.0)
+        '2m'
+        >>> _format_age_human(3725.0)
+        '1h2m'
+    """
+    seconds = int(age_seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    if minutes == 0:
+        return f"{hours}h"
+    return f"{hours}h{minutes}m"
+
+
+def _build_long_tool_notice(
+    parent_id: str,
+    episode_ctx: LongToolNudgeEpisodeCtx,
+    effective_threshold: int,
+) -> str:
+    """Build the nudge body — the SINGLE canonical home (AD-8).
+
+    Locked 5-section structure: (a) header with child/tool/call-id/
+    elapsed/threshold; (b) why-it-matters (busy-slow weak-model
+    signature, loop-breaker evasion); (c) exactly three
+    recommendations using EXISTING parent tools — explicitly NO
+    pause/resume advice (agents have no pause tools; pause is
+    operator-only); (d) the ``# FUTURE`` extensibility seam for the
+    Feature #1 companion (re-spawn-with-higher-intelligence-model) —
+    greppable, NOT implemented today; (e) advisory-only footer with
+    the episode id.
+    """
+    child_id = episode_ctx.get("child_id", "") or ""
+    tool_name = episode_ctx.get("tool_name", "") or ""
+    tool_call_id = episode_ctx.get("tool_call_id", "") or ""
+    elapsed_seconds = float(episode_ctx.get("elapsed_seconds", 0.0))
+    elapsed_human = _format_age_human(elapsed_seconds)
+    threshold_human = _format_age_human(effective_threshold)
+    lines: list[str] = [
+        (
+            f"[system:long-tool-nudge] Long-tool advisory: child "
+            f"{child_id[:8]}'s tool '{tool_name}' (call "
+            f"{tool_call_id[:8]}) has been in-flight {elapsed_human} "
+            f"(threshold {threshold_human})."
+        ),
+        (
+            "This is the busy-slow / weak-model signature — long tool "
+            "time, zero LLM errors so far. The loop breaker cannot "
+            "catch varying-args calls; you decide."
+        ),
+        (
+            "1. subtree_messages / get_instance_info — inspect the "
+            "child's recent turns to confirm wedged vs slow."
+        ),
+        (
+            "2. send_message the child — it lands at the next turn "
+            "boundary; a mid-tool child CANNOT receive messages."
+        ),
+        (
+            "3. terminate_instance + re-spawn a replacement if stuck "
+            "past 2x threshold."
+        ),
+        "# FUTURE: re-spawn-with-higher-intelligence-model recommendation",
+        (
+            "# FUTURE (Feature #1 companion): template — '4. Consider "
+            "re-spawning with a higher-intelligence model: "
+            "{spawn_tool_name}(child_role, model=<better_model>).' Do "
+            "NOT implement today."
+        ),
+        (
+            f"This is advisory only — no automatic action has been "
+            f"taken. Episode id: {child_id[:8]}:{tool_call_id[:8]}."
+        ),
+    ]
+    return "\n".join(lines)
+
+
 # ─── Scanner ─────────────────────────────────────────────────────────────────
 
 
@@ -648,23 +752,42 @@ class LongToolNudgeScanner:
 
     # ── Hand-off seam (scanner-bound; phase 2 replaces this body) ──
 
+    def _get_parent(self, parent_id: str) -> Any:
+        try:
+            return self._repo.get(parent_id)
+        except Exception:
+            logger.exception(
+                "[LongToolNudge] parent read failed for %s",
+                (parent_id or "")[:8],
+            )
+            return None
+
     async def deliver_long_tool_nudge(
         self,
         parent_id: str,
         child_id: str,
         episode_ctx: LongToolNudgeEpisodeCtx,
     ) -> bool:
-        """Deliver one nudge for a threshold crossing.
+        """Deliver a one-nudge-per-episode advisory to the parent.
 
-        Phase 1: stub-or-injected delivery. With
-        ``handoff_stub_enabled=True`` the module-level stub logs
-        ``[LongToolNudge] STUB_FIRE`` and returns ``True``; with
-        ``handoff_stub_enabled=False`` an injected ``handoff_fn``
-        (the test seam) is called instead. Phase 2 replaces this
-        body with the real ``enqueue_message`` delivery — the
-        signature and the EpisodeCtx field set are the pinned
-        contract and must not change.
+        Returns ``True`` if a nudge was enqueued this call; ``False``
+        if suppressed by: PAUSED parent (skip + WARN — retry every
+        tick, fires on resume; AM-7), a terminal parent (skip + WARN —
+        never revive; AD-40), nudge-level episode dedup, or a missing
+        parent row.
+
+        Delivery is the A5 double-notify pattern (``enqueue_message``
+        with ``priority=0`` + best-effort direct
+        ``worker_pool.notify_work()``). NO ``is_deferred`` /
+        ``is_background`` / ``work_id`` / ``work_id_required`` kwargs —
+        system nudges are foreground (AD-13). ``priority=0`` never
+        resets leader-attestation counters (the reset branch requires
+        ``priority == 1 AND msg_type == HUMAN.value``,
+        ``instance_messaging.py:1896-1902``) and queue-jumps priority-1
+        rows by claim order (``ORDER BY priority ASC``; AM-6).
         """
+        # Phase-1 contract dispatch (stub / injected test seam) first —
+        # the T6 contract tests pin these paths.
         if self._handoff_stub_enabled:
             return await deliver_long_tool_nudge(
                 parent_id, child_id, episode_ctx
@@ -681,7 +804,88 @@ class LongToolNudgeScanner:
                     (parent_id or "")[:8],
                 )
                 return False
-        return False
+
+        # ── Real delivery (phase 2) ──
+        parent = self._get_parent(parent_id)
+        if parent is None:
+            logger.warning(
+                "[LongToolNudge] parent %s... not found — nudge skipped",
+                (parent_id or "")[:8],
+            )
+            return False
+        status = getattr(parent, "status", None)
+        if status == _PARENT_STATUS_PAUSED:
+            # AM-7: retry-every-tick-while-paused — the stamp-level
+            # dedup only advances on a successful fire, so the same
+            # crossing remains eligible on resume with fresh numbers.
+            logger.warning(
+                "[LongToolNudge] parent %s... is PAUSED — nudge skipped "
+                "this tick (will fire on resume)",
+                (parent_id or "")[:8],
+            )
+            return False
+        if status in _TERMINAL_PARENT_STATUSES:
+            # AD-40: never revive a terminal parent for an advisory.
+            logger.warning(
+                "[LongToolNudge] parent %s... is %s (terminal) — nudge "
+                "skipped, no revive",
+                (parent_id or "")[:8],
+                status,
+            )
+            return False
+        if (parent_id, child_id) in self._active_episodes:
+            return False  # nudge-level episode dedup — no log (hot path)
+        # Fresh re-resolution for the notice (canonical chain rungs
+        # 2-4, per-child key) — reflects a just-written override.
+        effective_threshold = self._resolve_threshold(child_id)
+        notice = _build_long_tool_notice(
+            parent_id, episode_ctx, effective_threshold
+        )
+        metadata = {
+            "long_tool_nudge": True,
+            "long_tool_nudge_tool": episode_ctx.get("tool_name", ""),
+            "long_tool_nudge_tool_call_id": episode_ctx.get(
+                "tool_call_id", ""
+            ),
+            "long_tool_nudge_elapsed_seconds": episode_ctx.get(
+                "elapsed_seconds", 0.0
+            ),
+            "long_tool_nudge_threshold_seconds": effective_threshold,
+        }
+        await self._manager.enqueue_message(
+            instance_id=parent_id,
+            message=notice,
+            source=LONG_TOOL_NUDGE_SOURCE,
+            priority=0,
+            metadata=metadata,
+        )
+        # A5 direct-notify defense-in-depth (incident 33252 class):
+        # the enqueue path already notified once internally; this
+        # second direct pulse survives a lost-wake race. Idempotent on
+        # the pool side (a condition-variable signal).
+        worker_pool = getattr(self._manager, "_worker_pool", None)
+        if worker_pool is not None:
+            try:
+                notify_result = worker_pool.notify_work()
+                if inspect.iscoroutine(notify_result):
+                    await notify_result
+            except Exception as notify_err:
+                logger.warning(
+                    "[LongToolNudge] direct notify_work raised %r for "
+                    "parent %s... — relying on enqueue_message's "
+                    "internal notify",
+                    notify_err,
+                    (parent_id or "")[:8],
+                )
+        else:
+            logger.debug(
+                "[LongToolNudge] direct notify skipped — worker_pool "
+                "not wired (legacy test fixture / pre-wiring lifespan)"
+            )
+        # The episode opens AFTER the durable enqueue committed.
+        self._active_episodes.add((parent_id, child_id))
+        self._nudge_counts[(parent_id, child_id)] = 1
+        return True
 
     # ── Episode close (B4 / AD-42 Option (ii) close target) ──
 

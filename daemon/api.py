@@ -779,6 +779,10 @@ async def lifespan(app: FastAPI):
             instance_repo,
             manager,
             registry=_LONG_TOOL_REGISTRY,
+            # AD-7 phase-2 flip: production uses the real
+            # enqueue_message delivery body (phase 1 shipped the
+            # STUB_FIRE stub behind this flag).
+            handoff_stub_enabled=False,
             enabled=config.long_tool_nudge.enabled,
             interval_seconds=config.long_tool_nudge.interval_seconds,
             default_threshold_seconds=(
