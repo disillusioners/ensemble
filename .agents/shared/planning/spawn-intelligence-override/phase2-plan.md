@@ -13,7 +13,7 @@ Add the `model_tier: Literal["high"] | None` parameter to `spawn_instance` (Pyda
 ## Shared Context
 
 - **D1 (decisions.md L24-78):** new `model_tier: Literal["high"]` — global tier→model map. Vocabulary lock: param name = `model_tier`, literal value = `"high"` (Phase 3 docstring + Phase 4 nudge rec-4 lock onto this).
-- **D2 (decisions.md L82-124):** LOUD `ValueError`, mirroring `spawn_councilor`'s strict-validation pattern at `daemon/tools/instance.py:2046-2068`. The error message MUST include the valid-models list AND the operator-overridable default (per Open Question 2 draft position).
+- **D2 (decisions.md L82-124):** LOUD `ValueError`, mirroring `spawn_councilor`'s strict-validation pattern at `daemon/tools/instance.py:2046-2068`. The error message is the ADOPTED §2.1 VERBATIM text (architecture-recommendation.md; folded into task 4b.i by A2, 2026-09-14): valid-models list + tier→model resolution result + env-var operator hint + a 3-remedy cluster incl. the legacy `model=` retry — with NO canonicalization claim in the message (W7 normalization is a code step, `instance.py:2075-2077`, not message content).
 - **D3 (decisions.md L127-167):** `spawn_instance` ONLY. `spawn_councilor`, `terminate_instance`, and other instance-category tools MUST NOT have `model_tier` added in this phase. Negative tests pin the surface boundary.
 - **D5 (decisions.md L262-318):** param docstring updated to mention `model_tier` and the high-tier default. Phase 3 documents the exact wording.
 - **D7 (decisions.md L376-382):** no new InstanceManager kwarg. The resolver output threads via the existing `model=` kwarg at `daemon/services/instance_lifecycle.py:1325`. After resolution, the tool layer calls the EXACT SAME `manager.spawn_instance(...)` call site used today.
@@ -43,10 +43,11 @@ Add the `model_tier: Literal["high"] | None` parameter to `spawn_instance` (Pyda
 | 4 | Locate the body of `spawn_instance` (the function declared at L1804-…). The auth gate starts at L1826; the actual `manager.spawn_instance(...)` call happens AFTER the `_resolve_default_version_tag` await at L1882-1884 + the project_id inheritance block ending around L1870. Between those two (after the auth gate, after version resolution, BEFORE the `manager.spawn_instance` call), add the resolver block: | Tasks 1-3 | New block present; `git diff daemon/tools/instance.py` shows only the planned additions. |
 | 4a | …import the resolver: at top of `daemon/tools/instance.py`, add `from .services.instance_lifecycle import _resolve_intelligence_tier` (matching the existing import style — check `from ..services.` prefix; mirror the existing relative-import path used for sibling functions). | 4 | Import resolves; no circular-import error. |
 | 4b | …add the resolution block (skeleton — verbatim wording in 4c): `allowed_models = tuple(getattr(manager.config.llm, "allowed_models", None) or ())`. Then `if model_tier is not None:`. Two sub-branches: | 4a | Block compiles. |
-| 4b.i | …branch "WARN from resolver": `resolved, err = _resolve_intelligence_tier(model_tier, allowed_models=allowed_models)`; if `err` starts with `"ERROR:"`, `raise ValueError(err[len("ERROR:"):].strip() or "unknown tier")`. If `err` starts with `"WARN:"`, raise a NEW `ValueError` whose message includes both the resolved model and the allowed list (mirroring `spawn_councilor`'s L2065-2068 wording, but with one extra line: `f"Note: the configured SPAWN_INTELLIGENCE_TIER_HIGH_MODEL='{resolved}' is NOT in allowed_models ({allowed_models}). Set the env var to an allowed model, or use model= for legacy silent fallback."`). | 4b | Loud raise works. |
+| 4b.i | …branch "WARN from resolver": `resolved, err = _resolve_intelligence_tier(model_tier, allowed_models=allowed_models)`; if `err` starts with `"ERROR:"`, `raise ValueError(err[len("ERROR:"):].strip() or "unknown tier")`. If `err` starts with `"WARN:"`, raise `ValueError` with the ADOPTED VERBATIM message (A2, 2026-09-14 — architecture-recommendation.md §2.1, reproduced byte-exact in the block below the Tasks table; mirrors `spawn_councilor`'s raise at `daemon/tools/instance.py:2064-2067` "list valid models + No-fallback" style). | 4b | Loud raise works; message matches the §2.1 verbatim text byte-for-byte (modulo interpolation). |
 | 4b.ii | …branch "W7 canonical-name normalization": `canonical_resolved = next((m for m in allowed_models if m.lower() == resolved.lower()), resolved)`; assign `effective_model = canonical_resolved`. | 4b | After this branch, `effective_model` is canonical-spelling. |
 | 4b.iii | …branch "no tier requested": if `model_tier is None`, leave `effective_model = model` (the legacy path's value). | 4b | `effective_model` defaults to whatever the legacy `model` arg provides. |
 | 4c | Update the `manager.spawn_instance(...)` call site: change `model=model` to `model=effective_model` (no other kwarg change). DO NOT change the kwarg list (D7 — no new manager kwarg). | 4b.iii | Existing call site unchanged in shape; only the value passed to `model=` differs. |
+| 4d | …BOTH-PARAMS PRECEDENCE branch (A5; owner-ratified R-A5 2026-09-14 — tier-wins + visible `[NOTE]`, supersedes architecture-recommendation.md §9; explicitly NOT a strict-ValueError): inside the `if model_tier is not None:` block from 4b, add: if `model` is ALSO not None, `model_tier` WINS and `model=` is superseded — `effective_model` stays the tier-resolved canonical model (4b.ii), and the tool result MUST carry a visible supersede notice: `[NOTE] model='<model>' superseded by model_tier='high' (using <tier-mapped model>)`. House precedent: `caller_model_overrides` (`daemon/tools/knowledge_tools.py:722-788`) — explicit override wins, never silently, never rejected. | 4b.ii | Branch present; a both-params spawn proceeds on the tier-resolved model with the `[NOTE]` in the tool result; NO ValueError on mere conflict (D12). |
 | 5 | In the auth-gate region BEFORE the resolution block, ADD a single-line pass-through comment noting that `model_tier` is a tier-capability expression, NOT a model-name expression, so the loud-raise is the right semantics (one line; this is for code reviewers and is the only documentation of the asymmetry besides the docstring). | Tasks 4a-4c | Comment present. |
 | 6 | Run `uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/unit/services/test_instance_lifecycle.py tests/unit/services/test_spawn_intelligence_tier.py -q` and confirm GREEN (Phase 1's tests + Feature #2 settled tests). | Tasks 4-5 | All green. |
 | 7 | Create new test file `tests/integration/test_spawn_intelligence_tier.py` (or wherever the spawn_instance integration tests live — `ls tests/integration/`). Use the SAME fixtures the existing `test_spawn_instance_*` tests use; do NOT invent new DB fixtures. | none (parallel to 4c) | Test file exists; pytest discovery finds it. |
@@ -56,12 +57,31 @@ Add the `model_tier: Literal["high"] | None` parameter to `spawn_instance` (Pyda
 | 7d | Pin J: real-dispatch DEFAULT-UNCHANGED (D6) — call `await manager.spawn_instance(agent_id="coder", parent_id=<seed>)` (no `model_tier`, no `model`). Assert returned model is one of the weighted-pool candidates. Also monkeypatch `_resolve_intelligence_tier` and assert it was NOT called. | 7 | Test passes; pool non-determinism handled by membership assertion. |
 | 7e | Pin K: NEGATIVE surface boundary — assert `spawn_councilor` runtime signature does NOT accept `model_tier`. Inspect the function source via `inspect.signature(spawn_councilor.fn)` (or whatever the LangChain-wrapped accessor is — check Phase 1's note about `register_tool_category` patterns in this file) and assert `model_tier` is NOT a parameter. | 7 | Test passes; out-of-scope surface stays clean. |
 | 7f | Pin L: NEGATIVE surface boundary — assert `terminate_instance` does NOT accept `model_tier` (different tool, but mirrors Pin K as a defensive sweep). | 7 | Test passes; defensive breadth check. |
+| 7g | Pin X: real-dispatch BOTH-PARAMS precedence (A5 / owner-ratified R-A5, D12) — call `await manager.spawn_instance(agent_id="coder", parent_id=<seed>, model_tier="high", model="coding")` with BOTH passed. Assert ALL THREE: (1) spawn proceeds (NO ValueError) on the TIER-resolved model (`"agentic"`, not `"coding"`); (2) the tool result carries the visible `[NOTE]` supersede line (`model='coding' superseded by model_tier='high' (using agentic)`); (3) persisted `instance_metadata["model_override"]` equals the tier-mapped model (`"agentic"`). | 7 | Test passes; all three assertions green. |
 | 8 | Non-regression sweep — `uv run python -m pytest tests/unit tests/integration -q -x --ignore=tests/postgres` and confirm the ONLY new failures (if any) come from Pin K / Pin L if their accessors differ. Update the pin implementation if needed; rerun. | All tasks | No new failures. |
+
+### Task 4b.i — adopted verbatim ValueError message (A2, architecture-recommendation.md §2.1)
+
+Reproduce BYTE-EXACT (modulo `{resolved_model}` / `{allowed}` interpolation):
+
+```python
+"spawn_instance(model_tier='high') resolved to model '{resolved_model}' (from env "
+"SPAWN_INTELLIGENCE_TIER_HIGH_MODEL), but '{resolved_model}' is NOT in allowed_models: "
+"{allowed}. No fallback — add '{resolved_model}' to allowed_models and restart, set "
+"SPAWN_INTELLIGENCE_TIER_HIGH_MODEL to one of {allowed}, or retry with "
+"model='<one-of-{allowed}>' for the legacy silent-fallback path."
+```
+
+Compliance (all 4 required components verified present in §2.1): (1) valid-models list `{allowed}` ✓ (2) tier→model resolution result `{resolved_model}` ✓ (3) env-var name (operator hint) ✓ (4) parent-actionable remedies — three discrete paths incl. the legacy `model=` escape hatch ✓. All remedies in ONE message = the parent self-corrects in one retry without a follow-up question. **Do NOT claim canonicalization in the message** — W7 normalization is a code step (`instance.py:2075-2077`), not message content.
+
+### Pin X — what it catches (A5 / R-A5, D12)
+
+Pin X proves the both-params surface contract end-to-end: `model_tier` wins, `model=` is superseded LOUDLY (visible `[NOTE]`, not silent-ignore, not a strict-ValueError), and the persisted `model_override` records the tier-mapped model — closing the "both-params behavior UNDEFINED" risk (§8 of the recommendation) before implementation.
 
 ## Test Plan
 
 **New files:**
-- `tests/integration/test_spawn_intelligence_tier.py` (Pins G-L)
+- `tests/integration/test_spawn_intelligence_tier.py` (Pins G-L + X)
 
 **Run commands (exclusive):**
 ```bash
@@ -86,6 +106,7 @@ uv run python -m pytest tests/unit tests/integration -q --ignore=tests/postgres
 - Pin I (D2 asymmetry): proves the legacy `model=` silent path was NOT regressed by Phase 2's loud-raise logic.
 - Pin J (D6 regression): proves the no-`model_tier` path is undisturbed AND the resolver is NOT called (so the path is purely additive).
 - Pin K / Pin L (D3 surface boundary): out-of-scope tools stay clean.
+- Pin X (A5 / R-A5 both-params precedence, D12): proves `model_tier` wins with a visible `[NOTE]` supersede and the tier-mapped model persists — the conflict case is loud-but-successful, not silent, not rejected.
 
 ## Non-Regression Checks
 
@@ -124,7 +145,7 @@ This phase is DONE when:
 2. `git diff daemon/services/instance_lifecycle.py` is empty (Phase 1 owns that file).
 3. `git diff daemon/services/long_tool_nudge.py` is empty (Phase 4's territory).
 4. `git diff -U0 daemon/tools/instance.py` shows only: +1 `Literal` import (if needed), +1 field on `SpawnInstanceInput`, +1 kwarg on runtime signature, ~30 lines added inside `spawn_instance` body, zero edits to `spawn_councilor` or other tool bodies.
-5. `uv run python -m pytest tests/integration/test_spawn_intelligence_tier.py -v` is 6/6 green (Pins G-L).
+5. `uv run python -m pytest tests/integration/test_spawn_intelligence_tier.py -v` is 7/7 green (Pins G-L + X).
 6. `uv run python -m pytest tests/unit/test_long_tool_nudge.py -q` is GREEN (Feature #2 settled).
 7. `uv run python -m pytest tests/unit/services/test_instance_lifecycle.py -q` is GREEN (legacy silent-fallback regression).
 8. `uv run ruff check daemon/tools/instance.py` is clean.

@@ -75,7 +75,7 @@ The tier name (`"high"`) is the **discoverability handle** the spec is paying fo
 - Unit test: `_resolve_intelligence_tier("high")` returns `("agentic", None)` when env unset and `"agentic"` is in allowed_models.
 - Unit test: `_resolve_intelligence_tier("high")` returns `("agentic", "WARN: ...") ` when env unset and `"agentic"` is NOT in allowed_models — the warning is the loud-validation contract (D2).
 - Unit test: `_resolve_intelligence_tier(None)` returns `(None, None)` — no override.
-- Unit test: `_resolve_intelligence_tier("bogus")` returns `(None, "ERROR: ...") — unknown tier literal; mirrors `model_validator` rejection at `daemon/tools/instance.py:1757-1762`.
+- Unit test: `_resolve_intelligence_tier("bogus")` returns `(None, "ERROR: ...") — unknown tier literal; mirrors `spawn_councilor`'s RUNTIME validation at `daemon/tools/instance.py:2046-2068`. **A1 re-anchor (architect, 2026-09-14):** the previously cited `model_validator` rejection at `daemon/tools/instance.py:1757-1762` checks `agent_id` ONLY — `SpawnInstanceInput` has NO Pydantic-level model validation, which is precisely why the tool-body resolver block must do the validating.
 
 ---
 
@@ -209,6 +209,8 @@ Notes on the wording:
 - **`'high'`** — single quotes match the typical LLM tool-call style; unambiguous inside a JSON-ish prompt context.
 - **`picks the configured high-tier model (default 'agentic')`** — tells the parent what they'll actually get, including the operator-overridable default.
 - **`Use after recommendation 3`** — chains to the existing "terminate + re-spawn" rec so the parent's mental model is: terminate first, then re-spawn with high tier.
+
+**Architect ruling (A9, 2026-09-14):** the rec-4 wording above ships VERBATIM as planned — single-path (names only `model_tier='high'`; no second param in the notice). The dual-path insight (mentioning the legacy `model=` fallback in the notice) is RELOCATED to the loud `ValueError` message (architecture-recommendation.md §2.1, adopted as phase2-plan.md task 4b.i by A2), where it has strictly better context: the notice fires BEFORE any failure and teaches the one canonical path; the error fires exactly when the parent needs the fallback, with the actual allowed-list interpolated. This keeps the Feature #2 settled-zone delta minimal and the `test_length_within_1_5x_wedge_notice` margin untouched.
 
 ### Test pin update (coordinated)
 
@@ -408,7 +410,8 @@ The plan-overview.md Non-Goals section is the canonical list. Decisions-level su
 - **Multiple tier literals** (`"low"`, `"medium"`, `"auto"`): defer; v1 ships `"high"` only.
 - **`spawn_councilor` tier param**: defer; council semantics differ.
 - **Auto-recovery (no parent prompt required)**: explicitly NOT in scope; the parent decides.
-- **Tier→model map at runtime (hot-reload)**: defer; restart-only activation in v1.
+
+*(A10, architect review 2026-09-14: two previously-deferred items removed from this list as ANSWERED — (1) empty-string kill-switch semantics: answered "empty/whitespace env = UNSET = default `"agentic"`" per the `_clean_env_value` house pattern; soft-disable = a model name NOT in `allowed_models` (boot WARN + per-spawn loud raise, see D13). (2) Tier→model map hot-reload: answered "boot-snapshot only" (D8/A6) — single `load_config` env read, restart-only activation, no runtime reload in v1.)*
 
 ---
 
@@ -435,3 +438,26 @@ The plan-overview.md Non-Goals section is the canonical list. Decisions-level su
 2. **Should the loud `ValueError` message include the operator-overridable default ("default: 'agentic'")?** Spec implies yes (parents should know what they'd have gotten). **Recommendation: include in the message.**
 3. **Should `append_allowed_models` show the high-tier block when `inject_allowed_models=False`?** Spec says "no system-prompt changes"; a new always-on block is a system-prompt change. **Recommendation: gate on `inject_allowed_models=True` (existing opt-in).**
 4. **Is the rec-4 wording final, or should the architect review?** Wording is proposed, not committed; Phase 4 has architect review on the test-pin update as a natural gate.
+
+---
+
+## D12 — Both-Params Precedence (`model_tier` AND `model` passed together)
+
+**Owner-ratified 2026-09-14, supersedes architecture-recommendation.md §9** (pending-decision item 1; the strict-loudness ValueError-on-conflict alternative is REJECTED).
+
+**Decision:** when BOTH `model_tier` AND `model=` are passed to `spawn_instance`, **`model_tier` WINS** — `model=` is superseded — and the tool result carries a **visible `[NOTE]` line documenting the supersede**. **NOT a strict-ValueError.**
+
+- Supersede notice format: `[NOTE] model='<model>' superseded by model_tier='high' (using <tier-mapped model>)`.
+- Rationale (architecture-recommendation.md §4c): house precedent `caller_model_overrides` (`daemon/tools/knowledge_tools.py:722-788`) — explicit override wins, never silently, never rejected; "the newer, more specific intent wins" is least surprising for an LLM caller that just read the rec-4 nudge; a ValueError-on-conflict wastes a turn on two legitimate intents, while silent-ignore would violate the feature's own loudness philosophy — the notice is the correct middle.
+- Implementation: NEW phase-2 task (phase2-plan.md task 4d branch + task 7g / Pin X) with test pins: (1) both-params → tier resolution wins (spawn proceeds on the tier-resolved model); (2) `[NOTE]` supersede line present in the tool result; (3) persisted `instance_metadata.model_override` = tier-mapped model.
+
+## D13 — Boot WARNING + Per-Spawn Raise (tier-mapped model ∉ allowed_models)
+
+**Owner-ratified 2026-09-14, supersedes architecture-recommendation.md §9** (pending-decision item 2).
+
+**Decision:** when the tier-mapped model is NOT in `allowed_models`:
+
+- **Boot time:** emit a boot-time **WARNING (NOT boot-fail)** — one WARNING line at `load_config` naming the env var, the resolved value, and the allowed list. Boot-fail is rejected: the mismatch is semantic (well-formed string, wrong list), not malformed; the fail-loud-at-boot house pattern (`_parse_bool_switch`, `daemon/config.py:2444-2463`) is for malformed switch values only (architecture-recommendation.md §4a). Implemented as phase1-plan.md task 2d.
+- **Per spawn:** the loud `ValueError` stays as designed (D2) — the parent-facing contract; verbatim message adopted as phase2-plan.md task 4b.i (A2 / §2.1).
+
+Kill-switch semantics follow: setting a NON-ALLOWED model name (NOT an empty string) = soft-disable — boot WARN + every `model_tier="high"` call raises loud (empty/whitespace env = UNSET = default `"agentic"`; see A3/A4 and the A10 note under D11).

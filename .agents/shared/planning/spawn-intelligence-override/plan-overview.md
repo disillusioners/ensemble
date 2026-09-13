@@ -94,7 +94,7 @@ See `decisions.md` for full rationale; one-line summary here:
 |-------|------|-----------|----------------|------------------------|--------|
 | 1 | Config surface + resolver | Add `SPAWN_INTELLIGENCE_TIER_HIGH_MODEL` env (default `"agentic"`) and `_resolve_intelligence_tier` free function in lifecycle | `daemon/config.py` (new `spawn_intelligence` section), `daemon/services/instance_lifecycle.py` (new resolver) | Unit test: `_resolve_intelligence_tier("high") → ("agentic", None)` with default env; `("agentic", WARN)` when not in allowed_models; `(None, None)` when tier is `None`; `(None, ERROR)` for unknown literals | pending |
 | 2 | Tool surface + validation | Wire `SpawnInstanceInput.model_tier` and the loud-validation path; thread resolved model through `manager.spawn_instance(model=...)` | `daemon/tools/instance.py:1728-1806` (input model + signature), `daemon/tools/instance.py:2046-2068` (validation pattern) | Real-dispatch integration test: `spawn_instance(agent_id="coder", model_tier="high")` returns `(instance_id, "agentic")` when in allowed_models; raises `ValueError` listing valid models when NOT in allowed_models. Legacy `model=` silent path regression test unchanged. | pending |
-| 3 | Discoverability surfaces | Update `spawn_instance` docstring + extend `append_allowed_models` block with a `# Spawn Intelligence` tail | `daemon/tools/instance.py:1807-1825` (docstring), `daemon/services/instance_lifecycle.py:907-924` (allowed-models tail) | Unit test: docstring mentions `model_tier` and the high-tier default. Unit test: `append_allowed_models` with `inject_allowed_models=True` includes the new tail; with `inject_allowed_models=False` does NOT. | pending |
+| 3 | Discoverability surfaces | Update `spawn_instance` docstring + extend `append_allowed_models` block with a `# Spawn Intelligence` tail | `daemon/tools/instance.py:1807-1825` (docstring), `daemon/services/instance_lifecycle.py:907-924` (allowed-models tail) | Unit test: docstring mentions `model_tier` and the high-tier default. Unit test: `append_allowed_models` with `inject_allowed_models=True` includes the new tail; with `inject_allowed_models=False` does NOT. Merge constraint (A7): lands same-commit-as or after Phase 2 — never before. | pending |
 | 4 | Nudge text integration | Replace `# FUTURE` placeholder with real rec 4 referencing `model_tier='high'`; update notice test pin | `daemon/services/long_tool_nudge.py:843-849` (lines to replace), `tests/unit/test_long_tool_nudge.py:546` (pin update) | Test: `TestU11NoticeStructure` updated — `"# FUTURE"` replaced with `"model_tier"` + `"high"` + `"Re-spawn with high intelligence"` once. All other `TestU11*`/`U12*`/`U17*` UNCHANGED green. Length test (`test_length_within_1_5x_wedge_notice`) threshold comfortable. | pending |
 | 5 | Default-unchanged regression + activation | Prove `_select_weighted_model` still fires when `model_tier` absent; document activation/restart notes | New: `tests/unit/services/test_spawn_intelligence_tier.py`; new: `tests/integration/test_spawn_default_unchanged.py`; rollout doc section in plan | Unit + integration test: `manager.spawn_instance(agent_id="coder", model_tier=None, model=None)` proceeds through weighted pool; persisted `instance_metadata.model_override` matches pool-selected model; `_resolve_intelligence_tier` is NOT called. | pending |
 
@@ -112,6 +112,8 @@ Phase 4 is technically independent of Phase 1 (the nudge text only references th
 
 A combined "implementation worktree" can land all 5 phases in one PR; a "review worktree" can test each gate independently.
 
+**Merge shape (A7, architect-confirmed 2026-09-14):** one PR, **≥3 ordered commits: P1 / P2+P3 / P4+P5**, with the P2→P3 constraint explicit — P3's docstring/`Field`-description renders the tool-schema description for the P2 field, so P3 must land **same-commit-as or AFTER P2, never before** (a P3-first landing describes a nonexistent param).
+
 ---
 
 ## Coupling Map
@@ -126,7 +128,7 @@ A combined "implementation worktree" can land all 5 phases in one PR; a "review 
 
 **Tight couplings to flag for the phase-plan worker:**
 - Phases 1 ↔ 2: the resolver's return shape `(model: str | None, error: str | None)` is the contract Phase 2 consumes. Lock this in Phase 1 before Phase 2 starts.
-- Phase 2 ↔ Phase 3: the docstring text in Phase 3 must match the field name in Phase 2 (`model_tier`, literal `"high"`). Land in same commit or order 3 after 2.
+- Phase 2 ↔ Phase 3: the docstring text in Phase 3 must match the field name in Phase 2 (`model_tier`, literal `"high"`). Land in same commit or order 3 after 2. **A7 hard constraint (2026-09-14): same-commit-as or AFTER P2 — never before**; the docstring/`Field`-description references the P2 field, and landing first renders a description for a nonexistent param.
 - Phase 2 ↔ Phase 5: the integration test in Phase 5 needs Phase 2's `spawn_instance` signature to expose `model_tier`.
 
 **Independent pairs:** Phase 3 (discoverability) and Phase 4 (nudge) touch different surfaces; either can land first.
@@ -186,7 +188,7 @@ A combined "implementation worktree" can land all 5 phases in one PR; a "review 
 
 **No meta.json edits required.** The feature is operator-side env var only; no agent's `meta.json` changes.
 
-**No new kill-switch.** Feature #1 is additive and parent-initiated; a kill-switch would defeat the discoverability goal. (If a future operator wants to disable high-tier spawns, they can set `SPAWN_INTELLIGENCE_TIER_HIGH_MODEL=""` and the resolver returns an error path — but that's a v2 concern.)
+**No new kill-switch.** Feature #1 is additive and parent-initiated; a kill-switch would defeat the discoverability goal. (A3, 2026-09-14: setting `SPAWN_INTELLIGENCE_TIER_HIGH_MODEL=""` is **NOT** a kill-switch — empty/whitespace env = UNSET = default `"agentic"`, per the `_clean_env_value` shell-style `:-` house pattern at `daemon/config.py:2248-2253`, unanimous across every `_resolve_*` helper. Soft-disable instead = set the env var to a model name NOT in `allowed_models`: boot-time WARNING at load_config + every `model_tier="high"` call raises loud with the configured value named (R-A6). That soft-disable path is a v2 concern.)
 
 ---
 
@@ -213,7 +215,7 @@ The following are **out of scope** for v1:
 | `spawn_councilor` tier param | Council = diverse models by design | Use case surfaces for "high-tier council" |
 | Auto-recovery (no parent prompt required) | Parent decides per spec | Long-term automation arc |
 | Tier→model map hot-reload (no restart) | Env vars are process-lifetime; matches existing pattern | Operational request for no-downtime config flips |
-| `SPAWN_INTELLIGENCE_TIER_HIGH_MODEL=""` kill-switch | v1 ships additive only; failure loud = effective kill | Operator request for soft-disable |
+| ~~`SPAWN_INTELLIGENCE_TIER_HIGH_MODEL=""` kill-switch~~ | **ANSWERED/REMOVED (A3+A10, 2026-09-14):** empty/whitespace env = UNSET = default `"agentic"` (`_clean_env_value`, `daemon/config.py:2248-2253`); soft-disable = a model name NOT in `allowed_models` (boot WARN + per-spawn loud raise — see D13). Row kept for traceability. | n/a — answered by architect review + owner ratification |
 
 ---
 

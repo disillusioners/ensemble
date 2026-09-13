@@ -92,7 +92,7 @@ uv run python -m pytest tests/unit -q --ignore=tests/unit/services/test_spawn_in
 
 ## Coupling
 
-- **Tight with Phase 2:** the docstring text MUST use the literal `"high"` and param name `model_tier`. Phase 2 declares these. Phase 3's docstring is the LLM-facing surface; any drift breaks Phase 5's discoverability assertions and Phase 4's nudge-text link. Phase 3 SHOULD land in the same commit as Phase 2 — or, if separate, Phase 3's commit message MUST reference Phase 2's commit sha so reviewers know to validate the vocabulary lock.
+- **Tight with Phase 2:** the docstring text MUST use the literal `"high"` and param name `model_tier`. Phase 2 declares these. Phase 3's docstring is the LLM-facing surface; any drift breaks Phase 5's discoverability assertions and Phase 4's nudge-text link. Phase 3 SHOULD land in the same commit as Phase 2 — or, if separate, Phase 3's commit message MUST reference Phase 2's commit sha so reviewers know to validate the vocabulary lock. **A7 hard constraint (architect, 2026-09-14):** the docstring/`Field`-description references the P2 field — landing P3 BEFORE P2 renders a tool-schema description for a nonexistent param. P3 lands **same-commit-as or AFTER P2 — never before**.
 - **Loose with Phase 4:** the nudge rec-4 will name `model_tier='high'` (Phase 4's exact wording from `decisions.md` D4 L197-202). Phase 3's docstring is the canonical surface that the nudge "links" parents to. No direct import dependency, but vocabulary lock.
 - **Independent of Phase 1:** the discoverability surfaces do not reference the resolver function — they reference the TIER NAME (`"high"`), which is the user-facing vocabulary, not the implementation detail.
 - **Independent of Phase 5:** Phase 5 is purely the regression + activation checklist; it does not touch docstrings or `append_allowed_models`.
@@ -105,7 +105,7 @@ uv run python -m pytest tests/unit -q --ignore=tests/unit/services/test_spawn_in
 | R3.2 | `append_allowed_models` refactor accidentally breaks the empty-allowed-models branch's other behavior (e.g., the "confirm with the user" instruction) | Medium | Medium | Pin O asserts tail is present in the empty branch; review the diff — the existing other-text MUST remain unchanged. |
 | R3.3 | Tail block over-injects — when `inject_allowed_models=False`, the tail appears anyway (D5 violation) | High | Low | Pin N is the negative-pin; explicit gate assertion. |
 | R3.4 | Tail block accidentally created as a SEPARATE injection point (new `[SYSTEM CONTEXT: ...]` block) | High | Low | Task 3 is explicit: append INSIDE the existing `<allowed_models>` wrapper, NOT create a new wrapper. Code review checks this. |
-| R3.5 | Phase 2's docstring was already updated by Phase 3 ahead of Phase 2 | Medium | Low | Tasks are sequenced; reviewers check git log of `daemon/tools/instance.py` docstring vs the resolver block — they should land in the same commit. |
+| R3.5 | Phase 2's docstring was already updated by Phase 3 ahead of Phase 2 | Medium | Low | Tasks are sequenced; reviewers check git log of `daemon/tools/instance.py` docstring vs the resolver block — they should land in the same commit. A7 hard constraint (2026-09-14): P3 lands same-commit-as or AFTER P2 — never before (a P3-first landing describes a nonexistent param). |
 
 ## Acceptance Gate
 
