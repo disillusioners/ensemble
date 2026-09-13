@@ -136,6 +136,7 @@ Give the PARENT agent visibility into a child's wedged-slow tool call — a per-
 
 - **Daemon restart required** — the scanner is lifespan-wired (`api.py` block after the waiting-children-watchdog block); the wrapped `"tools"` node and the config class also load at boot. No DB migration to run.
 - **Kill-switch**: `LONG_TOOL_NUDGE_ENABLED` (env prefix of the nested `LongToolCallNudgeConfig`), **default ON**. `=0` disables the scanner at boot AND gates `set_instance_tunable` (Phase 3) — the tool returns a clear "feature disabled" message and writes NO metadata when disabled. The per-completion `[LongToolNudge] TOOL_COMPLETED` log line and stamp registry continue to tick by design when disabled; only the nudge *delivery* and tool *write* cease (stamp/log presence ≠ delivery). The `#`-comments in the module docstring record the restart semantics.
+- **Operator expectation note (A-N3 alignment, SC9):** Kill-switch `LONG_TOOL_NUDGE_ENABLED=0` does **NOT** mean zero overhead. The scanner loop stops (no tick cost from `run_once` / threshold resolution), but the per-completion `[LongToolNudge] TOOL_COMPLETED` log line and the stamp registry's `record_start`/`clear` continue by design — stamp/log presence is part of the duration-observability surface (SC6, independent of the kill-switch) and is preserved for forensics even when delivery is off. Only **nudge delivery** and **`set_instance_tunable` writes** cease when disabled. Operators reading the boot log or a forensic timeline should expect `[LongToolNudge] TOOL_COMPLETED` lines to appear regardless of the kill-switch state; absence would indicate the wrapper is not wired (separate failure mode, not a kill-switch effect).
 - **Validation boot lines** (grep after restart):
   - `Long-tool-nudge scanner started: interval=60s, default_threshold=900s` (enabled path)
   - `Long-tool-nudge scanner disabled by config` (kill-switch path)
@@ -150,11 +151,11 @@ Give the PARENT agent visibility into a child's wedged-slow tool call — a per-
 | Module | `daemon/services/long_tool_nudge.py` (net-new, single home for registry + scanner + seam + notice builder + loop) |
 | Scanner class | `LongToolNudgeScanner` (phase 1's working name `LongToolNudgeDetector` renamed — AD-29) |
 | Stamp registry | `LongToolNudgeRegistry`, module-level singleton `_LONG_TOOL_REGISTRY` (the ONLY stamp store — AD-28) |
-| Stamp shape | `_Stamp(tool_call_id, tool_name, started_at: time.monotonic())` |
+| Stamp shape | `_Stamp(tool_call_id, tool_name, started_at: time.monotonic(), parent_id: str)` (AD-42 Option (ii) cached-parent_id pin; `parent_id` captured at `record_start` and lives on the stamp for its lifetime — see phase1 Task 2 + Task 3) |
 | Hand-off seam | `deliver_long_tool_nudge(parent_id, child_id, episode_ctx) -> bool` (phase 1 stub → phase 2 real body) |
 | Episode context | `LongToolNudgeEpisodeCtx` (child_id, parent_id, tool_name, tool_call_id, elapsed_seconds, threshold_seconds, episode_started_at) |
 | Stamp-level fire dedup | `_fired_episodes: set[(child_id, tool_call_id)]` (scanner; per-process) |
-| Nudge-level episode dedup | `_active_episodes: set[(parent_id, child_id)]` (scanner; close on `tool_end`, re-arm on new `tool_call_id`) |
+| Nudge-level episode dedup | `_active_episodes: set[(parent_id, child_id)]` (scanner; close on HEALTHY `tool_end` ONLY — `duration_seconds < effective_threshold_seconds`, AD-9 + AD-42 Option ii close-gate; long completions intentionally LEAVE the episode open; AD-37 TTL belt is the secondary close; re-arm on new `tool_call_id` after a successful close) |
 | Config class | `LongToolCallNudgeConfig(BaseSettings)` nested on `EnsembleConfig.long_tool_nudge` |
 | Env vars | `LONG_TOOL_NUDGE_ENABLED` (default ON), `LONG_TOOL_NUDGE_INTERVAL_SECONDS` (default 60, ge=1), `LONG_TOOL_NUDGE_DEFAULT_THRESHOLD_SECONDS` (default 900, ge=1, le=1800) |
 | Hard-max constant | `HARD_MAX_THRESHOLD_SECONDS = 1800` in `daemon/services/long_tool_nudge.py` (canonical home — AD-30; defined in **Phase 1** per AM-8); imported by `daemon/services/long_tool_nudge.py` (self), `daemon/config.py`, and `daemon/tools/instance.py` |
