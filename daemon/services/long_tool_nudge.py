@@ -460,7 +460,7 @@ def _wrapped_tools_node(
                 if stamp is None:
                     continue
                 duration_seconds = now - stamp.started_at
-                threshold_crossed = duration_seconds >= threshold
+                threshold_crossed = duration_seconds > threshold
                 # (SC6) Per-completion duration record — logged
                 # REGARDLESS of crossing; this is the forensic line
                 # the bd4b36ef incident never had.

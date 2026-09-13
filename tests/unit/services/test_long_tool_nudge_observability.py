@@ -155,6 +155,45 @@ async def test_threshold_crossed_true_for_long_completion(
 
 
 @pytest.mark.asyncio
+async def test_threshold_crossed_false_at_exact_boundary(
+    lt_real, caplog, monkeypatch
+):
+    """Pin T7: at duration_seconds == threshold, threshold_crossed must be False.
+
+    The per-completion log mirrors the scanner fire boundary (strict `>`,
+    see daemon/services/long_tool_nudge.py: ``elapsed <= threshold: continue``),
+    so duration exactly equal to the threshold is NOT a crossing. Guards
+    against an ``>=`` regression that would re-arm the close-gate and
+    re-open the (parent, child) episode on the boundary.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(lt_real, "time", clock)
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    original_record = registry.record_start
+
+    async def boundary_record(
+        instance_id, tool_call_id, tool_name, parent_id=None
+    ):
+        await original_record(instance_id, tool_call_id, tool_name, parent_id)
+        # Backdate by exactly the default threshold (900s) so
+        # duration_seconds == threshold on completion.
+        registry._stamps[instance_id][tool_call_id].started_at = (
+            clock.t - 900
+        )
+
+    registry.record_start = boundary_record  # type: ignore[method-assign]
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        await _run(lt_real, node, _state(), _CONFIG)
+    records = _completed_records(caplog)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "duration_ms=900000" in message
+    assert "threshold_seconds=900" in message
+    assert "threshold_crossed=False" in message
+
+
+@pytest.mark.asyncio
 async def test_no_leak_on_exception_one_line_still_emitted(
     lt_real, caplog
 ):
