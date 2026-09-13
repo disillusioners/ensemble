@@ -75,6 +75,26 @@ export interface Work {
    */
   started_at?: string | null;
   completed_at?: string | null;
+  /**
+   * Mission-projection identity pair (jobs-page-improvement all-work
+   * title fix). The backend ``WorkRecord.to_dict()`` ships BOTH keys
+   * on every ``GET /api/work`` row (daemon/services/work_resolver.py):
+   * ``mission_id`` — the linked mission (== ``instance_id`` per the
+   * mission-class spec §3 identity; ``null`` only for queue-stage
+   * rows with no instance) — and ``mission_ref`` — the M2
+   * cross-reference payload ``{mission_id, agent_id, liveness}``
+   * (``null`` on degraded instance lookups). The pre-fix ``workToJob``
+   * dropped both, so every all-work group built ``missionId: null``
+   * (jobs-grouping.model.ts) and the P3 title-enrichment gate
+   * (``missionId != null``, jobs-enrichment.model.ts) skipped it —
+   * all-work groups never fetched titles. Optional so legacy fixtures
+   * and older wire payloads stay type-valid; absent maps to ``null``
+   * on the Job shape (child-bound semantics), never to a fabricated
+   * identity. ``outcome`` (ALWAYS ``null`` on the transport surface
+   * per the M2 contract §3.2) is deliberately NOT mirrored.
+   */
+  mission_id?: string | null;
+  mission_ref?: { mission_id: string; agent_id: string; liveness: string } | null;
 }
 
 /**
@@ -114,6 +134,11 @@ export interface WorkFilters {
  * * ``started_at`` / ``completed_at`` — carried from the wire
  *   (``?? null``), NOT hard-nulled. ``JobCardComponent``'s Timeline
  *   renders on all-work rows exactly as it does on queue rows.
+ * * ``mission_id`` / ``mission_ref`` — carried (``?? null``), NOT
+ *   dropped. Grouping derives ``missionId`` from ``mission_id`` and
+ *   the P3 title-enrichment picker requires a populated
+ *   ``missionId``; the pre-fix drop made every all-work group
+ *   permanently enrichment-ineligible (no titles, ever).
  * * ``result_summary`` — carried (``message`` stays ``undefined``:
  *   no BE surface carries report message content today — honest gap,
  *   drawer copy is addressed in Phase 5).
@@ -158,6 +183,13 @@ export function workToJob(work: Work): Job {
     // records carry null for both and render nothing extra.
     job_type: (work.job_type ?? null) as Job['job_type'],
     mission_liveness: work.mission_liveness ?? null,
+    // All-work title fix — carry the mission-projection identity pair
+    // through (see the Work docblock). Grouping derives ``missionId``
+    // from it and the title-enrichment gate requires a populated
+    // ``missionId``; dropping it here kept every all-work group
+    // permanently enrichment-ineligible.
+    mission_id: work.mission_id ?? null,
+    mission_ref: work.mission_ref ?? null,
   };
 }
 

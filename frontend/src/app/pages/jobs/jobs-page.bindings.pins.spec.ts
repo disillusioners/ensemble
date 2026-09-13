@@ -241,6 +241,22 @@ describe('F-5 production-source pins — the store OWNS the writes', () => {
     expect(workModelSrc).toMatch(/started_at\?: string \| null;/);
     expect(workModelSrc).toMatch(/completed_at\?: string \| null;/);
   });
+
+  it('workToJob mission carry-through lives in the REAL work model (all-work title fix — removing the interface field OR the mapping line fails)', () => {
+    // Work wire model carries the mission-projection identity pair
+    // (both keys ship unconditionally on GET /api/work rows —
+    // WorkRecord.to_dict, daemon/services/work_resolver.py).
+    expect(workModelSrc).toMatch(/mission_id\?: string \| null;/);
+    expect(workModelSrc).toMatch(
+      /mission_ref\?: \{ mission_id: string; agent_id: string; liveness: string \} \| null;/,
+    );
+    // ...and the mapper carries them through. Removing EITHER the
+    // interface field or the exact carry line re-opens the bug
+    // (all-work groups build missionId: null → enrichment gate
+    // skips → titles never fetch), so each pin is mutation-sensitive.
+    expect(workModelSrc).toMatch(/mission_id: work\.mission_id \?\? null/);
+    expect(workModelSrc).toMatch(/mission_ref: work\.mission_ref \?\? null/);
+  });
 });
 
 describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
