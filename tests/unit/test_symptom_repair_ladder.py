@@ -507,6 +507,164 @@ class TestBudgetResetOQ5:
         )
         assert result["repair_budget_used"] == 2
 
+    # ── E5 specific-marker negative arms ─────────────────────────────
+    #
+    # The two existing tests in this class pin the predicate at the
+    # bare-flag level (``injected_message=True`` alone) and at the
+    # ``context_kind`` level. The four cases below pin the SAME ruling
+    # against the EXACT marker-shape the production injector nodes stamp
+    # on their server-authored HumanMessages:
+    #
+    #   * empty-nudge        — ``nudge_node`` (graph.py:3195-3219) stamps
+    #                          ``NUDGE_MARKER_KWARG`` ("empty_response_nudge")
+    #   * language-reminder  — ``language_check_node`` (graph.py:3308-3326)
+    #                          stamps ``language_check_reminder``
+    #   * attestation-nudge  — attestation gate (graph.py:4510-4527) stamps
+    #                          ``attestation_nudge`` + counter
+    #   * [SYSTEM CONTEXT]   — ``context_messages._make_context_message``
+    #                          always pairs ``injected_message=True`` with
+    #                          ``context_kind`` (the prod-shape re-pin)
+    #
+    # These four additions guarantee that OQ5's "no budget reset on
+    # injected HumanMessage" ruling survives a future predicate drift
+    # in either direction. PINNED per P1-R6.
+
+    async def test_empty_response_nudge_does_not_reset(
+        self, ladder_on, monkeypatch
+    ):
+        """E5: empty-response nudge (nudge_node stamp) → budget UNCHANGED."""
+        from daemon.graph import NUDGE_MARKER_KWARG
+
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=_StubLoopBreakerSlot(),
+            llm=_StubLLM(response=AIMessage(content="continue")),
+        )
+        empty_nudge = HumanMessage(
+            content="Continue with your task, or provide your final response if you are finished.",
+            id="nudge-empty",
+            additional_kwargs={
+                "injected_message": True,
+                NUDGE_MARKER_KWARG: True,
+            },
+        )
+        result = await agent_node(
+            {
+                "messages": [
+                    AIMessage(content="earlier answer", id="old-ai"),
+                    empty_nudge,
+                ],
+                "repair_budget_used": 2,
+            },
+            config={"configurable": {"thread_id": "iid-oq5-nudge"}},
+        )
+        # NO reset on a server-authored empty-response nudge.
+        assert result["repair_budget_used"] == 2
+
+    async def test_language_check_reminder_does_not_reset(
+        self, ladder_on, monkeypatch
+    ):
+        """E5: language-check reminder (language_check_node stamp) → UNCHANGED."""
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=_StubLoopBreakerSlot(),
+            llm=_StubLLM(response=AIMessage(content="continue")),
+        )
+        reminder = HumanMessage(
+            content=(
+                "You are responding in the wrong language. "
+                "The user's preferred language is en. "
+                "Please respond again in en."
+            ),
+            id="nudge-lang",
+            additional_kwargs={
+                "injected_message": True,
+                "language_check_reminder": True,
+            },
+        )
+        result = await agent_node(
+            {
+                "messages": [
+                    AIMessage(content="earlier answer", id="old-ai"),
+                    reminder,
+                ],
+                "repair_budget_used": 2,
+            },
+            config={"configurable": {"thread_id": "iid-oq5-lang"}},
+        )
+        assert result["repair_budget_used"] == 2
+
+    async def test_attestation_nudge_does_not_reset(
+        self, ladder_on, monkeypatch
+    ):
+        """E5: attestation nudge (gate stamp + denied count) → UNCHANGED."""
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=_StubLoopBreakerSlot(),
+            llm=_StubLLM(response=AIMessage(content="continue")),
+        )
+        attestation_nudge = HumanMessage(
+            content=(
+                "[SYSTEM CONTEXT: Completion Check Nudge]\n\n"
+                "The work is not yet finished — check current progress "
+                "(tasks/children status) and continue (send_message to "
+                "children/revive as needed)."
+            ),
+            id="nudge-attest",
+            additional_kwargs={
+                "attestation_nudge": True,
+                # The gate (graph.py:4510-4527) stamps the denied-count
+                # counter alongside the marker; cover the production shape.
+                "injected_message": True,
+                "attestation_nudge_denied_count": 2,
+            },
+        )
+        result = await agent_node(
+            {
+                "messages": [
+                    AIMessage(content="earlier answer", id="old-ai"),
+                    attestation_nudge,
+                ],
+                "repair_budget_used": 2,
+            },
+            config={"configurable": {"thread_id": "iid-oq5-attest"}},
+        )
+        assert result["repair_budget_used"] == 2
+
+    async def test_system_context_injection_does_not_reset(
+        self, ladder_on, monkeypatch
+    ):
+        """E5: [SYSTEM CONTEXT] injection (full prod shape) → UNCHANGED.
+
+        Belt-and-suspenders re-pin of the existing
+        ``test_context_kind_injection_does_not_reset`` arm — this one
+        uses the EXACT ``_make_context_message`` production shape
+        (injected_message=True + context_kind; both stamps present and
+        content starts with the documented "[SYSTEM CONTEXT:" prefix)."""
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=_StubLoopBreakerSlot(),
+            llm=_StubLLM(response=AIMessage(content="continue")),
+        )
+        system_context = HumanMessage(
+            content=(
+                "[SYSTEM CONTEXT: Project Blueprint]\n\n"
+                "agents-ensemble is a persistent multi-agent daemon."
+            ),
+            id="ctx-prod-shape",
+            additional_kwargs={
+                "injected_message": True,
+                "context_kind": "project",
+            },
+        )
+        result = await agent_node(
+            {
+                "messages": [
+                    AIMessage(content="earlier answer", id="old-ai"),
+                    system_context,
+                ],
+                "repair_budget_used": 2,
+            },
+            config={"configurable": {"thread_id": "iid-oq5-sysctx"}},
+        )
+        assert result["repair_budget_used"] == 2
+
 
 # ---------------------------------------------------------------------------
 # D-1 — exhaustion escalation (T-6) / D-2 OFF preservation
