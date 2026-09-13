@@ -1,12 +1,20 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: 2719 lines — sits in the 1000-3000 band because routing
-logic (``_route_send_message``, ``_make_workdir_aware``,
-``_make_instance_id_aware``) and the tool-factory
-(``create_instance_tools`` + its per-tool wrappers) are co-located here
-for diff-review locality. A structural split into
-``daemon/tools/instance_routing.py`` + ``daemon/tools/instance_factory.py``
-is a ticketed follow-up; not done here.
+Module size: ~4630 lines (2026-09-13 post-phase-3-tunables-move).
+Originally aimed for the 1000-3000 line band; post-move we are ~1600
+lines over the band. Routing logic (``_route_send_message``,
+``_make_workdir_aware``, ``_make_instance_id_aware``) and the tool
+factory (``create_instance_tools`` + its per-tool wrappers) remain
+co-located here for diff-review locality. The phase-3
+``set_instance_tunable`` parent tool was extracted to
+``daemon/tools/tunables.py`` (2026-09-13, M6 + size) — the tool's
+metadata-write path is self-contained (one tool, one metadata key,
+two validation gates) and the move also let the write route through
+``manager.set_metadata_many`` instead of reaching into
+``manager._instance_repository`` directly (D14 violation). A deeper
+structural split into ``daemon/tools/instance_routing.py`` +
+``daemon/tools/instance_factory.py`` remains a ticketed follow-up;
+not done here.
 """
 
 import asyncio
@@ -18,24 +26,18 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from langchain_core.tools import tool, BaseTool
 
-from daemon.services.long_tool_nudge import (
-    HARD_MAX_THRESHOLD_SECONDS,
-    MIN_THRESHOLD_SECONDS,
-)
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
-# ── long-tool-call-nudge (phase 3): per-instance threshold tuning ──
-# The metadata key is the exact-spelling write contract with the
-# scanner's read (daemon/services/long_tool_nudge.py) — a misspelling
-# silently disables the override. Floor/ceiling are IDENTITY-imported
-# from the canonical home (AD-30): never duplicated, never aliased.
-LONG_TOOL_CALL_THRESHOLD_KEY = "long_tool_call_threshold_seconds"
-LONG_TOOL_CALL_ALLOWED_TUNABLES: frozenset = frozenset(
-    {"long_tool_call_threshold_seconds"}
-)
+# Phase-3 ``set_instance_tunable`` was moved to
+# ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
+# ``LONG_TOOL_CALL_THRESHOLD_KEY`` and ``LONG_TOOL_CALL_ALLOWED_TUNABLES``
+# constants live there now; tests and other consumers import from
+# ``daemon.tools.tunables`` (see tests/unit/tools/test_set_instance_tunable.py
+# TestHConstants). Floor/ceiling remain IDENTITY-imported from the
+# canonical home (AD-30): never duplicated, never aliased.
 
 if TYPE_CHECKING:
     from daemon.repositories.project.repository import SQLModelProjectRepository
@@ -230,6 +232,7 @@ from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
+from .tunables import create_set_instance_tunable_tool
 from ._tool_registry import (
     PRIVILEGED_TOOL_CATEGORIES,
     list_tools_by_category,
@@ -4169,129 +4172,10 @@ Returns:
 """
 
     # ── set_instance_tunable (long-tool-call-nudge, phase 3) ────────
-    # Parent-facing write side of the per-child long-tool threshold.
-    # Writes EXACTLY instance_metadata["long_tool_call_threshold_seconds"]
-    # via set_metadata (repository.py:2099) — NEVER update_instance,
-    # which rejects instance_metadata with ValueError. The scanner
-    # reads the key on its next tick — no daemon restart needed for
-    # per-child overrides.
-    @register_tool_category("instance")
-    @tool
-    async def set_instance_tunable(
-        instance_id: str,
-        key: Annotated[
-            str,
-            Field(
-                description=(
-                    "Tunable name; only 'long_tool_call_threshold_seconds' "
-                    "is currently accepted."
-                )
-            ),
-        ],
-        value: Annotated[
-            int,
-            Field(description="New threshold in seconds. Must be in [60, 1800]."),
-        ],
-    ) -> dict:
-        """Set a per-instance runtime tunable. Use tool_help("set_instance_tunable") for details."""
-        # (a) Kill-switch gate (AD-39) — FIRST; when disabled, NO
-        # metadata is written. Stamp/log presence in the daemon
-        # continues by design (stamp/log presence != delivery).
-        config = getattr(manager, "config", None)
-        nudge_config = getattr(config, "long_tool_nudge", None)
-        enabled = (
-            getattr(nudge_config, "enabled", True)
-            if nudge_config is not None
-            else True
-        )
-        if not enabled:
-            return {
-                "error_code": "FEATURE_DISABLED",
-                "message": (
-                    "long-tool-nudge is disabled by config "
-                    "(LONG_TOOL_NUDGE_ENABLED=0); no metadata written"
-                ),
-            }
-        # (c) Allowlist (recoverable error-dict — mirrors
-        # project_set_metadata; the LLM self-corrects from the message).
-        if key not in LONG_TOOL_CALL_ALLOWED_TUNABLES:
-            return {
-                "error": (
-                    f"Unknown tunable {key!r}. Allowed tunables: "
-                    f"{sorted(LONG_TOOL_CALL_ALLOWED_TUNABLES)}"
-                ),
-                "error_code": "UNKNOWN_KEY",
-            }
-        # (b) Type check — reject bool explicitly (bool is an int
-        # subclass in Python) and any non-int.
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(
-                f"{key} must be an integer number of seconds; got "
-                f"{value!r} ({type(value).__name__}). Correct the value "
-                f"and retry."
-            )
-        # (d) Range check — BOTH floor and ceiling, loud raise (the
-        # spawn_councilor strict-validation house style: a parent
-        # typing 18000 WANTED 18000 and must re-read, not receive a
-        # silent 1800).
-        if value < MIN_THRESHOLD_SECONDS or value > HARD_MAX_THRESHOLD_SECONDS:
-            raise ValueError(
-                f"{key} must be in [{MIN_THRESHOLD_SECONDS}, "
-                f"{HARD_MAX_THRESHOLD_SECONDS}] (got {value}). The hard "
-                f"maximum is the system ceiling; the floor prevents "
-                f"accidental micro-thresholds that defeat the feature. "
-                f"Correct the value and retry."
-            )
-        repo = manager._instance_repository
-        # (e) Prior value (single-key read, no row hydrate).
-        prior_value = repo.get_metadata_value(
-            instance_id, LONG_TOOL_CALL_THRESHOLD_KEY
-        )
-        # (f) Write via set_metadata — the SOLE write path for
-        # instance_metadata (single-statement atomic UPDATE).
-        updated = repo.set_metadata(
-            instance_id, LONG_TOOL_CALL_THRESHOLD_KEY, value
-        )
-        if updated is None:
-            return {"error_code": "NOT_FOUND"}
-        return {
-            "instance_id": instance_id,
-            "key": LONG_TOOL_CALL_THRESHOLD_KEY,
-            "prior_value": prior_value,
-            # Effective value the scanner will use (min-clamp echo).
-            "effective_value": min(value, HARD_MAX_THRESHOLD_SECONDS),
-            "applied_at": datetime.now(timezone.utc).isoformat(),
-        }
+    # Extracted to ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6).
+    # The tool is factory-acquired and inserted into the surface below.
+    set_instance_tunable = create_set_instance_tunable_tool(manager)
 
-    set_instance_tunable._full_doc_ = (
-        "Set a per-instance runtime tunable (currently: the long-tool-call "
-        "nudge threshold).\n"
-        "\n"
-        "Args:\n"
-        "    instance_id: The ID of the instance (usually a child) to tune.\n"
-        "    key: Tunable name - only 'long_tool_call_threshold_seconds' is "
-        "accepted in v1.\n"
-        "    value: New threshold in seconds; must be in [60, 1800].\n"
-        "\n"
-        "Returns:\n"
-        "    dict: {instance_id, key, prior_value, effective_value, "
-        "applied_at} on success (effective_value is min(value, 1800) - "
-        "what the scanner will actually use); {'error_code': "
-        "'UNKNOWN_KEY'} for an unknown tunable; {'error_code': "
-        "'NOT_FOUND'} when the instance does not exist; {'error_code': "
-        "'FEATURE_DISABLED'} when long-tool-nudge is disabled by config "
-        "(no metadata written). Raises ValueError for out-of-range or "
-        "non-int values - correct and retry.\n"
-        "\n"
-        "Effect timing:\n"
-        "    The long-tool-nudge scanner picks up the new threshold on "
-        "its next tick (default 60s) - no daemon restart needed.\n"
-        "\n"
-        "Example:\n"
-        "    set_instance_tunable(instance_id=\"abc-123\", "
-        "key=\"long_tool_call_threshold_seconds\", value=1200)"
-    )
-    
     # Create inner_soul tool for self-modification.
     # Thread version_tag so v2+ agents self-modify the versioned agent
     # subtree (C1 fix — base/v1 was being written by v2 instances).

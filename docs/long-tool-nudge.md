@@ -67,9 +67,12 @@ set_instance_tunable(instance_id="<child>", key="long_tool_call_threshold_second
 
 * Range `[60, 1800]` — out-of-range or non-int values raise `ValueError`
   (loud, no silent clamping).
-* Unknown key → `{"error_code": "UNKNOWN_KEY"}`; missing instance →
-  `{"error_code": "NOT_FOUND"}`; disabled →
-  `{"error_code": "FEATURE_DISABLED"}` (no metadata written).
+* Unknown key → `{"error": <msg>, "error_code": "UNKNOWN_KEY"}`;
+  missing instance → `{"error": <msg>, "error_code": "NOT_FOUND"}`;
+  disabled → `{"error": <msg>, "error_code": "FEATURE_DISABLED"}`
+  (no metadata written). All error branches use the same
+  `{"error": <human msg>, "error_code": <token>}` house shape
+  (``project_set_metadata`` lineage).
 * Effect: the scanner picks the new threshold up on its next tick
   (default 60s) — **no daemon restart** needed for per-child overrides
   (env vars DO require a restart).
