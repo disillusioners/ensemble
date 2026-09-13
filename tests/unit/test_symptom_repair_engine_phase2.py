@@ -23,6 +23,7 @@ Covers the three new symptom-class enrollments on the phase-1
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from langchain_core.messages import (
@@ -34,7 +35,7 @@ from langchain_core.messages import (
     messages_from_dict,
     messages_to_dict,
 )
-from langgraph.graph import END
+from langgraph.graph import END, START, MessagesState, StateGraph
 
 from daemon.compaction import (
     _injected_note_absorbed_ids,
@@ -67,6 +68,8 @@ from daemon.response_validation import (
     LLMResponseValidationError,
 )
 from daemon.utils import serialize_message
+
+from tests.helpers.symptom_repair import _RealLangGraph, ok_summarizer
 
 
 # ---------------------------------------------------------------------------
@@ -1191,3 +1194,478 @@ class TestFalsePositiveColonEndingBelowCap:
         ]
         assert _count_trailing_ghost_promise_ai_messages(msgs) == 3
         assert should_continue({"messages": msgs}) == "agent_repair_ghost"
+
+
+# ---------------------------------------------------------------------------
+# C1 fix (2026-09-13): ghost-rung budget-exhaustion terminal response-
+# substitution. The terminal SUBSTITUTES the agent_node's response so NO LLM
+# call fires AFTER the ghost exhaustion branch and the terminal is the final
+# visible message — closing the no-latch pathological cycle that was bounded
+# only by ``recursion_limit=300`` (and which culminated in uncaught
+# GraphRecursionError under some provider behaviors). Mirrors the loop class's
+# response-substitution precedent (graph.py:6751-6753).
+# ---------------------------------------------------------------------------
+
+
+class _C1ScriptedProvider:
+    """LLM stub with a scripted response sequence + call counter.
+
+    Used by the ghost-exhaustion real-graph test to prove that the
+    agent_node's response-substitution path DOES NOT invoke the LLM
+    a second time after the ghost rung exhausts the budget.
+    """
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls: list[list] = []
+
+    def invoke(self, messages):
+        self.calls.append(list(messages))
+        if not self.script:
+            raise AssertionError(
+                "provider script exhausted — unbounded run; "
+                "C1 fix should have short-circuited the LLM call"
+            )
+        return self.script.pop(0)
+
+
+class TestC1GhostExhaustionResponseSubstitution:
+    """C1 fix: ghost budget-exhaustion terminal routes to END via
+    response-substitution.
+
+    Acceptance (per spec):
+    * (a) ZERO LLM calls after ghost exhaustion (provider called
+      exactly once — at the pre-ghost agent_node re-entry);
+    * (b) ``messages[-1]`` IS the terminal (the loud
+      ``[GHOST TERMINATION]`` AIMessage);
+    * (c) cycle-kill — the no-latch cycle (terminal → break ghost
+      tail → 3 below-cap re-invokes → ghost → exhausted → another
+      terminal) cannot recur.
+
+    Master OFF / below-cap paths are unreachable in this scenario
+    (the test pre-seeds budget at the cap with master ON); byte-
+    identicality is verified separately by the existing OFF fixtures.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ghost_exhaustion_terminal_routes_to_end_no_cycle(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """Drive a ghost storm with the budget pre-seeded at the cap.
+        The router routes at-cap → ``agent_repair_ghost``; the ghost
+        node exhausts → stashes the loud terminal in
+        ``pending_repair_ghost_terminal``; the unconditional
+        ``agent_repair_ghost → agent`` edge routes here; the
+        ``agent_node`` substitutes the terminal as ITS response — NO
+        LLM invoke. The plain-AIMessage fall-through in
+        ``should_continue`` then routes to END with the terminal as
+        ``messages[-1]``.
+
+        The provider script holds ONE ghost response; the assertion
+        ``provider.calls == 1`` proves the cycle did not recur.
+        """
+        # Force the master ladder switch ON for this test (the
+        # autouse ``_restore_flags`` fixture only resets the cache).
+        monkeypatch.setenv("ENSEMBLE_SYMPTOM_REPAIR_LADDER", "1")
+        _reset_symptom_repair_ladder_for_tests()
+        # Engine summarizer stub — the surgery/budget/doc flow is real.
+        monkeypatch.setattr(
+            SymptomRepairEngine,
+            "_summarize",
+            staticmethod(ok_summarizer),
+        )
+
+        with _RealLangGraph():
+            import aiosqlite
+            # Re-import inside the swap — the top-of-file imports
+            # captured the conftest's MagicMocks (the daemon.graph
+            # module was already loaded by the test setup), so the
+            # real langgraph primitives must be re-bound for the
+            # real-graph harness (mirrors the joint integration
+            # test pattern in ``test_ladder_loop_x_empty_guard_integration.py``).
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.graph import (
+                END as _REAL_END,
+                START as _REAL_START,
+                MessagesState as _RealMessagesState,
+                StateGraph as _RealStateGraph,
+            )
+            # The agent_node's should_continue conditional edges use
+            # the SAME END sentinel — bind the imported symbol under
+            # its expected name so the conditional mapping works.
+            globals()["END"] = _REAL_END
+            globals()["START"] = _REAL_START
+            globals()["MessagesState"] = _RealMessagesState
+            globals()["StateGraph"] = _RealStateGraph
+
+            from daemon.graph import (
+                create_agent_node,
+                create_agent_repair_ghost_node,
+            )
+
+            provider = _C1ScriptedProvider(
+                [_ghost_ai("Step 4:", "g4")]  # exactly ONE response
+            )
+
+            agent_node = create_agent_node(
+                llm_with_tools=provider,
+                system_prompt="you are a test assistant",
+                compactor=None,
+                graph_ref=[None],
+                config=None,
+                llm_config={"model": "test-model"},
+                retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+            )
+            ghost_node = create_agent_repair_ghost_node(
+                llm_config={"model": "test-model"},
+                system_prompt="you are a test assistant",
+            )
+
+            class _GhostState(_RealMessagesState):
+                repair_budget_used: int
+                pending_repair_ghost_terminal: AIMessage | None = None
+
+            g = _RealStateGraph(_GhostState)
+            g.add_node("agent", agent_node)
+            g.add_node("agent_repair_ghost", ghost_node)
+            g.add_edge(_REAL_START, "agent")
+            g.add_conditional_edges(
+                "agent",
+                should_continue,
+                {
+                    "agent": "agent",
+                    "agent_repair_ghost": "agent_repair_ghost",
+                    _REAL_END: _REAL_END,
+                },
+            )
+            g.add_edge("agent_repair_ghost", "agent")
+
+            db_path = tmp_path / "ghost_exhaust_c1.db"
+            conn = await aiosqlite.connect(str(db_path))
+            saver = AsyncSqliteSaver(conn)
+            await saver.setup()
+            try:
+                compiled = g.compile(checkpointer=saver)
+                cfg = {
+                    "configurable": {"thread_id": "ghost-c1-iid"},
+                    "recursion_limit": 60,
+                }
+                with caplog.at_level(logging.INFO):
+                    await compiled.ainvoke(
+                        {
+                            "messages": [
+                                _real_human("do thing", "h1"),
+                                # Pre-seeded ghost history; the
+                                # router's first observation sees
+                                # trailing_ghost=3 (at cap).
+                                _ghost_ai("Step 1:", "g1"),
+                                _ghost_ai("Step 2:", "g2"),
+                                _ghost_ai("Step 3:", "g3"),
+                            ],
+                            # Budget at the cap → ghost rung exhausts
+                            # on the very first invocation.
+                            "repair_budget_used": 3,
+                        },
+                        cfg,
+                    )
+                st = await compiled.aget_state(cfg)
+                values = st.values
+
+                # ── (a) ZERO LLM calls after ghost exhaustion ──
+                # The provider script has ONE ghost response.
+                # Agent_node invoked the LLM ONCE (at the pre-ghost
+                # re-entry); the ghost-rung exhaust path then
+                # returned the terminal via response-substitution,
+                # so no further LLM call fires.
+                assert len(provider.calls) == 1, (
+                    f"expected exactly 1 LLM call (the pre-ghost "
+                    f"agent_node re-entry); got {len(provider.calls)} "
+                    f"— cycle did not get killed by the C1 fix"
+                )
+
+                # ── (b) messages[-1] IS the terminal ──
+                final_messages = values["messages"]
+                last_msg = final_messages[-1]
+                assert isinstance(last_msg, AIMessage)
+                assert "GHOST TERMINATION" in last_msg.content, (
+                    f"expected loud terminal as final message; "
+                    f"got content={last_msg.content[:80]!r}"
+                )
+                assert last_msg.id.startswith("repair-terminal-ghost-"), (
+                    f"expected ghost-rung terminal id prefix; got "
+                    f"{last_msg.id!r}"
+                )
+
+                # ── (c) cycle-kill ──
+                # The carrier is cleared on the substitution return
+                # so the NEXT turn starts fresh (byte-identical to
+                # a turn that never fired the ghost rung).
+                assert values.get("pending_repair_ghost_terminal") is None, (
+                    "pending_repair_ghost_terminal must be cleared "
+                    "on the substitution return — cycle-kill "
+                    "guarantee"
+                )
+                # The terminal MUST be the final visible message —
+                # no extra LLM response interleaved after it.
+                assert final_messages[-1] is last_msg, (
+                    "terminal must be the last message in the "
+                    "checkpoint; any subsequent LLM response would "
+                    "indicate the cycle recurred"
+                )
+
+                # The loud-substitution WARN logged once.
+                ghost_term_warns = [
+                    r.getMessage()
+                    for r in caplog.records
+                    if "[GHOST TERMINATION]" in r.getMessage()
+                ]
+                assert len(ghost_term_warns) == 1, (
+                    f"expected exactly one [GHOST TERMINATION] "
+                    f"loud-substitution WARN; got {len(ghost_term_warns)}: "
+                    f"{ghost_term_warns!r}"
+                )
+            finally:
+                await conn.close()
+
+    def test_pending_repair_ghost_terminal_in_session_state_schema(self):
+        """The carrier ``pending_repair_ghost_terminal`` is declared
+        on the ``SessionState`` schema with default ``None`` — pinned
+        so the field's schema presence cannot silently regress
+        (checkpoints would otherwise lose the carrier and the C1 fix
+        would silently break).
+
+        Note: the conftest mocks ``langgraph.graph.MessagesState``
+        so the runtime ``SessionState`` class cannot be inspected
+        via ``get_type_hints``; we read the ``daemon.graph`` source
+        directly and assert the field is declared after the
+        ``class SessionState(MessagesState)`` line — the same
+        pattern used by ``tests/unit/test_watchover_decision.py``
+        for ``watchover_route`` / ``watchover_denial_count``.
+        """
+        import os
+
+        src_path = os.path.join(
+            os.path.dirname(
+                os.path.dirname(
+                    os.path.dirname(__file__)
+                )
+            ),
+            "daemon",
+            "graph.py",
+        )
+        with open(src_path, "r", encoding="utf-8") as f:
+            src = f.read()
+
+        # Field MUST be declared on the SessionState class
+        # (i.e., AFTER the class header — not at module level
+        # before it, where it wouldn't be a schema field).
+        idx = src.find("class SessionState(MessagesState):")
+        assert idx != -1, (
+            "SessionState class declaration missing — conftest "
+            "should not have removed it"
+        )
+        field_marker = "pending_repair_ghost_terminal: AIMessage | None"
+        assert field_marker in src, (
+            f"SessionState must declare '{field_marker}' "
+            "— C1 carrier missing"
+        )
+        # The field MUST appear AFTER the class declaration —
+        # otherwise it's not a schema field.
+        assert src.find(field_marker) > idx, (
+            f"'{field_marker}' must be declared inside "
+            "SessionState (after its class header)"
+        )
+        # Default MUST be ``None`` (no field-default means pydantic
+        # raises on missing; the carrier must default cleanly so
+        # old checkpoints deserialize unchanged).
+        # Locate the field declaration and check the next line
+        # carries ``= None``.
+        field_idx = src.find(field_marker)
+        # Find the next newline after the field declaration.
+        next_newline = src.find("\n", field_idx)
+        field_line = src[field_idx:next_newline]
+        assert "= None" in field_line, (
+            f"SessionState.pending_repair_ghost_terminal must "
+            f"default to None (backward-compat); got: {field_line!r}"
+        )
+
+    def test_agent_repair_ghost_node_exhaustion_returns_pending_field(
+        self, monkeypatch
+    ):
+        """Source-level pin: ``create_agent_repair_ghost_node``'s
+        exhaustion branch returns the loud terminal via the new
+        ``pending_repair_ghost_terminal`` field, NOT the
+        ``messages`` channel (which is what allowed the round-0
+        review miss — the old code looked correct in isolation but
+        the channel-append terminal was never observed by
+        should_continue).
+        """
+        import inspect
+
+        from daemon.graph import create_agent_repair_ghost_node
+
+        src = inspect.getsource(create_agent_repair_ghost_node)
+        # Exhaustion branch returns the new field (cycle-kill carrier),
+        # NOT the messages channel — the original channel-append
+        # shape was the root cause of the round-0 review miss.
+        assert (
+            '"pending_repair_ghost_terminal": outcome.terminal_message'
+            in src
+        ), (
+            "create_agent_repair_ghost_node exhaustion branch must "
+            "return pending_repair_ghost_terminal (cycle-kill carrier)"
+        )
+        # Source MUST NOT contain the old channel-append shape for the
+        # terminal_message — that was the defect.
+        assert (
+            '"messages": [outcome.terminal_message]' not in src
+        ), (
+            "create_agent_repair_ghost_node MUST NOT channel-append "
+            "the terminal_message into messages — that was the C1 "
+            "defect (cycle unbounded)"
+        )
+
+    def test_agent_node_response_substitution_pin(self):
+        """Source-level pin: ``create_agent_node``'s agent_node reads
+        ``pending_repair_ghost_terminal`` at node entry and
+        substitutes the terminal as its response — mirroring the
+        loop class's ``response = _durable_loop.terminal_message``
+        precedent (graph.py:6751-6753). Pinned so the substitution
+        path cannot silently regress (e.g., a future refactor that
+        moves the check below the LLM invoke site).
+        """
+        import inspect
+
+        from daemon.graph import create_agent_node
+
+        src = inspect.getsource(create_agent_node)
+        # The carrier check MUST appear in the agent_node source.
+        assert (
+            'state.get("pending_repair_ghost_terminal")' in src
+        ), (
+            "create_agent_node must read "
+            "pending_repair_ghost_terminal at node entry "
+            "(response-substitution site)"
+        )
+        # The loud-substitution WARN line MUST exist — proves the
+        # operator-grep surface is preserved.
+        assert (
+            "[GHOST TERMINATION]" in src
+        ), (
+            "create_agent_node must emit the "
+            "[GHOST TERMINATION] loud-substitution WARN line "
+            "(operator grep surface)"
+        )
+
+
+class TestC1BudgetCompositionSameInvocationPin:
+    """C1 fix secondary pin (developer-declared pre-merge gap):
+    budget-composition same-invocation arithmetic is correct by
+    construction but currently unpinned.
+
+    Sequence under ONE ``agent_node`` invocation:
+    * Loop rung fires (D-2 review fix) → folds ``+1`` into
+      ``_durable_budget_current`` at ``graph.py:6654-6660``;
+    * Pre-terminal intercept reads the RESET-AWARE budget at
+      ``graph.py:7064`` (post-loop, so it sees the loop's
+      ``+1`` — at-cap refusal cannot be bypassed);
+    * ``max()`` return at ``graph.py:7371-7387`` selects the
+      largest budget value (pre-terminal's recovered value, else
+      loop's ``budget_used_new``, else the entry-time value) to
+      carry on the node return — the durable per-task counter
+      survives across the entire same-invocation chain.
+
+    Source-level pins assert the THREE sites stay in lockstep so
+    a future refactor cannot silently break the budget composition.
+    """
+
+    def test_loop_fold_at_graph_6654(self):
+        """The loop rung's ``+1`` MUST be folded into
+        ``_durable_budget_current`` BEFORE the pre-terminal
+        intercept can read it (D-2 review fix).
+        """
+        from daemon.graph import (
+            _maybe_durable_loop_repair as _loop_fn,
+        )
+        import inspect
+
+        # Read the loop-fold site from the agent_node body directly
+        # (the fold lives inside ``create_agent_node``, not
+        # ``_maybe_durable_loop_repair``).
+        from daemon.graph import create_agent_node
+
+        agent_src = inspect.getsource(create_agent_node)
+        # The fold site is the ``if _durable_loop.budget_used_new is
+        # not None`` block that assigns to ``_durable_budget_current``
+        # — pin both the conditional and the assignment shape.
+        assert (
+            "if _durable_loop.budget_used_new is not None:" in agent_src
+        ), "loop fold conditional missing"
+        assert (
+            "_durable_budget_current = int(" in agent_src
+        ), (
+            "loop fold MUST reassign _durable_budget_current from "
+            "_durable_loop.budget_used_new — at-cap refusal bypass "
+            "class is closed only by this fold"
+        )
+
+    def test_intercept_read_at_graph_7064(self):
+        """The pre-terminal intercept MUST read the RESET-AWARE
+        ``_durable_budget_current`` (post-loop-fold), NOT the raw
+        state value — so the loop rung's same-invocation ``+1`` is
+        visible to the intercept and at-cap refusal cannot be
+        bypassed.
+        """
+        import inspect
+
+        from daemon.graph import create_agent_node
+
+        agent_src = inspect.getsource(create_agent_node)
+        # The intercept call's ``durable_budget_used`` argument must
+        # be threaded from ``_durable_budget_current`` (the
+        # post-loop-fold value).
+        assert (
+            "durable_budget_used=int(_durable_budget_current)" in agent_src
+        ), (
+            "pre-terminal intercept must read "
+            "_durable_budget_current (post-loop-fold), not the raw "
+            "state value"
+        )
+
+    def test_max_return_at_graph_7371(self):
+        """The node return MUST carry the largest of the three
+        budget values on the channel — pre-terminal's recovered,
+        loop's ``budget_used_new``, or the entry-time value. The
+        ``max()`` selection is not literally used (the if/elif/else
+        picks the explicit winner); the pin asserts the explicit
+        winner selection stays correct.
+        """
+        import inspect
+
+        from daemon.graph import create_agent_node
+
+        agent_src = inspect.getsource(create_agent_node)
+        # Pre-terminal's recovered value MUST be the highest
+        # priority (it includes both the loop's ``+1`` AND the
+        # intercept's own ``+1``).
+        assert (
+            "_pre_terminal_outcome.budget_used" in agent_src
+        ), (
+            "pre-terminal recovered budget must participate in the "
+            "return-value selection"
+        )
+        # Loop's ``budget_used_new`` is the next priority.
+        assert (
+            "_durable_loop.budget_used_new" in agent_src
+        ), (
+            "loop budget_used_new must participate in the "
+            "return-value selection"
+        )
+        # The entry-time ``_durable_budget_current`` is the
+        # fallback.
+        assert (
+            "_budget_return = int(_durable_budget_current)" in agent_src
+        ), (
+            "entry-time _durable_budget_current must be the "
+            "fallback in the return-value selection"
+        )

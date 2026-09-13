@@ -3546,6 +3546,23 @@ class SessionState(MessagesState):
     # (old checkpoints deserialize with the documented default 0).
     repair_budget_used: int = 0
 
+    # Hallucination-recovery ladder phase 2 / C1: ghost-rung loud
+    # terminal response-substitution carrier (graph.py::create_agent_repair_ghost_node
+    # → ``agent_node``). Set by ``agent_repair_ghost`` when the durable
+    # budget is exhausted; consumed (and cleared to ``None``) by
+    # ``agent`` on its NEXT invocation. Mirrors the loop class's
+    # response-substitution precedent (graph.py:6751-6753): the
+    # terminal SUBSTITUTES the agent_node's response so NO LLM invoke
+    # fires and the plain-AIMessage fall-through in ``should_continue``
+    # routes to END with the terminal as ``messages[-1]`` — cycle-kill:
+    # the no-latch pathological cycle (terminal → break ghost tail →
+    # 3 below-cap re-invokes → ghost → exhausted → another terminal)
+    # bounded only by ``recursion_limit=300`` is closed. Master OFF /
+    # below-cap paths never set this field (the ghost node is
+    # unreachable); byte-identical to pre-fix behavior. Additive field
+    # with a default ``None`` — old checkpoints deserialize unchanged.
+    pending_repair_ghost_terminal: AIMessage | None = None
+
     # Watchover per-turn denial counter (resets at agent node entry = turn
     # boundary). Phase 2 increments this on Deny; Phase 1 declares it for
     # state-schema stability so checkpoints don't break when Phase 2 lands.
@@ -5778,8 +5795,12 @@ def create_agent_repair_ghost_node(
         ``{"messages": [sentinel, *hoisted, *doc, *tail, ...],
         "repair_budget_used": <new>}`` on success; ``{}`` on
         abort/fall-through (the bare ``"agent"`` re-invoke fires
-        unchanged); ``{"messages": [terminal_aimessage]}`` on
-        budget exhaustion (routed to END via the router).
+        unchanged); ``{"pending_repair_ghost_terminal": <terminal_ai>,
+        "repair_budget_used": <current>}`` on budget exhaustion —
+        the agent_node consumes the pending terminal via
+        response-substitution (no LLM invoke, terminal = ``messages[-1]``,
+        plain-AIMessage fall-through → END; cycle-kill for the
+        no-latch pathological cycle).
 
     """
     async def agent_repair_ghost_node(state, config=None) -> dict[str, Any]:
@@ -5832,12 +5853,25 @@ def create_agent_repair_ghost_node(
         ):
             return {}
 
-        # ── budget exhaustion: loud terminal AIMessage (routed to END
-        # via the router's terminal_message detection — the same
-        # path the loop class uses).
+        # ── budget exhaustion (C1 fix): stash the loud terminal in
+        # ``pending_repair_ghost_terminal`` instead of appending to
+        # ``messages``. The agent_node (which the unconditional
+        # ``agent_repair_ghost → agent`` edge routes to NEXT) consumes
+        # this field via response-substitution (graph.py::agent_node
+        # near top of the closure body) — mirroring the loop class's
+        # ``response = _durable_loop.terminal_message`` precedent
+        # (graph.py:6751-6753). The terminal SUBSTITUTES the LLM
+        # response, so NO LLM invoke fires, the terminal is the final
+        # visible message (``messages[-1]``), and
+        # ``should_continue``'s plain-AIMessage fall-through routes to
+        # END — cycle-kill for the no-latch pathological cycle
+        # (terminal → break ghost tail → 3 below-cap re-invokes →
+        # ghost → exhausted → another terminal) that was bounded only
+        # by ``recursion_limit=300`` (~60 terminal re-emissions,
+        # ~180+ LLM calls, ending in uncaught GraphRecursionError).
         if outcome.terminal_message is not None:
             return {
-                "messages": [outcome.terminal_message],
+                "pending_repair_ghost_terminal": outcome.terminal_message,
                 "repair_budget_used": durable_budget_used,
             }
 
@@ -6027,6 +6061,60 @@ def create_agent_node(
         }
         if is_turn_boundary:
             watchover_state_reset["watchover_denial_count"] = 0
+
+        # ── Ladder phase 2 / C1: ghost-rung response-substitution ──
+        # When the durable ghost-repair budget is exhausted the
+        # ``agent_repair_ghost`` node stashed a loud terminal AIMessage
+        # in the ``pending_repair_ghost_terminal`` channel (see
+        # ``create_agent_repair_ghost_node`` exhaustion branch). The
+        # unconditional ``agent_repair_ghost → agent`` edge then routes
+        # here. Mirror the loop class's response-substitution precedent
+        # (graph.py:6751-6753 — ``response = _durable_loop.terminal_message``):
+        # SUBSTITUTE the terminal as this node's response so NO LLM
+        # invoke, NO precall compaction, NO repair prefix assembly fires.
+        # The plain-AIMessage fall-through in ``should_continue`` then
+        # routes to END with the terminal as ``messages[-1]`` —
+        # cycle-kill guarantee that the no-latch pathological cycle
+        # (terminal → break ghost tail → 3 below-cap re-invokes →
+        # ghost → exhausted → another terminal) bounded only by
+        # ``recursion_limit=300`` cannot recur. Master OFF / below-cap
+        # paths never set this field (the ghost node is unreachable),
+        # so OFF byte-identical behavior is preserved. Placed AFTER
+        # the watchover turn-reset block so the existing
+        # ``tests/unit/test_watchover_decision.py::TestSessionStateTurnReset``
+        # source-window pin (4KB after ``async def agent_node``)
+        # stays valid — the substitution's stack-position is not
+        # load-bearing (the watchover reset fires only on a real
+        # HumanMessage boundary; the ghost terminal in
+        # ``messages[-1]`` is an AIMessage, never a real HumanMessage,
+        # so the substitution path leaves the watchover state
+        # untouched).
+        _pending_ghost_terminal = state.get("pending_repair_ghost_terminal")
+        if _pending_ghost_terminal is not None:
+            _ghost_terminal_budget = int(
+                state.get("repair_budget_used", 0) or 0
+            )
+            # Lazy import — the services module would re-enter graph
+            # via the instance_lifecycle → compaction → graph cycle
+            # if imported at module level (mirrors the
+            # ``_maybe_ghost_repair`` lazy-import precedent).
+            from .services.symptom_repair_engine import (
+                SYMPTOM_REPAIR_BUDGET,
+            )
+            logger.warning(
+                f"[GHOST TERMINATION] Instance {instance_short}: "
+                f"routing to END via response-substitution (loud "
+                f"terminal carried after budget exhaustion at "
+                f"{_ghost_terminal_budget}/{SYMPTOM_REPAIR_BUDGET})"
+            )
+            return {
+                "messages": [_pending_ghost_terminal],
+                "repair_budget_used": _ghost_terminal_budget,
+                # Clear the carrier so the NEXT turn starts fresh
+                # (byte-identical to a turn that never fired the
+                # ghost rung at all).
+                "pending_repair_ghost_terminal": None,
+            }
 
         # ── Ladder phase 1 / B-3 (OQ5 PINNED): durable repair-budget reset
         # ── policy ──

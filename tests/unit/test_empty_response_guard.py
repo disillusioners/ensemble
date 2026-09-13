@@ -165,13 +165,16 @@ class TestDegenerateReinvokeCap:
             llm_calls += 1
         assert llm_calls <= EMPTY_DEGENERATE_REINVOKE_CAP + 2
 
-    def test_ghost_promise_deliberately_not_capped(self):
+    def test_ghost_promise_capped_routes_agent_repair_ghost(self):
         # Phase 1 (S5 cap): ghost-promise content is truthy real text
         # under the shared predicate — the S5 cap owns the EMPTY
         # re-invoke classes only. The ghost row kept its pre-guard
-        # bare "agent" behavior, never the S5 cap. The test name
-        # ("deliberately_not_capped") preserved for backward-compat
-        # with the 343-baseline assertion pin.
+        # bare "agent" behavior, never the S5 cap. The original test
+        # name was ``test_ghost_promise_deliberately_not_capped``
+        # (preserved for backward-compat with the 343-baseline
+        # assertion pin) — RENAMED 2026-09-13 to reflect the
+        # phase-2 OPPOSITE behavior: ghost DOES route the
+        # repair-flagged re-entry at the cap with master ON.
         #
         # Phase 2 (recovery-ladder B-3) adds a SECOND cap on the ghost
         # row: GHOST_PROMISE_REINVOKE_CAP=3 with cap-before-surgery
