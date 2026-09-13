@@ -226,3 +226,44 @@ def test_resolve_intelligence_tier_with_configured_model_not_in_allowed():
     assert err is not None
     assert err.startswith("WARN:")
     assert "gpt-5" in err
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pin R — D6 re-pin: tier=None path is pure no-override (Phase 5 reference).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_resolve_intelligence_tier_none_returns_no_override_d6_repin():
+    """Pin R (D6 explicit re-pin, Phase 5): ``_resolve_intelligence_tier(None,
+    allowed_models=("agentic",))`` returns ``(None, None)`` — same shape as
+    Pin C, re-pinned in this phase for explicit D6 reference. The resolver
+    short-circuits BEFORE touching ``allowed_models`` — no error string ever
+    leaks on the no-override path.
+    """
+    resolved, err = _resolve_intelligence_tier(
+        None, allowed_models=("agentic",)
+    )
+    assert resolved is None
+    assert err is None
+    # And the resolver does NOT raise.
+    # (The function is documented pure; this assertion is defensive — if a
+    # future refactor accidentally adds a raise, this pin catches it.)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pin S — None path is pure (no side effects, no error leak).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_resolve_intelligence_tier_high_then_none_pure():
+    """Pin S (D6 unit): once the resolver returns ``(None, None)`` for
+    ``None``, no error string ever leaks into the caller. Defensive — a
+    ``WARN:`` or ``ERROR:`` prefix on the no-override path would be a
+    silent breakage of the default-unchanged contract.
+    """
+    for allowed in [None, (), [], ("agentic",), ("agentic", "coding")]:
+        _, err = _resolve_intelligence_tier(None, allowed_models=allowed)
+        assert err is None, (
+            f"resolver MUST NOT emit an error string on the None path "
+            f"(allowed_models={allowed!r}); got: {err!r}"
+        )
