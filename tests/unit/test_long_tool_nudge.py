@@ -543,7 +543,9 @@ class TestU11NoticeStructure:
         assert "send_message" in notice  # (c) rec 2
         assert "CANNOT receive" in notice  # bd4b36ef 19-min lesson
         assert "terminate_instance" in notice  # (c) rec 3
-        assert "# FUTURE" in notice  # (d) extensibility seam
+        assert "model_tier" in notice  # (d) rec 4 names the new opt-in param
+        assert "high" in notice  # (d) rec 4 names the tier literal
+        assert notice.count("Re-spawn with high intelligence") == 1  # exactly one rec 4 (no double-implementation)
         assert "advisory only" in notice  # (e) footer
         assert "child-1:call-1"[:15] in notice  # episode id
         # NO pause/resume advice as agent instructions.

@@ -802,13 +802,12 @@ def _build_long_tool_notice(
 
     Locked 5-section structure: (a) header with child/tool/call-id/
     elapsed/threshold; (b) why-it-matters (busy-slow weak-model
-    signature, loop-breaker evasion); (c) exactly three
-    recommendations using EXISTING parent tools — explicitly NO
-    pause/resume advice (agents have no pause tools; pause is
-    operator-only); (d) the ``# FUTURE`` extensibility seam for the
-    Feature #1 companion (re-spawn-with-higher-intelligence-model) —
-    greppable, NOT implemented today; (e) advisory-only footer with
-    the episode id.
+    signature, loop-breaker evasion); (c) recs 1-3 using EXISTING
+    parent tools — explicitly NO pause/resume advice (agents have
+    no pause tools; pause is operator-only); (d) rec 4 — re-spawn
+    with high intelligence via ``spawn_instance(model_tier='high')``
+    (Feature #1 opt-in, D4); (e) advisory-only footer with the
+    episode id.
     """
     child_id = episode_ctx.get("child_id", "") or ""
     tool_name = episode_ctx.get("tool_name", "") or ""
@@ -840,12 +839,11 @@ def _build_long_tool_notice(
             "3. terminate_instance + re-spawn a replacement if stuck "
             "past 2x threshold."
         ),
-        "# FUTURE: re-spawn-with-higher-intelligence-model recommendation",
         (
-            "# FUTURE (Feature #1 companion): template — '4. Consider "
-            "re-spawning with a higher-intelligence model: "
-            "{spawn_tool_name}(child_role, model=<better_model>).' Do "
-            "NOT implement today."
+            "4. Re-spawn with high intelligence: spawn_instance(agent_id=<role>, "
+            "model_tier='high') — picks the configured high-tier model "
+            "(default 'agentic'). Use after recommendation 3 if the child "
+            "was busy-slow on a low-tier model."
         ),
         (
             f"This is advisory only — no automatic action has been "

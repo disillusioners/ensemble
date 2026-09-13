@@ -216,7 +216,8 @@ class TestLongToolNudgeE2E:
         content = rows[0].content
         assert "[system:long-tool-nudge]" in content
         assert "busy-slow / weak-model signature" in content
-        assert "# FUTURE" in content
+        assert "model_tier" in content  # Feature #1 (Phase 4): rec 4 names the new opt-in param
+        assert content.count("Re-spawn with high intelligence") == 1  # exactly one rec 4
         assert "advisory only" in content
 
         # (b) the wake is real: WAITING_CHILDREN → RUNNING in the DB.

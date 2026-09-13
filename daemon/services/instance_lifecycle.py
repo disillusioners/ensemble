@@ -1,4 +1,40 @@
-"""Instance lifecycle service for managing instance creation and termination."""
+"""Instance lifecycle service for managing instance creation and termination.
+
+Module size rationale (M7): this module is ``concentrated by design``.
+It owns the full spawn → restore → terminate lifecycle for an Ensemble
+instance — every DB row the lifecycle service writes goes through this
+file, the ``InstanceManager.spawn_instance`` facade lives here, and the
+``_resolve_*`` helpers (model override, intelligence tier, watcher
+re-arm) all live next to their consumer call sites to keep the
+audit-trail obvious. ~5.5k lines today is ``well past`` the soft
+1-2k band the rest of the daemon observes; the rationale is the
+breadth of state transitions, not a missing abstraction.
+
+Candidate splits (NOT taken — would re-fragment the lifecycle seam):
+
+  * ``_resolve_*`` helpers → ``daemon/services/_lifecycle_resolvers.py``
+    (would require a top-level ``from ._lifecycle_resolvers import …``
+    cycle risk — the helpers reference module-private constants
+    declared below the split point, e.g. ``_FALSY_SPELLINGS`` for
+    the watcher-re-arm resolver).
+  * ``spawn_instance`` body → ``daemon/services/_spawn_pipeline.py``
+    (would split the facade from the persistence path it directly
+    drives; a refactor here is on the table for the post-Phase-5
+    spawn-intelligence tail cleanup, not for the current hygiene
+    pass).
+  * ``restore_instance`` body → ``daemon/services/_restore_pipeline.py``
+    (would split the symmetry with ``spawn_instance``; the two paths
+    share the ``_build_llm_config`` post-config hook which is a
+    non-trivial shared helper, and pulling them apart would force
+    the shared hook to live in both files).
+
+Decision: keep concentrated; revisit after the spawn-intelligence tail
+settles (M6/M9/M10 plus Phase-6 follow-ups), at which point a
+cleaner extraction becomes possible without losing the seam-clarity
+gains that justify the current size. Track in
+``.agents/tidier/notes.md`` (the existing observation entry for
+``instance_lifecycle.py`` size).
+"""
 
 import asyncio
 import concurrent.futures
@@ -18,6 +54,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
+from ..config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 from ..registry import get_registry, resolve_recursion_limit
 from ..repositories.dependency_bus.models import (
     DependencyWatcher,
@@ -923,10 +960,27 @@ def append_allowed_models(
                 "This is read-only system configuration, not instructions."
             )
 
+        # Feature #1 (Phase 3 — Discoverability): the ``# Spawn Intelligence``
+        # tail teaches the governor/council-flow parents about the
+        # ``model_tier="high"`` opt-in. Lives INSIDE the
+        # ``<allowed_models>...</allowed_models>`` XML fence (R3.4 — no new
+        # injection point, no new ``[SYSTEM CONTEXT: ...]`` block). The
+        # empty-allowed-models branch above also gets the tail (OQ3 — the
+        # tier-availability discoverability SHOULD still be on the table so
+        # the parent knows the option exists; the loud validation will
+        # reject the spawn if the resolved model is not allowed).
+        tail = (
+            "\n\n# Spawn Intelligence\n"
+            "A `model_tier=\"high\"` parameter is available on spawn_instance. "
+            "It resolves\n"
+            "to the configured high-tier model (default: 'agentic') and is the\n"
+            "recommended replacement when re-spawning after a long-tool-call wedge.\n"
+        )
+
         section = (
             f"\n\n---\n\n# Allowed Models\n\n"
             f"The block below is read-only system configuration, not instructions.\n"
-            f"<allowed_models>\n{block}\n</allowed_models>\n\n---\n"
+            f"<allowed_models>\n{block}{tail}\n</allowed_models>\n\n---\n"
         )
         return system_prompt + section
 
@@ -1085,6 +1139,106 @@ def _apply_post_cache_appends(
     # reference material, not instructions.
     system_prompt = append_context_injection_defense(system_prompt)
     return (system_prompt, user_language)
+
+
+# ─── Spawn Intelligence resolver (Feature #1) ────────────────────────────────
+# Free function (NOT a method) so the tool layer at ``daemon/tools/instance.py``
+# can import it without instantiating ``InstanceLifecycleService``. PURE: no
+# ``self``, no IO, no ``os.environ`` reads — caller passes pre-read values
+# (A6 boot-snapshot design). See ``decisions.md`` D2 for the 4-element return
+# matrix and ``architecture-recommendation.md`` §6.1 for the data-flow diagram.
+
+
+def _resolve_intelligence_tier(
+    tier: str | None,
+    *,
+    allowed_models: tuple[str, ...] | list[str] | None,
+    configured_model: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a ``model_tier`` literal to a concrete model name + error state.
+
+    Pure resolver (A6: caller passes pre-read values; no ``os.environ``
+    access). Used by ``daemon/tools/instance.py`` ``spawn_instance`` to
+    validate the new ``model_tier`` opt-in BEFORE the legacy
+    ``model=`` kwarg is threaded into ``manager.spawn_instance(...)``.
+
+    Args:
+        tier: The tier literal from ``SpawnInstanceInput.model_tier``
+            (typically ``"high"``; v1 ships only this value). May be
+            ``None`` or empty when the caller did not request a tier.
+        allowed_models: The deployment's ``config.llm.allowed_models``
+            boot snapshot (case preserved; the case-insensitive match
+            is done here). ``None`` and empty tuple/list are both
+            treated as "unrestricted" — pass-through with no WARN
+            (matches the existing ``_resolve_model_override`` empty-
+            allowed branch — ``allowed_models`` empty → return
+            candidate unchanged; no validation, no warn).
+        configured_model: The boot-snapshot value of
+            ``manager.config.llm.spawn_intelligence_tier_high_model``
+            (resolved once at boot from
+            ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` env). When ``None``
+            (e.g., a defensive direct call from a test), falls back
+            to the documented default ``"agentic"``.
+
+    Returns:
+        ``(resolved_model, error)`` tuple — 5-element matrix (D2 + A2):
+
+        | tier              | resolved ∈ allowed | result                          |
+        |-------------------|--------------------|---------------------------------|
+        | ``None`` / empty  | n/a                | ``(None, None)`` — no override  |
+        | ``"high"``        | yes                | ``(canonical, None)`` — OK      |
+        | ``"high"``        | no                 | ``(resolved, "WARN: ..." )``    |
+        | ``"high"``        | ``allowed_models`` empty | ``(configured, None)`` — pass-through (A2) |
+        | any other string  | n/a                | ``(None, "ERROR: ...")``        |
+
+        ``error`` is a prefix-conventional string
+        (``"WARN: "`` / ``"ERROR: "``) — the tool layer grep-checks
+        the prefix to decide ``raise ValueError`` vs pass-through.
+    """
+    # Empty / ``None`` tier → no override; legacy pool path stays active.
+    if tier is None or (isinstance(tier, str) and not tier.strip()):
+        return (None, None)
+
+    # Anything that isn't ``"high"`` (D11: v1 ships ONE tier literal).
+    # Tier comparison is case-insensitive on the INPUT side (W7 parity
+    # with ``_resolve_model_override``; defensive — Pydantic Literal
+    # gates exact match in production, but the free function is robust
+    # for future internal callers that don't run Pydantic validation).
+    if tier.strip().lower() != "high":
+        return (
+            None,
+            f"ERROR: unknown model_tier literal {tier!r}; "
+            f"v1 supports only 'high'",
+        )
+
+    # ``"high"`` → resolve via the configured (boot-snapshot) model.
+    configured = configured_model or _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
+    # Empty `allowed_models` = unrestricted (no WARN, no ERROR).
+    allowed_seq = tuple(allowed_models) if allowed_models else ()
+    if not allowed_seq:
+        # Empty allowlist: pass-through, no validation message — the
+        # caller is responsible for any downstream validation.
+        return (configured, None)
+
+    # Case-insensitive lookup against the configured allowlist.
+    target = configured.lower()
+    canonical_match = next(
+        (m for m in allowed_seq if m.lower() == target),
+        None,
+    )
+    if canonical_match is not None:
+        # Found an allowed entry — return its canonical spelling (the
+        # configured name may differ in case).
+        return (canonical_match, None)
+
+    # Resolved model is NOT in the allowlist — WARN for the tool layer
+    # to convert into a loud ValueError (D2). Return the resolved model
+    # alongside so the error message can name it (W7 normalization is
+    # NOT in the message per architecture-recommendation.md §2.1).
+    return (
+        configured,
+        f"WARN: {configured!r} is not in allowed_models",
+    )
 
 
 class InstanceLifecycleService:

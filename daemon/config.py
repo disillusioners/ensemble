@@ -95,6 +95,23 @@ def _parse_csv_or_json_list(value: Any) -> Any:
     return value
 
 
+# M5 — single source of truth for the documented default of
+# ``llm.spawn_intelligence_tier_high_model``. Declared here (BEFORE
+# ``LLMConfig``) so the ``Field(default=...)`` at :425 can reference
+# it directly without a NameError at class-construction time.
+# Consumed by:
+#   (a) the Pydantic ``Field(default=...)`` at :425 (this module),
+#   (b) ``_resolve_intelligence_tier_high_model`` at the ~:2340
+#       zone (returns it as the empty=unset normalization target),
+#   (c) the tool layer's
+#       ``getattr(..., default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT)``
+#       fallback at ``daemon/tools/instance.py`` (Feature #1
+#       resolver block — imports from this module). The "~:2340
+#       zone" M5 cross-ref comment is retained below the second
+#       occurrence; this early declaration is the load-bearing one.
+_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT: str = "agentic"
+
+
 class LLMConfig(BaseSettings):
     """LLM configuration settings."""
 
@@ -405,6 +422,38 @@ class LLMConfig(BaseSettings):
             "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
             "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
             "legacy name is the effective source). Default: []."
+        ),
+    )
+
+    # Feature #1 (spawn-time intelligence override). The configured
+    # high-tier model name that ``spawn_instance(model_tier="high")``
+    # resolves to. Resolved at boot by ``load_config`` from the
+    # ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` env var (single env read
+    # at boot — A6 hard rule; per-spawn reads FORBIDDEN to avoid
+    # split-brain with the ``allowed_models`` boot snapshot). Default
+    # ``"agentic"`` (mirrors the first element of
+    # ``_ALLOWED_MODELS_DEFAULT``). The tool layer reads this via
+    # ``manager.config.llm.spawn_intelligence_tier_high_model``; no
+    # per-spawn ``os.environ`` access. If the resolved value is NOT in
+    # ``allowed_models``, ``load_config`` emits a one-shot WARNING and
+    # every ``model_tier="high"`` call raises loud until the env is
+    # re-pointed and the daemon restarted.
+    spawn_intelligence_tier_high_model: str = Field(
+        default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT,
+        # M5 — this default MUST stay in lockstep with
+        # ``_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT`` (the single
+        # source defined at daemon/config.py:~2340). The tool layer
+        # at ``daemon/tools/instance.py`` (Feature #1 resolver
+        # block) imports the same constant for its ``getattr``
+        # fallback; ``_resolve_intelligence_tier_high_model``
+        # (helper at daemon/config.py:2340-zone) returns it as the
+        # empty=unset normalization target. Do not re-declare the
+        # literal here.
+        description=(
+            "Boot-snapshot of the high-tier model that "
+            "spawn_instance(model_tier='high') resolves to. Read once "
+            "from SPAWN_INTELLIGENCE_TIER_HIGH_MODEL env at "
+            "load_config; default 'agentic'."
         ),
     )
 
@@ -2307,6 +2356,51 @@ def warn_deprecated_allowed_models_env() -> None:
 _ALLOWED_MODELS_DEFAULT: tuple[str, ...] = ("agentic", "coding")
 
 
+# ─── Spawn Intelligence (Feature #1) ──────────────────────────────────────────
+# Operator-side configuration for the ``spawn_instance(model_tier="high")``
+# opt-in surface. The env var ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` overrides
+# the high-tier model name; default is ``"agentic"`` (mirrors the first
+# element of ``_ALLOWED_MODELS_DEFAULT``). Process-lifetime config (A6 / D8) —
+# the boot-snapshot is read ONCE in ``load_config`` (no per-spawn
+# ``os.environ`` reads) and installed as ``llm.spawn_intelligence_tier_high_model``.
+#
+# M5 — ``_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT`` is the SINGLE SOURCE of
+# truth for the documented default. The constant itself is declared at
+# module top (just before ``LLMConfig`` — so the ``Field(default=...)``
+# at :425 can reference it directly at class-construction time). This
+# block retains the cross-ref comment so future readers know the
+# canonical home is upstream of LLMConfig. Consumed by:
+#   (a) the Pydantic ``Field(default=...)`` at daemon/config.py:425,
+#   (b) ``_resolve_intelligence_tier_high_model`` below (returns it as
+#       the empty=unset normalization target),
+#   (c) the tool layer's
+#       ``getattr(..., default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT)``
+#       fallback at ``daemon/tools/instance.py`` (Feature #1 resolver
+#       block). Changing the constant ripples to all three call sites
+#       automatically. Do not re-declare the literal elsewhere.
+
+
+def _resolve_intelligence_tier_high_model(env_value: str | None) -> str:
+    """Resolve the configured high-tier model for ``model_tier="high"`` spawns.
+
+    Pure function — caller passes the env-var string (or ``None``); we
+    apply the ``_clean_env_value`` empty/whitespace normalization and
+    fall back to the documented default. No ``os.environ`` reads here;
+    ``load_config`` does the single env lookup and calls this helper.
+
+    Args:
+        env_value: Raw env-var string (or ``None``).
+
+    Returns:
+        Trimmed non-empty value if the env var is set; otherwise the
+        documented default ``"agentic"``.
+    """
+    cleaned = _clean_env_value(env_value)
+    if cleaned is None:
+        return _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
+    return cleaned
+
+
 def _resolve_allowed_models(
     yaml_value: Any,
     *,
@@ -3045,6 +3139,17 @@ def resolve_injected_notes_absorb() -> bool:
     )
 
 
+# Emit-once guard for the ``spawn_intelligence_tier_high_model`` boot
+# WARNING (daemon/config.py:3254-3264). The boot path invokes
+# ``load_config`` twice (daemon/api.py:245 lifespan startup +
+# daemon/services/attestation_resolver.py:513 judge-model boot-log
+# resolution); both calls re-enter the WARNING emit. Ops grep-count
+# WARNINGs as health signals — a permanent 2x count breaks exactly-N
+# checks. Mirrors the sibling precedent ``_allowed_models_deprecation_warned``
+# at daemon/config.py:2309 (same module-level flag checked-and-set idiom).
+_spawn_intelligence_tier_boot_warned = False
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -3137,6 +3242,43 @@ def load_config(config_path: str | None = None) -> Config:
         old_var=os.environ.get("OPENAI_ALLOWED_MODELS"),
         on_legacy=warn_deprecated_allowed_models_env,
     )
+    # Feature #1 (spawn-time intelligence override) — single ``os.environ``
+    # read at boot (A6 hard rule: per-spawn reads FORBIDDEN to avoid
+    # split-brain with the ``allowed_models`` boot snapshot above). The
+    # resolved value is installed as ``llm.spawn_intelligence_tier_high_model``
+    # for the tool layer (``manager.config.llm.spawn_intelligence_tier_high_model``).
+    spawn_intelligence_tier_high_model = _resolve_intelligence_tier_high_model(
+        os.environ.get("SPAWN_INTELLIGENCE_TIER_HIGH_MODEL"),
+    )
+    llm_config["spawn_intelligence_tier_high_model"] = spawn_intelligence_tier_high_model
+    # R-A6 boot WARNING (owner-ratified 2026-09-14; W4 verbatim pin):
+    # if the resolved tier-default is NOT in the boot-snapshot
+    # ``allowed_models``, emit ONE WARNING so operators can re-point
+    # the env var. WARNING, NOT boot-fail — the mismatch is semantic
+    # (well-formed string, wrong list), not malformed. Per-spawn loud
+    # ``ValueError`` remains the parent-facing contract (D2).
+    # NOTE: ``llm_config["allowed_models"]`` is the pre-pydantic raw value
+    # (CSV string from YAML interpolation or list from env); use the
+    # shared parser to mirror what pydantic's field validator will do.
+    _allowed_raw = llm_config.get("allowed_models")
+    _parsed_allowed_for_warn = _parse_csv_or_json_list(_allowed_raw)
+    # Emit-once guard (D-1): the boot path runs ``load_config`` twice
+    # (daemon/api.py:245 + daemon/services/attestation_resolver.py:513);
+    # the WARNING must still fire exactly once per process. Mirrors the
+    # sibling precedent at :2309 (``_allowed_models_deprecation_warned``).
+    global _spawn_intelligence_tier_boot_warned
+    if not _spawn_intelligence_tier_boot_warned and (
+        _parsed_allowed_for_warn
+        and spawn_intelligence_tier_high_model not in _parsed_allowed_for_warn
+    ):
+        _spawn_intelligence_tier_boot_warned = True
+        logger.warning(
+            "[Config] spawn_intelligence_tier_high_model resolves to '%s', "
+            "which is NOT in allowed_models %s; model_tier='high' spawns "
+            "will raise until the env is re-pointed.",
+            spawn_intelligence_tier_high_model,
+            _parsed_allowed_for_warn,
+        )
     config_dict["llm"] = llm_config
     if "daemon" in processed_config:
         config_dict["daemon"] = processed_config["daemon"]
