@@ -108,8 +108,8 @@ from .llm_error_classifier import (
     _truncate_error,
 )
 from .response_validation import (
-    LLMResponseValidationError,
     EmptyLLMResponseError,
+    LLMResponseValidationError,
     # Empty-response-guard Phase 1: shared emptiness predicate (S1 gate +
     # router row-5 nudge gate) + the nudge text (single-sourced in
     # response_validation so the validator can recognize nudge
@@ -3551,7 +3551,7 @@ class SessionState(MessagesState):
     # → ``agent_node``). Set by ``agent_repair_ghost`` when the durable
     # budget is exhausted; consumed (and cleared to ``None``) by
     # ``agent`` on its NEXT invocation. Mirrors the loop class's
-    # response-substitution precedent (graph.py:6751-6753): the
+    # response-substitution precedent (graph.py:6847-6848): the
     # terminal SUBSTITUTES the agent_node's response so NO LLM invoke
     # fires and the plain-AIMessage fall-through in ``should_continue``
     # routes to END with the terminal as ``messages[-1]`` — cycle-kill:
@@ -3828,7 +3828,7 @@ def _is_ghost_promise_message(message: Any) -> bool:
     Ghost-promise signature: AIMessage with NO tool_calls whose visible
     text (after stripping trailing whitespace) ends with a single colon
     ``":"``. Bare ``endswith(':')`` is the shipped detector (router
-    ``graph.py:3059`` row 4) — OQ2 ruled (a): keep the bare detector,
+    ``graph.py:3723`` row 4) — OQ2 ruled (a): keep the bare detector,
     rely on cap-before-surgery ordering for FP mitigation. Tool-call
     AIMessages are NEVER ghost-promise (P-1 — non-tool detectors must
     never count tool-call messages).
@@ -3934,7 +3934,7 @@ def _is_empty_response_error(exc: BaseException) -> bool:
 
 def _build_truncated_detection_from_exception(
     exc: BaseException,
-) -> "TruncatedDetectionResult | None":
+) -> TruncatedDetectionResult | None:
     """Build a :class:`TruncatedDetectionResult` from a raising exception.
 
     Returns ``None`` if the exception does not carry a usable
@@ -3952,7 +3952,7 @@ def _build_truncated_detection_from_exception(
 
 def _build_empty_post_ladder_detection_from_messages(
     messages: list,
-) -> "EmptyPostLadderDetectionResult":
+) -> EmptyPostLadderDetectionResult:
     """Build a :class:`EmptyPostLadderDetectionResult` from the LLM-bound list.
 
     The S1 raise carries the offending empty AIMessage on
@@ -5860,7 +5860,7 @@ def create_agent_repair_ghost_node(
         # this field via response-substitution (graph.py::agent_node
         # near top of the closure body) — mirroring the loop class's
         # ``response = _durable_loop.terminal_message`` precedent
-        # (graph.py:6751-6753). The terminal SUBSTITUTES the LLM
+        # (graph.py:6847-6848). The terminal SUBSTITUTES the LLM
         # response, so NO LLM invoke fires, the terminal is the final
         # visible message (``messages[-1]``), and
         # ``should_continue``'s plain-AIMessage fall-through routes to
@@ -6069,9 +6069,12 @@ def create_agent_node(
         # ``create_agent_repair_ghost_node`` exhaustion branch). The
         # unconditional ``agent_repair_ghost → agent`` edge then routes
         # here. Mirror the loop class's response-substitution precedent
-        # (graph.py:6751-6753 — ``response = _durable_loop.terminal_message``):
-        # SUBSTITUTE the terminal as this node's response so NO LLM
-        # invoke, NO precall compaction, NO repair prefix assembly fires.
+        # (graph.py:6847-6848 — ``response = _durable_loop.terminal_message``):
+        # APPEND the stashed terminal as this node's emitted message —
+        # different mechanism from the loop precedent's `response = ...`
+        # substitution, same cycle-kill: ``messages[-1]`` is a plain
+        # AIMessage so the router falls through to END and NO LLM invoke
+        # fires (no precall compaction, no repair prefix assembly).
         # The plain-AIMessage fall-through in ``should_continue`` then
         # routes to END with the terminal as ``messages[-1]`` —
         # cycle-kill guarantee that the no-latch pathological cycle
@@ -6091,6 +6094,11 @@ def create_agent_node(
         # untouched).
         _pending_ghost_terminal = state.get("pending_repair_ghost_terminal")
         if _pending_ghost_terminal is not None:
+            # Carrier co-occurrence impossible by construction — when this
+            # early return fires, the loop-substitution (graph.py:6847-6848)
+            # and pre-terminal-intercept (graph.py:7141) paths below are
+            # unreachable (the carrier is set ONLY on ghost-rung budget
+            # exhaustion, mutually exclusive with the other rungs).
             _ghost_terminal_budget = int(
                 state.get("repair_budget_used", 0) or 0
             )
@@ -10007,6 +10015,7 @@ __all__ = [
     "build_instance_graph",
     "build_session_graph",
     "create_agent_node",
+    "create_agent_repair_ghost_node",
     "create_watchover_check_node",
     "create_watchover_terminate_node",
     "should_end_watchover",

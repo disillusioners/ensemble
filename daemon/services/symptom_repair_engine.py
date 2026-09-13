@@ -239,7 +239,7 @@ class SymptomRepairEngine:
             "post_repair_routing": "continue",
         },
         # ── Phase 2 (B-1): ghost-promise ─────────────────────────────
-        # Router-detected (graph.py:3059, bare ``endswith(':')`` on
+        # Router-detected (graph.py:3723, bare ``endswith(':')`` on
         # trailing AIMessages). Bare ``"agent"`` re-invoke capped at
         # GHOST_PROMISE_REINVOKE_CAP=3 (cap-before-surgery ordering —
         # B-3). Evidence window: trailing ghost AIMessages from the
@@ -326,6 +326,8 @@ class SymptomRepairEngine:
     #: summarizer uses the shipped ``REPAIR_SUMMARIZATION_PROMPT`` template
     #: (lazy-imported from ``daemon.graph``) directly, so there is no
     #: per-class prompt drift for the converted class.
+    #: The ghost/truncated/empty_post_ladder rows added in phase 2 are likewise placeholder keys, not symbols — per-class doc text lives inline in ``_build_repair_doc``.
+    # NOT YET WIRED (phase 2): nothing reads SUMMARY_PROMPTS
     SUMMARY_PROMPTS: ClassVar[dict[str, str]] = {
         "loop": "_loop_prompt",
         "ghost": "_ghost_prompt",
@@ -583,6 +585,10 @@ class SymptomRepairEngine:
         list of trailing AIMessages; ``trailing_count`` int). The
         detector walks on the graph.py side (per turn) so the engine
         stays detector-agnostic.
+
+        The ``messages`` parameter is unused for this class (the
+        detection object carries the window); it is retained for the
+        uniform selector dispatch signature shared with the loop preset.
         """
         # Duck-typed extraction — the dataclass lives in graph.py and
         # is built there. Lazy import keeps graph ↔ services cycle safe.
@@ -649,6 +655,10 @@ class SymptomRepairEngine:
         Returns:
             ``(removal_ids, removed_empties)`` — ids to remove and the
             empty AIMessage objects (for telemetry).
+
+        The ``messages`` parameter is unused for this class (the
+        detection object carries the window); it is retained for the
+        uniform selector dispatch signature shared with the loop preset.
         """
         empty_msgs = list(getattr(detection, "empty_messages", []) or [])
         removal_ids: set[str] = set()

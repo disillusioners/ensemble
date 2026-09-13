@@ -13,7 +13,7 @@ Covers the four verifications the dispatcher asked for in this round:
   ``axis="ram-per-turn"`` / ``axis="durable-task"`` keyword-form sites
   in ``daemon/graph.py`` and confirm each is non-terminal. The terminal
   emit is statically pinned to be axis-free (axis_part suppressed when
-  phase == "terminal" — graph.py:1812).
+  phase == "terminal" — graph.py:1915).
 * **M2b** — Behavioral axis suffix: when the durable rung fires the
   [SYMPTOM] line carries ``axis=durable-task``; when the RAM-per-turn
   path fires (kill-switch OFF) it carries ``axis=ram-per-turn``. The
@@ -92,7 +92,7 @@ class TestAxisVocabularySites:
         """Each ``axis="ram-per-turn"`` / ``axis="durable-task"`` line
         must be a call to ``_emit_symptom_telemetry`` whose ``phase=``
         is NOT ``terminal`` — terminal lines self-label via ``detail=``
-        and carry NO axis (``graph.py:1812``: ``axis_part = f" axis={axis}" if axis and phase != "terminal" else ""``).
+        and carry NO axis (``graph.py:1915``: ``axis_part = f" axis={axis}" if axis and phase != "terminal" else ""``).
         """
         sites = list(_iter_axis_keyword_lines(self.DAEMON_GRAPH))
         assert sites, "expected axis keyword form on non-terminal emit sites"
@@ -121,7 +121,7 @@ class TestAxisVocabularySites:
 
         Source-level pin: every emit whose OWN first inner line is
         ``phase="terminal"`` MUST NOT carry ``axis=`` (the helper
-        suppresses axis at runtime when phase=='terminal' — graph.py:1812).
+        suppresses axis at runtime when phase=='terminal' — graph.py:1915).
         We isolate the actual terminal emit by looking for the emit
         whose own body starts with ``phase="terminal"``, NOT by span
         membership (which can include sibling non-terminal emits within

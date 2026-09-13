@@ -19,6 +19,10 @@ Covers the three new symptom-class enrollments on the phase-1
 * **F-4 cross-class isolation (P-9)** — each class consumes ONLY its
   own budget on the shared per-task counter; dual-budget scenarios
   (loop + ghost, ghost + empty, etc.) coexist.
+
+Size note: this module's size is a consequence of byte-identity
+pinning across the 4 preset classes; it is one coverage family per
+banner-separated class.
 """
 from __future__ import annotations
 
@@ -31,11 +35,10 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
     ToolMessage,
-    message_to_dict,
     messages_from_dict,
     messages_to_dict,
 )
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import END, MessagesState, StateGraph
 
 from daemon.compaction import (
     _injected_note_absorbed_ids,
@@ -57,7 +60,6 @@ from daemon.graph import (
     _maybe_pre_terminal_repair,
     should_continue,
 )
-from daemon.services.context_messages import CONTEXT_KIND_SYMPTOM_REPAIR
 from daemon.services.symptom_repair_engine import (
     SYMPTOM_REPAIR_BUDGET,
     SymptomRepairContext,
@@ -69,7 +71,11 @@ from daemon.response_validation import (
 )
 from daemon.utils import serialize_message
 
-from tests.helpers.symptom_repair import _RealLangGraph, ok_summarizer
+from tests.helpers.symptom_repair import (
+    _RealLangGraph,
+    loop_units,
+    ok_summarizer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -495,10 +501,7 @@ class TestTruncatedExcerptRoundTrip:
         msgs = [_real_human("go", "h-rt"), truncated]
         engine = SymptomRepairEngine()
 
-        async def _ok_summary(context, symptom_class):
-            return "LLM summary of the truncated turn."
-
-        engine._summarize = _ok_summary
+        engine._summarize = staticmethod(ok_summarizer)
         ctx = SymptomRepairContext(
             detection=TruncatedDetectionResult(truncated_message=truncated),
             messages=list(msgs),
@@ -598,10 +601,7 @@ class TestL1L13Preservation:
         detection = _build_empty_post_ladder_detection_from_messages(msgs)
         engine = SymptomRepairEngine()
 
-        async def _ok_summary(context, symptom_class):
-            return "summary"
-
-        engine._summarize = _ok_summary
+        engine._summarize = staticmethod(ok_summarizer)
         ctx = SymptomRepairContext(
             detection=detection,
             messages=list(msgs),
@@ -639,10 +639,7 @@ class TestL1L13Preservation:
         detection = _build_empty_post_ladder_detection_from_messages(msgs)
         engine = SymptomRepairEngine()
 
-        async def _ok_summary(context, symptom_class):
-            return "summary"
-
-        engine._summarize = _ok_summary
+        engine._summarize = staticmethod(ok_summarizer)
         ctx = SymptomRepairContext(
             detection=detection,
             messages=list(msgs),
@@ -685,32 +682,13 @@ class TestF4CrossClassIsolation:
         counter IS shared — but ONE increment per class per call."""
         engine = SymptomRepairEngine()
 
-        async def _ok_summary(context, symptom_class):
-            return "summary."
+        engine._summarize = staticmethod(ok_summarizer)
 
-        engine._summarize = _ok_summary
-
-        # Loop class: 3 consecutive identical tool-call units.
+        # Loop class: 3 consecutive identical tool-call units (helper
+        # produces 6 messages — 3× AIMessage/ToolMessage pairs).
         loop_msgs = [
             _real_human("do thing", "h1"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc1", "name": "bash", "args": {"c": 1}}],
-                id="ai1",
-            ),
-            ToolMessage(content="r1", tool_call_id="tc1", id="tm1"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc2", "name": "bash", "args": {"c": 1}}],
-                id="ai2",
-            ),
-            ToolMessage(content="r2", tool_call_id="tc2", id="tm2"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc3", "name": "bash", "args": {"c": 1}}],
-                id="ai3",
-            ),
-            ToolMessage(content="r3", tool_call_id="tc3", id="tm3"),
+            *loop_units(3),
         ]
         from daemon.graph import LoopDetector
 
@@ -772,10 +750,7 @@ class TestF4CrossClassIsolation:
           classes that did (loop)."""
         engine = SymptomRepairEngine()
 
-        async def _ok_summary(context, symptom_class):
-            return "summary."
-
-        engine._summarize = _ok_summary
+        engine._summarize = staticmethod(ok_summarizer)
 
         def _ctx(detection, messages, budget_used):
             return SymptomRepairContext(
@@ -787,27 +762,10 @@ class TestF4CrossClassIsolation:
                 budget_used=budget_used,
             )
 
-        # 1) loop repair consumes 0 → 1.
+        # 1) loop repair consumes 0 → 1 (3 identical units from helper).
         loop_msgs = [
             _real_human("do thing", "h1"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc1", "name": "bash", "args": {"c": 1}}],
-                id="ai1",
-            ),
-            ToolMessage(content="r1", tool_call_id="tc1", id="tm1"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc2", "name": "bash", "args": {"c": 1}}],
-                id="ai2",
-            ),
-            ToolMessage(content="r2", tool_call_id="tc2", id="tm2"),
-            AIMessage(
-                content="",
-                tool_calls=[{"id": "tc3", "name": "bash", "args": {"c": 1}}],
-                id="ai3",
-            ),
-            ToolMessage(content="r3", tool_call_id="tc3", id="tm3"),
+            *loop_units(3),
         ]
         from daemon.graph import LoopDetector
 
@@ -1203,7 +1161,7 @@ class TestFalsePositiveColonEndingBelowCap:
 # visible message — closing the no-latch pathological cycle that was bounded
 # only by ``recursion_limit=300`` (and which culminated in uncaught
 # GraphRecursionError under some provider behaviors). Mirrors the loop class's
-# response-substitution precedent (graph.py:6751-6753).
+# response-substitution precedent (graph.py:6847-6848).
 # ---------------------------------------------------------------------------
 
 
@@ -1530,7 +1488,7 @@ class TestC1GhostExhaustionResponseSubstitution:
         ``pending_repair_ghost_terminal`` at node entry and
         substitutes the terminal as its response — mirroring the
         loop class's ``response = _durable_loop.terminal_message``
-        precedent (graph.py:6751-6753). Pinned so the substitution
+        precedent (graph.py:6847-6848). Pinned so the substitution
         path cannot silently regress (e.g., a future refactor that
         moves the check below the LLM invoke site).
         """
@@ -1564,22 +1522,15 @@ class TestC1BudgetCompositionSameInvocationPin:
     construction but currently unpinned.
 
     Sequence under ONE ``agent_node`` invocation:
-    * Loop rung fires (D-2 review fix) → folds ``+1`` into
-      ``_durable_budget_current`` at ``graph.py:6654-6660``;
-    * Pre-terminal intercept reads the RESET-AWARE budget at
-      ``graph.py:7064`` (post-loop, so it sees the loop's
-      ``+1`` — at-cap refusal cannot be bypassed);
-    * ``max()`` return at ``graph.py:7371-7387`` selects the
-      largest budget value (pre-terminal's recovered value, else
-      loop's ``budget_used_new``, else the entry-time value) to
-      carry on the node return — the durable per-task counter
-      survives across the entire same-invocation chain.
+    * ``Loop rung folds`` ``+1`` into ``_durable_budget_current`` (graph.py:6748-6752 — the ``_durable_loop.budget_used_new`` reassignment);
+    * Pre-terminal intercept reads the RESET-AWARE budget at graph.py:7160 (post-loop, so it sees the loop's ``+1`` — at-cap refusal cannot be bypassed) via the ``durable_budget_used=int(_durable_budget_current)`` argument;
+    * ``_pre_terminal_outcome.budget_used`` assignment at graph.py:7177-7179 selects the largest budget value (pre-terminal's recovered value, else loop's ``budget_used_new``, else the entry-time value) to carry on the node return — the durable per-task counter survives across the entire same-invocation chain.
 
     Source-level pins assert the THREE sites stay in lockstep so
     a future refactor cannot silently break the budget composition.
     """
 
-    def test_loop_fold_at_graph_6654(self):
+    def test_loop_fold_via_budget_used_new(self):
         """The loop rung's ``+1`` MUST be folded into
         ``_durable_budget_current`` BEFORE the pre-terminal
         intercept can read it (D-2 review fix).
@@ -1609,7 +1560,7 @@ class TestC1BudgetCompositionSameInvocationPin:
             "class is closed only by this fold"
         )
 
-    def test_intercept_read_at_graph_7064(self):
+    def test_intercept_reads_reset_aware_budget(self):
         """The pre-terminal intercept MUST read the RESET-AWARE
         ``_durable_budget_current`` (post-loop-fold), NOT the raw
         state value — so the loop rung's same-invocation ``+1`` is
@@ -1632,7 +1583,7 @@ class TestC1BudgetCompositionSameInvocationPin:
             "state value"
         )
 
-    def test_max_return_at_graph_7371(self):
+    def test_max_return_carries_pre_terminal_recovered_budget(self):
         """The node return MUST carry the largest of the three
         budget values on the channel — pre-terminal's recovered,
         loop's ``budget_used_new``, or the entry-time value. The

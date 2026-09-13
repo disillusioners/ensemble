@@ -180,8 +180,7 @@ class TestDegenerateReinvokeCap:
         # row: GHOST_PROMISE_REINVOKE_CAP=3 with cap-before-surgery
         # ordering. Below the cap: bare "agent" (shipped). At the cap
         # with the master ladder switch ON: "agent_repair_ghost" (the
-        # repair-flagged re-entry). With the master OFF (default for
-        # this fixture, see the autouse ``_ladder_off`` elsewhere): the
+        # repair-flagged re-entry). With the master OFF (the empty-guard-only `_restore_empty_guard_defaults` autouse does not touch the ladder switch; the symptom-repair-ladder default is ON, so this test asserts the ON-path routing): the
         # cap routing is INERT — every route is "agent" byte-identical.
         # This test runs with the master ON by default; the
         # cap-emit "agent_repair_ghost" is expected at turn >=3.
