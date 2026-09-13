@@ -22,6 +22,7 @@ the real engine surgery + budget + outcome flow is exercised.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,11 +47,11 @@ from daemon.services.symptom_repair_engine import (
     SYMPTOM_REPAIR_BUDGET,
     SymptomRepairEngine,
 )
-
-try:
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    REMOVE_ALL_MESSAGES = "__remove_all__"
+from tests.helpers.symptom_repair import (
+    REMOVE_ALL_MESSAGES,
+    loop_units as _loop_units,
+    ok_summarizer as _ok_summarizer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,26 +104,6 @@ class _StubGraph:
         return state
 
 
-def _loop_units(count: int, tool: str = "bash", args: dict | None = None):
-    args = args or {"cmd": "ls"}
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": tool, "args": args}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name=tool, id=f"tm-{i}"
-            )
-        )
-    return out
-
-
 def _make_agent(
     *,
     loop_breaker_slot=None,
@@ -132,7 +113,7 @@ def _make_agent(
     graph_ref=None,
     compactor=None,
 ):
-    from daemon.graph import create_agent_node as _can
+
 
     if llm is None:
         llm = _StubLLM()
@@ -156,10 +137,6 @@ def _make_agent(
         loop_breaker_config=loop_breaker_config or LoopBreakerConfig(),
     )
     return agent_node, llm
-
-
-async def _ok_summarizer(context, symptom_class):
-    return "LLM summary of the loop."
 
 
 def _stub_engine_summarizer(monkeypatch):
@@ -258,7 +235,7 @@ class TestKillSwitchResolvers:
     def test_load_config_boot_probe_installs_and_logs(self, monkeypatch, tmp_path, caplog):
         """F-1 boot probe: load_config resolves + installs + logs the
         boot INFO line (grep-able at boot, never lazy)."""
-        import logging
+
 
         config_yaml = tmp_path / "config.yaml"
         config_yaml.write_text(
@@ -635,10 +612,10 @@ class TestPlacementPins:
         import daemon.graph as graph_module
 
         src = inspect.getsource(graph_module.create_agent_node)
-        assert "_durable_loop.repair_prefix is not None" in src
+        assert "_durable_loop.surgery_prefix is not None" in src
         assert "_maybe_precall_compact_95" in src
         # The skip guard textually guards the precall call site.
-        guard_pos = src.index("repair_prefix is not None")
+        guard_pos = src.index("surgery_prefix is not None")
         precall_pos = src.index("_maybe_precall_compact_95(")
         assert guard_pos < precall_pos
 
@@ -761,7 +738,7 @@ class TestSymptomTelemetry:
             loop_breaker_slot=_StubLoopBreakerSlot(),
             llm=_StubLLM(response=AIMessage(content="post")),
         )
-        import logging
+
 
         with caplog.at_level(logging.INFO):
             await agent_node(
@@ -799,7 +776,7 @@ class TestSymptomTelemetry:
             graph_ref=[_StubGraph()],
             llm=_StubLLM(response=AIMessage(content="post")),
         )
-        import logging
+
 
         with caplog.at_level(logging.INFO):
             await agent_node(
@@ -819,7 +796,7 @@ class TestSymptomTelemetry:
             loop_breaker_slot=_StubLoopBreakerSlot(),
             llm=_StubLLM(),
         )
-        import logging
+
 
         with caplog.at_level(logging.INFO):
             await agent_node(
@@ -844,7 +821,7 @@ class TestSymptomTelemetry:
             loop_breaker_slot=_StubLoopBreakerSlot(),
             llm=_StubLLM(response=AIMessage(content="ft")),
         )
-        import logging
+
 
         with caplog.at_level(logging.INFO):
             await agent_node(

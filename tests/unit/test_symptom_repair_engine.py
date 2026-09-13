@@ -36,37 +36,16 @@ from daemon.services.symptom_repair_engine import (
     SymptomRepairContext,
     SymptomRepairEngine,
 )
-
-try:
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    REMOVE_ALL_MESSAGES = "__remove_all__"
+from tests.helpers.symptom_repair import (
+    REMOVE_ALL_MESSAGES,
+    loop_units as _loop_units,
+    ok_summarizer as _ok_summarizer,
+)
 
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
-
-
-def _loop_units(count: int, tool: str = "bash", args: dict | None = None):
-    """``count`` consecutive identical AI+Tool units (oldest first)."""
-    args = args or {"cmd": "ls"}
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": tool, "args": args}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name=tool, id=f"tm-{i}"
-            )
-        )
-    return out
 
 
 def _history():
@@ -101,10 +80,6 @@ def _context(messages, *, budget_used: int = 0, instance_id: str = "iid-1"):
         budget_used=budget_used,
         budget_cap=SYMPTOM_REPAIR_BUDGET,
     )
-
-
-async def _ok_summarizer(context, symptom_class):
-    return "The agent ran ls three times without progress."
 
 
 @pytest.fixture(autouse=True)

@@ -1786,6 +1786,11 @@ def _emit_symptom_telemetry(
             axis=<ram-per-turn|durable-task> instance=<short> turn=<task_id> \\
             detail=<one-liner>
 
+    Vocabulary:
+        ``phase`` ∈ ``detect`` / ``repair`` / ``repair_abort`` / ``rung1``
+        / ``terminal`` (the shipped ladder emits no other phase today;
+        new values are a phase-2 design call).
+
     ``axis`` (W3 review hardening) disambiguates WHICH budget expression
     the ``budget=`` numbers belong to — the shipped path counts the
     RAM-per-turn ``max_repairs`` counter while the durable rung counts
@@ -1818,7 +1823,7 @@ def _emit_symptom_telemetry(
         logger.debug("[SYMPTOM] telemetry emit failed", exc_info=True)
 
 
-def _is_real_human_message(msg: Any) -> bool:
+def _is_real_human_message(msg: BaseMessage) -> bool:
     """True for a REAL (non-injected) ``HumanMessage`` (B-3, OQ5).
 
     Injected detection mirrors the compaction partition predicates
@@ -1846,8 +1851,8 @@ def _is_real_human_message(msg: Any) -> bool:
 _LOOP_TERMINAL_CONTENT = (
     "[LOOP TERMINATION] This task is stopping because the agent repeated "
     "the same tool call without progress and the recovery repair budget "
-    "is exhausted (0/3 successful repairs remaining). The agent was "
-    "stuck in a loop; automated recovery could not break it. "
+    "is exhausted (0/{budget_cap} successful repairs remaining). The agent "
+    "was stuck in a loop; automated recovery could not break it. "
     "Please re-state or refine the task with more specific instructions, "
     "or grant the missing access/data the agent was repeatedly requesting."
 )
@@ -1862,7 +1867,7 @@ class _DurableLoopOutcome:
             (ORIGINAL list when no repair fired).
         full_messages: LLM-bound payload (post-rung), system prompt
             included.
-        repair_prefix: Return-carried SENTINEL-FIRST surgery prefix —
+        surgery_prefix: Return-carried SENTINEL-FIRST surgery prefix —
             ``[RemoveMessage(REMOVE_ALL_MESSAGES), *hoisted, *doc,
             *tail]``. ``None`` when no durable repair landed this
             invocation.
@@ -1876,7 +1881,7 @@ class _DurableLoopOutcome:
 
     messages: list[BaseMessage]
     full_messages: list[BaseMessage]
-    repair_prefix: list[BaseMessage] | None = None
+    surgery_prefix: list[BaseMessage] | None = None
     budget_used_new: int | None = None
     terminal_message: AIMessage | None = None
 
@@ -1984,13 +1989,21 @@ async def _maybe_durable_loop_repair(
     budget_used = int(durable_budget_used or 0)
     repair_count = loop_breaker_slot.get_repair_count(instance_id)
 
-    # ── exhaustion checks (D-1): RAM per-turn cap OR durable per-task cap
-    if repair_count >= loop_breaker_config.max_repairs:
-        logger.warning(
-            f"[LOOP BREAKER] Instance {instance_short}: max "
-            f"repairs ({loop_breaker_config.max_repairs}) reached — "
-            f"escalating to loud terminal (repair-budget-exhausted)"
-        )
+    # ── exhaustion checks (D-1): RAM per-turn cap OR durable per-task cap.
+    # Both branches log a WARN, emit terminal telemetry, and return a
+    # _DurableLoopOutcome carrying the LOOP_TERMINAL content; the only
+    # variation is the WARN text + the detail label/values used in the
+    # telemetry detail string. Byte-identical output is preserved by
+    # building the log text at the call site and passing cap-specific
+    # detail values via kwargs.
+    def _emit_loop_terminal(
+        *,
+        log_message: str,
+        detail_label: str,
+        detail_used: int,
+        detail_cap: int,
+    ) -> "_DurableLoopOutcome":
+        logger.warning(log_message)
         _emit_symptom_telemetry(
             phase="terminal",
             action="escalate",
@@ -1999,43 +2012,40 @@ async def _maybe_durable_loop_repair(
             budget_used=budget_used,
             budget_cap=SYMPTOM_REPAIR_BUDGET,
             detail=(
-                f"repair-budget-exhausted: ram-per-turn-cap "
-                f"({repair_count}/{loop_breaker_config.max_repairs})"
+                f"repair-budget-exhausted: {detail_label} "
+                f"({detail_used}/{detail_cap})"
             ),
         )
         return _DurableLoopOutcome(
             messages=list(messages),
             full_messages=list(full_messages),
             terminal_message=AIMessage(
-                content=_LOOP_TERMINAL_CONTENT,
+                content=_LOOP_TERMINAL_CONTENT.format(budget_cap=SYMPTOM_REPAIR_BUDGET),
                 id=f"repair-terminal-{uuid.uuid4()}",
             ),
+        )
+
+    if repair_count >= loop_breaker_config.max_repairs:
+        return _emit_loop_terminal(
+            log_message=(
+                f"[LOOP BREAKER] Instance {instance_short}: max "
+                f"repairs ({loop_breaker_config.max_repairs}) reached — "
+                f"escalating to loud terminal (repair-budget-exhausted)"
+            ),
+            detail_label="ram-per-turn-cap",
+            detail_used=repair_count,
+            detail_cap=loop_breaker_config.max_repairs,
         )
     if budget_used >= SYMPTOM_REPAIR_BUDGET:
-        logger.warning(
-            f"[LOOP BREAKER] Instance {instance_short}: durable repair "
-            f"budget exhausted ({budget_used}/{SYMPTOM_REPAIR_BUDGET}) — "
-            f"escalating to loud terminal (repair-budget-exhausted)"
-        )
-        _emit_symptom_telemetry(
-            phase="terminal",
-            action="escalate",
-            instance_short=instance_short,
-            turn_id=turn_id,
-            budget_used=budget_used,
-            budget_cap=SYMPTOM_REPAIR_BUDGET,
-            detail=(
-                f"repair-budget-exhausted: durable-task-cap "
-                f"({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+        return _emit_loop_terminal(
+            log_message=(
+                f"[LOOP BREAKER] Instance {instance_short}: durable repair "
+                f"budget exhausted ({budget_used}/{SYMPTOM_REPAIR_BUDGET}) — "
+                f"escalating to loud terminal (repair-budget-exhausted)"
             ),
-        )
-        return _DurableLoopOutcome(
-            messages=list(messages),
-            full_messages=list(full_messages),
-            terminal_message=AIMessage(
-                content=_LOOP_TERMINAL_CONTENT,
-                id=f"repair-terminal-{uuid.uuid4()}",
-            ),
+            detail_label="durable-task-cap",
+            detail_used=budget_used,
+            detail_cap=SYMPTOM_REPAIR_BUDGET,
         )
 
     logger.warning(
@@ -2146,7 +2156,7 @@ async def _maybe_durable_loop_repair(
     return _DurableLoopOutcome(
         messages=new_messages,
         full_messages=new_full_messages,
-        repair_prefix=outcome.surgery_prefix,
+        surgery_prefix=outcome.surgery_prefix,
         budget_used_new=new_budget,
     )
 
@@ -5057,10 +5067,7 @@ def create_agent_node(
         # overwrite the same value repeatedly); the value falls back
         # to ``thread_id`` when the caller does not provide a
         # per-turn ``configurable.turn_id``.
-        turn_id = (
-            (config or {}).get('configurable', {}).get('turn_id')
-            or instance_id
-        )
+        turn_id = _turn_id_from_config(config, instance_id)
         is_turn_boundary = bool(messages) and isinstance(
             messages[-1], HumanMessage
         )
@@ -5799,7 +5806,7 @@ def create_agent_node(
                 _precall_outcome = _PRECALL_NOOP
                 if not (
                     _durable_loop is not None
-                    and _durable_loop.repair_prefix is not None
+                    and _durable_loop.surgery_prefix is not None
                 ):
                     _precall_outcome = await _maybe_precall_compact_95(
                         instance_id=instance_id,
@@ -6159,9 +6166,9 @@ def create_agent_node(
         # other rider appends at the sentinel boundary.
         if (
             _durable_loop is not None
-            and _durable_loop.repair_prefix is not None
+            and _durable_loop.surgery_prefix is not None
         ):
-            _repair_channel = list(_durable_loop.repair_prefix)
+            _repair_channel = list(_durable_loop.surgery_prefix)
             if pairing_synthesized_msgs:
                 _channel_ai_tc_ids = {
                     tc.get("id", "")

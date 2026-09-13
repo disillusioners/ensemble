@@ -10,7 +10,6 @@ from __future__ import annotations
 import inspect
 from unittest.mock import MagicMock
 
-import pytest
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -29,35 +28,12 @@ from daemon.services.symptom_repair_engine import (
     SymptomRepairContext,
     SymptomRepairEngine,
 )
-
-try:
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    REMOVE_ALL_MESSAGES = "__remove_all__"
+from tests.helpers.symptom_repair import REMOVE_ALL_MESSAGES, loop_units as _loop_units
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-def _loop_units(count: int):
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": "bash", "args": {"cmd": "ls"}}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name="bash", id=f"tm-{i}"
-            )
-        )
-    return out
 
 
 def _history():

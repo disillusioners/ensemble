@@ -47,39 +47,7 @@ from daemon.services.symptom_repair_engine import (
     REPAIR_DOC_ID_PREFIX,
     SymptomRepairEngine,
 )
-
-_MOCKED_LANGGRAPH_KEYS = (
-    "langgraph",
-    "langgraph.graph",
-    "langgraph.graph.state",
-    "langgraph.prebuilt",
-    "langgraph.constants",
-    "langgraph.checkpoint",
-    "langgraph.checkpoint.sqlite",
-    "langgraph.checkpoint.sqlite.aio",
-)
-
-
-class _RealLangGraph:
-    """Swap the conftest's mocked langgraph modules for the real ones."""
-
-    def __enter__(self):
-        self._original_modules = {
-            k: sys.modules[k] for k in _MOCKED_LANGGRAPH_KEYS if k in sys.modules
-        }
-        for key in _MOCKED_LANGGRAPH_KEYS:
-            if key in sys.modules:
-                del sys.modules[key]
-        for key in [k for k in sys.modules if k.startswith("langgraph")]:
-            del sys.modules[key]
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        for key in [k for k in sys.modules if k.startswith("langgraph")]:
-            del sys.modules[key]
-        for key, mod in self._original_modules.items():
-            sys.modules[key] = mod
-        return False
+from tests.helpers.symptom_repair import _RealLangGraph, ok_summarizer
 
 
 # ---------------------------------------------------------------------------
@@ -206,13 +174,10 @@ class TestJointLoopXEmptyGuard:
             from langgraph.graph import END, START, StateGraph
 
             # Engine summarizer stub — the surgery/budget/doc flow is real.
-            async def _ok_summarizer(context, symptom_class):
-                return "Stub summary of the loop."
-
             monkeypatch.setattr(
                 SymptomRepairEngine,
                 "_summarize",
-                staticmethod(_ok_summarizer),
+                staticmethod(ok_summarizer),
             )
 
             script = [
@@ -377,13 +342,10 @@ class TestJointLoopXEmptyGuard:
                 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
                 from langgraph.graph import END, START, MessagesState, StateGraph
 
-                async def _ok_summarizer(context, symptom_class):
-                    return "Stub summary of the loop."
-
                 monkeypatch.setattr(
                     SymptomRepairEngine,
                     "_summarize",
-                    staticmethod(_ok_summarizer),
+                    staticmethod(ok_summarizer),
                 )
 
                 script = [

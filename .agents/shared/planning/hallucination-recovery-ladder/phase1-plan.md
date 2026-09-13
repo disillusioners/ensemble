@@ -26,7 +26,7 @@ Convert today's **TRANSIENT** loop repair into the **durable, facade-wrapped, bu
 1. **Carrier conversion** — return-carried sentinel-first prefix at the `agent_node` return assembly; mirrors `build_sentinel_replacement` (`daemon/compaction.py:427-507`).
 2. **Durable budget** — new GraphState field (language-check pattern, `daemon/graph.py:2456-2459`); RAM `max_repairs` retained as per-turn expression.
 3. **Summarizer facade routing** — `wrap_langchain_failover` pattern (`daemon/services/llm_failover.py:617`) replacing the bare `ThinkingChatOpenAI.invoke` of `LoopRepairer` (`daemon/graph.py:1642-1677`); fail-open abort on degenerate summary.
-4. **Exhaustion escalation** — `WARN+continue` (`daemon/graph.py:1857-1864`) replaced with loud terminal + `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` under flag.
+4. **Exhaustion escalation** — `WARN+continue` (`daemon/graph.py:1857-1864`) replaced with loud terminal + `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` under flag. *(Shipped grammar: `phase=terminal action=escalate` with the reason riding inside `detail=`; the original prose shortened the line for readability.)*
 5. **Joint integration test (T-1, MISSING today)** — loop-prone tool storm DURING continuous-empty provider episode; bounded repairs + bounded S5/S1 behavior; no cross-budget interference.
 6. **Kill-switch + telemetry** — master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` + sub `ENSEMBLE_REPAIR_LOOP_DURABLE`; `[SYMPTOM] class=loop phase=*` line alongside existing `[LOOP BREAKER]` during transition.
 7. **Partition invariants P-1 … P-12 enforced as regression tests** (T-7).
@@ -69,7 +69,7 @@ Convert today's **TRANSIENT** loop repair into the **durable, facade-wrapped, bu
 | B-1 | Add GraphState field `repair_budget_used` (or equivalent name, final per Developer); default 0; declared alongside language-check fields `language_check_retry` / `language_check_count` (`daemon/graph.py:2456-2459`, explicit "Persisted in checkpoints" rationale) | none | `daemon/graph.py:2456-2459` (region — language-check field declaration) | Unit test: state declaration round-trip; GraphState schema unchanged for SQLite + PG |
 | B-2 | Initialise value at first turn (default 0); increment atomically on successful repair (NOT on repair_abort — budget not consumed on abort); per-turn reset of the per-TURN expression (the existing RAM `max_repairs=3` counter at `daemon/manager.py:754`) remains unchanged | A-3, B-1 | `daemon/graph.py` (post-repair region) | Unit test: successful repair → durable counter +1; repair_abort → durable counter unchanged; P-9 counter-theft invariant (no S5/S1/transient-budget cross-consumption) |
 | B-3 | Reset policy `[gated-by OQ5]` — default per ADR-0004: reset on new real (non-injected) HumanMessage; inject-detection via `injected_message=True` and `context_kind` patterns from `daemon/services/context_messages.py:85-110` | B-1 | `daemon/graph.py` (post-HumanMessage region) | Unit test: real HumanMessage → durable counter reset to 0; injected/context HumanMessage → counter unchanged |
-| B-4 | Wire the engine to consult the durable counter before each repair attempt; if `repair_budget_used >= REPAIR_BUDGET=3` (proposed, mirrors `max_repairs=3` semantics), refuse + escalate (Workstream D) | A-3, B-1, B-2 | `daemon/services/symptom_repair_engine.py` | Unit test: counter at cap → repair refused; no surgery; budget NOT incremented; routed to escalation path |
+| B-4 | Wire the engine to consult the durable counter before each repair attempt; if `repair_budget_used >= REPAIR_BUDGET=3` (proposed, mirrors `max_repairs=3` semantics; **shipped as `SYMPTOM_REPAIR_BUDGET`** in `daemon/services/symptom_repair_engine.py`), refuse + escalate (Workstream D) | A-3, B-1, B-2 | `daemon/services/symptom_repair_engine.py` | Unit test: counter at cap → repair refused; no surgery; budget NOT incremented; routed to escalation path |
 
 ### Workstream C — Summarizer facade routing + fail-open abort
 
@@ -84,7 +84,7 @@ Convert today's **TRANSIENT** loop repair into the **durable, facade-wrapped, bu
 
 | # | Task | Depends On | Touch-site (symbol + file) | Acceptance |
 |---|------|------------|----------------------------|------------|
-| D-1 | Replace `WARN+continue` (`daemon/graph.py:1857-1864`) under the flag with loud terminal: route to the loop class's loud terminal backstop with `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` telemetry | B-4 | `daemon/graph.py:1857-1864` (gated replacement) | Unit test (T-6): budget exhausted → loud terminal + class=loop attribution; OFF-mode → shipped WARN+continue preserved |
+| D-1 | Replace `WARN+continue` (`daemon/graph.py:1857-1864`) under the flag with loud terminal: route to the loop class's loud terminal backstop with `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` telemetry *(shipped grammar: `phase=terminal action=escalate` with reason riding inside `detail=`)* | B-4 | `daemon/graph.py:1857-1864` (gated replacement) | Unit test (T-6): budget exhausted → loud terminal + class=loop attribution; OFF-mode → shipped WARN+continue preserved |
 | D-2 | Ensure kill-switch OFF preserves byte-identical routing (P-11): every new branch gated before behavior; OFF path keeps the shipped return value from `graph.py:1857-1864` | D-1 | `daemon/graph.py:1857-1864`; new gating helper | Test (T-8): golden-routing pin: `ENSEMBLE_SYMPTOM_REPAIR_LADDER=0` + `ENSEMBLE_REPAIR_LOOP_DURABLE=0` → byte-identical to pre-phase-1 behavior |
 
 ### Workstream E — Joint integration test (T-1, MISSING today)
@@ -98,7 +98,7 @@ Convert today's **TRANSIENT** loop repair into the **durable, facade-wrapped, bu
 
 | # | Task | Depends On | Touch-site (symbol + file) | Acceptance |
 |---|------|------------|----------------------------|------------|
-| F-1 | Add `_resolve_symptom_repair_ladder` and `_resolve_repair_loop_durable` to `daemon/config.py` (mirroring `_resolve_proactive_enabled` `config.py:2409-` and `_resolve_compaction_model`); empty-string safe; invalid → `ValueError` at boot | none | `daemon/config.py` (new `_resolve_*` helpers) | Unit test: invalid env value → `ValueError` at boot; empty-string safe; defaults ON |
+| F-1 | Add `_resolve_symptom_repair_ladder` and `_resolve_repair_loop_durable` to `daemon/config.py` (mirroring `_resolve_proactive_enabled` (`config.py:_resolve_proactive_enabled`) and `_resolve_compaction_model`); empty-string safe; invalid → `ValueError` at boot | none | `daemon/config.py` (new `_resolve_*` helpers) | Unit test: invalid env value → `ValueError` at boot; empty-string safe; defaults ON |
 | F-2 | Wire master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` (default ON, restart-pending) and sub `ENSEMBLE_REPAIR_LOOP_DURABLE` (default ON) into the gating helpers | F-1 | `daemon/config.py` | Unit test: env var resolution + default; gating helper returns False when OFF |
 | F-3 | Emit `[SYMPTOM] class=loop phase=<detect|rung1|repair|repair_abort|terminal> action=<fired|skipped|abort|escalate> budget=<used>/<cap> instance=<short> turn=<task_id> detail=<one-liner>` alongside the existing `[LOOP BREAKER]` line (DQ4-b schema); telemetry stays on OFF (W1 KEEP precedent) | D-1, F-1 | `daemon/graph.py` (post-repair region) | Unit test: every transition emits the correct `[SYMPTOM]` shape; OFF-mode still emits telemetry (W1 KEEP) |
 
@@ -186,7 +186,7 @@ Phase-1 is DONE when:
 
 **Phase-2 cannot start until**:
 - Phase-1 ships + soaks for at least **one restart cycle** with the new GraphState field (durability verification, SC-1).
-- At least one `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` event is observed in soak (proves exhaustion escalation fires).
+- At least one `[SYMPTOM] class=loop phase=terminal reason=repair-budget-exhausted` event is observed in soak (proves exhaustion escalation fires; shipped grammar uses `phase=terminal action=escalate` with the reason riding inside `detail=`).
 - OQ1, OQ2, OQ3 architect rulings are received (gating phase-2 tasks).
 
 ---

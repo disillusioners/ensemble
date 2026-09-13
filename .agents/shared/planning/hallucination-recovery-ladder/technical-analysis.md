@@ -116,7 +116,7 @@ flowchart TD
     R1 -->|"rung-1 predicate NOT met"| OK(["continue normally"])
     R1 -->|"rung-1 FAILED (per-class predicate)"| BUDGET{"repair budget<br/>available?<br/>(durable per-task counter)"}
     BUDGET -->|"no (budget exhausted)"| R4
-    BUDGET -->|"yes"| R2["RUNG 2 — SYMPTOM-TRIGGERED CONTEXT REPAIR (NEW)<br/>targeted history surgery + facade-wrapped summary<br/>return-carried sentinel-first prefix → checkpoint-committed<br/>≤1 per turn, ≤REPAIR_BUDGET per task"]
+    BUDGET -->|"yes"| R2["RUNG 2 — SYMPTOM-TRIGGERED CONTEXT REPAIR (NEW)<br/>targeted history surgery + facade-wrapped summary<br/>return-carried sentinel-first prefix → checkpoint-committed<br/>≤1 per turn, ≤REPAIR_BUDGET per task (shipped as `SYMPTOM_REPAIR_BUDGET`)"]
     R2 -->|"repair landed"| CONT(["CONTINUE task on clean context<br/>(next invoke sees repaired history)"])
     R2 -->|"summarizer failed / fail-open abort"| R3
     R3["RUNG 3 — classified retry + failover (UNCHANGED facade)<br/>RetryByCategory :696-750, swap PRIMARY_TRANSIENT_MAX=3 :733-738"]
@@ -189,7 +189,7 @@ The repair summary/doc is itself injected context and must obey house rules: con
 | Control | Value | Home | Notes |
 |---|---|---|---|
 | Repair-per-turn latch | ≤1 | RAM (superstep-scoped) | Prevents multi-repair oscillation within one turn; reset at turn boundary. |
-| Repair budget per task | `REPAIR_BUDGET=3` (proposed; mirrors `max_repairs=3` `manager.py:754` semantics) | **DURABLE** GraphState field (language-check pattern `graph.py:2456-2459`) | Survives restart/revive; NOT auto-reset by clean turns initially (OQ5: loop breaker auto-resets after a clean detection turn `graph.py:1848-1855` — durable-budget reset policy needs an architect ruling). |
+| Repair budget per task | `REPAIR_BUDGET=3` (proposed; mirrors `max_repairs=3` `manager.py:754` semantics; **shipped as `SYMPTOM_REPAIR_BUDGET`** in `daemon/services/symptom_repair_engine.py`) | **DURABLE** GraphState field (language-check pattern `graph.py:2456-2459`) | Survives restart/revive; NOT auto-reset by clean turns initially (OQ5: loop breaker auto-resets after a clean detection turn `graph.py:1848-1855` — durable-budget reset policy needs an architect ruling). |
 | Loop-breaker `max_repairs` | 3 | RAM (existing) | Becomes the per-TURN expression of the same budget; durable counter is authoritative across restarts. |
 | `EMPTY_DEGENERATE_REINVOKE_CAP` | 3 (`graph.py:2620`; yaml `limits.empty_degenerate_reinvoke_cap`, restart-required) | derived | Unchanged; repair-at-cap is phase-3 optional (OQ4). |
 | `PRIMARY_TRANSIENT_MAX` | 3 (`llm_error_classifier.py:505,:733-738`) | facade | Unchanged. In phase-2 pre-terminal placement, ≤2 extra poisoned-context retries are accepted as the price of not touching the facade (OQ1 quantifies the alternative). |
@@ -202,7 +202,7 @@ Today: `repair_count >= max_repairs` → WARN + **continue with ORIGINAL message
 
 ### DQ3-c What happens when the repair summarizer itself returns empty/degenerate
 
-Facade-covered path (post-ADR-0006): `EmptyLLMResponseError` raises inside the summarizer's retry scope (`llm_error_classifier.py:916` semantics) → bounded retry → failover swap → if still failing, the wrap raises → the repair engine's except-path treats repair as ABORTED with `abort_policy=fail_open`: repair skipped, budget NOT consumed (no surgery happened), fall through to the next rung (retry/failover/terminal), loud `[SYMPTOM] … phase=repair action=abort reason=summarizer-failed` telemetry. NEVER wedge the turn; NEVER silently inject the static fallback summary as today (`graph.py:1632-1636`). The static truncation fallback is retained ONLY as last-resort-with-telemetry, or removed — architect's call (OQ-embedded in ADR-0006). If a persist seam call refuses (`persist_compaction_result` returns False on fail_open refusal, `_compaction_persist_seam.py:84-90`) the return value MUST be checked and treated as abort — same discipline as the compaction seam contract.
+Facade-covered path (post-ADR-0006): `EmptyLLMResponseError` raises inside the summarizer's retry scope (`llm_error_classifier.py:916` semantics) → bounded retry → failover swap → if still failing, the wrap raises → the repair engine's except-path treats repair as ABORTED with `abort_policy=fail_open`: repair skipped, budget NOT consumed (no surgery happened), fall through to the next rung (retry/failover/terminal), loud `[SYMPTOM] … phase=repair action=abort reason=summarizer-failed` telemetry *(shipped grammar uses `phase=repair_abort` with the reason riding inside `detail=`)*. NEVER wedge the turn; NEVER silently inject the static fallback summary as today (`graph.py:1632-1636`). The static truncation fallback is retained ONLY as last-resort-with-telemetry, or removed — architect's call (OQ-embedded in ADR-0006). If a persist seam call refuses (`persist_compaction_result` returns False on fail_open refusal, `_compaction_persist_seam.py:84-90`) the return value MUST be checked and treated as abort — same discipline as the compaction seam contract.
 
 ### DQ3-d Compaction cost profile (why repair must NOT just call compact_state)
 
@@ -392,3 +392,4 @@ Consolidated in `decisions.md` §OPEN QUESTIONS (OQ1 placement/facade-hook; OQ2 
 - `.agents/shared/planning/empty-response-guard/adr-0001-dropped-empty-content-check.md` — three latent defects (hypothesis); kill-switch OFF = byte-identical ROUTING, telemetry stays (W1 KEEP).
 - Ground truth (verification wanderer, HEAD `0acd3afa`) + Research Buffers A/B (explorer, HIGH confidence) — symptom table, lane facts, compaction engine facts; the one buffer correction recorded in Context Summary item 10.
 - Direct verifications this session (✔ items): `graph.py:1105-1118`, `:1845-1868`, `:1638-1680`, `:2618-2670`, `:2452-2462`; `compaction.py:427-460`; `llm_error_classifier.py:885-920`; `llm_failover.py:615-625`; `grep` confirmations of `wrap_langchain_failover` (`llm_failover.py:617`; callers `compaction.py:3383/:3395`).
+83/:3395`).

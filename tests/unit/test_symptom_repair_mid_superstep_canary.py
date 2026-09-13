@@ -23,7 +23,6 @@ import pytest
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
-    RemoveMessage,
     ToolMessage,
 )
 
@@ -33,51 +32,12 @@ from daemon.services.symptom_repair_engine import (
     SymptomRepairContext,
     SymptomRepairEngine,
 )
-
-try:
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    REMOVE_ALL_MESSAGES = "__remove_all__"
-
-
-# ---------------------------------------------------------------------------
-# Real-langgraph swap (mirrors the canary fixture in
-# tests/unit/services/test_compact_executor_revive_brick_e2e.py)
-# ---------------------------------------------------------------------------
-
-_MOCKED_LANGGRAPH_KEYS = (
-    "langgraph",
-    "langgraph.graph",
-    "langgraph.graph.state",
-    "langgraph.prebuilt",
-    "langgraph.constants",
-    "langgraph.checkpoint",
-    "langgraph.checkpoint.sqlite",
-    "langgraph.checkpoint.sqlite.aio",
+from tests.helpers.symptom_repair import (
+    REMOVE_ALL_MESSAGES,
+    _RealLangGraph,
+    loop_units as _loop_units,
+    ok_summarizer as _ok_summarizer,
 )
-
-
-class _RealLangGraph:
-    """Swap the conftest's mocked langgraph modules for the real ones
-    around a block of test code, then restore."""
-
-    def __enter__(self):
-        self._original_modules = {
-            k: sys.modules[k] for k in _MOCKED_LANGGRAPH_KEYS if k in sys.modules
-        }
-        for key in _MOCKED_LANGGRAPH_KEYS:
-            if key in sys.modules:
-                del sys.modules[key]
-        for key in [k for k in sys.modules if k.startswith("langgraph")]:
-            del sys.modules[key]
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        for key in [k for k in sys.modules if k.startswith("langgraph")]:
-            del sys.modules[key]
-        for key, mod in self._original_modules.items():
-            sys.modules[key] = mod
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +50,6 @@ def _build_repair_agent(instance_id: str):
     carries the repair on its RETURN (the production ``agent_node``
     recipe, reduced to the state channels this canary exercises)."""
     engine = SymptomRepairEngine()
-
-    async def _ok_summarizer(context, symptom_class):
-        return "Stub summary of the loop."
-
     engine._summarize = _ok_summarizer
 
     async def agent(state, config):
@@ -145,25 +101,6 @@ def _make_state_graph(agent):
     g.add_edge(START, "agent")
     g.add_edge("agent", END)
     return g
-
-
-def _loop_units(count: int):
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": "bash", "args": {"cmd": "ls"}}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name="bash", id=f"tm-{i}"
-            )
-        )
-    return out
 
 
 # ---------------------------------------------------------------------------

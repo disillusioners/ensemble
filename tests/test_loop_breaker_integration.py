@@ -48,6 +48,7 @@ from daemon.graph import (
     RepairResult,
 )
 from daemon.config import _reset_symptom_repair_ladder_for_tests
+from tests.helpers.symptom_repair import ladder_off_setup
 
 
 @pytest.fixture(autouse=True)
@@ -64,11 +65,9 @@ def _ladder_off(monkeypatch):
     by ``tests/unit/test_symptom_repair_ladder.py`` and
     ``tests/test_ladder_loop_x_empty_guard_integration.py``.
     """
-    monkeypatch.setenv("ENSEMBLE_SYMPTOM_REPAIR_LADDER", "0")
-    monkeypatch.setenv("ENSEMBLE_REPAIR_LOOP_DURABLE", "0")
-    _reset_symptom_repair_ladder_for_tests()
+    _teardown = ladder_off_setup(monkeypatch, _reset=_reset_symptom_repair_ladder_for_tests)
     yield
-    _reset_symptom_repair_ladder_for_tests()
+    _teardown()
 
 
 # ---------------------------------------------------------------------------

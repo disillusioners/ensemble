@@ -65,8 +65,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from langchain_core.messages import (
@@ -83,6 +82,19 @@ logger = logging.getLogger(__name__)
 #: per-TURN RAM expression; this is the per-TASK durable expression
 #: (checkpoint-persisted ``repair_budget_used`` GraphState field).
 SYMPTOM_REPAIR_BUDGET = 3
+
+#: Per-call summarizer timeout default (matches
+#: ``LoopBreakerConfig.summarization_timeout_seconds`` default = 120s).
+#: Used as the dataclass default for ``SymptomRepairContext`` and as the
+#: engine's last-resort fallback when neither the context nor the
+#: instance overrides it.
+DEFAULT_SUMMARIZATION_TIMEOUT_S = 120
+
+#: Maximum characters of the verbatim ``tool_args`` JSON snippet included
+#: in the repair doc and the summarization prompt. Mirrors the shipped
+#: compaction excerpt cap (C-4 safety: bound the verbatim payload the
+#: LLM is asked to acknowledge).
+MAX_VERBATIM_ARGS_CHARS = 500
 
 #: Repair-doc id namespace (A-4): ``repair-{instance_id}-{seq}``.
 #: Deliberately DISTINCT from the compaction doc namespace
@@ -101,6 +113,10 @@ class SymptomRepairAborted(Exception):
     no surgery, durable budget NOT consumed, the turn falls through to
     the next rung (shipped retry/failover/terminal backstops).
     """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -142,10 +158,10 @@ class SymptomRepairContext:
 
     detection: Any
     messages: list[BaseMessage]
-    llm_config: dict
+    llm_config: dict[str, Any]
     system_prompt: str
     injected_msg: list[BaseMessage] | None = None
-    summarization_timeout_seconds: int = 120
+    summarization_timeout_seconds: int = DEFAULT_SUMMARIZATION_TIMEOUT_S
     instance_id: str = ""
     budget_used: int = 0
     budget_cap: int = SYMPTOM_REPAIR_BUDGET
@@ -192,10 +208,22 @@ class SymptomRepairEngine:
     """
 
     #: Per-class preset table — a dict ON the class (ADR-0001). Each row
-    #: declares the four preset axes: evidence-window selector (method
-    #: name resolved on ``self``), summary-prompt fragment (key into
-    #: ``SUMMARY_PROMPTS``), retention set description, and post-repair
-    #: routing. Per-class variation is confined to DATA, not control flow.
+    #: declares four preset axes:
+    #:
+    #: - ``evidence_window_selector`` — method name resolved on ``self``.
+    #:   THE ONLY AXIS THE LOOP PATH CONSULTS AT RUNTIME.
+    #: - ``summary_prompt`` — key into ``SUMMARY_PROMPTS``. Declared for
+    #:   phase-2 enrollment; NOT consulted by the loop path. ``_summarize``
+    #:   uses ``REPAIR_SUMMARIZATION_PROMPT`` (lazy-imported from
+    #:   ``daemon.graph``) directly with no per-class branching.
+    #: - ``retention`` — declared for phase-2 enrollment; NOT consulted.
+    #:   The loop path's retention is the engine's hardcoded
+    #:   hoisted-injected + evidence-unit + verbatim-non-evidence policy.
+    #: - ``post_repair_routing`` — declared for phase-2 enrollment; NOT
+    #:   consulted. The loop path always routes ``continue``.
+    #:
+    #: Per-class variation is confined to DATA, not control flow. Wiring
+    #: the unconsulted axes into runtime paths is a phase-2 design call.
     PRESETS: ClassVar[dict[str, dict[str, Any]]] = {
         "loop": {
             "description": (
@@ -213,15 +241,18 @@ class SymptomRepairEngine:
     }
 
     #: Per-class summarizer prompt fragments (the preset's
-    #: ``summary_prompt`` key). The loop preset REUSES the shipped
-    #: ``REPAIR_SUMMARIZATION_PROMPT`` template (lazy-imported from
-    #: ``daemon.graph``) — no prompt drift for the converted class.
+    #: ``summary_prompt`` key). NOTE: the loop preset does NOT resolve
+    #: ``"loop"`` to anything here. ``_loop_prompt`` is a placeholder key,
+    #: not a symbol — nothing in this module reads it. The loop path's
+    #: summarizer uses the shipped ``REPAIR_SUMMARIZATION_PROMPT`` template
+    #: (lazy-imported from ``daemon.graph``) directly, so there is no
+    #: per-class prompt drift for the converted class.
     SUMMARY_PROMPTS: ClassVar[dict[str, str]] = {
-        "loop": "_loop_prompt",  # resolved lazily to the shipped template
+        "loop": "_loop_prompt",
     }
 
-    def __init__(self, timeout_seconds: int = 120) -> None:
-        self._timeout_seconds = timeout_seconds or 120
+    def __init__(self, timeout_seconds: int = DEFAULT_SUMMARIZATION_TIMEOUT_S) -> None:
+        self._timeout_seconds = timeout_seconds or DEFAULT_SUMMARIZATION_TIMEOUT_S
 
     # ── preset resolution ────────────────────────────────────────────
 
@@ -478,14 +509,15 @@ class SymptomRepairEngine:
         )
         from ..utils import parse_think_tags  # lazy
         from .llm_failover import wrap_langchain_failover  # lazy
+        from ..graph import LoopRepairer  # lazy: graph ↔ services cycle guard
 
         detection = context.detection
-        excerpt = self._build_excerpt(context.messages, max_messages=10)
+        excerpt = LoopRepairer._build_excerpt(context.messages, max_messages=10)
         prompt = REPAIR_SUMMARIZATION_PROMPT.format(
             tool_name=getattr(detection, "tool_name", "unknown"),
             tool_args=json.dumps(
                 getattr(detection, "tool_args", {}), indent=2
-            )[:500],
+            )[:MAX_VERBATIM_ARGS_CHARS],
             count=getattr(detection, "repetition_count", 0),
             conversation_excerpt=excerpt,
         )
@@ -493,7 +525,7 @@ class SymptomRepairEngine:
         timeout = (
             context.summarization_timeout_seconds
             or self._timeout_seconds
-            or 120
+            or DEFAULT_SUMMARIZATION_TIMEOUT_S
         )
         try:
             # clean_llm_config strips model_vision (same module as the
@@ -514,7 +546,7 @@ class SymptomRepairEngine:
             abort = SymptomRepairAborted(
                 f"summarizer-failed: {type(exc).__name__}: {exc}"
             )
-            abort.reason = "summarizer-failed"  # type: ignore[attr-defined]
+            abort.reason = "summarizer-failed"
             raise abort from exc
 
         text = _extract_text_from_content(getattr(response, "content", "") or "")
@@ -524,7 +556,7 @@ class SymptomRepairEngine:
                 "summarizer-failed: degenerate (empty) summary after "
                 "facade retry + failover"
             )
-            abort.reason = "summarizer-failed"  # type: ignore[attr-defined]
+            abort.reason = "summarizer-failed"
             raise abort
         return cleaned.strip()
 
@@ -533,7 +565,7 @@ class SymptomRepairEngine:
         llm_wrapper: Any,
         prompt: str,
         timeout_seconds: int,
-    ):
+    ) -> BaseMessage:
         """Run the synchronous facade ``invoke`` off-loop with a hard cap."""
         from langchain_core.messages import HumanMessage  # lazy
 
@@ -558,25 +590,13 @@ class SymptomRepairEngine:
     def _build_excerpt(
         messages: list[BaseMessage], max_messages: int = 10
     ) -> str:
-        """Text-only excerpt of the last ``max_messages`` messages.
-
-        Mirrors ``LoopRepairer._build_excerpt`` (multimodal content
-        flattened via ``_extract_text_from_content``).
-        """
-        from ..compaction import _extract_text_from_content  # lazy
-
-        if not messages:
-            return ""
-        tail = messages[-max_messages:]
-        lines: list[str] = []
-        for msg in tail:
-            content = getattr(msg, "content", "") or ""
-            text = _extract_text_from_content(content)
-            msg_type = type(msg).__name__
-            lines.append(
-                f"[{msg_type}] {text}" if text else f"[{msg_type}] <empty>"
-            )
-        return "\n".join(lines)
+        """Removed: engine now delegates to ``LoopRepairer._build_excerpt``
+        (daemon/graph.py) — byte-identical output, lazy-imported via the
+        existing graph ↔ services cycle guard. Kept here as a deprecation
+        shim for any external callers; the one internal call site at
+        ``_summarize`` now imports ``LoopRepairer`` directly."""
+        from .graph import LoopRepairer  # lazy: graph ↔ services cycle guard
+        return LoopRepairer._build_excerpt(messages, max_messages=max_messages)
 
     # ── repair doc (A-4 / T-11) ──────────────────────────────────────
 
@@ -639,7 +659,7 @@ class SymptomRepairEngine:
             f"Removed evidence (verbatim excerpts):\n"
             f"- tool: {getattr(detection, 'tool_name', 'unknown')}\n"
             f"- args (verbatim JSON): "
-            f"{json.dumps(getattr(detection, 'tool_args', {}), sort_keys=True)[:500]}\n"
+            f"{json.dumps(getattr(detection, 'tool_args', {}), sort_keys=True)[:MAX_VERBATIM_ARGS_CHARS]}\n"
             f"- consecutive repetitions removed: "
             f"{max(int(getattr(detection, 'repetition_count', 1)) - 1, 0)}\n\n"
             f"Attempted-work summary (LLM-generated — verify against the "
@@ -745,7 +765,7 @@ class SymptomRepairEngine:
                 f"replacement does not carry them and they are not in "
                 f"the declared removal set"
             )
-            abort.reason = "persist-refused"  # type: ignore[attr-defined]
+            abort.reason = "persist-refused"
             raise abort
 
 

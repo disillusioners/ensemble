@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.compaction import (
     _has_context_kind,
@@ -32,29 +31,11 @@ from daemon.services.symptom_repair_engine import (
     SymptomRepairContext,
     SymptomRepairEngine,
 )
-
-
-def _loop_units(count: int):
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": "bash", "args": {"cmd": "ls -la"}}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name="bash", id=f"tm-{i}"
-            )
-        )
-    return out
+from tests.helpers.symptom_repair import loop_units as _loop_units
 
 
 def _build_doc():
-    msgs = [HumanMessage(content="go", id="h1"), *_loop_units(3)]
+    msgs = [HumanMessage(content="go", id="h1"), *_loop_units(3, args={"cmd": "ls -la"})]
     ctx = SymptomRepairContext(
         detection=__import__("daemon.graph", fromlist=["LoopDetector"]).LoopDetector.scan(
             messages=msgs, threshold=3

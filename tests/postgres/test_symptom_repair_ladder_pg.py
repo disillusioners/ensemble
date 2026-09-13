@@ -37,16 +37,21 @@ from daemon.services.symptom_repair_engine import (
     SymptomRepairContext,
     SymptomRepairEngine,
 )
-
-try:
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
-    REMOVE_ALL_MESSAGES = "__remove_all__"
+from tests.helpers.symptom_repair import (
+    REMOVE_ALL_MESSAGES,
+    loop_units as _loop_units,
+    ok_summarizer as _ok_summarizer,
+)
 
 #: Connection string for the disposable PG (recipe in the module docstring).
 PG_CONNINFO_ENV = "LADDER_PG_CONNINFO"
 
-_MOCKED_LANGGRAPH_KEYS = (
+# PG uses a different (postgres-flavored) set of mocked langgraph keys;
+# the shared helper hardcodes the SQLite keys, so this module keeps its
+# own _MOCKED_LANGGRAPH_KEYS + _RealLangGraph. The other three objects
+# (loop_units, ok_summarizer, REMOVE_ALL_MESSAGES) are imported from the
+# helper like the SQLite counterparts.
+_PG_MOCKED_LANGGRAPH_KEYS = (
     "langgraph",
     "langgraph.graph",
     "langgraph.graph.state",
@@ -62,9 +67,9 @@ class _RealLangGraph:
 
     def __enter__(self):
         self._original_modules = {
-            k: sys.modules[k] for k in _MOCKED_LANGGRAPH_KEYS if k in sys.modules
+            k: sys.modules[k] for k in _PG_MOCKED_LANGGRAPH_KEYS if k in sys.modules
         }
-        for key in _MOCKED_LANGGRAPH_KEYS:
+        for key in _PG_MOCKED_LANGGRAPH_KEYS:
             if key in sys.modules:
                 del sys.modules[key]
         for key in [k for k in sys.modules if k.startswith("langgraph")]:
@@ -86,10 +91,6 @@ def _pg_conninfo() -> str | None:
 def _build_repair_agent(instance_id: str):
     """Same minimal repair-carrying agent as the SQLite canary."""
     engine = SymptomRepairEngine()
-
-    async def _ok_summarizer(context, symptom_class):
-        return "Stub summary of the loop."
-
     engine._summarize = _ok_summarizer
 
     async def agent(state, config):
@@ -130,25 +131,6 @@ def _make_state_graph(agent):
     g.add_edge(START, "agent")
     g.add_edge("agent", END)
     return g
-
-
-def _loop_units(count: int):
-    out = []
-    for i in range(count):
-        tc_id = f"tc-{i}"
-        out.append(
-            AIMessage(
-                content="",
-                tool_calls=[{"id": tc_id, "name": "bash", "args": {"cmd": "ls"}}],
-                id=f"ai-{i}",
-            )
-        )
-        out.append(
-            ToolMessage(
-                content=f"res-{i}", tool_call_id=tc_id, name="bash", id=f"tm-{i}"
-            )
-        )
-    return out
 
 
 @pytest.mark.postgres
