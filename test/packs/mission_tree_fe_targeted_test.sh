@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Test Pack: mission_tree_fe_targeted_test — targeted gate for the 3 FE suites
-# touched by panel-activity commits 85da9614 + bbe8d0c0 on
-# `fix/job-queue-panel-activity-ordering`. UNCOMMITTED ad-hoc pack (report-only arc;
-# giter lands it with the other infra files).
+# touched by jobs-page closing-bracket e38dea27..670626a0 on
+# `feature/jobs-page-improvement`. Pre-authorized worktree-local edit
+# (no commits in this worktree; giter lands the pin refresh with the other
+# infra files).
 #
-# Derived suite list (git show --name-only on the 2 gate commits, .spec.ts filter):
-#   src/app/components/job-queue-panel/job-queue-panel.component.spec.ts
-#   src/app/services/api.service.spec.ts
-#   src/app/services/instance.service.spec.ts
-# Expected: per-suite counts on this branch differ from the @0fd62cd5 baseline
-# (4 suites: indicator 114 + panel 116 + instance-node 57 + job.model 70 = 357).
-# This branch touches a different surface set (panel + 2 services), so per-suite
-# reconciliation is per-spec, not per-baseline-set. No known-failure baseline
-# for these suites → ANY failure is NEW-suspect.
+# Derived suite list (git show --name-only on e38dea27..670626a0, .spec.ts filter):
+#   src/app/pages/jobs/jobs-page.bindings.pins.spec.ts
+#   src/app/models/work.model.spec.ts
+# UNION with prior bracket's set (mission.service + jobs-page.bindings.pins)
+# so the closing bracket covers both fix seams:
+#   src/app/services/mission.service.spec.ts
+# Expected: all 3 suites green on this branch. No known-failure baseline for
+# these suites → ANY failure is NEW-suspect (per-suite counts reported
+# verbatim from jest output).
 #
 # Unit pack — estimated < 1 min. Dual-layer timeout:
 # Layer 2 (script-internal): 150s global deadline across the single jest run —
@@ -38,8 +39,8 @@ fi
 # --- Branch-drift guard (sibling-pack pattern: rev-parse bracket + exact pin) ---
 ACTUAL_BRANCH="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD)"
 ACTUAL_COMMIT="$(git -C "$PROJECT_DIR" rev-parse --short HEAD)"
-EXPECTED_BRANCH="fix/job-queue-panel-activity-ordering"
-EXPECTED_COMMIT="bbe8d0c0"
+EXPECTED_BRANCH="feature/jobs-page-improvement"
+EXPECTED_COMMIT="670626a0"
 echo "=== Test Pack: mission_tree_fe_targeted_test [${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT}] ==="
 if [[ "${ACTUAL_BRANCH}" != "${EXPECTED_BRANCH}" || "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
   echo "RESULT: DRIFT (expected ${EXPECTED_BRANCH} @ ${EXPECTED_COMMIT}, got ${ACTUAL_BRANCH} @ ${ACTUAL_COMMIT})"
@@ -49,9 +50,9 @@ fi
 cd "$FRONTEND_DIR"
 
 SPECS=(
-  src/app/components/job-queue-panel/job-queue-panel.component.spec.ts
-  src/app/services/api.service.spec.ts
-  src/app/services/instance.service.spec.ts
+  src/app/pages/jobs/jobs-page.bindings.pins.spec.ts
+  src/app/services/mission.service.spec.ts
+  src/app/models/work.model.spec.ts
 )
 
 INTERNAL_LIMIT=150
