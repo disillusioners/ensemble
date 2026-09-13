@@ -143,8 +143,10 @@ def test_resolve_intelligence_tier_high_case_insensitive_allowed_match():
     """Pin F (W7 parity): ``tier="HIGH"`` (uppercase tier literal) +
     ``allowed_models=("Agentic", "coding")`` (capitalized entry) →
     ``("Agentic", None)``. The resolver returns the canonical spelling from
-    the allowlist, mirroring ``_resolve_model_override`` at
-    ``instance_lifecycle.py:1267-1272``. Tier literal is case-insensitive on
+    the allowlist, mirroring
+    :meth:`daemon.services.instance_lifecycle.InstanceLifecycleService._resolve_model_override`
+    (case-insensitive canonical-name normalization against the
+    allowlist). Tier literal is case-insensitive on
     the input side too (defensive — Pydantic Literal gates exact match in
     production, but the free function is robust).
     """
@@ -174,11 +176,13 @@ def test_resolve_intelligence_tier_returns_canonical_from_mixed_case_allowlist()
 
 def test_resolve_intelligence_tier_empty_allowed_models_passthrough():
     """Pin A2 (W5 / A2): ``tier="high"`` + ``allowed_models=()`` (empty) →
-    ``("agentic", None)`` — pass-through, no WARN, no ERROR. Mirrors the
-    ``_resolve_model_override`` empty-allowed branch at
-    ``instance_lifecycle.py:1263-1265`` ("Empty list = unrestricted; pass
-    through"). Loud-raise responsibility stays downstream — empty allowlist
-    means no validation contract to enforce against.
+    ``("agentic", None)`` — pass-through, no WARN, no ERROR. Mirrors
+    the
+    :meth:`daemon.services.instance_lifecycle.InstanceLifecycleService._resolve_model_override`
+    empty-allowed branch (early-return for None / whitespace model +
+    empty allowlist pass-through). Loud-raise responsibility stays
+    downstream — empty allowlist means no validation contract to
+    enforce against.
     """
     resolved, err = _resolve_intelligence_tier("high", allowed_models=())
     assert resolved == "agentic"

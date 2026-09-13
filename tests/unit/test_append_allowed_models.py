@@ -21,21 +21,8 @@ from the worktree root.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _make_manager(allowed_models: list[str] | None = None) -> MagicMock:
-    """Build a stub manager with ``config.llm.allowed_models`` set."""
-    manager = MagicMock()
-    manager.config = MagicMock()
-    manager.config.llm = MagicMock()
-    manager.config.llm.allowed_models = list(allowed_models or [])
-    return manager
+from tests.helpers.send_message_fixtures import make_spawn_manager
 
 
 def _make_agent_meta(
@@ -70,7 +57,7 @@ def test_append_allowed_models_with_inject_flag_includes_spawn_intelligence_tail
     (the tail teaches the governor/council-flow parent about the
     new opt-in).
     """
-    manager = _make_manager(allowed_models=["agentic", "coding"])
+    manager = make_spawn_manager(allowed_models=["agentic", "coding"])
     agent_meta = _make_agent_meta(inject_allowed_models=True)
     system_prompt = "BASE SYSTEM PROMPT"
 
@@ -104,7 +91,7 @@ def test_append_allowed_models_without_inject_flag_excludes_tail():
     bypasses BOTH the existing block AND the new tail). No ambient
     context leakage.
     """
-    manager = _make_manager(allowed_models=["agentic", "coding"])
+    manager = make_spawn_manager(allowed_models=["agentic", "coding"])
     agent_meta = _make_agent_meta(inject_allowed_models=False)
     system_prompt = "BASE SYSTEM PROMPT — UNCHANGED"
 
@@ -130,7 +117,7 @@ def test_append_allowed_models_empty_allowed_still_includes_tail():
     will reject ``'agentic'`` if it's not in the list). The
     no-restriction text remains the model-list body.
     """
-    manager = _make_manager(allowed_models=[])
+    manager = make_spawn_manager(allowed_models=[])
     agent_meta = _make_agent_meta(inject_allowed_models=True)
     system_prompt = "BASE"
 

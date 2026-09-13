@@ -24,6 +24,7 @@ declares the package; this matches the existing pattern used by
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -37,14 +38,21 @@ _AGENT_ID = "developer"
 def patch_heavy_helpers():
     """Return a stack of ``unittest.mock.patch`` context managers that
     disable the heavy ``create_instance_tools`` factory helpers (RAG,
-    knowledge, MCP, project, job, mother, OpenCode, DB, infra, context)
-    so only the instance-management tools (spawn / send / terminate /
-    list / get) are built.
+    knowledge, MCP, project, job, mother, OpenCode, DB, infra, context,
+    chart) so only the instance-management tools (spawn / send /
+    terminate / list / get) are built.
 
     NOTE: ``_check_team_membership`` is patched at the test-method level
     (the ``with patch(...)`` block wraps the coroutine) so the team
     membership gate stays open for the full call duration — anything
     patched here is torn down BEFORE ``send_message.coroutine`` runs.
+
+    M3 — ``create_chart_tools`` is now part of the shared patch stack
+    (was previously only patched by individual spawn-tool test files
+    that needed a no-chart side-effect; the consolidated fixture must
+    mirror the full factory-helper set so test-tool extraction
+    via ``create_instance_tools`` yields the same tool surface across
+    send_message / spawn_instance / etc.).
     """
     return [
         patch("daemon.tools.instance.is_rag_enabled", return_value=False),
@@ -61,6 +69,7 @@ def patch_heavy_helpers():
         patch("daemon.tools.instance.create_db_tools", return_value=[]),
         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+        patch("daemon.tools.instance.create_chart_tools", return_value=[]),
         patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
         patch("daemon.tools.instance.scan_tools_for_full_docs"),
         patch("daemon.tools.instance._apply_tool_filter", side_effect=lambda tools, *a, **kw: tools),
@@ -191,3 +200,89 @@ def get_send_message_tool(manager: MagicMock):
         "send_message tool not found in create_instance_tools output; "
         f"got {[getattr(t, 'name', None) for t in tools]}"
     )
+
+
+def make_spawn_manager(
+    *,
+    allowed_models: list[str] | None = None,
+    spawn_result: tuple[str, str | None] = ("new-spawn-instance-id", "agentic"),
+    spawn_intelligence_tier_high_model: str = "agentic",
+    **kw: Any,
+) -> MagicMock:
+    """Build a mock manager wired for ``spawn_instance`` (tool path).
+
+    M4 — shared spawn-manager builder extracted from the local copies
+    that used to live in:
+
+      * ``tests/integration/test_spawn_intelligence_tier.py`` (the
+        ``_make_spawn_manager`` that drives the Pin G/H/X/AA tier-path
+        tests).
+      * ``tests/integration/test_spawn_default_unchanged.py`` (the
+        ``_make_default_unchanged_manager`` that drives the Pin T/U/V/W/Y
+        default-unchanged regression; re-used with a different
+        ``spawn_result`` tuple and the default-unchanged config).
+      * ``tests/unit/test_append_allowed_models.py`` (the
+        ``_make_manager(allowed_models=...)`` that drives the Pin M/N/O
+        allowed-models tail tests; smaller surface — no
+        ``spawn_intelligence_tier_high_model`` / ``spawn_result``).
+      * ``tests/unit/test_spawn_instance_input.py`` (the inline
+        ``MagicMock`` builder inside ``_build_spawn_instance_tool``;
+        re-used with the same surface as Pin M/N/O).
+
+    The shared builder covers all four local shapes via the
+    ``**kw`` passthrough + sensible defaults. Per-call sites that need
+    a richer surface (e.g. the Pin V DB read-back stubs or the Pin Y
+    lifecycle-service spec) extend the returned ``MagicMock`` after
+    the call — the builder returns the bare manager baseline.
+
+    Args:
+        allowed_models: Whitelist applied to ``config.llm.allowed_models``.
+            Defaults to ``["agentic", "coding", "coding2"]`` — mirrors
+            the legacy default-unchanged test surface.
+        spawn_result: The ``(instance_id, validated_model_override)``
+            tuple the SYNC facade returns. Pin G / X use the
+            default; Pin AA uses ``("new-spawn-instance-id", "agentic")``.
+        spawn_intelligence_tier_high_model: The boot-snapshot value the
+            tool layer reads via
+            ``manager.config.llm.spawn_intelligence_tier_high_model``.
+            Pin X-s1 (operator remap) overrides this to ``"gpt-5"``.
+        **kw: Reserved for future per-call deltas; currently inert.
+
+    Returns:
+        ``MagicMock`` manager with:
+          * ``config.llm.allowed_models`` (list).
+          * ``config.llm.spawn_intelligence_tier_high_model`` (str).
+          * ``_lifecycle_service._format_model_fallback_notice`` (mock
+            returning ``""`` — suppresses the legacy silent-fallback
+            notice on the tier path per Phase 2 task 4e item 4).
+          * ``spawn_instance`` (sync mock returning ``spawn_result``).
+          * ``_instance_repository.get`` (returns ``None`` — no live
+            DB rows in the pin path).
+    """
+    if allowed_models is None:
+        allowed_models = ["agentic", "coding", "coding2"]
+
+    manager = MagicMock()
+    manager.config = MagicMock()
+    manager.config.llm = MagicMock()
+    manager.config.llm.allowed_models = list(allowed_models)
+    manager.config.llm.spawn_intelligence_tier_high_model = (
+        spawn_intelligence_tier_high_model
+    )
+
+    # _lifecycle_service._format_model_fallback_notice: legacy
+    # silent-fallback notice (D2 — only fires on the legacy ``model=``
+    # path; SUPPRESSED on the tier path per Phase 2 task 4e item 4).
+    manager._lifecycle_service = MagicMock()
+    manager._lifecycle_service._format_model_fallback_notice = MagicMock(
+        return_value=""
+    )
+
+    # The SYNC facade method. Returns (instance_id, validated_model_override).
+    manager.spawn_instance = MagicMock(return_value=spawn_result)
+
+    # Async DB-touching helpers used by the tool body.
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get.return_value = None
+
+    return manager

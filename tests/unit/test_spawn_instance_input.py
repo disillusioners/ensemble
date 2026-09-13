@@ -23,45 +23,22 @@ from the worktree root.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from daemon.tools.instance import create_instance_tools  # noqa: F821 — imported for tool build
+from tests.helpers.send_message_fixtures import (
+    make_spawn_manager,
+    patch_heavy_helpers,
+)
 
 
-def _patch_heavy_helpers() -> list:
-    """Disable heavy ``create_instance_tools`` factory helpers."""
-    return [
-        patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-        patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-        patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_project_tools", return_value=[]),
-        patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-        patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
-        patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-        patch("daemon.tools.instance.create_context_tools", return_value=[]),
-        patch("daemon.tools.instance.create_chart_tools", return_value=[]),
-        patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-        patch("daemon.tools.instance.scan_tools_for_full_docs"),
-        patch("daemon.tools.instance._apply_tool_filter", side_effect=lambda tools, *a, **kw: tools),
-    ]
-
-
-def _build_spawn_instance_tool() -> MagicMock:
+def _build_spawn_instance_tool():
     """Drive ``create_instance_tools`` to find the ``spawn_instance`` tool."""
-    manager = MagicMock()
-    manager.config = MagicMock()
-    manager.config.llm = MagicMock()
-    manager.config.llm.allowed_models = ["agentic", "coding"]
+    manager = make_spawn_manager(allowed_models=["agentic", "coding"])
 
-    patches = _patch_heavy_helpers()
+    patches = patch_heavy_helpers()
     for p in patches:
         p.start()
     try:
-        tools = create_instance_tools(  # noqa: F821 — imported below
+        tools = create_instance_tools(
             manager, "parent-instance-id", agent_id="tester"
         )
     finally:
@@ -72,10 +49,6 @@ def _build_spawn_instance_tool() -> MagicMock:
         if getattr(t, "name", None) == "spawn_instance":
             return t
     raise RuntimeError("spawn_instance tool not found")
-
-
-# Deferred import — keep fixture definition first for top-down readability.
-from daemon.tools.instance import create_instance_tools  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────────────

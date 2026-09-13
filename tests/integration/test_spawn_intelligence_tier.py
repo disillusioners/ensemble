@@ -33,6 +33,10 @@ import pytest
 from pydantic import ValidationError
 
 from daemon.tools.instance import SpawnInstanceInput, create_instance_tools
+from tests.helpers.send_message_fixtures import (
+    make_spawn_manager,
+    patch_heavy_helpers,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,79 +44,10 @@ from daemon.tools.instance import SpawnInstanceInput, create_instance_tools
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _patch_heavy_helpers() -> list:
-    """Disable heavy ``create_instance_tools`` factory helpers.
-
-    Mirrors the pattern at
-    ``tests/unit/tools/test_spawn_councilor_default_version.py``.
-    """
-    return [
-        patch("daemon.tools.instance.is_rag_enabled", return_value=False),
-        patch("daemon.tools.instance.create_rag_tools", return_value=[]),
-        patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_project_tools", return_value=[]),
-        patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
-        patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
-        patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
-        patch("daemon.tools.instance.create_infra_tools", return_value=[]),
-        patch("daemon.tools.instance.create_context_tools", return_value=[]),
-        patch("daemon.tools.instance.create_chart_tools", return_value=[]),
-        patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
-        patch("daemon.tools.instance.scan_tools_for_full_docs"),
-        patch("daemon.tools.instance._apply_tool_filter", side_effect=lambda tools, *a, **kw: tools),
-    ]
-
-
-def _make_spawn_manager(
-    *,
-    allowed_models: list[str] | None = None,
-    spawn_result: tuple[str, str | None] = ("new-spawn-instance-id", "agentic"),
-    spawn_intelligence_tier_high_model: str = "agentic",
-) -> MagicMock:
-    """Build a mock manager wired for ``spawn_instance`` (tool path).
-
-    ``spawn_instance(...)`` is the SYNC facade method (D7 — no
-    ``model_tier`` kwarg crosses the facade). The tool layer validates
-    the tier-resolved model against ``config.llm.allowed_models`` and
-    threads the resolved model name through the existing ``model=``
-    kwarg.
-    """
-    if allowed_models is None:
-        allowed_models = ["agentic", "coding", "coding2"]
-
-    manager = MagicMock()
-    manager.config = MagicMock()
-    manager.config.llm = MagicMock()
-    manager.config.llm.allowed_models = list(allowed_models)
-    manager.config.llm.spawn_intelligence_tier_high_model = (
-        spawn_intelligence_tier_high_model
-    )
-
-    # _lifecycle_service._format_model_fallback_notice: legacy
-    # silent-fallback notice (D2 — only fires on the legacy ``model=``
-    # path; SUPPRESSED on the tier path per Phase 2 task 4e item 4).
-    manager._lifecycle_service = MagicMock()
-    manager._lifecycle_service._format_model_fallback_notice = MagicMock(return_value="")
-
-    # The SYNC facade method. Returns (instance_id, validated_model_override).
-    manager.spawn_instance = MagicMock(return_value=spawn_result)
-
-    # Async DB-touching helpers used by the tool body.
-    manager._instance_repository = MagicMock()
-    manager._instance_repository.get.return_value = None
-
-    return manager
-
-
 def _get_spawn_tool(manager: MagicMock) -> MagicMock:
     """Build instance tools via the patched factory and return the
     ``spawn_instance`` StructuredTool."""
-    patches = _patch_heavy_helpers()
+    patches = patch_heavy_helpers()
     for p in patches:
         p.start()
     try:
@@ -152,7 +87,7 @@ class TestSpawnIntelligenceTierSuccess:
         ``model='agentic'`` as the priority-1 override (D7 — no
         ``model_tier`` kwarg crosses the facade).
         """
-        manager = _make_spawn_manager(allowed_models=["agentic", "coding", "coding2"])
+        manager = make_spawn_manager(allowed_models=["agentic", "coding", "coding2"])
         spawn_tool = _get_spawn_tool(manager)
 
         with patch(
@@ -214,10 +149,11 @@ class TestSpawnIntelligenceTierLoud:
         NOT in ``allowed_models`` → tool RAISES ``ValueError`` with the
         A2 verbatim message (Phase 2 task 4b.i). Possible ONLY because
         the resolver block sits BEFORE the ``try:`` (B2 — load-bearing
-        placement); INSIDE the try the ``except ValueError`` at :1960
-        would flatten it to a soft ``ERROR: ...`` string.
+        placement); INSIDE the try the ``except ValueError`` at
+        :sym:`daemon.tools.instance.spawn_instance` (load-bearing
+        placement) would flatten it to a soft ``ERROR: ...`` string.
         """
-        manager = _make_spawn_manager(allowed_models=["coding"])
+        manager = make_spawn_manager(allowed_models=["coding"])
         spawn_tool = _get_spawn_tool(manager)
 
         with patch(
@@ -228,7 +164,10 @@ class TestSpawnIntelligenceTierLoud:
                 "daemon.registry.get_registry",
                 return_value=_fake_registry(),
             ):
-                with pytest.raises(ValueError) as exc_info:
+                with pytest.raises(
+                    ValueError,
+                    match=r"spawn_instance\(model_tier='high'\) resolved to model",
+                ) as exc_info:
                     await spawn_tool.coroutine(
                         agent_id="coder", model_tier="high"
                     )
@@ -279,7 +218,7 @@ class TestLegacyModelSilentFallback:
         the facade, not the tool — the tool body never sees a
         ``model=`` mismatch when ``model_tier=None``.
         """
-        manager = _make_spawn_manager(allowed_models=["agentic", "coding"])
+        manager = make_spawn_manager(allowed_models=["agentic", "coding"])
         # Simulate the facade's silent-fallback behavior: when
         # ``model='gpt-4'`` ∉ ``allowed_models``, lifecycle's
         # ``_resolve_model_override`` returns ``None`` (silent
@@ -318,7 +257,7 @@ class TestDefaultUnchangedAtManagerLevel:
         module ``daemon.services.instance_lifecycle`` never
         intercepts the tool's reference).
         """
-        manager = _make_spawn_manager()
+        manager = make_spawn_manager()
         manager.spawn_instance = MagicMock(return_value=("inst-id", "coding"))
 
         with patch(
@@ -345,8 +284,8 @@ class TestSurfaceBoundary:
         differ (council = diverse models by design); tier override is
         out of scope for v1.
         """
-        manager = _make_spawn_manager()
-        patches = _patch_heavy_helpers()
+        manager = make_spawn_manager()
+        patches = patch_heavy_helpers()
         for p in patches:
             p.start()
         try:
@@ -376,8 +315,8 @@ class TestSurfaceBoundary:
         scope-bound to ``spawn_instance`` only (D3); terminate
         operates on existing instances.
         """
-        manager = _make_spawn_manager()
-        patches = _patch_heavy_helpers()
+        manager = make_spawn_manager()
+        patches = patch_heavy_helpers()
         for p in patches:
             p.start()
         try:
@@ -429,7 +368,7 @@ class TestBothParamsPrecedence:
         records ``'agentic'``. NO ``ValueError`` (D12 — both-params is
         loud-but-successful, not strict-reject).
         """
-        manager = _make_spawn_manager(allowed_models=["agentic", "coding"])
+        manager = make_spawn_manager(allowed_models=["agentic", "coding"])
         spawn_tool = _get_spawn_tool(manager)
 
         with patch(
@@ -475,7 +414,7 @@ class TestBothParamsPrecedence:
         layer and threaded into the resolver. Operator remap
         (``= 'gpt-5'``) → ``'gpt-5'`` is the resolved model.
         """
-        manager = _make_spawn_manager(
+        manager = make_spawn_manager(
             allowed_models=["agentic", "coding", "gpt-5"],
             spawn_intelligence_tier_high_model="gpt-5",
             spawn_result=("new-spawn-instance-id", "gpt-5"),
@@ -517,7 +456,9 @@ class TestSchemaRejectsInvalidLiteral:
         type renders as ``enum: ['high']`` in the tool's JSON schema
         — the LLM sees the closed tier set.
         """
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(
+            ValidationError, match=r"model_tier"
+        ) as exc_info:
             SpawnInstanceInput(agent_id="coder", model_tier="low")
 
         # The validation error must mention the field.
@@ -556,7 +497,7 @@ class TestBothParamsInvalidLegacyModel:
         model appears (suppressed per Phase 2 task 4e item 4); NO
         ``ValueError`` (the tier path is canonical + validated).
         """
-        manager = _make_spawn_manager(allowed_models=["agentic", "coding"])
+        manager = make_spawn_manager(allowed_models=["agentic", "coding"])
         spawn_tool = _get_spawn_tool(manager)
 
         with patch(

@@ -16,7 +16,11 @@ legacy/default paths):
     replacement) and assert ``resolved_source == "llm_models"`` on
     the no-param spawn.
   - Pin Y: RESTORE-REVALIDATE parity — two scenarios against the
-    restore seam at ``daemon/services/instance_lifecycle.py:3894-3929``:
+    restore seam in
+    :func:`daemon.services.instance_lifecycle.InstanceLifecycleService.restore_instance`
+    (load-bearing helper that re-runs
+    ``_resolve_model_override`` on the stored ``model_override``
+    before re-building the LLM config):
     (a) seed stored override, re-point env, restore → still uses
     STORED value (origin-blind, no env read); (b) remove from
     allowed_models, restore → silent fallback + WARN.
@@ -34,62 +38,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from daemon.services.instance_lifecycle import InstanceLifecycleService
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures — lightweight manager stub for the SYNC facade path
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _make_default_unchanged_manager(
-    *,
-    allowed_models: list[str] | None = None,
-    pool_return: str = "coding",
-    stored_override: str | None = None,
-) -> MagicMock:
-    """Build a manager stub simulating the SYNC facade + DB.
-
-    The facade's ``manager.spawn_instance(...)`` is SYNC (D7) and
-    returns ``(instance_id, validated_model_override)``. For the
-    no-``model_tier`` path, the facade's real implementation runs the
-    weighted pool at ``instance_lifecycle.py:1640-1668`` and persists
-    the selection into ``instance_metadata.model_override``. We stub
-    the facade to simulate that contract for the unit-level pins.
-    """
-    if allowed_models is None:
-        allowed_models = ["agentic", "coding", "coding2"]
-
-    manager = MagicMock()
-    manager.config = MagicMock()
-    manager.config.llm = MagicMock()
-    manager.config.llm.allowed_models = list(allowed_models)
-    manager.config.llm.spawn_intelligence_tier_high_model = "agentic"
-
-    # SYNC facade — returns (id, validated_model_override).
-    manager.spawn_instance = MagicMock(
-        return_value=("spawned-instance-id", pool_return)
-    )
-
-    # Lifecycle service — used for restore (Pin Y).
-    manager._lifecycle_service = MagicMock(spec=InstanceLifecycleService)
-
-    # Instance repository — used for the DB read-back assertion (Pin V).
-    if stored_override is not None:
-        manager._instance_repository = MagicMock()
-        manager._instance_repository.get_by_id = MagicMock(
-            return_value=MagicMock(
-                instance_metadata={"model_override": stored_override}
-            )
-        )
-    else:
-        manager._instance_repository = MagicMock()
-        manager._instance_repository.get_by_id = MagicMock(
-            return_value=MagicMock(
-                instance_metadata={"model_override": pool_return}
-            )
-        )
-    return manager
+from tests.helpers.send_message_fixtures import make_spawn_manager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +55,9 @@ class TestDefaultUnchangedPrimary:
         pool-selected model that gets persisted to
         ``instance_metadata.model_override``.
         """
-        manager = _make_default_unchanged_manager(pool_return="coding")
+        manager = make_spawn_manager(
+            spawn_result=("spawned-instance-id", "coding"),
+        )
 
         # SYNC facade call (B3: drop await), NO model_tier.
         instance_id, validated_model_override = manager.spawn_instance(
@@ -161,7 +112,9 @@ class TestResolverNotCalledOnDefaultPath:
             verify the resolver was never invoked.
         """
         # MANAGER-level: trivially can't reach the resolver (D7).
-        manager = _make_default_unchanged_manager(pool_return="coding")
+        manager = make_spawn_manager(
+            spawn_result=("spawned-instance-id", "coding"),
+        )
         with patch(
             "daemon.tools.instance._resolve_intelligence_tier",
             wraps=lambda *a, **kw: pytest.fail(
@@ -273,8 +226,14 @@ class TestPersistedOverrideReadsBack:
         model_override]`` equals the model the facade returned. Closes
         the persistence round-trip contract for the no-param path.
         """
-        manager = _make_default_unchanged_manager(
-            pool_return="coding", stored_override="coding"
+        manager = make_spawn_manager(
+            spawn_result=("spawned-instance-id", "coding"),
+        )
+        # Pin V: persist row carries the pool-selected value.
+        manager._instance_repository.get_by_id = MagicMock(
+            return_value=MagicMock(
+                instance_metadata={"model_override": "coding"}
+            )
         )
 
         # Drive the facade.
@@ -317,7 +276,9 @@ class TestPoolSourceSanity:
         # We call ``_resolve_model_override(None)`` to assert the
         # no-override path; the actual log emission happens inside
         # ``spawn_instance`` — we stub that and capture caplog.
-        manager = _make_default_unchanged_manager()
+        manager = make_spawn_manager(
+            spawn_result=("spawned-instance-id", "coding"),
+        )
 
         # Capture logs during the facade call.
         with caplog.at_level(logging.DEBUG):
@@ -331,8 +292,11 @@ class TestPoolSourceSanity:
         # The pool-source sanity contract is captured at the
         # lifecycle service boundary (the facade's
         # ``validated_model_override`` is the pool selection; the
-        # log seam at ``instance_lifecycle.py:1647-1652`` writes
-        # ``resolved_source='llm_models'`` before that).
+        # Pool-source log seam in :mod:`daemon.services.llm_load_balancer`
+        # (canonical home — the load-balancer itself; the facade's
+        # ``validated_model_override`` is the pool selection; the
+        # log seam there writes ``resolved_source='llm_models'``
+        # before that).
         assert manager.spawn_instance.called
         kwargs = manager.spawn_instance.call_args.kwargs
         assert kwargs.get("model") is None
@@ -346,13 +310,12 @@ class TestPoolSourceSanity:
 class TestRestoreRevalidateParity:
     def test_restore_revalidates_stored_override_origin_blind(self):
         """Pin Y (W6 / D7 — restore-revalidate identity):
-        ``restore_instance`` (at
-        ``daemon/services/instance_lifecycle.py:3894-3929``) re-runs
-        ``_resolve_model_override`` on the STORED ``model_override``
-        value. Re-pointing ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` to
-        a DIFFERENT model post-spawn does NOT retro-change the
-        child — the restore path is origin-blind (no env read, no
-        tier re-resolution).
+        :func:`daemon.services.instance_lifecycle.InstanceLifecycleService.restore_instance`
+        re-runs ``_resolve_model_override`` on the STORED
+        ``model_override`` value. Re-pointing
+        ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` to a DIFFERENT model
+        post-spawn does NOT retro-change the child — the restore
+        path is origin-blind (no env read, no tier re-resolution).
 
         Scenario (a): seed an instance with stored
         ``model_override='agentic'``; restore; assert the restored
@@ -364,9 +327,15 @@ class TestRestoreRevalidateParity:
         # returns it if in allowed_models. We stub the lifecycle
         # service to confirm the path uses the STORED value, not a
         # re-resolved tier.
-        manager = _make_default_unchanged_manager(
+        manager = make_spawn_manager(
             allowed_models=["agentic", "coding"],
-            stored_override="agentic",
+            spawn_result=("spawned-instance-id", "coding"),
+        )
+        # Pin Y scenario (a): persist row carries the stored override.
+        manager._instance_repository.get_by_id = MagicMock(
+            return_value=MagicMock(
+                instance_metadata={"model_override": "agentic"}
+            )
         )
         # Simulate ``_resolve_model_override`` returning the
         # validated stored value (origin-blind — no env read).
@@ -396,24 +365,28 @@ class TestRestoreRevalidateParity:
     def test_restore_logs_warning_when_stored_override_no_longer_allowed(self, caplog):
         """Pin Y scenario (b): seed ``model_override='legacy-model'``
         (NOT in current ``allowed_models``) → restore emits a
-        WARNING and falls back to the default. The restore seam at
-        ``instance_lifecycle.py:3924-3928`` logs ``WARN: stored
-        model_override ... is no longer in allowed_models; falling
-        back to default``.
+        WARNING and falls back to the default. The restore-revalidate
+        seam in
+        :func:`daemon.services.instance_lifecycle.InstanceLifecycleService.restore_instance`
+        logs ``WARN: stored model_override ... is no longer in
+        allowed_models; falling back to default`` when the stored
+        value is rejected by the re-validation
+        (``_resolve_model_override``).
         """
-        manager = _make_default_unchanged_manager(
+        manager = make_spawn_manager(
             allowed_models=["agentic", "coding"],
+            spawn_result=("spawned-instance-id", "coding"),
         )
         # Simulate the lifecycle's ``_resolve_model_override``
         # returning ``None`` for a stored value that's no longer
-        # allowed (silent fallback path at
-        # ``instance_lifecycle.py:1274-1280``).
+        # allowed (silent fallback path in
+        # :meth:`daemon.services.instance_lifecycle.InstanceLifecycleService._resolve_model_override`).
         manager._lifecycle_service._resolve_model_override = MagicMock(
             return_value=None
         )
 
-        # The restore-revalidate body at :3894-3929 fires the WARN
-        # when ``raw_stored_override.strip()`` is truthy AND
+        # The restore-revalidate body fires the WARN when
+        # ``raw_stored_override.strip()`` is truthy AND
         # ``validated_stored_override is None``. We exercise that
         # guard via caplog.
         raw_stored_override = "legacy-model"  # NOT in allowed_models
@@ -425,11 +398,12 @@ class TestRestoreRevalidateParity:
 
         # Helper returned ``None`` (silent fallback).
         assert validated is None
-        # The WARN log is emitted by the restore-revalidate body at
-        # ``instance_lifecycle.py:3924-3928`` — we stub the helper
-        # to return ``None`` and verify the contract that triggers
-        # the WARN; the actual log emission is exercised by the
-        # real restore path (covered by the integration test suite).
+        # The WARN log is emitted by the restore-revalidate body in
+        # :meth:`daemon.services.instance_lifecycle.InstanceLifecycleService.restore_instance`
+        # — we stub the helper to return ``None`` and verify the
+        # contract that triggers the WARN; the actual log emission
+        # is exercised by the real restore path (covered by the
+        # integration test suite).
         assert raw_stored_override.strip()  # guard condition holds
 
 
