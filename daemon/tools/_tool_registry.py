@@ -482,7 +482,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "project_history": "daemon.tools.project_history",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
-    "instance": "daemon.tools.instance",
+    "instance": ["daemon.tools.instance", "daemon.tools.tunables"],
     "self": ["daemon.tools.inner_soul", "daemon.tools.access_memory"],
     "project": "daemon.tools.project",
     "job": "daemon.tools.job_queue",
