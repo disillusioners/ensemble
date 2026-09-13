@@ -121,43 +121,118 @@ Status: Draft — ADRs proposed for architect enrichment; OPEN QUESTIONS section
 
 **Context.** Empty-guard shipped the convention: `ENSEMBLE_EMPTY_RESPONSE_GUARD` default ON, restart-pending, OFF = byte-identical ROUTING with `[LLM-EMPTY]` telemetry intentionally NOT gated (adr-0001 consequences, W1 leader decision KEEP — OFF-mode data is needed during an OFF soak). Resolver convention: explicit `_resolve_*` in `load_config`, invalid → `ValueError` at boot.
 
-**Decision.** Master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` (default ON, restart-pending; OFF = every router branch returns shipped values, middleware slot is a no-op pass-through, telemetry continues). Per-class sub-flags per enrollment phase (`ENSEMBLE_REPAIR_LOOP_DURABLE`, `ENSEMBLE_REPAIR_GHOST_PROMISE`, `ENSEMBLE_REPAIR_EMPTY_POST_LADDER`, `ENSEMBLE_REPAIR_TRUNCATED`; phase-3 candidates default OFF until soaked). Same `_resolve_*` discipline.
+**Decision.** Master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` (default ON, restart-pending; OFF = every router branch returns shipped values, middleware slot is a no-op pass-through, telemetry continues). Sub-flag per phase-1 loop enrollment: `ENSEMBLE_REPAIR_LOOP_DURABLE` (default ON). Same `_resolve_*` discipline. Telemetry stays ungated-by-design (W1 KEEP).
 
-**Consequences.** Surgical disable of one class without killing the ladder; OFF-soak observability preserved; operator muscle memory from the empty-guard rollout transfers.
+**Phase-2 amendment (ADR-0009).** Phase 2 enrolls three new classes (ghost / truncated / empty_post_ladder) WITHOUT per-class sub-flags. The master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` governs ALL FOUR classes (loop + 3 new) — the P1 OFF contract extends: master OFF = byte-identical routing for every class. No `ENSEMBLE_REPAIR_GHOST_PROMISE` / `ENSEMBLE_REPAIR_TRUNCATED` / `ENSEMBLE_REPAIR_EMPTY_POST_LADDER` env vars exist. The sub-flag path documented here is preserved for phase-3 detector-gated classes (tool storms with drift, stuck-without-progress, schema/format violations) where surgical disable of one class without killing the whole ladder is needed.
 
-**Alternatives rejected.** *Single master only*: a ghost-promise FP would force disabling loop durability too. *Default OFF soak-first*: contradicts the established default-ON restart-pending convention and the restart-pending activation runbook pattern already in use for this project's features.
+**Consequences.** Surgical disable of one class without killing the ladder — available NOW for loop (`ENSEMBLE_REPAIR_LOOP_DURABLE`); reserved for phase-3 detector-gated classes. OFF-soak observability preserved; operator muscle memory from the empty-guard rollout transfers.
+
+**Alternatives rejected.**
+- *Single master only, no sub-flags ever*: a loop-only FP would force disabling the whole ladder (loop's primary value is the durable carrier; ghost / truncated / empty are detector-FP bounded by their respective cap / L1-L13 / excerpt invariants — phase 2 ships without sub-flags per USER AMENDMENT; phase 3 may revisit).
+- *Default OFF soak-first*: contradicts the established default-ON restart-pending convention and the restart-pending activation runbook pattern already in use for this project's features.
 
 ---
 
-## OPEN QUESTIONS (for architect enrichment)
+## ADR-0009 — Phase 2 amendment: NO per-class sub-flags; master governs all classes (USER AMENDMENT 2026-09-13)
+
+**Context.** Phase 2 enrollment of ghost-promise, truncated, and
+empty_post_ladder classes (per `phase2-plan.md`) originally proposed
+three per-class sub-flags (``ENSEMBLE_REPAIR_GHOST_PROMISE`` /
+``ENSEMBLE_REPAIR_TRUNCATED`` / ``ENSEMBLE_REPAIR_EMPTY_POST_LADDER``)
+to gate each enrollment independently (ADR-0008 default-ON-with-soak
+semantics). On 2026-09-13 the user AMENDED the design: NO per-class
+sub-flags. All three enrollments are governed ONLY by the existing
+master ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` (default ON). Master OFF =
+byte-identical routing for ALL FOUR classes (loop + 3 new). Telemetry
+stays ungated-by-design (W1 KEEP).
+
+**Decision.**
+* **B-5 / C-5 / D-5 CANCELLED.** No ``ENSEMBLE_REPAIR_GHOST_PROMISE``
+  / ``ENSEMBLE_REPAIR_TRUNCATED`` / ``ENSEMBLE_REPAIR_EMPTY_POST_LADDER``
+  env vars exist.
+* Master ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` (default ON, restart-pending)
+  governs every class. The P1 OFF contract extends: master OFF =
+  byte-identical routing for ALL FOUR classes (loop + ghost + truncated
+  + empty_post_ladder).
+* Telemetry stays ungated-by-design (W1 KEEP) — OFF soak data is
+  needed during soak windows.
+* Every new branch (ghost cap-routing in ``should_continue``,
+  pre-terminal intercept for truncated/empty in ``agent_node``) is
+  gated by the master switch FIRST; gate-OFF preserves the shipped
+  byte-identical routing.
+
+**Consequences.**
+* One operator surface, one mental model. Muscle memory from the
+  empty-guard and ladder phase-1 rollouts transfers directly.
+* A FP in any one class requires disabling the WHOLE ladder — mitigated
+  by phase-3 detector-gated enrollment (the cap-before-surgery FP
+  mitigation on ghost; the L1-L13 exemption table on empty; the
+  excerpt-round-trip verification on truncated).
+* The ADR-0008 "kill-switch convention: master + per-class sub-flags"
+  is SUPERSEDED in part for phase 2 — the sub-flag sub-bullet is
+  re-scoped to phase-3 detector-gated classes (not phase 2's three).
+
+**Alternatives rejected.**
+* *Per-class sub-flags default ON after soak (phase-2 original)*:
+  contradicted by the user's amendment.
+* *Per-class sub-flags default OFF until soak*: contradicted the
+  established default-ON restart-pending convention; also adds
+  operator surface noise.
+* *Single master only, no per-class granularity at all*: same as the
+  decision; the ADR-0008 "per-class sub-flags" path was for FUTURE
+  detector-gated classes (phase 3+) where a specific class might
+  need surgical disable without disabling the whole ladder.
+
+---
+
+## OPEN QUESTIONS (for architect enrichment) — RESOLVED on 2026-09-13
 
 **OQ1 — S1-class repair placement: pre-terminal (recommended) vs shallow facade hook.**
 - *Blocking:* the facade hook (repair on 2nd `EmptyLLMResponseError`, replacing retries 2-3) saves ≤2 poisoned-context re-sends per incident but modifies the review-approved raise-in-retry-scope contract (`llm_error_classifier.py:907/:916`) and its lane semantics; pre-terminal wastes those retries but is contract-clean.
 - *Options:* (a) pre-terminal only, permanently; (b) pre-terminal now, facade hook later behind its own sub-flag after telemetry shows poisoned-retry success rate ≈ 0; (c) facade hook immediately. Recommended: (b).
+- **RESOLVED 2026-09-13 (leader ruling): option (b) PRE-TERMINAL placement now; the facade-hook alternative stays deferred — no scaffold for it.** Implemented in `daemon/graph.py::_maybe_pre_terminal_repair` for truncated and empty_post_ladder classes; consumed in `agent_node`'s retry-exhaustion except block. The intercept is gated by the master ladder switch (USER AMENDMENT — no sub-flag).
 
 **OQ2 — Ghost-promise detector conservatism.**
 - *Blocking:* shipped detection is bare `content.endswith(":")` (`graph.py:2596-2601`); legitimate colon-ending content (code blocks, list intros) would be capped/stripped once enrolled. No FP profile exists.
 - *Options:* (a) enroll with bare detector + derived cap (FP bounded by cap-before-surgery ordering); (b) require a minimum-length/heuristic guard (e.g. only short trailing fragments count) before enrollment; (c) phase-3 until FP soak data exists. Recommended: (a) with sub-flag default ON only after a soak window; FP telemetry via `[SYMPTOM] class=ghost phase=detect`.
+- **RESOLVED 2026-09-13 (leader ruling): option (a) — bare `endswith(':')` detector + derived trailing-ghost counter, cap 3, CAP-BEFORE-SURGERY ordering.** Implemented in `daemon/graph.py::_is_ghost_promise_message` + `_count_trailing_ghost_promise_ai_messages` + `GHOST_PROMISE_REINVOKE_CAP=3`. No sub-flag (USER AMENDMENT). The cap-routing branch in `should_continue` is master-gated; below cap the bare `"agent"` re-invoke is preserved byte-identically (OFF-mode). FP telemetry emitted via `[SYMPTOM] class=ghost phase=detect` even when OFF (W1 KEEP).
 
 **OQ3 — Truncated-class partial-content preservation.**
 - *Blocking:* repair drops the truncated AIMessage as degenerate evidence — but a `finish_reason=length` partial may contain real user-facing content; silent loss is a data-loss risk.
 - *Options:* (a) preserve the partial VERBATIM inside the repair doc (excerpt section); (b) drop it (pure cleanup); (c) do not enroll truncated class at all. Recommended: (a).
-
-**OQ4 — Should S5-cap-exceeded route to repair instead of loud END (phase-3 option)?**
-- *Blocking:* S5's loud END at cap is freshly shipped (merge f8ada495, restart-pending) and review-approved; changing its terminal semantics re-opens an approved contract for marginal value (degenerate messages carry nothing to summarize — repair would be a bare drop).
-- *Options:* (a) keep loud END permanently; (b) bare-drop repair at cap behind a default-OFF sub-flag after soak; (c) escalate to repair only for the reasoning-only subclass. Recommended: (a) for now; revisit with soak data.
+- **RESOLVED 2026-09-13 (leader ruling): option (a) — verbatim `excerpt=` preservation in the repair doc.** Implemented in `daemon/services/symptom_repair_engine.py::SymptomRepairEngine._build_repair_doc` (truncated branch); excerpt round-trips through checkpoint serialize/deserialize byte-exact (T-11 / C-7 invariant pinned by `TestTruncatedExcerptRoundTrip`).
 
 **OQ5 — Durable repair-budget reset policy.**
 - *Blocking:* the loop breaker auto-resets its RAM counter after a clean detection turn (`graph.py:1848-1855`) — a deliberate freshness heuristic. A durable per-task budget must decide: never reset (long-lived tasks with many GENUINE repairs lock up), reset on clean-turn (re-admits slow-grinding loops), or reset on new user message (task-turn semantic).
 - *Options:* (a) never reset within a task; (b) reset-on-clean-turn mirrored durably; (c) reset on new real (non-injected) HumanMessage. Recommended: (c) — aligns budget lifetime with user-visible task episodes; needs architect ruling because it defines "task" for budgeting purposes.
+- *Phase-1 ruling:* option (c) was adopted (see phase-1 graph.py:5092-5102). Carried forward unchanged in phase 2.
+
+**E — RAM streak decision (Workstream E).** Per phase-2 plan workstream E:
+- The `[LLM-EMPTY]` / `[SYMPTOM]` / `[LOOP BREAKER]` streaks share the
+  same RAM-vs-instance-row decision (recommendation: RAM, non-gating,
+  telemetry-only — same as the existing `[LLM-EMPTY]` precedent).
+- **RESOLVED 2026-09-13 (phase-2 E-1 ruling): RAM, non-gating,
+  telemetry-only.** All three telemetry surfaces use the same gating
+  helper; consolidation implementation deferred to phase 3 (per OQ7
+  ruling — the dual emit during transition is acceptable). No code
+  change for E in phase 2 — the existing `[LLM-EMPTY]` precedent and
+  the `[SYMPTOM]` dual-emit (F-3) already satisfy the RAM,
+  non-gating decision.
+
+**OQ4 — Should S5-cap-exceeded route to repair instead of loud END (phase-3 option)?**
+- *Blocking:* S5's loud END at cap is freshly shipped (merge f8ada495, restart-pending) and review-approved; changing its terminal semantics re-opens an approved contract for marginal value (degenerate messages carry nothing to summarize — repair would be a bare drop).
+- *Options:* (a) keep loud END permanently; (b) bare-drop repair at cap behind a default-OFF sub-flag after soak; (c) escalate to repair only for the reasoning-only subclass. Recommended: (a) for now; revisit with soak data.
+- *Unresolved — phase-3 backlog.*
 
 **OQ6 — Bulk delegation to `compact_state` (hybrid escape hatch) — needed at all?**
 - *Blocking:* if a degenerate evidence window can span most of a huge history, targeted-surgery retention may exceed practical sentinel size; delegation to `compact_state` force=True would handle bulk but re-imports the engine gates (dedup `:2098`, min-messages `:2198-2208`) and cost envelope.
 - *Options:* (a) phase-3 behind telemetry (only if `[SYMPTOM] repair` events show large-window cases); (b) never (rely on L2/L3 compaction to have bounded history sizes before repair fires); (c) hard size cap on repair window — abort repair if exceeded (fall through to backstops). Recommended: (c) as an invariant, making (a) moot in most cases.
+- *Unresolved — phase-3 backlog.*
 
 **OQ7 — Telemetry consolidation + the FE SSE renderer gap.**
 - *Blocking:* `[SYMPTOM]` is proposed alongside `[LOOP BREAKER]`/`[LLM-EMPTY]` during transition — when to consolidate is an operator-tooling call. Separately, the FE has NO SSE error-event renderer (pre-existing: all LLM-failure classes render a silent empty transcript — critical-notes flagged): if the ladder's loud terminals surface via SSE, users still see nothing.
 - *Options:* (a) consolidate after one soak cycle; (b) keep dual lines permanently; FE renderer is a separate workstream either way. Recommended: (a) + file the FE renderer as its own fix (out of ladder scope; noted so the ladder's loudness is not assumed user-visible).
+- *Unresolved — phase-3 backlog for the consolidation. FE renderer is a separate workstream entirely.*
 
 ---
 

@@ -109,6 +109,7 @@ from .llm_error_classifier import (
 )
 from .response_validation import (
     LLMResponseValidationError,
+    EmptyLLMResponseError,
     # Empty-response-guard Phase 1: shared emptiness predicate (S1 gate +
     # router row-5 nudge gate) + the nudge text (single-sourced in
     # response_validation so the validator can recognize nudge
@@ -976,6 +977,108 @@ class LoopDetectionResult:
     repetition_count: int
     loop_messages: list[BaseMessage] = field(default_factory=list)
     evidence_message_ids: list[str] = field(default_factory=list)
+
+
+# ============================================================================
+# Hallucination-recovery ladder PHASE 2 — detection dataclasses
+# (B-1 ghost / C-1 truncated / D-1 empty_post_ladder)
+#
+# Three new symptom classes enroll on the phase-1 ``SymptomRepairEngine``
+# carrier via per-class preset rows. Each class has its own minimal
+# detection dataclass carried on ``SymptomRepairContext.detection`` (the
+# engine is detector-agnostic — duck-typed access via ``getattr``).
+#
+# Per-class placement (ADR-0003, OQ1/OQ2/OQ3):
+#   * ghost       — router-detected (cap-before-surgery at
+#                   GHOST_PROMISE_REINVOKE_CAP=3); surgery happens in
+#                   ``agent_node`` via a repair-flagged re-entry.
+#   * truncated   — PRE-TERMINAL placement (OQ1=pre-terminal-now);
+#                   intercept AFTER shipped retry ladder exhausts and
+#                   BEFORE loud ERROR; ``excerpt=<verbatim partial>``
+#                   on the repair doc (OQ3).
+#   * empty_post_ladder — PRE-TERMINAL placement (OQ1=pre-terminal-now);
+#                   intercept ONCE after shipped retry ladder exhausts
+#                   and BEFORE loud ERROR; tool results retained; L1-L13
+#                   preserved (L6 nudge HumanMessages re-emitted).
+#
+# Master OFF = byte-identical for ALL FOUR classes (USER AMENDMENT
+# 2026-09-13: no per-class sub-flags; the master
+# ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` governs every new enrollment).
+# ============================================================================
+
+
+@dataclass
+class GhostDetectionResult:
+    """Ghost-promise symptom detection (B-1).
+
+    Captured by ``_count_trailing_ghost_promise_ai_messages`` /
+    ``_detect_ghost_promise_window`` on the router side. The detection
+    result feeds ``SymptomRepairEngine.repair(context, symptom_class=
+    "ghost")`` directly — the engine's ghost preset selector
+    (``_select_ghost_evidence_window``) consumes this shape.
+
+    Attributes:
+        ghost_messages: Trailing ghost-promise AIMessages in removal
+            order (newest first; mirrors the loop class's
+            ``loop_messages`` convention).
+        trailing_count: Number of trailing ghost-promise AIMessages
+            (mirrors the S5 trailing-degenerate counter shape).
+    """
+
+    ghost_messages: list[BaseMessage] = field(default_factory=list)
+    trailing_count: int = 0
+
+
+@dataclass
+class TruncatedDetectionResult:
+    """Truncated (finish_reason=length) symptom detection (C-1).
+
+    Captured at the pre-terminal seam by extracting the truncated
+    ``AIMessage`` from the raising ``LLMResponseValidationError``
+    exception (raised inside ``validate_llm_response`` at
+    ``daemon/response_validation.py:452-457``, propagated through
+    ``_run_with_classification`` at ``daemon/llm_error_classifier.py:916``,
+    exhausted by the shipped retry ladder, surfaced here PRE-TERMINAL
+    per OQ1 ruling).
+
+    The truncated AIMessage is preserved on the dataclass so the
+    repair doc can carry the verbatim partial content as
+    ``excerpt=<text>`` (OQ3 ruling) without losing user-facing output.
+
+    Attributes:
+        truncated_message: The original ``AIMessage`` whose
+            ``response_metadata.finish_reason == "length"``. The
+            ``.content`` attribute is the verbatim partial text the
+            engine renders as ``excerpt=`` on the repair doc.
+    """
+
+    truncated_message: AIMessage | None = None
+
+
+@dataclass
+class EmptyPostLadderDetectionResult:
+    """Empty (S1) post-ladder symptom detection (D-1).
+
+    Captured at the pre-terminal seam by extracting the empty
+    ``AIMessage`` from the raising ``EmptyLLMResponseError`` (a
+    ``LLMResponseValidationError`` subclass raised inside
+    ``validate_llm_response`` at
+    ``daemon/response_validation.py:467-475``, propagated through
+    ``_run_with_classification`` at ``daemon/llm_error_classifier.py:916``,
+    exhausted by the shipped retry ladder, surfaced here PRE-TERMINAL
+    per OQ1 ruling).
+
+    The detected empty AIMessages are removed; tool results and the
+    L6 nudge HumanMessage (P-5 sentinel re-emit) are RETAINED in the
+    surgery's tail.
+
+    Attributes:
+        empty_messages: Empty AIMessages removed by the surgery.
+            Tool messages and the L6 nudge HumanMessage are NOT in
+            this list (they survive in the retained tail).
+    """
+
+    empty_messages: list[BaseMessage] = field(default_factory=list)
 
 
 class LoopDetector:
@@ -2161,6 +2264,531 @@ async def _maybe_durable_loop_repair(
     )
 
 
+async def _maybe_ghost_repair(
+    *,
+    messages: list[BaseMessage],
+    full_messages: list[BaseMessage],
+    instance_id: str,
+    instance_short: str,
+    config: dict | None,
+    injected_msg: list[BaseMessage] | None,
+    system_prompt: str,
+    llm_config: dict | None,
+    durable_budget_used: int,
+    turn_id: str,
+) -> _DurableLoopOutcome | None:
+    """Ghost-promise repair rung (phase-2 ladder, ADR-0001/B-1).
+
+    Fires from the ``agent_repair_ghost`` node (router-detected at
+    ``should_continue`` once the trailing-ghost counter hits
+    ``GHOST_PROMISE_REINVOKE_CAP=3`` AND the master ladder switch is
+    ON — ADR-0009 / USER AMENDMENT byte-identity contract). Routes the
+    repair through :class:`SymptomRepairEngine` exactly like the loop
+    rung: return-carried sentinel surgery, durable budget, facade
+    summarizer, loud-terminal exhaustion.
+
+    Reuses :class:`_DurableLoopOutcome` as the carrier — the fields
+    are generic (surgery prefix + budget increment + terminal
+    AIMessage) and the caller (the ``agent_repair_ghost`` node)
+    applies the same outgoing-channel assembly pattern as the loop
+    rung.
+
+    Gate contract (P-11): returns ``None`` — caller falls through to
+    the bare ``"agent"`` re-invoke byte-identically — when EITHER the
+    master kill-switch is OFF (``ENSEMBLE_SYMPTOM_REPAIR_LADDER``) OR
+    the trailing-ghost counter is below cap (B-3 cap-before-surgery).
+
+    Budget expressions (B-2/B-4): shared durable per-task budget
+    (``repair_budget_used`` GraphState value) — consumed across ALL
+    enrolled classes on the same counter (P-9 / F-4 cross-class
+    isolation tests pin each class to its own consumption).
+
+    Durability note: this function NEVER touches the graph/checkpoint
+    — the surgery is carried on the caller's NODE RETURN (P-10 /
+    A-3 / A-5). The shipped ``graph_ref``-binding guard does not
+    apply here (the engine is checkpoint-agnostic).
+    """
+    # ── gate (kill-switches first — every new branch gated BEFORE behavior)
+    if not get_symptom_repair_ladder_enabled():
+        return None
+    # Pre-condition: this rung is ONLY called by the
+    # ``agent_repair_ghost`` node, which the router routes to ONLY when
+    # ``_count_trailing_ghost_promise_ai_messages(messages) >=
+    # GHOST_PROMISE_REINVOKE_CAP`` AND the master is ON. The
+    # conditional edge wires the master OFF / below-cap fall-through
+    # to ``"agent"`` (byte-identical) BEFORE this rung fires. Defensive
+    # re-check here is correctness-pinned in case future graph
+    # wiring changes route this rung from a different surface.
+    trailing_ghost = _count_trailing_ghost_promise_ai_messages(messages)
+    if trailing_ghost < GHOST_PROMISE_REINVOKE_CAP:
+        return None
+
+    from .services.symptom_repair_engine import (  # lazy: cycle guard
+        SYMPTOM_REPAIR_BUDGET,
+        SymptomRepairContext,
+        SymptomRepairEngine,
+    )
+
+    ghost_msgs = _collect_trailing_ghost_promise_ai_messages(messages)
+    detection = GhostDetectionResult(
+        ghost_messages=ghost_msgs,
+        trailing_count=trailing_ghost,
+    )
+
+    _emit_symptom_telemetry(
+        phase="detect",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        axis="durable-task",
+        detail=(
+            f"{trailing_ghost}x trailing ghost-promise AIMessages "
+            f"(cap={GHOST_PROMISE_REINVOKE_CAP}) — durable ghost rung"
+        ),
+    )
+
+    budget_used = int(durable_budget_used or 0)
+
+    # ── exhaustion (B-4): durable per-task cap.
+    if budget_used >= SYMPTOM_REPAIR_BUDGET:
+        logger.warning(
+            f"[GHOST REPAIR] Instance {instance_short}: durable repair "
+            f"budget exhausted ({budget_used}/{SYMPTOM_REPAIR_BUDGET}) — "
+            f"escalating to loud terminal (repair-budget-exhausted)"
+        )
+        _emit_symptom_telemetry(
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-budget-exhausted: durable-task-cap "
+                f"({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages),
+            full_messages=list(full_messages),
+            terminal_message=AIMessage(
+                content=(
+                    f"[GHOST TERMINATION] This task is stopping because "
+                    f"the agent repeated the ghost-promise pattern "
+                    f"({trailing_ghost}x trailing colon-only re-invokes) "
+                    f"and the durable repair budget "
+                    f"({SYMPTOM_REPAIR_BUDGET}) is exhausted. The next "
+                    f"instance should produce a tool_call or a complete "
+                    f"final response on the first try."
+                ),
+                id=f"repair-terminal-ghost-{uuid.uuid4()}",
+            ),
+        )
+
+    logger.warning(
+        f"[GHOST REPAIR] Instance {instance_short}: detected "
+        f"{trailing_ghost}x trailing ghost-promise AIMessages. "
+        f"Triggering DURABLE repair "
+        f"(durable budget {budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+    )
+
+    engine = SymptomRepairEngine()
+    engine_context = SymptomRepairContext(
+        detection=detection,
+        messages=list(messages),
+        llm_config=dict(llm_config or {}),
+        system_prompt=system_prompt,
+        injected_msg=list(injected_msg) if injected_msg else None,
+        instance_id=instance_id,
+        budget_used=budget_used,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+    )
+    try:
+        outcome = await engine.repair(engine_context, symptom_class="ghost")
+    except Exception as rep_err:  # noqa: BLE001
+        logger.error(
+            f"[GHOST REPAIR] durable repair raised unexpectedly for "
+            f"{instance_short}: {type(rep_err).__name__}: {rep_err}"
+        )
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=f"engine-raise: {type(rep_err).__name__}",
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
+    if outcome.aborted or not outcome.success:
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"reason={outcome.abort_reason or 'unknown'} "
+                f"error={outcome.error or ''}"[:200]
+            ),
+        )
+        logger.error(
+            f"[GHOST REPAIR] durable repair aborted fail-open "
+            f"({outcome.abort_reason}): {outcome.error} — continuing "
+            f"with original messages"
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
+    # ── success: record the durable increment + carry the surgery prefix.
+    new_budget = budget_used + 1
+    _emit_symptom_telemetry(
+        phase="repair",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        axis="durable-task",
+        budget_used=new_budget,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+        detail=(
+            f"durable surgery: removing {len(ghost_msgs)} ghost-promise "
+            f"AIMessage(s) (cap={trailing_ghost}/"
+            f"{GHOST_PROMISE_REINVOKE_CAP})"
+        ),
+    )
+
+    new_messages = list(outcome.repaired_messages)
+    if injected_msg:
+        existing_ids = {
+            m.id for m in new_messages if getattr(m, "id", None) is not None
+        }
+        for msg in injected_msg:
+            if msg.id is None or msg.id not in existing_ids:
+                new_messages = list(new_messages) + [msg]
+                existing_ids.add(msg.id)
+    new_full_messages = [SystemMessage(content=system_prompt)] + list(
+        new_messages
+    )
+    return _DurableLoopOutcome(
+        messages=new_messages,
+        full_messages=new_full_messages,
+        surgery_prefix=outcome.surgery_prefix,
+        budget_used_new=new_budget,
+    )
+
+
+# ============================================================================
+# Hallucination-recovery ladder PHASE 2 — pre-terminal repair (C-2 / D-2)
+# ============================================================================
+
+
+@dataclass
+class _PreTerminalRepairOutcome:
+    """Result of :func:`_maybe_pre_terminal_repair`.
+
+    Carries the recovered response (re-invoked LLM with surgery-prefixed
+    history) OR the abort reason. The agent_node's except block uses
+    this to decide whether to skip the loud-ERROR re-raise.
+
+    Attributes:
+        recovered: True iff the pre-terminal repair succeeded and the
+            LLM re-invocation produced a fresh response.
+        response: The fresh ``AIMessage`` from the re-invocation
+            (``None`` when ``recovered`` is False).
+        messages: Post-surgery conversation list (replaces the agent_node
+            ``messages`` closure-local).
+        full_messages: Post-surgery LLM-bound list (replaces the
+            agent_node ``full_messages`` closure-local).
+        surgery_prefix: Return-carried SENTINEL-FIRST surgery prefix
+            (``[RemoveMessage(REMOVE_ALL_MESSAGES), *hoisted, *doc,
+            *tail]`` — same carrier shape as the loop/ghost rungs).
+            The agent_node return assembly heads ``outgoing`` with it
+            so the repair LANDS in the checkpoint via the node's own
+            commit (mirror of the ``_durable_loop`` branch).
+            ``None`` on any non-success outcome.
+        budget_used: The new durable budget value (carried on the
+            node return; ``old`` when no repair landed).
+        abort_reason: Machine-readable abort reason
+            (``"budget-exhausted"`` / ``"summarizer-failed"`` /
+            ``"engine-raise"`` / ``"second-exception"``); ``None`` when
+            ``recovered`` is True.
+    """
+
+    recovered: bool
+    response: AIMessage | None = None
+    messages: list[BaseMessage] | None = None
+    full_messages: list[BaseMessage] | None = None
+    surgery_prefix: list[BaseMessage] | None = None
+    budget_used: int = 0
+    abort_reason: str | None = None
+
+
+async def _maybe_pre_terminal_repair(
+    *,
+    messages: list[BaseMessage],
+    full_messages: list[BaseMessage],
+    instance_id: str,
+    instance_short: str,
+    config: dict | None,
+    injected_msg: list[BaseMessage] | None,
+    system_prompt: str,
+    llm_config: dict | None,
+    durable_budget_used: int,
+    turn_id: str,
+    exc: BaseException,
+    current_llm: Any,
+) -> _PreTerminalRepairOutcome | None:
+    """Pre-terminal repair intercept (C-2 / D-2; ADR-0003 / OQ1 ruling).
+
+    Fires ONCE after the shipped retry ladder exhausts and BEFORE the
+    loud ERROR. Detects truncated (``finish_reason=length``) and
+    empty_post_ladder (``EmptyLLMResponseError``) raises, runs the
+    matching preset through :class:`SymptomRepairEngine`, and
+    re-invokes the LLM ONCE with the surgery-prefixed history.
+
+    Returns:
+        ``_PreTerminalRepairOutcome`` when the intercept FIRES
+        (master ON + one of the two recognized exception classes).
+        ``None`` when the gate is off or the exception is not one of
+        the two pre-terminal classes (the caller falls through to
+        the shipped loud-ERROR path unchanged).
+
+    Master-OFF byte-identical (USER AMENDMENT 2026-09-13 / ADR-0009):
+    the caller-side gate at the except block makes this path
+    unreachable when the master is OFF, AND the P-11 self-gate above
+    returns ``None`` on any direct invocation — the shipped loud-ERROR
+    is preserved exactly on BOTH surfaces.
+
+    Source-level pin (T-10): this function NEVER raises from inside
+    the shipped retry try-block. The raise-in-retry-scope contract
+    at ``llm_error_classifier.py:907/:916`` is untouched.
+    """
+    from .services.symptom_repair_engine import (  # lazy: cycle guard
+        SYMPTOM_REPAIR_BUDGET,
+        SymptomRepairContext,
+        SymptomRepairEngine,
+    )
+
+    # ── gate (P-11 discipline — kill-switches first, every rung
+    # gated BEFORE behavior; mirrors ``_maybe_durable_loop_repair`` /
+    # ``_maybe_ghost_repair``). Master OFF → ``None``: the caller
+    # falls through to the shipped loud ERROR byte-identically. The
+    # caller-side gate at the except block already makes this path
+    # unreachable when OFF — this self-gate is defense-in-depth so a
+    # direct invocation can never bypass the OFF byte-identity
+    # contract (pinned by TestMasterKillSwitchByteIdentical for BOTH
+    # pre-terminal classes).
+    if not get_symptom_repair_ladder_enabled():
+        return None
+
+    # ── Detect the pre-terminal incident
+    if _is_truncated_response_error(exc):
+        symptom_class = "truncated"
+        detection = _build_truncated_detection_from_exception(exc)
+        if detection is None:
+            return None
+        phase_label = "truncated"
+    elif _is_empty_response_error(exc):
+        symptom_class = "empty_post_ladder"
+        detection = _build_empty_post_ladder_detection_from_messages(
+            messages
+        )
+        phase_label = "empty_post_ladder"
+    else:
+        # Not a pre-terminal class — caller falls through to loud ERROR.
+        return None
+
+    budget_used = int(durable_budget_used or 0)
+
+    _emit_symptom_telemetry(
+        phase="detect",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        axis="durable-task",
+        detail=(
+            f"{phase_label} pre-terminal: retry ladder exhausted, "
+            f"intercepting before loud ERROR "
+            f"(durable budget {budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+        ),
+    )
+
+    # ── Budget gate (B-4): at cap, no surgery, fall through to loud ERROR
+    if budget_used >= SYMPTOM_REPAIR_BUDGET:
+        logger.warning(
+            f"[{phase_label.upper()} REPAIR] Instance {instance_short}: "
+            f"durable repair budget exhausted "
+            f"({budget_used}/{SYMPTOM_REPAIR_BUDGET}) — refusing "
+            f"pre-terminal repair (fall through to loud ERROR)"
+        )
+        _emit_symptom_telemetry(
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-budget-exhausted: pre-terminal {phase_label} "
+                f"({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _PreTerminalRepairOutcome(
+            recovered=False,
+            abort_reason="budget-exhausted",
+            budget_used=budget_used,
+        )
+
+    logger.warning(
+        f"[{phase_label.upper()} REPAIR] Instance {instance_short}: "
+        f"pre-terminal intercept (durable budget "
+        f"{budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+    )
+
+    engine = SymptomRepairEngine()
+    engine_context = SymptomRepairContext(
+        detection=detection,
+        messages=list(messages),
+        llm_config=dict(llm_config or {}),
+        system_prompt=system_prompt,
+        injected_msg=list(injected_msg) if injected_msg else None,
+        instance_id=instance_id,
+        budget_used=budget_used,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+    )
+    try:
+        outcome = await engine.repair(
+            engine_context, symptom_class=symptom_class
+        )
+    except Exception as rep_err:  # noqa: BLE001
+        logger.error(
+            f"[{phase_label.upper()} REPAIR] engine raised "
+            f"unexpectedly for {instance_short}: "
+            f"{type(rep_err).__name__}: {rep_err}"
+        )
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=f"engine-raise: {type(rep_err).__name__}",
+        )
+        return _PreTerminalRepairOutcome(
+            recovered=False,
+            abort_reason="engine-raise",
+            budget_used=budget_used,
+        )
+
+    if outcome.aborted or not outcome.success:
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"reason={outcome.abort_reason or 'unknown'} "
+                f"error={outcome.error or ''}"[:200]
+            ),
+        )
+        logger.error(
+            f"[{phase_label.upper()} REPAIR] repair aborted fail-open "
+            f"({outcome.abort_reason}): {outcome.error} — falling "
+            f"through to loud ERROR"
+        )
+        return _PreTerminalRepairOutcome(
+            recovered=False,
+            abort_reason=outcome.abort_reason or "summarizer-failed",
+            budget_used=budget_used,
+        )
+
+    # ── Success: surgery-prefixed history ready. Re-invoke the LLM ONCE
+    new_budget = budget_used + 1
+    new_messages = list(outcome.repaired_messages)
+    if injected_msg:
+        existing_ids = {
+            m.id for m in new_messages if getattr(m, "id", None) is not None
+        }
+        for msg in injected_msg:
+            if msg.id is None or msg.id not in existing_ids:
+                new_messages = list(new_messages) + [msg]
+                existing_ids.add(msg.id)
+    new_full_messages = [
+        SystemMessage(content=system_prompt)
+    ] + list(new_messages)
+
+    _emit_symptom_telemetry(
+        phase="repair",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        axis="durable-task",
+        budget_used=new_budget,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+        detail=(
+            f"{phase_label} pre-terminal repair: "
+            f"re-invoking LLM once with surgery-prefixed history "
+            f"(durable budget {new_budget}/{SYMPTOM_REPAIR_BUDGET})"
+        ),
+    )
+
+    loop = asyncio.get_running_loop()
+    try:
+        new_response = await loop.run_in_executor(
+            None, lambda: current_llm.invoke(new_full_messages)
+        )
+    except Exception as re_inv_exc:  # noqa: BLE001
+        # Symptom-persists-after-repair path (C-2 / D-2): the LLM
+        # re-invocation failed AGAIN with the SAME/SIMILAR exception.
+        # The shipped loud-ERROR contract is preserved exactly —
+        # agent_node re-raises.
+        logger.error(
+            f"[{phase_label.upper()} REPAIR] pre-terminal "
+            f"re-invocation raised: {type(re_inv_exc).__name__}: "
+            f"{_truncate_error(re_inv_exc)} — symptom persists after "
+            f"repair, falling through to loud ERROR"
+        )
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=new_budget,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"second-exception: {type(re_inv_exc).__name__} "
+                f"(symptom persists after repair)"
+            ),
+        )
+        return _PreTerminalRepairOutcome(
+            recovered=False,
+            abort_reason="second-exception",
+            budget_used=new_budget,
+        )
+
+    return _PreTerminalRepairOutcome(
+        recovered=True,
+        response=new_response,
+        messages=new_messages,
+        full_messages=new_full_messages,
+        surgery_prefix=outcome.surgery_prefix,
+        budget_used=new_budget,
+    )
+
+
 async def _maybe_repair_loop(
     messages: list[BaseMessage],
     full_messages: list[BaseMessage],
@@ -3055,8 +3683,44 @@ def should_continue(state: MessagesState) -> str:
 
     # Ghost promise detection: LLM promised action but didn't emit tool_call
     # Common pattern: "Now let me write the document:" (ends with ':')
+    #
+    # PHASE 2 (B-3): at the derived cap (GHOST_PROMISE_REINVOKE_CAP=3),
+    # the router routes to a REPAIR-FLAGGED re-entry
+    # (``"agent_repair_ghost"``) instead of the bare ``"agent"`` re-invoke.
+    # ``cap-before-surgery ordering`` (B-3) mitigates R6 FP on legitimate
+    # colon-ending content — below the cap the bare re-invoke is the
+    # shipped behavior (OFF byte-identical for the bare row); only at
+    # >=cap does the repair-flagged re-entry fire.
+    #
+    # MASTER-OFF BYTE-IDENTICAL (USER AMENDMENT 2026-09-13, ADR-0009):
+    # when ``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` is OFF, the cap-routing
+    # branch is INERT — the row ALWAYS emits ``"agent"`` regardless of
+    # ghost count, matching the shipped pre-phase-2 behavior exactly.
+    #
+    # Telemetry for ghost (B-6) is emitted from the
+    # ``agent_repair_ghost`` node itself (which has access to the
+    # closure-local ``instance_short``/``turn_id``); the router is a
+    # free function without those handles and keeps the bare-row
+    # byte-identical output regardless of telemetry state.
     content = getattr(last_message, 'content', '') or ''
     if isinstance(content, str) and content.rstrip().endswith(':'):
+        # Master-gated cap routing (B-3): at the cap with the master
+        # switch ON, route to the repair-flagged re-entry. Master OFF
+        # preserves the bare ``"agent"`` re-invoke byte-identically.
+        if get_symptom_repair_ladder_enabled():
+            trailing_ghost = _count_trailing_ghost_promise_ai_messages(
+                messages
+            )
+            if trailing_ghost >= GHOST_PROMISE_REINVOKE_CAP:
+                logger.warning(
+                    f"[Graph] Ghost promise at cap detected, "
+                    f"trailing={trailing_ghost} "
+                    f"cap={GHOST_PROMISE_REINVOKE_CAP} — routing to "
+                    f"agent_repair_ghost (repair-flagged re-entry)"
+                )
+                return "agent_repair_ghost"
+        # Below cap (or master OFF): bare ``"agent"`` re-invoke —
+        # shipped behavior, OFF byte-identical.
         logger.warning(f"[Graph] Ghost promise detected, LLM text ends with ':': {content[:100]}...")
         return "agent"  # Re-invoke agent to produce actual tool_call
 
@@ -3124,6 +3788,183 @@ def _count_trailing_degenerate_ai_messages(messages: list) -> int:
             continue
         break
     return count
+
+
+# ============================================================================
+# Hallucination-recovery ladder PHASE 2 — ghost-promise helper (B-2)
+# ============================================================================
+
+# Ghost-promise re-invoke cap (B-2 / B-3). Threshold 3 matches the S5
+# degenerate cap and the LoopDetector repetition threshold — the cap is
+# the SHARED operator-tunable value across all hallucination rungs.
+# Mirrors ``EMPTY_DEGENERATE_REINVOKE_CAP`` (above) and the loop
+# breaker's repetition threshold. ``cap-before-surgery ordering`` (B-3)
+# is the FP-mitigation: at <cap the router runs the bare ``"agent"``
+# re-invoke (shipped behavior, OFF-mode byte-identical); only at >=cap
+# does the repair-flagged re-entry fire.
+GHOST_PROMISE_REINVOKE_CAP: int = 3
+
+
+def _is_ghost_promise_message(message: Any) -> bool:
+    """True for a ghost-promise AIMessage (B-2 detector primitive).
+
+    Ghost-promise signature: AIMessage with NO tool_calls whose visible
+    text (after stripping trailing whitespace) ends with a single colon
+    ``":"``. Bare ``endswith(':')`` is the shipped detector (router
+    ``graph.py:3059`` row 4) — OQ2 ruled (a): keep the bare detector,
+    rely on cap-before-surgery ordering for FP mitigation. Tool-call
+    AIMessages are NEVER ghost-promise (P-1 — non-tool detectors must
+    never count tool-call messages).
+    """
+    if getattr(message, "type", None) != "ai":
+        return False
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", None)
+    if not isinstance(content, str):
+        return False
+    if not content.strip():
+        return False
+    return content.rstrip().endswith(":")
+
+
+def _count_trailing_ghost_promise_ai_messages(messages: list) -> int:
+    """Count consecutive ghost-promise AIMessages at the tail of ``messages``.
+
+    Derived B-2 counter — zero new state, mirroring
+    :func:`_count_trailing_degenerate_ai_messages`. Walk stops at the
+    first non-ghost AI message, any tool_call-bearing message, any
+    non-AI message, or any message with empty/non-string content
+    (defensive — the shared predicate fails open on non-str shapes).
+
+    Returns the trailing ghost count ``>= 0``. ``0`` means "no ghost
+    tail" (no router action).
+    """
+    count = 0
+    for message in reversed(messages):
+        if _is_ghost_promise_message(message):
+            count += 1
+            continue
+        break
+    return count
+
+
+def _collect_trailing_ghost_promise_ai_messages(messages: list) -> list[BaseMessage]:
+    """Return the trailing ghost-promise AIMessages in newest-first order.
+
+    Mirrors the count helper but yields the message objects themselves
+    (for ``GhostDetectionResult.ghost_messages``). Used by the ghost
+    preset's repair-doc builder to surface verbatim excerpts.
+    """
+    out: list[BaseMessage] = []
+    for message in reversed(messages):
+        if _is_ghost_promise_message(message):
+            out.append(message)
+            continue
+        break
+    return out
+
+
+# ============================================================================
+# Hallucination-recovery ladder PHASE 2 — pre-terminal detection helpers
+# (C-1 truncated / D-1 empty_post_ladder).
+#
+# Pre-terminal placement (ADR-0003, OQ1 ruling): repair is intercepted
+# AFTER the shipped retry ladder exhausts (raise → retries → failover)
+# and BEFORE the loud ERROR. The two raise-lane classes — truncated
+# (``finish_reason=length``, raised by Check 1 in
+# ``daemon/response_validation.py:452-457``) and empty_post_ladder
+# (raised by Check 3 / S1 in ``daemon/response_validation.py:467-475``,
+# a ``LLMResponseValidationError`` subclass) — are detected from the
+# raising exception's ``.response`` attribute (the original AIMessage
+# the LLM produced before raising).
+# ============================================================================
+
+
+def _is_truncated_response_error(exc: BaseException) -> bool:
+    """True if ``exc`` is a ``LLMResponseValidationError`` raised by the
+    truncated-response Check 1 (``daemon/response_validation.py:452-457``).
+
+    Detection rule: ``exc.response.response_metadata.get("finish_reason") == "length"``.
+    Empty-or-malformed metadata fails open as non-truncated (the
+    shipped validator's own fail-open contract at
+    ``daemon/response_validation.py:478-510``).
+    """
+    if not isinstance(exc, LLMResponseValidationError):
+        return False
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    metadata = getattr(response, "response_metadata", None) or {}
+    finish_reason = metadata.get("finish_reason")
+    return finish_reason == "length"
+
+
+def _is_empty_response_error(exc: BaseException) -> bool:
+    """True if ``exc`` is an ``EmptyLLMResponseError`` (S1 raise).
+
+    Detection rule: ``isinstance(exc, EmptyLLMResponseError)`` — the
+    S1 raise class (a ``LLMResponseValidationError`` subclass). The
+    S1 truth-table predicates (``input_messages`` turn-aware context,
+    L1-L13 exemptions) are owned by
+    ``daemon/response_validation._empty_response_guard_should_raise``
+    and are NOT consulted here — the detector only confirms the
+    raise class so the pre-terminal intercept fires on the right
+    incident class.
+    """
+    return isinstance(exc, EmptyLLMResponseError)
+
+
+def _build_truncated_detection_from_exception(
+    exc: BaseException,
+) -> "TruncatedDetectionResult | None":
+    """Build a :class:`TruncatedDetectionResult` from a raising exception.
+
+    Returns ``None`` if the exception does not carry a usable
+    ``.response`` (defensive — the validator at
+    ``daemon/response_validation.py:452-457`` always attaches one,
+    but the detection surface is defensive against future refactors).
+    """
+    if not _is_truncated_response_error(exc):
+        return None
+    truncated_message = getattr(exc, "response", None)
+    if truncated_message is None:
+        return None
+    return TruncatedDetectionResult(truncated_message=truncated_message)
+
+
+def _build_empty_post_ladder_detection_from_messages(
+    messages: list,
+) -> "EmptyPostLadderDetectionResult":
+    """Build a :class:`EmptyPostLadderDetectionResult` from the LLM-bound list.
+
+    The S1 raise carries the offending empty AIMessage on
+    ``.response`` (single message). For the surgery we collect the
+    empty AIMessages in the post-nudge turn window — empty AIMessages
+    in state.messages whose preceding human boundary is the L6 nudge
+    (or any non-empty HumanMessage that broke the empty chain). The
+    detector walks forward from the LAST real (non-injected) human
+    boundary; everything that looks like a raise-class empty AIMessage
+    in that window is included.
+    """
+    empty_messages: list[BaseMessage] = []
+    # Walk forward from the LAST real (non-injected) human boundary.
+    # Mirrors the validator's turn-aware context.
+    last_human_idx = -1
+    for idx, msg in enumerate(messages):
+        if getattr(msg, "type", None) == "human":
+            kwargs = getattr(msg, "additional_kwargs", None) or {}
+            if not kwargs.get("injected_message", False):
+                last_human_idx = idx
+    scan_from = last_human_idx if last_human_idx >= 0 else 0
+    for msg in messages[scan_from:]:
+        if not isinstance(msg, AIMessage):
+            continue
+        if getattr(msg, "tool_calls", None):
+            continue
+        if is_empty_llm_content(getattr(msg, "content", None)):
+            empty_messages.append(msg)
+    return EmptyPostLadderDetectionResult(empty_messages=empty_messages)
 
 
 def _is_empty_content(content) -> bool:
@@ -4904,6 +5745,116 @@ async def _maybe_precall_compact_95(
         return _PRECALL_NOOP
 
 
+def create_agent_repair_ghost_node(
+    *,
+    llm_config: dict | None = None,
+    system_prompt: str = "",
+):
+    """Create the ``agent_repair_ghost`` node (phase-2 ladder, B-3).
+
+    Runs the ghost-promise durable repair and applies the surgery as
+    a state update; routes back to ``"agent"`` for the next LLM
+    call. Mirrors the loop-rung's ``_maybe_durable_loop_repair``
+    pattern but lives in its own node (the router emits the
+    ``"agent_repair_ghost"`` label from ``should_continue`` when the
+    trailing-ghost counter hits ``GHOST_PROMISE_REINVOKE_CAP`` AND
+    the master ladder switch is ON).
+
+    Master OFF byte-identical contract (ADR-0009 / USER AMENDMENT
+    2026-09-13): the router NEVER emits ``"agent_repair_ghost"`` when
+    the master is OFF, so this node is unreachable. The bare
+    ``"agent"`` re-invoke at ``should_continue`` keeps the shipped
+    byte-identical routing.
+
+    Args:
+        llm_config: Session LLM config (closure-local; passed to the
+            engine for facade summarizer construction).
+        system_prompt: Session system prompt (carried for payload-
+            rebuild parity; consumed only when repair succeeds).
+
+    Returns:
+        An async callable suitable for ``graph.add_node`` whose
+        return shape follows the loop-rung convention:
+        ``{"messages": [sentinel, *hoisted, *doc, *tail, ...],
+        "repair_budget_used": <new>}`` on success; ``{}`` on
+        abort/fall-through (the bare ``"agent"`` re-invoke fires
+        unchanged); ``{"messages": [terminal_aimessage]}`` on
+        budget exhaustion (routed to END via the router).
+
+    """
+    async def agent_repair_ghost_node(state, config=None) -> dict[str, Any]:
+        messages = list(state.get("messages", []) or [])
+        if not messages:
+            return {}
+
+        instance_id = str(
+            state.get("instance_id", "") or config.get("configurable", {}).get(
+                "thread_id", ""
+            ) if config else ""
+            or state.get("instance_id", "")
+            or ""
+        )
+        instance_short = instance_id[:8] if instance_id else ""
+        turn_id = (
+            (config.get("configurable", {}) or {}).get("turn_id")
+            if config else None
+        ) or state.get("turn_id") or ""
+
+        # OQ5 reset: durable budget cleared on real (non-injected)
+        # HumanMessage at turn boundary — same predicate the loop
+        # rung uses. Mirrors graph.py:5092-5102.
+        durable_budget_used = int(state.get("repair_budget_used", 0) or 0)
+        if messages and _is_real_human_message(messages[-1]) and durable_budget_used != 0:
+            durable_budget_used = 0
+
+        outcome = await _maybe_ghost_repair(
+            messages=messages,
+            full_messages=[SystemMessage(content=system_prompt)] + list(messages),
+            instance_id=instance_id,
+            instance_short=instance_short,
+            config=config,
+            injected_msg=None,
+            system_prompt=system_prompt,
+            llm_config=llm_config,
+            durable_budget_used=durable_budget_used,
+            turn_id=turn_id,
+        )
+
+        # ── fall-through: no repair landed (gate off, below cap,
+        # abort). The bare ``"agent"`` re-invoke at should_continue
+        # handles the byte-identical OFF case — but if the graph
+        # routing changes in future and this node is called with no
+        # outcome, return an empty update so the next superstep
+        # continues from the original messages.
+        if outcome is None or (
+            outcome.terminal_message is None
+            and outcome.surgery_prefix is None
+        ):
+            return {}
+
+        # ── budget exhaustion: loud terminal AIMessage (routed to END
+        # via the router's terminal_message detection — the same
+        # path the loop class uses).
+        if outcome.terminal_message is not None:
+            return {
+                "messages": [outcome.terminal_message],
+                "repair_budget_used": durable_budget_used,
+            }
+
+        # ── success: carry the surgery prefix as the state update.
+        # The reducer upserts the sentinel-first prefix onto the
+        # channel atomically; tool-pairing-synthesized placeholders
+        # are added by the next agent_node run (the placeholders are
+        # closure-local until then).
+        return_value: dict[str, Any] = {
+            "messages": list(outcome.surgery_prefix),
+            "repair_budget_used": outcome.budget_used_new,
+        }
+        return return_value
+
+    return agent_repair_ghost_node
+
+
 def create_agent_node(
     llm_with_tools,
     system_prompt: str,
@@ -5669,6 +6620,11 @@ def create_agent_node(
         # the SHIPPED transient path byte-identically (P-11/T-8). The two
         # paths must never both fire — exactly one owns the rung per
         # invocation.
+        # Phase-2 (D-2): the pre-terminal intercept outcome is
+        # except-block-scoped; pre-initialize to ``None`` so the
+        # return-assembly surgery-prefix selection can reference it on
+        # every path (happy path included).
+        _pre_terminal_outcome = None
         _durable_loop = await _maybe_durable_loop_repair(
             messages=messages,
             full_messages=full_messages,
@@ -5686,6 +6642,19 @@ def create_agent_node(
         if _durable_loop is not None:
             messages = _durable_loop.messages
             full_messages = _durable_loop.full_messages
+            # Phase-2 review fix (D-2b composition): fold the loop
+            # rung's same-invocation increment into the reset-aware
+            # budget BEFORE any later consumer reads it — the
+            # pre-terminal intercept must see the loop's +1 so the
+            # shared per-task counter never under-counts (at-cap
+            # refusal cannot be bypassed by an intercept firing after
+            # a successful loop surgery). The return assembly's
+            # ``_durable_loop.budget_used_new`` override becomes a
+            # same-value overwrite (safe by its own contract).
+            if _durable_loop.budget_used_new is not None:
+                _durable_budget_current = int(
+                    _durable_loop.budget_used_new
+                )
         else:
             # The full detection+repair pipeline lives in
             # ``_maybe_repair_loop`` so the LLM-call site here stays
@@ -6044,11 +7013,148 @@ def create_agent_node(
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError) as e:
-            transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
-            timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
-            category = 'timeout' if isinstance(e, TIMEOUT_EXCEPTIONS) else 'transient' if isinstance(e, TRANSIENT_EXCEPTIONS) else 'non-retryable'
-            logger.error(f"[LLM] All retries exhausted ({category}, transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {_truncate_error(e)}")
-            raise
+            # ── Hallucination-recovery ladder PHASE 2 (C-2 / D-2):
+            # PRE-TERMINAL intercept for truncated and empty_post_ladder
+            # (ADR-0003 / OQ1=pre-terminal-now). When the master ladder
+            # switch is ON AND the raising exception is a
+            # ``LLMResponseValidationError`` whose raising class is
+            # either truncated (finish_reason=length) or empty
+            # (EmptyLLMResponseError), attempt ONCE to repair the
+            # history. On repair success: re-invoke the LLM ONCE with
+            # the surgery-prefixed history. On repair abort OR a second
+            # exception: fall through to the loud ERROR unchanged
+            # (shipped contract intact — symptom-persist-after-repair
+            # → loud ERROR fires).
+            #
+            # Source-level pin (T-10): this intercept lives in
+            # ``agent_node`` (graph.py) and NEVER inside the retry
+            # try-block at ``llm_error_classifier.py:907/:916`` — the
+            # raise-in-retry-scope contract is preserved.
+            #
+            # Master OFF (USER AMENDMENT 2026-09-13 / ADR-0009):
+            # byte-identical routing. The intercept is INERT; the
+            # original ``raise`` fires unchanged.
+            if (
+                get_symptom_repair_ladder_enabled()
+                and isinstance(e, LLMResponseValidationError)
+                and (
+                    _is_truncated_response_error(e)
+                    or _is_empty_response_error(e)
+                )
+            ):
+                _pre_terminal_outcome = await _maybe_pre_terminal_repair(
+                    messages=list(messages),
+                    full_messages=list(full_messages),
+                    instance_id=instance_id,
+                    instance_short=instance_short,
+                    config=config,
+                    injected_msg=injected_msgs,
+                    system_prompt=system_prompt,
+                    llm_config=llm_config,
+                    # Phase-2 review fix (D-2b): read the RESET-AWARE
+                    # budget computed at node entry (real-HumanMessage
+                    # → 0, OQ5), NOT the raw state value — a new task
+                    # episode whose first LLM call truncates must NOT
+                    # inherit the previous episode's exhausted budget
+                    # (fail-closed misfire → loud ERROR). Mirrors the
+                    # ghost node's correct read. NOTE: the loop rung's
+                    # same-invocation increment (if any) is folded into
+                    # ``_durable_budget_current`` at its call site, so
+                    # the shared-counter arithmetic stays exact.
+                    durable_budget_used=int(_durable_budget_current),
+                    turn_id=turn_id,
+                    exc=e,
+                    current_llm=current_llm,
+                )
+                if _pre_terminal_outcome is not None:
+                    if (
+                        _pre_terminal_outcome.recovered
+                        and _pre_terminal_outcome.response is not None
+                    ):
+                        response = _pre_terminal_outcome.response
+                        # Re-thread messages so the rest of the
+                        # agent_node body sees the post-repair history.
+                        messages = _pre_terminal_outcome.messages
+                        full_messages = _pre_terminal_outcome.full_messages
+                        # Mark durable budget as updated so the node
+                        # return carries it.
+                        _durable_budget_current = (
+                            _pre_terminal_outcome.budget_used
+                        )
+                        # Skip the rest of the except block (no loud
+                        # ERROR); fall through to the response-shape
+                        # handlers below.
+                    else:
+                        # Repair aborted / budget exhausted / second
+                        # exception — fall through to loud ERROR
+                        # (shipped contract preserved). Telemetry for
+                        # the repair attempt already emitted by the
+                        # helper.
+                        transient = retry_config.get(
+                            'transient_attempts', 'N/A'
+                        ) if retry_config else 'N/A'
+                        timeout = retry_config.get(
+                            'timeout_attempts', 'N/A'
+                        ) if retry_config else 'N/A'
+                        category = (
+                            'timeout'
+                            if isinstance(e, TIMEOUT_EXCEPTIONS)
+                            else 'transient'
+                            if isinstance(e, TRANSIENT_EXCEPTIONS)
+                            else 'non-retryable'
+                        )
+                        logger.error(
+                            f"[LLM] All retries exhausted "
+                            f"({category}, transient_attempts={transient}, "
+                            f"timeout_attempts={timeout}): "
+                            f"{type(e).__name__}: {_truncate_error(e)}"
+                        )
+                        raise
+                else:
+                    # Helper returned None (gate off / not the right
+                    # exception class) — fall through to the shipped
+                    # loud ERROR unchanged.
+                    transient = retry_config.get(
+                        'transient_attempts', 'N/A'
+                    ) if retry_config else 'N/A'
+                    timeout = retry_config.get(
+                        'timeout_attempts', 'N/A'
+                    ) if retry_config else 'N/A'
+                    category = (
+                        'timeout'
+                        if isinstance(e, TIMEOUT_EXCEPTIONS)
+                        else 'transient'
+                        if isinstance(e, TRANSIENT_EXCEPTIONS)
+                        else 'non-retryable'
+                    )
+                    logger.error(
+                        f"[LLM] All retries exhausted "
+                        f"({category}, transient_attempts={transient}, "
+                        f"timeout_attempts={timeout}): "
+                        f"{type(e).__name__}: {_truncate_error(e)}"
+                    )
+                    raise
+            else:
+                transient = retry_config.get(
+                    'transient_attempts', 'N/A'
+                ) if retry_config else 'N/A'
+                timeout = retry_config.get(
+                    'timeout_attempts', 'N/A'
+                ) if retry_config else 'N/A'
+                category = (
+                    'timeout'
+                    if isinstance(e, TIMEOUT_EXCEPTIONS)
+                    else 'transient'
+                    if isinstance(e, TRANSIENT_EXCEPTIONS)
+                    else 'non-retryable'
+                )
+                logger.error(
+                    f"[LLM] All retries exhausted ({category}, "
+                    f"transient_attempts={transient}, "
+                    f"timeout_attempts={timeout}): "
+                    f"{type(e).__name__}: {_truncate_error(e)}"
+                )
+                raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {_truncate_error(e)}")
             raise
@@ -6164,11 +7270,26 @@ def create_agent_node(
         # placeholders whose parent AIMessage the surgery removed are
         # DROPPED (an orphan ToolMessage would be API-invalid); every
         # other rider appends at the sentinel boundary.
+        # Ladder phase 2 (D-2 fix): the pre-terminal repair's surgery is
+        # the LATEST sentinel-first rewrite when both it and the loop
+        # rung landed this invocation — its repaired tail was derived
+        # FROM the post-loop-surgery messages, so its prefix SUBSUMES
+        # the loop's. Precedence: pre-terminal > loop. Either carrier
+        # heads ``outgoing`` with the SAME assembly as the shipped
+        # ``_durable_loop`` branch (pairing placeholders whose parent
+        # AIMessage the surgery removed are DROPPED — an orphan
+        # ToolMessage would be API-invalid).
+        _repair_surgery_prefix: list[BaseMessage] | None = None
         if (
-            _durable_loop is not None
-            and _durable_loop.surgery_prefix is not None
+            _pre_terminal_outcome is not None
+            and _pre_terminal_outcome.recovered
+            and _pre_terminal_outcome.surgery_prefix is not None
         ):
-            _repair_channel = list(_durable_loop.surgery_prefix)
+            _repair_surgery_prefix = _pre_terminal_outcome.surgery_prefix
+        elif _durable_loop is not None:
+            _repair_surgery_prefix = _durable_loop.surgery_prefix
+        if _repair_surgery_prefix is not None:
+            _repair_channel = list(_repair_surgery_prefix)
             if pairing_synthesized_msgs:
                 _channel_ai_tc_ids = {
                     tc.get("id", "")
@@ -6249,6 +7370,16 @@ def create_agent_node(
         # ``watchover_turn_id`` precedent) and keeps the channel fresh.
         _budget_return = int(_durable_budget_current)
         if (
+            _pre_terminal_outcome is not None
+            and _pre_terminal_outcome.recovered
+        ):
+            # Phase-2 (D-2 fix): a RECOVERED pre-terminal repair owns
+            # the newest budget value (loop increment + pre-terminal
+            # increment) — the recovered path already folded it into
+            # ``_durable_budget_current``; the explicit carry keeps the
+            # atomicity obvious.
+            _budget_return = int(_pre_terminal_outcome.budget_used)
+        elif (
             _durable_loop is not None
             and _durable_loop.budget_used_new is not None
         ):
@@ -8473,6 +9604,24 @@ def build_instance_graph(
         # disables the telemetry entirely.
         empty_streak_manager=manager,
     ))
+    # Phase 2 (B-3): ghost-promise repair node. The router emits
+    # ``"agent_repair_ghost"`` from ``should_continue`` when the
+    # trailing-ghost counter is at the cap AND the master ladder
+    # switch is ON. Master OFF / below-cap fall through to bare
+    # ``"agent"`` re-invoke (byte-identical). The node runs the
+    # durable ghost repair and applies the surgery as a state
+    # update; the routing then sends the next superstep back to
+    # ``"agent"`` for the LLM call. ``None`` ``llm_config_with_headers``
+    # falls back to the raw ``llm_config`` for the engine's facade
+    # summarizer construction (test fixtures without headers).
+    graph.add_node(
+        "agent_repair_ghost",
+        create_agent_repair_ghost_node(
+            llm_config=llm_config_with_headers or llm_config,
+            system_prompt=system_prompt,
+        ),
+    )
+    graph.add_edge("agent_repair_ghost", "agent")
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)
     
@@ -8626,6 +9775,7 @@ def build_instance_graph(
         graph.add_conditional_edges("agent", routing_fn, {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: retry agent
+            "agent_repair_ghost": "agent_repair_ghost",  # Phase 2 (B-3): ghost at cap → repair
             "nudge": "nudge",          # Empty after tool: inject prompt
             "end_candidate": "language_check",  # Would-be END: validate language
         })
@@ -8662,6 +9812,7 @@ def build_instance_graph(
         agent_paths = {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
+            "agent_repair_ghost": "agent_repair_ghost",  # Phase 2 (B-3): ghost at cap → repair
             "nudge": "nudge",          # Empty after tool: inject prompt to continue
         }
         if attestation_gate_active:

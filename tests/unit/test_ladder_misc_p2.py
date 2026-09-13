@@ -114,17 +114,49 @@ class TestAxisVocabularySites:
         assert len(ram) + len(durable) == len(sites)
 
     def test_terminal_emit_has_no_axis_kwarg(self):
-        """The terminal emit (built inside ``_emit_loop_terminal``)
+        """The terminal emit (built inside ``_emit_loop_terminal`` and
+        the phase-2 ghost / truncated / empty_post_ladder variants)
         calls ``_emit_symptom_telemetry`` WITHOUT an ``axis=`` kwarg —
-        axis is suppressed by the helper when ``phase == 'terminal'``."""
-        terminal_emit_lines = []
-        for _, _, span in _iter_emit_callsites(self.DAEMON_GRAPH):
-            joined = "\n".join(span)
-            if 'phase="terminal"' in joined:
-                terminal_emit_lines.append(span)
-        assert terminal_emit_lines, "expected at least one phase=terminal emit"
-        for span in terminal_emit_lines:
-            joined = "\n".join(span)
+        axis is suppressed by the helper when ``phase == 'terminal'``.
+
+        Source-level pin: every emit whose OWN first inner line is
+        ``phase="terminal"`` MUST NOT carry ``axis=`` (the helper
+        suppresses axis at runtime when phase=='terminal' — graph.py:1812).
+        We isolate the actual terminal emit by looking for the emit
+        whose own body starts with ``phase="terminal"``, NOT by span
+        membership (which can include sibling non-terminal emits within
+        a 30-line window).
+        """
+        raw = self.DAEMON_GRAPH.read_text().splitlines()
+        terminal_spans = []
+        for n, line in enumerate(raw, start=1):
+            if '_emit_symptom_telemetry(' not in line:
+                continue
+            span_end = min(n + 30, len(raw))
+            span = raw[n - 1 : span_end]
+            # Is THIS emit's body a terminal one? Look at lines 1..10
+            # after the opener (a non-terminal body has phase=detect /
+            # repair / repair_abort / rung1 in that range; a terminal
+            # body has phase="terminal" right at the top).
+            opener_idx = next(
+                (
+                    i
+                    for i, sub in enumerate(span)
+                    if '_emit_symptom_telemetry(' in sub
+                ),
+                None,
+            )
+            if opener_idx is None:
+                continue
+            own_body = "\n".join(span[opener_idx:opener_idx + 10])
+            if 'phase="terminal"' not in own_body:
+                continue
+            # The terminal emit body MUST NOT carry axis= anywhere in
+            # its 30-line forward span (the helper suppresses it).
+            joined = "\n".join(span[opener_idx:])
+            terminal_spans.append(joined)
+        assert terminal_spans, "expected at least one phase=terminal emit"
+        for joined in terminal_spans:
             assert "axis=" not in joined, (
                 f"terminal emit span must NOT carry axis kwarg: "
                 f"{joined[:300]}"
