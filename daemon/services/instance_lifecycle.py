@@ -1087,6 +1087,105 @@ def _apply_post_cache_appends(
     return (system_prompt, user_language)
 
 
+# ─── Spawn Intelligence resolver (Feature #1) ────────────────────────────────
+# Free function (NOT a method) so the tool layer at ``daemon/tools/instance.py``
+# can import it without instantiating ``InstanceLifecycleService``. PURE: no
+# ``self``, no IO, no ``os.environ`` reads — caller passes pre-read values
+# (A6 boot-snapshot design). See ``decisions.md`` D2 for the 4-element return
+# matrix and ``architecture-recommendation.md`` §6.1 for the data-flow diagram.
+from ..config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT  # noqa: E402
+
+
+def _resolve_intelligence_tier(
+    tier: str | None,
+    *,
+    allowed_models: tuple[str, ...] | list[str] | None,
+    configured_model: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a ``model_tier`` literal to a concrete model name + error state.
+
+    Pure resolver (A6: caller passes pre-read values; no ``os.environ``
+    access). Used by ``daemon/tools/instance.py`` ``spawn_instance`` to
+    validate the new ``model_tier`` opt-in BEFORE the legacy
+    ``model=`` kwarg is threaded into ``manager.spawn_instance(...)``.
+
+    Args:
+        tier: The tier literal from ``SpawnInstanceInput.model_tier``
+            (typically ``"high"``; v1 ships only this value). May be
+            ``None`` or empty when the caller did not request a tier.
+        allowed_models: The deployment's ``config.llm.allowed_models``
+            boot snapshot (case preserved; the case-insensitive match
+            is done here). ``None`` and empty tuple/list are both
+            treated as "unrestricted" — pass-through with no WARN
+            (matches the existing ``_resolve_model_override`` empty
+            branch at ``instance_lifecycle.py:1263-1265``).
+        configured_model: The boot-snapshot value of
+            ``manager.config.llm.spawn_intelligence_tier_high_model``
+            (resolved once at boot from
+            ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL`` env). When ``None``
+            (e.g., a defensive direct call from a test), falls back
+            to the documented default ``"agentic"``.
+
+    Returns:
+        ``(resolved_model, error)`` tuple — 4-element matrix (D2):
+
+        | tier              | resolved ∈ allowed | result                          |
+        |-------------------|--------------------|---------------------------------|
+        | ``None`` / empty  | n/a                | ``(None, None)`` — no override  |
+        | ``"high"``        | yes                | ``(canonical, None)`` — OK      |
+        | ``"high"``        | no                 | ``(resolved, "WARN: ..." )``    |
+        | any other string  | n/a                | ``(None, "ERROR: ...")``        |
+
+        ``error`` is a prefix-conventional string
+        (``"WARN: "`` / ``"ERROR: "``) — the tool layer grep-checks
+        the prefix to decide ``raise ValueError`` vs pass-through.
+    """
+    # Empty / ``None`` tier → no override; legacy pool path stays active.
+    if tier is None or (isinstance(tier, str) and not tier.strip()):
+        return (None, None)
+
+    # Anything that isn't ``"high"`` (D11: v1 ships ONE tier literal).
+    # Tier comparison is case-insensitive on the INPUT side (W7 parity
+    # with ``_resolve_model_override``; defensive — Pydantic Literal
+    # gates exact match in production, but the free function is robust
+    # for future internal callers that don't run Pydantic validation).
+    if tier.strip().lower() != "high":
+        return (
+            None,
+            f"ERROR: unknown model_tier literal {tier!r}; "
+            f"v1 supports only 'high'",
+        )
+
+    # ``"high"`` → resolve via the configured (boot-snapshot) model.
+    configured = configured_model or _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
+    # Empty `allowed_models` = unrestricted (no WARN, no ERROR).
+    allowed_seq = tuple(allowed_models) if allowed_models else ()
+    if not allowed_seq:
+        # Empty allowlist: pass-through, no validation message — the
+        # caller is responsible for any downstream validation.
+        return (configured, None)
+
+    # Case-insensitive lookup against the configured allowlist.
+    target = configured.lower()
+    canonical_match = next(
+        (m for m in allowed_seq if m.lower() == target),
+        None,
+    )
+    if canonical_match is not None:
+        # Found an allowed entry — return its canonical spelling (the
+        # configured name may differ in case).
+        return (canonical_match, None)
+
+    # Resolved model is NOT in the allowlist — WARN for the tool layer
+    # to convert into a loud ValueError (D2). Return the resolved model
+    # alongside so the error message can name it (W7 normalization is
+    # NOT in the message per architecture-recommendation.md §2.1).
+    return (
+        configured,
+        f"WARN: {configured!r} is not in allowed_models",
+    )
+
+
 class InstanceLifecycleService:
     """Service for managing instance lifecycle (spawn, terminate, restore).
     
