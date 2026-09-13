@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: WC wake/resilience fix program (branch feature/fix-wc-wake-resilience @ f4091734, base latest @ 8a30f75b, 29 commits)
-Slug: wc-wake-resilience
+Plan: Long Tool Call Detection → Parent Nudge (branch plan/long-tool-call-nudge @ ce17a36a, 6-file planning package)
+Slug: long-tool-call-nudge
 Status: APPROVED
-Iteration: 001 (final)
-Started: 2026-09-11T21:00:50Z
-Last Verdict: APPROVED (iteration 001, 2026-09-11 — 2 workers, 0 blocking findings; see wc-wake-resilience-tracking.md)
-Note: previous active plan (leader-completion-attestation) closed ESCALATED 2026-09-05 — historical, tracking file preserved.
+Iteration: 002 (final — APPROVED 2026-09-13; see long-tool-call-nudge-tracking.md)
+Started: 2026-09-13T07:29:33Z
+Last Verdict: APPROVED (iteration 002, 2026-09-13 — 2 workers, 0 blocking; iter-001 close-gate issue verified resolved fresh via AD-42/AD-9 + U2b regression pin)
+Note: previous active plan (wc-wake-resilience) closed APPROVED 2026-09-11 — tracking file preserved; earlier (leader-completion-attestation) closed ESCALATED 2026-09-05.
