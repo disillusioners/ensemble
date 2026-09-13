@@ -1,4 +1,4 @@
-"""T4 — _wrapped_tools_node tests: delegation, verbatim return, stamp
+"""T4 — wrapped_tools_node tests: delegation, verbatim return, stamp
 lifecycle (entry stamps / finally clears / exception / cancel), the
 ``handle_tool_errors=True`` pass-through, and the AD-9 healthy-gated
 episode close.
@@ -127,7 +127,7 @@ class TestWrappedToolsNodeNoBehaviorChange:
     @pytest.mark.asyncio
     async def test_output_shape_identical_for_mock_tool(self, lt_real):
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         result = await _run_through_real_graph(
             lt_real, node, _state(), _config()
         )
@@ -156,7 +156,7 @@ class TestWrappedToolsNodeNoBehaviorChange:
 
         _patch_langgraph_toolnode(lt_real, monkeypatch, _RecordingToolNode)
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         state, config = _state(), _config()
         result = await _run_through_real_graph(
             lt_real, node, state, config
@@ -177,7 +177,7 @@ class TestWrappedToolsNodeStampsAndClears:
     @pytest.mark.asyncio
     async def test_entry_stamps_and_return_clears_all(self, lt_real):
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         state = _state()
         state["messages"][0].tool_calls.append(
             {
@@ -214,7 +214,7 @@ class TestWrappedToolsNodeStampsAndClears:
             return "probed"
 
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([probe], registry)
+        node = lt_real.wrapped_tools_node([probe], registry)
         state = {
             "messages": [
                 AIMessage(
@@ -259,7 +259,7 @@ class TestWrappedToolsNodeStampsAndClears:
             observed["started_at"]["call-b"] = snap["call-b"].started_at
             return "b"
 
-        node = lt_real._wrapped_tools_node([probe_a, probe_b], registry)
+        node = lt_real.wrapped_tools_node([probe_a, probe_b], registry)
         state = {
             "messages": [
                 AIMessage(
@@ -297,7 +297,7 @@ class TestWrappedToolsNodeExceptionClearsStamps:
 
         _patch_langgraph_toolnode(lt_real, monkeypatch, _RaisingToolNode)
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         with pytest.raises(RuntimeError, match="tool dispatch exploded"):
             await _run_through_real_graph(
                 lt_real, node, _state(), _config()
@@ -318,7 +318,7 @@ class TestWrappedToolsNodeCancelClearsStamps:
 
         _patch_langgraph_toolnode(lt_real, monkeypatch, _CancellingToolNode)
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         with pytest.raises(BaseException):  # CancelledError may wrap in the runtime
             await _run_through_real_graph(
                 lt_real, node, _state(), _config()
@@ -355,7 +355,7 @@ class TestWrappedToolsNodeA5CancelImmuneClear:
 
         _patch_langgraph_toolnode(lt_real, monkeypatch, _CancellingToolNode)
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         # 3 tool_calls in one batch — the wrapper's finally must
         # clear all 3 even when the inner ainvoke cancels.
         state = _state()
@@ -389,7 +389,7 @@ class TestWrappedToolsNodeHandleToolErrorsTrue:
     @pytest.mark.asyncio
     async def test_tool_error_returns_errormessage_no_raise(self, lt_real):
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([boom_tool], registry)
+        node = lt_real.wrapped_tools_node([boom_tool], registry)
         result = await _run_through_real_graph(
             lt_real, node, _state(name="boom_tool", args={"x": "y"}), _config()
         )
@@ -420,7 +420,7 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
         registry.attach_close_handler(close)
         registry.attach_threshold_resolver(lambda iid: 900)
         registry.attach_parent_lookup(lambda iid: "parent-1")
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         # Healthy: the batch completes in << threshold.
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert closes == [("parent-1", "inst-1")]
@@ -436,7 +436,7 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
         registry.attach_close_handler(close)
         registry.attach_threshold_resolver(lambda iid: 900)
         registry.attach_parent_lookup(lambda iid: "parent-1")
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         original_record = registry.record_start
 
         async def aging_record(
@@ -460,7 +460,7 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
         registry.attach_close_handler(close)
         registry.attach_threshold_resolver(lambda iid: 900)
         # No parent lookup attached → parent_id None → no close call.
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert closes == []
 
@@ -468,7 +468,7 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
 class TestWrappedToolsNodeAsyncParentLookupAttach:
     """Council fix-cycle 2 — async parent-lookup attach pin.
 
-    Production attaches ``scanner._read_parent_id`` (an ``async def``)
+    Production attaches ``scanner.read_parent_id`` (an ``async def``)
     at ``daemon/api.py:811-812``. The pre-fix implementation wrapped
     any attached lookup in ``asyncio.to_thread`` and returned the
     coroutine object unawaited (truthy → stamped as
@@ -497,7 +497,7 @@ class TestWrappedToolsNodeAsyncParentLookupAttach:
         registry.attach_close_handler(close)
         registry.attach_threshold_resolver(lambda iid: 900)
         registry.attach_parent_lookup(async_lookup)
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         # Healthy completion: the close handler MUST fire.
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert len(closes) == 1
@@ -534,7 +534,7 @@ class TestWrappedToolsNodeAsyncParentLookupAttach:
         registry.attach_close_handler(close)
         registry.attach_threshold_resolver(lambda iid: 900)
         registry.attach_parent_lookup(async_lookup_none)
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert closes == []  # parent_id None suppresses close
 
@@ -543,7 +543,7 @@ class TestWrappedToolsNodeNoToolCalls:
     @pytest.mark.asyncio
     async def test_empty_tool_calls_delegates_without_stamping(self, lt_real):
         registry = lt_real.LongToolNudgeRegistry()
-        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
         state = {"messages": [AIMessage(content="no tools here")]}
         result = await _run_through_real_graph(lt_real, node, state, _config())
         # Bare ToolNode with no tool_calls returns an empty messages list.

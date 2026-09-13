@@ -28,7 +28,7 @@ from daemon.services.long_tool_nudge import (
     LONG_TOOL_NUDGE_SOURCE,
     LongToolNudgeRegistry,
     LongToolNudgeScanner,
-    _LONG_TOOL_REGISTRY,
+    LONG_TOOL_REGISTRY,
 )
 
 
@@ -449,7 +449,7 @@ class TestU20CompactionWindowInterleave:
             }
             return "cw-probed"
 
-        node = lt_real._wrapped_tools_node([cw_probe], registry)
+        node = lt_real.wrapped_tools_node([cw_probe], registry)
         state = {
             "messages": [
                 AIMessage(

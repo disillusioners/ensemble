@@ -4,11 +4,11 @@ This module is the single canonical home for the long-tool-call-nudge
 feature's detection primitive:
 
 * :class:`LongToolNudgeRegistry` — the RAM stamp registry
-  (module-level singleton :data:`_LONG_TOOL_REGISTRY`). The graph-side
+  (module-level singleton :data:`LONG_TOOL_REGISTRY`). The graph-side
   wrapper writes stamps (``record_start`` / ``clear`` in a ``finally``);
   the scanner reads them via :meth:`LongToolNudgeRegistry.snapshot`.
   There is NO second stamp store (synthesis AD-28).
-* :func:`_wrapped_tools_node` — the ``"tools"`` node wrapper installed
+* :func:`wrapped_tools_node` — the ``"tools"`` node wrapper installed
   at the single ``add_node("tools", ...)`` seam in ``daemon/graph.py``.
   Both graph wiring variants (watched ``agent → watchover_check →
   tools`` and the manager-less ``agent → tools`` fallback) converge on
@@ -42,7 +42,10 @@ Heartbeat-independent detection invariant: detection keys on
 in-flight stamp age ONLY — never on ``TaskHeartbeat`` (which beats
 every 30 s independent of tool execution; a wedged-mid-tool child
 stays "heartbeat-fresh" forever). Regression-pinned by
-``TestLongToolNudgeScannerHeartbeatFreshStillFires``.
+``tests/unit/services/test_long_tool_nudge_detector.py::
+test_heartbeat_fresh_child_still_fires`` (M8 — was cited under the
+outdated ``TestLongToolNudgeScannerHeartbeatFreshStillFires`` cast
+name; that class never shipped).
 
 Episode keying (AD-2 / AD-31, two levels, coexisting by design):
 
@@ -123,6 +126,8 @@ from typing import Any, Awaitable, Callable, Optional, TypedDict, Union
 
 from langchain_core.runnables import RunnableConfig
 
+from daemon.constants import INSTANCE_STATUS_PAUSED, TERMINAL_INSTANCE_STATUSES
+
 logger = logging.getLogger(__name__)
 
 # ─── Canonical constants (single home — synthesis AD-30) ─────────────────────
@@ -133,9 +138,17 @@ logger = logging.getLogger(__name__)
 #: runtime ``min(·, HARD_MAX)`` clamp in threshold resolution.
 HARD_MAX_THRESHOLD_SECONDS: int = 1800
 
+#: Maximum allowed value for ``hard_max_threshold_seconds`` — 24h.
+#: This is a hard ceiling on the system ceiling; you cannot
+#: construct a scanner with a ``hard_max_threshold_seconds`` above
+#: 24h. Hoisted from the prior inline literal ``86400`` at :874
+#: (LOW, 2026-09-13) so the 24h semantics are searchable and the
+#: error message can name it.
+MAX_HARD_MAX_THRESHOLD_SECONDS: int = 86400
+
 #: Floor for any effective threshold (AD-38). Enforced on BOTH sides:
 #: the phase-3 tool loud-raises below it, and the scanner's
-#: ``_resolve_threshold`` treats a hand-edited below-floor metadata
+#: ``resolve_threshold`` treats a hand-edited below-floor metadata
 #: value as invalid and falls back to the configured default.
 MIN_THRESHOLD_SECONDS: int = 60
 
@@ -220,7 +233,7 @@ class LongToolNudgeRegistry:
       registry it already holds (no scanner import, no import
       cycle). NoOp when nothing is attached (phase-1 shapes).
     * ``attach_threshold_resolver`` — the scanner's bound
-      ``_resolve_threshold`` so the wrapper's per-completion log and
+      ``resolve_threshold`` so the wrapper's per-completion log and
       AD-9 healthy/long classification use the SAME resolution the
       scanner fires with (parity). Falls back to
       ``DEFAULT_THRESHOLD_FALLBACK`` when nothing is attached.
@@ -247,7 +260,7 @@ class LongToolNudgeRegistry:
         # scanner's per-tick read) pull the resolved value from this
         # cache — no repo hit on the asyncio loop. The FIRST stamp of
         # a batch still has to resolve once: the attached sync
-        # resolver (``_resolve_threshold`` → ``repo.get_metadata_value``)
+        # resolver (``resolve_threshold`` → ``repo.get_metadata_value``)
         # runs via ``asyncio.to_thread`` BEFORE the module singleton
         # lock is acquired, so a slow PG read no longer stalls every
         # other instance's stamp / clear / snapshot. Steady state is
@@ -269,7 +282,7 @@ class LongToolNudgeRegistry:
     def attach_threshold_resolver(
         self, resolver: Callable[[str], int]
     ) -> None:
-        """Attach the scanner's ``_resolve_threshold`` (parity pin)."""
+        """Attach the scanner's ``resolve_threshold`` (parity pin)."""
         self._threshold_resolver = resolver
 
     def attach_parent_lookup(
@@ -284,7 +297,7 @@ class LongToolNudgeRegistry:
         coroutine function returns the unawaited coroutine object,
         which would stamp ``parent_id=<coroutine>`` and silently
         break every fire path). Production attaches the scanner's
-        ``_read_parent_id`` (async); legacy sync test doubles stay
+        ``read_parent_id`` (async); legacy sync test doubles stay
         on the to_thread path.
         """
         self._parent_lookup = lookup
@@ -440,11 +453,16 @@ class LongToolNudgeRegistry:
         """Threshold via the cache, falling through to the resolver.
 
         The per-batch cache (W1) eliminates the wrapper's finally
-        sync repo hit on the asyncio hot path. The cache is set by
-        ``record_start`` and evicted by ``clear`` (or by the
-        registry's overflow sweep) — when the cache is empty we
-        fall through to the attached resolver for back-compat with
-        any caller that does NOT go through ``record_start``.
+        SYNC repo hit on the asyncio hot path: when the cache is
+        cold (a caller that does NOT go through ``record_start`` —
+        e.g. an out-of-band test or a post-restart first tick) we
+        still pay one off-thread repo read. The cache itself is
+        populated by ``record_start`` and evicted by ``clear`` (or by
+        the registry's overflow sweep). The off-thread wrapper
+        here mirrors :meth:`lookup_parent_for`'s shape-aware
+        dispatch — even on cache miss, the resolver MUST run off
+        the event loop so a slow PG read cannot stall the wrapper's
+        finally path or any other awaiting coroutine.
         """
         async with self._lock:
             cached = self._batch_threshold_cache.get(instance_id)
@@ -453,7 +471,15 @@ class LongToolNudgeRegistry:
         resolver = self._threshold_resolver
         if resolver is not None:
             try:
-                return int(resolver(instance_id))
+                # Mirror :meth:`lookup_parent_for` — run the sync
+                # resolver in ``asyncio.to_thread`` so the wrapper's
+                # finally hot path stays off the PG DB call. The
+                # cache-miss path is rare (post-restart / out-of-band
+                # caller) but a slow repo hit here would otherwise
+                # stall the wrapper's `finally` block for every
+                # other instance's stamp / clear / snapshot.
+                value = await asyncio.to_thread(resolver, instance_id)
+                return int(value)
             except Exception:  # pragma: no cover - defensive
                 logger.exception(
                     "[LongToolNudge] attached threshold resolver raised "
@@ -467,7 +493,7 @@ class LongToolNudgeRegistry:
 
         Council fix-cycle 2 — shape-aware dispatch: an async lookup
         is awaited directly (production attaches the scanner's
-        ``_read_parent_id``, an ``async def``); a sync lookup is
+        ``read_parent_id``, an ``async def``); a sync lookup is
         wrapped in ``asyncio.to_thread`` so the wrapper's batch-
         entry path does NOT block the event loop on the repo. The
         pre-fix implementation always used ``asyncio.to_thread`` —
@@ -537,13 +563,13 @@ class LongToolNudgeRegistry:
 #: graph-wrapped wrapper (graph.py) MUST share this ONE instance.
 #: Per-graph / per-ctor allocation silently no-ops the whole feature
 #: (pinned by the T8 ``id()`` identity smoke test).
-_LONG_TOOL_REGISTRY = LongToolNudgeRegistry()
+LONG_TOOL_REGISTRY = LongToolNudgeRegistry()
 
 
 # ─── Wrapped "tools" node (graph seam) ───────────────────────────────────────
 
 
-def _wrapped_tools_node(
+def wrapped_tools_node(
     tools: list, registry: LongToolNudgeRegistry
 ) -> Any:
     """Factory wrapping the bare ``ToolNode`` with stamp lifecycle.
@@ -594,11 +620,11 @@ def _wrapped_tools_node(
         # (2) Stamp every tool_call at batch entry — SAME started_at for
         # the whole batch (AD-3 overestimation semantics). parent_id is
         # read ONCE via the attached lookup (cheap; AD-42 Option (ii)).
-        parent_id: Optional[str] = None
-        try:
-            parent_id = await registry.lookup_parent_for(instance_id)
-        except Exception:  # pragma: no cover - defensive
-            parent_id = None
+        # M3 — ``lookup_parent_for`` already swallows its own exceptions
+        # (see its try/except — defensive contract), so the dead
+        # try/except here was unreachable for any raising lookup. A
+        # raising lookup test now pins the propagation contract.
+        parent_id = await registry.lookup_parent_for(instance_id)
         for tc in tool_calls:
             tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
             tc_name = (
@@ -725,16 +751,18 @@ async def deliver_long_tool_nudge(
 
 # ─── Delivery constants + notice builder (phase 2) ───────────────────────────
 
-#: Parent status that defers (never consumes) a nudge — AM-7.
-_PARENT_STATUS_PAUSED = "paused"  # InstanceStatus.PAUSED.value
-
-#: Terminal parents NEVER receive a nudge on this feature (AD-40): no
-#: revive path, skip + WARN. The orphan-child terminal class is owned
-#: by existing machinery (terminate_instance / cascade-resume /
-#: instance_lifecycle).
-_TERMINAL_PARENT_STATUSES = frozenset(
-    {"completed", "terminated", "error", "failed"}
-)
+# Terminal parents NEVER receive a nudge on this feature (AD-40): no
+# revive path, skip + WARN. The orphan-child terminal class is owned
+# by existing machinery (terminate_instance / cascade-resume /
+# instance_lifecycle). M1 — single-home: imported from
+# ``daemon.constants`` (``TERMINAL_INSTANCE_STATUSES``) so the
+# routing-relevant status sets live in one canonical module (same
+# fork-prevention discipline as ``INJECTION_ELIGIBLE_STATUSES``).
+_TERMINAL_PARENT_STATUSES = TERMINAL_INSTANCE_STATUSES
+# ``_PARENT_STATUS_PAUSED`` likewise imports the canonical literal
+# (``INSTANCE_STATUS_PAUSED`` in ``daemon.constants``); this local
+# binding keeps the existing call-site tokens unchanged.
+_PARENT_STATUS_PAUSED = INSTANCE_STATUS_PAUSED
 
 
 def _format_age_human(age_seconds: float) -> str:
@@ -871,15 +899,16 @@ class LongToolNudgeScanner:
                 f"hard_max_threshold_seconds ({hard_max_threshold_seconds}); "
                 f"got {default_threshold_seconds!r}"
             )
-        if hard_max_threshold_seconds > 86400:
+        if hard_max_threshold_seconds > MAX_HARD_MAX_THRESHOLD_SECONDS:
             raise ValueError(
-                "hard_max_threshold_seconds must be <= 86400; got "
+                "hard_max_threshold_seconds must be <= "
+                f"{MAX_HARD_MAX_THRESHOLD_SECONDS} (24h); got "
                 f"{hard_max_threshold_seconds!r}"
             )
 
         self._repo = instance_repository
         self._manager = manager
-        self._registry = registry if registry is not None else _LONG_TOOL_REGISTRY
+        self._registry = registry if registry is not None else LONG_TOOL_REGISTRY
         self._enabled = bool(enabled)
         self._interval_seconds = int(interval_seconds)
         self._default_threshold_seconds = int(default_threshold_seconds)
@@ -909,6 +938,19 @@ class LongToolNudgeScanner:
         self._episode_last_seen: dict[tuple[str, str], float] = {}
         # Future escalation hook — never gates firing in v1.
         self._nudge_counts: dict[tuple[str, str], int] = {}
+        # BEHAVIORAL — log-once-per-episode gate for the
+        # ``[LongToolNudge] parent ... not found — nudge skipped``
+        # WARN. Without this gate, a long-tool episode whose parent
+        # row vanished mid-tool would re-WARN every 60s tick for the
+        # entire wedge duration (~minutes-hours), flooding the log
+        # without adding signal. The set tracks
+        # ``(parent_id, child_id)`` pairs we've already surfaced;
+        # a HEALTHY tool completion closes the episode via
+        # ``close_episode`` (clears the entry here too), so a fresh
+        # tool_call_id crossing after a successful close gets a
+        # single fresh WARN. RAM-only, restart-reset — matches the
+        # lifetime of every other dedup set on this scanner.
+        self._missing_parent_warned: set[tuple[str, str]] = set()
 
     # ── Introspection surface ──
 
@@ -926,7 +968,7 @@ class LongToolNudgeScanner:
 
     # ── Threshold resolution (canonical chain, AD-41) ──
 
-    def _resolve_threshold(self, instance_id: str) -> int:
+    def resolve_threshold(self, instance_id: str) -> int:
         """Resolve the effective threshold for one child.
 
         Rung 2 of the canonical chain: the per-child metadata key,
@@ -953,7 +995,7 @@ class LongToolNudgeScanner:
         )
         return min(effective, self._hard_max_threshold_seconds)
 
-    async def _read_parent_id(self, child_id: str) -> Optional[str]:
+    async def read_parent_id(self, child_id: str) -> Optional[str]:
         """Lazy ``child_id -> parent_id`` read (defer DB hit to crossing).
 
         Council fix-cycle 1, W1: runs in ``asyncio.to_thread`` so a
@@ -1038,10 +1080,25 @@ class LongToolNudgeScanner:
         # ── Real delivery (phase 2) ──
         parent = await self._get_parent(parent_id)
         if parent is None:
-            logger.warning(
-                "[LongToolNudge] parent %s... not found — nudge skipped",
-                (parent_id or "")[:8],
-            )
+            # BEHAVIORAL — log-once-per-episode: only WARN the first
+            # time this ``(parent_id, child_id)`` is seen missing;
+            # subsequent ticks in the same wedge episode stay silent
+            # (debug-level so the missing-parent event is still
+            # observable without log spam).
+            episode_key = (parent_id, child_id)
+            if episode_key not in self._missing_parent_warned:
+                self._missing_parent_warned.add(episode_key)
+                logger.warning(
+                    "[LongToolNudge] parent %s... not found — nudge skipped",
+                    (parent_id or "")[:8],
+                )
+            else:
+                logger.debug(
+                    "[LongToolNudge] parent %s... still missing for child %s... "
+                    "— nudge suppressed (episode-level dedup)",
+                    (parent_id or "")[:8],
+                    (child_id or "")[:8],
+                )
             return False
         status = getattr(parent, "status", None)
         if status == _PARENT_STATUS_PAUSED:
@@ -1067,7 +1124,7 @@ class LongToolNudgeScanner:
             return False  # nudge-level episode dedup — no log (hot path)
         # Fresh re-resolution for the notice (canonical chain rungs
         # 2-4, per-child key) — reflects a just-written override.
-        effective_threshold = self._resolve_threshold(child_id)
+        effective_threshold = self.resolve_threshold(child_id)
         notice = _build_long_tool_notice(
             parent_id, episode_ctx, effective_threshold
         )
@@ -1101,11 +1158,13 @@ class LongToolNudgeScanner:
         # txn commit time (sub-second in practice); a slow repo or
         # a hung parent-flush daemon widens it but never escapes
         # the per-instance error isolation at the tick level.
-        try:
-            post_status_obj = await self._get_parent(parent_id)
-            post_status = getattr(post_status_obj, "status", None)
-        except Exception:
-            post_status = None
+        # M4 — ``_get_parent`` already swallows its own exceptions
+        # (see its try/except — defensive contract). The dead
+        # try/except here was unreachable for any raising lookup;
+        # the propagation test pins ``post_status=None`` for a
+        # raising lookup.
+        post_status_obj = await self._get_parent(parent_id)
+        post_status = getattr(post_status_obj, "status", None)
         if post_status in _TERMINAL_PARENT_STATUSES:
             logger.warning(
                 "[LongToolNudge] post-enqueue terminal-parent race: "
@@ -1156,10 +1215,16 @@ class LongToolNudgeScanner:
         (``registry.attach_close_handler(scanner.close_episode)``);
         invoked by the wrapper's ``finally`` for HEALTHY completions
         only (AD-9 + AD-42 Option (ii)). Idempotent.
+
+        BEHAVIORAL — also clears the ``_missing_parent_warned``
+        entry so a fresh tool_call_id crossing for the same
+        ``(parent_id, child_id)`` after a HEALTHY close can
+        surface its missing-parent WARN again on the first tick.
         """
         self._active_episodes.discard((parent_id, child_id))
         self._episode_last_seen.pop((parent_id, child_id), None)
         self._nudge_counts.pop((parent_id, child_id), None)
+        self._missing_parent_warned.discard((parent_id, child_id))
 
     # ── Scan tick ──
 
@@ -1201,13 +1266,19 @@ class LongToolNudgeScanner:
 
         # Per-tick threshold memoization: ONE resolution per child
         # with stamps per tick (not per stamp) — Working-Names pin.
+        # The resolve runs through ``asyncio.to_thread`` so the sync
+        # ``_repo.get_metadata_value`` call does NOT block the event
+        # loop on a slow PG read (mirrors the to_thread discipline
+        # applied in ``_get_parent`` and ``resolve_threshold_for``).
         thresholds: dict[str, int] = {}
 
         for instance_id, stamps in snapshot.items():
             stats["instances_scanned"] += 1
             try:
                 if instance_id not in thresholds:
-                    thresholds[instance_id] = self._resolve_threshold(instance_id)
+                    thresholds[instance_id] = await asyncio.to_thread(
+                        self.resolve_threshold, instance_id
+                    )
                 threshold = thresholds[instance_id]
                 for tool_call_id, stamp in stamps.items():
                     stats["stamps_inspected"] += 1
@@ -1220,7 +1291,7 @@ class LongToolNudgeScanner:
                     if not parent_id:
                         # Stamps recorded before the parent lookup was
                         # attached — lazy repo read (defer to crossing).
-                        parent_id = await self._read_parent_id(instance_id) or ""
+                        parent_id = await self.read_parent_id(instance_id) or ""
                     episode_ctx = LongToolNudgeEpisodeCtx(
                         child_id=instance_id,
                         parent_id=parent_id or "",
@@ -1400,6 +1471,7 @@ async def run_long_tool_nudge_loop(
 __all__ = [
     "LONG_TOOL_NUDGE_SOURCE",
     "HARD_MAX_THRESHOLD_SECONDS",
+    "MAX_HARD_MAX_THRESHOLD_SECONDS",
     "MIN_THRESHOLD_SECONDS",
     "STALE_STAMP_TTL_SECONDS",
     "LONG_TOOL_NUDGE_THRESHOLD_KEY",
@@ -1409,6 +1481,6 @@ __all__ = [
     "LongToolNudgeScanner",
     "run_long_tool_nudge_loop",
     "deliver_long_tool_nudge",
-    "_LONG_TOOL_REGISTRY",
-    "_wrapped_tools_node",
+    "LONG_TOOL_REGISTRY",
+    "wrapped_tools_node",
 ]

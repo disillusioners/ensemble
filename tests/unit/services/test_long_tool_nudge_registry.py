@@ -150,7 +150,7 @@ async def test_snapshot_is_shallow_copy_not_live(registry):
 async def test_lookup_parent_for_awaits_async_callable(registry):
     """SURGICAL PIN: ``lookup_parent_for`` MUST await an async callable.
 
-    Council fix-cycle 2 — production attaches ``_read_parent_id`` (an
+    Council fix-cycle 2 — production attaches ``read_parent_id`` (an
     ``async def``) at ``api.py:811-812``; the previous implementation
     wrapped any attached lookup in ``asyncio.to_thread`` and returned
     the coroutine object unawaited (truthy → stamped as

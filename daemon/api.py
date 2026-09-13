@@ -2,6 +2,25 @@
 
 This module contains the app factory, lifespan management, middleware,
 and global error handlers. All API endpoints are in daemon/routers/.
+
+M10 — module-band rationale (2026-09-13): this file lives in the
+~1000-3000-line band by design. It carries (a) the FastAPI app
+factory ``create_app`` (the lifespan wiring + middleware
+registration lives here), (b) the ``lifespan`` async-context
+manager that boots the per-instance watchdog, the long-tool-call-
+nudge scanner, the dead-letter service, the job-queue reconcile,
+and the per-instance lazy-import graph cache (each a single, large
+``try / except`` block keyed on construction-time failure), and
+(c) global error handlers (``HTTPException`` shim, request-validation
+handler, the startup-shutdown banner). Co-locating app factory +
+lifespan wiring + middleware + error handlers is the project-house
+pattern (mirror ``daemon/services/long_tool_nudge.py`` module-
+band rationale) — the alternative (splitting lifespan across
+``daemon/api_lifespan.py``) would force every router to import two
+modules instead of one and would scatter the related
+construction-failure recovery decisions. The routers themselves
+live under ``daemon/routers/``; this module owns the wiring, not
+the routes.
 """
 
 import warnings
@@ -766,11 +785,11 @@ async def lifespan(app: FastAPI):
     # ── Long-tool-call nudge scanner (feature: long-tool-call-nudge) ──
     # Mirrors the watchdog block above (AD-20 / AM-11). The wrapper in
     # daemon/graph.py and this scanner MUST share the module-level
-    # ``_LONG_TOOL_REGISTRY`` singleton — importing it explicitly here
+    # ``LONG_TOOL_REGISTRY`` singleton — importing it explicitly here
     # (a per-graph or per-ctor allocation silently no-ops the whole
     # feature; pinned by the T8 identity smoke test).
     from daemon.services.long_tool_nudge import (
-        _LONG_TOOL_REGISTRY,
+        LONG_TOOL_REGISTRY,
         LongToolNudgeScanner,
         run_long_tool_nudge_loop,
     )
@@ -778,7 +797,7 @@ async def lifespan(app: FastAPI):
         long_tool_nudge_scanner = LongToolNudgeScanner(
             instance_repo,
             manager,
-            registry=_LONG_TOOL_REGISTRY,
+            registry=LONG_TOOL_REGISTRY,
             # AD-7 phase-2 flip: production uses the real
             # enqueue_message delivery body (phase 1 shipped the
             # STUB_FIRE stub behind this flag).
@@ -802,14 +821,14 @@ async def lifespan(app: FastAPI):
         # threshold resolver + parent lookup ride the same attach so
         # the wrapper resolves thresholds/parentage identically to
         # the scanner.
-        _LONG_TOOL_REGISTRY.attach_close_handler(
+        LONG_TOOL_REGISTRY.attach_close_handler(
             long_tool_nudge_scanner.close_episode
         )
-        _LONG_TOOL_REGISTRY.attach_threshold_resolver(
-            long_tool_nudge_scanner._resolve_threshold
+        LONG_TOOL_REGISTRY.attach_threshold_resolver(
+            long_tool_nudge_scanner.resolve_threshold
         )
-        _LONG_TOOL_REGISTRY.attach_parent_lookup(
-            long_tool_nudge_scanner._read_parent_id
+        LONG_TOOL_REGISTRY.attach_parent_lookup(
+            long_tool_nudge_scanner.read_parent_id
         )
         if long_tool_nudge_scanner.enabled:
             long_tool_nudge_task = asyncio.create_task(

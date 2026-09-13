@@ -29,7 +29,7 @@ from daemon.services.long_tool_nudge import (
     _build_long_tool_notice,
     _format_age_human,
     run_long_tool_nudge_loop,
-    _LONG_TOOL_REGISTRY,
+    LONG_TOOL_REGISTRY,
 )
 from daemon.services.waiting_children_watchdog import _build_wedge_notice
 

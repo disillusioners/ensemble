@@ -16,7 +16,7 @@ from daemon.services.long_tool_nudge import (
     HARD_MAX_THRESHOLD_SECONDS,
     MIN_THRESHOLD_SECONDS,
     LongToolNudgeScanner,
-    _LONG_TOOL_REGISTRY,
+    LONG_TOOL_REGISTRY,
 )
 
 
@@ -26,7 +26,7 @@ def _scanner(metadata_value=None, **overrides) -> LongToolNudgeScanner:
     kwargs = dict(
         instance_repository=repo,
         manager=None,
-        registry=_LONG_TOOL_REGISTRY,
+        registry=LONG_TOOL_REGISTRY,
         interval_seconds=60,
         default_threshold_seconds=900,
     )
@@ -37,30 +37,30 @@ def _scanner(metadata_value=None, **overrides) -> LongToolNudgeScanner:
 class TestThresholdResolution:
     def test_metadata_value_used_when_in_range(self):
         scanner = _scanner(metadata_value=1200)
-        assert scanner._resolve_threshold("child-1") == 1200
+        assert scanner.resolve_threshold("child-1") == 1200
 
     def test_metadata_value_above_hard_max_capped(self):
         scanner = _scanner(metadata_value=3600)
-        assert scanner._resolve_threshold("child-1") == HARD_MAX_THRESHOLD_SECONDS
+        assert scanner.resolve_threshold("child-1") == HARD_MAX_THRESHOLD_SECONDS
 
     def test_metadata_value_below_one_falls_back_to_default(self):
         scanner = _scanner(metadata_value=0)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_metadata_missing_returns_default(self):
         scanner = _scanner(metadata_value=None)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_metadata_non_int_string_falls_back(self):
         # SQLite TEXT round-trip — get_metadata_value re-parses JSON,
         # but a bare string value must NOT be honored.
         scanner = _scanner(metadata_value="900")
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_metadata_bool_falls_back(self):
         # bool is an int subclass — the explicit bool trap.
         scanner = _scanner(metadata_value=True)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_default_below_one_rejected_by_ctor(self):
         with pytest.raises(ValueError):
@@ -85,27 +85,27 @@ class TestResolveThresholdFloorBypass:
 
     def test_below_floor_30_falls_back_to_default(self):
         scanner = _scanner(metadata_value=30)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_floor_value_60_is_honored(self):
         scanner = _scanner(metadata_value=MIN_THRESHOLD_SECONDS)
-        assert scanner._resolve_threshold("child-1") == MIN_THRESHOLD_SECONDS
+        assert scanner.resolve_threshold("child-1") == MIN_THRESHOLD_SECONDS
 
     def test_zero_falls_back(self):
         scanner = _scanner(metadata_value=0)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_none_falls_back(self):
         scanner = _scanner(metadata_value=None)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_string_60_falls_back(self):
         scanner = _scanner(metadata_value="60")
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_negative_falls_back(self):
         scanner = _scanner(metadata_value=-5)
-        assert scanner._resolve_threshold("child-1") == 900
+        assert scanner.resolve_threshold("child-1") == 900
 
     def test_metadata_read_error_propagates_to_isolation(self):
         """A repo error during resolution is NOT silently absorbed —
@@ -117,4 +117,4 @@ class TestResolveThresholdFloorBypass:
             side_effect=RuntimeError("db down")
         )
         with pytest.raises(RuntimeError, match="db down"):
-            scanner._resolve_threshold("child-1")
+            scanner.resolve_threshold("child-1")

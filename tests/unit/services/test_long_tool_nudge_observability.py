@@ -109,7 +109,7 @@ def _completed_records(caplog):
 @pytest.mark.asyncio
 async def test_log_line_fields_and_marker(lt_real, caplog):
     registry = lt_real.LongToolNudgeRegistry()
-    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    node = lt_real.wrapped_tools_node([sample_tool], registry)
     with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
         await _run(lt_real, node, _state(), _CONFIG)
     records = _completed_records(caplog)
@@ -134,7 +134,7 @@ async def test_threshold_crossed_true_for_long_completion(
     clock = _FakeClock()
     monkeypatch.setattr(lt_real, "time", clock)
     registry = lt_real.LongToolNudgeRegistry()
-    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    node = lt_real.wrapped_tools_node([sample_tool], registry)
     original_record = registry.record_start
 
     async def aging_record(
@@ -169,7 +169,7 @@ async def test_threshold_crossed_false_at_exact_boundary(
     clock = _FakeClock()
     monkeypatch.setattr(lt_real, "time", clock)
     registry = lt_real.LongToolNudgeRegistry()
-    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    node = lt_real.wrapped_tools_node([sample_tool], registry)
     original_record = registry.record_start
 
     async def boundary_record(
@@ -198,7 +198,7 @@ async def test_no_leak_on_exception_one_line_still_emitted(
     lt_real, caplog
 ):
     registry = lt_real.LongToolNudgeRegistry()
-    node = lt_real._wrapped_tools_node([boom_tool], registry)
+    node = lt_real.wrapped_tools_node([boom_tool], registry)
     # handle_tool_errors=True converts the tool's raise into an error
     # ToolMessage (no node-level exception) — the stamp clears
     # normally on the error path and the completion line still emits.
@@ -232,7 +232,7 @@ async def test_completed_log_emitted_when_kill_switch_off(
     # under the empty registry + no resolver/lookup attached (the
     # exact shape the disabled lifespan leaves the registry in).
     registry = lt_real.LongToolNudgeRegistry()
-    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    node = lt_real.wrapped_tools_node([sample_tool], registry)
     # No close handler / resolver / lookup attached — the disabled
     # shape. Stamp lifecycle must still complete and emit the log.
     with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):

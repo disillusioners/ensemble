@@ -1,5 +1,5 @@
 """T8 — graph smoke: the wired "tools" node IS the long-tool-nudge
-wrapper over the module-level ``_LONG_TOOL_REGISTRY`` singleton.
+wrapper over the module-level ``LONG_TOOL_REGISTRY`` singleton.
 
 Pins against any future refactor that allocates a per-graph registry
 (graph builds many graphs per process — a per-graph allocation would
@@ -8,7 +8,7 @@ silently no-op the whole feature):
 * ``build_instance_graph`` registers a ``"tools"`` node whose callable
   is the wrapper factory product.
 * That wired callable stamps in-flight tool calls into the
-  ``_LONG_TOOL_REGISTRY`` singleton of the SAME module instance the
+  ``LONG_TOOL_REGISTRY`` singleton of the SAME module instance the
   graph was built against (behavioral singleton-identity pin), and
   leaves the registry EMPTY after a happy-path single-tool-call batch.
 
@@ -139,7 +139,7 @@ async def test_wired_tools_node_stamps_the_singleton_and_clears(
     }
     config = {"configurable": {"thread_id": "smoke-instance-1"}}
 
-    registry = lt._LONG_TOOL_REGISTRY
+    registry = lt.LONG_TOOL_REGISTRY
     assert await registry.snapshot() == {}  # clean start
     result = await compiled.ainvoke(state, config=config)
     # Happy-path single tool_call completed → registry EMPTY post-turn.
@@ -168,7 +168,7 @@ async def test_wired_tools_node_registry_identity_is_the_module_singleton(
     def identity_probe(x: str) -> str:
         """Inspects the module singleton mid-batch."""
         observed["singleton_stamps"] = {
-            iid: dict(tcs) for iid, tcs in lt._LONG_TOOL_REGISTRY._stamps.items()
+            iid: dict(tcs) for iid, tcs in lt.LONG_TOOL_REGISTRY._stamps.items()
         }
         return "identity-ok"
 
@@ -203,4 +203,4 @@ async def test_wired_tools_node_registry_identity_is_the_module_singleton(
     )
     mid = observed["singleton_stamps"]
     assert "call-id-1" in mid.get("smoke-instance-2", {})  # SAME singleton
-    assert await lt._LONG_TOOL_REGISTRY.snapshot() == {}  # cleared after
+    assert await lt.LONG_TOOL_REGISTRY.snapshot() == {}  # cleared after
