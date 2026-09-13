@@ -27,6 +27,10 @@ const jobServiceSrc = readFileSync(
   join(__dirname, '../../services/job.service.ts'),
   'utf-8',
 );
+const missionServiceSrc = readFileSync(
+  join(__dirname, '../../services/mission.service.ts'),
+  'utf-8',
+);
 
 // The enumerated filter bindings. Every entry: the template binding
 // (exact production text) ↔ the JobsFilterState key it drives ↔ the
@@ -572,6 +576,35 @@ describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
       'utf-8',
     );
     expect(enrichmentModelSrc).toMatch(/if \(!g\.missionId\) continue/);
+  });
+
+  it('P3 review — enrichment reads the FLAT mission wire shape (anti-wrapper pin: resp?.title, never resp?.mission?.title)', () => {
+    // 2026-09-13 wire-contract break: the consumer read
+    // ``resp?.mission?.title`` (an invented wrapper) while
+    // GET /api/missions/{id} returns FLAT MissionResponse fields
+    // (``title`` TOP-LEVEL — daemon/routers/schemas.py
+    // MissionResponse). Every titled group silently fell back to
+    // "developer · Xm ago" on fresh load. The wrapper-shaped
+    // service mock kept the suite green throughout — this pin
+    // fails on BOTH halves of that shape.
+    // (a) Consumer half — the exact production expression, and the
+    // wrapper-family reads are FORBIDDEN on this path.
+    expect(componentSrc).toMatch(/const title = resp\?\.title;/);
+    expect(componentSrc).not.toMatch(/resp\?\.(mission|data|result)\?\./);
+    // Success path: the extracted flat title is written into
+    // ``titleOverrides`` (what the group header renders) — the
+    // flat fixture in mission.service.spec.ts drives this exact
+    // field.
+    expect(componentSrc).toMatch(
+      /titleOverrides\.update\(\(m\) => \{[\s\S]{0,120}?next\.set\(id, title\)/,
+    );
+    // (b) Service half — getMission is typed to the FLAT
+    // MissionSummary and the MissionGetResponse wrapper type is
+    // deleted; its return is byte-for-byte what the BE sends.
+    expect(missionServiceSrc).toMatch(
+      /getMission\(id: string\): Observable<MissionSummary>/,
+    );
+    expect(missionServiceSrc).not.toMatch(/MissionGetResponse/);
   });
 
   it('P3 header title uses the instanceDisplayTitle chain (NOT the job-row resolveTitle chain)', () => {

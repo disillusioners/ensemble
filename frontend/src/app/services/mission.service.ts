@@ -37,16 +37,19 @@ interface JobListResponse {
 }
 
 /**
- * Wrapper over the BE ``/api/missions/{id}`` endpoint. P3 (jobs-page-
- * improvement) — the page's group-title enrichment calls this for
- * VISIBLE groups only (capped at ``MAX_TITLE_ENRICHMENT_FETCHES``).
- * Errors propagate so the retain-last-data discipline keeps the
- * fallback title when the enrichment fails (the user still sees an
- * honest header; the enrichment is an enhancement, never a blocker).
+ * FLAT wire contract (fixed 2026-09-13): ``GET /api/missions/{id}``
+ * returns ``MissionResponse`` with every field TOP-LEVEL (``title``,
+ * ``mission_id``, ``agent_id``, …) — there is NO ``{ mission: … }``
+ * wrapper on the wire (see ``daemon/routers/schemas.py`` class
+ * ``MissionResponse`` and ``daemon/routers/missions.py::get_mission``).
+ * The service therefore returns the flat ``MissionSummary`` directly.
+ * History: P3 initially typed this as a ``{ mission: MissionSummary }``
+ * wrapper while the consumer read ``resp?.mission?.title`` — the
+ * enrichment "succeeded" (200) but read ``undefined`` and every titled
+ * group fell back to the ``agent · Xm ago`` header. Pinned flat by the
+ * anti-wrapper pins in ``jobs-page.bindings.pins.spec.ts`` +
+ * ``mission.service.spec.ts``.
  */
-export interface MissionGetResponse {
-  mission: MissionSummary;
-}
 
 @Injectable({
   providedIn: 'root',
@@ -119,11 +122,15 @@ export class MissionService {
    * render tick; failures keep the fallback title rendered
    * (retain-last-data discipline — the panel pattern).
    *
+   * FLAT wire contract: the BE returns ``MissionResponse`` with
+   * ``title`` (and every other field) TOP-LEVEL — no
+   * ``{ mission: … }`` wrapper. Consumers read ``resp?.title``.
+   *
    * Errors propagate so the page's per-fetch ``catchError` returns
    * ``null`` for the failed key without disturbing the others.
    */
-  getMission(id: string): Observable<MissionGetResponse> {
-    return this.http.get<MissionGetResponse>(
+  getMission(id: string): Observable<MissionSummary> {
+    return this.http.get<MissionSummary>(
       `${this.API_BASE}/${encodeURIComponent(id)}`,
     );
   }

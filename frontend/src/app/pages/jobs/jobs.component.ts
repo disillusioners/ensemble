@@ -1012,7 +1012,12 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.missionService.getMission(id).subscribe({
           next: (resp) => {
             this.inFlightKeys.delete(id);
-            const title = resp?.mission?.title;
+            // FLAT wire shape (GET /api/missions/{id} → MissionResponse):
+            // ``title`` is TOP-LEVEL — there is no ``{ mission: … }``
+            // wrapper. Reading the wrapped mission-title form here was
+            // the 2026-09-13 wire-contract break (enrichment 200'd but
+            // read undefined → fallback header always won).
+            const title = resp?.title;
             if (!title) {
               // 200-with-null-title is treated as a failure
               // (no enrichment would mean re-pick every poll —

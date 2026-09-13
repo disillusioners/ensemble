@@ -112,21 +112,23 @@ class TestMissionService {
     const url = `/api/missions/${encodeURIComponent(id)}`;
     this.lastRequestUrl = url;
 
+    // FLAT wire shape — exactly what GET /api/missions/{id} sends
+    // (MissionResponse: title/mission_id/… TOP-LEVEL, no wrapper).
+    // The previous mock shipped ``{ mission: { … } }`` which made
+    // the whole suite blind to the wrapper-shape consumer break.
     const mockResponse = {
-      mission: {
-        mission_id: id,
-        agent_id: 'leader',
-        parent_mission_id: null,
-        liveness: 'processing' as const,
-        terminal_reason: null,
-        epoch: 1,
-        linked_jobs: [],
-        started_at: '2026-09-10T10:00:00Z',
-        last_activity_at: '2026-09-10T10:30:00Z',
-        title: 'Mission One',
-        initiative_preview: 'Do the thing',
-      } satisfies MissionSummary,
-    };
+      mission_id: id,
+      agent_id: 'leader',
+      parent_mission_id: null,
+      liveness: 'processing' as const,
+      terminal_reason: null,
+      epoch: 1,
+      linked_jobs: [],
+      started_at: '2026-09-10T10:00:00Z',
+      last_activity_at: '2026-09-10T10:30:00Z',
+      title: 'Mission One',
+      initiative_preview: 'Do the thing',
+    } satisfies MissionSummary;
 
     return {
       pipe: () => ({
@@ -252,8 +254,9 @@ describe('MissionService', () => {
         result = r;
       });
       expect(service.lastRequestUrl).toBe('/api/missions/m-1');
-      expect(result.mission).toBeDefined();
-      expect(result.mission.mission_id).toBe('m-1');
+      // FLAT shape: fields are top-level, exactly as the BE sends.
+      expect(result.mission_id).toBe('m-1');
+      expect(result.title).toBe('Mission One');
     });
 
     it('should URL-encode the mission id', () => {
@@ -263,17 +266,29 @@ describe('MissionService', () => {
       );
     });
 
-    it('returns the mission envelope (mission: MissionSummary)', () => {
+    it('returns the FLAT wire shape (MissionResponse — title top-level, NO { mission } wrapper)', () => {
+      // 2026-09-13 wire-contract fix: the BE (daemon/routers/
+      // missions.py::get_mission → MissionResponse) has NO envelope —
+      // every field is top-level. The earlier wrapper-shaped mock
+      // ({ mission: … }) + wrapper assertions here are why the
+      // consumer break (resp?.mission?.title) stayed green.
       let result: any = null;
       service.getMission('m-1').pipe().subscribe((r: any) => {
         result = r;
       });
-      expect(result).toHaveProperty('mission');
-      expect(result.mission).toHaveProperty('mission_id');
-      expect(result.mission).toHaveProperty('agent_id');
-      expect(result.mission).toHaveProperty('liveness');
-      expect(result.mission).toHaveProperty('title');
-      expect(result.mission).toHaveProperty('linked_jobs');
+      // Behavioral half: a flat fixture with a populated top-level
+      // ``title`` — the exact field the page's enrichment consumer
+      // reads into ``titleOverrides`` (source-pinned in
+      // jobs-page.bindings.pins.spec.ts).
+      expect(result.title).toBe('Mission One');
+      expect(result.mission_id).toBe('m-1');
+      expect(result.agent_id).toBe('leader');
+      expect(result.liveness).toBe('processing');
+      expect(result.linked_jobs).toEqual([]);
+      // Anti-wrapper pin: the response MUST NOT carry an envelope.
+      // If a future mock (or a real BE change) reintroduces
+      // ``{ mission: … }``, this fails first.
+      expect(result).not.toHaveProperty('mission');
     });
   });
 });
