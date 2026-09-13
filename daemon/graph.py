@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from langgraph.graph import StateGraph, MessagesState, START, END
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode  # noqa: F401 — kept importable: existing tests patch ``daemon.graph.ToolNode``
+from daemon.services.long_tool_nudge import (
+    _LONG_TOOL_REGISTRY,
+    _wrapped_tools_node,
+)
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import (
     BaseChatOpenAI,
@@ -7876,7 +7880,18 @@ def build_instance_graph(
         # disables the telemetry entirely.
         empty_streak_manager=manager,
     ))
-    graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+    graph.add_node(
+        "tools",
+        # Long-tool-nudge wrapper (long_tool_nudge.py): stamps every
+        # tool_call at batch entry into the module-level
+        # ``_LONG_TOOL_REGISTRY`` singleton (shared with the
+        # lifespan-wired scanner in api.py — per-graph allocation is
+        # forbidden), delegates to the bare ToolNode, and ALWAYS
+        # clears in ``finally`` (pause-cancel + task-cap included)
+        # with the per-completion ``[LongToolNudge] TOOL_COMPLETED``
+        # log line and the AD-9 healthy-gated episode close.
+        _wrapped_tools_node(tools, registry=_LONG_TOOL_REGISTRY),
+    )
     graph.add_node("nudge", nudge_node)
     
     # Add edges

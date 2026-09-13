@@ -1,0 +1,172 @@
+"""T7 — per-completion duration observability tests.
+
+Pins the SC6 log contract: ONE ``[LongToolNudge] TOOL_COMPLETED``
+INFO line per tool completion (no duplicates, no leak on exception)
+carrying instance_id / tool_call_id / tool_name / duration_ms /
+threshold_seconds / threshold_crossed.
+
+Runs under the repo-standard real-langgraph evict/restore pattern —
+the wrapper delegates to the real ``ToolNode``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import sys
+
+import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
+from tests.helpers.checkpoint_prune_pg import (
+    evict_langgraph_mocks,
+    restore_langgraph_mocks,
+)
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.t = 10_000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+def lt_real(monkeypatch):
+    saved = evict_langgraph_mocks()
+    saved_lt = sys.modules.pop("daemon.services.long_tool_nudge", None)
+    try:
+        yield importlib.import_module("daemon.services.long_tool_nudge")
+    finally:
+        sys.modules.pop("daemon.services.long_tool_nudge", None)
+        if saved_lt is not None:
+            sys.modules["daemon.services.long_tool_nudge"] = saved_lt
+        restore_langgraph_mocks(saved)
+
+
+@tool
+def sample_tool(x: str) -> str:
+    """Sample tool."""
+    return f"ok:{x}"
+
+
+@tool
+def boom_tool(x: str) -> str:
+    """Tool that always raises."""
+    raise RuntimeError("boom")
+
+
+class _S(dict):
+    pass
+
+
+async def _run(lt, node, state, config):
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class S(TypedDict, total=False):
+        messages: list
+
+    g = StateGraph(S)
+    g.add_node("tools", node)
+    g.add_edge(START, "tools")
+    g.add_edge("tools", END)
+    return await g.compile().ainvoke(state, config=config)
+
+
+def _state(name="sample_tool", call_id="call-1"):
+    return {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": name,
+                        "args": {"x": "y"},
+                        "id": call_id,
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    }
+
+
+_CONFIG = {"configurable": {"thread_id": "inst-12345678"}}
+
+
+def _completed_records(caplog):
+    return [
+        r
+        for r in caplog.records
+        if "TOOL_COMPLETED" in r.getMessage()
+        and r.name == "daemon.services.long_tool_nudge"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_log_line_fields_and_marker(lt_real, caplog):
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        await _run(lt_real, node, _state(), _CONFIG)
+    records = _completed_records(caplog)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "[LongToolNudge] TOOL_COMPLETED" in message
+    assert "inst-123" in message  # 8-char truncation per watchdog convention
+    assert "call-1" in message
+    assert "sample_tool" in message
+    assert "duration_ms=" in message
+    assert "threshold_seconds=" in message
+    # threshold_crossed=False for a fast completion (900 fallback default).
+    assert "threshold_crossed=False" in message
+    # The registry cleared — no duplicate on the clear path.
+    assert await registry.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_threshold_crossed_true_for_long_completion(
+    lt_real, caplog, monkeypatch
+):
+    clock = _FakeClock()
+    monkeypatch.setattr(lt_real, "time", clock)
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    original_record = registry.record_start
+
+    async def aging_record(
+        instance_id, tool_call_id, tool_name, parent_id=None
+    ):
+        await original_record(instance_id, tool_call_id, tool_name, parent_id)
+        registry._stamps[instance_id][tool_call_id].started_at = (
+            clock.t - 1200
+        )
+
+    registry.record_start = aging_record  # type: ignore[method-assign]
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        await _run(lt_real, node, _state(), _CONFIG)
+    records = _completed_records(caplog)
+    assert len(records) == 1
+    assert "threshold_crossed=True" in records[0].getMessage()
+    assert "duration_ms=1200000" in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_no_leak_on_exception_one_line_still_emitted(
+    lt_real, caplog
+):
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real._wrapped_tools_node([boom_tool], registry)
+    # handle_tool_errors=True converts the tool's raise into an error
+    # ToolMessage (no node-level exception) — the stamp clears
+    # normally on the error path and the completion line still emits.
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        result = await _run(lt_real, node, _state(name="boom_tool"), _CONFIG)
+    tm = result["messages"][-1]
+    assert "Error" in tm.content
+    records = _completed_records(caplog)
+    assert len(records) == 1  # exactly one line — no duplicates on error
+    assert await registry.snapshot() == {}
