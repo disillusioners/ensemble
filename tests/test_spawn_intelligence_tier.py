@@ -328,9 +328,12 @@ class TestLoadConfigBootWarning:
     ):
         """(a) ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL="gpt-x"`` (NOT in
         ``allowed_models``) → ``load_config`` emits exactly ONE
-        WARNING record. The record text carries (i) the env-var name,
-        (ii) the resolved value, (iii) the allowed list. ``load_config``
-        MUST NOT raise (R-A6: WARNING, not boot-fail)."""
+        WARNING record. The record text carries (i) the
+        ``[Config]`` log-forensics prefix, (ii) the field name
+        ``spawn_intelligence_tier_high_model`` (the WARNING's
+        subject — M9 single-source change), (iii) the resolved
+        value, (iv) the allowed list. ``load_config`` MUST NOT
+        raise (R-A6: WARNING, not boot-fail)."""
         monkeypatch.setenv(_FLAG, "gpt-x")
         from daemon.config import load_config
 
@@ -342,9 +345,14 @@ class TestLoadConfigBootWarning:
         assert cfg.llm.spawn_intelligence_tier_high_model == "gpt-x"
 
         records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # M9: the WARNING now uses the field name as its subject
+        # (not the env var name) and the ``[Config]`` log-forensics
+        # prefix. Filter on the field-name substring to identify
+        # the record; the env-var-name assertion (i) below was
+        # re-framed to the field name per the M9 lockstep.
         tier_records = [
             r for r in records
-            if "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+            if "spawn_intelligence_tier_high_model" in r.getMessage()
         ]
         assert len(tier_records) == 1, (
             f"exactly ONE boot WARNING expected; got: "
@@ -352,15 +360,21 @@ class TestLoadConfigBootWarning:
         )
 
         msg = tier_records[0].getMessage()
-        # (i) env var name
-        assert "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in msg, (
-            f"WARNING must name the env var; got: {msg!r}"
+        # (i) [Config] log-forensics prefix (M9 — joins the
+        # [Config] family at daemon/config.py:2259, :2318).
+        assert "[Config]" in msg, (
+            f"WARNING must carry the [Config] log-forensics prefix; got: {msg!r}"
         )
-        # (ii) resolved value
+        # (ii) field name (M9 — subject is now the field name, not
+        # the env var name).
+        assert "spawn_intelligence_tier_high_model" in msg, (
+            f"WARNING must name the field; got: {msg!r}"
+        )
+        # (iii) resolved value
         assert "gpt-x" in msg, (
             f"WARNING must carry the resolved value; got: {msg!r}"
         )
-        # (iii) allowed list — accept either bracket-or-string repr
+        # (iv) allowed list — accept either bracket-or-string repr
         # of the parsed CSV list (``['agentic', 'coding']`` from the
         # shared ``_parse_csv_or_json_list`` helper).
         assert "agentic" in msg and "coding" in msg, (
@@ -386,7 +400,7 @@ class TestLoadConfigBootWarning:
         tier_records = [
             r for r in caplog.records
             if r.levelno >= logging.WARNING
-            and "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+            and "spawn_intelligence_tier_high_model" in r.getMessage()
         ]
         assert tier_records == [], (
             f"clean config must not emit the tier-mismatch WARNING; "
@@ -412,7 +426,7 @@ class TestLoadConfigBootWarning:
         tier_records = [
             r for r in caplog.records
             if r.levelno >= logging.WARNING
-            and "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+            and "spawn_intelligence_tier_high_model" in r.getMessage()
         ]
         assert tier_records == [], (
             f"default-in-allowlist must not warn; got: "

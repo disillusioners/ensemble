@@ -95,6 +95,23 @@ def _parse_csv_or_json_list(value: Any) -> Any:
     return value
 
 
+# M5 — single source of truth for the documented default of
+# ``llm.spawn_intelligence_tier_high_model``. Declared here (BEFORE
+# ``LLMConfig``) so the ``Field(default=...)`` at :425 can reference
+# it directly without a NameError at class-construction time.
+# Consumed by:
+#   (a) the Pydantic ``Field(default=...)`` at :425 (this module),
+#   (b) ``_resolve_intelligence_tier_high_model`` at the ~:2340
+#       zone (returns it as the empty=unset normalization target),
+#   (c) the tool layer's
+#       ``getattr(..., default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT)``
+#       fallback at ``daemon/tools/instance.py`` (Feature #1
+#       resolver block — imports from this module). The "~:2340
+#       zone" M5 cross-ref comment is retained below the second
+#       occurrence; this early declaration is the load-bearing one.
+_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT: str = "agentic"
+
+
 class LLMConfig(BaseSettings):
     """LLM configuration settings."""
 
@@ -422,7 +439,16 @@ class LLMConfig(BaseSettings):
     # every ``model_tier="high"`` call raises loud until the env is
     # re-pointed and the daemon restarted.
     spawn_intelligence_tier_high_model: str = Field(
-        default="agentic",
+        default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT,
+        # M5 — this default MUST stay in lockstep with
+        # ``_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT`` (the single
+        # source defined at daemon/config.py:~2340). The tool layer
+        # at ``daemon/tools/instance.py`` (Feature #1 resolver
+        # block) imports the same constant for its ``getattr``
+        # fallback; ``_resolve_intelligence_tier_high_model``
+        # (helper at daemon/config.py:2340-zone) returns it as the
+        # empty=unset normalization target. Do not re-declare the
+        # literal here.
         description=(
             "Boot-snapshot of the high-tier model that "
             "spawn_instance(model_tier='high') resolves to. Read once "
@@ -2337,7 +2363,21 @@ _ALLOWED_MODELS_DEFAULT: tuple[str, ...] = ("agentic", "coding")
 # element of ``_ALLOWED_MODELS_DEFAULT``). Process-lifetime config (A6 / D8) —
 # the boot-snapshot is read ONCE in ``load_config`` (no per-spawn
 # ``os.environ`` reads) and installed as ``llm.spawn_intelligence_tier_high_model``.
-_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT: str = "agentic"
+#
+# M5 — ``_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT`` is the SINGLE SOURCE of
+# truth for the documented default. The constant itself is declared at
+# module top (just before ``LLMConfig`` — so the ``Field(default=...)``
+# at :425 can reference it directly at class-construction time). This
+# block retains the cross-ref comment so future readers know the
+# canonical home is upstream of LLMConfig. Consumed by:
+#   (a) the Pydantic ``Field(default=...)`` at daemon/config.py:425,
+#   (b) ``_resolve_intelligence_tier_high_model`` below (returns it as
+#       the empty=unset normalization target),
+#   (c) the tool layer's
+#       ``getattr(..., default=_SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT)``
+#       fallback at ``daemon/tools/instance.py`` (Feature #1 resolver
+#       block). Changing the constant ripples to all three call sites
+#       automatically. Do not re-declare the literal elsewhere.
 
 
 def _resolve_intelligence_tier_high_model(env_value: str | None) -> str:
@@ -3216,8 +3256,8 @@ def load_config(config_path: str | None = None) -> Config:
         and spawn_intelligence_tier_high_model not in _parsed_allowed_for_warn
     ):
         logger.warning(
-            "spawn_intelligence: SPAWN_INTELLIGENCE_TIER_HIGH_MODEL resolves to "
-            "'%s', which is NOT in allowed_models %s; model_tier='high' spawns "
+            "[Config] spawn_intelligence_tier_high_model resolves to '%s', "
+            "which is NOT in allowed_models %s; model_tier='high' spawns "
             "will raise until the env is re-pointed.",
             spawn_intelligence_tier_high_model,
             _parsed_allowed_for_warn,

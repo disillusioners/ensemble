@@ -11,7 +11,11 @@ Moved OUT of ``daemon/tools/instance.py`` so the per-instance routing
 surface (instance lifecycle / workdir-aware wrappers / spawn-family)
 stays under the 1000-3000 line band the original co-location comment
 aimed at. After phase-3 phase shipped, ``instance.py`` had grown to
-``~4749`` lines — well past the band — and the tunable write surface is
+``~4776`` lines (refreshed L16 — stale ``~4749`` figure was off by
+27 lines from the latest phase-3 + phase-5 follow-ups; figure
+re-verified via ``wc -l daemon/tools/instance.py`` at the M5 + M8
+single-source commit) — well past the band — and the tunable write
+surface is
 self-contained: one tool, one metadata key, two validation gates. The
 move also lets the tool route through the
 ``InstanceManager.set_metadata_many`` facade instead of reaching into

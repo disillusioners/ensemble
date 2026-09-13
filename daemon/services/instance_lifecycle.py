@@ -1,4 +1,40 @@
-"""Instance lifecycle service for managing instance creation and termination."""
+"""Instance lifecycle service for managing instance creation and termination.
+
+Module size rationale (M7): this module is ``concentrated by design``.
+It owns the full spawn → restore → terminate lifecycle for an Ensemble
+instance — every DB row the lifecycle service writes goes through this
+file, the ``InstanceManager.spawn_instance`` facade lives here, and the
+``_resolve_*`` helpers (model override, intelligence tier, watcher
+re-arm) all live next to their consumer call sites to keep the
+audit-trail obvious. ~5.5k lines today is ``well past`` the soft
+1-2k band the rest of the daemon observes; the rationale is the
+breadth of state transitions, not a missing abstraction.
+
+Candidate splits (NOT taken — would re-fragment the lifecycle seam):
+
+  * ``_resolve_*`` helpers → ``daemon/services/_lifecycle_resolvers.py``
+    (would require a top-level ``from ._lifecycle_resolvers import …``
+    cycle risk — the helpers reference module-private constants
+    declared below the split point, e.g. ``_FALSY_SPELLINGS`` for
+    the watcher-re-arm resolver).
+  * ``spawn_instance`` body → ``daemon/services/_spawn_pipeline.py``
+    (would split the facade from the persistence path it directly
+    drives; a refactor here is on the table for the post-Phase-5
+    spawn-intelligence tail cleanup, not for the current hygiene
+    pass).
+  * ``restore_instance`` body → ``daemon/services/_restore_pipeline.py``
+    (would split the symmetry with ``spawn_instance``; the two paths
+    share the ``_build_llm_config`` post-config hook which is a
+    non-trivial shared helper, and pulling them apart would force
+    the shared hook to live in both files).
+
+Decision: keep concentrated; revisit after the spawn-intelligence tail
+settles (M6/M9/M10 plus Phase-6 follow-ups), at which point a
+cleaner extraction becomes possible without losing the seam-clarity
+gains that justify the current size. Track in
+``.agents/tidier/notes.md`` (the existing observation entry for
+``instance_lifecycle.py`` size).
+"""
 
 import asyncio
 import concurrent.futures
@@ -18,6 +54,7 @@ from sqlmodel import Session
 
 from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
+from ..config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 from ..registry import get_registry, resolve_recursion_limit
 from ..repositories.dependency_bus.models import (
     DependencyWatcher,
@@ -1110,7 +1147,6 @@ def _apply_post_cache_appends(
 # ``self``, no IO, no ``os.environ`` reads — caller passes pre-read values
 # (A6 boot-snapshot design). See ``decisions.md`` D2 for the 4-element return
 # matrix and ``architecture-recommendation.md`` §6.1 for the data-flow diagram.
-from ..config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT  # noqa: E402
 
 
 def _resolve_intelligence_tier(
@@ -1145,13 +1181,14 @@ def _resolve_intelligence_tier(
             to the documented default ``"agentic"``.
 
     Returns:
-        ``(resolved_model, error)`` tuple — 4-element matrix (D2):
+        ``(resolved_model, error)`` tuple — 5-element matrix (D2 + A2):
 
         | tier              | resolved ∈ allowed | result                          |
         |-------------------|--------------------|---------------------------------|
         | ``None`` / empty  | n/a                | ``(None, None)`` — no override  |
         | ``"high"``        | yes                | ``(canonical, None)`` — OK      |
         | ``"high"``        | no                 | ``(resolved, "WARN: ..." )``    |
+        | ``"high"``        | ``allowed_models`` empty | ``(configured, None)`` — pass-through (A2) |
         | any other string  | n/a                | ``(None, "ERROR: ...")``        |
 
         ``error`` is a prefix-conventional string

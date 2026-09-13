@@ -802,12 +802,12 @@ def _build_long_tool_notice(
 
     Locked 5-section structure: (a) header with child/tool/call-id/
     elapsed/threshold; (b) why-it-matters (busy-slow weak-model
-    signature, loop-breaker evasion); (c) exactly three
-    recommendations using EXISTING parent tools — explicitly NO
-    pause/resume advice (agents have no pause tools; pause is
-    operator-only); (d) rec 4 — re-spawn with high intelligence via
-    ``spawn_instance(model_tier='high')`` (Feature #1 opt-in, D4);
-    (e) advisory-only footer with the episode id.
+    signature, loop-breaker evasion); (c) recs 1-3 using EXISTING
+    parent tools — explicitly NO pause/resume advice (agents have
+    no pause tools; pause is operator-only); (d) rec 4 — re-spawn
+    with high intelligence via ``spawn_instance(model_tier='high')``
+    (Feature #1 opt-in, D4); (e) advisory-only footer with the
+    episode id.
     """
     child_id = episode_ctx.get("child_id", "") or ""
     tool_name = episode_ctx.get("tool_name", "") or ""

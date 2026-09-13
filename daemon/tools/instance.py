@@ -30,6 +30,13 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
+# M5 — single-source the documented default for the
+# ``spawn_intelligence_tier_high_model`` boot snapshot. The constant
+# lives in ``daemon.config`` (canonical home); the tool layer imports
+# it here so the literal ``"agentic"`` stays out of the tool body.
+# The Pydantic field default at daemon/config.py:425 and the doc
+# block at :~2340 both cross-reference this single source.
+from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 
 # Phase-3 ``set_instance_tunable`` was moved to
 # ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
@@ -1851,7 +1858,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 resolves it to the configured high-tier model name. ASYMMETRY:
                 this param raises ValueError if the resolved model is not in
                 allowed_models; the legacy ``model=`` param silently falls back
-                to default in the same situation.
+                to default in the same situation. If None, the spawn proceeds
+                via today's weighted-pool default (or the model= legacy
+                override). Full semantics (D2 / D12 / A5): if the resolved
+                model is not in config.llm.allowed_models, raises ValueError;
+                if both ``model_tier`` and ``model=`` are passed, ``model_tier``
+                wins with a visible ``[NOTE]`` supersede line in the return;
+                ``allowed_models`` empty is treated as unrestricted (pass-through,
+                no WARN, no ERROR) per the A2 contract.
 
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
@@ -1925,7 +1939,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 getattr(manager.config.llm, "allowed_models", None) or ()
             )
             configured_model = getattr(
-                manager.config.llm, "spawn_intelligence_tier_high_model", "agentic"
+                manager.config.llm,
+                "spawn_intelligence_tier_high_model",
+                _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT,  # single-source (M5)
             )
             resolved, err = _resolve_intelligence_tier(
                 model_tier,
