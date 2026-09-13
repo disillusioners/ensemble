@@ -11,38 +11,10 @@ the wrapper delegates to the real ``ToolNode``.
 
 from __future__ import annotations
 
-import asyncio
-import importlib
-import sys
-
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
-from tests.helpers.checkpoint_prune_pg import (
-    evict_langgraph_mocks,
-    restore_langgraph_mocks,
-)
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 10_000.0
-
-    def monotonic(self) -> float:
-        return self.t
-
-
-@pytest.fixture
-def lt_real(monkeypatch):
-    saved = evict_langgraph_mocks()
-    saved_lt = sys.modules.pop("daemon.services.long_tool_nudge", None)
-    try:
-        yield importlib.import_module("daemon.services.long_tool_nudge")
-    finally:
-        sys.modules.pop("daemon.services.long_tool_nudge", None)
-        if saved_lt is not None:
-            sys.modules["daemon.services.long_tool_nudge"] = saved_lt
-        restore_langgraph_mocks(saved)
+from tests.helpers.long_tool_nudge import FakeClock, lt_real
 
 
 @tool
@@ -131,7 +103,7 @@ async def test_log_line_fields_and_marker(lt_real, caplog):
 async def test_threshold_crossed_true_for_long_completion(
     lt_real, caplog, monkeypatch
 ):
-    clock = _FakeClock()
+    clock = FakeClock()
     monkeypatch.setattr(lt_real, "time", clock)
     registry = lt_real.LongToolNudgeRegistry()
     node = lt_real.wrapped_tools_node([sample_tool], registry)
@@ -166,7 +138,7 @@ async def test_threshold_crossed_false_at_exact_boundary(
     against an ``>=`` regression that would re-arm the close-gate and
     re-open the (parent, child) episode on the boundary.
     """
-    clock = _FakeClock()
+    clock = FakeClock()
     monkeypatch.setattr(lt_real, "time", clock)
     registry = lt_real.LongToolNudgeRegistry()
     node = lt_real.wrapped_tools_node([sample_tool], registry)

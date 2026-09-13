@@ -7,7 +7,6 @@ for the attestation/queue-jump pin).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,7 +15,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-import daemon.services.long_tool_nudge as lt
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.message_queue.models import MessageQueue
@@ -28,7 +26,6 @@ from daemon.services.long_tool_nudge import (
     LongToolNudgeRegistry,
     _build_long_tool_notice,
     _format_age_human,
-    run_long_tool_nudge_loop,
     LONG_TOOL_REGISTRY,
 )
 from daemon.services.waiting_children_watchdog import _build_wedge_notice
@@ -79,17 +76,10 @@ def _make_instance_row(engine, *, instance_id, status, parent_id=None):
 
 
 def _ctx(**overrides) -> LongToolNudgeEpisodeCtx:
-    fields = dict(
-        child_id="child-1",
-        parent_id="parent-1",
-        tool_name="bash",
-        tool_call_id="call-1",
-        elapsed_seconds=950.0,
-        threshold_seconds=900,
-        episode_started_at=100.0,
-    )
-    fields.update(overrides)
-    return LongToolNudgeEpisodeCtx(**fields)
+    """Thin alias over the shared helper (M2 consolidation)."""
+    from tests.helpers.long_tool_nudge import make_episode_ctx
+
+    return make_episode_ctx(**overrides)
 
 
 class _ParentStub:
@@ -106,19 +96,21 @@ def _scanner(
     repo=None,
     threshold_metadata=None,
 ) -> LongToolNudgeScanner:
+    """Thin wrapper over ``make_scanner`` (M2 consolidation) that
+    routes ``parent_status`` through the local ``_ParentStub`` so the
+    remaining call sites in this file keep their existing kwargs.
+    """
+    from tests.helpers.long_tool_nudge import make_scanner
+
     if repo is None:
         repo = MagicMock()
         repo.get_metadata_value = MagicMock(return_value=threshold_metadata)
         repo.get = MagicMock(return_value=_ParentStub(parent_status))
-    if manager is None:
-        manager = AsyncMock()
-        manager.enqueue_message = AsyncMock()
-    return LongToolNudgeScanner(
-        repo,
+    return make_scanner(
+        registry,
         manager=manager,
-        registry=registry,
-        enabled=True,
-        handoff_stub_enabled=False,
+        repo=repo,
+        threshold_metadata=threshold_metadata,
     )
 
 
@@ -575,29 +567,18 @@ class TestU11NoticeStructure:
 
 
 # ─── U12 / U13: loop entry contracts ─────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_u12_loop_returns_immediately_when_disabled():
-    scanner = AsyncMock()
-    scanner.enabled = False
-    result = await run_long_tool_nudge_loop(scanner, interval_seconds=60)
-    assert result is None
-    scanner.run_once.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_u13_loop_cancellation_propagates(monkeypatch):
-    scanner = AsyncMock()
-    scanner.enabled = True
-    scanner.run_once = AsyncMock(side_effect=asyncio.CancelledError())
-
-    async def _fail_sleep(_):
-        raise AssertionError("must not reach sleep")
-
-    monkeypatch.setattr(lt.asyncio, "sleep", _fail_sleep)
-    with pytest.raises(asyncio.CancelledError):
-        await run_long_tool_nudge_loop(scanner, interval_seconds=60)
+# M2 — deleted. Both tests are strictly weaker than the loop.py
+# equivalents (tests/unit/services/test_long_tool_nudge_loop.py):
+#   * test_disabled_loop_returns_immediately monkeypatches
+#     ``lt.asyncio.sleep`` to assert sleep is NOT called when
+#     disabled. The root test_u12 only checked that ``run_once``
+#     wasn't awaited.
+#   * test_cancelled_error_from_run_once_propagates monkeypatches
+#     ``lt.asyncio.sleep`` to assert sleep is NOT called when
+#     ``run_once`` cancels. The root test_u13 didn't pin the
+#     post-cancel behavior — only that CancelledError propagates.
+# Loop.py is the single source for both shapes; the family delta
+# in the gate report covers the deletion.
 
 
 # ─── U17: close_episode drops count, idempotent ──────────────────────────────
@@ -673,6 +654,104 @@ class TestW2PostEnqueueTerminalParentTocTou:
         assert not any(
             "post-enqueue terminal-parent race" in r.message
             for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_enqueue_get_parent_raises_post_status_none(
+        self, registry
+    ):
+        """M4 — ``_get_parent`` already swallows its own exceptions
+        (defensive contract) and returns ``None`` on any raise. The
+        post-enqueue terminal-parent TOCTOU re-check consumes that
+        ``None`` as ``post_status = None`` (no attribute lookup, no
+        ``TERMINAL_PARENT_STATUSES`` membership check, no WARN).
+        The dead try/except that used to wrap this in the call site
+        was unreachable; this test pins the post-move behavior."""
+        scanner = _scanner(registry)
+        parent_running = _ParentStub("running")
+        # Pre-read succeeds (running), post-read raises. ``_get_parent``
+        # catches and returns ``None``; ``post_status`` becomes
+        # ``None``; no TOCTOU WARN is logged; nudge still durable.
+        scanner._repo.get = MagicMock(
+            side_effect=[parent_running, RuntimeError("db blip")]
+        )
+        result = await scanner.deliver_long_tool_nudge(
+            "parent-1", "child-1", _ctx()
+        )
+        assert result is True
+        scanner._manager.enqueue_message.assert_awaited_once()
+
+
+class TestParentNotFoundLogOncePerEpisode:
+    """BEHAVIORAL — log-once-per-episode for the
+    ``[LongToolNudge] parent ... not found — nudge skipped`` WARN.
+
+    A long-tool episode whose parent row vanished mid-tool must not
+    re-WARN every 60s tick for the entire wedge duration. The
+    scanner's ``_missing_parent_warned`` set keys on
+    ``(parent_id, child_id)`` and clears on ``close_episode`` so a
+    fresh tool_call_id crossing after a HEALTHY close gets a single
+    fresh WARN again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warn_emitted_once_across_ticks(self, registry, caplog):
+        scanner = _scanner(registry)
+        # _get_parent returns None on every call (parent row absent).
+        scanner._repo.get = MagicMock(return_value=None)
+        with caplog.at_level(
+            "WARNING", logger="daemon.services.long_tool_nudge"
+        ):
+            first = await scanner.deliver_long_tool_nudge(
+                "parent-gone", "child-1", _ctx()
+            )
+            second = await scanner.deliver_long_tool_nudge(
+                "parent-gone", "child-1", _ctx()
+            )
+        assert first is False
+        assert second is False
+        warns = [
+            r for r in caplog.records
+            if "parent ... not found" in r.getMessage()
+            or "not found — nudge skipped" in r.getMessage()
+        ]
+        # ONE warn across both calls (same episode key).
+        assert len(warns) == 1, (
+            f"BEHAVIORAL: expected exactly one missing-parent WARN "
+            f"per episode; got {len(warns)}: "
+            f"{[r.getMessage() for r in warns]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_warn_resets_after_close_episode(
+        self, registry, caplog
+    ):
+        """Closing the episode via ``close_episode`` clears the
+        dedup entry so a fresh ``(parent_id, child_id)`` crossing
+        after a HEALTHY close can surface its missing-parent WARN
+        again on the first tick of the next episode."""
+        scanner = _scanner(registry)
+        scanner._repo.get = MagicMock(return_value=None)
+        with caplog.at_level(
+            "WARNING", logger="daemon.services.long_tool_nudge"
+        ):
+            await scanner.deliver_long_tool_nudge(
+                "parent-gone", "child-1",
+                _ctx(tool_call_id="call-1"),
+            )
+            scanner.close_episode("parent-gone", "child-1")
+            await scanner.deliver_long_tool_nudge(
+                "parent-gone", "child-1",
+                _ctx(tool_call_id="call-2"),
+            )
+        warns = [
+            r for r in caplog.records
+            if "not found — nudge skipped" in r.getMessage()
+        ]
+        assert len(warns) == 2, (
+            f"close_episode must reset the missing-parent dedup so a "
+            f"fresh tool_call_id crossing can WARN again; got "
+            f"{len(warns)}: {[r.getMessage() for r in warns]}"
         )
 
 

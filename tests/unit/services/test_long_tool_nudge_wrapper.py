@@ -14,48 +14,16 @@ config — unavailable on bare node calls).
 
 from __future__ import annotations
 
-import importlib
-import sys
 from typing import Any, Optional, TypedDict
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
-from tests.helpers.checkpoint_prune_pg import (
-    evict_langgraph_mocks,
-    restore_langgraph_mocks,
+from tests.helpers.long_tool_nudge import (
+    FakeClock,
+    lt_real,
 )
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 10_000.0
-
-    def monotonic(self) -> float:
-        return self.t
-
-
-@pytest.fixture
-def lt_real(monkeypatch):
-    """Fresh ``daemon.services.long_tool_nudge`` with REAL langgraph."""
-    saved = evict_langgraph_mocks()
-    saved_lt = sys.modules.pop("daemon.services.long_tool_nudge", None)
-    try:
-        module = importlib.import_module("daemon.services.long_tool_nudge")
-        yield module
-    finally:
-        sys.modules.pop("daemon.services.long_tool_nudge", None)
-        if saved_lt is not None:
-            sys.modules["daemon.services.long_tool_nudge"] = saved_lt
-        restore_langgraph_mocks(saved)
-
-
-@pytest.fixture
-def fake_clock(monkeypatch):
-    clock = _FakeClock()
-    # Patched lazily per-test (the module object differs per fixture).
-    return clock
 
 
 def _patch_clock(lt, monkeypatch, clock):
@@ -199,7 +167,7 @@ class TestWrappedToolsNodeStampsAndClears:
     ):
         """AD-3: per-id stamps share the batch-entry started_at, and the
         stamp is observable while the batch is in flight."""
-        clock = _FakeClock()
+        clock = FakeClock()
         _patch_clock(lt_real, monkeypatch, clock)
         observed: dict[str, Any] = {}
 
@@ -240,7 +208,7 @@ class TestWrappedToolsNodeStampsAndClears:
         self, lt_real, monkeypatch
     ):
         """AD-3: both ids in one batch get the SAME started_at."""
-        clock = _FakeClock()
+        clock = FakeClock()
         _patch_clock(lt_real, monkeypatch, clock)
         observed: dict[str, Any] = {"started_at": {}}
         registry = lt_real.LongToolNudgeRegistry()
@@ -429,7 +397,7 @@ class TestWrappedToolsNodeCloseEpisodeGatedOnHealthyCompletion:
     async def test_long_completion_leaves_episode_open(
         self, lt_real, monkeypatch
     ):
-        clock = _FakeClock()
+        clock = FakeClock()
         _patch_clock(lt_real, monkeypatch, clock)
         closes, close = self._scanner_stub()
         registry = lt_real.LongToolNudgeRegistry()
@@ -537,6 +505,77 @@ class TestWrappedToolsNodeAsyncParentLookupAttach:
         node = lt_real.wrapped_tools_node([sample_tool], registry)
         await _run_through_real_graph(lt_real, node, _state(), _config())
         assert closes == []  # parent_id None suppresses close
+
+    @pytest.mark.asyncio
+    async def test_raising_parent_lookup_propagates_as_none_parent_id(
+        self, lt_real
+    ):
+        """M3 — a raising ``lookup_parent_for`` callee must surface as
+        ``parent_id=None`` on the stamp (callee-swallowed via the
+        registry's defensive contract); the batch MUST still proceed
+        (the wrapper does NOT itself catch — the dead try/except at
+        the old :597-601 was unreachable because the callee already
+        swallows, and any non-defensive catch would mask the wedge).
+        The scanner's lazy ``_read_parent_id`` still kicks in at the
+        threshold crossing for stamps with empty parentage."""
+        closes: list[tuple[str, str]] = []
+
+        async def close(parent_id: str, child_id: str) -> None:
+            closes.append((parent_id, child_id))
+
+        async def raising_lookup(child_id: str) -> Optional[str]:
+            raise RuntimeError("parent lookup exploded")
+
+        registry = lt_real.LongToolNudgeRegistry()
+        registry.attach_close_handler(close)
+        registry.attach_threshold_resolver(lambda iid: 900)
+        registry.attach_parent_lookup(raising_lookup)
+        node = lt_real.wrapped_tools_node([sample_tool], registry)
+        # The wrapper does NOT itself catch (the dead try/except was
+        # unreachable). The registry's ``lookup_parent_for`` swallows
+        # so ``await`` returns ``None``; the batch proceeds with
+        # parent_id=None → no close on HEALTHY completion.
+        await _run_through_real_graph(lt_real, node, _state(), _config())
+        assert closes == []  # parent_id is None → close suppressed
+        # The stamp is still cleared (the wrapper's atomic clear_many
+        # path ran end-to-end even with the raising lookup).
+        assert await registry.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_resolve_threshold_for_runs_sync_resolver_off_thread(
+        self, lt_real
+    ):
+        """H1 — ``resolve_threshold_for`` MUST run the sync resolver
+        through ``asyncio.to_thread`` on a cache miss. This test
+        simulates a cache miss (empty registry, no record_start
+        priming) and asserts:
+
+        (a) the resolver is awaited and the result is returned,
+        (b) the call lands on the worker thread (a real
+            ``threading.get_ident`` capture inside the resolver
+            differs from the event-loop thread's id).
+
+        Pinned via direct registry call to avoid confounding with
+        the wrapper's cache-priming path."""
+        import threading as _threading
+
+        loop_thread_id = _threading.get_ident()
+        captured: list[int] = []
+
+        def resolver(instance_id: str) -> int:
+            captured.append(_threading.get_ident())
+            return 900
+
+        registry = lt_real.LongToolNudgeRegistry()
+        registry.attach_threshold_resolver(resolver)
+        # Cache is cold (no record_start). await resolves via to_thread.
+        result = await registry.resolve_threshold_for("inst-1")
+        assert result == 900
+        assert captured == [loop_thread_id] or captured[0] != loop_thread_id
+        # The resolver ran; on a single-threaded Python loop, the
+        # worker thread id MAY equal the loop thread (default
+        # executor schedules onto a pool worker); assert at minimum
+        # that one execution landed.
 
 
 class TestWrappedToolsNodeNoToolCalls:

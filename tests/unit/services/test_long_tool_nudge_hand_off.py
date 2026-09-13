@@ -13,33 +13,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import daemon.services.long_tool_nudge as lt
 from daemon.services.long_tool_nudge import (
     LONG_TOOL_NUDGE_SOURCE,
     LongToolNudgeEpisodeCtx,
     LongToolNudgeScanner,
     deliver_long_tool_nudge,
 )
+from tests.helpers.long_tool_nudge import make_episode_ctx
 
 
 def _ctx(**overrides) -> LongToolNudgeEpisodeCtx:
-    fields = dict(
-        child_id="child-1",
-        parent_id="parent-1",
-        tool_name="bash",
-        tool_call_id="call-abc123",
-        elapsed_seconds=950.5,
-        threshold_seconds=900,
-        episode_started_at=100.0,
-    )
-    fields.update(overrides)
-    return LongToolNudgeEpisodeCtx(**fields)
+    """M2 — thin alias over the shared helper."""
+    return make_episode_ctx(**overrides)
 
 
 @pytest.mark.asyncio
 async def test_module_stub_logs_stub_fire_and_returns_true(caplog):
     with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
-        result = await deliver_long_tool_nudge("parent-1", "child-1", _ctx())
+        result = await deliver_long_tool_nudge(
+            "parent-1", "child-1", _ctx(tool_call_id="call-abc123")
+        )
     assert result is True
     records = [r for r in caplog.records if "STUB_FIRE" in r.message]
     assert len(records) == 1
@@ -115,16 +108,39 @@ async def test_handoff_fn_exception_returns_false_not_raise():
 
 
 @pytest.mark.asyncio
-async def test_no_handoff_and_no_stub_returns_false():
+async def test_no_handoff_and_no_stub_exercises_phase2_branch():
+    """LOWS — this test previously passed via the WRONG path: with
+    ``instance_repository=None`` and ``manager=None``, the
+    ``_get_parent`` callee would AttributeError on
+    ``None.get(parent_id)``, swallow, return ``None``, hit the
+    "parent not found" WARN, return ``False`` — and the test would
+    report success without ever entering the phase-2 real-delivery
+    branch it claims to exercise.
+
+    Give it a valid MagicMock repo + AsyncMock manager so the test
+    actually walks the phase-2 branch: pre-read returns a running
+    parent → enqueue is awaited → nudge durable → ``True``. The
+    renamed test name matches the exercised surface.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo = MagicMock()
+    repo.get_metadata_value = MagicMock(return_value=None)
+    parent = MagicMock()
+    parent.status = "running"
+    repo.get = MagicMock(return_value=parent)
+    manager = AsyncMock()
+    manager.enqueue_message = AsyncMock()
+
     scanner = LongToolNudgeScanner(
-        instance_repository=None,
-        manager=None,
+        instance_repository=repo,
+        manager=manager,
         handoff_stub_enabled=False,
         handoff_fn=None,
     )
-    assert (
-        await scanner.deliver_long_tool_nudge("p", "c", _ctx())
-    ) is False
+    result = await scanner.deliver_long_tool_nudge("p", "c", _ctx())
+    assert result is True
+    manager.enqueue_message.assert_awaited_once()
 
 
 def test_source_constant_canonical():

@@ -19,19 +19,22 @@ from daemon.services.long_tool_nudge import (
     LongToolNudgeScanner,
     LongToolNudgeEpisodeCtx,
 )
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 10_000.0
-
-    def monotonic(self) -> float:
-        return self.t
+from tests.helpers.long_tool_nudge import FakeClock
 
 
 @pytest.fixture
-def fake_clock(monkeypatch) -> _FakeClock:
-    clock = _FakeClock()
+def fake_clock(monkeypatch) -> FakeClock:
+    """M2 — local fixture (not the helper-shared one) so the patch
+    target is the ``lt`` reference the test actually uses. The
+    helper uses the dotted-path ``monkeypatch.setattr`` which
+    resolves via ``sys.modules``; if the ``lt_real`` fixture in
+    the wrapper/observability suites swapped the module
+    reference mid-suite, the dotted path lands on a different
+    module object than the test's bound class (causing the stamp
+    time-monotonic calls to see the real clock — see the belt.py
+    failure mode). Patching ``lt.time`` directly mirrors the
+    pre-consolidation behavior."""
+    clock = FakeClock()
     monkeypatch.setattr(lt, "time", clock)
     return clock
 
@@ -69,13 +72,17 @@ async def _stamp(
     registry: LongToolNudgeRegistry,
     child: str,
     call_id: str,
-    clock: _FakeClock,
+    clock,
     age: float,
     parent_id: str = "parent-1",
 ) -> None:
-    await registry.record_start(child, call_id, "bash", parent_id)
-    snap = await registry.snapshot()
-    snap[child][call_id].started_at = clock.t - age
+    """M2 — thin alias over ``stamp_started_at_ago``. Kept for the
+    pre-existing call-site verbosity (the helper omits the
+    ``parent_id`` kwarg from the canonical signature; this file's
+    callers pass it positionally)."""
+    from tests.helpers.long_tool_nudge import stamp_started_at_ago as _s
+
+    await _s(registry, child, call_id, clock, age, parent_id=parent_id)
 
 
 @pytest.mark.asyncio

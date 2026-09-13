@@ -17,24 +17,30 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import daemon.services.long_tool_nudge as lt
 from daemon.services.long_tool_nudge import (
     LongToolNudgeRegistry,
     LongToolNudgeScanner,
 )
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 10_000.0
-
-    def monotonic(self) -> float:
-        return self.t
+import daemon.services.long_tool_nudge as lt
+from tests.helpers.long_tool_nudge import (
+    FakeClock,
+    stamp_started_at_ago,
+)
 
 
 @pytest.fixture
-def fake_clock(monkeypatch) -> _FakeClock:
-    clock = _FakeClock()
+def fake_clock(monkeypatch) -> FakeClock:
+    """M2 — local fixture (not the helper-shared one) so the patch
+    target is the ``lt`` reference the test actually uses. The
+    helper uses the dotted-path ``monkeypatch.setattr`` which
+    resolves via ``sys.modules``; if the ``lt_real`` fixture in
+    the wrapper/observability suites swapped the module
+    reference mid-suite, the dotted path lands on a different
+    module object than the test's bound class (causing the stamp
+    time-monotonic calls to see the real clock — see the belt.py
+    failure mode). Patching ``lt.time`` directly mirrors the
+    pre-consolidation behavior."""
+    clock = FakeClock()
     monkeypatch.setattr(lt, "time", clock)
     return clock
 
@@ -50,8 +56,8 @@ def _repo(parent_status: str = "paused"):
 
 
 async def _stamp(registry, child, call_id, clock, age):
-    await registry.record_start(child, call_id, "bash", "parent-1")
-    registry._stamps[child][call_id].started_at = clock.t - age
+    """M2 — thin alias over ``stamp_started_at_ago``."""
+    await stamp_started_at_ago(registry, child, call_id, clock, age)
 
 
 class TestFiredEpisodesOnlySetOnSuccessfulFire:

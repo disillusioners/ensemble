@@ -1360,7 +1360,7 @@ async def lifespan(app: FastAPI):
             pass
         except Exception as e:
             logger.warning(
-                f"Long-tool-nudge shutdown error: {e}"
+                f"Long-tool-nudge scanner shutdown error: {e}"
             )
     app.state.long_tool_nudge_task = None
 

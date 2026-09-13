@@ -15,30 +15,38 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import daemon.services.long_tool_nudge as lt
 from daemon.services.long_tool_nudge import (
     STALE_STAMP_TTL_SECONDS,
     LongToolNudgeRegistry,
     LongToolNudgeScanner,
 )
-
-
-class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 10_000.0
-
-    def monotonic(self) -> float:
-        return self.t
+import daemon.services.long_tool_nudge as lt
+from tests.helpers.long_tool_nudge import (
+    FakeClock,
+    stamp_started_at_ago,
+)
 
 
 @pytest.fixture
-def fake_clock(monkeypatch) -> _FakeClock:
-    clock = _FakeClock()
+def fake_clock(monkeypatch) -> FakeClock:
+    """M2 — local fixture rather than the helper-shared one. The
+    helper uses ``monkeypatch.setattr("daemon.services.long_tool_nudge.time", ...)``
+    which resolves via ``sys.modules`` and is contaminated by the
+    ``lt_real`` fixture's module swap (wrapper/observability suites
+    swap the module; belt runs after). Patching the ``lt`` reference
+    directly keeps the fixture stable across the suite's fixture
+    ordering."""
+    clock = FakeClock()
     monkeypatch.setattr(lt, "time", clock)
     return clock
 
 
 def _scanner(registry: LongToolNudgeRegistry, fired: bool = True):
+    """M2 — thin local wrapper; the canonical mock-scanner surface
+    lives in ``tests.helpers.long_tool_nudge.make_scanner``. This
+    file keeps its own shape only because it threads an explicit
+    ``handoff_fn`` through (the canonical helper supports it via
+    kwarg but the call-site names the kwarg explicitly)."""
     repo = MagicMock()
     repo.get_metadata_value = MagicMock(return_value=None)
     parent = MagicMock()
@@ -55,8 +63,8 @@ def _scanner(registry: LongToolNudgeRegistry, fired: bool = True):
 
 
 async def _stamp(registry, child, call_id, clock, age):
-    await registry.record_start(child, call_id, "bash", "parent-1")
-    registry._stamps[child][call_id].started_at = clock.t - age
+    """M2 — thin alias over ``stamp_started_at_ago``."""
+    await stamp_started_at_ago(registry, child, call_id, clock, age)
 
 
 class TestTickStatsShape:

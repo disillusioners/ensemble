@@ -14,6 +14,7 @@ import pytest
 
 from daemon.services.long_tool_nudge import (
     HARD_MAX_THRESHOLD_SECONDS,
+    MAX_HARD_MAX_THRESHOLD_SECONDS,
     MIN_THRESHOLD_SECONDS,
     LongToolNudgeScanner,
     LONG_TOOL_REGISTRY,
@@ -63,19 +64,19 @@ class TestThresholdResolution:
         assert scanner.resolve_threshold("child-1") == 900
 
     def test_default_below_one_rejected_by_ctor(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must be >= 1"):
             _scanner(default_threshold_seconds=0)
 
     def test_hard_max_above_24h_rejected_by_ctor(self):
-        with pytest.raises(ValueError):
-            _scanner(hard_max_threshold_seconds=86401)
+        with pytest.raises(ValueError, match="86400"):
+            _scanner(hard_max_threshold_seconds=MAX_HARD_MAX_THRESHOLD_SECONDS + 1)
 
     def test_default_above_hard_max_rejected_by_ctor(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must be <="):
             _scanner(default_threshold_seconds=2000)
 
     def test_interval_zero_rejected_by_ctor(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must be > 0"):
             _scanner(interval_seconds=0)
 
 
