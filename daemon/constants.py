@@ -271,6 +271,16 @@ TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     "failed",
 })
 
+# Alive-instance status literal — companion to ``TERMINAL_INSTANCE_STATUSES``
+# above. Used by the long-tool-nudge parent-status gate (``deliver_long_tool_nudge``
+# in ``daemon/services/long_tool_nudge.py``) and any other caller that needs
+# to branch on the PAUSED state without depending on the ``InstanceStatus``
+# enum (which would create a ``daemon.constants → daemon.repositories``
+# cycle). Mirrors ``InstanceStatus.PAUSED.value`` exactly. Adding a new
+# "pause-equivalent" status means adding the literal here AND updating the
+# ``InstanceStatus`` enum in the same change.
+INSTANCE_STATUS_PAUSED: str = "paused"
+
 # Alive instance statuses — companion to ``TERMINAL_INSTANCE_STATUSES``
 # above. The five instance statuses that gate liveness checks across the
 # reconciler/drift-cancel code path:

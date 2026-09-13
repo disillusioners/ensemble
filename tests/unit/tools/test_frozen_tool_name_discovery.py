@@ -242,6 +242,41 @@ def test_known_tool_names_matches_source_exactly_no_drift() -> None:
     )
 
 
+def test_instance_category_scans_both_instance_and_tunables_modules() -> None:
+    """Drift pin: ``CATEGORY_MODULES["instance"]`` must scan BOTH
+    ``daemon.tools.instance`` AND ``daemon.tools.tunables``.
+
+    When a ``@tool``/``@register_tool_category("instance")``-decorated
+    function moves OUT of ``daemon/tools/instance.py`` (commit ``ac607c31``
+    moved ``set_instance_tunable`` into ``daemon/tools/tunables.py``), the
+    AST scanner in ``_scan_category_module_sources()`` only walks modules
+    listed in ``CATEGORY_MODULES``. If the new home module is NOT added to
+    the map, the tool disappears from source-discovered names while
+    ``KNOWN_TOOL_NAMES`` (statically maintained) still lists it, and
+    ``test_known_tool_names_matches_source_exactly_no_drift`` fails with
+    ``only_in_static=[...]``.
+
+    This pin fails LOUDLY the moment a future module move drops one of the
+    two modules from the category map.
+    """
+    instance_value = CATEGORY_MODULES["instance"]
+    if isinstance(instance_value, list):
+        modules = set(instance_value)
+    else:
+        modules = {instance_value}
+
+    missing = {"daemon.tools.instance", "daemon.tools.tunables"} - modules
+    assert not missing, (
+        "CATEGORY_MODULES['instance'] is missing scanned module(s) "
+        f"{sorted(missing)} — @tool/@register_tool_category('instance')-"
+        "decorated functions in those modules will NOT be AST-discovered, "
+        "creating drift between KNOWN_TOOL_NAMES and the source scan "
+        "(see test_known_tool_names_matches_source_exactly_no_drift). "
+        "When a tool moves out of instance.py into a new module, update "
+        "CATEGORY_MODULES['instance'] to include the new home."
+    )
+
+
 def test_source_only_raises_in_frozen_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """``discover_source_only_tool_names()`` must fail loudly with
     ``RuntimeError`` when zero source files are readable — frozen-binary

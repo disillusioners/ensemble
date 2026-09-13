@@ -2,6 +2,25 @@
 
 This module contains the app factory, lifespan management, middleware,
 and global error handlers. All API endpoints are in daemon/routers/.
+
+M10 — module-band rationale (2026-09-13): this file lives in the
+~1000-3000-line band by design. It carries (a) the FastAPI app
+factory ``create_app`` (the lifespan wiring + middleware
+registration lives here), (b) the ``lifespan`` async-context
+manager that boots the per-instance watchdog, the long-tool-call-
+nudge scanner, the dead-letter service, the job-queue reconcile,
+and the per-instance lazy-import graph cache (each a single, large
+``try / except`` block keyed on construction-time failure), and
+(c) global error handlers (``HTTPException`` shim, request-validation
+handler, the startup-shutdown banner). Co-locating app factory +
+lifespan wiring + middleware + error handlers is the project-house
+pattern (mirror ``daemon/services/long_tool_nudge.py`` module-
+band rationale) — the alternative (splitting lifespan across
+``daemon/api_lifespan.py``) would force every router to import two
+modules instead of one and would scatter the related
+construction-failure recovery decisions. The routers themselves
+live under ``daemon/routers/``; this module owns the wiring, not
+the routes.
 """
 
 import warnings
@@ -716,8 +735,13 @@ async def lifespan(app: FastAPI):
         WaitingChildrenWatchdog,
         run_waiting_children_watchdog_loop,
     )
+    # B-N4 pin: construct the repo ONCE — reused by BOTH the
+    # watchdog below and the long-tool-nudge scanner block that
+    # follows (two engine-holding repos on the same engine would
+    # silently double the connection pool).
+    instance_repo = SQLModelInstanceRepository(engine=manager.engine)
     try:
-        watchdog_instance_repo = SQLModelInstanceRepository(engine=manager.engine)
+        watchdog_instance_repo = instance_repo
         waiting_children_watchdog = WaitingChildrenWatchdog(
             instance_repository=watchdog_instance_repo,
             manager=manager,
@@ -757,6 +781,73 @@ async def lifespan(app: FastAPI):
         else:
             app.state.waiting_children_watchdog_task = None
             logger.info("Waiting-children watchdog disabled by config")
+
+    # ── Long-tool-call nudge scanner (feature: long-tool-call-nudge) ──
+    # Mirrors the watchdog block above (AD-20 / AM-11). The wrapper in
+    # daemon/graph.py and this scanner MUST share the module-level
+    # ``LONG_TOOL_REGISTRY`` singleton — importing it explicitly here
+    # (a per-graph or per-ctor allocation silently no-ops the whole
+    # feature; pinned by the T8 identity smoke test).
+    from daemon.services.long_tool_nudge import (
+        LONG_TOOL_REGISTRY,
+        LongToolNudgeScanner,
+        run_long_tool_nudge_loop,
+    )
+    try:
+        long_tool_nudge_scanner = LongToolNudgeScanner(
+            instance_repo,
+            manager,
+            registry=LONG_TOOL_REGISTRY,
+            # AD-7 phase-2 flip: production uses the real
+            # enqueue_message delivery body (phase 1 shipped the
+            # STUB_FIRE stub behind this flag).
+            handoff_stub_enabled=False,
+            enabled=config.long_tool_nudge.enabled,
+            interval_seconds=config.long_tool_nudge.interval_seconds,
+            default_threshold_seconds=(
+                config.long_tool_nudge.default_threshold_seconds
+            ),
+        )
+    except Exception as long_tool_nudge_boot_exc:
+        app.state.long_tool_nudge_task = None
+        logger.error(
+            f"Long-tool-nudge scanner DISABLED — construction failed: "
+            f"{long_tool_nudge_boot_exc}",
+            exc_info=True,
+        )
+    else:
+        # AD-42 Option (ii): the wrapper's ``finally`` reaches the
+        # episode close through the registry it already holds; the
+        # threshold resolver + parent lookup ride the same attach so
+        # the wrapper resolves thresholds/parentage identically to
+        # the scanner.
+        LONG_TOOL_REGISTRY.attach_close_handler(
+            long_tool_nudge_scanner.close_episode
+        )
+        LONG_TOOL_REGISTRY.attach_threshold_resolver(
+            long_tool_nudge_scanner.resolve_threshold
+        )
+        LONG_TOOL_REGISTRY.attach_parent_lookup(
+            long_tool_nudge_scanner.read_parent_id
+        )
+        if long_tool_nudge_scanner.enabled:
+            long_tool_nudge_task = asyncio.create_task(
+                run_long_tool_nudge_loop(
+                    long_tool_nudge_scanner,
+                    interval_seconds=long_tool_nudge_scanner.interval_seconds,
+                ),
+                name="long-tool-nudge",
+            )
+            app.state.long_tool_nudge_task = long_tool_nudge_task
+            logger.info(
+                f"Long-tool-nudge scanner started: "
+                f"interval={long_tool_nudge_scanner.interval_seconds}s, "
+                f"default_threshold="
+                f"{long_tool_nudge_scanner.default_threshold_seconds}s"
+            )
+        else:
+            app.state.long_tool_nudge_task = None
+            logger.info("Long-tool-nudge scanner disabled by config")
 
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
@@ -1254,6 +1345,24 @@ async def lifespan(app: FastAPI):
                 f"Waiting-children watchdog shutdown error: {e}"
             )
     app.state.waiting_children_watchdog_task = None
+
+    # Stop the long-tool-nudge scanner (mirrors the watchdog branch
+    # above; the ``getattr`` guard survives partial-startup failures
+    # where the task was never created).
+    long_tool_nudge_task = getattr(
+        app.state, "long_tool_nudge_task", None
+    )
+    if long_tool_nudge_task is not None and not long_tool_nudge_task.done():
+        long_tool_nudge_task.cancel()
+        try:
+            await long_tool_nudge_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                f"Long-tool-nudge scanner shutdown error: {e}"
+            )
+    app.state.long_tool_nudge_task = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the

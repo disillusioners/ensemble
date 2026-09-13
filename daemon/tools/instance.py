@@ -1,12 +1,20 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: 2719 lines — sits in the 1000-3000 band because routing
-logic (``_route_send_message``, ``_make_workdir_aware``,
-``_make_instance_id_aware``) and the tool-factory
-(``create_instance_tools`` + its per-tool wrappers) are co-located here
-for diff-review locality. A structural split into
-``daemon/tools/instance_routing.py`` + ``daemon/tools/instance_factory.py``
-is a ticketed follow-up; not done here.
+Module size: ~4630 lines (2026-09-13 post-phase-3-tunables-move).
+Originally aimed for the 1000-3000 line band; post-move we are ~1600
+lines over the band. Routing logic (``_route_send_message``,
+``_make_workdir_aware``, ``_make_instance_id_aware``) and the tool
+factory (``create_instance_tools`` + its per-tool wrappers) remain
+co-located here for diff-review locality. The phase-3
+``set_instance_tunable`` parent tool was extracted to
+``daemon/tools/tunables.py`` (2026-09-13, M6 + size) — the tool's
+metadata-write path is self-contained (one tool, one metadata key,
+two validation gates) and the move also let the write route through
+``manager.set_metadata_many`` instead of reaching into
+``manager._instance_repository`` directly (D14 violation). A deeper
+structural split into ``daemon/tools/instance_routing.py`` +
+``daemon/tools/instance_factory.py`` remains a ticketed follow-up;
+not done here.
 """
 
 import asyncio
@@ -17,10 +25,19 @@ from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from langchain_core.tools import tool, BaseTool
+
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
+
+# Phase-3 ``set_instance_tunable`` was moved to
+# ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
+# ``LONG_TOOL_CALL_THRESHOLD_KEY`` and ``LONG_TOOL_CALL_ALLOWED_TUNABLES``
+# constants live there now; tests and other consumers import from
+# ``daemon.tools.tunables`` (see tests/unit/tools/test_set_instance_tunable.py
+# TestHConstants). Floor/ceiling remain IDENTITY-imported from the
+# canonical home (AD-30): never duplicated, never aliased.
 
 if TYPE_CHECKING:
     from daemon.repositories.project.repository import SQLModelProjectRepository
@@ -215,6 +232,7 @@ from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
+from .tunables import create_set_instance_tunable_tool
 from ._tool_registry import (
     PRIVILEGED_TOOL_CATEGORIES,
     list_tools_by_category,
@@ -4152,7 +4170,12 @@ Args:
 Returns:
     Instance info dictionary
 """
-    
+
+    # ── set_instance_tunable (long-tool-call-nudge, phase 3) ────────
+    # Extracted to ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6).
+    # The tool is factory-acquired and inserted into the surface below.
+    set_instance_tunable = create_set_instance_tunable_tool(manager)
+
     # Create inner_soul tool for self-modification.
     # Thread version_tag so v2+ agents self-modify the versioned agent
     # subtree (C1 fix — base/v1 was being written by v2 instances).
@@ -4205,6 +4228,7 @@ Returns:
         time,
         # Instance management tools
         spawn_instance,
+        set_instance_tunable,     # long-tool-call-nudge: per-child threshold tuning
         spawn_councilor,          # Phase 2: council category — governor-only
         clear_councilor_errors,   # Phase 2: council category — governor-only
         convene_council,          # Council category — team-membership authorized

@@ -1977,6 +1977,98 @@ class ContextMessagesConfig(BaseSettings):
         return value
 
 
+class LongToolCallNudgeConfig(BaseSettings):
+    """Configuration for the long-tool-call nudge scanner.
+
+    Nested ``BaseSettings`` per the ``LoopBreakerConfig`` precedent
+    (the modern house style for grouped infra-loop knobs). Env vars
+    derive mechanically from ``env_prefix`` + field names:
+
+    * ``LONG_TOOL_NUDGE_ENABLED`` (default ON) — kill-switch. When
+      OFF: no scanner loop, no nudge delivery, and (phase 3) no
+      ``set_instance_tunable`` writes. The wrapper's stamping and the
+      per-completion ``[LongToolNudge] TOOL_COMPLETED`` log line
+      CONTINUE by design — stamp/log presence ≠ delivery (SC9).
+    * ``LONG_TOOL_NUDGE_INTERVAL_SECONDS`` (default 60, ge=1) —
+      scanner tick cadence.
+    * ``LONG_TOOL_NUDGE_DEFAULT_THRESHOLD_SECONDS`` (default 900,
+      ge=1, le=1800) — per-child fallback when the
+      ``long_tool_call_threshold_seconds`` metadata key is absent or
+      invalid (read-side floor 60, AD-38).
+
+    Canonical threshold precedence chain (AD-41): kill-switch →
+    per-child metadata key → this env default → ``min(·, 1800)``
+    clamp → strict ``>`` comparison in the scanner.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LONG_TOOL_NUDGE_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable the long-tool-call nudge scanner and delivery (kill-switch)",
+    )
+    # Empty-string convention (ladder-family precedent — mirrors
+    # ``CompactionConfig._parse_proactive_enabled``). A bare
+    # ``LONG_TOOL_NUDGE_ENABLED=`` line in .env reaches pydantic as the
+    # empty string and would otherwise raise ``bool_parsing`` at boot
+    # (kill-switch crash on a typo-free config). Empty / whitespace-only
+    # → documented True default. ``"0"`` / ``"false"`` / ``"no"`` /
+    # ``"off"`` → False; ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"`` →
+    # True; ANY other non-empty string still raises (fail-loud
+    # contract preserved — 'maybe' / '2' / typos continue to crash
+    # boot loud per the kill-switch convention).
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _parse_long_tool_nudge_enabled(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return True  # documented default ON (restart-pending activation)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in _PROACTIVE_FALSE_BOOLS:
+                return False
+            if v in _PROACTIVE_TRUE_BOOLS:
+                return True
+            # Anything else passes through; pydantic raises with
+            # a clear type error so a typo is caught at startup.
+        return value
+
+    interval_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Seconds between long-tool-nudge scanner ticks",
+    )
+    default_threshold_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="Default per-child long-tool threshold in seconds (hard max 1800)",
+    )
+
+    @field_validator("default_threshold_seconds")
+    @classmethod
+    def _enforce_hard_max_from_canonical_home(cls, v: int) -> int:
+        # Lazy import (validator-run time). The ``daemon.services``
+        # package __init__ imports ``daemon.config`` at runtime
+        # (job_retry_engine -> JobSystemConfig; context_messages ->
+        # _resolve_kv_ambient_system_default_enabled), so a module-top
+        # import here would partial-initialize config into a cycle.
+        # By the time this validator runs (load_config),
+        # ``daemon.config`` is fully initialized and the import
+        # resolves cleanly. The constant object is STILL the
+        # canonical one from ``daemon.services.long_tool_nudge``
+        # (AD-30) — only the import mechanism is deferred.
+        from daemon.services.long_tool_nudge import (
+            HARD_MAX_THRESHOLD_SECONDS,
+        )
+
+        if v > HARD_MAX_THRESHOLD_SECONDS:
+            raise ValueError(
+                "default_threshold_seconds must be <= "
+                f"{HARD_MAX_THRESHOLD_SECONDS} "
+                f"(HARD_MAX_THRESHOLD_SECONDS); got {v}"
+            )
+        return v
+
+
 class LanguageConfig(BaseSettings):
     """Language check configuration."""
 
@@ -2107,6 +2199,7 @@ class Config(BaseSettings):
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
+    long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)
     report_repair: ReportRepairConfig = Field(default_factory=ReportRepairConfig)
     report_integrity: ReportIntegrityConfig = Field(default_factory=ReportIntegrityConfig)
     language: LanguageConfig = Field(default_factory=LanguageConfig)
