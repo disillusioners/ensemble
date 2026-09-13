@@ -23,7 +23,7 @@ Pin that omitting `model_tier` continues the existing weighted-pool default beha
 
 | File | Symbol / anchor | Reason |
 |------|----------------|--------|
-| `tests/unit/services/test_spawn_intelligence_tier.py` | (Existing from Phase 1 — extend it.) | Add unit-level default-unchanged regression assertions on the resolver + tool layer. |
+| `tests/test_spawn_intelligence_tier.py` | (Existing from Phase 1 — extend it.) | Add unit-level default-unchanged regression assertions on the resolver + tool layer. |
 | `tests/integration/test_spawn_default_unchanged.py` | NEW file. Place under `tests/integration/` next to `test_spawn_intelligence_tier.py` from Phase 2 (or merge into the Phase 2 file — designer's choice, see Tasks below). | The primary regression gate for this phase. |
 | `.agents/shared/planning/spawn-intelligence-override/plan-overview.md` | The "Activation / Restart Notes" section (L175-189 currently). | Extend the section into a full runbook with restart-boot-line verification + post-restart grep + smoke-test recipe. |
 
@@ -35,8 +35,8 @@ Pin that omitting `model_tier` continues the existing weighted-pool default beha
 |---|------|------------|------------|
 | 1 | Read `decisions.md` D6 + D8 + the plan-overview "Activation / Restart Notes" section. Confirm 4 understanding points: (a) the regression test pins the no-`model_tier` path; (b) `_resolve_intelligence_tier` MUST NOT be called when `model_tier=None`; (c) `instance_metadata["model_override"]` MUST equal the pool selection; (d) the rollout is process-lifetime restart. | none | Implementer can recite the 4 steps of the rollout out of order. |
 | 1a | PRE-CHECK (W7): BEFORE writing the Pin-W replacement (task 4d) or any fixture-dependent membership assertion, read the chosen fixture agent's `agents/<fixture>/meta.json` `llm_models` (plus any seeded pool in the fixture) and confirm the ACTUAL candidate set; record it in the test's membership-constant comment. | Task 1 | The membership set in Pins T/W reflects the fixture's real pool, not the assumed `{"agentic", "coding", "coding2"}`; mismatch (if any) is corrected AT THE TEST with a comment. |
-| 2 | Locate the Phase 1 test file `tests/unit/services/test_spawn_intelligence_tier.py`. Decide whether to extend it or create a sibling file for Phase 5 — recommendation: EXTEND (keeps spawn-intelligence test consolidation). | Task 1 | Path confirmed. |
-| 3 | Open `tests/unit/services/test_spawn_intelligence_tier.py` (Phase 1's file). Add unit-level regression assertions for the default-unchanged path: | Tasks 1-2 | Pins added. |
+| 2 | Locate the Phase 1 test file `tests/test_spawn_intelligence_tier.py`. Decide whether to extend it or create a sibling file for Phase 5 — recommendation: EXTEND (keeps spawn-intelligence test consolidation). | Task 1 | Path confirmed. |
+| 3 | Open `tests/test_spawn_intelligence_tier.py` (Phase 1's file). Add unit-level regression assertions for the default-unchanged path: | Tasks 1-2 | Pins added. |
 | 3a | Pin R: `test_resolve_intelligence_tier_none_returns_no_override` (DUPLICATE of Pin C — re-pinned in this phase for explicit D6 reference; if Pin C exists from Phase 1, this is a cross-reference comment). | 3 | Pinned. |
 | 3b | Pin S: `test_resolve_intelligence_tier_high_then_none_pure` — once the resolver returns `(None, None)` for `None`, no error string ever leaks: assert `_resolve_intelligence_tier(None, allowed_models=("agentic",))[1] is None`. | 3 | Pinned. |
 | 4 | Create new integration test file `tests/integration/test_spawn_default_unchanged.py`. Use the existing spawn_instance integration fixture (Phase 2's Pin J reuses the same). | Tasks 1-3 | File exists; pytest discovers. |
@@ -64,19 +64,19 @@ Pin that omitting `model_tier` continues the existing weighted-pool default beha
 ## Test Plan
 
 **Files:**
-- `tests/unit/services/test_spawn_intelligence_tier.py` (extended — Pins R, S)
+- `tests/test_spawn_intelligence_tier.py` (extended — Pins R, S)
 - `tests/integration/test_spawn_default_unchanged.py` (NEW — Pins T, U, V, W, Y; Pin from 5a)
 
 **Run commands (exclusive):**
 ```bash
 # Phase 5 unit slice
-uv run python -m pytest tests/unit/services/test_spawn_intelligence_tier.py -v
+uv run python -m pytest tests/test_spawn_intelligence_tier.py -v
 
 # Phase 5 integration slice
 uv run python -m pytest tests/integration/test_spawn_default_unchanged.py -v
 
 # Combined phases 1-5
-uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/unit/services/test_spawn_intelligence_tier.py tests/integration/test_spawn_intelligence_tier.py tests/integration/test_spawn_default_unchanged.py -v
+uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/test_spawn_intelligence_tier.py tests/integration/test_spawn_intelligence_tier.py tests/integration/test_spawn_default_unchanged.py -v
 
 # Full sweep (Phase 5 acceptance)
 uv run python -m pytest tests/unit tests/integration -q --ignore=tests/postgres
@@ -130,7 +130,7 @@ This phase is DONE when:
 1. `git diff daemon/manager.py` is STILL empty (D7 final verification).
 2. `git diff daemon/services/instance_lifecycle.py` is STILL unchanged from Phase 1's HEAD (resolver, append_allowed_models, _resolve_model_override all stable).
 3. `uv run python -m pytest tests/integration/test_spawn_default_unchanged.py -v` is 6/6 green (Pins T, U, V, W, Y + 5a).
-4. `uv run python -m pytest tests/unit/services/test_spawn_intelligence_tier.py -v` is ≥8/8 green (Phase 1 Pins A-F + Phase 5 Pins R, S).
+4. `uv run python -m pytest tests/test_spawn_intelligence_tier.py -v` is ≥8/8 green (Phase 1 Pins A-F + Phase 5 Pins R, S).
 5. `uv run python -m pytest tests/unit/test_long_tool_nudge.py -q` is GREEN (Feature #2 settled zones intact).
 6. `uv run python -m pytest tests/unit tests/integration -q --ignore=tests/postgres` is 0 NEW-FAILS.
 7. `.agents/shared/planning/spawn-intelligence-override/plan-overview.md` "Activation / Restart Notes" section has been extended to a 6-step runbook with Rollback + Kill-switch subsections, committed in this phase's commit.

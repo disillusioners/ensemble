@@ -68,7 +68,7 @@ uv run python -m pytest tests/unit/services/test_append_allowed_models.py -v
 uv run python -m pytest tests/unit/tools/test_spawn_instance_input.py -v   # or wherever the docstring test lands
 
 # Phase 3 full sweep
-uv run python -m pytest tests/unit -q --ignore=tests/unit/services/test_spawn_intelligence_tier.py
+uv run python -m pytest tests/unit -q --ignore=tests/test_spawn_intelligence_tier.py
 ```
 
 **What each pin catches:**
@@ -117,7 +117,7 @@ This phase is DONE when:
 4. `grep -rn "model_tier" daemon/` returns ≥4 matches (SpawnInstanceInput field, runtime signature kwarg, docstring paragraph, append_allowed_models tail).
 5. `uv run python -m pytest tests/unit/services/test_append_allowed_models.py -v` is 3/3 green (Pins M-O).
 6. `uv run python -m pytest tests/unit/tools/test_spawn_instance_input.py -v` (or equivalent) is 2/2 green (Pins P-Q).
-7. `uv run python -m pytest tests/unit/services/test_instance_lifecycle.py tests/unit/services/test_spawn_intelligence_tier.py -q` is GREEN (Phase 1 + lifecycle regressions unchanged).
+7. `uv run python -m pytest tests/unit/services/test_instance_lifecycle.py tests/test_spawn_intelligence_tier.py -q` is GREEN (Phase 1 + lifecycle regressions unchanged).
 8. `uv run python -m pytest tests/unit/test_long_tool_nudge.py -q` is GREEN (Phase 4 deferred; Feature #2 settled zones intact).
 9. `git grep "SYSTEM CONTEXT:" -- 'daemon/**'` shows NO new producers (D5 unviolated).
 

@@ -75,7 +75,7 @@ Replace the `# FUTURE` extensibility seam at `daemon/services/long_tool_nudge.py
 uv run python -m pytest tests/unit/test_long_tool_nudge.py -v
 
 # Phase 4 + Phase 1 + Phase 2 sweep
-uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/unit/services/test_spawn_intelligence_tier.py tests/integration/test_spawn_intelligence_tier.py -v
+uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/test_spawn_intelligence_tier.py tests/integration/test_spawn_intelligence_tier.py -v
 ```
 
 **What the (single) updated pin catches:**

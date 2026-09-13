@@ -367,7 +367,7 @@ The block is read-only (existing contract at `daemon/services/instance_lifecycle
 
 ### Test implications
 
-- New file: `tests/unit/services/test_spawn_intelligence_tier.py` — unit tests for the resolver + tool param.
+- New file: `tests/test_spawn_intelligence_tier.py` — unit tests for the resolver + tool param.
 - New file: `tests/integration/test_spawn_default_unchanged.py` — integration test for the no-`model_tier` path.
 - All existing tests in `tests/unit/services/test_instance_lifecycle.py` (model override / pool / restore paths) — UNCHANGED, run green as regression.
 
