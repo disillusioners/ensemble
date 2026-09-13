@@ -1,0 +1,1380 @@
+// Jobs page template/source pins — jobs-page-improvement arc, Phase 1.
+//
+// F-5-class pins: PLAIN-TS specs cannot verify DOM bindings, so every
+// production write-path and filter binding is pinned against the REAL
+// file text (readFileSync + __dirname). This spec is the flagship
+// proof of plan task 6: every filter binding in jobs.component.html
+// is enumerated and mapped 1:1 to a JobsFilterState key — provable
+// from TEMPLATE wiring, not from a store spec alone — plus the
+// dual-pipeline DELETION proof on the component source.
+
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+const jobsDir = join(__dirname, '.');
+const componentSrc = readFileSync(join(jobsDir, 'jobs.component.ts'), 'utf-8');
+const templateSrc = readFileSync(join(jobsDir, 'jobs.component.html'), 'utf-8');
+const storeSrc = readFileSync(join(jobsDir, 'jobs-page.store.ts'), 'utf-8');
+const modelSrc = readFileSync(
+  join(__dirname, '../../models/jobs-filter-state.model.ts'),
+  'utf-8',
+);
+const workModelSrc = readFileSync(
+  join(__dirname, '../../models/work.model.ts'),
+  'utf-8',
+);
+const jobServiceSrc = readFileSync(
+  join(__dirname, '../../services/job.service.ts'),
+  'utf-8',
+);
+const missionServiceSrc = readFileSync(
+  join(__dirname, '../../services/mission.service.ts'),
+  'utf-8',
+);
+
+// The enumerated filter bindings. Every entry: the template binding
+// (exact production text) ↔ the JobsFilterState key it drives ↔ the
+// view scope. This table IS the enumeration pin — the describe below
+// proves each row against the real template text.
+const FILTER_BINDINGS: Array<{
+  key: string;
+  viewScope: 'both' | 'queues-only';
+  templateEvidence: RegExp;
+  storeEvidence?: RegExp;
+}> = [
+  {
+    key: 'project_id',
+    viewScope: 'both',
+    templateEvidence:
+      /\[ngModel\]="filters\(\)\.project_id \|\| ''"/,
+    storeEvidence: /onProjectFilterChange[\s\S]{0,400}setFilters\(\{ project_id: projectId \|\| null, queue_id: null \}\)/,
+  },
+  {
+    key: 'view_mode',
+    viewScope: 'both',
+    templateEvidence: /\(change\)="onViewModeChange\(\$event\.value\)"/,
+    storeEvidence: /onViewModeChange[\s\S]{0,400}setFilters\(\{ view_mode: mode \}\)/,
+  },
+  {
+    key: 'status',
+    viewScope: 'both',
+    templateEvidence:
+      /\[selected\]="filters\(\)\.status\.includes\(option\.value\)"/,
+    storeEvidence: /onStatusFilterChange[\s\S]{0,400}setFilters\(\{ status: statuses\.length > 0 \? statuses : \[\] \}\)/,
+  },
+  {
+    key: 'source',
+    viewScope: 'queues-only',
+    templateEvidence:
+      /\[ngModel\]="filters\(\)\.source \|\| 'all'"/,
+    storeEvidence: /onSourceFilterChange[\s\S]{0,300}setFilters\(\{ source: source === 'all' \? null : source \}\)/,
+  },
+  {
+    key: 'agent_id',
+    viewScope: 'both',
+    templateEvidence:
+      /\[ngModel\]="filters\(\)\.agent_id \|\| 'all'"/,
+    storeEvidence: /onAgentFilterChange[\s\S]{0,300}setFilters\(\{ agent_id: agentId === 'all' \? null : agentId \}\)/,
+  },
+  {
+    key: 'queue_id',
+    viewScope: 'queues-only',
+    templateEvidence: /\(queueSelected\)="onQueueSelected\(\$event\)"/,
+    storeEvidence: /onQueueSelected[\s\S]{0,200}setFilters\(\{ queue_id: queueId \|\| null \}\)/,
+  },
+  {
+    key: 'include_deleted',
+    viewScope: 'queues-only',
+    templateEvidence: /\(change\)="onToggleShowDeleted\(\$event\.checked\)"/,
+    storeEvidence: /onToggleShowDeleted[\s\S]{0,300}setFilters\(\{ include_deleted: checked \}\)/,
+  },
+];
+
+/** Every JobsFilterState key declared in the model. */
+const MODEL_KEYS = [
+  'status',
+  'source',
+  'agent_id',
+  'project_id',
+  'queue_id',
+  'include_deleted',
+  'view_mode',
+];
+
+describe('Template-source enumeration pin — filter bindings ↔ JobsFilterState keys (1:1)', () => {
+  it('the model declares EXACTLY the enumerated keys (no hidden filter state)', () => {
+    for (const key of MODEL_KEYS) {
+      expect(modelSrc).toMatch(new RegExp(`^  ${key}[,:?]`, 'm'));
+    }
+    // No extra filter keys slipped into the interface without an
+    // enumerated binding row.
+    const interfaceBody = modelSrc.slice(
+      modelSrc.indexOf('export interface JobsFilterState'),
+      modelSrc.indexOf('}', modelSrc.indexOf('export interface JobsFilterState')),
+    );
+    const declaredKeys = interfaceBody.match(/^  (\w+)[,:?]/gm)?.map((l) => l.trim().replace(/[,:?]$/, '')) ?? [];
+    expect(declaredKeys.sort()).toEqual([...MODEL_KEYS].sort());
+  });
+
+  it('EVERY enumerated binding is present in the real template text', () => {
+    for (const binding of FILTER_BINDINGS) {
+      expect({ key: binding.key, ok: binding.templateEvidence.test(templateSrc) })
+        .toEqual({ key: binding.key, ok: true });
+    }
+  });
+
+  it('EVERY binding row drives its key through the real component handler → store.setFilters', () => {
+    for (const binding of FILTER_BINDINGS) {
+      if (binding.storeEvidence) {
+        expect({ key: binding.key, ok: binding.storeEvidence.test(componentSrc) })
+          .toEqual({ key: binding.key, ok: true });
+      }
+    }
+  });
+
+  it('enumeration is exhaustive BOTH ways (every row unique, every key covered)', () => {
+    const rowKeys = FILTER_BINDINGS.map((b) => b.key).sort();
+    expect(rowKeys).toEqual([...MODEL_KEYS].sort());
+    expect(new Set(rowKeys).size).toBe(rowKeys.length);
+  });
+
+  it('queue/source/show-deleted are the queues-view-scoped keys (documented scoping, not dead controls)', () => {
+    const scoped = FILTER_BINDINGS.filter((b) => b.viewScope === 'queues-only').map((b) => b.key);
+    expect(scoped.sort()).toEqual(['include_deleted', 'queue_id', 'source'].sort());
+  });
+
+  it('all-work view HIDES the queues-only controls with honest copy (absent-with-copy, not no-op)', () => {
+    // Source select sits inside the queues-only branch…
+    const sourceBranch = templateSrc.match(
+      /@if \(!isAllWorkView\(\)\) \{[\s\S]{0,400}?label="Source \(window-scoped\)"[\s\S]{0,400}?\} @else \{[\s\S]{0,400}?sourceUnavailableCopy[\s\S]{0,200}?\}/,
+    );
+    expect(sourceBranch).not.toBeNull();
+    // …and so does the Show Deleted checkbox, with explanatory copy.
+    const deletedBranch = templateSrc.match(
+      /@if \(!isAllWorkView\(\)\) \{[\s\S]{0,400}?onToggleShowDeleted\(\$event\.checked\)[\s\S]{0,400}?\} @else \{[\s\S]{0,400}?showDeletedUnavailableCopy[\s\S]{0,200}?\}/,
+    );
+    expect(deletedBranch).not.toBeNull();
+    // The copy strings exist on the component.
+    expect(componentSrc).toMatch(/sourceUnavailableCopy\s*=/);
+    expect(componentSrc).toMatch(/showDeletedUnavailableCopy\s*=/);
+  });
+
+  it('window-scoped labels are on the real controls', () => {
+    expect(templateSrc).toContain('label="Source (window-scoped)"');
+    expect(templateSrc).toContain('label="Agent (window-scoped)"');
+  });
+
+  it('the template list renders EXACTLY ONE projection (no view-mode branch in the loop)', () => {
+    // Phase 2 — the list moved from ``@for (job of ...)`` to
+    // ``cdk-virtual-scroll-viewport`` + ``*cdkVirtualFor`` over the
+    // flattened ``renderRows()`` (WindowItem[]). The projection
+    // source is ONE (the store's ``filteredJobs`` projected through
+    // ``renderRows``), not two view-mode branches. Pin anchors on
+    // the REAL production text.
+    const loop = templateSrc.match(/\*cdkVirtualFor="let item of (\w+)\(\); trackBy: trackByKey"/);
+    expect(loop).not.toBeNull();
+    expect(loop![1]).toBe('renderRows');
+    // Exactly one ``*cdkVirtualFor`` over the list, no second
+    // branch — same invariant the pre-Phase-2 ``@for`` pin held.
+    expect(templateSrc.match(/\*cdkVirtualFor=/g)).toHaveLength(1);
+  });
+
+  it('virtual-scroll track-by keys on item.key (job_id for rows; Phase 3 missionId for headers)', () => {
+    // Plan task 4 — track by job_id. The page-level trackBy
+    // helper returns ``item.key`` (which IS ``job.job_id`` for
+    // rows, and which Phase 3 will set to the missionId for
+    // header items). The bind is the page's trackByKey, not
+    // Angular's default identity.
+    expect(componentSrc).toMatch(/protected trackByKey = \(_index: number, item: WindowItem\): string => item\.key/);
+    expect(templateSrc).toMatch(/trackBy: trackByKey/);
+  });
+});
+
+describe('F-5 production-source pins — the store OWNS the writes', () => {
+  it('store write-sites exist on the REAL store file (payload set + degrade flags + patch paths)', () => {
+    expect(storeSrc).toMatch(/this\.jobs\.set\(jobs\)/);
+    expect(storeSrc).toMatch(/this\.works\.set\(works\)/);
+    expect(storeSrc).toMatch(/this\.jobsDegraded\.set\(false\)/);
+    expect(storeSrc).toMatch(/this\.worksDegraded\.set\(false\)/);
+    expect(storeSrc).toMatch(/this\.jobsDegraded\.set\(true\)/);
+    expect(storeSrc).toMatch(/this\.worksDegraded\.set\(true\)/);
+    // Retain-last-data: the error branches contain NO payload reset.
+    const errorBranch = storeSrc.match(
+      /error: \(err\) => \{[\s\S]{0,300}?jobsDegraded\.set\(true\)[\s\S]{0,300}?\}/,
+    );
+    expect(errorBranch).not.toBeNull();
+    expect(errorBranch![0]).not.toContain('this.jobs.set');
+    const workErrorBranch = storeSrc.match(
+      /error: \(err\) => \{[\s\S]{0,300}?worksDegraded\.set\(true\)[\s\S]{0,300}?\}/,
+    );
+    expect(workErrorBranch).not.toBeNull();
+    expect(workErrorBranch![0]).not.toContain('this.works.set');
+  });
+
+  it('store SSE patch and mutation seams exist on the REAL store file', () => {
+    expect(storeSrc).toMatch(/updateJobFromSse\(status: JobEventPayload\)/);
+    expect(storeSrc).toMatch(/this\.jobs\.update\(jobs =>/);
+    expect(storeSrc).toMatch(/this\.works\.update\(works =>/);
+    expect(storeSrc).toMatch(/removeJob\(jobId: string\)/);
+    expect(storeSrc).toMatch(/patchJob\(jobId: string, patch: Partial<Job>\)/);
+  });
+
+  it('store P-A contract: root_only:false inside toWorkFilters (real model file text)', () => {
+    expect(modelSrc).toMatch(/root_only: false/);
+    expect(storeSrc).toMatch(/fetchWorks\(\): void/);
+    expect(storeSrc).toMatch(/this\.fetchers\.fetchWorks\(toWorkFilters\(this\.filterState\(\)\)\)/);
+  });
+
+  it('limit=100 ships on the REAL JobService.listJobs (explicit newest-100 window)', () => {
+    // Source-text pin: the params construction starts with the explicit
+    // limit — behavioral URL pins live in the service spec's mirror;
+    // THIS pin is the production-text anchor per F-5.
+    expect(jobServiceSrc).toMatch(/let params = new HttpParams\(\)\s*\n\s*\/\/ P1 — explicit newest-100 window[\s\S]{0,200}?\.set\('limit', '100'\)/);
+    expect(jobServiceSrc).not.toMatch(/return of\(\[\]\)/); // swallow-to-empty retired
+  });
+
+  it('workToJob row parity lives in the REAL work model (Timeline fields carried, not nulled)', () => {
+    expect(workModelSrc).toMatch(/export function workToJob\(work: Work\): Job \{/);
+    expect(workModelSrc).toMatch(/started_at: work\.started_at \?\? null/);
+    expect(workModelSrc).toMatch(/completed_at: work\.completed_at \?\? null/);
+    // The Work wire model carries the parity fields.
+    expect(workModelSrc).toMatch(/started_at\?: string \| null;/);
+    expect(workModelSrc).toMatch(/completed_at\?: string \| null;/);
+  });
+
+  it('workToJob mission carry-through lives in the REAL work model (all-work title fix — removing the interface field OR the mapping line fails)', () => {
+    // Work wire model carries the mission-projection identity pair
+    // (both keys ship unconditionally on GET /api/work rows —
+    // WorkRecord.to_dict, daemon/services/work_resolver.py).
+    expect(workModelSrc).toMatch(/mission_id\?: string \| null;/);
+    expect(workModelSrc).toMatch(
+      /mission_ref\?: \{ mission_id: string; agent_id: string; liveness: string \} \| null;/,
+    );
+    // ...and the mapper carries them through. Removing EITHER the
+    // interface field or the exact carry line re-opens the bug
+    // (all-work groups build missionId: null → enrichment gate
+    // skips → titles never fetch), so each pin is mutation-sensitive.
+    expect(workModelSrc).toMatch(/mission_id: work\.mission_id \?\? null/);
+    expect(workModelSrc).toMatch(/mission_ref: work\.mission_ref \?\? null/);
+  });
+});
+
+describe('Dual-pipeline DELETION proof (jobs.component.ts / .html)', () => {
+  it('the component has NO code references to the deleted all-work mapper', () => {
+    expect(componentSrc).not.toMatch(/private\s+worksAsJobs/);
+    expect(componentSrc).not.toMatch(/private\s+workToJob/);
+    expect(componentSrc).not.toMatch(/this\.worksAsJobs\(\)/);
+    expect(componentSrc).not.toMatch(/this\.workToJob\(/);
+  });
+
+  it('the component has NO local filteredJobs computed (the store owns the pipeline)', () => {
+    expect(componentSrc).not.toMatch(/readonly filteredJobs\s*=\s*computed/);
+    // The ONLY filteredJobs references are the store projection alias.
+    expect(componentSrc).toMatch(/readonly displayedJobs = this\.store\.filteredJobs;/);
+  });
+
+  it('the component does NOT branch displayedJobs on view mode (no second path)', () => {
+    expect(componentSrc).not.toMatch(/displayedJobs = computed<Job\[\]>/);
+    expect(componentSrc).not.toMatch(/viewMode\(\) === 'all-work'\s*\?\s*this\.worksAsJobs/);
+  });
+
+  it('the component has NO loadJobs/loadWorks fetch bodies (legs live in the store)', () => {
+    expect(componentSrc).not.toMatch(/private loadJobs\(\): void/);
+    expect(componentSrc).not.toMatch(/private loadWorks\(\): void/);
+    expect(componentSrc).not.toMatch(/this\.jobService\.listJobs\(this\.filters\(\)\)\.subscribe/);
+    expect(componentSrc).toMatch(/fetchJobs: \(filters\) => this\.jobService\.listJobs\(filters\)/);
+    expect(componentSrc).toMatch(/fetchWorks: \(filters\) => this\.workService\.getWork\(filters\)/);
+  });
+
+  it('the component has NO local SSE patch body (moved verbatim to the store)', () => {
+    expect(componentSrc).not.toMatch(/private updateJobFromSse\(/);
+    expect(componentSrc).toMatch(/this\.store\.updateJobFromSse\(latestStatus\)/);
+  });
+
+  it('the template never bypasses the pipeline for the all-work view', () => {
+    // The all-work empty/error states are the ONLY view-mode branches
+    // in the template; the LIST itself renders from one projection.
+    expect(templateSrc).not.toMatch(/@for[\s\S]*worksAsJobs/);
+    expect(templateSrc).not.toMatch(/workToJob/);
+  });
+
+  // ── Phase 2 — banner + render-guard + poll-gate + expansion ─────
+  //
+  // F-5 class pins: every NEW write-path / binding that ships in
+  // Phase 2 must be pinned against the REAL production source. The
+  // behavior pins (truth tables, fixtures AT/PAST caps) live in the
+  // pure-model specs; THIS describe is the source-text anchor that
+  // prevents drift between the spec and the production.
+
+  it('window-honesty banner is mounted in BOTH view modes (banner region + aria-live + Reload)', () => {
+    // Plan task 2 — banner region is ``aria-live="polite"`` and the
+    // Reload button carries an explicit accessible label.
+    expect(templateSrc).toMatch(/<div[\s\S]*?class="window-banner"[\s\S]*?aria-live="polite"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="reloadAccessibleLabel"/);
+    expect(templateSrc).toMatch(/\(click\)="onReloadBanner\(\)"/);
+  });
+
+  it('banner state is driven by the pure window model + store degraded flag', () => {
+    // The banner mount condition is ``windowBanner() === 'visible'
+    // || windowDegraded()`` — the template binds both. The policy
+    // (``windowIsFull``) lives in the model.
+    expect(templateSrc).toMatch(/windowBanner\(\) === 'visible'/);
+    expect(templateSrc).toMatch(/windowDegraded\(\)/);
+    expect(componentSrc).toMatch(/readonly windowBanner = this\.store\.windowBanner/);
+    expect(componentSrc).toMatch(/readonly windowDegraded = this\.store\.windowDegraded/);
+  });
+
+  it('render-guard truncation notice wires the pure boundary-slicing guard + the "switch to Queues" affordance', () => {
+    // P3 review — the legacy ``renderGuard(this.windowItems())``
+    // call silently slices the FLAT items list, which produces the
+    // orphan-header case (header rendered, zero visible rows) for
+    // expanded groups that cross the cap. The page now wires the
+    // BOUNDARY-AWARE ``toBoundedWindowItems`` directly against
+    // ``jobGroups + expandedGroupIds`` so a group is rendered whole
+    // or omitted whole (no orphan). Plan task 3 acceptance:
+    // the notice carries a "switch to Queues view" affordance.
+    expect(templateSrc).toMatch(/@if \(truncationNotice\(\); as notice\)/);
+    expect(templateSrc).toMatch(/class="render-guard-notice"/);
+    expect(templateSrc).toMatch(/\(click\)="onSwitchToQueuesView\(\)"/);
+    expect(componentSrc).toMatch(/readonly renderGuardOutcome = computed/);
+    expect(componentSrc).toMatch(/toBoundedWindowItems\(/);
+  });
+
+  it('expansion state is keyed by job_id in the parent (survives virtual recycle)', () => {
+    // Plan task 4 — DOM-local state would reset on recycle. The
+    // parent owns a Set<job_id>; the card's ``expanded`` input
+    // + ``expandToggle`` output wire it.
+    expect(componentSrc).toMatch(/readonly expandedJobIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/onToggleExpansion\(jobId: string\)/);
+    expect(componentSrc).toMatch(/isCardExpanded\(item: WindowItem\)/);
+    expect(templateSrc).toMatch(/\[expanded\]="isCardExpanded\(item\)"/);
+    expect(templateSrc).toMatch(/\(expandToggle\)="onToggleExpansion\(item\.job\.job_id\)"/);
+  });
+
+  it('poll gate is wired through shouldTick (visibility + drawer + modal + fetchInFlight)', () => {
+    // Plan task 5 — the 30s tick consults shouldTick BEFORE making
+    // the HTTP call. The four gate inputs are the four pause
+    // conditions.
+    expect(componentSrc).toMatch(/POLL_INTERVAL_MS/);
+    expect(componentSrc).toMatch(/shouldTick\(\{/);
+    expect(componentSrc).toMatch(/tabVisible: this\.tabVisible\(\)/);
+    expect(componentSrc).toMatch(/drawerOpen: this\.drawerOpen\(\)/);
+    expect(componentSrc).toMatch(/modalOpen: this\.modalOpen\(\)/);
+    expect(componentSrc).toMatch(/fetchInFlight: this\.fetchInFlight\(\)/);
+  });
+
+  it('visibilitychange listener is attached in ngOnInit and detached in ngOnDestroy (no leak)', () => {
+    // The listener MUST be removed on destroy; without the
+    // ``removeEventListener`` the listener survives and fires after
+    // the component is gone (memory + correctness leak).
+    expect(componentSrc).toMatch(/this\.doc\.addEventListener\('visibilitychange', this\.onVisibilityChange\)/);
+    expect(componentSrc).toMatch(/this\.doc\.removeEventListener\('visibilitychange', this\.onVisibilityChange\)/);
+  });
+
+  it('refocus-immediate refresh is debounced (storm mitigation)', () => {
+    // Plan task 5 risk — rapid tab switching would storm the BE.
+    // The refocus path goes through a setTimeout(REFOCUS_DEBOUNCE_MS)
+    // and a new focus cancels the pending timer.
+    expect(componentSrc).toMatch(/REFOCUS_DEBOUNCE_MS/);
+    expect(componentSrc).toMatch(/clearTimeout\(this\.refocusTimer\)/);
+    expect(componentSrc).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,300}?shouldTick/);
+  });
+
+  it('modal-open gate tracks the page-owned dialogs (create / cleanup / cancel confirm)', () => {
+    // Each dialog open sets ``modalOpen = true`` BEFORE the open
+    // call and clears it in ``afterClosed`` — belt + braces against
+    // dialog leaks (if afterClosed fails to fire, the gate stays
+    // shut — a safer failure mode than staying open).
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(JobCreateDialogComponent/);
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open\(SystemCleanupConfirmDialogComponent/);
+    expect(componentSrc).toMatch(/this\.modalOpen\.set\(true\);[\s\S]{0,200}?this\.dialog\.open<ConfirmDialogComponent/);
+    // P2 fix (jobs-page-improvement) — the previous single pin
+    // ``modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)`` only
+    // matched the JobCreateDialog close site (the two
+    // ConfirmDialog branches use ``if (!confirmed)``). Split into
+    // three expects, one per dialog site, anchored to the dialog's
+    // OWN open call so each close is provably bound to its dialog.
+    // 1500-char windows are safe: each dialog's close sits within
+    // ~1100 chars of its open call (well below 1500), so the
+    // anchors can't span across dialog sites.
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open\(JobCreateDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(result\)/,
+    );
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open<ConfirmDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(!confirmed\)/,
+    );
+    expect(componentSrc).toMatch(
+      /this\.dialog\.open\(SystemCleanupConfirmDialogComponent[\s\S]{0,1500}?this\.modalOpen\.set\(false\);[\s\S]{0,200}?if \(!confirmed\)/,
+    );
+  });
+
+  it('empty-state classifier is wired (loading/dataEmpty/filterEmpty/errored)', () => {
+    // Plan task 8 — skeleton ONLY for first fetch; the classifier
+    // is the single source of empty-state truth.
+    expect(componentSrc).toMatch(/readonly emptyStateKind = computed<JobsEmptyStateKind>/);
+    expect(componentSrc).toMatch(/classifyJobsEmptyState\(/);
+    expect(templateSrc).toMatch(/@if \(showLoadingSkeleton\(\)\)/);
+    expect(templateSrc).toMatch(/@if \(showEmptyState\(\)\)/);
+    expect(templateSrc).toMatch(/\{\{ emptyStateCopy\(\)\.title \}\}/);
+  });
+
+  it('showEmptyState has the hasRows short-circuit (P2 fix — list visible with rows)', () => {
+    // P2 fix (jobs-page-improvement) — the COMPONENT must override
+    // the classifier's defensive ``dataEmpty`` return for
+    // hasRows=true so the virtual list stays visible. Without this
+    // gate, a steady-state page with rows renders the empty card
+    // AND the virtual list's ``!showEmptyState()`` branch hides the
+    // list. The pin anchors on the REAL production text — it MUST
+    // fail if the hasRows check is reverted (the pre-fix pin only
+    // asserted ``showEmptyState = computed`` existed, which passed
+    // green against the buggy source).
+    const showEmptyStateBlock = componentSrc.match(
+      /readonly showEmptyState = computed<boolean>\(\(\) => \{[\s\S]{0,800}?\}\)/,
+    );
+    expect(showEmptyStateBlock).not.toBeNull();
+    expect(showEmptyStateBlock![0]).toMatch(
+      /this\.store\.filteredJobs\(\)\.length > 0/,
+    );
+    // The errored-with-rows branch is the only legitimate
+    // ``showEmptyState === true`` path with rows retained (the user
+    // must be able to retry).
+    expect(showEmptyStateBlock![0]).toMatch(
+      /if \([\s\S]{0,200}?\.length > 0\) \{[\s\S]{0,200}?return kind === 'errored'/,
+    );
+  });
+
+  it('WorkService retain-last-data fix is live (errors propagate, no swallow-to-empty)', () => {
+    // Plan task 6 — pre-Phase-2 swallowed errors via
+    // ``catchError → of([])``, which the store's ``.next`` arm
+    // treated as honest empty data and wiped the previous payload.
+    // The real service now propagates via ``throwError`` so the
+    // store's ``.error`` arm flips ``worksDegraded`` and retains
+    // the last good list. The mirror parity pin in
+    // ``work.service.spec.ts`` anchors this contract; THIS pin is
+    // the production-source cross-check from the page's
+    // perspective.
+    const workServiceSrc = readFileSync(
+      join(__dirname, '../../services/work.service.ts'),
+      'utf-8',
+    );
+    expect(workServiceSrc).toMatch(/return throwError\(\(\) => err\)/);
+    expect(workServiceSrc).not.toMatch(/return of\(\[\] as Work\[\]\)/);
+  });
+
+  it('panel + indicator surfaces stay untouched (Plan non-goal #1)', () => {
+    // Plan non-goal #1 — the header panel/indicator owns the
+    // glanceable/live-status role. Phase 2 must NOT touch it. The
+    // components are referenced by selector; this grep proves no
+    // P2 write-path snuck into them.
+    const componentDir = join(__dirname, '../../components');
+    // Re-read the component directory in case the test runner has
+    // cached the file content (Node caches are per-process).
+    const fs = require('fs');
+    const path = require('path');
+    const indicatorDir = path.join(componentDir, 'job-queue-indicator');
+    const panelDir = path.join(componentDir, 'job-queue-panel');
+    // Defensive: if the dirs don't exist (e.g. renamed), skip — the
+    // plan explicitly bans edits and a missing dir is a stronger
+    // invariant than a non-match.
+    if (fs.existsSync(indicatorDir)) {
+      const indicatorFiles = fs.readdirSync(indicatorDir);
+      expect(indicatorFiles.length).toBeGreaterThan(0);
+      // No Phase 2 addons — the indicator's exports list is the
+      // legacy set (the file's existence IS the cross-seam
+      // guarantee).
+      for (const file of indicatorFiles) {
+        if (file.endsWith('.ts')) {
+          const src = fs.readFileSync(path.join(indicatorDir, file), 'utf-8');
+          expect(src).not.toMatch(/window-banner|cdk-virtual-scroll|jobs-window|jobs-poll|jobs-empty-state/);
+        }
+      }
+    }
+    if (fs.existsSync(panelDir)) {
+      const panelFiles = fs.readdirSync(panelDir);
+      for (const file of panelFiles) {
+        if (file.endsWith('.ts')) {
+          const src = fs.readFileSync(path.join(panelDir, file), 'utf-8');
+          expect(src).not.toMatch(/window-banner|cdk-virtual-scroll|jobs-window|jobs-poll|jobs-empty-state/);
+        }
+      }
+    }
+  });
+
+  // ── Phase 3 — grouping + titles + vocabulary (F-5 source-text anchors) ─
+  //
+  // P3 plan task 1-6 — every NEW write-path / binding / template
+  // hunk ships with a source-text pin AND a behavior spec (the
+  // lesson from P2: a source-text pin alone passed green against a
+  // buggy ``showEmptyState``). The behavior specs live in
+  // ``jobs-grouping.model.spec.ts`` (grouping property), the
+  // ``JobsPageStore`` spec (P2 store computeds), and the
+  // ``MissionService`` spec (URL pins). This describe is the
+  // SOURCE-TEXT anchor for the wiring.
+
+  it('P3 grouping projection is wired: groupJobs → toWindowItems in the REAL component', () => {
+    // The projection is a presentation layer over the store's
+    // filteredJobs; the page must NOT re-implement grouping inline.
+    expect(componentSrc).toMatch(/readonly jobGroups = computed<readonly JobGroup\[\]>\(\(\) => \{[\s\S]{0,500}?groupJobs\(this\.store\.filteredJobs\(\)\)/);
+    expect(componentSrc).toMatch(/toWindowItems\(\s*this\.jobGroups\(\),\s*this\.expandedGroupIds\(\)/);
+    // The windowItems computed MUST consume the new toWindowItems
+    // signature (groups + expandedGroupIds + helpers), NOT the
+    // pre-P3 flat-job signature.
+    expect(componentSrc).not.toMatch(/toWindowItems\(this\.store\.filteredJobs\(\)\)/);
+  });
+
+  it('P3 group-header expansion is keyed by group id (parent owns the set, G1 panel port)', () => {
+    expect(componentSrc).toMatch(/readonly expandedGroupIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/readonly userTouchedGroupIds = signal<Set<string>>\(new Set\(\)\)/);
+    expect(componentSrc).toMatch(/isGroupExpanded\(groupKey: string\): boolean/);
+    expect(componentSrc).toMatch(/onToggleGroupExpansion\(groupKey: string\): void/);
+    // G1 port: touched-wins merge — autoExpandGroupIds runs in an
+    // effect that filters out touched ids, the effect MUST touch
+    // the userTouchedGroupIds signal.
+    expect(componentSrc).toMatch(/autoExpandGroupIds\(this\.jobGroups\(\)\)/);
+  });
+
+  it('P3 chevron click is a real <button type="button"> with aria-expanded + stopPropagation', () => {
+    // Template-extraction audit (the plan's audit): chevron tap
+    // MUST be a real button (not a clickable div) with
+    // aria-expanded, an accessible label, and stopPropagation so
+    // the tap never bubbles to a card/navigate handler.
+    expect(templateSrc).toMatch(/<button[\s\S]*?type="button"[\s\S]*?class="group-header-chevron"[\s\S]*?\[attr\.aria-expanded\]="isGroupExpanded\(item\.groupKey\)"/);
+    expect(templateSrc).toMatch(/onChevronClick\(\$event, item\.groupKey\)/);
+    // stopPropagation on the chevron (template binding carries it).
+    expect(templateSrc).toMatch(/\$event\.stopPropagation\(\)/);
+    // The component handler exists and stops propagation too.
+    expect(componentSrc).toMatch(/protected onChevronClick\(event: MouseEvent, groupKey: string\): void/);
+    expect(componentSrc).toMatch(/event\.stopPropagation\(\)/);
+  });
+
+  it('P3 MissionService is the canonical home (component + indicator migrated, no JobService.listMissions)', () => {
+    expect(componentSrc).toMatch(/import\s+\{[^}]*MissionService[^}]*\}\s+from\s+['"][^'"]*services\/mission\.service['"]/);
+    expect(componentSrc).toMatch(/private readonly missionService = inject\(MissionService\)/);
+    // JobService no longer hosts listMissions (the F-5 pin in the
+    // mission.service.spec already asserts this; this is the
+    // cross-pin on the component side: no JobService.listMissions
+    // calls anywhere in the page).
+    expect(componentSrc).not.toMatch(/this\.jobService\.listMissions\(/);
+    // Component DOES use MissionService.getMission for enrichment.
+    expect(componentSrc).toMatch(/this\.missionService\.getMission\(/);
+  });
+
+  it('P3 review — lazy title enrichment is capped at MAX_TITLE_ENRICHMENT_FETCHES + cascade / dedup / no-retry / missionId gate', () => {
+    // Cap (named constant, not a magic number).
+    expect(componentSrc).toMatch(/MAX_TITLE_ENRICHMENT_FETCHES/);
+    // The picker is the cap enforcer now (extracted to
+    // ``pickEnrichmentTargets`` in ``jobs-enrichment.model.ts``);
+    // the component calls the helper. The behaviour spec pins
+    // the cap value.
+    expect(componentSrc).toMatch(/pickEnrichmentTargets\(/);
+    // Defence-in-depth: the component ALSO checks
+    // attemptedKeys.size before firing each request (the
+    // cascade-prevention belt to the picker's braces).
+    expect(componentSrc).toMatch(/attemptedKeys\.size >= MAX_TITLE_ENRICHMENT_FETCHES/);
+    // Retain-last-data: the failure handler keeps the fallback
+    // title — empty body, never a re-fetch (the picker filters
+    // failed keys; the error handler adds to failedKeys).
+    expect(componentSrc).toMatch(/error: \(\) => \{[\s\S]{0,500}?failedKeys\.add\(id\)/);
+    // No-retry: the error handler stamps the key into
+    // ``failedKeys`` so the picker never re-emits it across
+    // polls (the spec's "no infinite retry" pin).
+    expect(componentSrc).toMatch(/failedKeys\.add\(id\)/);
+    // Cascade / concurrent dedup: the subscribe path stamps the
+    // key into both ``attemptedKeys`` and ``inFlightKeys`` BEFORE
+    // the request fires; the picker filters both sets.
+    expect(componentSrc).toMatch(/attemptedKeys\.add\(id\)[\s\S]{0,40}?inFlightKeys\.add\(id\)/);
+    // Child-bound (missionId null) groups never fetch — the
+    // picker enforces the gate. Pin the picker model file too.
+    const fs = require('fs');
+    const path = require('path');
+    const enrichmentModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/jobs-enrichment.model.ts'),
+      'utf-8',
+    );
+    expect(enrichmentModelSrc).toMatch(/if \(!g\.missionId\) continue/);
+  });
+
+  it('P3 review — enrichment reads the FLAT mission wire shape (anti-wrapper pin: resp?.title, never resp?.mission?.title)', () => {
+    // 2026-09-13 wire-contract break: the consumer read
+    // ``resp?.mission?.title`` (an invented wrapper) while
+    // GET /api/missions/{id} returns FLAT MissionResponse fields
+    // (``title`` TOP-LEVEL — daemon/routers/schemas.py
+    // MissionResponse). Every titled group silently fell back to
+    // "developer · Xm ago" on fresh load. The wrapper-shaped
+    // service mock kept the suite green throughout — this pin
+    // fails on BOTH halves of that shape.
+    // (a) Consumer half — the exact production expression, and the
+    // wrapper-family reads are FORBIDDEN on this path.
+    expect(componentSrc).toMatch(/const title = resp\?\.title;/);
+    expect(componentSrc).not.toMatch(/resp\?\.(mission|data|result)\?\./);
+    // Success path: the extracted flat title is written into
+    // ``titleOverrides`` (what the group header renders) — the
+    // flat fixture in mission.service.spec.ts drives this exact
+    // field.
+    expect(componentSrc).toMatch(
+      /titleOverrides\.update\(\(m\) => \{[\s\S]{0,120}?next\.set\(id, title\)/,
+    );
+    // (b) Service half — getMission is typed to the FLAT
+    // MissionSummary and the MissionGetResponse wrapper type is
+    // deleted; its return is byte-for-byte what the BE sends.
+    expect(missionServiceSrc).toMatch(
+      /getMission\(id: string\): Observable<MissionSummary>/,
+    );
+    expect(missionServiceSrc).not.toMatch(/MissionGetResponse/);
+  });
+
+  it('P3 header title uses the instanceDisplayTitle chain (NOT the job-row resolveTitle chain)', () => {
+    // The plan: title fallback via ``instanceDisplayTitle`` (NOT
+    // ``resolveTitle`` which stays on cards). The component wires
+    // the model helper into the projection.
+    expect(componentSrc).toMatch(/groupHeaderTitle\(group/);
+    // Anti-pin: the legacy ``resolveTitle`` chain is NOT used for
+    // group headers (it stays on cards / panel, never on the page).
+    expect(componentSrc).not.toMatch(/this\.resolveTitle\(group/);
+  });
+
+  it('P3 NO_MISSION_CONTEXT_TITLE is the explicit fallback copy (F-5 anchor)', () => {
+    // The template MUST render the pinned copy via the model helper
+    // — never an inline "settled" or other mission-side-prose
+    // violation. The component delegates the fallback to
+    // ``groupHeaderTitle`` (which reads ``NO_MISSION_CONTEXT_TITLE``).
+    expect(componentSrc).toMatch(/NO_MISSION_CONTEXT_KEY/);
+    // The pinned copy itself lives on the grouping model — the
+    // grouping-model spec is the behavioral pin; this pin is the
+    // production-source anchor.
+    const fs = require('fs');
+    const path = require('path');
+    const groupingModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/jobs-grouping.model.ts'),
+      'utf-8',
+    );
+    expect(groupingModelSrc).toMatch(/NO_MISSION_CONTEXT_TITLE\s*=\s*'No mission context'/);
+  });
+
+  it('P3 review — settled → teal #14B8A6 + RECEIPT_LONG_GLYPH constant (single source of truth)', () => {
+    // P3 review: the literal ``receipt_long`` was promoted to a
+    // NAMED export (``RECEIPT_LONG_GLYPH``) in ``job.model.ts``
+    // so the card / panel / receipt-chip share one constant —
+    // drift risk on three independent literals is closed. The
+    // card imports + uses the constant; the panel imports +
+    // uses the constant; the receipt-chip template binds to
+    // the constant via a component field.
+    const fs = require('fs');
+    const path = require('path');
+    const jobModelSrc = fs.readFileSync(
+      path.join(__dirname, '../../models/job.model.ts'),
+      'utf-8',
+    );
+    const jobCardSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-card/job-card.component.ts'),
+      'utf-8',
+    );
+    const panelSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-queue-panel/job-queue-panel.component.ts'),
+      'utf-8',
+    );
+    const jobCardHtmlSrc = fs.readFileSync(
+      path.join(__dirname, '../../components/job-card/job-card.component.html'),
+      'utf-8',
+    );
+    // Model export — single source of truth for the glyph.
+    expect(jobModelSrc).toMatch(/export const RECEIPT_LONG_GLYPH = 'receipt_long'/);
+    // Teal color #14B8A6 for settled (NOT green completed).
+    expect(jobModelSrc).toMatch(/case 'settled':[\s\S]{0,80}?#14B8A6/);
+    // Card imports the constant; the literal is gone from the
+    // status switch.
+    expect(jobCardSrc).toMatch(/RECEIPT_LONG_GLYPH/);
+    expect(jobCardSrc).not.toMatch(/case 'settled':[\s\S]{0,200}?return 'receipt_long'/);
+    // Panel imports + uses the constant.
+    expect(panelSrc).toMatch(/RECEIPT_LONG_GLYPH/);
+    // Receipt-chip template binds via the component field — no
+    // bare literal in the HTML.
+    expect(jobCardHtmlSrc).not.toMatch(/receipt-icon">receipt_long/);
+    expect(jobCardHtmlSrc).toMatch(/receipt-icon">\{\{ receiptLongGlyph \}\}/);
+  });
+
+  it('P3 carry-over — dead-legacy aliases isEmptyState / isEmptyWorkState are removed from the component', () => {
+    // The P2 empty-state model + P2 ``showEmptyState`` computed
+    // REPLACED both aliases; the P3 carry-over checklist retires
+    // them so a future refactor cannot re-introduce silently-sliced
+    // dead code. A grep confirms ZERO production-text references.
+    expect(componentSrc).not.toMatch(/readonly isEmptyState\s*=\s*computed/);
+    expect(componentSrc).not.toMatch(/readonly isEmptyWorkState\s*=\s*computed/);
+    // The template never bound them either (the P2 source-text
+    // pin covers the new path).
+    expect(templateSrc).not.toMatch(/isEmptyState\(/);
+    expect(templateSrc).not.toMatch(/isEmptyWorkState\(/);
+  });
+
+  it('P3 carry-over — unused MatProgressSpinnerModule import is removed from the component', () => {
+    // The P2 empty-state model replaced the legacy spinner with a
+    // loading skeleton; the import had no template reference and
+    // no spec pin. The P3 carry-over removes it so the unused
+    // import cannot drift back into the bundle as a budget hit.
+    expect(componentSrc).not.toMatch(/import\s*\{[^}]*MatProgressSpinnerModule[^}]*\}\s*from\s*['"]@angular\/material\/progress-spinner['"]/);
+    // The component must NOT add the symbol to its ``imports`` array
+    // (the array entry would re-introduce it to the bundle).
+    expect(componentSrc).not.toMatch(/MatProgressSpinnerModule,\s*\n\s*MatChipsModule/);
+  });
+});
+
+// ── P4 — defer banner + holders panel binding pins ────────────────────
+//
+// Plain-TS specs cannot verify DOM bindings; the F-5 pins below
+// pin every (template ↔ component) ↔ (handler ↔ store) wiring the
+// P4 plan introduced. The companion behavior specs in
+// ``jobs-page.store.spec.ts`` and ``defer-blocked.model.spec.ts``
+// prove the LOGIC; this spec proves the WIRING.
+
+describe('P4 — defer banner + holders panel template↔component binding pins', () => {
+  it('template renders the defer banner under the filter bar (visibility helper)', () => {
+    // P4 task 1: page-level banner under the filter bar; the
+    // ``@if (deferPageBanner(); as banner)`` template guard IS the
+    // visibility helper (matches ``deferBlockIndicator``'s null-
+    // hiding semantics).
+    expect(templateSrc).toMatch(/@if \(deferPageBanner\(\); as banner\)/);
+  });
+
+  it('template binds the severity classes to the banner (amber/info/red)', () => {
+    // The three severity classes are mutually exclusive (the model
+    // helper returns ONE severity per payload) — pinning them keeps
+    // a future SCSS refactor from collapsing two severities into
+    // one style.
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-amber\]="banner\.severity === 'amber'"/);
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-info\]="banner\.severity === 'info'"/);
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-red\]="banner\.severity === 'red'"/);
+  });
+
+  it('template binds the degraded flag (overlay class + note copy)', () => {
+    // P4 task 4: replaces the silent swallow at :587-589. The
+    // degraded overlay MUST surface in three places — the dashed
+    // border (visual), the "stale" tag (inline), and the
+    // "Last check failed — showing retained state." note (body).
+    expect(templateSrc).toMatch(/\[class\.defer-page-banner-degraded\]="deferDegraded\(\)"/);
+    expect(templateSrc).toMatch(/@if \(deferDegraded\(\)\)/);
+    expect(templateSrc).toMatch(/Last check failed — showing retained state/);
+  });
+
+  it('template mounts the inline holders panel with the four IO bindings', () => {
+    // P4 task 2: holders drill-down. The panel consumes the same
+    // store signals the banner does — the inputs are direct
+    // aliases, not re-derived.
+    expect(templateSrc).toMatch(/<app-defer-holders-panel/);
+    expect(templateSrc).toMatch(/\[status\]="deferStatus\(\)"/);
+    expect(templateSrc).toMatch(/\[degraded\]="deferDegraded\(\)"/);
+    expect(templateSrc).toMatch(/\[actionInFlight\]="deferActionInFlight\(\)"/);
+    expect(templateSrc).toMatch(/\(forceComplete\)="onHolderForceComplete\(\$event\)"/);
+    expect(templateSrc).toMatch(/\(resendForeground\)="onHolderResendForeground\(\$event\)"/);
+  });
+
+  it('template renders the "Review holders" toggle ONLY when holders are present', () => {
+    // P4 task 2: the banner button is gated on ``banner.holders.length > 0``.
+    // The anomaly branch (RED) hides the button — anomaly is banner-only
+    // with "Open System Cleanup" instead.
+    expect(templateSrc).toMatch(/@if \(banner\.holders\.length > 0\)/);
+    expect(templateSrc).toMatch(/\(click\)="onToggleDeferPanel\(\)"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-expanded\]="deferPanelOpen\(\)"/);
+  });
+
+  it('template renders the "Open System Cleanup" affordance ONLY in the anomaly branch', () => {
+    // P4 risk table: "RED-anomaly state nags without actionable
+    // remediation" ⇒ offer "Open System Cleanup" rather than a bare
+    // alarm. The button reuses the existing handler so the
+    // System-Cleanup dialog contract stays unchanged (task 6).
+    expect(templateSrc).toMatch(/@if \(banner\.isAnomaly\)/);
+    expect(templateSrc).toMatch(/\(click\)="onSystemCleanup\(\)"/);
+  });
+
+  it('component declares the defer leg wiring — fetcher + signals + aliases + handlers', () => {
+    // The fetcher wires the store to JobService.listDeferBlocked.
+    expect(componentSrc).toMatch(/fetchDeferBlocked: \(\) => this\.jobService\.listDeferBlocked\(\)/);
+    // The component aliases the store signals.
+    expect(componentSrc).toMatch(/readonly deferStatus = this\.store\.deferStatus/);
+    expect(componentSrc).toMatch(/readonly deferDegraded = this\.store\.deferDegraded/);
+    // The component declares the page-banner helper as a computed.
+    expect(componentSrc).toMatch(/readonly deferPageBanner = computed\(\(\) => deferPageBanner\(this\.store\.deferStatus\(\)\)\)/);
+    // The component declares the panel open/close + action-in-flight flags.
+    expect(componentSrc).toMatch(/readonly deferPanelOpen = signal<boolean>\(false\)/);
+    expect(componentSrc).toMatch(/readonly deferActionInFlight = signal<boolean>\(false\)/);
+  });
+
+  it('component fetches the defer leg on init + poll tick + refocus + onRefresh (P4 task 5)', () => {
+    // P4 task 5: defer leg joins the Phase-2 poll tick with per-leg
+    // catchError (the store's subscribe error handler is the
+    // catchError port from the indicator — ``forkJoin`` discipline
+    // for a single-tick poll). The regexes below allow a generous
+    // comment-blank window between the fetch and the next statement
+    // so the spec survives a future docstring touch-up.
+    expect(componentSrc).toMatch(/this\.store\.fetchDeferBlocked\(\);[\s\S]{0,400}?this\.tabVisible\.set\(this\.doc\.visibilityState/);
+    // Poll tick — the defer fetch is the second statement inside the
+    // tick callback (after ``refreshActive``).
+    expect(componentSrc).toMatch(/this\.store\.refreshActive\(\);[\s\S]{0,300}?this\.store\.fetchDeferBlocked\(\);[\s\S]{0,200}?\}, POLL_INTERVAL_MS\)/);
+    // Refocus debounce — same pattern, gated by the gate inputs.
+    expect(componentSrc).toMatch(/this\.store\.refreshActive\(\);[\s\S]{0,300}?this\.store\.fetchDeferBlocked\(\);[\s\S]{0,200}?\}, REFOCUS_DEBOUNCE_MS\)/);
+    // onRefresh — the manual refresh button path.
+    expect(componentSrc).toMatch(/protected onRefresh\(\): void \{[\s\S]{0,800}?this\.store\.fetchDeferBlocked\(\);/);
+  });
+
+  it('component action handlers gate the service call behind the confirm dialog (P4 task 3)', () => {
+    // Two-stage confirm: the action handler opens a ConfirmDialog;
+    // the service call fires ONLY inside the ``afterClosed``
+    // subscribe callback's confirm branch. The cancel path closes
+    // the dialog and returns without dispatching.
+    expect(componentSrc).toMatch(/protected onHolderForceComplete\(holder: DeferBlockHolder\): void/);
+    expect(componentSrc).toMatch(/protected onHolderResendForeground\(holder: DeferBlockHolder\): void/);
+    // Both handlers must reference ConfirmDialogComponent via dialog.open.
+    // The actual call uses generic type arguments (erased at build
+    // time, but visible in source) — match the prefix-then-arg shape.
+    expect(componentSrc).toMatch(/this\.dialog\.open<[\s\S]*?>\(ConfirmDialogComponent,/);
+    // Both handlers subscribe to ``afterClosed`` to gate the
+    // service call on the dialog result.
+    expect(componentSrc).toMatch(/afterClosed\(\)\.subscribe\(\(confirmed\)/);
+  });
+
+  it('component action handlers keep the service call INSIDE the afterClosed callback (P4 F-5 structural pin)', () => {
+    // P4 REVIEW FIX — the previous regex
+    // (``afterClosed().subscribe((confirmed)``) only proved the
+    // shape existed; it did NOT prove the service call sat inside
+    // the callback. A hoisted call (dispatching BEFORE the dialog
+    // resolves) would still pass. The structural pin below anchors
+    // on the start of the ``afterClosed().subscribe((confirmed)``
+    // callback and requires the service call to appear within a
+    // bounded window — the window is set wide enough to cover
+    // comment-blank lines + the ``deferActionInFlight.set(true)``
+    // flag toggle, but tight enough that a ``});`` from a hoisted
+    // handler would fall outside it.
+    //
+    // Stated regex:
+    //   ``ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{
+    //     [\s\S]{0,600}?this\.jobService\.<method>\(holder\.instance_id\)``
+    //
+    // Hoist failure mode: if a future refactor moves the
+    // ``forceCompleteDeferHolder`` / ``resendDeferredForeground``
+    // call ABOVE the ``ref.afterClosed().subscribe(...)`` open, the
+    // regex's anchor would be AFTER the call and the match would
+    // fail. The behavioral specs in ``jobs.component.spec.ts``
+    // (``Holder action two-stage confirm``) provide the
+    // corroborating assertion; the structural pin is the cheap
+    // source-text guard that survives any TestBed-free mock drift.
+    expect(componentSrc).toMatch(
+      /ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{[\s\S]{0,600}?this\.jobService\.forceCompleteDeferHolder\(holder\.instance_id\)/,
+    );
+    expect(componentSrc).toMatch(
+      /ref\.afterClosed\(\)\.subscribe\(\(confirmed\) => \{[\s\S]{0,600}?this\.jobService\.resendDeferredForeground\(holder\.instance_id\)/,
+    );
+  });
+
+  it('component refreshes the defer leg after every successful action (banner/panel post-action refresh)', () => {
+    // P4 task 3 acceptance: "success refreshes holders leg". Both
+    // action handlers re-fetch the defer leg on success. The window
+    // covers the whole ``subscribe({...})`` callback (incl. the
+    // ``result`` handling, the snackbar open, etc.) up to the
+    // trailing ``fetchDeferBlocked`` call.
+    expect(componentSrc).toMatch(/this\.jobService\.forceCompleteDeferHolder\(holder\.instance_id\)\.subscribe\(\{[\s\S]{0,2000}?this\.store\.fetchDeferBlocked\(\)/);
+    expect(componentSrc).toMatch(/this\.jobService\.resendDeferredForeground\(holder\.instance_id\)\.subscribe\(\{[\s\S]{0,2000}?this\.store\.fetchDeferBlocked\(\)/);
+  });
+
+  it('refreshBadStateCount applies retain-last-data to the preflight too (P4 task 4)', () => {
+    // The preflight fetch error handler flips ``preflightDegraded``
+    // (the same flag pattern the store uses). The legacy silent
+    // swallow at the end of the Promise.all chain is GONE.
+    expect(componentSrc).toMatch(/this\.preflightDegraded\.set\(true\)/);
+    expect(componentSrc).not.toMatch(/\.catch\(\(\) => \{\s*\/\/ Fail silently/);
+  });
+
+  it('P4 REVIEW FIX — preflightDegraded staleness marker is rendered on the System Cleanup button (🟡2 pin pair)', () => {
+    // The dead-flag review finding: ``preflightDegraded`` was set on
+    // failure but NEVER rendered — the operator saw a stale red-glow
+    // as if it were healthy. The fix renders BOTH a visible "stale"
+    // tag AND adjusts the tooltip copy so the badge number no longer
+    // reads as ground-truth. Placement decision (chosen from the
+    // review's three options — tooltip only, glow only, banner
+    // banner area):
+    //
+    //   * The "stale" tag sits INSIDE the System Cleanup button,
+    //     mirroring the existing ``defer-page-banner-degraded-tag``
+    //     and ``window-banner-degraded-tag`` chips so the operator's
+    //     eye learns ONE visual idiom = "the count you're looking
+    //     at may not match reality".
+    //   * The tooltip ALSO picks up a stale suffix in either branch
+    //     (has-bad-state OR neutral) so the explanatory text stays
+    //     honest regardless of which tooltip branch fires.
+    //   * The button picks up a softer warning tint via
+    //     ``cleanup-btn-degraded`` so the visual cue is also
+    //     hover-persistent (the tag itself is purely static).
+    //
+    // Pin pair: behavior — the template renders the marker iff
+    // ``preflightDegraded()`` (the @if gate proves the marker is
+    // not unconditionally visible); source — the component
+    // declares the flag as the ``signal`` the template reads.
+    expect(templateSrc).toMatch(/\[class\.cleanup-btn-degraded\]="preflightDegraded\(\)"/);
+    expect(templateSrc).toMatch(/@if \(preflightDegraded\(\)\) \{[\s\S]*?class="cleanup-btn-degraded-tag"/);
+    expect(templateSrc).toMatch(/preflight stale — count may be out of date/);
+    expect(componentSrc).toMatch(/readonly preflightDegraded = signal<boolean>\(false\)/);
+  });
+
+  it('P4 REVIEW FIX — deferHolderKind is a computed over store.deferStatus() (🟡3 race-spec source pin)', () => {
+    // The dead-flag-style race review finding: the legacy code
+    // read ``store.deferStatus()`` synchronously when the
+    // preflight resolved. If preflight landed BEFORE the defer
+    // leg, ``deferHolderKind`` was set to ``null`` despite a
+    // paused holder; nothing re-derived it (the poll does not
+    // refresh preflight). The signal→computed refactor closes
+    // the race because the computed re-evaluates the moment
+    // ``store.deferStatus()`` changes.
+    //
+    // Source pin: the field is declared as a ``computed`` (not a
+    // ``signal``) and its body calls ``deferBlockAction`` on
+    // ``store.deferStatus()``. The corresponding ``.set`` from
+    // the legacy ``refreshBadStateCount`` body must be GONE.
+    expect(componentSrc).toMatch(
+      /readonly deferHolderKind = computed<[\s\S]*?>\(\s*\(\) => deferBlockAction\(this\.store\.deferStatus\(\)\)/,
+    );
+    // The legacy setter is dead — ``deferHolderKind.set`` must
+    // not appear in the production source. (The mock component
+    // in ``jobs.component.spec.ts`` still uses ``.set`` freely,
+    // so this assertion is scoped to ``componentSrc`` only.)
+    expect(componentSrc).not.toMatch(/this\.deferHolderKind\.set\(/);
+    // The defer-block payload arriving AFTER preflight still
+    // yields the correct kind — the computed re-evaluates
+    // reactively. The behavioral race spec lives in
+    // ``jobs.component.spec.ts`` (``Holder action deferred kind
+    // race`` describe block): a placeholder
+    // ``store.deferStatus() = null`` followed by setting the
+    // paused holder proves the computed returns ``'paused'``,
+    // not the legacy null.
+  });
+
+  it('P4 REVIEW FIX — defer-holders panel delegates formatSince to formatDeferHoldSince (🟡4 anti-duplication pin)', () => {
+    // The duplication review finding: the panel's private
+    // ``formatSince`` was byte-identical to the model helper
+    // ``formatDeferHoldSince`` (incl. the ``'unknown time'``
+    // fallback branch). The fix imports the helper and reduces
+    // the panel method to a one-line delegate — any drift
+    // between the panel and the banner is now impossible because
+    // both call the same function.
+    //
+    // Pin (source-only): the panel source contains BOTH the
+    // import AND a delegate body — and does NOT carry the
+    // duplicated ``'unknown time'`` branch shape (the
+    // pre-fix body had ``if (!since) return 'unknown time'``).
+    const fs = require('fs');
+    const path = require('path');
+    const panelSource = fs.readFileSync(
+      path.join(__dirname, 'defer-holders-panel/defer-holders-panel.component.ts'),
+      'utf-8',
+    );
+    // Import present.
+    expect(panelSource).toMatch(/import \{[\s\S]*?formatDeferHoldSince[\s\S]*?\} from/);
+    // Delegate body present (one-line return).
+    expect(panelSource).toMatch(/return formatDeferHoldSince\(since\);/);
+    // Duplicated branch shape GONE — the pre-fix ``if (!since)
+    // { return 'unknown time' }`` body would surface here if
+    // re-introduced.
+    expect(panelSource).not.toMatch(/if \(!since\) \{\s*return 'unknown time'/);
+  });
+
+  it('the page banner DOES NOT touch the cleanup dialog directly (P4 task 6 — dialog contract untouched)', () => {
+    // P4 task 6: the System Cleanup dialog keeps working unchanged.
+    // The banner's "Open System Cleanup" button reuses the page's
+    // existing ``onSystemCleanup`` handler — it does NOT open the
+    // dialog directly (the dialog's data contract is untouched).
+    expect(componentSrc).toMatch(/onSystemCleanup/);
+    // The page banner template handler is ``(click)="onSystemCleanup()"`` —
+    // confirmed by the template-source pin above.
+  });
+});
+
+// ── P5 (jobs-page-improvement) — URL binding + deep-link F-5 pins ──────
+//
+// Every NEW write-path / binding / template hunk that ships in
+// Phase 5 ships with a source-text pin AND a behavior spec (the
+// house convention: a source-text pin alone passed green against
+// the pre-P2 ``showEmptyState`` regression). The codec + binding
+// behavior specs live in ``jobs-url-state.model.spec.ts`` and
+// ``jobs.component.spec.ts`` (P5 describe); this describe is the
+// SOURCE-TEXT anchor for the wiring.
+
+describe('P5 — URL binding + deep-link template↔component binding pins', () => {
+  // Helper — re-read the file text on every test (the binding pin
+  // file IS the production referent; caching would mask a
+  // cross-phase regression that touches the same files).
+  const fs = require('fs');
+  const path = require('path');
+
+  it('URL ↔ store binding imports the codec + the navigation primitives', () => {
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?parseJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?serializeJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    expect(componentSrc).toMatch(
+      /import\s*\{\s*[\s\S]*?diffJobsUrlState[\s\S]*?\}\s*from\s*['"][^'"]*jobs-url-state\.model['"]/,
+    );
+    // ActivatedRoute injection — the URL source.
+    expect(componentSrc).toMatch(
+      /import\s*\{[^}]*ActivatedRoute[^}]*\}\s*from\s+['"]@angular\/router['"]/,
+    );
+    // toSignal from rxjs-interop — the Angular helper that
+    // converts the route's queryParamMap into a signal.
+    expect(componentSrc).toMatch(
+      /import\s*\{[^}]*toSignal[^}]*\}\s*from\s+['"]@angular\/core\/rxjs-interop['"]/,
+    );
+  });
+
+  it('URL ↔ store binding: route is injected and queryParamMap drives urlStateRaw', () => {
+    expect(componentSrc).toMatch(/private readonly route = inject\(ActivatedRoute\)/);
+    expect(componentSrc).toMatch(
+      /private readonly urlStateRaw = toSignal\(\s*this\.route\.queryParamMap\.pipe\(/,
+    );
+    // distinctUntilChanged collapse — the production-side dedup
+    // is required so a duplicate emit (the router sometimes
+    // double-emits on the same nav) does not re-fire the binding.
+    expect(componentSrc).toMatch(/distinctUntilChanged\(/);
+    // Parsed URL state — the canonical view consumed by the
+    // URL → store effect + the deep-link effect.
+    expect(componentSrc).toMatch(
+      /readonly urlState = computed<JobsUrlState>\(\(\) =>\s*parseJobsUrlState\(this\.urlStateRaw\(\)\)/,
+    );
+    // Convenience — the deep-link effect reads this.
+    expect(componentSrc).toMatch(
+      /readonly urlDeepLinkJobId = computed<string \| null>\(\(\) => this\.urlState\(\)\.job\)/,
+    );
+  });
+
+  it('URL → store effect applies parsed filter via setFilters + migration hook', () => {
+    // The URL → store effect reads urlState + storeFilterStateKey,
+    // bails on equality, otherwise applies the filter.
+    expect(componentSrc).toMatch(/this\.store\.setFilters\(url\.filter\)/);
+    // Migration hook — runs on the first non-matching URL emit.
+    expect(componentSrc).toMatch(/this\.runUrlStateMigrationIfNeeded\(\)/);
+    // Active-leg fetch — the store's setFilters is filter-only;
+    // the URL restore path triggers the wire fetch. P5 rev (🟡5):
+    // the view-mode snapshot is taken by the CALLER before
+    // setFilters (a post-write snapshot made the view-mode branch
+    // dead) and passed in.
+    expect(componentSrc).toMatch(
+      /const beforeViewMode = this\.viewMode\(\);\s*this\.store\.setFilters\(url\.filter\);\s*[\s\S]{0,400}?this\.refreshActiveLegsForFilter\(url\.filter, beforeViewMode\)/,
+    );
+    expect(componentSrc).toMatch(
+      /private refreshActiveLegsForFilter\(\s*filter: ReturnType<typeof this\.store\.filterState>,\s*beforeViewMode: JobsViewMode,/,
+    );
+  });
+
+  it('store → URL effect navigates with diff + merge + replaceUrl (no history pollution)', () => {
+    expect(componentSrc).toMatch(
+      /this\.router\.navigate\(\[\],\s*\{[\s\S]*?queryParams: diff,[\s\S]*?queryParamsHandling: 'merge',[\s\S]*?replaceUrl: true,[\s\S]*?\}\)/,
+    );
+  });
+
+  it('migration: legacy localStorage keys are cleared by URL presence OR seed', () => {
+    // Both keys are cleared by the helper (one-time cleanup).
+    expect(componentSrc).toMatch(
+      /private clearLegacyLocalStorageKeys\(\): void \{[\s\S]*?localStorage\.removeItem\(this\.STORAGE_KEY\)/,
+    );
+    expect(componentSrc).toMatch(
+      /localStorage\.removeItem\(this\.VIEW_MODE_KEY\)/,
+    );
+    // The bare-URL branch in runUrlStateMigrationIfNeeded seeds
+    // the store from localStorage AND marks migration done.
+    expect(componentSrc).toMatch(/this\.store\.setFilters\(patch\)/);
+    expect(componentSrc).toMatch(/this\.markUrlMigrationDone\(\)/);
+  });
+
+  it('deep-link: openDrawerForDeepLink is the resolver entry point (in-window + fetch-200 paths)', () => {
+    expect(componentSrc).toMatch(/private openDrawerForDeepLink\(job: Job\): void/);
+    // SSE wiring on non-terminal jobs.
+    expect(componentSrc).toMatch(/streamJobEvents\(job\.job_id\)/);
+    // deepLinkMissingJobId reset on a healthy open.
+    expect(componentSrc).toMatch(/this\.deepLinkMissingJobId\.set\(null\)/);
+  });
+
+  it('deep-link: 404 / network error flips deepLinkMissingJobId (honest "job not found")', () => {
+    // The 404 path keeps the drawer open (NOT a silent failure)
+    // and flips the missing flag so the template renders the
+    // honest empty card. The error branch lives inside the
+    // ``jobService.getJob`` subscribe callback (window set wide
+    // enough to cover the missing-flag block). P5 rev (🟢8): the
+    // identical 404/other-error arms are collapsed (the ``status``
+    // check was dead) and the 🟡3 stale-response guard fronts the
+    // honest-missing flip.
+    expect(componentSrc).toMatch(
+      /error: \(\) => \{[\s\S]{0,800}?this\.deepLinkMissingJobId\.set\(jobId\)[\s\S]{0,200}?this\.drawerOpen\.set\(true\)/,
+    );
+    // In-flight flag flips on entry (the fetch guard) + clears on
+    // completion (both success + error branches).
+    expect(componentSrc).toMatch(/this\.deepLinkFetchInFlight\.set\(true\)/);
+    expect(componentSrc).toMatch(/this\.deepLinkFetchInFlight\.set\(false\)/);
+  });
+
+  it('deep-link: clearUrlDeepLink is the close-path URL strip', () => {
+    expect(componentSrc).toMatch(/private clearUrlDeepLink\(\): void/);
+    expect(componentSrc).toMatch(
+      /this\.router\.navigate\(\[\],\s*\{[\s\S]*?queryParams:\s*\{\s*job:\s*null\s*\}/,
+    );
+    // onCloseDrawer guards on the URL still having the link.
+    expect(componentSrc).toMatch(
+      /onCloseDrawer\(\): void \{[\s\S]{0,800}?if \(this\.urlDeepLinkJobId\(\) !== null\) \{[\s\S]{0,200}?this\.clearUrlDeepLink\(\)/,
+    );
+  });
+
+  it('template: deep-link missing + loading cards mount inside the drawer', () => {
+    expect(templateSrc).toMatch(
+      /@else if \(deepLinkMissingJobId\(\); as missingId\)/,
+    );
+    expect(templateSrc).toMatch(
+      /class="job-detail-drawer deep-link-missing"/,
+    );
+    expect(templateSrc).toMatch(/@else if \(deepLinkFetchInFlight\(\)\)/);
+    expect(templateSrc).toMatch(
+      /class="job-detail-drawer deep-link-loading"/,
+    );
+    // Honest copy (the user-facing text MUST match the spec verbatim).
+    expect(templateSrc).toMatch(/Job not found/);
+    expect(templateSrc).toMatch(/We could not load the job/);
+    // The drawer template carries the report-row Message copy
+    // (different file; the jobs.component.html never renders the
+    // drawer body — it mounts <app-job-detail-drawer> instead).
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).toMatch(/Report rows do not carry message content\./);
+  });
+
+  it('drawer template: Result gate no longer requires status==="completed"', () => {
+    // P5 task 4 — the @if guard was relaxed to ``result_summary
+    // present`` (no status gate). The pin anchors on the drawer
+    // template's ABSENCE of the legacy gate AND the presence of
+    // the relaxed guard.
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).not.toMatch(
+      /@if \(job\(\)\.status === 'completed' && job\(\)\.result_summary\)/,
+    );
+    expect(drawerHtmlSrc).toMatch(/@if \(job\(\)\.result_summary\)/);
+    // The "Result" section title still renders (sanity).
+    expect(drawerHtmlSrc).toMatch(/<h3 class="section-title">Result<\/h3>/);
+  });
+
+  it('drawer template: Message honest-empty copy on report rows', () => {
+    // P5 task 6 — the @else if branch surfaces the gap-e6 copy
+    // when the row is a report kind AND has no message.
+    const drawerHtmlSrc = fs.readFileSync(
+      path.join(
+        __dirname,
+        '../../components/job-detail-drawer/job-detail-drawer.component.html',
+      ),
+      'utf-8',
+    );
+    expect(drawerHtmlSrc).toMatch(
+      /@else if \(job\(\)\.kind === 'report'\)/,
+    );
+    expect(drawerHtmlSrc).toMatch(/Report rows do not carry message content\./);
+    expect(drawerHtmlSrc).toMatch(/class="message-empty-copy"/);
+  });
+
+  it('P5 task 7 (SSE re-pin) — order-preserving + in-place patch lives in the store', () => {
+    // The store's updateJobFromSse uses ``.map`` (in-place)
+    // and never re-sorts. The companion behavioral pin lives in
+    // ``jobs-page.store.spec.ts``; this pin is the source-text
+    // anchor that catches a future refactor that drifts to a
+    // sort/replace implementation.
+    const storeSrc = fs.readFileSync(
+      path.join(__dirname, 'jobs-page.store.ts'),
+      'utf-8',
+    );
+    expect(storeSrc).toMatch(
+      /this\.jobs\.update\(jobs =>\s*jobs\.map\(job =>/,
+    );
+    expect(storeSrc).toMatch(
+      /this\.works\.update\(works =>\s*works\.map\(work =>/,
+    );
+    // The pre-Phase-2 anti-patterns are gone (no ``this.jobs = [...]``,
+    // no spread-then-sort).
+    expect(storeSrc).not.toMatch(/this\.jobs\s*=\s*\[\.\.\.this\.jobs/);
+    expect(storeSrc).not.toMatch(/this\.works\s*=\s*\[\.\.\.this\.works/);
+  });
+
+  it('P5 task 7 (SSE re-pin) — per-job stream only opens on non-terminal jobs + drawer-open', () => {
+    // The component's onViewJobDetails + openDrawerForDeepLink paths
+    // both guard on isTerminalStatus(job.status) before subscribing.
+    // A future refactor that drops the guard would re-introduce the
+    // pre-P2 SSE-on-terminal bug class. The early `return` for
+    // terminal jobs means the regex window is wider on the
+    // streamJobEvents match (skips past the return).
+    expect(componentSrc).toMatch(
+      /protected onViewJobDetails\(job: Job\): void \{[\s\S]*?isTerminalStatus\(job\.status\)[\s\S]*?return;[\s\S]*?streamJobEvents\(job\.job_id\)/,
+    );
+    expect(componentSrc).toMatch(
+      /private openDrawerForDeepLink\(job: Job\): void \{[\s\S]*?isTerminalStatus\(job\.status\)[\s\S]*?streamJobEvents\(job\.job_id\)/,
+    );
+    // The drawer close disconnects — Phase 2 modal-pause gate
+    // preserved (no SSE resource leak across deep-link opens).
+    expect(componentSrc).toMatch(
+      /protected onCloseDrawer\(\): void \{[\s\S]*?this\.jobSseService\.disconnect\(\)/,
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// P6 — Accessibility close-out (jobs-page-improvement Phase 6).
+//
+// Task 1: the grouped virtual list is a WAI-ARIA tree — role pins on
+// the REAL template text (F-5: template pins are PINS, never
+// behavioral proof; the behavior lives in the pure keyboard model
+// spec, jobs-keyboard.model.spec.ts).
+// Task 3: zero title-only icon controls (connection pills carry
+// programmatic labels; decorative glyphs are aria-hidden; the status
+// chip listbox carries a programmatic label; the defer panel's
+// action rows keep their per-holder aria-labels).
+// Task 8: the disabled New Job button EXPLAINS itself (P5.3 copy).
+// ─────────────────────────────────────────────────────────────────────
+
+// The defer-holders panel is IN a11y scope (plan task 3) — read its
+// real template too.
+const deferPanelTemplateSrc = readFileSync(
+  join(jobsDir, 'defer-holders-panel', 'defer-holders-panel.component.html'),
+  'utf-8',
+);
+
+describe('P6 — ARIA tree structure on the grouped list (task 1, template pins)', () => {
+  it('the virtual-scroll viewport is role="tree" with a programmatic section label', () => {
+    expect(templateSrc).toMatch(
+      /<cdk-virtual-scroll-viewport\s*\n\s*class="job-list"\s*\n\s*role="tree"\s*\n\s*aria-label="Jobs grouped by conversation"/,
+    );
+  });
+
+  it('group headers are role="treeitem" with aria-level and LIVE aria-expanded', () => {
+    expect(templateSrc).toMatch(/class="group-header"\s*\n\s*role="treeitem"\s*\n\s*aria-level="1"\s*\n\s*\[attr\.aria-expanded\]="isGroupExpanded\(item\.groupKey\)"/);
+  });
+
+  it('the chevron is STILL a real <button type="button"> with aria-expanded + stopPropagation (P3 pin preserved)', () => {
+    expect(templateSrc).toMatch(
+      /<button\s*\n\s*type="button"\s*\n\s*class="group-header-chevron"\s*\n\s*\[attr\.aria-expanded\]=[\s\S]*?\(click\)="onChevronClick\(\$event, item\.groupKey\); \$event\.stopPropagation\(\)"/,
+    );
+  });
+
+  it('rows are role="button" tabindex="0" activation targets with a programmatic label', () => {
+    expect(templateSrc).toMatch(
+      /<app-job-card\s*\n\s*\[job\]="item\.job"\s*\n\s*role="button"\s*\n\s*tabindex="0"/,
+    );
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="'Job from '/);
+  });
+
+  it('chevron tap NEVER toggles selection/expansion beyond the group: stopPropagation is the LAST statement in the binding', () => {
+    // Template-extraction audit: the click binding toggles the GROUP
+    // and stops propagation — no row-selection, no card-toggle, no
+    // navigation path from the chevron.
+    expect(templateSrc).toMatch(
+      /\(click\)="onChevronClick\(\$event, item\.groupKey\); \$event\.stopPropagation\(\)"/,
+    );
+    expect(componentSrc).toMatch(
+      /protected onChevronClick\(event: MouseEvent, groupKey: string\): void \{\s*\n\s*event\.stopPropagation\(\);\s*\n\s*this\.onToggleGroupExpansion\(groupKey\);\s*\n\s*\}/,
+    );
+  });
+
+  it('the keyboard handler rides the tree container; rows activate via their own Enter/Space bindings', () => {
+    expect(templateSrc).toMatch(/\(keydown\)="onListKeydown\(\$event\)"/);
+    expect(templateSrc).toMatch(/\(keydown\.enter\)="onRowActivate\(\$event, item\)"/);
+    expect(templateSrc).toMatch(/\(keydown\.space\)="onRowActivate\(\$event, item\)"/);
+    // The container handler MUST NOT handle Enter/Space (the chevron
+    // button's native activation would double-fire).
+    expect(componentSrc).toMatch(
+      /const key = event\.key;\s*\n\s*if \(key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowRight' && key !== 'ArrowLeft'\) \{\s*\n\s*return;/,
+    );
+  });
+
+  it('the single-writer (focus) binding + focused class are on BOTH item kinds', () => {
+    const focusBindings = (templateSrc.match(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/g) ?? []).length;
+    expect(focusBindings).toBe(2);
+    expect(templateSrc).toMatch(/\[class\.focused\]="isFocusedItem\(itemId\(item\)\)"/);
+  });
+
+  it('W1 — the focus-target id is bound on the SAME element that carries (focus); arrow nav lands on a real DOM node', () => {
+    // scheduleFocusAfterRender resolves focus via
+    // document.getElementById(id)?.focus() after the recycling tick.
+    // Without [id] on the host, the lookup is always null and the
+    // viewport-container fallback fires every arrow press — the
+    // (focus) single-writer never fires for arrow nav. Revert-fail:
+    // drop the [id]="itemId(item)" line on either host and this
+    // regex stops matching (we capture the whole opening tag, so
+    // attribute reorder inside the tag is also covered).
+    const groupHeaderOpen = templateSrc.match(/class="group-header"[^>]*>/);
+    expect(groupHeaderOpen).not.toBeNull();
+    expect(groupHeaderOpen![0]).toMatch(/\[id\]="itemId\(item\)"/);
+    // The (focus) binding MUST be on the same element so the
+    // id→focusedItemId mirror is single-writer per node.
+    expect(groupHeaderOpen![0]).toMatch(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/);
+
+    const appJobCardOpen = templateSrc.match(/<app-job-card[^>]*>/);
+    expect(appJobCardOpen).not.toBeNull();
+    expect(appJobCardOpen![0]).toMatch(/\[id\]="itemId\(item\)"/);
+    expect(appJobCardOpen![0]).toMatch(/\(focus\)="onWindowItemFocus\(itemId\(item\)\)"/);
+  });
+});
+
+describe('P6 — icon-only semantics (task 3, zero title-only icon controls)', () => {
+  it('the connection pills carry programmatic aria-labels (title stays for sighted hover)', () => {
+    expect(templateSrc).toMatch(/class="connection-status connected"[^>]*aria-label="Real-time updates connected"/);
+    expect(templateSrc).toMatch(/\[attr\.aria-label\]="'Reconnecting to server, attempt ' \+ retryAttempt\(\) \+ ' of 5'"/);
+    expect(templateSrc).toMatch(/class="connection-status disconnected"[^>]*aria-label="Real-time connection failed — click Refresh to retry"/);
+    expect(templateSrc).toMatch(/class="connection-status disconnected"[^>]*aria-label="Real-time updates disconnected"/);
+  });
+
+  it('the status chip listbox has a programmatic label (chips alone name no group)', () => {
+    expect(templateSrc).toMatch(/<mat-chip-listbox\s*\n\s*class="status-chips"\s*\n\s*multiple\s*\n\s*aria-label="Filter jobs by status"/);
+  });
+
+  it('decorative status glyphs are aria-hidden (wifi / sync / wifi_off pills)', () => {
+    expect(templateSrc).toMatch(/<mat-icon aria-hidden="true">wifi<\/mat-icon>/);
+    expect(templateSrc).toMatch(/<mat-icon class="spinning" aria-hidden="true">sync<\/mat-icon>/);
+    expect((templateSrc.match(/<mat-icon aria-hidden="true">wifi_off<\/mat-icon>/g) ?? []).length).toBe(2);
+  });
+
+  it('ZERO mat-icon on the page template carries a bare title (title-only icon control class)', () => {
+    expect(templateSrc).not.toMatch(/<mat-icon[^>]*\stitle=/);
+    expect(deferPanelTemplateSrc).not.toMatch(/<mat-icon[^>]*\stitle=/);
+  });
+
+  it('the defer-holders panel stays in a11y scope: banner region label + aria-live + labeled action rows', () => {
+    expect(deferPanelTemplateSrc).toMatch(/role="region"\s*\n\s*aria-label="Defer-blocked holders"/);
+    expect(deferPanelTemplateSrc).toMatch(/\[attr\.aria-label\]="\s*'Force-complete holder ' \+ holder\.instance_id \+ ' \(' \+ holder\.kind \+ '\)'/);
+    expect(deferPanelTemplateSrc).toMatch(/\[attr\.aria-label\]="\s*'Resend foreground for holder ' \+ holder\.instance_id \+ ' \(' \+ holder\.kind \+ '\)'/);
+    // The page-level defer banner is the aria-live region (task 3).
+    expect(templateSrc).toMatch(/class="defer-page-banner"\s*\n\s*role="status"\s*\n\s*aria-live="polite"/);
+  });
+});
+
+describe('P6 — New Job honest-disabled copy (task 8 / P5.3)', () => {
+  const NEW_JOB_ALL_WORK_TOOLTIP =
+    'Task creation requires a queue — switch to Queues view';
+
+  it('the component owns the exact copy', () => {
+    expect(componentSrc).toMatch(/protected readonly newJobAllWorkTooltip =\s*\n\s*'Task creation requires a queue — switch to Queues view';/);
+  });
+
+  it('the template binds the copy to the disabled New Job button', () => {
+    expect(templateSrc).toMatch(/\[matTooltip\]="newJobAllWorkTooltip"/);
+  });
+
+  it('the copy names BOTH the reason (requires a queue) and the remedy (switch to Queues view)', () => {
+    expect(NEW_JOB_ALL_WORK_TOOLTIP).toMatch(/requires a queue/);
+    expect(NEW_JOB_ALL_WORK_TOOLTIP).toMatch(/switch to Queues view/);
+  });
+
+  it('the button stays disabled in all-work (the gate is unchanged — copy only)', () => {
+    expect(templateSrc).toMatch(
+      /\[disabled\]="!filters\(\)\.project_id \|\| isAllWorkView\(\)"/,
+    );
+  });
+});

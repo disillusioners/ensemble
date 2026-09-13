@@ -16,7 +16,7 @@
 // queue badge. The UI does not lie about which backing table the row
 // came from.
 
-import { MissionLiveness } from './job.model';
+import { Job, MissionLiveness } from './job.model';
 
 /**
  * The kind of work record.
@@ -62,6 +62,39 @@ export interface Work {
    * nothing extra rather than inventing a state.
    */
   mission_liveness?: MissionLiveness | null;
+  /**
+   * P1 row-parity fix (jobs-page-improvement arc) — execution-timing
+   * fields the backend ``WorkRecord`` already ships (ISO-8601 strings;
+   * ``Instance.last_activity_at`` / ``Instance.updated_at`` proxies or
+   * the JobItem mirror columns). The pre-P1 ``workToJob`` mapping
+   * hard-nulled both, permanently breaking the Timeline on all-work
+   * rows even though the data was on the wire. Optional so legacy
+   * fixtures and older wire payloads stay type-valid; absent maps to
+   * ``null`` on the Job shape (honest "never started/finished"),
+   * never to a fabricated timestamp.
+   */
+  started_at?: string | null;
+  completed_at?: string | null;
+  /**
+   * Mission-projection identity pair (jobs-page-improvement all-work
+   * title fix). The backend ``WorkRecord.to_dict()`` ships BOTH keys
+   * on every ``GET /api/work`` row (daemon/services/work_resolver.py):
+   * ``mission_id`` — the linked mission (== ``instance_id`` per the
+   * mission-class spec §3 identity; ``null`` only for queue-stage
+   * rows with no instance) — and ``mission_ref`` — the M2
+   * cross-reference payload ``{mission_id, agent_id, liveness}``
+   * (``null`` on degraded instance lookups). The pre-fix ``workToJob``
+   * dropped both, so every all-work group built ``missionId: null``
+   * (jobs-grouping.model.ts) and the P3 title-enrichment gate
+   * (``missionId != null``, jobs-enrichment.model.ts) skipped it —
+   * all-work groups never fetched titles. Optional so legacy fixtures
+   * and older wire payloads stay type-valid; absent maps to ``null``
+   * on the Job shape (child-bound semantics), never to a fabricated
+   * identity. ``outcome`` (ALWAYS ``null`` on the transport surface
+   * per the M2 contract §3.2) is deliberately NOT mirrored.
+   */
+  mission_id?: string | null;
+  mission_ref?: { mission_id: string; agent_id: string; liveness: string } | null;
 }
 
 /**
@@ -89,6 +122,76 @@ export interface WorkFilters {
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────
+
+/**
+ * Single-row ``Work`` → ``Job`` mapper (pure, exported so specs can
+ * drive the REAL construction — it used to live as a private method
+ * on ``JobsComponent``, where the all-work pipeline bypassed filters
+ * and hard-nulled the timeline fields).
+ *
+ * Row-parity contract (jobs-page-improvement P1):
+ *
+ * * ``started_at`` / ``completed_at`` — carried from the wire
+ *   (``?? null``), NOT hard-nulled. ``JobCardComponent``'s Timeline
+ *   renders on all-work rows exactly as it does on queue rows.
+ * * ``mission_id`` / ``mission_ref`` — carried (``?? null``), NOT
+ *   dropped. Grouping derives ``missionId`` from ``mission_id`` and
+ *   the P3 title-enrichment picker requires a populated
+ *   ``missionId``; the pre-fix drop made every all-work group
+ *   permanently enrichment-ineligible (no titles, ever).
+ * * ``result_summary`` — carried (``message`` stays ``undefined``:
+ *   no BE surface carries report message content today — honest gap,
+ *   drawer copy is addressed in Phase 5).
+ * * ``source`` — stays ``undefined``: the ``/api/work`` wire carries
+ *   no source concept (gap-e5). The source FILTER is therefore
+ *   queues-view-scoped (control hidden in all-work with honest copy).
+ * * ``priority`` — ``0`` placeholder (no BE priority on work rows).
+ * * ``queue_id`` — pinned ``null`` for every kind so a stale value
+ *   cannot re-enable the queue badge after the kind guardrail runs
+ *   in ``JobCardComponent`` (non-job kinds show no queue badge).
+ *
+ * The mapping is deliberately one-way and lossy in the direction
+ * Work→Job (the card template stays type-stable on ``Job``); the
+ * ``kind`` field carries the backing-table semantics.
+ */
+export function workToJob(work: Work): Job {
+  return {
+    job_id: work.work_id,
+    agent_id: work.agent_id ?? '',
+    message: undefined,
+    source: undefined,
+    project_id: work.project_id,
+    priority: 0,
+    // Defensive fallback covers null/undefined AND empty-string
+    // statuses (an empty string would render a blank status chip;
+    // the pre-P1 ``??`` alone missed it).
+    status: (work.status || 'pending') as Job['status'],
+    created_at: work.created_at,
+    // P1 row-parity fix — see the docstring: carry the wire timings
+    // through instead of nulling them.
+    started_at: work.started_at ?? null,
+    completed_at: work.completed_at ?? null,
+    instance_id: work.instance_id,
+    error_message: work.error,
+    result_summary: work.result_summary,
+    queue_id: null,
+    cancelled_at: null,
+    kind: work.kind,
+    // Fix C read-model split (§8.2) — pass the discriminator +
+    // liveness pair through so JobCardComponent can render the
+    // receipt chip and the mission-liveness indicator. Task-backed
+    // records carry null for both and render nothing extra.
+    job_type: (work.job_type ?? null) as Job['job_type'],
+    mission_liveness: work.mission_liveness ?? null,
+    // All-work title fix — carry the mission-projection identity pair
+    // through (see the Work docblock). Grouping derives ``missionId``
+    // from it and the title-enrichment gate requires a populated
+    // ``missionId``; dropping it here kept every all-work group
+    // permanently enrichment-ineligible.
+    mission_id: work.mission_id ?? null,
+    mission_ref: work.mission_ref ?? null,
+  };
+}
 
 /**
  * Canonical chip colour for a WorkKind.
@@ -151,3 +254,4 @@ export function getKindIcon(kind: WorkKind | undefined | null): string {
       return 'help_outline';
   }
 }
+

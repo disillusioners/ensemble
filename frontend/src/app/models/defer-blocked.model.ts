@@ -175,3 +175,173 @@ export function deferBlockAction(
 
   return null;
 }
+
+/**
+ * Kind-rank for the page-banner holder ordering. The same paused >
+ * stalled > live precedence as ``deferBlockIndicator`` (P4 task 2:
+ * "paused > stalled > live order").
+ *
+ * The numeric ranks are a stable, spec-able contract — adding a new
+ * kind later requires an explicit rank decision (the comparator is
+ * exported below as ``compareDeferHolderKind``).
+ */
+export const DEFER_HOLDER_KIND_RANK: Readonly<Record<DeferHolderKind, number>> = {
+  paused: 0,
+  stalled: 1,
+  live: 2,
+};
+
+/**
+ * Sort-comparator for ``DeferHolderKind`` — the page banner's
+ * ordered holder list keeps the wire's within-kind order (stable
+ * sort) and only reorders across kinds.
+ */
+export function compareDeferHolderKind(
+  a: DeferHolderKind,
+  b: DeferHolderKind
+): number {
+  return DEFER_HOLDER_KIND_RANK[a] - DEFER_HOLDER_KIND_RANK[b];
+}
+
+/**
+ * Page-banner holder ordering. Returns a NEW array (no mutation) so
+ * callers can wire it straight into a signal without aliasing the
+ * wire payload. Stable within each kind — the wire's per-kind order
+ * is preserved (the existing helper ``deferBlockAction`` picks
+ * ``Array.prototype.find`` so within-kind order already drives
+ * "first paused wins"; this helper generalises that to the full
+ * list).
+ */
+export function orderDeferHolders(
+  holders: readonly DeferBlockHolder[]
+): DeferBlockHolder[] {
+  // ``Array.prototype.sort`` is stable in V8 (Chrome, Node) and all
+  // modern browsers (since 2019); we do NOT need a custom tiebreak.
+  return [...holders].sort((a, b) => compareDeferHolderKind(a.kind, b.kind));
+}
+
+/**
+ * Render-ready banner state for the page-level defer-blocked banner
+ * (P4 task 1).
+ *
+ * The existing ``deferBlockIndicator`` returns a tooltip-shaped
+ * payload (severity + single sentence). The PAGE banner needs
+ * separate title and body fields so the template can render a
+ * heading + paragraph instead of a single-line tooltip. The two
+ * helpers coexist — the indicator still drives the header badge
+ * (no copy change there); this helper drives the new page banner.
+ *
+ * Render gate (plan task 1 verbatim): hidden ONLY when no data AND
+ * no anomaly. Concretely:
+ *   - ``null`` payload ⇒ return ``null`` (nothing to surface)
+ *   - ``pending_count === 0`` AND holders empty ⇒ return ``null``
+ *   - ``pending_count > 0`` AND holders empty ⇒ RED-anomaly (the
+ *     "no holder" state IS the anomaly that justifies rendering)
+ *   - ``pending_count > 0`` AND holders present ⇒ AMBER or INFO per
+ *     the existing severity conjunction
+ *
+ * ``isAnomaly`` is exported as a convenience for the template's
+ * anomaly-specific copy branch (the "Open System Cleanup" affordance
+ * lives only in the anomaly path).
+ */
+export interface DeferPageBanner {
+  severity: DeferBlockSeverity;
+  /** Short heading for the banner — e.g. "Defer-blocked" or "Possibly stuck". */
+  title: string;
+  /** Body sentence(s) explaining the state — e.g. "5 messages held by paused instance …" */
+  body: string;
+  /** ``true`` iff the render gate fired for the anomaly (pending > 0, holders == []). */
+  isAnomaly: boolean;
+  /** The payload's holder list (already deferred — empty in the anomaly case). */
+  holders: DeferBlockHolder[];
+  /** The payload's pending count — exposes the raw number for the anomaly copy branch. */
+  pendingCount: number;
+}
+
+/**
+ * Singular / plural suffix helper for "message" / "messages" — the
+ * defer lane is the ONLY place where the same noun carries singular
+ * grammar rules, so we keep it local to the defer helpers (not a
+ * global string util).
+ */
+function deferPendingNoun(count: number): string {
+  return count === 1 ? 'message' : 'messages';
+}
+
+/**
+ * Derive the page-banner state from the defer payload. The
+ * severity-table truth is the SAME conjunction the indicator
+ * helper uses; this helper just splits the single-line tooltip into
+ * a title + body pair and tags the anomaly branch.
+ */
+export function deferPageBanner(
+  status: DeferBlockedStatus | null | undefined
+): DeferPageBanner | null {
+  if (!status) {
+    return null;
+  }
+  const pendingCount = status.pending_count;
+  const holders = status.holders ?? [];
+
+  // Render gate (matches ``deferBlockIndicator``): no pending defer
+  // pressure ⇒ no banner — even if holders happen to be present.
+  // The page banner's extra branch over the indicator is the
+  // title/body SPLIT, not a new render gate.
+  if (!(pendingCount > 0)) {
+    return null;
+  }
+
+  // Anomaly: pending > 0 + zero holders.
+  if (holders.length === 0) {
+    const noun = deferPendingNoun(pendingCount);
+    return {
+      severity: 'red',
+      title: 'Possibly stuck',
+      body: `${pendingCount} ${noun} held with no holder — possibly stuck? Open System Cleanup to reconcile.`,
+      isAnomaly: true,
+      holders: [],
+      pendingCount,
+    };
+  }
+
+  // Holders present — severity per the existing conjunction.
+  const ordered = orderDeferHolders(holders);
+
+  const paused = ordered.find((h) => h.kind === 'paused');
+  if (paused) {
+    const noun = deferPendingNoun(pendingCount);
+    return {
+      severity: 'amber',
+      title: 'Defer-blocked',
+      body: `${pendingCount} ${noun} held by paused instance ${paused.instance_id} since ${formatDeferHoldSince(paused.since)} — resume or terminate to unblock.`,
+      isAnomaly: false,
+      holders: ordered,
+      pendingCount,
+    };
+  }
+
+  const stalled = ordered.find((h) => h.kind === 'stalled');
+  if (stalled) {
+    const noun = deferPendingNoun(pendingCount);
+    return {
+      severity: 'amber',
+      title: 'Defer-blocked',
+      body: `${pendingCount} ${noun} held by stalled mission ${stalled.instance_id} since ${formatDeferHoldSince(stalled.since)} — no live work; safe to force-complete.`,
+      isAnomaly: false,
+      holders: ordered,
+      pendingCount,
+    };
+  }
+
+  // All-live path — deferral working as designed, but the banner
+  // stays visible (the message gate is non-zero).
+  const noun = deferPendingNoun(pendingCount);
+  return {
+    severity: 'info',
+    title: 'Defer-blocked',
+    body: `${pendingCount} ${noun} held by ${holders.length} live mission${holders.length === 1 ? '' : 's'}.`,
+    isAnomaly: false,
+    holders: ordered,
+    pendingCount,
+  };
+}

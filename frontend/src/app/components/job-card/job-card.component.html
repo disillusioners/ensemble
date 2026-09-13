@@ -30,7 +30,7 @@
         <span
           class="receipt-chip"
           matTooltip="Message receipt — handled as soon as it was delivered (not queued work)">
-          <mat-icon class="receipt-icon">receipt_long</mat-icon>
+          <mat-icon class="receipt-icon">{{ receiptLongGlyph }}</mat-icon>
           message
         </span>
       }
@@ -71,10 +71,10 @@
 
     <p class="message-preview">{{ messagePreview() }}</p>
 
-    <button 
-      mat-button 
+    <button
+      mat-button
       class="expand-toggle"
-      (click)="toggleExpanded()">
+      (click)="onExpandToggle()">
       <mat-icon>{{ expanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
       {{ expanded() ? 'Hide Details' : 'Show Details' }}
     </button>

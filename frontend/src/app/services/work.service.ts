@@ -1,6 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, tap, catchError, of, finalize } from 'rxjs';
+import { Observable, tap, catchError, throwError, finalize } from 'rxjs';
 import { Work, WorkFilters } from '../models/work.model';
 
 /**
@@ -38,15 +38,31 @@ export class WorkService {
    * the backend only sees the params the caller actually filtered on.
    * ``root_only`` is always serialised as ``true`` or ``false`` (never
    * omitted as a bare token) so the backend ``bool`` parser never has
-   * to guess. On error the works signal is left untouched and
-   * ``error`` is set — callers can opt to read the latest error via
-   * the ``error()`` signal or display a toast.
+   * to guess.
+   *
+   * ERROR CONTRACT (Phase 2 — jobs-page-improvement): errors
+   * PROPAGATE — this method no longer swallows failures into
+   * ``of([])``. The pre-Phase-2 behavior collapsed a failed poll
+   * into a healthy-looking ``[]`` emission, which the store's
+   * ``.next`` callback treated as honest empty data and replaced
+   * the last good payload — the exact retain-last-data violation
+   * the indicator fixed for its legs and the exact lossy failure
+   * mode the Phase 2 task-6 sweep was chartered to kill (the
+   * snackbar-only swallow at ``jobs.component.ts:628-641``). The
+   * service-level ``error`` signal still records the failure for
+   * legacy readers; the fetch now also FAILS the observable so
+   * callers (the ``JobsPageStore.fetchWorks`` leg) can flip
+   * ``worksDegraded`` and retain the previous payload.
+   *
+   * ``getWork`` toggles the ``loading`` signal so direct subscribers
+   * still see the spinner state.
    *
    * Args:
    *     filters: Optional filter object. All fields are optional.
    *
    * Returns:
-   *     Observable<Work[]> — also pushed into the ``works`` signal.
+   *     Observable<Work[]> — propagates errors. Also pushes the
+   *     healthy payload into the ``works`` signal.
    */
   getWork(filters?: WorkFilters): Observable<Work[]> {
     let params = new HttpParams();
@@ -63,15 +79,18 @@ export class WorkService {
       }
     }
 
-    // Mirror ``refreshWork`` — toggle the loading signal so the
-    // Jobs page's skeleton/spinner state also surfaces for callers
-    // that subscribe to ``getWork`` directly (e.g. ``loadWorks``).
+    // Toggle the loading signal so direct subscribers + the page
+    // skeleton/spinner state still surface. ``finalize`` clears the
+    // flag on BOTH the healthy and the errored path.
     this.loading.set(true);
     return this.http.get<Work[]>(this.API_BASE, { params }).pipe(
       tap((works) => this.works.set(works)),
       catchError((err) => {
+        // Record the failure for legacy readers, but PROPAGATE it —
+        // the store's retain-last-data discipline requires the
+        // observable to fail, not emit a healthy-looking ``[]``.
         this.error.set(err?.message || 'Failed to fetch work');
-        return of([] as Work[]);
+        return throwError(() => err);
       }),
       finalize(() => this.loading.set(false))
     );

@@ -1,20 +1,33 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
-import { Router } from '@angular/router';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, viewChild, DOCUMENT } from '@angular/core';
+import { ActivatedRoute, Router } from '@angular/router';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
+// P6 (task 2) — the viewport reference is needed for the keyboard
+// recycling contract: focus moves scrollToIndex FIRST so the target
+// row is inside the rendered range, THEN real DOM focus is
+// re-resolved after the render tick.
+import { ScrollingModule, CdkVirtualScrollViewport } from '@angular/cdk/scrolling';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
-import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+// P3 carry-over — ``MatProgressSpinnerModule`` removed (unused).
+// The P2 empty-state model replaces the legacy spinner affordance
+// (a loading skeleton, not a spinner); the import had no template
+// reference and no test pin. Removed in the carry-over checklist.
 import { MatChipsModule } from '@angular/material/chips';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
-import { Subscription, switchMap, of, catchError, tap, firstValueFrom } from 'rxjs';
+// P5 (jobs-page-improvement) — ``MatDividerModule`` for the deep-link
+// honest-empty / loading cards (the drawer body uses ``<mat-divider>``).
+import { MatDividerModule } from '@angular/material/divider';
+import { Subscription, switchMap, of, catchError, tap, distinctUntilChanged, map } from 'rxjs';
 import { JobService } from '../../services/job.service';
+import { MissionService } from '../../services/mission.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
@@ -28,13 +41,68 @@ import { QueueListComponent } from '../../components/queue-list/queue-list.compo
 import { SearchableSelectComponent } from '../../components';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
 import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
-import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
+import { DeferHoldersPanelComponent } from './defer-holders-panel/defer-holders-panel.component';
+import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.model';
+import { workToJob } from '../../models/work.model';
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
-import { Work } from '../../models/work.model';
 import { CleanupPreflight } from '../../models/cleanup-preflight.model';
-import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
+import { DeferBlockHolder, deferBlockAction, deferPageBanner } from '../../models/defer-blocked.model';
+import { JobsPageStore } from './jobs-page.store';
+import {
+  JobsViewMode,
+  hasActiveJobsFilter,
+} from '../../models/jobs-filter-state.model';
+import {
+  POLL_INTERVAL_MS,
+  REFOCUS_DEBOUNCE_MS,
+  PollGateInputs,
+  shouldTick,
+} from './jobs-poll.model';
+import {
+  MAX_RENDER_ROWS,
+  WINDOW_BANNER_COPY,
+  RenderGuardOutcome,
+  WindowItem,
+  renderGuard,
+  toBoundedWindowItems,
+  toWindowItems,
+} from './jobs-window.model';
+// P6 (task 2) — pure keyboard model: clamped arrow nav + WAI-ARIA
+// tree action resolution over the flattened WindowItem list.
+import {
+  isJobsActivateKey,
+  jobsWindowItemId,
+  resolveJobsKeyAction,
+} from './jobs-keyboard.model';
+import {
+  JobsEmptyStateKind,
+  classifyJobsEmptyState,
+  emptyStateCopy,
+  JobsEmptyStateCopy,
+} from './jobs-empty-state.model';
+import {
+  JOB_QUERY_PARAM,
+  JobsUrlState,
+  createEmptyJobsUrlState,
+  diffJobsUrlState,
+  parseJobsUrlState,
+  resolveJobsUrlMigration,
+  serializeJobsUrlState,
+} from './jobs-url-state.model';
+import {
+  JobGroup,
+  MAX_TITLE_ENRICHMENT_FETCHES,
+  NO_MISSION_CONTEXT_KEY,
+  autoExpandGroupIds,
+  compareJobGroups,
+  defaultGroupTimeAgo,
+  groupHeaderTitle,
+  groupJobs,
+  groupMetaLine,
+} from '../../models/jobs-grouping.model';
+import { pickEnrichmentTargets } from '../../models/jobs-enrichment.model';
 
 /**
  * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
@@ -47,8 +115,13 @@ import { DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked
  *   visible but inactive, main pane shows ALL work records (jobs +
  *   turns + reports) backed by ``WorkService``. The kind chip on
  *   each card tells the user which backing table the row came from.
+ *
+ * P1 (jobs-page-improvement): the type now lives in
+ * ``jobs-filter-state.model.ts`` (view_mode is a ``JobsFilterState``
+ * key) and is re-exported above — both view modes are projections of
+ * ONE ``JobsPageStore`` pipeline.
  */
-export type JobsViewMode = 'queues' | 'all-work';
+export type { JobsViewMode };
 
 @Component({
   selector: 'app-jobs',
@@ -56,27 +129,46 @@ export type JobsViewMode = 'queues' | 'all-work';
   imports: [
     CommonModule,
     FormsModule,
+    ScrollingModule,
     MatButtonModule,
     MatButtonToggleModule,
     MatIconModule,
-    MatProgressSpinnerModule,
+    // P3 carry-over — ``MatProgressSpinnerModule`` removed (unused).
     MatChipsModule,
     MatSidenavModule,
     MatSnackBarModule,
     MatDialogModule,
     MatTooltipModule,
     MatCheckboxModule,
+    MatDividerModule,
     JobCardComponent,
     JobDetailDrawerComponent,
     QueueListComponent,
-    SearchableSelectComponent
+    SearchableSelectComponent,
+    DeferHoldersPanelComponent,
   ],
   templateUrl: './jobs.component.html',
   styleUrl: './jobs.component.scss'
 })
 export class JobsComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
+  /**
+   * P5 (jobs-page-improvement) — ActivatedRoute is the source of
+   * truth for the URL ↔ filter-state binding (plan tasks 2 + 3).
+   * `queryParamMap` is converted to a signal via `toSignal` so the
+   * rest of the binding (URL → store, store → URL, deep-link) can
+   * use the plain-signal pipeline already established in P1-P4.
+   */
+  private readonly route = inject(ActivatedRoute);
   private readonly jobService = inject(JobService);
+  /**
+   * P3 (jobs-page-improvement) — MissionService is the canonical home
+   * for /api/missions calls. The page uses ``getMission(id)`` for
+   * lazy group-title enrichment (plan task 4). The indicator uses
+   * ``listMissions`` for its LEG A (the parallel-creation trap
+   * fix: one home per call).
+   */
+  private readonly missionService = inject(MissionService);
   private readonly jobSseService = inject(JobSseService);
   private readonly projectService = inject(ProjectService);
   private readonly tabStateService = inject(TabStateService);
@@ -97,24 +189,526 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly STORAGE_KEY = 'job-page-selected-project';
   private readonly VIEW_MODE_KEY = 'job-page-view-mode';
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
+  /** Phase 2 — pending refocus-refresh timer id (debounce storm mitigation). */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
   private sseSubscription: Subscription | null = null;
   private projectRestored = false;
 
-  // Signals for state
-  readonly jobs = signal<Job[]>([]);
-  readonly loading = signal(false);
-  readonly error = signal<string | null>(null);
+  /**
+   * P1 (jobs-page-improvement) — THE single fetch + filter pipeline
+   * behind BOTH view modes. The pre-P1 dual path (component-local
+   * ``filteredJobs`` over the jobs dataset; ``worksAsJobs`` bypassing
+   * filters over the work dataset) is DELETED — every view mode is a
+   * projection of this store.
+   *
+   * The fetchers wire the store to the services; every leg propagates
+   * errors so the store's per-leg retain-last-data contract holds.
+   *
+   * P4 — added the ``fetchDeferBlocked`` leg (page-level defer banner
+   * + holders panel). The fetcher delegates to ``JobService.listDeferBlocked``
+   * which is the existing wrapped endpoint; the leg rides the same
+   * poll tick and shares the store's in-flight guard.
+   */
+  private readonly store = new JobsPageStore({
+    fetchJobs: (filters) => this.jobService.listJobs(filters),
+    fetchWorks: (filters) => this.workService.getWork(filters),
+    fetchDeferBlocked: () => this.jobService.listDeferBlocked(),
+  });
+
+  // Dataset + fetch-state aliases — the template keeps reading the
+  // same names, but the signals are OWNED by the store now (single
+  // source of truth; the component holds no shadow copies).
+  readonly jobs = this.store.jobs;
+  readonly works = this.store.works;
+  readonly loading = this.store.jobsLoading;
+  readonly error = this.store.jobsError;
+  readonly workLoading = this.store.worksLoading;
+  readonly workError = this.store.worksError;
+
+  // ── Phase 2 — banner + poll-gate derived state (aliases over the
+  // store). Kept here as component-level computeds so the template
+  // reads them like pre-Phase-2 locals; the policy (windowIsFull,
+  // shouldTick) lives in the pure models.
+  readonly windowRowCount = this.store.windowRowCount;
+  readonly windowBanner = this.store.windowBanner;
+  readonly windowDegraded = this.store.windowDegraded;
+  readonly fetchInFlight = this.store.fetchInFlight;
+  /** The unified, view-mode-aware error string (first non-null leg error). */
+  readonly unifiedError = this.store.error;
+
+  // ── P4 — defer leg aliases + page-banner state ─────────────────────
+  //
+  // The defer leg rides the same poll tick as the data legs; the
+  // store owns the in-flight guard + the retain-last-data discipline.
+  // The page banner derives from ``deferPageBanner`` (the model helper
+  // is the source of truth — the template does not re-derive the
+  // severity conjunction). ``deferPanelOpen`` is the local UI flag
+  // for the inline holders panel (driven by the banner's button).
+  readonly deferStatus = this.store.deferStatus;
+  readonly deferLoading = this.store.deferLoading;
+  readonly deferDegraded = this.store.deferDegraded;
+  /** Convenience computed — the page banner state (null ⇒ hidden). */
+  readonly deferPageBanner = computed(() => deferPageBanner(this.store.deferStatus()));
+  /** Inline panel open state (driven by the banner's "Review holders" button). */
+  readonly deferPanelOpen = signal<boolean>(false);
+  /** Per-holder action in-flight flag (set true while a service call is on the wire). */
+  readonly deferActionInFlight = signal<boolean>(false);
+
+  // P1 review watch-item (a): the WorkService's own `loading` signal
+  // is shadowed by the store's `worksLoading` — both can be true at
+  // once. P2 ties them to one source: the template binds ONLY to the
+  // store's flag (above) so the two cannot surface contradictory
+  // spinner states. The page never reads `WorkService.loading`
+  // directly — the `workLoading` alias here goes to the store.
+  // (Pre-Phase-2: `loading()` returned `jobsLoading()`; the
+  // queues-view Refresh button kept both flags in sync. P2 collapses
+  // both to the store. F-5 pin in jobs-page.bindings.pins.spec.)
+
+  // ── Phase 3 — grouping projection (groupJobs → WindowItem[]) ─────────
+  //
+  // Phase 2's flat-job projection is REPLACED by a grouping layer:
+  // store.filteredJobs() → groupJobs → toWindowItems(groups,
+  // expandedGroupIds, titleFor, metaLineFor). The grouping is a
+  // PRESENTATION layer over the store's projection — the store
+  // never sees groups, the store's filteredJobs stays order-
+  // preserving, and the cards never re-key (panel invariant).
+
+  /**
+   * Grouping projection: filteredJobs → ordered JobGroup[].
+   * Live-first sort port (panel :283-305) applied on top of the
+   * insertion-order groups so the user sees live groups first.
+   */
+  readonly jobGroups = computed<readonly JobGroup[]>(() => {
+    const grouped = groupJobs(this.store.filteredJobs());
+    // Sort a shallow copy so we don't mutate the grouped output.
+    return [...grouped].sort(compareJobGroups);
+  });
+
+  /**
+   * Expansion state — Set keyed by group key. Survives data
+   * refreshes (a poll that reorders the groups does NOT collapse
+   * the user's expanded group). The Phase-2 ``expandedJobIds`` set
+   * uses the same pattern but for row-level expansion.
+   */
+  readonly expandedGroupIds = signal<Set<string>>(new Set());
+
+  /**
+   * G1 port (panel :145-154) — group ids the user has MANUALLY
+   * toggled (chevron button click; native ``Enter`` / ``Space`` on
+   * the button activate the same path). The auto-seed effect only
+   * seeds UNTOUCHED first-2-live group ids; once an id is touched,
+   * the auto-seed NEVER un-toggles or re-expands it, regardless of
+   * how the live-group set drifts across polls. The user's choice
+   * wins.
+   *
+   * Note (P3 review — doc-truth): the earlier draft of this comment
+   * mentioned ``ArrowRight / ArrowLeft`` as keyboard surfaces; no
+   * such wiring exists. The real surface is the chevron ``<button>``
+   * + native button-key activation (``Enter`` / ``Space``). The
+   * ``aria-expanded`` attribute on the button is the ARIA hint for
+   * the group state.
+   */
+  readonly userTouchedGroupIds = signal<Set<string>>(new Set());
+
+  /**
+   * Lazy title enrichment — Map<GroupKey, string> of titles that
+   * arrived via ``MissionService.getMission(id)``. A missing entry
+   * means "use the fallback title" (the model ``groupHeaderTitle``).
+   * Failures keep the fallback title rendered (retain-last-data
+   * discipline — the panel pattern). Cleared on group-id change
+   * only when the BE row goes away (the effect is keyed on the
+   * group list, not the map).
+   */
+  private readonly titleOverrides = signal<Map<string, string>>(new Map());
+
+  /**
+   * P3 review — title-enrichment cascade prevention. Plain
+   * ``Set`` (NOT a signal) so writes don't self-trigger the
+   * enrichment effect. The effect reads ``jobGroups()`` and
+   * ``titleOverrides()`` (those are the cascade triggers); the
+   * sets below are mutated as a side-effect of subscribe / next
+   * / error and cleared by the dataset-change effect above.
+   *
+   * * ``attemptedKeys`` — keys we've fired a GET for in the
+   *   current dataset generation. Cleared on every poll (a new
+   *   jobGroups reference means the dataset is fresh and the
+   *   cap is available again). The picker filters against it
+   *   so the effect never re-attempts a key in the same
+   *   cascade.
+   * * ``inFlightKeys`` — keys with an outstanding subscribe.
+   *   Cleared on every poll (orphan in-flight entries from a
+   *   destroyed group must be cleared so the picker doesn't
+   *   dedup against a request that will never resolve). The
+   *   picker filters against it so two concurrent effect runs
+   *   can't fire duplicate GETs for the same key.
+   * * ``failedKeys`` — keys that have failed at least once.
+   *   PERSISTS across polls (no infinite retry). A failed
+   *   enrichment keeps the fallback title for the lifetime of
+   *   the page; the picker filters against it.
+   */
+  private readonly attemptedKeys = new Set<string>();
+  private readonly inFlightKeys = new Set<string>();
+  private readonly failedKeys = new Set<string>();
+
+  /**
+   * Dataset-change effect — clears the per-generation dedup state
+   * (``attemptedKeys``, ``inFlightKeys``) when the jobGroups
+   * REFERENCE changes (a poll brought new data). ``failedKeys``
+   * persists: the spec's "no infinite retry across polls" rule.
+   *
+   * Tracked on ``jobGroups()`` only — reading titleOverrides here
+   * would re-clear the dedup state on every successful fetch,
+   * which is exactly the cascade the picker prevents.
+   */
+  private readonly jobGroupsVersion = computed(() => this.jobGroups());
+
+  /**
+   * Helper: pick the FIRST ``MAX_TITLE_ENRICHMENT_FETCHES``
+   * group keys that are eligible for enrichment. Delegates to
+   * the pure ``pickEnrichmentTargets`` helper in
+   * ``jobs-enrichment.model.ts`` (the policy lives there so it
+   * is unit-testable as a plain function). The component just
+   * wires the dedup-state Sets as parameters.
+   *
+   * The picker enforces:
+   *
+   * * child-bound (missionId null) groups are never picked;
+   * * the no-context fallback group is never picked;
+   * * already-enriched groups (success-side) are skipped;
+   * * attempted / in-flight / failed keys are skipped.
+   */
+  private pickEnrichmentTargets(): readonly string[] {
+    return pickEnrichmentTargets(
+      this.jobGroups(),
+      this.attemptedKeys,
+      this.inFlightKeys,
+      this.failedKeys,
+      this.titleOverrides(),
+      MAX_TITLE_ENRICHMENT_FETCHES,
+    );
+  }
+
+  /**
+   * Header title for a group — the enrichment override wins, the
+   * fallback ``groupHeaderTitle`` (instanceDisplayTitle chain)
+   * otherwise. Pure data, used by ``toWindowItems`` via the
+   * ``titleFor`` callback below.
+   */
+  private titleForGroup = (group: {
+    readonly key: string;
+    readonly agentId: string | null;
+    readonly lastActivityAt: string | null;
+  }): string => {
+    const override = this.titleOverrides().get(group.key);
+    if (override) return override;
+    return groupHeaderTitle(group, (d) => this.formatTimeAgo(d));
+  };
+
+  /**
+   * Meta-line for a group header — ``agent · N jobs · timeAgo(last
+   * activity)``. Pure data; zero-count segments are dropped by the
+   * model. The page uses its own ``formatTimeAgo`` so the wording
+   * matches the rest of the page (panel ``timeAgo`` parity).
+   */
+  private metaLineForGroup = (group: {
+    readonly agentId: string | null;
+    readonly jobCount: number;
+    readonly lastActivityAt: string | null;
+  }): string => {
+    return groupMetaLine(group, (d) => this.formatTimeAgo(d));
+  };
+
+  /**
+   * Page-level timeAgo formatter. Mirrors the panel/legacy
+   * ``timeAgo`` so a job-card "just now" reads the same as a
+   * group-header "just now".
+   */
+  private formatTimeAgo(dateString: string | null | undefined): string {
+    return defaultGroupTimeAgo(dateString);
+  }
+
+  /**
+   * The flattened ``WindowItem[]`` the virtual scroll consumes —
+   * header + rows. The track-by identity is the union's ``key``
+   * field (job_id for rows; group key for headers). The projection
+   * is pure given the inputs; the component memoizes by reference
+   * equality on the underlying arrays so it doesn't fire on every
+   * change-detection pass.
+   *
+   * Note (P3 review — guard honesty): ``windowItems`` is the
+   * UNBOUNDED projection. The render guard (``renderGuardOutcome``
+   * below) uses ``toBoundedWindowItems`` directly against the
+   * groups + expansion set so it can slice on GROUP boundaries
+   * (an expanded group is rendered whole or omitted whole — never
+   * a header without its rows, which would be the silent-slice
+   * orphan case the legacy ``renderGuard`` would produce when fed
+   * the flat ``windowItems``).
+   */
+  readonly windowItems = computed<readonly WindowItem[]>(() =>
+    toWindowItems(
+      this.jobGroups(),
+      this.expandedGroupIds(),
+      this.titleForGroup,
+      this.metaLineForGroup,
+    ),
+  );
+
+  /**
+   * Render-guard outcome — boundary-aware slice over the grouped
+   * projection. P3 review: the legacy ``renderGuard(this.windowItems())``
+   * would silently slice the flat list, producing the orphan
+   * expanded-header case (header renders with zero visible rows).
+   * ``toBoundedWindowItems`` walks groups in order and includes a
+   * group ONLY if its full cost (1 header + N rows if expanded)
+   * fits in the remaining cap; otherwise the whole group is
+   * omitted and its expanded rows count toward ``hidden``.
+   *
+   * Collapsed groups contribute a 1-item cost (header only) — the
+   * spec's "collapsed group is header-only by design" path. The
+   * hidden count is ROWS dropped by the cap (NOT collapsed-by-user
+   * rows; collapsed = by user choice, not by truncation). The
+   * template's "N hidden rows" copy stays truthful.
+   */
+  readonly renderGuardOutcome = computed<RenderGuardOutcome<WindowItem>>(() =>
+    toBoundedWindowItems(
+      this.jobGroups(),
+      this.expandedGroupIds(),
+      this.titleForGroup,
+      this.metaLineForGroup,
+    ),
+  );
+
+  /**
+   * Rows to render — either the full windowItems list (ok branch) or
+   * the kept slice (guarded branch). The template binds here so the
+   * cap is enforced consistently.
+   */
+  readonly renderRows = computed<readonly WindowItem[]>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'ok' ? out.rows : out.kept;
+  });
+
+  /**
+   * Render-guard truncation notice — non-null only when the
+   * projection is at/above the cap. The template renders an explicit
+   * affordance above the virtual scroll list with this copy + a
+   * "switch to Queues view" link.
+   */
+  readonly truncationNotice = computed<string | null>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'guarded' ? out.notice : null;
+  });
+
+  readonly truncationHiddenCount = computed<number | null>(() => {
+    const out = this.renderGuardOutcome();
+    return out.kind === 'guarded' ? out.hidden : null;
+  });
+
+  // ── Phase 2 — empty-state classifier ──────────────────────────────────
+  //
+  // ``classifyJobsEmptyState`` is pure; the component just wires the
+  // inputs (loading / degraded / hasRows / hasActiveFilters / viewMode).
+  // The plan's skeleton rule: skeleton ONLY for the first fetch — a
+  // background refresh during ``dataEmpty``/``filterEmpty``/``errored``
+  // RETAINS the last good list, never flashes a skeleton.
+
+  readonly emptyStateKind = computed<JobsEmptyStateKind>(() =>
+    classifyJobsEmptyState({
+      loading: this.fetchInFlight(),
+      degraded: this.windowDegraded(),
+      hasRows: this.store.filteredJobs().length > 0,
+      hasActiveFilters: hasActiveJobsFilter(this.store.filterState()),
+      viewMode: this.viewMode(),
+    }),
+  );
+
+  readonly emptyStateCopy = computed<JobsEmptyStateCopy>(() =>
+    emptyStateCopy(this.emptyStateKind(), this.viewMode()),
+  );
+
+  /** Skeleton fires ONLY for the first fetch (no data to retain). */
+  readonly showLoadingSkeleton = computed<boolean>(
+    () => this.emptyStateKind() === 'loading',
+  );
+
+  /**
+   * Empty-state card fires when the projection is empty.
+   *
+   * P2 fix (jobs-page-improvement) — hasRows short-circuit. Without
+   * this gate, a steady-state page with rows renders the empty card
+   * AND the virtual list's `!showEmptyState()` branch hides the list
+   * — the page is broken on every settled fetch and every background
+   * refresh of a non-empty dataset. The classifier defensively
+   * returns ``dataEmpty`` whenever ``hasRows=true && !degraded`` (see
+   * ``jobs-empty-state.model.ts``); the COMPONENT must override that
+   * to keep the list visible. ``errored`` is the only exception — the
+   * banner card must stay visible even with retained rows so the
+   * user can retry.
+   *
+   * Invariant: **rows present → list visible; empty card ONLY when
+   * NO rows** (filterEmpty / dataEmpty / errored-with-no-rows).
+   */
+  readonly showEmptyState = computed<boolean>(() => {
+    const kind = this.emptyStateKind();
+    // hasRows short-circuit — the only safe way to keep the virtual
+    // list visible while a non-empty dataset is in flight.
+    if (this.store.filteredJobs().length > 0) {
+      return kind === 'errored';
+    }
+    return (
+      kind === 'dataEmpty' ||
+      kind === 'filterEmpty' ||
+      kind === 'errored'
+    );
+  });
+
+  // ── Phase 2 — poll-gate + visibility state ───────────────────────────
+  //
+  // ``tabVisible`` mirrors ``document.visibilityState``. The poll tick
+  // consults ``shouldTick(tabVisible, drawerOpen, modalOpen,
+  // fetchInFlight)`` and skips the HTTP call when any pause condition
+  // is set. ``tabVisible`` starts TRUE (the spec-friendly default;
+  // the listener updates it on mount).
+
+  private readonly doc = inject(DOCUMENT);
+  readonly tabVisible = signal<boolean>(true);
+
+  /** True while a page-owned modal dialog (create / cleanup / confirm) is open. */
+  readonly modalOpen = signal<boolean>(false);
+
+  // ── Phase 2 — expansion state keyed by job_id (survives recycle) ─────
+
+  /**
+   * Expansion state for ``cdk-virtual-scroll``-rendered cards. The
+   * plan calls this out explicitly: a DOM-local ``signal(false)`` in
+   * the card would reset on every virtual recycle, so the parent
+   * owns the source of truth keyed by ``job_id``. The card's
+   * ``expanded`` input + ``expandToggle`` output wire this through.
+   */
+  readonly expandedJobIds = signal<Set<string>>(new Set());
+
+  /** Phase 2 — virtual-scroll item size in px (card min-height tuned). */
+  protected readonly itemSize = 144;
+
   readonly agents = signal<Agent[]>([]);
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = this.projectService.projects;
 
-  // Queue sidebar signals
-  readonly selectedQueueId = signal<string | null>(null);
+  // ── P5 (jobs-page-improvement) — URL ↔ filter-state binding ───────
+  //
+  // The plan task 2 contract: URL is the SOLE authority for filter
+  // state after the one-time migration from localStorage. The
+  // component owns the parsing + write-back; the codec lives in
+  // ``jobs-url-state.model.ts`` (pure, spec-driven). The signals
+  // below are the three layers:
+  //
+  // * ``urlStateRaw`` — the raw queryParamMap converted to a plain
+  //   object. Drives the URL → store effect via ``parseJobsUrlState``.
+  // * ``urlState`` — the parsed JobsUrlState (the canonical view of
+  //   what the URL currently says). The deep-link handler reads it
+  //   directly; the URL → store effect compares it against the
+  //   store state to break the bidirectional sync loop.
+  // * ``urlDeepLinkJobId`` — convenience signal = ``urlState().job``;
+  //   the deep-link effect subscribes here so a URL-only navigation
+  //   triggers the drawer-open path even if the rest of the URL
+  //   (filter state) is unchanged.
+  //
+  // ``urlMigrationDone`` flips true after the one-time localStorage
+  // seed + cleanup. Re-running the seed on every reload would be
+  // the duplicate-migration trap; the flag is the guard.
+
+  /**
+   * Raw queryParamMap → plain object conversion. ``distinctUntilChanged``
+   * on the serialized JSON collapses router-emit duplicates (the
+   * router emits a new paramMap on every navigation; distinct-equal
+   * emissions would otherwise re-fire the binding effect).
+   */
+  private readonly urlStateRaw = toSignal(
+    this.route.queryParamMap.pipe(
+      map((params) => {
+        const out: Record<string, string | null> = {};
+        for (const key of params.keys) {
+          out[key] = params.get(key);
+        }
+        return out;
+      }),
+      distinctUntilChanged(
+        (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      ),
+    ),
+    { initialValue: {} as Record<string, string | null> },
+  );
+
+  /** Parsed URL state (the canonical view of what the URL says). */
+  readonly urlState = computed<JobsUrlState>(() =>
+    parseJobsUrlState(this.urlStateRaw()),
+  );
+
+  /** Convenience — the deep-link job id from the URL (null = no link). */
+  readonly urlDeepLinkJobId = computed<string | null>(() => this.urlState().job);
+
+  /** One-time migration guard — flips true after the localStorage seed. */
+  private readonly urlMigrationDone = signal<boolean>(false);
+
+  // P5 (jobs-page-improvement) — deep-link "job not found" overlay.
+  // Set when ``?job=<id>`` is present AND the GET 404s. The drawer
+  // renders the honest empty-card instead of an empty drawer body.
+  // The signal is null on a healthy open (the row itself is the
+  // visible content) and carries the missing job_id otherwise.
+  readonly deepLinkMissingJobId = signal<string | null>(null);
+
+  /**
+   * True while a single-job GET is in flight for the deep-link.
+   * Distinct from the data-leg fetches so the drawer can render
+   * a skeleton / spinner without flashing the empty card.
+   */
+  readonly deepLinkFetchInFlight = signal<boolean>(false);
+
+  // ── P5 cycle-guard fields (plan task 2 + 3) ──────────────────────
+  //
+  // These are plain class fields (not signals) so writes do NOT
+  // re-trigger the URL ↔ store effects. Each effect reads the
+  // relevant guard on entry and bails when the guard indicates
+  // "this emit is from the OTHER side of the loop".
+
+  /** JSON-serialized view of the store filterState — for equality checks. */
+  private readonly storeFilterStateKey = computed(() =>
+    JSON.stringify(this.store.filterState()),
+  );
+
+  /** Last serialized store state we applied from the URL (cycle guard). */
+  private lastAppliedFromUrl = '';
+
+  /** Last serialized URL state we wrote to the router (cycle guard). */
+  private lastWrittenToUrl = '';
+
+  /** P5 — last deep-link job id we tried to resolve (cycle guard). */
+  private lastDeepLinkResolved: string | null = null;
+
+  /** P5 — last deep-link job id we in-flight-fetched (cycle guard). */
+  private lastDeepLinkFetched: string | null = null;
+
+  /**
+   * P5 rev (🟡4/🟡7) — the param value the two guards above belong
+   * to. When the URL param CHANGES (including → null), the guards
+   * are stale by definition and are reset: Back to a previously-404'd
+   * ``?job=x`` re-resolves instead of silently no-op'ing, and Back
+   * ``?job=y → ?job=x`` re-opens x instead of leaving the drawer
+   * showing y under x's URL.
+   */
+  private lastDeepLinkParam: string | null = null;
+
+
+  // Queue sidebar selection — derived from the single filter state
+  // (pre-P1 this was a component-local signal MIRRORED into the
+  // filters object; the mirror is gone, the state is the store's).
+  readonly selectedQueueId = computed(() => this.store.filterState().queue_id);
   readonly selectedProjectId = computed(() => this.filters().project_id ?? null);
 
-  // Filter signals
-  readonly filters = signal<JobFilters>({});
+  // Filter state — THE store's filterState (single source of truth;
+  // pre-P1 this was a component-local ``JobFilters`` signal).
+  readonly filters = this.store.filterState;
 
   // DLQ signals
   readonly retryingAll = signal(false);
@@ -167,28 +761,39 @@ export class JobsComponent implements OnInit, OnDestroy {
   // NOT on the preflight wire — the preflight endpoint
   // ``GET /api/jobs/cleanup/preflight`` does NOT emit it. The
   // field is sourced from the SEPARATE
-  // ``GET /api/queues/defer-blocked`` endpoint and populated by
-  // this component when the JS snapshot is wired (see the
-  // setter below — populated via ``deferBlockAction(deferStatus)``
-  // composition). The TS interface in
+  // ``GET /api/queues/defer-blocked`` endpoint via
+  // ``JobsPageStore.fetchDeferBlocked``. P4 — derived as a
+  // ``computed`` over ``store.deferStatus()`` so it stays in
+  // sync no matter which leg lands first (the legacy
+  // ``signal.set`` inside ``refreshBadStateCount`` raced when
+  // preflight resolved before the defer leg). The TS interface in
   // ``cleanup-preflight.model.ts`` annotates the field as a
   // type-completeness convenience only.
-  readonly deferHolderKind = signal<CleanupPreflight['defer_holder_kind']>(null);
+  readonly deferHolderKind = computed<CleanupPreflight['defer_holder_kind']>(
+    () => deferBlockAction(this.store.deferStatus())?.holder.kind ?? null,
+  );
 
-  // Deleted jobs filter
-  readonly showDeleted = signal(false);
+  // P4 — preflight degradation flag (retain-last-data discipline).
+  // The legacy code silently swallowed preflight failures at :587-589;
+  // a flag is now flipped on error so the consumer can render an
+  // honest "last preflight failed" note instead of a stale red-glow.
+  // The retained counts above stay unchanged — clearing would be the
+  // false-healthy trap (retain-last-data is the same pattern the data
+  // legs use; see ``JobsPageStore.fetchJobs`` for the canonical shape).
+  readonly preflightDegraded = signal<boolean>(false);
+
+  // Deleted jobs filter — derived from the single filter state.
+  readonly showDeleted = computed(() => this.store.filterState().include_deleted);
 
   // View mode signal (Phase 4) — 'queues' (legacy) or 'all-work'
-  // (unified list backed by /api/work). Persisted in localStorage so
-  // the user's preferred view survives a page reload.
-  readonly viewMode = signal<JobsViewMode>('queues');
-  private viewModeRestored = false;
+  // (unified list backed by /api/work). P1: a PROJECTION of the
+  // store's filter state, not an independent signal. Persistence is
+  // URL-DRIVEN (P5): the toggle writes the ``view_mode`` query param
+  // via the store → URL effect; the legacy localStorage key is read
+  // exactly ONCE by the one-time bare-URL boot seed
+  // (``runUrlStateMigrationIfNeeded``).
+  readonly viewMode = computed<JobsViewMode>(() => this.store.filterState().view_mode);
 
-  // Unified work list (Phase 4) — only populated when viewMode is
-  // 'all-work'. The mapping to Job[] lives in ``displayedJobs`` so
-  // the rest of the template can stay type-agnostic.
-  readonly works = signal<Work[]>([]);
-  
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
   readonly retryAttempt = this.jobSseService.retryAttempt;
@@ -226,105 +831,39 @@ export class JobsComponent implements OnInit, OnDestroy {
     return map;
   });
 
-  // Computed values
-  readonly filteredJobs = computed(() => {
-    const currentFilters = this.filters();
-    const queueId = this.selectedQueueId();
-    let filtered = this.jobs();
-
-    if (currentFilters.status && currentFilters.status.length > 0) {
-      filtered = filtered.filter(job => currentFilters.status!.includes(job.status));
-    }
-    if (currentFilters.source) {
-      filtered = filtered.filter(job => job.source === currentFilters.source);
-    }
-    if (currentFilters.agent_id) {
-      filtered = filtered.filter(job => job.agent_id === currentFilters.agent_id);
-    }
-    if (queueId) {
-      filtered = filtered.filter(job => job.queue_id === queueId);
-    }
-
-    return filtered;
-  });
-
-  readonly hasJobs = computed(() => this.filteredJobs().length > 0);
-  readonly isEmptyState = computed(() => !this.loading() && this.filteredJobs().length === 0 && !this.error());
-
-  // Phase 4 — unified work view computeds.
+  // ── P1: THE ONE PIPELINE ────────────────────────────────────────────
+  //
+  // The pre-P1 dual path is DELETED from this file:
+  //
+  // * ``filteredJobs`` (computed over ``jobs()`` ONLY) — replaced by
+  //   ``store.filteredJobs``, which filters the ACTIVE dataset.
+  // * ``worksAsJobs()`` / ``workToJob()`` (all-work mapping that
+  //   BYPASSED filters entirely and hard-nulled ``started_at`` /
+  //   ``completed_at``) — replaced by the pure ``workToJob`` mapper
+  //   in ``work.model.ts`` + ``store.filteredJobs``.
+  // * ``displayedJobs``'s view-mode BRANCH — both modes now read the
+  //   same store projection; the alias below is not a second path.
 
   /**
-   * Source for the displayed list — either the legacy filteredJobs
-   * (queues view) or jobs synthesised from the WorkService response
-   * (all-work view). The card template stays type-stable on ``Job``
-   * so it does not need to branch on view mode.
+   * Source for the displayed list — the store's unified projection.
+   * In the all-work view the store projects Work rows through the
+   * row-parity ``workToJob`` mapper INSIDE the pipeline; the card
+   * template stays type-stable on ``Job`` either way.
    */
-  readonly displayedJobs = computed<Job[]>(() => {
-    if (this.viewMode() === 'all-work') {
-      return this.worksAsJobs();
-    }
-    return this.filteredJobs();
-  });
+  readonly displayedJobs = this.store.filteredJobs;
 
-  /**
-   * Map ``Work`` records onto the ``Job`` shape that ``JobCardComponent``
-   * already knows how to render.
-   *
-   * The mapping is deliberately one-way and lossy — turn / report rows
-   * do not have a ``message`` or ``priority`` in the backend, so the
-   * JobCardComponent's ``messagePreview`` falls back to ``result_summary``
-   * and the priority badge reads as ``P0``. The ``kind`` field is what
-   * carries the semantic difference; that is the whole point of the
-   * kind chip.
-   *
-   * The map also pins ``queue_id`` to ``null`` for non-job kinds so a
-   * stale value cannot accidentally re-enable the queue badge after
-   * the kind guardrail runs in JobCardComponent.
-   */
-  private worksAsJobs(): Job[] {
-    return this.works().map((work) => this.workToJob(work));
-  }
+  readonly hasJobs = computed(() => this.store.filteredJobs().length > 0);
 
-  /**
-   * Single-row Work → Job mapper. Kept private and pure so it can be
-   * reused by the SSE update path when a work_id event arrives.
-   */
-  private workToJob(work: Work): Job {
-    return {
-      job_id: work.work_id,
-      agent_id: work.agent_id ?? '',
-      message: undefined,
-      source: undefined,
-      project_id: work.project_id,
-      priority: 0,
-      status: (work.status as Job['status']) ?? 'pending',
-      created_at: work.created_at,
-      started_at: null,
-      completed_at: null,
-      instance_id: work.instance_id,
-      error_message: work.error,
-      result_summary: work.result_summary,
-      queue_id: null,
-      cancelled_at: null,
-      kind: work.kind,
-      // Fix C read-model split (§8.2) — pass the discriminator +
-      // liveness pair through so JobCardComponent can render the
-      // receipt chip and the mission-liveness indicator. Task-backed
-      // records carry null for both and render nothing extra.
-      job_type: (work.job_type ?? null) as Job['job_type'],
-      mission_liveness: work.mission_liveness ?? null,
-    };
-  }
-
-  /**
-   * Empty-state flag for the unified work view (Phase 4).
-   */
-  readonly isEmptyWorkState = computed(() => {
-    return this.viewMode() === 'all-work'
-      && !this.workLoading()
-      && this.works().length === 0
-      && !this.workError();
-  });
+  // ── P3 carry-over — DEAD-LEGACY-ALIAS RETIREMENT ─────────────────
+  //
+  // ``isEmptyState`` and ``isEmptyWorkState`` were pre-P2 component
+  // booleans that the P2 empty-state model + P2 ``showEmptyState``
+  // computeds replaced. The P2 source-text pin in
+  // ``jobs-page.bindings.pins.spec`` already proved the new wiring
+  // owns the empty-state surface; a grep confirms zero template
+  // references. The aliases are removed in P3 (the carry-over
+  // checklist) so the legacy locals cannot drift back into a future
+  // refactor as silently-sliced dead code.
 
   /**
    * Convenience boolean — true while the page is in the all-work view.
@@ -332,13 +871,11 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly isAllWorkView = computed(() => this.viewMode() === 'all-work');
 
   /**
-   * Convenience accessors for the WorkService signals so the template
-   * does not need to reach into a private field. Wrapping in computed
-   * is intentional — it lets Angular track the dependency cleanly
-   * through the template change-detection cycle.
+   * Convenience accessors for the store's per-leg fetch flags so the
+   * template keeps its pre-P1 binding names.
    */
-  readonly workLoading = computed(() => this.workService.loading());
-  readonly workError = computed(() => this.workService.error());
+  readonly jobsDegraded = this.store.jobsDegraded;
+  readonly worksDegraded = this.store.worksDegraded;
 
   // Status filter options
   // M3 (mission-class, 2026-09-03) — ``settled`` added to the
@@ -366,6 +903,15 @@ export class JobsComponent implements OnInit, OnDestroy {
     { value: 'webhook', label: 'Webhook' }
   ];
 
+  // P1 — honest copy for the controls that are queues-view-only
+  // (rendered in their place inside the All Work view; see the
+  // template's @if branches). These state the BE gap instead of
+  // shipping a no-op control (plan task 6: zero no-op controls).
+  readonly sourceUnavailableCopy =
+    'Source filter applies to the Queues view — work records carry no source';
+  readonly showDeletedUnavailableCopy =
+    'Deleted-job filter applies to the Queues view — work records have no deleted state';
+
   // Project filter options — derive from ProjectService.projects() and
   // lead with a sentinel empty-string option so the user can deselect
   // the project. Matches the shape SearchableSelectComponent expects
@@ -385,12 +931,134 @@ export class JobsComponent implements OnInit, OnDestroy {
   ]);
 
   constructor() {
-    // Effect to handle job status updates from SSE
+    // Effect to handle job status updates from SSE — the patch
+    // itself lives in the store (both datasets, order-preserving).
     effect(() => {
       const latestStatus = this.jobSseService.latestStatus();
       if (latestStatus && latestStatus.job_id) {
-        this.updateJobFromSse(latestStatus);
+        this.store.updateJobFromSse(latestStatus);
       }
+    });
+
+    // P3 (jobs-page-improvement) — G1 port: auto-seed the
+    // expansion set on every true change to the live-group key
+    // list. Only the FIRST 2 live groups auto-expand (user-locked:
+    // exactly 2). User-touched ids are NEVER un-toggled or
+    // re-expanded by the seed. The effect is keyed on a stable
+    // string of the live-group ids so unrelated input changes
+    // (e.g. a title-enrichment map mutation) do NOT re-fire it.
+    let seededForKey = '';
+    const liveGroupKey = computed(() =>
+      this.jobGroups()
+        .filter((g) => g.isLive)
+        .map((g) => g.key)
+        .slice()
+        .sort()
+        .join('|'),
+    );
+    effect(() => {
+      const key = liveGroupKey();
+      if (key === seededForKey) return;
+      seededForKey = key;
+      const liveIds = autoExpandGroupIds(this.jobGroups());
+      const touched = this.userTouchedGroupIds();
+      const toSeed = liveIds.filter((id) => !touched.has(id));
+      if (toSeed.length === 0) return;
+      this.expandedGroupIds.update((set) => {
+        const next = new Set(set);
+        for (const id of toSeed) next.add(id);
+        return next;
+      });
+    });
+
+    // P3 review — lazy title enrichment. The effect is keyed on
+    // the group list (via the dataset-change effect below clearing
+    // the dedup Sets) and on ``titleOverrides`` (so a successful
+    // enrichment triggers a re-evaluation that picks the NEXT
+    // un-attempted key within the cap). The picker
+    // (``pickEnrichmentTargets``) ensures the returned list:
+    //
+    // * never exceeds ``MAX_TITLE_ENRICHMENT_FETCHES``;
+    // * contains no key in ``attemptedKeys`` (cascade dedup);
+    // * contains no key in ``inFlightKeys`` (concurrent dedup);
+    // * contains no key in ``failedKeys`` (no infinite retry);
+    // * contains no key with ``missionId == null`` (child-bound
+    //   groups never fetch — their coalesced key is the
+    //   instance_id and ``GET /api/missions/{instance_id}`` is
+    //   semantically wrong).
+    //
+    // After firing each GET, the key is added to
+    // ``attemptedKeys`` + ``inFlightKeys`` so subsequent
+    // picker calls within the same dataset generation never
+    // re-pick it. ``next`` clears the in-flight flag and (on
+    // non-empty title) writes to ``titleOverrides``; ``error``
+    // clears the in-flight flag and writes the key to
+    // ``failedKeys`` (no retry).
+    effect(() => {
+      const targets = this.pickEnrichmentTargets();
+      for (const id of targets) {
+        // Defence-in-depth cap: even if the picker returned
+        // more than ``MAX_TITLE_ENRICHMENT_FETCHES`` (it can't,
+        // but a future refactor might), stop at the cap.
+        if (this.attemptedKeys.size >= MAX_TITLE_ENRICHMENT_FETCHES) {
+          break;
+        }
+        // Mark attempted BEFORE the subscribe so a concurrent
+        // effect run (triggered by the titleOverrides write in
+        // a sibling key's ``next`` handler) doesn't re-pick
+        // this key mid-flight.
+        this.attemptedKeys.add(id);
+        this.inFlightKeys.add(id);
+        this.missionService.getMission(id).subscribe({
+          next: (resp) => {
+            this.inFlightKeys.delete(id);
+            // FLAT wire shape (GET /api/missions/{id} → MissionResponse):
+            // ``title`` is TOP-LEVEL — there is no ``{ mission: … }``
+            // wrapper. Reading the wrapped mission-title form here was
+            // the 2026-09-13 wire-contract break (enrichment 200'd but
+            // read undefined → fallback header always won).
+            const title = resp?.title;
+            if (!title) {
+              // 200-with-null-title is treated as a failure
+              // (no enrichment would mean re-pick every poll —
+              // same bug class as a network failure).
+              this.failedKeys.add(id);
+              return;
+            }
+            this.titleOverrides.update((m) => {
+              const next = new Map(m);
+              next.set(id, title);
+              return next;
+            });
+          },
+          error: () => {
+            this.inFlightKeys.delete(id);
+            // No-retry — the spec: a failed key never re-fires
+            // for the page lifetime. The fallback title stays
+            // rendered (retain-last-data discipline).
+            this.failedKeys.add(id);
+          },
+        });
+      }
+    });
+
+    // Dataset-change effect — clears the per-generation dedup
+    // state when the jobGroups REFERENCE changes. A poll that
+    // produces a new group list resets the cascade; a poll that
+    // produces the same reference (no real change) keeps the
+    // dedup state, so a re-fetch of identical data never
+    // re-attempts the same keys.
+    //
+    // ``failedKeys`` persists across polls: the spec's
+    // "no infinite retry across polls" rule. A previously-
+    // failed key keeps the fallback title for the page
+    // lifetime.
+    effect(() => {
+      this.jobGroupsVersion();
+      this.attemptedKeys.clear();
+      this.inFlightKeys.clear();
+      // failedKeys intentionally NOT cleared — see comment
+      // above + the picker doc.
     });
 
     // Effect to handle SSE errors with user-friendly messages
@@ -428,30 +1096,308 @@ export class JobsComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Effect to restore the persisted view mode ('queues' vs.
-    // 'all-work') once on first read. Uses a guard flag so it does
-    // not race with subsequent user-driven view-mode changes.
+    // P5 rev — the view-mode localStorage seed lives in the URL →
+    // store effect below (``runUrlStateMigrationIfNeeded``), which
+    // owns the one-time bare-URL boot migration. The pre-rev
+    // ``viewModeRestored`` effect + ``tryRestoreViewMode`` were
+    // DELETED: its guard early-returned on an always-truthy parsed
+    // ``view_mode`` (the tolerant parser never yields null), so the
+    // seed was unreachable — every pre-P5 user with
+    // ``job-page-view-mode='all-work'`` silently booted back to
+    // 'queues' on every reload.
+
+    // ── P5 — URL ↔ store filter-state binding (plan task 2) ─────────
+    //
+    // Bidirectional sync between `urlState()` (parsed query params)
+    // and `store.filterState` (the filter pipeline). The two effects
+    // are intentionally symmetric: each one checks equality BEFORE
+    // writing, so a round-trip URL→store→URL produces an empty diff
+    // and bails out cleanly. No "ignore next emit" flag needed.
+    //
+    // URL → store (restore / back / forward):
+    //   1. Read `urlState()`.
+    //   2. Compare with the serialized store state.
+    //   3. If equal — bail (avoids re-applying the URL on every
+    //      router emit).
+    //   4. Apply via `setFilters` (the store's normalize-tolerance
+    //      keeps hostile inputs from breaking the state).
+    //
+    // Store → URL (filter handler / view-mode toggle):
+    //   1. Read `store.filterState()`.
+    //   2. Compute `diffJobsUrlState(prevUrlState, newUrlState)`.
+    //   3. If empty — bail (the URL is already in sync).
+    //   4. `router.navigate` with the minimal patch using
+    //      `queryParamsHandling: 'merge'` + `replaceUrl: true` so
+    //      every filter tweak does NOT push a new history entry.
+
     effect(() => {
-      if (this.viewModeRestored) {
+      // Touch urlState() + storeFilterStateKey() — both must be read
+      // for the effect to re-fire on EITHER side.
+      const url = this.urlState();
+      const currentStoreKey = this.storeFilterStateKey();
+      // Cycle guard — the suffix MUST be the same on both sides
+      // ('|null' when job is unset). The previous draft used `?? ''`
+      // which made the URL side bare and missed equality with the
+      // store side; the F-5 spec in jobs.component.spec.ts pins
+      // both keys verbatim.
+      const urlKey =
+        JSON.stringify(url.filter) + '|' + (url.job ?? 'null');
+      // P5 rev — the one-time bare-URL boot seed runs BEFORE any
+      // early-return: the pre-arm below used to swallow the very
+      // first emit (a bare URL compares equal to the default store),
+      // making the migration branch dead. When the seed APPLIES, arm
+      // the cycle guard with the CURRENT url key and bail — the
+      // store-change re-fire then hits the armed guard (no clobber),
+      // and the store → URL effect writes the seeded state to the
+      // URL; that emit lands via the normal equality path.
+      if (!this.urlMigrationDone() && this.runUrlStateMigrationIfNeeded()) {
+        this.lastAppliedFromUrl = urlKey;
         return;
       }
-      this.viewModeRestored = true;
-      this.tryRestoreViewMode();
+      if (urlKey === this.lastAppliedFromUrl) {
+        return;
+      }
+      // URL state (filter+job) matches the store state exactly —
+      // nothing to apply. P5 rev (🟡5): the guard compares the FULL
+      // urlKey (including the job suffix) against store+current-job.
+      // The previous draft hardcoded the empty-state suffix ('|null')
+      // on the store side, so a ``?job=a → ?job=b`` Back navigation
+      // (same filter, different deep-link) never matched, re-fired
+      // ``setFilters`` and refetched BOTH legs on every Back/Forward.
+      // The deep-link effect owns the drawer flip; this effect only
+      // owns the filter side.
+      if (urlKey === currentStoreKey + '|' + (url.job ?? 'null')) {
+        this.lastAppliedFromUrl = urlKey;
+        return;
+      }
+      this.lastAppliedFromUrl = urlKey;
+      // 🟡5 — snapshot the view mode BEFORE setFilters mutates the
+      // store: the post-setFilters read always equaled the incoming
+      // filter, so the view-mode switch branch in
+      // ``refreshActiveLegsForFilter`` was dead (a view-mode flip
+      // refetched BOTH legs instead of ``refreshActive()``).
+      const beforeViewMode = this.viewMode();
+      this.store.setFilters(url.filter);
+      // Status / agent_id / project / view-mode changes that
+      // affect the wire fetch — fetch the active leg so the page
+      // reflects the URL state immediately. The setFilters call
+      // alone does NOT trigger a fetch (the store is filter-only;
+      // handlers own the fetch trigger — see P1 review).
+      this.refreshActiveLegsForFilter(url.filter, beforeViewMode);
+    });
+
+    effect(() => {
+      // 🟢10 — strip a bare ``?job=`` (empty string): it parses to
+      // null but the KEY persists in the URL forever (the filter
+      // diff below is job-blind — both sides carry job=null). The
+      // strip is idempotent: once the key is gone the raw read is
+      // undefined and this branch never fires again. The next router
+      // emit re-runs the normal flow (the URL → store effect's armed
+      // guard bails on the unchanged filter key).
+      const rawJobParam = this.urlStateRaw()[JOB_QUERY_PARAM];
+      if (typeof rawJobParam === 'string' && rawJobParam === '') {
+        this.clearUrlDeepLink();
+        return;
+      }
+      const storeState = this.store.filterState();
+      const currentUrl = this.urlState();
+      const next: JobsUrlState = {
+        filter: storeState,
+        job: currentUrl.job,
+      };
+      // Diff against the CURRENT URL — if the filter matches, no
+      // write needed. (The deep-link side is never written from
+      // this effect: the drawer open/close paths own that flip.)
+      const filterUrl: JobsUrlState = { filter: storeState, job: null };
+      const currentFilterUrl: JobsUrlState = {
+        filter: currentUrl.filter,
+        job: null,
+      };
+      const diff = diffJobsUrlState(currentFilterUrl, filterUrl);
+      const serializedNext = JSON.stringify(serializeJobsUrlState(next));
+      if (serializedNext === this.lastWrittenToUrl) {
+        return;
+      }
+      this.lastWrittenToUrl = serializedNext;
+      if (Object.keys(diff).length === 0) {
+        return;
+      }
+      // Fire-and-forget — the router will emit a new queryParamMap,
+      // which re-runs the URL → store effect; that effect's equality
+      // guard then bails out (this write IS the source of truth).
+      this.router.navigate([], {
+        relativeTo: this.route,
+        queryParams: diff,
+        queryParamsHandling: 'merge',
+        replaceUrl: true,
+      });
+    });
+
+    // ── P5 — `?job=<id>` deep-link (plan task 3) ────────────────────
+    //
+    // The deep-link effect watches BOTH the URL job id AND the
+    // currently-filtered rows (jobs dataset + work dataset). When a
+    // deep-link is present:
+    //
+    //   1. If the job is already in the current window — open the
+    //      drawer immediately (no extra GET).
+    //   2. If the job is not in the window — fetch via
+    //      ``JobService.getJob(id)`` (the BE ``GET /api/jobs/{id}``
+    //      endpoint already exists; no new BE work).
+    //   3. On 404 (or any error) — flip ``deepLinkMissingJobId``
+    //      and keep the drawer OPEN with the honest "job not found"
+    //      state. The banner stays in place; the drawer renders an
+    //      honest empty card (NOT a blank drawer body).
+    //
+    // The effect re-runs when:
+    //   * the URL job id changes (a new deep-link or close),
+    //   * the dataset changes (a fetch brought the job into the
+    //     window — in-window open path),
+    //   * the deep-link fetch state changes (404 → 200 → missing).
+    //
+    // Focus management (P5 task 3 acceptance): MatDrawer covers the
+    // focus contract by DEFAULT — autoFocus moves focus INTO the
+    // drawer content on open, and restoreFocus returns it to the
+    // invoking element on close. The deep-link open path therefore
+    // needs no bespoke focus code (the pre-rev comment referenced a
+    // ``focusDrawerOnDeepLink`` method that never existed — fixed).
+    // Accepted deviation: the cold-bookmark case (page opened
+    // straight into a deep-linked drawer) has no heading fallback —
+    // there is no invoking row to restore focus to; the drawer
+    // itself receives focus.
+
+    effect(() => {
+      const jobId = this.urlDeepLinkJobId();
+      // 🟡4/🟡7 — epoch reset: the dedup guards below belong to the
+      // PREVIOUS param value. When the URL param changes — including
+      // becoming null (close / Back past the deep-link) — reset them
+      // so a previously-404'd ``?job=x`` RE-RESOLVES on re-entry
+      // (the pre-rev guards stayed armed forever: Back to a dead id
+      // was a silent no-op) and a ``?job=y → ?job=x`` Back
+      // navigation re-opens x instead of leaving the drawer showing
+      // y under x's URL.
+      if (jobId !== this.lastDeepLinkParam) {
+        this.lastDeepLinkParam = jobId;
+        this.lastDeepLinkResolved = null;
+        this.lastDeepLinkFetched = null;
+      }
+      // Clear cycle: the URL was stripped to no deep-link; nothing
+      // to resolve (the drawer close path handled the cleanup).
+      if (!jobId) {
+        return;
+      }
+      // Already resolved — no-op (the resolved id tracks the LAST
+      // job this param value opened; the epoch reset above retires
+      // it when the param changes, so the 🟡7 drawerOpen() half of
+      // this guard was DROPPED: with it, Back ``?job=y → ?job=x``
+      // bailed whenever ANY drawer was visible — URL/visible
+      // divergence).
+      if (this.lastDeepLinkResolved === jobId) {
+        return;
+      }
+      // Already fetched — no-op.
+      if (this.lastDeepLinkFetched === jobId) {
+        return;
+      }
+      // In-window search — both datasets (the all-work view projects
+      // ``Work`` rows through ``workToJob`` and the search must cover
+      // the projected shape; the page-side dataset uses job_id).
+      const inJobs = this.store.jobs().find((j) => j.job_id === jobId);
+      if (inJobs) {
+        this.lastDeepLinkResolved = jobId;
+        this.openDrawerForDeepLink(inJobs);
+        return;
+      }
+      const inWorks = this.store.works().find((w) => w.work_id === jobId);
+      if (inWorks) {
+        const mapped = workToJob(inWorks);
+        this.lastDeepLinkResolved = jobId;
+        this.openDrawerForDeepLink(mapped);
+        return;
+      }
+      // In-flight guard: if a previous emit already kicked the
+      // GET, the response will land in the same draw (the next
+      // emit re-runs this effect, but ``lastDeepLinkFetched`` is
+      // set below before the subscribe so the dedup is exact).
+      this.lastDeepLinkFetched = jobId;
+      this.deepLinkFetchInFlight.set(true);
+      this.deepLinkMissingJobId.set(null);
+      this.jobService.getJob(jobId).subscribe({
+        next: (job) => {
+          this.deepLinkFetchInFlight.set(false);
+          // 🟡3 — stale-response guard: the deep-link may have been
+          // closed (URL stripped) or swapped (Back to another id)
+          // while the GET was in flight; a stale next must NOT
+          // re-open the drawer.
+          if (this.urlDeepLinkJobId() !== jobId) {
+            return;
+          }
+          this.lastDeepLinkResolved = jobId;
+          this.openDrawerForDeepLink(job);
+        },
+        error: () => {
+          this.deepLinkFetchInFlight.set(false);
+          // 🟡3 — the same stale guard covers the error arm (a stale
+          // failure must NOT re-open the drawer either). 🟢8 — the
+          // 404/other-error arms were IDENTICAL (the ``status``
+          // check was dead): collapsed to one honest-missing flip.
+          if (this.urlDeepLinkJobId() !== jobId) {
+            return;
+          }
+          // 404 is the canonical "missing"; other errors (500,
+          // network) surface the same way because the drawer would
+          // be empty otherwise. The honest card tells the user we
+          // COULD NOT load the job.
+          this.deepLinkMissingJobId.set(jobId);
+          // Open the drawer in its empty-card state so the user
+          // sees the honest message (NOT a silent failure).
+          this.drawerOpen.set(true);
+        },
+      });
     });
   }
 
+  /**
+   * P5 — open the drawer with a resolved job. Wraps the
+   * ``onViewJobDetails`` path so the deep-link + card-click share
+   * the same drawer-open contract (SSE subscription, missing-flag
+   * reset, URL-write if the URL differs from the clicked job).
+   */
+  private openDrawerForDeepLink(job: Job): void {
+    this.selectedJob.set(job);
+    this.drawerOpen.set(true);
+    this.deepLinkMissingJobId.set(null);
+    // Non-terminal jobs need SSE so live updates flow.
+    if (!isTerminalStatus(job.status)) {
+      this.jobSseService.disconnect();
+      this.jobSseService.clearEvents();
+      this.sseSubscription = this.jobSseService
+        .streamJobEvents(job.job_id)
+        .subscribe();
+    }
+  }
+
   ngOnInit(): void {
-    this.loadJobs();
+    // P1 — both fetch legs live in the store; kick both off so
+    // switching to the All Work view later is instantaneous (the
+    // work fetch is harmless if the user never toggles the view).
+    this.store.fetchJobs();
     this.loadAgents();
     this.loadProjects();
     this.startAutoRefresh();
-    // Phase 4 — kick off an initial WorkService fetch in parallel so
-    // switching to the All Work view later is instantaneous. The fetch
-    // is harmless if the user never toggles the view mode.
-    this.loadWorks();
+    this.store.fetchWorks();
     // Phase 4 — fetch the bad-state preflight so the red-glow + tooltip
     // appear on first paint when the system has stale rows.
     this.refreshBadStateCount();
+    // P4 — fetch the defer payload so the page banner + holders panel
+    // are populated on first paint when the system has defer pressure.
+    this.store.fetchDeferBlocked();
+    // Phase 2 — seed tabVisible from the document state at mount
+    // (SSR-safe: ``doc`` is the injected DOCUMENT token, which is
+    // the platform's document — never ``window`` directly so tests
+    // can stub it). Wire the visibilitychange listener.
+    this.tabVisible.set(this.doc.visibilityState === 'visible');
+    this.doc.addEventListener('visibilitychange', this.onVisibilityChange);
   }
 
   private tryRestoreProject(): void {
@@ -459,6 +1405,18 @@ export class JobsComponent implements OnInit, OnDestroy {
       return;
     }
     this.projectRestored = true;
+
+    // P5 (jobs-page-improvement) — URL is the SOLE authority for
+    // filter state after the one-time migration. If the URL already
+    // pins a project, skip the localStorage seed — the URL wins.
+    const urlProjectId = this.urlState().filter.project_id;
+    if (urlProjectId) {
+      // URL wins — clear the legacy localStorage key (the one-time
+      // migration cleanup also runs from the URL→store effect, but
+      // a double-clear is safe).
+      this.clearLegacyLocalStorageKeys();
+      return;
+    }
 
     let savedProjectId: string | null = null;
     try {
@@ -473,8 +1431,14 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Check if saved project still exists in the project list
     const projectExists = this.projects().some(p => p.project_id === savedProjectId);
     if (projectExists) {
-      // Directly set the filter without calling loadJobs() — ngOnInit already called it
-      this.filters.update(f => ({ ...f, project_id: savedProjectId }));
+      // Directly set the filter without fetching — ngOnInit already
+      // fetched (the restored scope applies from the next refresh on;
+      // pre-existing restore/fetch ordering is unchanged by P1).
+      this.store.setFilters({ project_id: savedProjectId });
+      // P5 — migration cleanup runs unconditionally once the
+      // user-typed seed path fires (the URL → store effect will
+      // then pick it up and write the URL via `replaceUrl`).
+      this.markUrlMigrationDone();
     } else {
       // Clear stale entry
       try {
@@ -485,30 +1449,142 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
   }
 
+  // ── P5 — URL migration helpers (plan task 2) ───────────────────────
+  //
+  // The one-time migration: bare URL (no ``view_mode``/``job`` param)
+  // ⇒ hydrate from localStorage + `replaceUrl`. After that, the URL
+  // is the SOLE authority and the legacy keys are removed. The
+  // decision logic is the REAL pure function
+  // ``resolveJobsUrlMigration`` (jobs-url-state.model.ts) so the spec
+  // drives production code; the cleanup runs from multiple sites
+  // (``tryRestoreProject`` and the URL → store effect) so the legacy
+  // keys never outlive a single page session. (The pre-rev
+  // ``tryRestoreViewMode`` seed site is gone — see the constructor
+  // note.)
+
+  /** Mark the migration done — flips the guard + clears legacy keys. */
+  private markUrlMigrationDone(): void {
+    this.urlMigrationDone.set(true);
+    this.clearLegacyLocalStorageKeys();
+  }
+
   /**
-   * Restore the persisted view mode ('queues' vs 'all-work') from
-   * localStorage. Wrapped in try/catch for private-browsing safety
-   * — matches the pattern used by ``tryRestoreProject``.
+   * Remove the legacy localStorage keys. Idempotent — safe to call
+   * multiple times; the `removeItem` swallows missing keys.
    */
-  private tryRestoreViewMode(): void {
-    let saved: string | null = null;
+  private clearLegacyLocalStorageKeys(): void {
     try {
-      saved = localStorage.getItem(this.VIEW_MODE_KEY);
+      localStorage.removeItem(this.STORAGE_KEY);
     } catch {
-      return;
+      // privately ignore (private-browsing safety)
     }
-    if (saved === 'queues' || saved === 'all-work') {
-      this.viewMode.set(saved);
-      // If the user previously left the page in all-work view, kick
-      // off an initial fetch so the list is not blank on reload.
-      if (saved === 'all-work') {
-        this.loadWorks();
+    try {
+      localStorage.removeItem(this.VIEW_MODE_KEY);
+    } catch {
+      // privately ignore
+    }
+  }
+
+  /**
+   * One-time seed from localStorage when the URL carries no
+   * ``view_mode``/``job`` param. Called from the URL → store effect
+   * BEFORE any early-return. After the seed, the URL → store effect
+   * re-fires (the store state changed) but the cycle guard bails —
+   * and the store → URL effect writes the seeded state to the URL
+   * via ``replaceUrl``. The legacy keys are then cleared.
+   *
+   * P5 rev — the decision is the REAL pure function
+   * ``resolveJobsUrlMigration``; this method is the thin adapter
+   * (localStorage reads + store apply + one-time guard). The guard
+   * compares the RAW param map: the parsed shape never yields a null
+   * ``view_mode``, which is exactly what made the pre-rev seed
+   * unreachable.
+   *
+   * Returns true when the seed APPLIED a patch — the caller must arm
+   * the URL cycle guard with the current URL key and bail, so the
+   * store-change re-fire cannot clobber the seed with the bare-URL
+   * defaults.
+   */
+  private runUrlStateMigrationIfNeeded(): boolean {
+    let savedProjectId: string | null = null;
+    let savedViewMode: string | null = null;
+    try {
+      savedProjectId = localStorage.getItem(this.STORAGE_KEY);
+    } catch {
+      // privately ignore
+    }
+    try {
+      savedViewMode = localStorage.getItem(this.VIEW_MODE_KEY);
+    } catch {
+      // privately ignore
+    }
+    const result = resolveJobsUrlMigration({
+      rawParams: this.urlStateRaw(),
+      migrationDone: this.urlMigrationDone(),
+      savedProjectId,
+      savedViewMode,
+      knownProjectIds: this.projects().map((p) => p.project_id),
+      urlFilter: this.urlState().filter,
+    });
+    if (result.action === 'seed' && result.patch) {
+      const patch = result.patch;
+      this.store.setFilters(patch);
+      // If the seed restored 'all-work', make sure the work leg has
+      // data even if the ngOnInit fetch raced with the restore
+      // (the pre-rev tryRestoreViewMode top-up, moved here).
+      if (patch.view_mode === 'all-work' && this.store.works().length === 0) {
+        this.store.fetchWorks();
       }
     }
+    // 'url-wins' (explicit params present) and 'none' both complete
+    // the one-time migration: the URL is authoritative from here on
+    // and the legacy keys are cleared.
+    this.markUrlMigrationDone();
+    return result.action === 'seed';
+  }
+
+  /**
+   * When the URL → store effect applies a filter (e.g. on
+   * back/forward), refresh the active legs so the page reflects
+   * the new filter immediately. The store's `setFilters` does NOT
+   * fetch — that's by design (filter handlers own the fetch).
+   *
+   * 🟡5 — ``beforeViewMode`` is snapshotted by the CALLER before
+   * ``setFilters`` mutates the store: a snapshot taken after the
+   * write always equaled the incoming filter, so the view-mode
+   * switch branch below was dead.
+   */
+  private refreshActiveLegsForFilter(
+    filter: ReturnType<typeof this.store.filterState>,
+    beforeViewMode: JobsViewMode,
+  ): void {
+    // Filter changes that affect the wire:
+    // * status — both legs (jobs + works)
+    // * source — queues view only (work rows have no source)
+    // * agent_id — both legs (works rows carry agent_id)
+    // * project_id — both legs
+    // * queue_id — queues view only (work rows have no queue_id)
+    // * include_deleted — queues view only (work resolver hides
+    //   soft-deleted unconditionally)
+    // * view_mode — switches the active leg
+    if (filter.view_mode !== beforeViewMode) {
+      this.store.refreshActive();
+      return;
+    }
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
   ngOnDestroy(): void {
     this.stopAutoRefresh();
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+    // Phase 2 — detach the visibilitychange listener (the cleanup
+    // pin in jobs-page.bindings.pins.spec.ts). Without this the
+    // listener survives the component and re-fires after destroy.
+    this.doc.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.jobSseService.disconnect();
     this.jobSseService.clearEvents();
     if (this.sseSubscription) {
@@ -525,22 +1601,14 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
-  private loadJobs(): void {
-    this.loading.set(true);
-    this.error.set(null);
-
-    this.jobService.listJobs(this.filters()).subscribe({
-      next: (jobs) => {
-        this.jobs.set(jobs);
-        this.loading.set(false);
-      },
-      error: (err) => {
-        console.error('Failed to load jobs:', err);
-        this.error.set(err.message || 'Failed to load jobs');
-        this.loading.set(false);
-      }
-    });
-  }
+  // ── P1 deletion note ────────────────────────────────────────────────
+  // The pre-P1 ``loadJobs()`` / ``loadWorks()`` component methods are
+  // DELETED. Their fetch logic (filter→query projection, per-leg error
+  // handling, retain-last-data discipline) lives in ``JobsPageStore``
+  // (``fetchJobs`` / ``fetchWorks``), where it serves BOTH view modes
+  // from one pipeline. The pre-P1 ``loadWorks`` snackbar-on-error is
+  // replaced by the store's ``worksError`` signal + the template's
+  // error block — errors no longer bypass the view state.
 
   /**
    * Phase 4 — fetch the system-wide bad-state count from
@@ -553,93 +1621,53 @@ export class JobsComponent implements OnInit, OnDestroy {
    * (parallel to ``bad_state_count``) which the confirm dialog uses to
    * surface a separate instance-termination warning.
    *
-   * Errors are intentionally swallowed — the red-glow + tooltip are
-   * UX-only and a transient preflight failure should not surface as
-   * a snackbar to the operator.
+   * P4 — the legacy "Errors are intentionally swallowed" comment is
+   * OBSOLETE. The preflight fetch now uses retain-last-data discipline:
+   * a preflight failure flips the ``preflightDegraded`` flag instead of
+   * silently dropping the call. The defer fetch is delegated to
+   * ``JobsPageStore.fetchDeferBlocked`` (retain-last-data + degraded
+   * flag) — this method no longer touches the defer endpoint.
    */
   private refreshBadStateCount(): void {
-    const preflight = firstValueFrom(
-      this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight')
-    );
-    // The preflight intentionally exposes only the defer count. Read the
-    // existing defer-blocked surface as well so the dialog can preserve the
-    // holder-specific remediation without adding a daemon-only field.
-    const deferBlocked = firstValueFrom(
-      this.http.get<DeferBlockedStatus>('/api/queues/defer-blocked')
-    ).catch(() => null);
-
-    Promise.all([preflight, deferBlocked])
-      .then(([result, deferStatus]) => {
+    // P4 — retain-last-data discipline replaces the silent swallow
+    // at the legacy :587-589 path. A preflight error flips the
+    // ``preflightDegraded`` flag instead of clearing the existing
+    // counts (clearing would be the false-healthy trap). The defer
+    // fetch is delegated to ``JobsPageStore.fetchDeferBlocked``
+    // (retain-last-data + degraded flag).
+    this.http.get<CleanupPreflight>('/api/jobs/cleanup/preflight').subscribe({
+      next: (result) => {
         this.badStateCount.set(result.bad_state_count);
-        this.zombieInstanceCount.set(
-          result.zombie_instance_count ?? 0
-        );
-        // WS4 — the live-vs-reap split + the separate defer count
-        // feed the confirm dialog ("will remain" listing + the
-        // by-design "deferred messages are not cancelled here" note).
+        this.zombieInstanceCount.set(result.zombie_instance_count ?? 0);
+        // WS4 — live-vs-reap split + separate defer count feed the
+        // confirm dialog (will-remain listing + the by-design
+        // "deferred messages are not cancelled here" note).
         this.liveInstanceCount.set(result.live_instance_count ?? 0);
         this.liveInstanceIds.set(result.live_instance_ids ?? []);
         this.deferBlockedCount.set(result.defer_blocked_count ?? 0);
-        this.deferHolderKind.set(
-          deferBlockAction(deferStatus)?.holder.kind ?? null
-        );
-      })
-      .catch(() => {
-        // Fail silently — badge is UX-only.
-      });
+        // P4 — ``deferHolderKind`` is now a ``computed`` over the
+        // store's defer status (the signal→computed refactor that
+        // closed the first-load race when preflight resolved before
+        // the defer leg). Itself therefore re-derives the moment
+        // ``store.deferStatus()`` changes — no manual ``set`` needed.
+        // Preflight succeeded — clear any prior degradation.
+        this.preflightDegraded.set(false);
+      },
+      error: () => {
+        // P4 — do NOT clear existing counts (retain-last-data). Flip
+        // the ``preflightDegraded`` flag so the consumer can render
+        // an honest "last preflight failed" note.
+        this.preflightDegraded.set(true);
+      },
+    });
   }
 
   /**
-   * Phase 4 — fetch the unified work list from ``WorkService``.
-   *
-   * Filters mirror what the page already exposes for the legacy
-   * Jobs view (status / project_id); the queue sidebar stays inactive
-   * in this view so we deliberately do NOT push ``queue_id`` into the
-   * filter payload — that filter would force the backend to return
-   * ONLY queued work, defeating the unified surface.
-   *
-   * ``root_only`` is hard-coded to ``false`` here (P-A of the Virtual
-   * Job Tool Completeness plan). The "All Work" view is contractually
-   * named — it must show every row the resolver can find, including
-   * child-instance turns and reports. The backend default is
-   * ``root_only=true`` (jober-management view, excludes children);
-   * we override that default at the only call site that represents
-   * "all" to the user. The Queues view goes through ``JobService``
-   * and is unaffected.
-   *
-   * Errors are non-fatal — the legacy Jobs list still renders and the
-   * snackbar gives the operator a hint about why the work list is
-   * empty.
+   * P1 — the pre-P1 ``loadWorks()`` is deleted (see the store note
+   * above). The fetch — including the ``root_only: false`` P-A
+   * contract and the status/project projection onto ``WorkFilters`` —
+   * is ``JobsPageStore.fetchWorks`` via ``toWorkFilters``.
    */
-  private loadWorks(): void {
-    const projectId = this.filters().project_id;
-    const statusFilter = this.filters().status;
-    this.workService.getWork({
-      project_id: projectId || undefined,
-      status: statusFilter && statusFilter.length > 0 ? statusFilter.join(',') : undefined,
-      // P-A — the All Work view intentionally bypasses the root-only
-      // filter so child-instance rows stay visible. See the method
-      // docstring for the rationale.
-      root_only: false,
-    }).subscribe({
-      next: (works) => {
-        this.works.set(works);
-      },
-      error: (err) => {
-        console.error('[Jobs] Failed to load works:', err);
-        // Surface the error to the user; do NOT clear the legacy
-        // Jobs signal — operators may still want to use that view.
-        this.snackBar.open(
-          err?.message || 'Failed to load unified work list',
-          'Dismiss',
-          {
-            duration: 5000,
-            panelClass: 'error-snackbar'
-          }
-        );
-      }
-    });
-  }
 
   private loadAgents(): void {
     this.api.listAgents().subscribe({
@@ -652,22 +1680,83 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Phase 2 — the 30s poll ticks through ``shouldTick`` BEFORE
+   * making the HTTP call. The gate is a pure function over four
+   * inputs (``tabVisible``, ``drawerOpen``, ``modalOpen``,
+   * ``fetchInFlight``) so a paused tick is structurally a no-op —
+   * the timer keeps firing, the gate decides. The store's in-flight
+   * guard also prevents double-fire when the gate accidentally
+   * passes during a long request (belt + braces).
+   *
+   * Cadence: ``POLL_INTERVAL_MS`` (30000) from jobs-poll.model.ts;
+   * pin lives in jobs-poll.model.spec.ts.
+   *
+   * P4 — the defer leg rides the same tick (per-leg ``catchError``
+   * discipline port from ``job-queue-indicator.component.ts:657-735``).
+   * A failed defer fetch MUST NOT kill the data legs (the store's
+   * per-leg subscribe handles that); the drawer/modal pause applies
+   * to all legs uniformly via the gate.
+   */
   private startAutoRefresh(): void {
     this.refreshInterval = setInterval(() => {
-      if (this.viewMode() === 'all-work') {
-        // Refresh whichever view is currently active. The legacy
-        // refresh path stays untouched so other call sites are not
-        // disturbed.
-        if (!this.workService.loading()) {
-          this.loadWorks();
-        }
-        return;
+      if (
+        shouldTick({
+          tabVisible: this.tabVisible(),
+          drawerOpen: this.drawerOpen(),
+          modalOpen: this.modalOpen(),
+          fetchInFlight: this.fetchInFlight(),
+        })
+      ) {
+        this.store.refreshActive();
+        // P4 — defer leg rides the same tick (retain-last-data on
+        // failure; the store's in-flight guard prevents double-fire).
+        this.store.fetchDeferBlocked();
       }
-      if (!this.loading()) {
-        this.jobService.refreshJobs(this.filters());
-      }
-    }, 30000); // 30 seconds
+    }, POLL_INTERVAL_MS);
   }
+
+  /**
+   * Phase 2 — ``document.visibilitychange`` listener. Pauses the poll
+   * while the tab is hidden (the gate above) and fires an immediate
+   * refresh on refocus, debounced by ``REFOCUS_DEBOUNCE_MS`` so rapid
+   * tab-switching does not storm the BE.
+   *
+   * The listener is added in ``ngOnInit`` and torn down in
+   * ``ngOnDestroy`` (the ``removeEventListener`` call is the
+   * cleanup pin in jobs-page.bindings.pins.spec.ts).
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = this.doc.visibilityState === 'visible';
+    this.tabVisible.set(visible);
+    if (!visible) {
+      return;
+    }
+    // Refocus: schedule an immediate refresh if the gate is open
+    // and the debounce window has elapsed. The pending timer id is
+    // stored so a rapid second focus cancels the previous and
+    // extends the debounce (the storm-mitigation rule).
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (
+        shouldTick({
+          tabVisible: true,
+          drawerOpen: this.drawerOpen(),
+          modalOpen: this.modalOpen(),
+          fetchInFlight: this.fetchInFlight(),
+        })
+      ) {
+        this.store.refreshActive();
+        // P4 — refresh the defer leg on refocus so the page banner
+        // reflects post-refocus reality without waiting for the next
+        // tick (the gate's debounce window applies uniformly).
+        this.store.fetchDeferBlocked();
+      }
+    }, REFOCUS_DEBOUNCE_MS);
+  };
 
   private stopAutoRefresh(): void {
     if (this.refreshInterval) {
@@ -676,100 +1765,493 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
   }
 
-  private updateJobFromSse(status: JobEventPayload): void {
-    // Present-as-null semantics for every Fix C split field:
-    // - key absent on the payload  → keep previous value (stale-tolerant)
-    // - key present + value `null` → degraded-lookup, clear the field
-    // - key present + non-null      → overwrite
-    // The ``in`` check is the only way to distinguish "wire didn't
-    // carry the field" from "wire explicitly said null"; ``??`` would
-    // collapse the two and pin stale liveness through degraded
-    // windows. Same logic applies to the work patch path below.
-    const nextJobType: Job['job_type'] = 'job_type' in status
-      ? (status.job_type ?? null) as Job['job_type']
-      : undefined; // undefined → keep via spread
-    const nextMissionLiveness: Job['mission_liveness'] = 'mission_liveness' in status
-      ? (status.mission_liveness ?? null)
-      : undefined; // undefined → keep via spread
-
-    this.jobs.update(jobs =>
-      jobs.map(job =>
-        job.job_id === status.job_id
-          ? {
-              ...job,
-              status: status.status || job.status,
-              queue_id: status.queue_id ?? job.queue_id,
-              instance_id: status.instance_id || job.instance_id,
-              result_summary: status.result_summary || job.result_summary,
-              error_message: status.error_message || job.error_message,
-              // M3 (mission-class, 2026-09-03) — ``completed_at`` is
-              // stamped for any wire-terminal status, including the
-              // mirror-receipt terminal ``settled``. The pre-M3 check
-              // only matched ``completed``/``failed`` and missed
-              // settled terminals (rename-introduced regression); the
-              // settled-aware helper covers every wire terminal so a
-              // future terminal rename does not silently regress here.
-              completed_at: status.status && isTerminalStatus(status.status)
-                ? new Date().toISOString()
-                : job.completed_at,
-              started_at: status.status === 'processing' && !job.started_at
-                ? new Date().toISOString()
-                : job.started_at,
-              // Fix C (§8.2) — propagate the split-semantics fields
-              // through the jobs[] patch path too (mirrors the works[]
-              // path below). The previous round only patched works[],
-              // so a live mission that finished while the Queues view
-              // was open stayed pinned to its stale live chip. See
-              // job-queue-indicator's liveMissionIds: a terminal
-              // receipt must immediately drop out of the badge.
-              //
-              // M3 (mission-class, 2026-09-03) — prose uses
-              // ``terminal`` (mission-side vocabulary) instead of
-              // ``settled`` (transport-receipt vocabulary).
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : job
-      )
-    );
-
-    // Phase 4 — also patch the unified Work list so SSE updates
-    // land on the right record in the All Work view too. The SSE
-    // payload uses ``job_id`` as the work_id key — the backend SSE
-    // endpoint already resolves work_id through WorkResolverService,
-    // so the same status update is valid for both Job and Work rows.
-    // Fix C (§8.2): the split-semantics SSE payload also carries
-    // ``mission_liveness`` — patch it through so a live mission that
-    // settles while the page is open flips its indicator without a
-    // full refetch. Same present-as-null contract as the jobs[] path
-    // above: absent keeps previous, explicit null clears.
-    this.works.update(works =>
-      works.map(work =>
-        work.work_id === status.job_id
-          ? {
-              ...work,
-              status: status.status || work.status,
-              instance_id: status.instance_id ?? work.instance_id,
-              result_summary: status.result_summary ?? work.result_summary,
-              error: status.error_message ?? work.error,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : work
-      )
-    );
-  }
+  // ── P1 deletion note ────────────────────────────────────────────────
+  // The pre-P1 ``updateJobFromSse`` method is DELETED from this file —
+  // it moved VERBATIM into ``JobsPageStore.updateJobFromSse`` (both
+  // datasets, order-preserving map, present-as-null contract, M3
+  // terminal stamping). The constructor's SSE effect now delegates.
 
   protected onRefresh(): void {
-    if (this.viewMode() === 'all-work') {
-      this.loadWorks();
-    } else {
-      this.loadJobs();
-    }
+    // P1 — refresh the ACTIVE view's leg through the store.
+    this.store.refreshActive();
     // Phase 4 — refresh the preflight count alongside the main list so
     // the red-glow + tooltip reflect post-refresh reality.
     this.refreshBadStateCount();
+    // P4 — refresh the defer leg so the page banner + holders panel
+    // reflect post-refresh reality (the store's in-flight guard
+    // prevents overlap with the data leg).
+    this.store.fetchDeferBlocked();
   }
+
+  /**
+   * Phase 2 — manual reload wired to the honesty banner. The banner
+   * surfaces when the row count is at or above the wire cap so the
+   * operator can ask for a fresh fetch without scrolling to the
+   * page-level Refresh button. Calls the same store path as
+   * ``onRefresh`` (the store's in-flight guard prevents overlap).
+   */
+  protected onReloadBanner(): void {
+    this.onRefresh();
+  }
+
+  /**
+   * Phase 2 — render-guard truncation affordance: switch to the
+   * Queues view (the bounded window surface backed by
+   * ``/api/jobs``'s clamp-100 wire) so the operator sees every row
+   * the BE will return for this filter scope.
+   *
+   * No-op when the user is already in the Queues view (the
+   * guard would not have fired here, but defensive).
+   */
+  protected onSwitchToQueuesView(): void {
+    if (this.viewMode() === 'queues') {
+      return;
+    }
+    this.onViewModeChange('queues');
+  }
+
+  /**
+   * Phase 2 — retry from the errored empty-state card. The
+   * banner above the list already shows the "Last refresh failed"
+   * copy during a degraded render; this fires when the projection
+   * itself is empty AND the last fetch failed (the errored
+   * empty-state branch).
+   */
+  protected onRetryEmpty(): void {
+    this.onRefresh();
+  }
+
+  /**
+   * Phase 2 — clear-filters from the filterEmpty empty-state card.
+   * Reuses the same store path as ``onClearFilters`` so the view
+   * mode is preserved.
+   */
+  protected onClearFiltersForEmpty(): void {
+    this.onClearFilters();
+  }
+
+  // ── P4 — defer banner + holders panel handlers ─────────────────────
+  //
+  // The page banner carries the severity-graded defer state. The
+  // "Review holders →" button toggles the inline panel (one click
+  // from page root). The per-holder action buttons (force-complete,
+  // resend-foreground) emit through the panel — the page owns the
+  // two-stage confirm dialog (the click is stage 1; the dialog is
+  // stage 2). The service call fires ONLY after ``afterClosed``
+  // resolves ``true`` — the cancel path fires nothing.
+
+  /**
+   * Toggle the inline holders panel. The banner's button is the
+   * single entry-point; clicking it a second time collapses the
+   * panel (closing does NOT reset the banner state).
+   */
+  protected onToggleDeferPanel(): void {
+    this.deferPanelOpen.update((open) => !open);
+  }
+
+  /**
+   * Two-stage confirm + ``POST /api/jobs/defer-holders/{id}/force-complete``.
+   *
+   * Stage 1 — the panel emits ``forceComplete`` with the holder.
+   * Stage 2 — this handler opens a ConfirmDialog naming the holder
+   * and stating irreversibility; the destructive call fires ONLY
+   * after the dialog resolves ``true``.
+   *
+   * Cancel path: dialog close with ``false`` / ``undefined`` ⇒
+   * the action is NOT dispatched. ``actionInFlight`` flips back to
+   * ``false`` unconditionally so a stale flag cannot deadlock the
+   * next attempt.
+   */
+  protected onHolderForceComplete(holder: DeferBlockHolder): void {
+    if (this.deferActionInFlight()) {
+      return;
+    }
+    this.modalOpen.set(true);
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean | undefined
+    >(ConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+      data: {
+        title: 'Force-complete defer holder?',
+        message:
+          `This will terminate the ${holder.kind} holder instance ` +
+          `${holder.instance_id} and reconcile its deferred message mirrors. ` +
+          `The action is irreversible.`,
+        confirmLabel: 'Force complete',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      },
+    });
+    ref.afterClosed().subscribe((confirmed) => {
+      this.modalOpen.set(false);
+      if (!confirmed) {
+        return;
+      }
+      this.deferActionInFlight.set(true);
+      this.jobService.forceCompleteDeferHolder(holder.instance_id).subscribe({
+        next: (result) => {
+          this.deferActionInFlight.set(false);
+          this.deferPanelOpen.set(false);
+          const verb = result.terminated ? 'Force-completed' : 'Force-complete refused';
+          this.snackBar.open(
+            `${verb} holder ${holder.instance_id}: ${result.message}`,
+            'Close',
+            { duration: 3500, panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar' },
+          );
+          // Refresh the defer leg so the panel re-renders without
+          // the resolved holder.
+          this.store.fetchDeferBlocked();
+        },
+        error: (err) => {
+          this.deferActionInFlight.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to force-complete holder',
+            'Dismiss',
+            { duration: 5000, panelClass: 'error-snackbar' },
+          );
+        },
+      });
+    });
+  }
+
+  /**
+   * Two-stage confirm + ``POST /api/jobs/defer-holders/{id}/resend-foreground``.
+   *
+   * Same confirm-flow as ``onHolderForceComplete`` — the dialog
+   * names the holder and states the side-effect; the service call
+   * fires ONLY after ``afterClosed`` resolves ``true``.
+   */
+  protected onHolderResendForeground(holder: DeferBlockHolder): void {
+    if (this.deferActionInFlight()) {
+      return;
+    }
+    this.modalOpen.set(true);
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean | undefined
+    >(ConfirmDialogComponent, {
+      width: '420px',
+      panelClass: 'dark-modal-panel',
+      data: {
+        title: 'Resend deferred messages as foreground?',
+        message:
+          `This will cancel the ${holder.kind} holder ${holder.instance_id}'s ` +
+          `queued defer-lane jobs and re-send their message content as NEW ` +
+          `foreground message jobs. The action is irreversible.`,
+        confirmLabel: 'Resend foreground',
+        cancelLabel: 'Cancel',
+        destructive: true,
+      },
+    });
+    ref.afterClosed().subscribe((confirmed) => {
+      this.modalOpen.set(false);
+      if (!confirmed) {
+        return;
+      }
+      this.deferActionInFlight.set(true);
+      this.jobService.resendDeferredForeground(holder.instance_id).subscribe({
+        next: (result) => {
+          this.deferActionInFlight.set(false);
+          this.deferPanelOpen.set(false);
+          this.snackBar.open(
+            `Resent foreground for ${holder.instance_id}: ${result.cancelled_defer_jobs} cancelled, ` +
+              `${result.skipped_empty_content} skipped`,
+            'Close',
+            { duration: 3500, panelClass: 'success-snackbar' },
+          );
+          this.store.fetchDeferBlocked();
+        },
+        error: (err) => {
+          this.deferActionInFlight.set(false);
+          this.snackBar.open(
+            err?.message || 'Failed to resend deferred messages',
+            'Dismiss',
+            { duration: 5000, panelClass: 'error-snackbar' },
+          );
+        },
+      });
+    });
+  }
+
+  /**
+   * Phase 2 — expansion-state helpers for ``cdk-virtual-scroll``.
+   * The set is keyed by ``job_id`` so a card's expansion survives
+   * virtual recycle (the card re-mounts; the input binding picks up
+   * the same membership).
+   */
+  protected isCardExpanded(item: WindowItem): boolean {
+    if (item.kind !== 'row') {
+      return false;
+    }
+    return this.expandedJobIds().has(item.job.job_id);
+  }
+
+  protected onToggleExpansion(jobId: string): void {
+    this.expandedJobIds.update((set) => {
+      const next = new Set(set);
+      if (next.has(jobId)) {
+        next.delete(jobId);
+      } else {
+        next.add(jobId);
+      }
+      return next;
+    });
+  }
+
+  // ── Phase 3 — group-header expansion (G1 port) ─────────────────────
+
+  /**
+   * True iff the group with this key is currently expanded.
+   * Header rows in the virtual-scroll viewport always render; the
+   * GROUP'S ROWS render only when this returns true (the
+   * collapsed-omission invariant).
+   */
+  protected isGroupExpanded(groupKey: string): boolean {
+    return this.expandedGroupIds().has(groupKey);
+  }
+
+  /**
+   * Toggle a group header — chevron-only, ``stopPropagation`` so the
+   * tap never bubbles to the card/navigate handler (template
+   * extraction audit: chevron tap never navigates).
+   *
+   * Marks the id as user-touched (G1): once an id is touched, the
+   * auto-seed effect NEVER un-toggles or re-expands it. The user's
+   * choice survives any subsequent live-set drift.
+   */
+  protected onToggleGroupExpansion(groupKey: string): void {
+    this.userTouchedGroupIds.update((set) => {
+      const next = new Set(set);
+      next.add(groupKey);
+      return next;
+    });
+    this.expandedGroupIds.update((set) => {
+      const next = new Set(set);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Chevron click is REAL `<button type="button">` with
+   * ``aria-expanded`` + ``stopPropagation`` (template-extraction
+   * audit). This handler delegates to ``onToggleGroupExpansion`` —
+   * the stopPropagation happens in the template binding
+   * ``(click)="onChevronClick($event, item.groupKey); $event.stopPropagation()"``.
+   */
+  protected onChevronClick(event: MouseEvent, groupKey: string): void {
+    event.stopPropagation();
+    this.onToggleGroupExpansion(groupKey);
+  }
+
+  /**
+   * Phase 2 — ``cdkVirtualFor`` track-by. The plan calls for
+   * track-by-``job_id`` so DOM-stable identity survives recycle.
+   * The ``WindowItem.key`` already encodes the right identity
+   * (``job.job_id`` for rows; Phase 3 will set ``missionId`` for
+   * headers), so the helper is identity on the key.
+   */
+  protected trackByKey = (_index: number, item: WindowItem): string => item.key;
+
+  // ── Phase 6 — keyboard model wiring (task 2) ───────────────────────
+  //
+  // Port of the panel's arrow-key model (job-queue-panel
+  // ``onTreeKeydown``) onto the VIRTUAL-SCROLL list, with the one
+  // behavioral difference the medium demands: rows recycle, so every
+  // focus move scrolls the target into the rendered range FIRST and
+  // re-resolves real DOM focus AFTER the render tick (see
+  // ``scheduleFocusAfterRender`` + the contract doc on
+  // ``jobs-keyboard.model.ts``).
+
+  /** The virtual viewport (conditional in the template — optional ref). */
+  private readonly virtualViewport = viewChild(CdkVirtualScrollViewport);
+
+  /**
+   * Id of the flattened item that currently owns keyboard focus
+   * (header OR row). SINGLE-WRITER: the item's own ``(focus)``
+   * binding is the only writer during real focus movement — arrow
+   * keys move REAL DOM focus and the resulting focus event mirrors
+   * the id back here (panel parity: ``focusedItemId``).
+   */
+  private readonly focusedItemId = signal<string | null>(null);
+
+  /** Stable DOM id for a flattened item (focus/class binding). */
+  protected itemId(item: WindowItem): string {
+    return jobsWindowItemId(item);
+  }
+
+  /** True iff the given item id owns keyboard focus (``.focused`` class). */
+  protected isFocusedItem(id: string): boolean {
+    return this.focusedItemId() === id;
+  }
+
+  /** ``(focus)`` handler on header + row items — the single writer. */
+  protected onWindowItemFocus(id: string): void {
+    this.focusedItemId.set(id);
+  }
+
+  /**
+   * Arrow-key handler bound to the virtual-scroll viewport (the
+   * ``role="tree"`` container). REAL DOM focus moves; the item's own
+   * ``(focus)`` binding mirrors it back into ``focusedItemId``.
+   *
+   *   * ArrowDown / ArrowUp → clamped ±1 move over the flattened
+   *     items (headers AND rows — one walk, DOM order == keyboard
+   *     order by construction).
+   *   * ArrowRight          → expand a collapsed group (no-op on an
+   *     expanded header or a row).
+   *   * ArrowLeft           → collapse an expanded group; on a ROW,
+   *     collapse the nearest ancestor group (WAI-ARIA tree pattern)
+   *     and move focus to its header — the row's DOM slot is
+   *     recycled away by the collapse.
+   *
+   * Enter / Space are NOT handled here — they stay on the row hosts
+   * (``onRowActivate``) and on the chevron's native button
+   * activation. A container-level Enter handler would double-fire
+   * against the button activation bubbling up from the chevron.
+   */
+  protected onListKeydown(event: KeyboardEvent): void {
+    const items = this.renderRows();
+    if (items.length === 0) return;
+    const key = event.key;
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowRight' && key !== 'ArrowLeft') {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    const currentId = this.focusedItemId();
+    const currentIndex = currentId
+      ? items.findIndex((it) => jobsWindowItemId(it) === currentId)
+      : -1;
+
+    const action = resolveJobsKeyAction(items, currentIndex, key, (groupKey) =>
+      this.isGroupExpanded(groupKey),
+    );
+
+    if (action.kind === 'focus') {
+      if (action.index < 0 || action.index >= items.length) return;
+      const nextId = jobsWindowItemId(items[action.index]);
+      this.focusedItemId.set(nextId);
+      this.scheduleFocusAfterRender(nextId, action.index);
+      return;
+    }
+
+    if (action.kind === 'expand') {
+      // Rows mount AFTER the header — focus stays put.
+      this.onToggleGroupExpansion(action.groupKey);
+      return;
+    }
+
+    if (action.kind === 'collapse') {
+      this.onToggleGroupExpansion(action.groupKey);
+      if (!action.refocusHeaderId) return;
+      // Re-resolve the header's index on the POST-toggle list — the
+      // collapsed group's rows were AFTER their header, so the
+      // header index is unchanged, but re-deriving it is immune to
+      // that ordering assumption.
+      const postItems = this.renderRows();
+      const headerIndex = postItems.findIndex(
+        (it) => it.kind === 'header' && it.groupKey === action.groupKey,
+      );
+      this.focusedItemId.set(action.refocusHeaderId);
+      if (headerIndex >= 0) {
+        this.scheduleFocusAfterRender(action.refocusHeaderId, headerIndex);
+      } else {
+        this.doc.getElementById(action.refocusHeaderId)?.focus();
+      }
+      return;
+    }
+    // action.kind === 'none' — nothing to do.
+  }
+
+  /**
+   * Row activation (task 2: Enter / Space ACTIVATE). Bound to the
+   * ``app-job-card`` host as ``(keydown.enter)`` /
+   * ``(keydown.space)``; activation opens the detail drawer — the
+   * row's deep-inspection action, same destination as the card's
+   * explicit Details button.
+   *
+   * The ``event.target === event.currentTarget`` guard is the
+   * inner-button shield: the card's Cancel / Retry / Delete /
+   * Details / expand-toggle buttons live INSIDE the host, and their
+   * key events bubble up — without the guard, pressing Enter on
+   * Retry would ALSO open the drawer. ``preventDefault`` swallows
+   * the Space page-scroll (F2-class trap kept off this page: rows
+   * here are not inside a mat-menu, but Enter defaults are still
+   * suppressed for determinism).
+   *
+   * ⚠️ W1 maintenance warning — the shield assumes the host element
+   * is the ONLY focusable ancestor of the card's action buttons.
+   * If a future template addition wraps the card or adds another
+   * focusable descendant (e.g. a focusable header chip, an inline
+   * edit field), re-evaluate the shield: any inner focusable that
+   * should NOT trigger drawer activation will get its Enter/Space
+   * swallowed if the host eats the bubble. The (focus) binding on
+   * the host (paired with [id]="itemId(item)") is the contract that
+   * makes ``focusedItemId`` mirror real DOM focus; if the host
+   * changes identity, the bindings pin in
+   * ``jobs-page.bindings.pins.spec.ts`` must move with it.
+   */
+  protected onRowActivate(event: Event, item: WindowItem): void {
+    if (!isJobsActivateKey((event as KeyboardEvent).key)) return;
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    if (item.kind !== 'row') return;
+    this.onViewJobDetails(item.job);
+  }
+
+  /**
+   * VIRTUAL-SCROLL RECYCLING CONTRACT (pinned in
+   * ``jobs-keyboard.model.spec.ts``): the viewport recycles row DOM,
+   * so the target item may not exist yet at press time. Sequence:
+   *
+   *   1. ``viewport.scrollToIndex(index)`` FIRST — bring the target
+   *      into (or near) the rendered range;
+   *   2. re-resolve ``document.getElementById(id)?.focus()`` AFTER
+   *      the render tick (``setTimeout`` macrotask — CDK renders the
+   *      new range on the scroll-driven tick, not synchronously);
+   *   3. VIEWPORT-CONTAINER FALLBACK: if the id is still not mounted,
+   *      focus the viewport element itself so keyboard focus stays
+   *      inside the list region (never falls to ``<body>``).
+   */
+  private scheduleFocusAfterRender(id: string, index: number): void {
+    const viewport = this.virtualViewport();
+    viewport?.scrollToIndex(index);
+    setTimeout(() => {
+      const el = this.doc.getElementById(id);
+      if (el) {
+        el.focus();
+        return;
+      }
+      // Viewport-container fallback — the id is not (yet) mounted.
+      viewport?.elementRef.nativeElement.focus();
+    });
+  }
+
+  /**
+   * P6 (task 8 / P5.3) — the disabled New Job button's explanatory
+   * copy: all-work rows carry no queue concept and task creation
+   * requires a queue, so the tooltip names the reason AND the
+   * remedy. Pinned via the bindings pins spec (grep the exact copy).
+   */
+  protected readonly newJobAllWorkTooltip =
+    'Task creation requires a queue — switch to Queues view';
+
+  /**
+   * Phase 2 — exposed reload accessible label. The plan calls for
+   * an explicit accessible label on the banner Reload button (never
+   * icon-only). Pinned via ``WINDOW_BANNER_COPY.reloadAccessibleLabel``.
+   */
+  protected readonly reloadAccessibleLabel = WINDOW_BANNER_COPY.reloadAccessibleLabel;
 
   /**
    * Phase 4 — switch between 'queues' (legacy) and 'all-work'
@@ -785,48 +2267,64 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (this.viewMode() === mode) {
       return;
     }
-    this.viewMode.set(mode);
-    try {
-      localStorage.setItem(this.VIEW_MODE_KEY, mode);
-    } catch {
-      // Private-browsing — silently ignore.
+    // P1 — view_mode is a JobsFilterState key; the projection flips
+    // datasets inside the ONE pipeline (no second fetch path).
+    this.store.setFilters({ view_mode: mode });
+    // P5 rev — persistence is URL-driven (the store → URL effect
+    // writes the ``view_mode`` param via replaceUrl). The legacy
+    // ``job-page-view-mode`` key is only written while the one-time
+    // migration is still pending; after the cleanup removed it, a
+    // re-write here would resurrect a stale key no reader should
+    // see again.
+    if (!this.urlMigrationDone()) {
+      try {
+        localStorage.setItem(this.VIEW_MODE_KEY, mode);
+      } catch {
+        // Private-browsing — silently ignore.
+      }
     }
     if (mode === 'all-work' && this.works().length === 0) {
-      this.loadWorks();
+      this.store.fetchWorks();
     }
   }
 
+  /**
+   * Status filter — server-side on BOTH wires (jobs + work), so both
+   * legs refetch; the client-side projection re-applies the same key.
+   */
   protected onStatusFilterChange(statuses: JobStatus[]): void {
-    this.filters.update(filters => ({
-      ...filters,
-      status: statuses.length > 0 ? statuses : undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ status: statuses.length > 0 ? statuses : [] });
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
+  /**
+   * Source filter — WINDOW-SCOPED, client-side only (BE gap-e5: the
+   * jobs list endpoint ignores ``source``; the work endpoint has no
+   * source concept at all). A source change must NOT refetch — the
+   * projection re-derives instantly from the fetched window. The
+   * control is queues-view-only (hidden in all-work with honest
+   * copy, since work rows carry no source to match).
+   */
   protected onSourceFilterChange(source: JobSource | 'all'): void {
-    this.filters.update(filters => ({
-      ...filters,
-      source: source === 'all' ? undefined : source
-    }));
-    this.loadJobs();
+    this.store.setFilters({ source: source === 'all' ? null : source });
   }
 
+  /**
+   * Agent filter — WINDOW-SCOPED, client-side in BOTH views (``Work``
+   * rows carry ``agent_id``, so the projection can match them). No
+   * refetch — same instant re-projection as source.
+   */
   protected onAgentFilterChange(agentId: string): void {
-    this.filters.update(filters => ({
-      ...filters,
-      agent_id: agentId === 'all' ? undefined : agentId
-    }));
-    this.loadJobs();
+    this.store.setFilters({ agent_id: agentId === 'all' ? null : agentId });
   }
 
+  /**
+   * Project filter — server-side on BOTH wires; clears the queue
+   * selection (a queue belongs to a project) and persists the choice.
+   */
   protected onProjectFilterChange(projectId: string): void {
-    this.filters.update(filters => ({
-      ...filters,
-      project_id: projectId || undefined
-    }));
-    // Clear queue selection when project changes
-    this.selectedQueueId.set(null);
+    this.store.setFilters({ project_id: projectId || null, queue_id: null });
     // Persist selection to localStorage
     try {
       if (projectId) {
@@ -837,45 +2335,53 @@ export class JobsComponent implements OnInit, OnDestroy {
     } catch {
       // silently ignore
     }
-    this.loadJobs();
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
   protected onClearFilters(): void {
-    this.filters.set({});
-    this.selectedQueueId.set(null);
-    this.showDeleted.set(false);
+    // P1 — store.clearFilters preserves the active view mode.
+    this.store.clearFilters();
     // Clear localStorage so the project isn't silently restored on next visit
     try {
       localStorage.removeItem(this.STORAGE_KEY);
     } catch {
       // silently ignore
     }
-    this.loadJobs();
+    this.store.fetchJobs();
+    this.store.fetchWorks();
   }
 
+  /**
+   * Show-deleted toggle — server-side on the jobs wire only
+   * (``/api/work`` has no soft-delete concept). Queues-view-only
+   * control (hidden in all-work with honest copy).
+   */
   protected onToggleShowDeleted(checked: boolean): void {
-    this.showDeleted.set(checked);
-    this.filters.update(filters => ({
-      ...filters,
-      include_deleted: checked ? true : undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ include_deleted: checked });
+    this.store.fetchJobs();
   }
 
+  /**
+   * Queue selection — queues-view-only (server-side on the jobs
+   * wire; work rows carry no queue_id).
+   */
   protected onQueueSelected(queueId: string | null): void {
-    this.selectedQueueId.set(queueId);
-    this.filters.update(filters => ({
-      ...filters,
-      queue_id: queueId || undefined
-    }));
-    this.loadJobs();
+    this.store.setFilters({ queue_id: queueId || null });
+    this.store.fetchJobs();
   }
 
   protected onQueueChanged(): void {
-    this.loadJobs();
+    this.store.fetchJobs();
   }
 
   protected onOpenCreateDialog(): void {
+    // Phase 2 — flip the poll gate's ``modalOpen`` so the 30s tick
+    // pauses while the create dialog is up. The previous snackbar
+    // spam during long dialog sessions came from the poll replacing
+    // the list mid-dialog; the gate + retain-last-data discipline
+    // kill both surfaces.
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open(JobCreateDialogComponent, {
       width: '500px',
       panelClass: 'dark-modal-panel',
@@ -886,6 +2392,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
 
     dialogRef.afterClosed().subscribe((result: JobCreateDialogResult | undefined) => {
+      this.modalOpen.set(false);
       if (result) {
         this.createJob(result);
       }
@@ -906,7 +2413,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           duration: 3000,
           panelClass: 'success-snackbar'
         });
-        this.loadJobs();
+        this.store.fetchJobs();
       },
       error: (err) => {
         console.error('Failed to create job:', err);
@@ -942,6 +2449,9 @@ export class JobsComponent implements OnInit, OnDestroy {
    *     the snackbar.
    */
   protected onCancelJob(job: Job): void {
+    // Phase 2 — flip the poll gate's ``modalOpen`` (the cancel
+    // confirm IS a modal from the gate's perspective).
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open<ConfirmDialogComponent, ConfirmDialogData, boolean>(
       ConfirmDialogComponent,
       {
@@ -958,6 +2468,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     );
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      this.modalOpen.set(false);
       if (!confirmed) {
         return;
       }
@@ -1009,18 +2520,16 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.snackBar.open('Job deleted', 'Undo', { duration: 5000 })
           .onAction().subscribe(() => {
             this.jobService.restoreJob(job.job_id).subscribe({
-              next: () => this.loadJobs(),
+              next: () => this.store.fetchJobs(),
               error: () => {}
             });
           });
         if (!this.showDeleted()) {
-          // Remove from local list
-          this.jobs.update(jobs => jobs.filter(j => j.job_id !== job.job_id));
+          // Remove from local list (store-owned mutation seam)
+          this.store.removeJob(job.job_id);
         } else {
           // Update the job in place (show as deleted)
-          this.jobs.update(jobs =>
-            jobs.map(j => j.job_id === job.job_id ? { ...j, deleted_at: new Date().toISOString() } : j)
-          );
+          this.store.patchJob(job.job_id, { deleted_at: new Date().toISOString() });
         }
       },
       error: (err) => {
@@ -1034,7 +2543,7 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   protected onRestoreJob(job: Job): void {
     this.jobService.restoreJob(job.job_id).subscribe({
-      next: () => this.loadJobs(),
+      next: () => this.store.fetchJobs(),
       error: (err) => {
         this.snackBar.open(err.message || 'Failed to restore job', 'Dismiss', {
           duration: 5000,
@@ -1063,7 +2572,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           'Close',
           { duration: 5000 }
         );
-        this.loadJobs();
+        this.store.fetchJobs();
       },
       error: (err) => {
         console.error('Failed to retry all dead letter jobs:', err);
@@ -1112,6 +2621,9 @@ export class JobsComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // Phase 2 — flip the poll gate's ``modalOpen`` (the confirm
+    // dialog IS a modal from the gate's perspective).
+    this.modalOpen.set(true);
     const dialogRef = this.dialog.open(SystemCleanupConfirmDialogComponent, {
       width: '420px',
       panelClass: 'dark-modal-panel',
@@ -1134,6 +2646,7 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
 
     dialogRef.afterClosed().subscribe((confirmed: boolean | undefined) => {
+      this.modalOpen.set(false);
       if (!confirmed) {
         return;
       }
@@ -1180,6 +2693,19 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onViewJobDetails(job: Job): void {
     this.selectedJob.set(job);
     this.drawerOpen.set(true);
+    // P5 — opening the drawer from a card click clears the
+    // deep-link "missing" state (the user is now interacting
+    // with a real row, not the empty card).
+    this.deepLinkMissingJobId.set(null);
+    // If the URL still carries a ?job=<id> that does NOT match
+    // this row (e.g. the user clicked a different row after a
+    // deep-link), clear the URL so the deep-link target stays
+    // consistent. The single-row click is the user's current
+    // intent; the URL reflects it.
+    const urlJob = this.urlDeepLinkJobId();
+    if (urlJob && urlJob !== job.job_id) {
+      this.clearUrlDeepLink();
+    }
 
     // Don't connect to SSE for terminal jobs - no live updates needed
     if (isTerminalStatus(job.status)) {
@@ -1195,22 +2721,45 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onCloseDrawer(): void {
     this.drawerOpen.set(false);
     this.selectedJob.set(null);
+    this.deepLinkMissingJobId.set(null);
     this.jobSseService.disconnect();
     if (this.sseSubscription) {
       this.sseSubscription.unsubscribe();
       this.sseSubscription = null;
     }
+    // P5 — closing the drawer while a deep-link is active
+    // strips ``?job=`` from the URL (the URL must stay consistent
+    // with the visible state). The store → URL effect will see
+    // no diff on the filter side and skip its own write.
+    if (this.urlDeepLinkJobId() !== null) {
+      this.clearUrlDeepLink();
+    }
+  }
+
+  /**
+   * P5 — strip ``?job=`` from the URL via ``router.navigate`` with
+   * the key removed. ``queryParams: { job: null }`` deletes the key
+   * while ``queryParamsHandling: 'merge'`` preserves every other
+   * filter param.
+   */
+  private clearUrlDeepLink(): void {
+    this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { job: null },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
+    });
   }
 
   protected onDrawerCancelJob(jobId: string): void {
-    const job = this.jobs().find(j => j.job_id === jobId);
+    const job = this.store.findJob(jobId);
     if (job) {
       this.onCancelJob(job);
     }
   }
 
   protected onDrawerRetryJob(jobId: string): void {
-    const job = this.jobs().find(j => j.job_id === jobId);
+    const job = this.store.findJob(jobId);
     if (job) {
       this.onRetryJob(job);
     }
@@ -1227,8 +2776,9 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected hasActiveFilters(): boolean {
-    const filters = this.filters();
-    return !!(filters.status || filters.source || filters.agent_id || filters.queue_id);
+    // P1 — the single model helper (status/source/agent_id/queue_id;
+    // project_id is a scope selection, not a clearable filter).
+    return hasActiveJobsFilter(this.store.filterState());
   }
 
   protected isProjectSelected(): boolean {
@@ -1241,9 +2791,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (!projectId) return;
 
     // Update local project state
-    this.projectService.projects.update(projects => 
-      projects.map(p => 
-        p.project_id === projectId 
+    this.projectService.projects.update(projects =>
+      projects.map(p =>
+        p.project_id === projectId
           ? { ...p, job_queue_paused: isPaused }
           : p
       )

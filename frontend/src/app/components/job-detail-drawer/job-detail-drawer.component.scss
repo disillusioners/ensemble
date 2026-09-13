@@ -167,6 +167,23 @@ mat-chip {
   line-height: 1.6;
 }
 
+// P5 (jobs-page-improvement) — Honest-empty Message copy for
+// report/all-work rows. The pre-P5 drawer's @if guard hid the
+// Message section entirely for any row without `message`; the
+// new contract surfaces the gap explicitly so the user knows the
+// row's data model does not carry message content (the BE wire
+// has no report message field — gap-e6, by design).
+.message-empty-copy {
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--surface-color, #252526);
+  border: 1px dashed var(--border-color, #3c3c3c);
+  border-radius: 6px;
+  color: var(--text-tertiary, #757575);
+  font-size: 13px;
+  font-style: italic;
+}
+
 .session-link {
   display: flex;
   align-items: center;

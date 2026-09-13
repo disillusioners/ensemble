@@ -37,23 +37,27 @@
 
       @if (drawerOpen()) {
         @if (isConnected()) {
-          <span class="connection-status connected" title="Real-time updates connected">
-            <mat-icon>wifi</mat-icon>
+          <span class="connection-status connected" title="Real-time updates connected"
+                aria-label="Real-time updates connected">
+            <mat-icon aria-hidden="true">wifi</mat-icon>
             Live
           </span>
         } @else if (isRetrying()) {
-          <span class="connection-status retrying" title="Reconnecting to server...">
-            <mat-icon class="spinning">sync</mat-icon>
+          <span class="connection-status retrying" title="Reconnecting to server..."
+                [attr.aria-label]="'Reconnecting to server, attempt ' + retryAttempt() + ' of 5'">
+            <mat-icon class="spinning" aria-hidden="true">sync</mat-icon>
             Reconnecting ({{ retryAttempt() }}/5)
           </span>
         } @else if (isFailed()) {
-          <span class="connection-status disconnected" title="Connection failed - click refresh to retry">
-            <mat-icon>wifi_off</mat-icon>
+          <span class="connection-status disconnected" title="Connection failed - click refresh to retry"
+                aria-label="Real-time connection failed — click Refresh to retry">
+            <mat-icon aria-hidden="true">wifi_off</mat-icon>
             Offline
           </span>
         } @else {
-          <span class="connection-status disconnected" title="Real-time updates disconnected">
-            <mat-icon>wifi_off</mat-icon>
+          <span class="connection-status disconnected" title="Real-time updates disconnected"
+                aria-label="Real-time updates disconnected">
+            <mat-icon aria-hidden="true">wifi_off</mat-icon>
             Offline
           </span>
         }
@@ -75,18 +79,38 @@
         [disabled]="cleanupInProgress()"
         class="cleanup-btn"
         [class.has-bad-state]="hasBadState()"
+        [class.cleanup-btn-degraded]="preflightDegraded()"
         [matTooltip]="hasBadState()
-          ? '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.'
-          : 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects'">
+          ? (preflightDegraded()
+              ? '⚠ ' + badStateCount() + ' bad-state items detected (preflight stale — count may be out of date). Click to fix.'
+              : '⚠ ' + badStateCount() + ' bad-state items detected. Click to fix.')
+          : (preflightDegraded()
+              ? 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects — preflight stale'
+              : 'Cancel ALL jobs (every lane) + clean up stalled missions across ALL projects')">
         <mat-icon [class.spinning]="cleanupInProgress()">cleaning_services</mat-icon>
         System Cleanup
+        <!-- P4 — preflight staleness tag. Same shape as the
+             ``defer-page-banner-degraded-tag`` and
+             ``window-banner-degraded-tag`` chips so the operator's
+             eye learns one tag = "the count you're looking at may
+             not match reality". The flag flips on
+             ``/api/jobs/cleanup/preflight`` failure and clears on
+             the next successful poll. -->
+        @if (preflightDegraded()) {
+          <span class="cleanup-btn-degraded-tag" aria-label="preflight stale">stale</span>
+        }
       </button>
+      <!-- P6 (task 8 / P5.3) — the disabled New Job button EXPLAINS
+           itself: all-work rows have no queue concept, and task
+           creation requires a queue, so the tooltip names the reason
+           AND the remedy (switch to Queues view). Copy pinned via
+           NEW_JOB_ALL_WORK_TOOLTIP in jobs-page.bindings.pins.spec. -->
       <button
         mat-flat-button
         color="primary"
         (click)="onOpenCreateDialog()"
         [disabled]="!filters().project_id || isAllWorkView()"
-        [matTooltip]="isAllWorkView() ? 'Switch to Queues view to create jobs' : ''"
+        [matTooltip]="newJobAllWorkTooltip"
         class="create-btn">
         <mat-icon>add</mat-icon>
         New Job
@@ -98,14 +122,17 @@
   <div class="filter-bar">
     <div class="filter-group">
       <span class="filter-label">Status:</span>
+      <!-- P6 (a11y) — programmatic label on the chip listbox (the
+           rendered chips alone carry no group name for AT). -->
       <mat-chip-listbox
         class="status-chips"
         multiple
+        aria-label="Filter jobs by status"
         (change)="onStatusFilterChange($event.value)">
         @for (option of statusOptions; track option.value) {
           <mat-chip-option
             [value]="option.value"
-            [selected]="filters().status?.includes(option.value) ?? false">
+            [selected]="filters().status.includes(option.value)">
             {{ option.label }}
           </mat-chip-option>
         }
@@ -135,30 +162,176 @@
     </div>
 
     <div class="filter-row">
-      <app-searchable-select
-        class="filter-field"
-        label="Source"
-        [options]="sourceOptions"
-        [ngModel]="filters().source || 'all'"
-        (ngModelChange)="onSourceFilterChange($event)">
-      </app-searchable-select>
+      <!-- P1 — Source is WINDOW-SCOPED and queues-view-only: the
+           /api/work wire carries no source concept (gap-e5), so a
+           source control in the All Work view could never match a
+           row. Hidden there with honest copy instead of shipping a
+           no-op control. -->
+      @if (!isAllWorkView()) {
+        <app-searchable-select
+          class="filter-field"
+          label="Source (window-scoped)"
+          [options]="sourceOptions"
+          [ngModel]="filters().source || 'all'"
+          (ngModelChange)="onSourceFilterChange($event)">
+        </app-searchable-select>
+      } @else {
+        <span class="filter-field filter-unavailable-note" [matTooltip]="sourceUnavailableCopy">
+          {{ sourceUnavailableCopy }}
+        </span>
+      }
 
       <app-searchable-select
         class="filter-field"
-        label="Agent"
+        label="Agent (window-scoped)"
         [options]="agentOptions()"
         [ngModel]="filters().agent_id || 'all'"
         (ngModelChange)="onAgentFilterChange($event)">
       </app-searchable-select>
 
-      <mat-checkbox
-        [checked]="showDeleted()"
-        (change)="onToggleShowDeleted($event.checked)"
-        class="show-deleted-checkbox">
-        Show Deleted
-      </mat-checkbox>
+      <!-- P1 — Show Deleted is queues-view-only: /api/work has no
+           soft-delete concept (the resolver's query hides soft-deleted
+           rows with no flag to un-hide), so the toggle is inert in the
+           All Work view. Hidden there with honest copy. -->
+      @if (!isAllWorkView()) {
+        <mat-checkbox
+          [checked]="showDeleted()"
+          (change)="onToggleShowDeleted($event.checked)"
+          class="show-deleted-checkbox">
+          Show Deleted
+        </mat-checkbox>
+      } @else {
+        <span class="filter-unavailable-note">
+          {{ showDeletedUnavailableCopy }}
+        </span>
+      }
 
   </div>
+
+  <!-- P4 — Defer-blocked page banner. Severity-graded (AMBER /
+       INFO / RED-anomaly) via the existing ``defer-blocked.model.ts``
+       conjunction; hidden when ``deferPageBanner`` returns null
+       (no pending defer pressure). Sits above the window banner
+       so the most actionable state (defer-blocked) is closest to
+       the action surface (filter bar). Degraded note surfaces
+       when the leg's last fetch failed and the visible payload is
+       retained (P4 task 4 — replaces the legacy silent-swallow at
+       :587-589). -->
+  @if (deferPageBanner(); as banner) {
+    <div
+      class="defer-page-banner"
+      role="status"
+      aria-live="polite"
+      [class.defer-page-banner-amber]="banner.severity === 'amber'"
+      [class.defer-page-banner-info]="banner.severity === 'info'"
+      [class.defer-page-banner-red]="banner.severity === 'red'"
+      [class.defer-page-banner-degraded]="deferDegraded()">
+      <mat-icon class="defer-page-banner-icon" aria-hidden="true">
+        {{ banner.severity === 'red' ? 'report' : 'warning_amber' }}
+      </mat-icon>
+      <div class="defer-page-banner-text">
+        <span class="defer-page-banner-title">
+          {{ banner.title }}
+          @if (deferDegraded()) {
+            <span class="defer-page-banner-degraded-tag">stale</span>
+          }
+        </span>
+        <span class="defer-page-banner-body">{{ banner.body }}</span>
+        @if (deferDegraded()) {
+          <span class="defer-page-banner-degraded-note">
+            Last check failed — showing retained state.
+          </span>
+        }
+      </div>
+      <div class="defer-page-banner-actions">
+        @if (banner.holders.length > 0) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="primary"
+            class="defer-page-banner-review-btn"
+            [attr.aria-expanded]="deferPanelOpen()"
+            [attr.aria-label]="deferPanelOpen() ? 'Hide defer holders' : 'Review defer holders'"
+            (click)="onToggleDeferPanel()">
+            <mat-icon>{{ deferPanelOpen() ? 'expand_less' : 'expand_more' }}</mat-icon>
+            {{ deferPanelOpen() ? 'Hide holders' : 'Review holders (' + banner.holders.length + ')' }}
+          </button>
+        }
+        @if (banner.isAnomaly) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="warn"
+            class="defer-page-banner-cleanup-btn"
+            [disabled]="cleanupInProgress()"
+            (click)="onSystemCleanup()">
+            <mat-icon>cleaning_services</mat-icon>
+            Open System Cleanup
+          </button>
+        }
+      </div>
+    </div>
+  }
+
+  <!-- P4 — Inline defer-holders panel. Page-scoped (no
+       ``@Input()`` wiring needed; the parent component owns the
+       store). The panel reads the SAME ``deferPageBanner`` helper
+       the banner uses so the holder list and the banner copy
+       cannot disagree on whose row is where (cross-seam
+       invariant — pinned in
+       ``defer-holders-panel.component.spec.ts``). -->
+  <app-defer-holders-panel
+    [status]="deferStatus()"
+    [degraded]="deferDegraded()"
+    [actionInFlight]="deferActionInFlight()"
+    (forceComplete)="onHolderForceComplete($event)"
+    (resendForeground)="onHolderResendForeground($event)">
+  </app-defer-holders-panel>
+
+  <!-- Phase 2 — window-honesty banner (BOTH view modes). The
+       banner is an exact function of the projected row count: it
+       shows AT or ABOVE the wire cap (DEFAULT_WINDOW_LIMIT = 100),
+       where we cannot tell whether the slice is complete or
+       truncated. The copy is the BOTH-WAYS variant — never
+       "Showing first 100" (the plan rejects completeness claims).
+       The ``aria-live="polite"`` region announces updates without
+       interrupting the user; the manual Reload button carries an
+       explicit accessible label (never icon-only). Degraded copies
+       layer on top so a failed refresh always tells the user. -->
+  @if (windowBanner() === 'visible' || windowDegraded()) {
+    <div
+      class="window-banner"
+      role="status"
+      aria-live="polite"
+      [class.window-banner-degraded]="windowDegraded()">
+      <mat-icon class="banner-icon">
+        {{ windowDegraded() ? 'cloud_off' : 'info_outline' }}
+      </mat-icon>
+      <div class="banner-text">
+        @if (windowDegraded()) {
+          <span class="banner-title">Last refresh failed — showing retained data</span>
+        } @else {
+          <span class="banner-title">Showing newest 100</span>
+        }
+        <span class="banner-body">
+          @if (windowDegraded()) {
+            The previously loaded jobs are still shown. Click Reload to try again.
+          } @else {
+            The list may continue or may be complete — refine filters to narrow.
+          }
+        </span>
+      </div>
+      <button
+        mat-stroked-button
+        color="primary"
+        class="banner-reload-btn"
+        (click)="onReloadBanner()"
+        [attr.aria-label]="reloadAccessibleLabel">
+        <mat-icon>refresh</mat-icon>
+        Reload
+      </button>
+    </div>
+  }
 
   <!-- Main Content with Queue Sidebar and Drawer -->
   <div class="jobs-main-layout">
@@ -179,8 +352,10 @@
       <!-- Job List Content -->
       <mat-drawer-content class="jobs-content">
 
-        <!-- Loading State -->
-        @if ((loading() || workLoading()) && jobs().length === 0 && works().length === 0) {
+        <!-- Phase 2 — loading skeleton fires ONLY for the first
+             fetch (no data to retain). Background refreshes keep
+             the last good list and never flash a skeleton. -->
+        @if (showLoadingSkeleton()) {
           <div class="loading-container">
             @for (i of [1, 2, 3]; track i) {
               <div class="skeleton-card">
@@ -198,79 +373,146 @@
           </div>
         }
 
-        <!-- Error State — only surface the legacy JobService error in
-             the queues view; in the all-work view we show the
-             WorkService error specifically. -->
-        @if (error() && !isAllWorkView()) {
-          <div class="error-container">
-            <mat-icon class="error-icon">error_outline</mat-icon>
-            <h3>Failed to load jobs</h3>
-            <p>{{ error() }}</p>
-            <button mat-stroked-button color="primary" (click)="onRefresh()">
-              <mat-icon>refresh</mat-icon>
-              Try Again
-            </button>
-          </div>
-        }
-
-        @if (workError() && isAllWorkView()) {
-          <div class="error-container">
-            <mat-icon class="error-icon">error_outline</mat-icon>
-            <h3>Failed to load work</h3>
-            <p>{{ workError() }}</p>
-            <button mat-stroked-button color="primary" (click)="onRefresh()">
-              <mat-icon>refresh</mat-icon>
-              Try Again
-            </button>
-          </div>
-        }
-
-        <!-- Empty State — queues view (legacy) -->
-        @if (isEmptyState() && !isAllWorkView()) {
+        <!-- Phase 2 — empty-state card (dataEmpty / filterEmpty /
+             errored). View-mode-aware copy comes from
+             ``jobs-empty-state.model``. Skeleton is mutually
+             exclusive — the classifier guarantees exactly one
+             branch fires. -->
+        @if (showEmptyState()) {
           <div class="empty-container">
-            <mat-icon class="empty-icon">inbox</mat-icon>
-            <h3>No jobs found</h3>
-            @if (hasActiveFilters()) {
-              <p>Try adjusting your filters or
-                <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
-              </p>
-            } @else {
-              <p>Get started by creating your first job</p>
-            }
-            <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
-              <mat-icon>add</mat-icon>
-              Create Job
-            </button>
-          </div>
-        }
-
-        <!-- Empty State — All Work view (Phase 4) -->
-        @if (isEmptyWorkState()) {
-          <div class="empty-container">
-            <mat-icon class="empty-icon">workspaces</mat-icon>
-            <h3>No work records yet</h3>
-            <p>No jobs, turns, or reports have been recorded for this project.</p>
-          </div>
-        }
-
-        <!-- Job List — feeds both views through ``displayedJobs``.
-             In the All Work view the same cards render but each
-             carries its ``kind`` chip. -->
-        @if (!loading() || jobs().length > 0 || works().length > 0) {
-          <div class="job-list">
-            @for (job of displayedJobs(); track job.job_id) {
-              <app-job-card
-                [job]="job"
-                [projectPaused]="getProjectPaused(job.project_id || '')"
-                [queueMap]="queueNameMap()"
-                (cancel)="onCancelJob(job)"
-                (retry)="onRetryJob(job)"
-                (delete)="onDeleteJob(job)"
-                (restore)="onRestoreJob(job)"
-                (viewDetails)="onViewJobDetails(job)">
-              </app-job-card>
+            <mat-icon class="empty-icon">{{ emptyStateCopy().icon }}</mat-icon>
+            <h3>{{ emptyStateCopy().title }}</h3>
+            <p>{{ emptyStateCopy().body }}</p>
+            @if (emptyStateKind() === 'errored') {
+              <button mat-flat-button color="primary" (click)="onRetryEmpty()">
+                <mat-icon>refresh</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
+            } @else if (emptyStateKind() === 'filterEmpty') {
+              <button mat-flat-button color="primary" (click)="onClearFiltersForEmpty()">
+                <mat-icon>filter_alt_off</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
+            } @else if (emptyStateCopy().ctaLabel) {
+              <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
+                <mat-icon>add</mat-icon>
+                {{ emptyStateCopy().ctaLabel }}
+              </button>
             }
           </div>
+        }
+
+        <!-- Phase 2 — render-guard truncation notice. Fires when
+             the all-work projection is at or above the hard cap
+             (MAX_RENDER_ROWS = 1000). The notice names the hidden
+             count and offers a "switch to Queues view" affordance
+             (Queues is the bounded window surface). -->
+        @if (truncationNotice(); as notice) {
+          <div class="render-guard-notice" role="status" aria-live="polite">
+            <mat-icon class="guard-icon">visibility_off</mat-icon>
+            <div class="guard-text">
+              <span class="guard-title">
+                {{ truncationHiddenCount() }} hidden rows
+              </span>
+              <span class="guard-body">{{ notice }}</span>
+            </div>
+            <button
+              mat-stroked-button
+              color="primary"
+              class="guard-switch-btn"
+              (click)="onSwitchToQueuesView()">
+              Switch to Queues view
+            </button>
+          </div>
+        }
+
+        <!-- Phase 3 — grouped virtual-scroll list. Headers AND rows
+             are items in the SAME flattened WindowItem[] (no nested
+             scrollers — the arc's known fiddly bit is solved by
+             structure, not by a scroller trick). Headers render
+             even when the group is COLLAPSED (chevron is the
+             only expand toggle); collapsed groups' rows are
+             OMITTED from the list (keyboard order == DOM order).
+             The track-by identity is ``item.key`` (job_id for rows,
+             group key for headers) so DOM-stable identity survives
+             recycle. Expansion state for rows is keyed by
+             ``job_id`` (Phase 2); expansion state for headers is
+             keyed by group key (Phase 3, G1 panel port). -->
+        @if (!showLoadingSkeleton() && !showEmptyState()) {
+          <!-- P6 (task 1) — the grouped list is a WAI-ARIA tree:
+               the viewport is ``role="tree"``; each group header is
+               ``role="treeitem"`` (level 1, ``aria-expanded``); rows
+               are ``role="button"`` activation targets. The
+               tree/section label is programmatic (not icon-only).
+               The chevron stays a REAL ``<button type="button">``
+               (P3) so native Enter/Space activation toggles the
+               group without a container-level key handler (which
+               would double-fire against the button's own
+               activation). -->
+          <cdk-virtual-scroll-viewport
+            class="job-list"
+            role="tree"
+            aria-label="Jobs grouped by conversation"
+            [itemSize]="itemSize"
+            minBufferPx="288"
+            maxBufferPx="576"
+            (keydown)="onListKeydown($event)">
+            <ng-container *cdkVirtualFor="let item of renderRows(); trackBy: trackByKey">
+              @if (item.kind === 'header') {
+                <div
+                  class="group-header"
+                  role="treeitem"
+                  aria-level="1"
+                  [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
+                  tabindex="0"
+                  [id]="itemId(item)"
+                  [class.group-header-live]="item.isLive"
+                  [class.focused]="isFocusedItem(itemId(item))"
+                  (focus)="onWindowItemFocus(itemId(item))">
+                  <button
+                    type="button"
+                    class="group-header-chevron"
+                    [attr.aria-expanded]="isGroupExpanded(item.groupKey)"
+                    [attr.aria-label]="isGroupExpanded(item.groupKey) ? 'Collapse group' : 'Expand group'"
+                    (click)="onChevronClick($event, item.groupKey); $event.stopPropagation()">
+                    <mat-icon aria-hidden="true">{{ isGroupExpanded(item.groupKey) ? 'expand_less' : 'expand_more' }}</mat-icon>
+                  </button>
+                  <div class="group-header-text">
+                    <span class="group-header-title">{{ item.title }}</span>
+                    <span class="group-header-meta">{{ item.metaLine }}</span>
+                  </div>
+                </div>
+              } @else {
+                <!-- P6 (task 2) — row activation: Enter/Space open the
+                     detail drawer. The handler ignores events bubbled
+                     from the card's INNER buttons (target !==
+                     currentTarget) so Retry/Cancel/Delete keep their
+                     own single action; preventDefault swallows the
+                     Space page-scroll. Mouse users activate via the
+                     card's explicit Details button (unchanged). -->
+                <app-job-card
+                  [job]="item.job"
+                  role="button"
+                  tabindex="0"
+                  [id]="itemId(item)"
+                  [attr.aria-label]="'Job from ' + (item.job.agent_id || 'unknown agent') + ' — press Enter to view details'"
+                  [class.focused]="isFocusedItem(itemId(item))"
+                  [projectPaused]="getProjectPaused(item.job.project_id || '')"
+                  [queueMap]="queueNameMap()"
+                  [expanded]="isCardExpanded(item)"
+                  (focus)="onWindowItemFocus(itemId(item))"
+                  (keydown.enter)="onRowActivate($event, item)"
+                  (keydown.space)="onRowActivate($event, item)"
+                  (cancel)="onCancelJob(item.job)"
+                  (retry)="onRetryJob(item.job)"
+                  (delete)="onDeleteJob(item.job)"
+                  (restore)="onRestoreJob(item.job)"
+                  (viewDetails)="onViewJobDetails(item.job)"
+                  (expandToggle)="onToggleExpansion(item.job.job_id)">
+                </app-job-card>
+              }
+            </ng-container>
+          </cdk-virtual-scroll-viewport>
         }
 
       </mat-drawer-content>
@@ -291,6 +533,71 @@
             (retryJob)="onDrawerRetryJob($event)"
             (viewSession)="onDrawerViewInstance($event)">
           </app-job-detail-drawer>
+        } @else if (deepLinkMissingJobId(); as missingId) {
+          <!-- P5 (jobs-page-improvement) — honest "job not found" card.
+               Fires when ``?job=<id>`` is present AND the single-job
+               GET 404s. Renders inside the drawer so the layout stays
+               consistent with the normal open path. ``aria-live``
+               announces the empty state politely. -->
+          <div class="job-detail-drawer deep-link-missing" role="status" aria-live="polite">
+            <div class="drawer-header">
+              <div class="header-top">
+                <h2 class="deep-link-missing-title">Job not found</h2>
+                <div class="header-actions">
+                  <button mat-icon-button
+                          matTooltip="Close"
+                          aria-label="Close drawer"
+                          (click)="onCloseDrawer()">
+                    <mat-icon>close</mat-icon>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <mat-divider></mat-divider>
+            <section class="detail-section">
+              <p class="deep-link-missing-body">
+                We could not load the job <code>{{ missingId }}</code> from the URL.
+                It may have been deleted, belong to another project, or the
+                link is malformed.
+              </p>
+              <p class="deep-link-missing-body">
+                Closing this drawer will clear <code>?job=</code> from the URL.
+              </p>
+            </section>
+          </div>
+        } @else if (deepLinkFetchInFlight()) {
+          <!-- P5 — honest loading state for the deep-link GET. The
+               drawer's skeleton card matches the page's first-fetch
+               skeleton contract (no spinner affordance; a card-shaped
+               placeholder is the truthful loading surface). -->
+          <div class="job-detail-drawer deep-link-loading" role="status" aria-live="polite">
+            <div class="drawer-header">
+              <div class="header-top">
+                <h2 class="deep-link-loading-title">Loading job…</h2>
+                <div class="header-actions">
+                  <button mat-icon-button
+                          matTooltip="Close"
+                          aria-label="Close drawer"
+                          (click)="onCloseDrawer()">
+                    <mat-icon>close</mat-icon>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <mat-divider></mat-divider>
+            <section class="detail-section">
+              <div class="skeleton-card">
+                <div class="skeleton-header">
+                  <div class="skeleton-badge"></div>
+                  <div class="skeleton-badge small"></div>
+                </div>
+                <div class="skeleton-content">
+                  <div class="skeleton-line"></div>
+                  <div class="skeleton-line short"></div>
+                </div>
+              </div>
+            </section>
+          </div>
         }
       </mat-drawer>
     </mat-drawer-container>

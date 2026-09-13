@@ -4,6 +4,10 @@ import {
   deferBlockIndicator,
   deferBlockAction,
   DeferBlockAction,
+  deferPageBanner,
+  orderDeferHolders,
+  compareDeferHolderKind,
+  DEFER_HOLDER_KIND_RANK,
   formatDeferHoldSince,
 } from './defer-blocked.model';
 
@@ -318,5 +322,251 @@ describe('defer-blocked.model — deferBlockAction (WS4)', () => {
       })
     );
     expect(action!.holder.instance_id).toBe('inst-a');
+  });
+});
+
+// ── P4 page-banner helper (vs. the legacy tooltip helper) ──────────────
+
+describe('defer-blocked.model — orderDeferHolders (P4 task 2)', () => {
+  const holder = (overrides?: Partial<DeferBlockHolder>): DeferBlockHolder => ({
+    instance_id: 'inst-123',
+    agent: 'leader',
+    status: 'processing',
+    since: '2026-09-04T15:33:24+00:00',
+    kind: 'live',
+    ...(overrides ?? {}),
+  });
+
+  it('returns a NEW array (does not mutate the input)', () => {
+    const input: DeferBlockHolder[] = [
+      holder({ instance_id: 'live-A', kind: 'live' }),
+      holder({ instance_id: 'pau-B', kind: 'paused' }),
+    ];
+    const copy = orderDeferHolders(input);
+    expect(copy).not.toBe(input);
+    expect(input.map((h) => h.instance_id)).toEqual(['live-A', 'pau-B']);
+  });
+
+  it('places paused holders FIRST, then stalled, then live', () => {
+    const out = orderDeferHolders([
+      holder({ instance_id: 'live-1', kind: 'live' }),
+      holder({ instance_id: 'pau-2', kind: 'paused' }),
+      holder({ instance_id: 'stl-3', kind: 'stalled' }),
+      holder({ instance_id: 'live-4', kind: 'live' }),
+    ]);
+    expect(out.map((h) => h.instance_id)).toEqual([
+      'pau-2',
+      'stl-3',
+      'live-1',
+      'live-4',
+    ]);
+  });
+
+  it('preserves the wire order WITHIN each kind (stable sort)', () => {
+    const out = orderDeferHolders([
+      holder({ instance_id: 'live-1', kind: 'live' }),
+      holder({ instance_id: 'pau-2', kind: 'paused' }),
+      holder({ instance_id: 'pau-3', kind: 'paused' }),
+      holder({ instance_id: 'stl-4', kind: 'stalled' }),
+      holder({ instance_id: 'live-5', kind: 'live' }),
+    ]);
+    expect(out.map((h) => h.instance_id)).toEqual([
+      'pau-2',
+      'pau-3',
+      'stl-4',
+      'live-1',
+      'live-5',
+    ]);
+  });
+
+  it('handles an empty list — returns []', () => {
+    expect(orderDeferHolders([])).toEqual([]);
+  });
+
+  it('handles a single-holder list', () => {
+    const out = orderDeferHolders([holder({ instance_id: 'only', kind: 'stalled' })]);
+    expect(out.map((h) => h.instance_id)).toEqual(['only']);
+  });
+});
+
+describe('defer-blocked.model — compareDeferHolderKind (rank contract)', () => {
+  it('ranks paused < stalled < live', () => {
+    expect(DEFER_HOLDER_KIND_RANK.paused).toBeLessThan(DEFER_HOLDER_KIND_RANK.stalled);
+    expect(DEFER_HOLDER_KIND_RANK.stalled).toBeLessThan(DEFER_HOLDER_KIND_RANK.live);
+  });
+
+  it('compareDeferHolderKind returns the rank difference', () => {
+    expect(compareDeferHolderKind('paused', 'paused')).toBe(0);
+    expect(compareDeferHolderKind('paused', 'stalled')).toBeLessThan(0);
+    expect(compareDeferHolderKind('stalled', 'paused')).toBeGreaterThan(0);
+    expect(compareDeferHolderKind('live', 'paused')).toBeGreaterThan(0);
+  });
+});
+
+describe('defer-blocked.model — deferPageBanner (P4 task 1)', () => {
+  const holder = (overrides?: Partial<DeferBlockHolder>): DeferBlockHolder => ({
+    instance_id: 'inst-123',
+    agent: 'leader',
+    status: 'processing',
+    since: '2026-09-04T15:33:24+00:00',
+    kind: 'live',
+    ...(overrides ?? {}),
+  });
+
+  const payload = (overrides?: Partial<DeferBlockedStatus>): DeferBlockedStatus => ({
+    defer_blocked: true,
+    pending_count: 2,
+    holders: [],
+    ...(overrides ?? {}),
+  });
+
+  // ── Render gate ─────────────────────────────────────────────────────
+
+  it('returns null for a null/undefined payload (defensive)', () => {
+    expect(deferPageBanner(null)).toBeNull();
+    expect(deferPageBanner(undefined)).toBeNull();
+  });
+
+  it('hidden when pending_count = 0 AND holders empty — no data, no anomaly', () => {
+    // Plan task 1: "hidden only when no data AND no anomaly"
+    expect(
+      deferPageBanner(payload({ pending_count: 0, holders: [] }))
+    ).toBeNull();
+  });
+
+  it('hidden when pending_count = 0 even with holders present — matches the indicator render gate', () => {
+    // P4 task 1: the page banner uses the existing conjunction
+    // (the indicator's gate is the source of truth — ``pending_count
+    // === 0`` ⇒ null). The page banner inherits that gate so a
+    // zero-pressure state never reserves space. The page banner's
+    // extra branch is the ANOMALY path (``pending > 0 + holders
+    // empty``), which the indicator helper already covers (red).
+    expect(
+      deferPageBanner(payload({ pending_count: 0, holders: [holder()] }))
+    ).toBeNull();
+  });
+
+  // ── RED anomaly branch ──────────────────────────────────────────────
+
+  it('RED anomaly: pending > 0 + holders empty ⇒ isAnomaly true', () => {
+    const banner = deferPageBanner(payload({ pending_count: 3, holders: [] }));
+    expect(banner).not.toBeNull();
+    expect(banner!.severity).toBe('red');
+    expect(banner!.isAnomaly).toBe(true);
+    expect(banner!.title).toBe('Possibly stuck');
+    expect(banner!.body).toContain('3 messages');
+    expect(banner!.pendingCount).toBe(3);
+    expect(banner!.holders).toEqual([]);
+  });
+
+  it('RED anomaly pluralizes pending_count (singular vs plural)', () => {
+    const single = deferPageBanner(payload({ pending_count: 1, holders: [] }));
+    expect(single!.body).toContain('1 message ');
+    expect(single!.body).not.toContain('messages');
+    const multi = deferPageBanner(payload({ pending_count: 2, holders: [] }));
+    expect(multi!.body).toContain('2 messages');
+  });
+
+  // ── AMBER (paused) ──────────────────────────────────────────────────
+
+  it('AMBER when any holder is paused — banner carries body + ordered holders', () => {
+    const banner = deferPageBanner(
+      payload({
+        holders: [
+          holder({ kind: 'paused', instance_id: 'pau-A', since: '2026-09-04T08:05:00+00:00' }),
+        ],
+      })
+    );
+    expect(banner).not.toBeNull();
+    expect(banner!.severity).toBe('amber');
+    expect(banner!.isAnomaly).toBe(false);
+    expect(banner!.title).toBe('Defer-blocked');
+    expect(banner!.body).toContain('paused instance pau-A');
+    expect(banner!.body).toContain('resume or terminate to unblock');
+    expect(banner!.holders.map((h) => h.instance_id)).toEqual(['pau-A']);
+  });
+
+  // ── AMBER (stalled) ─────────────────────────────────────────────────
+
+  it('AMBER when any holder is stalled — distinct copy from paused', () => {
+    const banner = deferPageBanner(
+      payload({
+        holders: [
+          holder({ kind: 'stalled', instance_id: 'stl-A', since: '2026-09-05T11:00:00+00:00' }),
+        ],
+      })
+    );
+    expect(banner!.severity).toBe('amber');
+    expect(banner!.body).toContain('stalled mission stl-A');
+    expect(banner!.body).toContain('safe to force-complete');
+  });
+
+  // ── INFO (all-live) ─────────────────────────────────────────────────
+
+  it('INFO when holders present and all live — deferral working as designed', () => {
+    const banner = deferPageBanner(
+      payload({
+        holders: [
+          holder({ instance_id: 'live-1' }),
+          holder({ instance_id: 'live-2' }),
+        ],
+      })
+    );
+    expect(banner!.severity).toBe('info');
+    expect(banner!.isAnomaly).toBe(false);
+    expect(banner!.body).toContain('2 live missions');
+  });
+
+  // ── Holder ordering propagates into the banner ──────────────────────
+
+  it('banner.holders is orderDeferHolders-shaped — paused first, then stalled, then live', () => {
+    const banner = deferPageBanner(
+      payload({
+        holders: [
+          holder({ instance_id: 'live-1', kind: 'live' }),
+          holder({ instance_id: 'pau-2', kind: 'paused' }),
+          holder({ instance_id: 'stl-3', kind: 'stalled' }),
+        ],
+      })
+    );
+    expect(banner!.holders.map((h) => h.instance_id)).toEqual([
+      'pau-2',
+      'stl-3',
+      'live-1',
+    ]);
+  });
+
+  // ── Cross-seam invariant: banner severity ↔ indicator severity ──────
+
+  it('banner severity matches deferBlockIndicator severity for the same payload (page-level parity)', () => {
+    // Plan test strategy: "banner severity identical whether data
+    // arrives via poll tick or manual refresh" — equivalent here to
+    // the page-level helper agreeing with the header indicator helper
+    // (both read the same payload).
+    const samples: DeferBlockedStatus[] = [
+      payload({ pending_count: 0, holders: [] }), // null on both
+      payload({ pending_count: 3, holders: [] }), // red on both
+      payload({
+        holders: [
+          holder({ instance_id: 'pau-A', kind: 'paused' }),
+          holder({ instance_id: 'live-1', kind: 'live' }),
+        ],
+      }), // amber on both
+      payload({
+        holders: [holder({ instance_id: 'stl-X', kind: 'stalled' })],
+      }), // amber on both
+      payload({ holders: [holder({ kind: 'live' })] }), // info on both
+    ];
+    for (const sample of samples) {
+      const ind = deferBlockIndicator(sample);
+      const bn = deferPageBanner(sample);
+      // When the banner is hidden (no data + no anomaly), the indicator
+      // is also null — invariant holds.
+      if (bn === null) {
+        expect(ind).toBeNull();
+      } else {
+        expect(bn.severity).toBe(ind!.severity);
+      }
+    }
   });
 });

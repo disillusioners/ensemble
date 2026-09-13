@@ -176,6 +176,17 @@
     gap: 16px;
     flex-wrap: wrap;
 
+    // P1 — honest-copy note rendered in place of queues-view-only
+    // controls inside the All Work view (see the template @if
+    // branches). Muted, small, never interactive.
+    .filter-unavailable-note {
+      width: auto;
+      max-width: 320px;
+      font-size: 12px;
+      color: var(--text-secondary, #9e9e9e);
+      font-style: italic;
+    }
+
     .filter-field {
       width: 140px;
 
@@ -297,12 +308,366 @@
   background: var(--background-color, #1e1e1e);
 }
 
-// Job List
-.job-list {
+// Phase 2 — window-honesty banner. Renders ABOVE the filter bar
+// when the projection is at/above the wire cap, OR when the last
+// fetch failed. The plan calls for an ``aria-live="polite"`` region
+// (handled in the template); this SCSS is the visual surface.
+.window-banner {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  background: rgba(16, 167, 247, 0.08);
+  border-bottom: 1px solid rgba(16, 167, 247, 0.3);
+  color: var(--text-color, #e0e0e0);
+  font-size: 14px;
+
+  .banner-icon {
+    flex: 0 0 auto;
+    color: var(--accent-cyan, #10a7f7);
+  }
+
+  .banner-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .banner-title {
+    font-weight: 600;
+    color: var(--text-color, #e0e0e0);
+  }
+
+  .banner-body {
+    font-size: 13px;
+    color: var(--text-secondary, #9e9e9e);
+    line-height: 1.4;
+  }
+
+  .banner-reload-btn {
+    flex: 0 0 auto;
+    mat-icon {
+      margin-right: 6px;
+    }
+  }
+}
+
+// Degraded variant — the last refresh failed but the payload is
+// retained. The plan's retain-last-data discipline applies: the
+// user MUST see that the data is stale.
+.window-banner.window-banner-degraded {
+  background: rgba(244, 67, 54, 0.08);
+  border-bottom-color: rgba(244, 67, 54, 0.35);
+
+  .banner-icon {
+    color: #f44336;
+  }
+}
+
+// P4 — Defer-blocked page banner. Severity-graded (AMBER / INFO /
+// RED-anomaly) via the same model helper the indicator uses; the
+// SCSS only carries the visual surface (color family per
+// severity + degraded overlay). Sits above the filter bar so the
+// most actionable state is closest to the action surface.
+.defer-page-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border-bottom: 1px solid rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-color, #e0e0e0);
+  font-size: 14px;
+
+  .defer-page-banner-icon {
+    flex: 0 0 auto;
+    color: #f59e0b;
+  }
+
+  .defer-page-banner-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .defer-page-banner-title {
+    font-weight: 600;
+    color: #fbbf24;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .defer-page-banner-degraded-tag {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(244, 63, 94, 0.22);
+    color: #fda4af;
+  }
+
+  .defer-page-banner-body {
+    font-size: 13px;
+    color: #fef3c7;
+    line-height: 1.4;
+  }
+
+  .defer-page-banner-degraded-note {
+    font-size: 12px;
+    color: #fda4af;
+    font-weight: 500;
+    margin-top: 2px;
+  }
+
+  .defer-page-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+
+    button mat-icon {
+      margin-right: 6px;
+    }
+  }
+}
+
+// Severity variants — amber (paused / stalled), info (all live),
+// red (anomaly). Each variant is mutually exclusive (the model
+// helper returns ONE severity per payload).
+.defer-page-banner.defer-page-banner-amber {
+  background: rgba(245, 158, 11, 0.08);
+  border-bottom-color: rgba(245, 158, 11, 0.3);
+}
+
+.defer-page-banner.defer-page-banner-info {
+  background: rgba(56, 189, 248, 0.06);
+  border-bottom-color: rgba(56, 189, 248, 0.3);
+
+  .defer-page-banner-icon {
+    color: #38bdf8;
+  }
+
+  .defer-page-banner-title {
+    color: #7dd3fc;
+  }
+
+  .defer-page-banner-body {
+    color: #cbd5e1;
+  }
+}
+
+.defer-page-banner.defer-page-banner-red {
+  background: rgba(244, 63, 94, 0.08);
+  border-bottom-color: rgba(244, 63, 94, 0.35);
+
+  .defer-page-banner-icon {
+    color: #f43f5e;
+  }
+
+  .defer-page-banner-title {
+    color: #fda4af;
+  }
+
+  .defer-page-banner-body {
+    color: #fecdd3;
+  }
+}
+
+// Degraded overlay — the last fetch failed; the payload is
+// retained. The degraded-tag + the degraded-note copy both
+// surface; the severity color stays so the user can still read
+// the alert family.
+.defer-page-banner.defer-page-banner-degraded {
+  border-bottom-style: dashed;
+}
+
+// Phase 2 — render-guard truncation notice. Surfaces when the
+// all-work projection is at/above MAX_RENDER_ROWS = 1000. The
+// notice names the hidden count and offers a "switch to Queues
+// view" affordance (the bounded window surface).
+.render-guard-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  color: var(--text-color, #e0e0e0);
+  font-size: 14px;
   max-width: 900px;
+
+  .guard-icon {
+    flex: 0 0 auto;
+    color: #f59e0b;
+  }
+
+  .guard-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .guard-title {
+    font-weight: 600;
+    color: var(--text-color, #e0e0e0);
+  }
+
+  .guard-body {
+    font-size: 13px;
+    color: var(--text-secondary, #9e9e9e);
+    line-height: 1.4;
+  }
+
+  .guard-switch-btn {
+    flex: 0 0 auto;
+  }
+}
+
+// Job List — Phase 2 wraps the ``@for`` in a
+// ``cdk-virtual-scroll-viewport`` so the all-work path cannot
+// silently render thousands of DOM nodes. The viewport needs a
+// concrete height; the parent ``.jobs-content`` is a flex child
+// with ``overflow-y: auto`` so the viewport fills the available
+// space below the banner / filter bar / truncation notice.
+//
+// Each ``<app-job-card>`` rendered via ``*cdkVirtualFor`` gets a
+// 16px bottom margin so the virtualized list keeps the same
+// vertical rhythm the pre-Phase-2 ``@for`` produced (gap: 16px).
+// We target the host element (``app-job-card``) instead of the
+// internal card so the spacing is owned by the parent that knows
+// the layout intent.
+.job-list {
+  display: block;
+  width: 100%;
+  max-width: 900px;
+  // The viewport manages its own internal scroll; we just give it
+  // a concrete height so it can render. The flex chain above
+  // (``jobs-container`` → ``jobs-content``) provides the height.
+  height: 100%;
+  min-height: 320px;
+  contain: layout paint;
+
+  app-job-card {
+    display: block;
+    margin-bottom: 16px;
+  }
+
+  // Phase 3 — group-header rows live INSIDE the same virtual
+  // viewport (the arc's known fiddly bit is solved by structure:
+  // no nested scrollers, no item-size trick — headers ARE items in
+  // the SAME flattened list). The header carries a different
+  // visual weight from the cards beneath it: muted surface,
+  // left-aligned title, chevron-only toggle. ``itemSize`` is the
+  // same value the cards use so the fixed-size assumption holds.
+  //
+  // P3 review — the virtual-scroll ``itemSize`` is 144 (cards); the
+  // header row's natural content height is much smaller (~56px),
+  // which leaves a visible dead band inside the fixed-stride slot.
+  // Stretch to ``100%`` of the slot so the header fills the same
+  // vertical band the card would — keeps the scrollbar math and
+  // recycled-row layout in sync with ``cdkVirtualFor``'s spacer.
+  // The visual weight stays the same (the inner content is still
+  // ~56px tall, padding included); the slot just doesn't leave a
+  // gap underneath before the next row renders.
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color, #3c3c3c);
+    border-radius: 6px;
+    max-width: 900px;
+    height: 100%;
+    box-sizing: border-box;
+  }
+
+  .group-header-live {
+    // Subtle live tint so the auto-expanded groups visually carry
+    // the "this is actively working" affordance (the page is a
+    // deep-inspection surface — NOT a glanceable one; the tint is
+    // minimal, never animated, never pulsing).
+    border-left: 3px solid var(--accent-cyan, #10a7f7);
+  }
+
+  // P6 (task 2) — keyboard-focus affordance for the flattened items.
+  // The ``.focused`` class is driven by the single-writer ``(focus)``
+  // signal (``isFocusedItem``), NOT by ``:focus`` alone: with virtual
+  // recycling the focused row's element can be re-created, and the
+  // class must survive via the id signal until focus moves on.
+  .group-header.focused,
+  app-job-card.focused {
+    outline: 2px solid var(--accent-cyan, #10a7f7);
+    outline-offset: -2px;
+    border-radius: 6px;
+  }
+
+  .group-header-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: var(--text-secondary, #9e9e9e);
+    cursor: pointer;
+    padding: 0;
+
+    mat-icon {
+      font-size: 20px;
+      width: 20px;
+      height: 20px;
+    }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-color, #e0e0e0);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--accent-cyan, #10a7f7);
+      outline-offset: 1px;
+    }
+  }
+
+  .group-header-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .group-header-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-color, #e0e0e0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .group-header-meta {
+    font-size: 12px;
+    color: var(--text-secondary, #9e9e9e);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 
 // Loading Skeleton
@@ -495,6 +860,30 @@
   }
 }
 
+// P4 — preflight staleness surface on the System Cleanup button.
+// Mirrors the ``defer-page-banner-degraded-tag`` + tag-class shape so
+// operators learn ONE visual idiom = "the count you're looking at
+// may not match reality". The button border picks up a softer
+// warning tint while degraded (the harder ``#f43f5e`` red is owned
+// by ``has-bad-state`` — they can coexist when both flags fire, the
+// red wins).
+.cleanup-btn.cleanup-btn-degraded {
+  border-color: rgba(253, 164, 175, 0.7) !important;
+  color: #fda4af !important;
+}
+
+.cleanup-btn-degraded-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(244, 63, 94, 0.22);
+  color: #fda4af;
+  margin-left: 6px;
+}
+
 // Button Styles
 .refresh-btn,
 .create-btn {
@@ -599,5 +988,48 @@
 
   .job-detail-drawer-panel {
     width: 100%;
+  }
+}
+
+// P5 (jobs-page-improvement) — deep-link "job not found" + loading
+// states. The drawer renders these in place of the normal
+// <app-job-detail-drawer> when the URL ?job=<id> resolves to a
+// missing or still-fetching row. The empty-card surface is the
+// honest shape (no spinner); the skeleton mirrors the page-level
+// first-fetch skeleton for visual parity.
+.deep-link-missing,
+.deep-link-loading {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface-color, #1e1e1e);
+  color: var(--text-color, #e0e0e0);
+}
+
+.deep-link-missing-title,
+.deep-link-loading-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-color, #e0e0e0);
+}
+
+.deep-link-loading-title {
+  color: var(--text-secondary, #9e9e9e);
+}
+
+.deep-link-missing-body {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary, #9e9e9e);
+
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    background: var(--code-bg, #2d2d2d);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--text-color, #d4d4d4);
+    word-break: break-all;
   }
 }

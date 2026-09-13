@@ -292,3 +292,52 @@ describe('WorkService.getWork — All Work view contract', () => {
     expect(falseFilter.root_only).toBe(false);
   });
 });
+// ── P1 mirror-parity pin (jobs-page-improvement) ─────────────────────────
+//
+// Plan task 7 acceptance: the TestableWorkService mirror above
+// duplicates the real service's params construction and can DRIFT
+// silently. This pin anchors the mirror against the REAL source file
+// (readFileSync, F-5 class): if the production HttpParams construction
+// changes without the mirror following (or vice versa), this fails.
+
+describe('WorkService.getWork — real-construction mirror parity (P1)', () => {
+  const realSource = require('fs').readFileSync(
+    require('path').join(__dirname, 'work.service.ts'),
+    'utf-8',
+  );
+
+  it('the real getWork still serialises every param the mirror mirrors', () => {
+    for (const param of ['status', 'project_id', 'instance_id', 'kind', 'root_only']) {
+      expect({ param, ok: realSource.includes(`params.set('${param}', `) })
+        .toEqual({ param, ok: true });
+    }
+  });
+
+  it('the real getWork serialises root_only as explicit true/false literals (FastAPI bool contract)', () => {
+    expect(realSource).toMatch(
+      /params\.set\('root_only', filters\.root_only \? 'true' : 'false'\)/,
+    );
+  });
+
+  it('the real getWork still toggles loading and PROPAGATES errors (Phase 2 retain-last-data fix)', () => {
+    // Phase 2 (jobs-page-improvement) — the pre-Phase-2 swallow
+    // ``return of([] as Work[])`` collapsed a failed poll into a
+    // healthy-looking empty list, which the store's ``.next`` arm
+    // treated as honest empty data and wiped the previous payload.
+    // The contract is now: ERRORS PROPAGATE via ``throwError``. The
+    // store's ``.error`` arm flips ``worksDegraded`` and retains the
+    // last good list (the same retain-last-data discipline the
+    // jobs leg already had). This pin is the source-text anchor
+    // for the Phase 2 fix; mirror-parity for the observable shape
+    // lives in the TestableWorkService above (the mirror keeps the
+    // pre-Phase-2 swallow so legacy direct subscribers that DO
+    // expect ``[]`` on failure keep working — the mirror's failure
+    // path is a test convenience only, the real service propagates).
+    expect(realSource).toMatch(/this\.loading\.set\(true\)/);
+    expect(realSource).toMatch(/catchError\(\(err\) => \{/);
+    expect(realSource).toMatch(/return throwError\(\(\) => err\)/);
+    // Belt-and-braces: the swallow-to-empty is GONE from the real
+    // file.
+    expect(realSource).not.toMatch(/return of\(\[\] as Work\[\]\)/);
+  });
+});

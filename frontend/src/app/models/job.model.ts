@@ -360,6 +360,19 @@ export function getStatusColor(status: JobStatus): string {
   }
 }
 
+/**
+ * P3 review (jobs-page-improvement) — the receipt glyph
+ * (``receipt_long``, Material Icons codepoint ``ef6e``) is the
+ * settled terminal's icon, shared by THREE surfaces: the job-card
+ * status glyph, the queue-panel status glyph, and the receipt-chip
+ * glyph on the card. Promoted to a single NAMED export here so
+ * every consumer imports the same constant (the pre-fix literals
+ * were three independent copies — drift risk). Teal colour
+ * ``#14B8A6`` above is its colour-side sibling; both are the
+ * transport-vs-work vocabulary split surfaces.
+ */
+export const RECEIPT_LONG_GLYPH = 'receipt_long';
+
 export function getPriorityColor(priority: number): string {
   if (priority >= 8) return '#EF4444'; // red-500 - high priority
   if (priority >= 5) return '#F59E0B'; // amber-500 - medium-high

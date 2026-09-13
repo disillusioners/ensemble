@@ -1,4 +1,4 @@
-import { Component, input, output, computed, signal } from '@angular/core';
+import { Component, input, output, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -6,7 +6,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip } from '../../models/job.model';
+import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted, isReceiptRow, missionLivenessChip, RECEIPT_LONG_GLYPH } from '../../models/job.model';
 import {
   getKindColor,
   getKindIcon,
@@ -43,8 +43,23 @@ export class JobCardComponent {
   restore = output<void>();
   viewDetails = output<void>();
 
-  // Internal state
-  expanded = signal(false);
+  /**
+   * Phase 2 — external expansion state. Phase 2's `cdk-virtual-scroll`
+   * (jobs-page-improvement) recycles the card DOM when it scrolls
+   * off-screen — a DOM-local ``signal(false)`` would reset on every
+   * recycle, which is the bug the plan explicitly calls out. The
+   * parent (JobsComponent) holds a ``Set<job_id>`` keyed by job
+   * identity and binds the membership via this input. The card is
+   * read-only here; the parent updates the set on ``expandToggle``.
+   *
+   * Default ``false`` — without a binding the card collapses. Every
+   * consumer (today: only the Jobs page) MUST pass ``[expanded]``
+   * or no expansion state will survive a virtual recycle.
+   */
+  expanded = input<boolean>(false);
+
+  /** Phase 2 — emit on user toggle so the parent can flip the set. */
+  expandToggle = output<void>();
 
   // Computed values
   priorityColor = computed(() => getPriorityColor(this.job().priority));
@@ -73,6 +88,18 @@ export class JobCardComponent {
       case 'processing': return 'sync';
       case 'paused': return 'pause_circle';
       case 'completed': return 'check_circle';
+      // P3 (jobs-page-improvement) — vocabulary sweep: ``settled``
+      // is a TRANSPORT-receipt terminal (mirror rows) and gets the
+      // receipt-style glyph, NOT a generic help icon. Mirrors the
+      // panel's ``getStatusIcon`` (:611-630) so a settled card
+      // reads as transport-handled (receipt) rather than work-done
+      // (completed's check_circle). Keeps the transport/work
+      // vocabulary split visible on every surface.
+      //
+      // P3 review — the literal was promoted to ``RECEIPT_LONG_GLYPH``
+      // in ``models/job.model.ts`` so the card / panel / receipt-
+      // chip stay in sync (three literals would drift).
+      case 'settled': return RECEIPT_LONG_GLYPH;
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
       case 'dead_letter': return 'report_problem';
@@ -82,8 +109,26 @@ export class JobCardComponent {
 
   statusLabel = computed(() => {
     const status = this.job().status;
-    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter')
-    return status.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter').
+    const title = status
+      .replace(/_/g, ' ')
+      .split(' ')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+    // P3 (jobs-page-improvement) — vocabulary sweep: UPPERCASE
+    // status text on LIVE rows (pending/processing/paused). The
+    // non-live terminals (completed/settled/failed/cancelled/
+    // dead_letter) stay Title Case — uppercase is reserved for
+    // "actively in flight" so the live state is glanceable on the
+    // card without scanning the status chip colour.
+    if (
+      status === 'pending' ||
+      status === 'processing' ||
+      status === 'paused'
+    ) {
+      return title.toUpperCase();
+    }
+    return title;
   });
 
   // Used to apply spinning animation to processing status icon
@@ -153,6 +198,14 @@ export class JobCardComponent {
    * extra.
    */
   showReceiptChip = computed(() => isReceiptRow(this.job()));
+
+  /**
+   * P3 review — promoted from the literal ``receipt_long`` (the
+   * receipt-chip glyph) so the card / panel / receipt-chip stay
+   * in sync with the model export. The template binds to this
+   * property to keep a single source of truth.
+   */
+  readonly receiptLongGlyph = RECEIPT_LONG_GLYPH;
 
   /**
    * Mission-liveness chip for mirror rows, or ``null`` when the row
@@ -237,8 +290,15 @@ export class JobCardComponent {
     this.viewDetails.emit();
   }
 
-  protected toggleExpanded(): void {
-    this.expanded.update(v => !v);
+  /**
+   * Phase 2 — the expand-toggle button emits ``expandToggle`` for the
+   * parent to handle. The parent (JobsComponent) flips the
+   * ``job_id`` membership in its ``expandedJobIds`` Set, then the
+   * card re-renders with the new ``expanded`` input. There is no
+   * DOM-local state here (see the input comment above).
+   */
+  protected onExpandToggle(): void {
+    this.expandToggle.emit();
   }
 
   protected getRelativeTime(date: Date): string {

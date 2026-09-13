@@ -4,8 +4,18 @@ import { Job, JobStatus, JobSource, isTerminalStatus } from '../../models/job.mo
 import type { Work } from '../../models/work.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
-import { ConfirmDialogComponent } from '../../components/confirm-dialog/confirm-dialog.component';
+import { ConfirmDialogComponent, ConfirmDialogData } from '../../components/confirm-dialog/confirm-dialog.component';
 import { SystemCleanupConfirmDialogComponent } from '../../components/system-cleanup-confirm-dialog/system-cleanup-confirm-dialog.component';
+import { DeferBlockHolder, DeferBlockedStatus, deferBlockAction } from '../../models/defer-blocked.model';
+import {
+  JobsEmptyStateKind,
+  classifyJobsEmptyState,
+} from './jobs-empty-state.model';
+import {
+  JobsFilterState,
+  hasActiveJobsFilter,
+  normalizeJobsFilterState,
+} from '../../models/jobs-filter-state.model';
 
 // Storage key matching the component
 const STORAGE_KEY = 'job-page-selected-project';
@@ -183,6 +193,47 @@ class MockJobsComponent {
 
   // System cleanup signal
   readonly cleanupInProgress = signal(false);
+
+  // ── P2 mirror (jobs-page-improvement) — empty-state classifier ────────
+  // Mirror of the production ``JobsComponent.emptyStateKind`` and
+  // ``JobsComponent.showEmptyState`` computeds. The mirror MUST
+  // faithfully copy the FIXED computed (the F-5 source-pin in
+  // jobs-page.bindings.pins.spec.ts proves the production text
+  // carries the hasRows gate; this mirror makes the BUG testable
+  // as a behavior pin — if the production gate is reverted, the
+  // mirror breaks on the steady-state assertion below).
+  readonly viewMode = signal<'queues' | 'all-work'>('queues');
+  readonly fetchInFlight = signal<boolean>(false);
+  readonly windowDegraded = signal<boolean>(false);
+
+  readonly emptyStateKind = computed<JobsEmptyStateKind>(() =>
+    classifyJobsEmptyState({
+      loading: this.fetchInFlight(),
+      degraded: this.windowDegraded(),
+      hasRows: this.jobs().length > 0,
+      hasActiveFilters: hasActiveJobsFilter(
+        normalizeJobsFilterState(this.filters()) as JobsFilterState,
+      ),
+      viewMode: this.viewMode(),
+    }),
+  );
+
+  readonly showEmptyState = computed<boolean>(() => {
+    // P2 fix mirror — hasRows short-circuit. DO NOT remove: this
+    // mirror reproduces the production gate so the steady-state
+    // behavior pin below proves the fix survives in code, not
+    // just in source text. See F-5 source-pin in
+    // jobs-page.bindings.pins.spec.ts.
+    const kind = this.emptyStateKind();
+    if (this.jobs().length > 0) {
+      return kind === 'errored';
+    }
+    return (
+      kind === 'dataEmpty' ||
+      kind === 'filterEmpty' ||
+      kind === 'errored'
+    );
+  });
   
   // SSE connection status
   readonly isConnected = mockJobSseService.isConnected;
@@ -426,69 +477,12 @@ class MockJobsComponent {
     return agent ? `${agent.icon} ${agent.name}` : agentId;
   }
 
-  /**
-   * Mirror of the real component's ``updateJobFromSse`` — used by the
-   * SSE propagation specs. Keeps the SAME present-as-null contract
-   * for ``job_type`` and ``mission_liveness`` as the real method:
-   * key absent → keep previous value, key present + null → clear.
-   * See ``jobs.component.ts:updateJobFromSse`` for the canonical
-   * implementation.
-   */
-  updateJobFromSse(status: import('../../models/job.model').JobEventPayload): void {
-    const nextJobType: Job['job_type'] =
-      'job_type' in status
-        ? (status.job_type ?? null) as Job['job_type']
-        : undefined;
-    const nextMissionLiveness: Job['mission_liveness'] =
-      'mission_liveness' in status
-        ? (status.mission_liveness ?? null)
-        : undefined;
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // The ``updateJobFromSse`` mirror method was deleted with the
+  // describes that drove it: the production method moved VERBATIM into
+  // ``JobsPageStore.updateJobFromSse`` (jobs-page.store.ts), and the
+  // pins now drive the REAL store class in jobs-page.store.spec.ts.
 
-    this.jobs.update(jobs =>
-      jobs.map(job =>
-        job.job_id === status.job_id
-          ? {
-              ...job,
-              status: status.status || job.status,
-              queue_id: status.queue_id ?? job.queue_id,
-              instance_id: status.instance_id || job.instance_id,
-              result_summary: status.result_summary || job.result_summary,
-              error_message: status.error_message || job.error_message,
-              // M3 (mission-class, 2026-09-03) — ``completed_at``
-              // is stamped for any wire-terminal status, including
-              // the mirror-receipt terminal ``settled``. Mirrors the
-              // production fix at jobs.component.ts (the mock here
-              // runs the same terminal-aware check; if the production
-              // regresses this fixture will drift).
-              completed_at: status.status && isTerminalStatus(status.status)
-                ? new Date().toISOString()
-                : job.completed_at,
-              started_at: status.status === 'processing' && !job.started_at
-                ? new Date().toISOString()
-                : job.started_at,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : job
-      )
-    );
-
-    this.works.update(works =>
-      works.map(work =>
-        work.work_id === status.job_id
-          ? {
-              ...work,
-              status: status.status || work.status,
-              instance_id: status.instance_id ?? work.instance_id,
-              result_summary: status.result_summary ?? work.result_summary,
-              error: status.error_message ?? work.error,
-              ...(nextJobType !== undefined ? { job_type: nextJobType } : {}),
-              ...(nextMissionLiveness !== undefined ? { mission_liveness: nextMissionLiveness } : {}),
-            }
-          : work
-      )
-    );
-  }
 }
 
 describe('JobsComponent Logic', () => {
@@ -528,64 +522,18 @@ describe('JobsComponent Logic', () => {
     mockDialog.reset();
   });
 
-  describe('filteredJobs computed', () => {
-    it('should return all jobs when no filters', () => {
-      component.filters.set({});
-      expect(component.filteredJobs()).toHaveLength(mockJobs.length);
-    });
-
-    it('should filter by status', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed' }),
-        createMockJob({ job_id: '3', status: 'pending' }),
-      ]);
-      
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.status === 'pending')).toBe(true);
-    });
-
-    it('should filter by source', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', source: 'api' }),
-        createMockJob({ job_id: '2', source: 'telegram' }),
-      ]);
-      
-      component.onSourceFilterChange('api');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.source === 'api')).toBe(true);
-    });
-
-    it('should filter by agent_id', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', agent_id: 'developer' }),
-        createMockJob({ job_id: '2', agent_id: 'tester' }),
-      ]);
-      
-      component.onAgentFilterChange('developer');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.agent_id === 'developer')).toBe(true);
-    });
-
-    it('should filter by multiple criteria', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', source: 'api', agent_id: 'developer' }),
-        createMockJob({ job_id: '2', status: 'completed', source: 'api', agent_id: 'developer' }),
-        createMockJob({ job_id: '3', status: 'pending', source: 'telegram', agent_id: 'developer' }),
-      ]);
-      
-      component.onStatusFilterChange('pending');
-      component.onSourceFilterChange('api');
-
-      const filtered = component.filteredJobs();
-      expect(filtered.length).toBe(1);
-      expect(filtered[0].job_id).toBe('1');
-    });
-  });
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // The pre-P1 ``filteredJobs computed`` and ``filteredJobs with
+  // deleted jobs`` describes were DELETED, not migrated: they pinned
+  // the component-local dual pipeline (``filteredJobs`` over the jobs
+  // dataset + ``worksAsJobs`` bypassing filters over the work
+  // dataset) that P1 removed. The unified pipeline's coverage now
+  // lives in ``jobs-page.store.spec.ts`` (real store, one pipeline,
+  // both view modes) and ``jobs-filter-state.model.spec.ts`` (pure
+  // ``applyJobsFilter``). Note: the old mirror ALSO filtered
+  // ``deleted_at`` client-side — production never did (soft-delete is
+  // server-side via ``include_deleted``), so those pins were
+  // mirror-drift on top of being dual-path pins.
 
   describe('projectsWithPendingJobs computed', () => {
     it('should return only projects with pending jobs', () => {
@@ -960,7 +908,16 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('showDeleted signal', () => {
+  // P3 (jobs-page-improvement) carry-over — the mock-fixture
+  // ``showDeleted`` is a HAND-ROLLED ``signal(false)`` (NOT the
+  // production component's ``computed(() => store.filterState()
+  // .include_deleted)``). The describe is renamed so the
+  // mock-fixture-vs-production distinction is obvious in the spec
+  // tree: this pin drives the MOCK's local signal, not the
+  // production derived computed. The production read path lives on
+  // the bindings.pins.spec.ts filter-binding table (P1 template
+  // enumeration pin).
+  describe('MockJobsComponent — showDeleted fixture signal', () => {
     it('should default to false', () => {
       const newComponent = new MockJobsComponent();
       expect(newComponent.showDeleted()).toBe(false);
@@ -1030,83 +987,12 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('filteredJobs with deleted jobs', () => {
-    it('should hide deleted jobs when showDeleted is false', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '3', status: 'failed' }),
-      ]);
-      component.showDeleted.set(false);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-      expect(filtered.some(j => j.job_id === '1')).toBe(true);
-      expect(filtered.some(j => j.job_id === '2')).toBe(false);
-      expect(filtered.some(j => j.job_id === '3')).toBe(true);
-    });
-
-    it('should show deleted jobs when showDeleted is true', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '3', status: 'failed' }),
-      ]);
-      component.showDeleted.set(true);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(3);
-      expect(filtered.some(j => j.job_id === '1')).toBe(true);
-      expect(filtered.some(j => j.job_id === '2')).toBe(true);
-      expect(filtered.some(j => j.job_id === '3')).toBe(true);
-    });
-
-    it('should not filter jobs without deleted_at when showDeleted is false', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending' }),
-        createMockJob({ job_id: '2', status: 'completed' }), // no deleted_at
-      ]);
-      component.showDeleted.set(false);
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-    });
-
-    it('should work with other filters combined', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '2', status: 'pending' }),
-        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '4', status: 'completed' }),
-      ]);
-      component.showDeleted.set(true);
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(2);
-      expect(filtered.every(j => j.status === 'pending')).toBe(true);
-    });
-
-    it('should filter out deleted jobs and apply status filter', () => {
-      component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '2', status: 'pending' }),
-        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
-        createMockJob({ job_id: '4', status: 'completed' }),
-      ]);
-      component.showDeleted.set(false); // Hide deleted
-      component.onStatusFilterChange('pending');
-
-      const filtered = component.filteredJobs();
-
-      expect(filtered.length).toBe(1);
-      expect(filtered[0].job_id).toBe('2');
-    });
-  });
+  // ── P1 DELETION (jobs-page-improvement) ─────────────────────────────
+  // ``filteredJobs with deleted jobs`` deleted with the dual pipeline
+  // it pinned (see the deletion note above the
+  // ``projectsWithPendingJobs`` describe). Client-side ``deleted_at``
+  // filtering was NEVER production behavior — soft-delete filtering
+  // is server-side (``include_deleted`` on the wire).
 
   describe('onClearFilters resets showDeleted', () => {
     it('should reset showDeleted when clearing filters', () => {
@@ -1514,135 +1400,14 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  describe('All Work view loadWorks — root_only contract (P-A)', () => {
-    /**
-     * Mirrors the body of ``JobsComponent.loadWorks`` (the
-     * Phase-4 unified-work fetch) just enough to assert that the
-     * component hands ``root_only: false`` to ``WorkService.getWork``.
-     *
-     * The real component is heavy with Angular lifecycle hooks,
-     * dialogs, and snackbar wiring; re-declaring just the
-     * work-fetch path keeps the test focused and avoids the
-     * TestBed setup that would otherwise be needed to exercise the
-     * component end-to-end. The URL serialisation guarantee is
-     * separately covered by ``work.service.spec.ts``.
-     */
-    class AllWorkLoadComponent {
-      // Captured filters handed to WorkService.getWork.
-      public lastFilters: any = undefined;
-      // Subscription observers, in case a future test wants to
-      // assert on the snackbar side effect.
-      public errored = false;
-
-      constructor(private readonly filtersValue: { project_id?: string; status?: any }) {}
-
-      loadWorks(workService: { getWork: jest.Mock }): void {
-        const projectId = this.filtersValue.project_id;
-        const statusFilter = this.filtersValue.status;
-        const filters = {
-          project_id: projectId || undefined,
-          status:
-            statusFilter && statusFilter.length > 0
-              ? statusFilter.join(',')
-              : undefined,
-          // P-A — the All Work view intentionally bypasses the
-          // root-only filter so child-instance rows stay visible.
-          root_only: false,
-        };
-        workService.getWork(filters).subscribe({
-          next: (works: unknown[]) => {
-            this.lastFilters = filters;
-          },
-          error: () => {
-            this.errored = true;
-          },
-        });
-      }
-    }
-
-    it('should pass root_only: false to WorkService.getWork (no filters)', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({});
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledTimes(1);
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: undefined,
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should pass root_only: false alongside a project_id filter', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({ project_id: 'project-123' });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: 'project-123',
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should pass root_only: false alongside a status filter', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({
-        project_id: 'project-123',
-        status: ['pending', 'processing'],
-      });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: 'project-123',
-        status: 'pending,processing',
-        root_only: false,
-      });
-    });
-
-    it('should drop status when the filter array is empty', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({ status: [] });
-
-      component.loadWorks(workService);
-
-      expect(workService.getWork).toHaveBeenCalledWith({
-        project_id: undefined,
-        status: undefined,
-        root_only: false,
-      });
-    });
-
-    it('should always include root_only: false even if other filters are undefined', () => {
-      const workService = { getWork: jest.fn().mockReturnValue({
-        subscribe: (obs: any) => obs.next([]),
-      }) };
-      const component = new AllWorkLoadComponent({});
-
-      component.loadWorks(workService);
-
-      // ``mock.calls[0]`` is the array of arguments to the first
-      // ``getWork`` call — ``[filters]`` since there's one arg.
-      const filtersArg = workService.getWork.mock.calls[0][0];
-      // The contract: ``root_only`` is always present and is always
-      // exactly ``false`` for the All Work view. If this assertion
-      // fails, the user is back to seeing the backend-default
-      // root-scoped list — the very thing this fix was meant to
-      // prevent.
-      expect(filtersArg.root_only).toBe(false);
-    });
-  });
+  // ── P1 MIGRATION (jobs-page-improvement) ────────────────────────────
+  // ``All Work view loadWorks — root_only contract (P-A)`` migrated to
+  // ``jobs-page.store.spec.ts``: the fetch moved from the deleted
+  // ``JobsComponent.loadWorks`` into ``JobsPageStore.fetchWorks`` (via
+  // the pure ``toWorkFilters``), so the ``root_only: false`` contract
+  // is now pinned against the REAL store construction (behavioral pin
+  // + production-source-text pin) instead of a local ``loadWorks``
+  // clone.
 
   /**
    * Phase 4 — bad-state visibility + enhanced cleanup tests.
@@ -1959,127 +1724,1163 @@ describe('JobsComponent Logic', () => {
     });
   });
 
-  // ── Fix C (§8.2) — SSE patch propagation ─────────────────────────────
+  // ── P4 HOLDERS ACTION GATE (jobs-page-improvement) — behavioral specs ─
   //
-  // Round-1 only patched the works[] path, so a terminal mirror in
-  // the Queues view stayed pinned to its stale live chip and the
-  // header badge kept counting it as a live mission. These specs
-  // drive ``updateJobFromSse`` directly so any future regression
-  // that drops the patch or collapses null-vs-absent fails loudly.
+  // Review finding: the existing two-stage-confirm pins in
+  // ``jobs-page.bindings.pins.spec.ts`` (``afterClosed().subscribe`` +
+  // ``this.dialog.open<…>(ConfirmDialogComponent, …)``) were TAUTOLOGICAL —
+  // they matched shapes that pre-existed on the cleanup dialog handler
+  // (which they were copied from), so an unguarded action would still
+  // pass the regex. The IMPLEMENTATION is correct (production handler
+  // gates the service call on ``confirmed``); the safety net was not.
   //
-  // M3 (mission-class, 2026-09-03) — prose uses ``terminal``
-  // (mission-side vocabulary) instead of ``settled`` (transport-
-  // receipt vocabulary; belongs only to mirror rows now). The
-  // data shape (``mission_liveness``) is unchanged.
+  // The fix: a CONTROLLABLE dialog mock (``mockDialog.nextResult``)
+  // drives both ``false`` and ``true`` paths and asserts the service
+  // call count is exactly 0 / exactly 1. The mirror component below
+  // copies the production ``onHolderForceComplete`` and
+  // ``onHolderResendForeground`` bodies faithfully — if the mirror
+  // drifts, the behavior pins become meaningless (mirror-parity duty,
+  // same convention as ``BadStateAwareJobsComponent`` above).
+  //
+  // The structural F-5 pin lives in
+  // ``jobs-page.bindings.pins.spec.ts`` (the regex the original task
+  // accepted): it pins the service-call text to live INSIDE the
+  // ``afterClosed().subscribe`` callback so a hoist above ``ref.open()``
+  // would break the pin.
+  describe('Holder action two-stage confirm — behavioral gate (P4 review fix)', () => {
+    /**
+     * Mirror of the production ``JobsComponent`` holders actions.
+     * Faithfully copies both ``onHolderForceComplete`` and
+     * ``onHolderResendForeground`` bodies (incl. the
+     * ``modalOpen`` / ``deferActionInFlight`` flag toggles + the
+     * dialog config) so the behavior pins below prove the REAL
+     * gate. If the production body changes, this mirror MUST be
+     * updated in lockstep — drift = meaningless test (mirror-parity
+     * duty, F-2 in the F-5 pin).
+     */
+    class HolderActionJobsComponent {
+      readonly deferActionInFlight = signal<boolean>(false);
+      readonly deferPanelOpen = signal<boolean>(false);
+      readonly modalOpen = signal<boolean>(false);
 
-  describe('updateJobFromSse — mission_liveness propagation (jobs[] path)', () => {
-    function seedMirrorRow(liveness: import('../../models/job.model').MissionLiveness) {
-      component.jobs.set([
-        createMockJob({
-          job_id: 'mirror-1',
-          status: 'completed',
-          instance_id: 'leader-x',
-          job_type: 'message',
-          mission_liveness: liveness,
-        }),
-      ]);
-      component.works.set([
-        {
-          work_id: 'mirror-1',
-          kind: 'job',
-          status: 'completed',
-          instance_id: 'leader-x',
-          project_id: null,
-          agent_id: 'developer',
-          result_summary: null,
-          error: null,
-          created_at: new Date().toISOString(),
-          job_type: 'message',
-          mission_liveness: liveness,
+      constructor(
+        private readonly jobService: {
+          forceCompleteDeferHolder: jest.Mock;
+          resendDeferredForeground: jest.Mock;
         },
-      ]);
+        private readonly store: {
+          fetchDeferBlocked: jest.Mock;
+        },
+        private readonly snackBar: {
+          openCalls: Array<{ message: string; action: string; config?: any }>;
+          open: (message: string, action: string, config?: any) => unknown;
+        },
+      ) {}
+
+      onHolderForceComplete(holder: DeferBlockHolder): void {
+        if (this.deferActionInFlight()) {
+          return;
+        }
+        this.modalOpen.set(true);
+        const ref = mockDialog.open<
+          ConfirmDialogComponent,
+          ConfirmDialogData,
+          boolean | undefined
+        >(ConfirmDialogComponent, {
+          width: '420px',
+          panelClass: 'dark-modal-panel',
+          data: {
+            title: 'Force-complete defer holder?',
+            message:
+              `This will terminate the ${holder.kind} holder instance ` +
+              `${holder.instance_id} and reconcile its deferred message mirrors. ` +
+              `The action is irreversible.`,
+            confirmLabel: 'Force complete',
+            cancelLabel: 'Cancel',
+            destructive: true,
+          },
+        });
+        ref.afterClosed().subscribe((confirmed) => {
+          this.modalOpen.set(false);
+          if (!confirmed) {
+            return;
+          }
+          this.deferActionInFlight.set(true);
+          this.jobService.forceCompleteDeferHolder(holder.instance_id).subscribe({
+            next: (result: { terminated: boolean; message: string }) => {
+              this.deferActionInFlight.set(false);
+              this.deferPanelOpen.set(false);
+              const verb = result.terminated ? 'Force-completed' : 'Force-complete refused';
+              this.snackBar.open(
+                `${verb} holder ${holder.instance_id}: ${result.message}`,
+                'Close',
+                { duration: 3500, panelClass: result.terminated ? 'success-snackbar' : 'error-snackbar' },
+              );
+              this.store.fetchDeferBlocked();
+            },
+            error: (err: { message?: string }) => {
+              this.deferActionInFlight.set(false);
+              this.snackBar.open(
+                err?.message || 'Failed to force-complete holder',
+                'Dismiss',
+                { duration: 5000, panelClass: 'error-snackbar' },
+              );
+            },
+          });
+        });
+      }
+
+      onHolderResendForeground(holder: DeferBlockHolder): void {
+        if (this.deferActionInFlight()) {
+          return;
+        }
+        this.modalOpen.set(true);
+        const ref = mockDialog.open<
+          ConfirmDialogComponent,
+          ConfirmDialogData,
+          boolean | undefined
+        >(ConfirmDialogComponent, {
+          width: '420px',
+          panelClass: 'dark-modal-panel',
+          data: {
+            title: 'Resend deferred messages as foreground?',
+            message:
+              `This will cancel the ${holder.kind} holder ${holder.instance_id}'s ` +
+              `queued defer-lane jobs and re-send their message content as NEW ` +
+              `foreground message jobs. The action is irreversible.`,
+            confirmLabel: 'Resend foreground',
+            cancelLabel: 'Cancel',
+            destructive: true,
+          },
+        });
+        ref.afterClosed().subscribe((confirmed) => {
+          this.modalOpen.set(false);
+          if (!confirmed) {
+            return;
+          }
+          this.deferActionInFlight.set(true);
+          this.jobService.resendDeferredForeground(holder.instance_id).subscribe({
+            next: (result: { cancelled_defer_jobs: number; skipped_empty_content: number }) => {
+              this.deferActionInFlight.set(false);
+              this.deferPanelOpen.set(false);
+              this.snackBar.open(
+                `Resent foreground for ${holder.instance_id}: ${result.cancelled_defer_jobs} cancelled, ` +
+                  `${result.skipped_empty_content} skipped`,
+                'Close',
+                { duration: 3500, panelClass: 'success-snackbar' },
+              );
+              this.store.fetchDeferBlocked();
+            },
+            error: (err: { message?: string }) => {
+              this.deferActionInFlight.set(false);
+              this.snackBar.open(
+                err?.message || 'Failed to resend deferred messages',
+                'Dismiss',
+                { duration: 5000, panelClass: 'error-snackbar' },
+              );
+            },
+          });
+        });
+      }
     }
 
-    it('jobs[] path: terminal mission_liveness in the payload overwrites the live row', () => {
-      seedMirrorRow('processing');
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        mission_liveness: 'completed',
-      });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('completed');
-      // works[] path also patches — same payload, same contract.
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('completed');
+    /**
+     * Build a noop Observable that captures ``next`` / ``error``
+     * callbacks so the test can drive the post-confirm subscribe
+     * synchronously. Same shape as ``buildCleanupMock`` above.
+     */
+    const buildActionMock = () => {
+      let nextFn: ((r: any) => void) | null = null;
+      let errorFn: ((e: any) => void) | null = null;
+      const obs: any = {
+        pipe: () => obs,
+        subscribe: (observer: any) => {
+          if (typeof observer === 'function') {
+            nextFn = observer;
+          } else {
+            nextFn = observer.next;
+            errorFn = observer.error;
+          }
+          return { unsubscribe: () => {} };
+        },
+      };
+      return {
+        obs,
+        invokeNext: (r: any) => nextFn && nextFn(r),
+        invokeError: (e: any) => errorFn && errorFn(e),
+      };
+    };
+
+    let component: HolderActionJobsComponent;
+    let jobService: {
+      forceCompleteDeferHolder: jest.Mock;
+      resendDeferredForeground: jest.Mock;
+    };
+    let store: { fetchDeferBlocked: jest.Mock };
+    const snackBar = {
+      openCalls: [] as Array<{ message: string; action: string; config?: any }>,
+      open(message: string, action: string, config?: any) {
+        this.openCalls.push({ message, action, config });
+        return { afterDismissed: () => new Observable<void>(() => {}) };
+      },
+    };
+
+    const holder: DeferBlockHolder = {
+      instance_id: 'inst-1',
+      agent: 'agent-1',
+      status: 'paused',
+      since: '2026-09-10T12:00:00Z',
+      kind: 'paused',
+    };
+
+    beforeEach(() => {
+      jobService = {
+        forceCompleteDeferHolder: jest.fn(),
+        resendDeferredForeground: jest.fn(),
+      };
+      store = { fetchDeferBlocked: jest.fn() };
+      component = new HolderActionJobsComponent(jobService, store, snackBar);
+      mockDialog.reset();
+      snackBar.openCalls.length = 0;
+      // Each action returns a noop observable by default — tests that
+      // need synchronous next/error control overwrite per-call.
+      const noop = buildActionMock().obs;
+      jobService.forceCompleteDeferHolder.mockReturnValue(noop);
+      jobService.resendDeferredForeground.mockReturnValue(noop);
     });
 
-    it('present-as-null: explicit null CLEARS, absent key KEEPS previous value', () => {
-      seedMirrorRow('processing');
+    // ── onHolderForceComplete ──────────────────────────────────────────
 
-      // Explicit null → cleared on BOTH paths.
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        mission_liveness: null,
-      });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBeNull();
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBeNull();
+    describe('onHolderForceComplete', () => {
+      it('dialog dismissed (nextResult=false) ⇒ service NOT called, no snackbar', () => {
+        mockDialog.nextResult = false;
 
-      // Reset, then payload without the key → previous value survives.
-      seedMirrorRow('processing');
-      component.updateJobFromSse({
-        job_id: 'mirror-1',
-        status: 'completed',
-        // mission_liveness key ABSENT.
+        component.onHolderForceComplete(holder);
+
+        // CORE BEHAVIORAL PIN — the gate is real. Pre-fix this was
+        // a tautology (regex match on the dialog shape, not on the
+        // dispatch count).
+        expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
+        expect(mockDialog.openCalls).toHaveLength(1);
+        // The dialog IS the correct component with the destructive
+        // config (this part was already covered by the source-pin).
+        expect(mockDialog.openCalls[0].component).toBe(ConfirmDialogComponent);
+        expect((mockDialog.openCalls[0].data as ConfirmDialogData).destructive).toBe(true);
+        expect(snackBar.openCalls).toHaveLength(0);
       });
-      expect(component.jobs().find(j => j.job_id === 'mirror-1')!.mission_liveness).toBe('processing');
-      expect(component.works().find(w => w.work_id === 'mirror-1')!.mission_liveness).toBe('processing');
+
+      it('dialog dismissed (nextResult=undefined — backdrop) ⇒ service NOT called', () => {
+        // Backdrop / Esc dismiss emits ``undefined``, which the
+        // handler treats as NOT confirmed (same ``!confirmed``
+        // branch). Pin the equality so a future refactor that
+        // converts ``undefined`` to ``true`` fails this gate.
+        mockDialog.nextResult = undefined;
+
+        component.onHolderForceComplete(holder);
+
+        expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
+        expect(snackBar.openCalls).toHaveLength(0);
+      });
+
+      it('dialog confirmed (nextResult=true) ⇒ service called EXACTLY once with the holder instance_id', () => {
+        mockDialog.nextResult = true;
+        const { obs } = buildActionMock();
+        jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+        component.onHolderForceComplete(holder);
+
+        // CORE BEHAVIORAL PIN — the dispatch fires, and ONLY once.
+        // The ``toHaveBeenCalledTimes(1)`` catches any double-fire
+        // from a duplicate handler registration or a hoist above
+        // the dialog.
+        expect(jobService.forceCompleteDeferHolder).toHaveBeenCalledTimes(1);
+        expect(jobService.forceCompleteDeferHolder).toHaveBeenCalledWith('inst-1');
+      });
+
+      it('dialog confirmed → success callback refreshes the defer leg (post-action refresh)', () => {
+        // Pins the success-path fetchDeferBlocked call (P4 task 3
+        // acceptance: "success refreshes holders leg"). Confirmed
+        // path ⇒ next fires ⇒ store.fetchDeferBlocked runs.
+        mockDialog.nextResult = true;
+        const { obs, invokeNext } = buildActionMock();
+        jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+        component.onHolderForceComplete(holder);
+        invokeNext({ terminated: true, message: 'OK' });
+
+        expect(store.fetchDeferBlocked).toHaveBeenCalledTimes(1);
+        expect(snackBar.openCalls).toHaveLength(1);
+        expect(snackBar.openCalls[0].message).toContain('Force-completed');
+      });
+    });
+
+    // ── onHolderResendForeground ──────────────────────────────────────
+
+    describe('onHolderResendForeground', () => {
+      it('dialog dismissed (nextResult=false) ⇒ service NOT called, no snackbar', () => {
+        mockDialog.nextResult = false;
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).not.toHaveBeenCalled();
+        expect(mockDialog.openCalls).toHaveLength(1);
+        expect(mockDialog.openCalls[0].component).toBe(ConfirmDialogComponent);
+        expect((mockDialog.openCalls[0].data as ConfirmDialogData).destructive).toBe(true);
+        expect(snackBar.openCalls).toHaveLength(0);
+      });
+
+      it('dialog dismissed (nextResult=undefined) ⇒ service NOT called', () => {
+        mockDialog.nextResult = undefined;
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).not.toHaveBeenCalled();
+      });
+
+      it('dialog confirmed (nextResult=true) ⇒ service called EXACTLY once with the holder instance_id', () => {
+        mockDialog.nextResult = true;
+        const { obs } = buildActionMock();
+        jobService.resendDeferredForeground.mockReturnValue(obs);
+
+        component.onHolderResendForeground(holder);
+
+        expect(jobService.resendDeferredForeground).toHaveBeenCalledTimes(1);
+        expect(jobService.resendDeferredForeground).toHaveBeenCalledWith('inst-1');
+      });
+
+      it('dialog confirmed → success callback refreshes the defer leg', () => {
+        mockDialog.nextResult = true;
+        const { obs, invokeNext } = buildActionMock();
+        jobService.resendDeferredForeground.mockReturnValue(obs);
+
+        component.onHolderResendForeground(holder);
+        invokeNext({ cancelled_defer_jobs: 3, skipped_empty_content: 1 });
+
+        expect(store.fetchDeferBlocked).toHaveBeenCalledTimes(1);
+        expect(snackBar.openCalls).toHaveLength(1);
+        expect(snackBar.openCalls[0].message).toContain('Resent foreground');
+        expect(snackBar.openCalls[0].message).toContain('3 cancelled');
+      });
+    });
+
+    // ── Guard rails shared by both handlers ────────────────────────────
+
+    it('handler is a no-op while deferActionInFlight=true (re-entry guard)', () => {
+      // The action-in-flight flag is set inside the confirm branch.
+      // The handler returns early on re-entry so a double-click on
+      // the action button cannot dispatch two POSTs. This pins the
+      // guard so a future refactor that drops it surfaces here.
+      component.deferActionInFlight.set(true);
+      mockDialog.nextResult = true;
+      const { obs } = buildActionMock();
+      jobService.forceCompleteDeferHolder.mockReturnValue(obs);
+
+      component.onHolderForceComplete(holder);
+
+      expect(mockDialog.openCalls).toHaveLength(0);
+      expect(jobService.forceCompleteDeferHolder).not.toHaveBeenCalled();
     });
   });
 
-  // M3 (mission-class, 2026-09-03) — ``completed_at`` is stamped for
-  // every wire-terminal value, INCLUDING the mirror-receipt terminal
-  // ``settled``. The pre-M3 check only matched ``completed``/``failed``;
-  // a settled mirror slipped through and the row stayed pinned to a
-  // stale (null) ``completed_at``. These specs pin the regression so a
-  // future terminal rename cannot silently re-introduce it.
-  describe('updateJobFromSse — completed_at stamped for every wire-terminal (M3 pin)', () => {
-    function seedJob(status: import('../../models/job.model').JobStatus): string {
-      const id = `job-${status}`;
-      component.jobs.set([
-        createMockJob({ job_id: id, status, completed_at: null }),
-      ]);
-      return id;
+  // ── P4 deferHolderKind RACE-SPEC (jobs-page-improvement) ──────────────
+  //
+  // Review finding: the legacy ``deferHolderKind`` was a ``signal``
+  // populated by a ``.set(...)`` inside ``refreshBadStateCount``. When
+  // preflight resolved BEFORE the defer leg, ``deferHolderKind`` was
+  // null despite a paused holder; the poll does not re-fire the
+  // preflight, so the dialog surfaced ``defer_holder_kind: null``
+  // for the lifetime of the page session. The signal→computed
+  // refactor re-derives the kind reactively.
+  //
+  // The spec below uses Angular's ``computed`` directly (no mirror
+  // component needed — the contract is the pure helper call). It
+  // proves the race-spec invariant: defer payload arriving AFTER
+  // preflight still yields the correct kind.
+  describe('deferHolderKind computed — defer-late race spec (P4 review fix)', () => {
+    it('preflight lands first (deferStatus=null) ⇒ deferHolderKind=null; defer leg arrival re-derives to the correct kind', () => {
+      // The race: the preflight fetch resolves before the defer leg
+      // fetch. Under the legacy signal-set, this set ``deferHolderKind``
+      // to null and it STAYED null until the next preflight fetch.
+      // Under the computed, the field re-derives the moment
+      // ``deferStatus()`` changes.
+      const deferStatus = signal<DeferBlockedStatus | null>(null);
+      const deferHolderKind = computed(() =>
+        deferBlockAction(deferStatus())?.holder.kind ?? null,
+      );
+
+      // Phase 1 — preflight only; defer leg still pending.
+      expect(deferHolderKind()).toBeNull();
+
+      // Phase 2 — defer leg resolves with a paused holder. The
+      // computed MUST reactively return the new kind. The legacy
+      // ``.set`` would still be null because nothing re-fires the
+      // preflight on the defer leg's success.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          {
+            instance_id: 'inst-1',
+            agent: 'agent-1',
+            status: 'paused',
+            since: '2026-09-10T00:00:00Z',
+            kind: 'paused',
+          },
+        ],
+      });
+
+      expect(deferHolderKind()).toBe('paused');
+    });
+
+    it('stalled holder wins over live (deferBlockAction priority) — computed tracks priority too', () => {
+      // deferBlockAction's priority is paused > stalled > null;
+      // the computed inherits that priority because it calls the
+      // helper directly. Pins the priority so a future refactor
+      // that "optimizes" the computed to skip the helper call
+      // (and reads status.holders directly) surfaces here.
+      const deferStatus = signal<DeferBlockedStatus | null>(null);
+      const deferHolderKind = computed(() =>
+        deferBlockAction(deferStatus())?.holder.kind ?? null,
+      );
+
+      // Multiple holders: paused is highest priority.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+          { instance_id: 'i-paused', agent: 'a', status: 'paused', since: null, kind: 'paused' },
+          { instance_id: 'i-stalled', agent: 'a', status: 'stalled', since: null, kind: 'stalled' },
+        ],
+      });
+      expect(deferHolderKind()).toBe('paused');
+
+      // Drop the paused holder — stalled wins.
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+          { instance_id: 'i-stalled', agent: 'a', status: 'stalled', since: null, kind: 'stalled' },
+        ],
+      });
+      expect(deferHolderKind()).toBe('stalled');
+
+      // Drop stalled too — null (live has no action; the dialog
+      // does not surface a kind when only live holders remain).
+      deferStatus.set({
+        defer_blocked: true,
+        pending_count: 5,
+        holders: [
+          { instance_id: 'i-live', agent: 'a', status: 'live', since: null, kind: 'live' },
+        ],
+      });
+      expect(deferHolderKind()).toBeNull();
+    });
+  });
+
+  // ── P2 FIX (jobs-page-improvement) — empty-state hasRows gate ────────
+  // Behavior pins for the FIXED ``showEmptyState`` computed. The
+  // mirror above (``MockJobsComponent.showEmptyState``) faithfully
+  // copies the production logic; the F-5 source-pin in
+  // jobs-page.bindings.pins.spec.ts proves the production text
+  // carries the hasRows gate. Together: if the gate is reverted,
+  // EITHER the source-pin fails OR these behavior pins fail — the
+  // bug class is double-pinned.
+  describe('showEmptyState hasRows short-circuit (P2 fix)', () => {
+    beforeEach(() => {
+      // Steady state baseline: 5 rows, not loading, not degraded,
+      // no filters active. Pre-fix this returned TRUE (empty card
+      // rendered, virtual list hidden).
+      component.jobs.set(createMockJobList(5));
+      component.fetchInFlight.set(false);
+      component.windowDegraded.set(false);
+    });
+
+    it('steady state (hasRows=true, degraded=false, not loading) → showEmptyState FALSE', () => {
+      // The bug: pre-fix the classifier returned 'dataEmpty' for
+      // hasRows=true (defensive branch in the model), showEmptyState
+      // matched 'dataEmpty' in the list, and the empty card
+      // rendered — hiding the virtual list. Post-fix the hasRows
+      // gate returns FALSE so the list stays visible.
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(false);
+    });
+
+    it('background refresh (loading=true, hasRows=true) → no skeleton flash, no empty card', () => {
+      // The skeleton ONLY fires for the first fetch (no data to
+      // retain); showEmptyState must stay FALSE so the list is
+      // visible. The classifier returns 'dataEmpty' defensively;
+      // the COMPONENT overrides via the hasRows gate.
+      component.fetchInFlight.set(true);
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(false);
+    });
+
+    it('errored WITH rows → showEmptyState TRUE (banner card with retry, list hidden)', () => {
+      // The ONLY legitimate showEmptyState===true path with rows
+      // retained: errored. The user MUST be able to click Retry;
+      // the banner card is the affordance.
+      component.windowDegraded.set(true);
+      expect(component.emptyStateKind()).toBe('errored');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('dataEmpty (no rows, not loading, no filters) → showEmptyState TRUE', () => {
+      component.jobs.set([]);
+      expect(component.emptyStateKind()).toBe('dataEmpty');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('filterEmpty (no rows, hasActiveFilters) → showEmptyState TRUE', () => {
+      component.jobs.set([]);
+      // Cast to JobsFilterState — the mock's ``filters`` signal has
+      // a partial shape (singular status); passing the proper array
+      // shape exercises the classifier's ``hasActiveFilters`` branch.
+      component.filters.set({ status: ['failed'] } as unknown as JobsFilterState);
+      expect(component.emptyStateKind()).toBe('filterEmpty');
+      expect(component.showEmptyState()).toBe(true);
+    });
+
+    it('loading skeleton (no rows, loading=true, no filters) → showEmptyState FALSE', () => {
+      // The skeleton branch — empty card MUST NOT render; the
+      // skeleton IS the affordance.
+      component.jobs.set([]);
+      component.fetchInFlight.set(true);
+      expect(component.emptyStateKind()).toBe('loading');
+      expect(component.showEmptyState()).toBe(false);
+    });
+  });
+
+  // ── P1 MIGRATION (jobs-page-improvement) ────────────────────────────
+  // The two ``updateJobFromSse`` describes (Fix C mission_liveness
+  // propagation; M3 completed_at terminal stamping) migrated to
+  // ``jobs-page.store.spec.ts``: the patch method moved VERBATIM from
+  // this component into ``JobsPageStore.updateJobFromSse``, so the
+  // pins now drive the REAL store class (they previously drove the
+  // ``MockJobsComponent`` mirror — the production referent no longer
+  // exists on the component). Pin coverage is preserved 1:1 there,
+  // plus a new order-preservation pin (merge-order rule).
+});
+
+// ── P5 (jobs-page-improvement) — URL ↔ store binding + deep-link ──────
+//
+// The deep-link lifecycle (Task 3) + URL write/read binding (Task 2)
+// are routed through the component; the codec itself is pinned by
+// ``jobs-url-state.model.spec.ts``. These specs reproduce the
+// production wiring as a plain-TS mirror so we can drive the three
+// state machine paths — in-window open, out-of-window fetch + 200,
+// out-of-window fetch + 404 — without TestBed.
+//
+// The mirrors are SHORT and pure: each spec instantiates a minimal
+// JobsUrlStateBinding mock (URL side) + a signal-stub store (filter
+// side) + a fetch-stub (the 200/404 leg). The F-5 source-text pins
+// in ``jobs-page.bindings.pins.spec.ts`` cover the production-text
+// shape; this describe covers the BEHAVIORAL contract that the
+// source-text pin alone cannot (a falsy source-text regex passes
+// against a buggy effect body).
+
+import {
+  parseJobsUrlState,
+  serializeJobsUrlState,
+  diffJobsUrlState,
+  createEmptyJobsUrlState,
+  JOB_QUERY_PARAM,
+  JobsUrlState,
+  resolveJobsUrlMigration,
+} from './jobs-url-state.model';
+import {
+  JobsFilterState,
+  createEmptyJobsFilterState,
+  normalizeJobsFilterState,
+} from '../../models/jobs-filter-state.model';
+import { JobsPageStore } from './jobs-page.store';
+import { of } from 'rxjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+/**
+ * Mirror of the URL-binding effect's logic. The production code is
+ * two effects on JobsComponent (URL → store, store → URL); this
+ * mirror reproduces the round-trip invariants as plain functions so
+ * the spec can drive the cycle-guard + diff + equality-check
+ * behavior without spinning up a component instance.
+ */
+class UrlBindingMirror {
+  /** The current URL state (the canonical source for the URL → store effect). */
+  urlState: JobsUrlState = createEmptyJobsUrlState();
+  /** The current store state. */
+  storeFilter: JobsFilterState = createEmptyJobsFilterState();
+  /** Cycle-guard mirrors (last applied/written keys). */
+  lastAppliedFromUrl = '';
+  lastWrittenToUrl = '';
+  /** Recorded writes — the test asserts on these. */
+  urlWrites: Array<Record<string, string | null>> = [];
+
+  /** Apply a URL → store resync (mirror of the page's first effect). */
+  applyUrlToStore(): { changed: boolean; migrated: boolean } {
+    // P5 rev — the guard-2 predicate below MUST stay IDENTICAL to
+    // the production effect (jobs.component.ts, URL → store effect):
+    // the identity-grep pins in the mirror-parity describe read the
+    // REAL production source and assert this exact text appears
+    // verbatim (whitespace-normalized). A production drift breaks
+    // the pin; a mirror drift breaks the behavioral tests.
+    const url = this.urlState;
+    const currentStoreKey = JSON.stringify(this.storeFilter);
+    const urlKey =
+      JSON.stringify(url.filter) + '|' + (url.job ?? 'null');
+    if (urlKey === this.lastAppliedFromUrl) {
+      return { changed: false, migrated: false };
+    }
+    if (urlKey === currentStoreKey + '|' + (url.job ?? 'null')) {
+      // Already in sync — record the equality visit.
+      this.lastAppliedFromUrl = urlKey;
+      return { changed: false, migrated: false };
+    }
+    this.lastAppliedFromUrl = urlKey;
+    this.storeFilter = url.filter;
+    return { changed: true, migrated: false };
+  }
+
+  /** Apply a store → URL resync (mirror of the page's second effect). */
+  syncStoreToUrl(): { wrote: boolean } {
+    const next: JobsUrlState = {
+      filter: this.storeFilter,
+      job: this.urlState.job,
+    };
+    const filterUrl: JobsUrlState = { filter: this.storeFilter, job: null };
+    const currentFilterUrl: JobsUrlState = {
+      filter: this.urlState.filter,
+      job: null,
+    };
+    const diff = diffJobsUrlState(currentFilterUrl, filterUrl);
+    const serializedNext = JSON.stringify(serializeJobsUrlState(next));
+    if (serializedNext === this.lastWrittenToUrl) {
+      return { wrote: false };
+    }
+    this.lastWrittenToUrl = serializedNext;
+    if (Object.keys(diff).length === 0) {
+      return { wrote: false };
+    }
+    this.urlWrites.push(diff);
+    // Apply the diff to the local URL state (mirror of what
+    // router.navigate does — the test exercises the resulting
+    // round-trip).
+    const newSerialized = serializeJobsUrlState(next);
+    this.urlState = parseJobsUrlState(newSerialized);
+    return { wrote: true };
+  }
+
+  /** Simulate a router emit (e.g. URL changes via back/forward). */
+  setUrlState(next: JobsUrlState): void {
+    this.urlState = next;
+  }
+}
+
+describe('P5 — URL ↔ store binding (plan task 2)', () => {
+  let binding: UrlBindingMirror;
+
+  beforeEach(() => {
+    binding = new UrlBindingMirror();
+  });
+
+  describe('round-trip equality', () => {
+    it('URL state already matches store state ⇒ no apply, no write', () => {
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['pending'],
+        view_mode: 'queues',
+      });
+      binding.urlState = { filter: binding.storeFilter, job: null };
+      const apply = binding.applyUrlToStore();
+      const write = binding.syncStoreToUrl();
+      expect(apply.changed).toBe(false);
+      expect(write.wrote).toBe(false);
+    });
+
+    it('filter change → store write → URL write (no cycle)', () => {
+      // Initial: empty store + empty URL.
+      binding.syncStoreToUrl();
+      expect(binding.urlWrites).toHaveLength(0);
+
+      // User toggles a filter.
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['failed'],
+      });
+      binding.syncStoreToUrl();
+      expect(binding.urlWrites).toHaveLength(1);
+      expect(binding.urlWrites[0]).toEqual({ status: 'failed' });
+
+      // The mirror applied the diff to the local URL state — the
+      // URL → store effect would now see equality and bail.
+      const apply = binding.applyUrlToStore();
+      expect(apply.changed).toBe(false);
+    });
+
+    it('URL change (back/forward) → store apply → no URL write', () => {
+      // Initial: store has one filter, URL has another.
+      binding.storeFilter = normalizeJobsFilterState({
+        status: ['pending'],
+      });
+      binding.urlState = {
+        filter: normalizeJobsFilterState({ source: 'api' }),
+        job: null,
+      };
+      const apply = binding.applyUrlToStore();
+      expect(apply.changed).toBe(true);
+      expect(binding.storeFilter.source).toBe('api');
+      // After the URL applied, store → URL produces NO write
+      // (the cycle guard catches it).
+      const write = binding.syncStoreToUrl();
+      expect(write.wrote).toBe(false);
+    });
+  });
+
+  describe('P5 rev — REAL view-mode migration (production seed logic)', () => {
+    // These drive the REAL ``resolveJobsUrlMigration`` (imported
+    // from production jobs-url-state.model.ts) + a REAL
+    // ``JobsPageStore`` instance. The pre-rev tests here were
+    // tautological — a spec-local ``migrate`` that set a flag and
+    // asserted the flag — and could not catch the dead-seed
+    // regression (the component's seed became unreachable and every
+    // pre-P5 ``all-work`` user booted back to 'queues').
+    const VIEW_MODE_KEY = 'job-page-view-mode';
+
+    const seedInput = (
+      overrides: Partial<Parameters<typeof resolveJobsUrlMigration>[0]> = {},
+    ): Parameters<typeof resolveJobsUrlMigration>[0] => ({
+      rawParams: {},
+      migrationDone: false,
+      savedProjectId: null,
+      savedViewMode: null,
+      knownProjectIds: [],
+      urlFilter: createEmptyJobsFilterState(),
+      ...overrides,
+    });
+
+    const newRealStore = (): JobsPageStore =>
+      new JobsPageStore({
+        fetchJobs: () => of<Job[]>([]),
+        fetchWorks: () => of<Work[]>([]),
+        fetchDeferBlocked: () => of(null as unknown as DeferBlockedStatus),
+      });
+
+    it('seed `all-work` + bare URL ⇒ REAL seed decision returns all-work; REAL store boots all-work', () => {
+      // jsdom localStorage: the pre-P5 user's persisted choice.
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const result = resolveJobsUrlMigration(
+        seedInput({ savedViewMode: localStorage.getItem(VIEW_MODE_KEY) }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch!.view_mode).toBe('all-work');
+      // Applying the REAL patch to a REAL store boots all-work —
+      // the exact user-facing regression this fix restores.
+      const store = newRealStore();
+      expect(store.filterState().view_mode).toBe('queues');
+      store.setFilters(result.patch!);
+      expect(store.filterState().view_mode).toBe('all-work');
+    });
+
+    it('seed merges INTO the parsed URL filter — URL params (status etc.) survive the seed', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const urlFilter = normalizeJobsFilterState({ status: ['failed'] });
+      const result = resolveJobsUrlMigration(
+        seedInput({
+          savedViewMode: localStorage.getItem(VIEW_MODE_KEY),
+          urlFilter,
+        }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch).toEqual({ ...urlFilter, view_mode: 'all-work' });
+    });
+
+    it('URL pins view_mode ⇒ URL WINS (no seed); `?job=` present also wins; empty `?job=` counts as bare', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const saved = localStorage.getItem(VIEW_MODE_KEY);
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({ savedViewMode: saved, rawParams: { view_mode: 'queues' } }),
+        ).action,
+      ).toBe('url-wins');
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedViewMode: saved,
+            rawParams: { [JOB_QUERY_PARAM]: 'abc-123' },
+          }),
+        ).action,
+      ).toBe('url-wins');
+      // An empty-string param is LITERALLY absent — the seed fires.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedViewMode: saved,
+            rawParams: { [JOB_QUERY_PARAM]: '' },
+          }),
+        ).action,
+      ).toBe('seed');
+    });
+
+    it('second load (migrationDone) ⇒ NO re-seed — one-time migration contract', () => {
+      localStorageData[VIEW_MODE_KEY] = 'all-work';
+      const result = resolveJobsUrlMigration(
+        seedInput({
+          migrationDone: true,
+          savedViewMode: localStorage.getItem(VIEW_MODE_KEY),
+        }),
+      );
+      expect(result.action).toBe('none');
+      expect(result.patch).toBeNull();
+    });
+
+    it('legacy project key seeds ONLY when the URL carries no explicit project (stale id dropped)', () => {
+      const result = resolveJobsUrlMigration(
+        seedInput({ savedProjectId: 'proj-1', knownProjectIds: ['proj-1'] }),
+      );
+      expect(result.action).toBe('seed');
+      expect(result.patch!.project_id).toBe('proj-1');
+      // Stale (deleted) saved project is dropped — no seed.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({ savedProjectId: 'gone', knownProjectIds: ['proj-1'] }),
+        ).action,
+      ).toBe('none');
+      // An explicit URL project beats the saved one.
+      expect(
+        resolveJobsUrlMigration(
+          seedInput({
+            savedProjectId: 'proj-1',
+            knownProjectIds: ['proj-1'],
+            urlFilter: normalizeJobsFilterState({ project_id: 'proj-2' }),
+          }),
+        ).action,
+      ).toBe('none');
+    });
+
+    it('saved view_mode equal to the URL default ⇒ no-op (action none, no pointless write)', () => {
+      expect(
+        resolveJobsUrlMigration(seedInput({ savedViewMode: 'queues' })).action,
+      ).toBe('none');
+    });
+  });
+});
+
+describe('P5 — `?job=<id>` deep-link lifecycle (plan task 3, rev guards)', () => {
+  /**
+   * Mirror of the deep-link effect — P5 rev models the DEDUP GUARDS
+   * faithfully (``lastDeepLinkParam`` epoch + ``lastDeepLinkResolved``
+   * + ``lastDeepLinkFetched``, the 🟡7 drawerOpen()-less resolved
+   * guard, the 🟡3 stale-response guards) with a DEFERRED fetch so
+   * tests can navigate the URL between the effect run and the GET
+   * landing. The pre-rev ``resolveDeepLink`` function modeled none of
+   * the guards — it could not see the stale-reopen or dead-re-entry
+   * races at all.
+   */
+  class DeepLinkEffectMirror {
+    /** The URL `?job=` value (mutable — Back/forward/close change it). */
+    urlJobId: string | null = null;
+    jobs: { job_id: string }[] = [];
+    works: { work_id: string }[] = [];
+    /** fetch outcome per id — missing entries default to 'ok'. */
+    fetchResults = new Map<string, 'ok' | 'not-found'>();
+    fetchCalls: string[] = [];
+    // Guards (mirror the production fields).
+    lastParam: string | null = null;
+    lastResolved: string | null = null;
+    lastFetched: string | null = null;
+    // Visible state.
+    drawerOpen = false;
+    openedWith: string | null = null;
+    missingJobId: string | null = null;
+    // The deferred GET responses (multiple subscriptions can be in
+    // flight — landed FIFO by the test).
+    private pendingResponses: Array<() => void> = [];
+
+    /** Mirror of the production effect body (P5 rev predicates). */
+    run(): void {
+      const jobId = this.urlJobId;
+      // 🟡4/🟡7 — epoch reset on ANY param change (incl. → null).
+      if (jobId !== this.lastParam) {
+        this.lastParam = jobId;
+        this.lastResolved = null;
+        this.lastFetched = null;
+      }
+      if (!jobId) {
+        return;
+      }
+      // 🟡7 — drawerOpen() half DROPPED from the resolved guard.
+      if (this.lastResolved === jobId) {
+        return;
+      }
+      if (this.lastFetched === jobId) {
+        return;
+      }
+      const inJobs = this.jobs.find((j) => j.job_id === jobId);
+      if (inJobs) {
+        this.lastResolved = jobId;
+        this.open(jobId);
+        return;
+      }
+      const inWorks = this.works.find((w) => w.work_id === jobId);
+      if (inWorks) {
+        this.lastResolved = jobId;
+        this.open(jobId);
+        return;
+      }
+      this.lastFetched = jobId;
+      const id = jobId;
+      this.fetchCalls.push(id);
+      const outcome = this.fetchResults.get(id) ?? 'ok';
+      this.pendingResponses.push(() => {
+        if (outcome === 'ok') {
+          // 🟡3 — stale next: URL moved on ⇒ no reopen.
+          if (this.urlJobId !== id) return;
+          this.lastResolved = id;
+          this.open(id);
+        } else {
+          // 🟡3 + 🟢8 — stale error: same guard, collapsed arms.
+          if (this.urlJobId !== id) return;
+          this.missingJobId = id;
+          this.drawerOpen = true;
+        }
+      });
     }
 
-    it('stamps completed_at when status === "settled" (mirror-receipt terminal)', () => {
-      const id = seedJob('processing');
-      component.updateJobFromSse({ job_id: id, status: 'settled' });
-      const stamped = component.jobs().find(j => j.job_id === id)!.completed_at;
-      expect(stamped).not.toBeNull();
-      expect(typeof stamped).toBe('string');
-      // Sanity: ISO timestamp parses to a finite Date in the recent past.
-      expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
-    });
+    /** Land the OLDEST in-flight GET response (next OR error arm). */
+    landResponse(): void {
+      const respond = this.pendingResponses.shift();
+      respond?.();
+    }
 
-    it('also stamps completed_at for the legacy terminals (completed/failed/cancelled)', () => {
-      // Defensive coverage — pins the legacy terminal members so a
-      // future drift back to a hard-coded subset cannot quietly drop one.
-      for (const status of ['completed', 'failed', 'cancelled'] as const) {
-        const id = seedJob('processing');
-        component.updateJobFromSse({ job_id: id, status });
-        expect(component.jobs().find(j => j.job_id === id)!.completed_at).not.toBeNull();
-      }
-    });
+    private open(id: string): void {
+      this.openedWith = id;
+      this.drawerOpen = true;
+      this.missingJobId = null;
+    }
+  }
 
-    it('does NOT stamp completed_at for non-terminal statuses (pending/processing/paused)', () => {
-      // Negative pin — the settled-aware check must not over-reach into
-      // the live states. A pre-M3 regression that incorrectly stamped
-      // for every status would surface here.
-      for (const status of ['pending', 'processing', 'paused'] as const) {
-        const id = seedJob('pending');
-        component.updateJobFromSse({ job_id: id, status });
-        expect(component.jobs().find(j => j.job_id === id)!.completed_at).toBeNull();
-      }
+  const mirrorWith = (
+    init: Partial<DeepLinkEffectMirror> = {},
+  ): DeepLinkEffectMirror => {
+    const mirror = new DeepLinkEffectMirror();
+    Object.assign(mirror, init);
+    return mirror;
+  };
+
+  it('in-window: jobs dataset has the deep-linked row ⇒ open drawer, NO fetch', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-1');
+    expect(mirror.drawerOpen).toBe(true);
+    expect(mirror.fetchCalls).toHaveLength(0);
+  });
+
+  it('in-window: works dataset has the deep-linked row (all-work view) ⇒ open drawer, NO fetch', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1', works: [{ work_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-1');
+    expect(mirror.drawerOpen).toBe(true);
+    expect(mirror.fetchCalls).toHaveLength(0);
+  });
+
+  it('out-of-window: dataset miss ⇒ fetch via JobService.getJob, 200 ⇒ open drawer', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-2', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    expect(mirror.fetchCalls).toEqual(['job-2']);
+    mirror.landResponse();
+    expect(mirror.openedWith).toBe('job-2');
+    expect(mirror.drawerOpen).toBe(true);
+  });
+
+  it('out-of-window: dataset miss ⇒ fetch, 404 ⇒ honest "job not found" (drawer stays open)', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'job-3',
+      fetchResults: new Map([['job-3', 'not-found' as const]]),
     });
+    mirror.run();
+    expect(mirror.fetchCalls).toEqual(['job-3']);
+    mirror.landResponse();
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.missingJobId).toBe('job-3');
+    expect(mirror.drawerOpen).toBe(true);
+  });
+
+  it('no deep-link (URL bare of `?job=`) ⇒ no-op, no fetch', () => {
+    const mirror = mirrorWith({ urlJobId: null });
+    mirror.run();
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+    expect(mirror.fetchCalls).toHaveLength(0);
+  });
+
+  it('dataset refresh re-runs the effect while the SAME param resolves ⇒ no refetch, no re-open', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1', jobs: [{ job_id: 'job-1' }] });
+    mirror.run();
+    mirror.run(); // dataset emit, same param
+    mirror.run();
+    expect(mirror.fetchCalls).toHaveLength(0);
+    expect(mirror.openedWith).toBe('job-1');
+  });
+
+  it('RACE-A (🟡3): stale 200 after close ⇒ drawer does NOT reopen', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-1' });
+    mirror.run(); // GET in flight
+    mirror.urlJobId = null; // user closed the drawer (URL stripped)
+    mirror.run(); // close cycle clears the guards
+    mirror.landResponse(); // the stale 200 lands
+    expect(mirror.openedWith).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+  });
+
+  it('RACE-A variant (🟡3): stale 404 after close ⇒ drawer does NOT reopen with the honest-missing card', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'job-1',
+      fetchResults: new Map([['job-1', 'not-found' as const]]),
+    });
+    mirror.run();
+    mirror.urlJobId = 'job-2'; // Back to a different id
+    mirror.run();
+    mirror.landResponse(); // job-1's 404 lands while ?job=job-2
+    expect(mirror.missingJobId).toBeNull();
+    expect(mirror.drawerOpen).toBe(false);
+  });
+
+  it('RACE-B (🟡4): 404 then Back to the same id ⇒ RE-RESOLVES (fetch fires again)', () => {
+    const mirror = mirrorWith({
+      urlJobId: 'dead-id',
+      fetchResults: new Map([['dead-id', 'not-found' as const]]),
+    });
+    mirror.run();
+    mirror.landResponse();
+    expect(mirror.missingJobId).toBe('dead-id');
+    // Back past the deep link, then Back to the same dead id.
+    mirror.urlJobId = null;
+    mirror.run();
+    mirror.urlJobId = 'dead-id';
+    mirror.run();
+    // The pre-rev guards stayed armed forever — this fetch would
+    // never have fired and re-entry was a silent no-op.
+    expect(mirror.fetchCalls).toEqual(['dead-id', 'dead-id']);
+    mirror.landResponse();
+    expect(mirror.missingJobId).toBe('dead-id');
+  });
+
+  it('RACE-C (🟡7): Back ?job=y → ?job=x re-opens x (drawer follows the URL, no drawerOpen() bail)', () => {
+    const mirror = mirrorWith({ urlJobId: 'job-x', jobs: [{ job_id: 'job-x' }] });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-x');
+    // Navigate to y (in-window too), then Back to x.
+    mirror.urlJobId = 'job-y';
+    mirror.jobs.push({ job_id: 'job-y' });
+    mirror.run();
+    expect(mirror.openedWith).toBe('job-y');
+    mirror.urlJobId = 'job-x';
+    mirror.run();
+    // The pre-rev `lastDeepLinkResolved === jobId && drawerOpen()`
+    // guard bailed here (drawer was open showing y) — URL/visible
+    // divergence. The epoch reset + dropped drawerOpen() half fix it.
+    expect(mirror.openedWith).toBe('job-x');
+  });
+});
+
+// ── P5 rev — mirror-parity identity pins (spec ↔ production) ──────────
+//
+// Mirror-parity pin pattern: the UrlBindingMirror above MUST compute
+// the SAME key conventions as the production URL → store effect. The
+// pre-rev mirror's guard-2 used `urlState.job ?? 'null'` while
+// production hardcoded `'|null'` — the parity drifted SILENTLY (both
+// suites stayed green against different predicates). These pins read
+// the REAL production source and assert the mirrored predicate text
+// appears verbatim (whitespace-normalized): a production drift breaks
+// the pin, a mirror drift breaks the behavioral tests above.
+describe('P5 rev — identity-grep pins (mirror predicate ↔ production source)', () => {
+  const componentSource = readFileSync(join(__dirname, 'jobs.component.ts'), 'utf-8');
+  const norm = (s: string) => s.replace(/\s+/g, ' ');
+  const production = norm(componentSource);
+
+  it('guard-1 urlKey assembly: mirror key convention appears VERBATIM in production', () => {
+    const mirrored = norm(
+      `const urlKey = JSON.stringify(url.filter) + '|' + (url.job ?? 'null');`,
+    );
+    expect(production).toContain(mirrored);
+  });
+
+  it('guard-2: full-key compare (incl. job suffix) appears VERBATIM in production', () => {
+    const mirrored = norm(
+      `if (urlKey === currentStoreKey + '|' + (url.job ?? 'null')) {`,
+    );
+    expect(production).toContain(mirrored);
+    // The pre-rev dead-predicate literal is GONE.
+    expect(production).not.toContain(norm(`currentStoreKey + '|null'`));
+  });
+
+  it('seed ordering: runUrlStateMigrationIfNeeded runs BEFORE the pre-arm early-return (the 🔴1 fix)', () => {
+    const seedIdx = production.indexOf(norm(`this.runUrlStateMigrationIfNeeded()`));
+    const preArmIdx = production.indexOf(norm(`if (urlKey === this.lastAppliedFromUrl) {`));
+    expect(seedIdx).toBeGreaterThan(-1);
+    expect(preArmIdx).toBeGreaterThan(-1);
+    expect(seedIdx).toBeLessThan(preArmIdx);
+    // And the seed APPLIES → arm + bail (the clobber prevention).
+    expect(production).toContain(
+      norm(`if (!this.urlMigrationDone() && this.runUrlStateMigrationIfNeeded()) {
+        this.lastAppliedFromUrl = urlKey;
+        return;
+      }`),
+    );
+  });
+
+  it('🟡5 — the view-mode snapshot precedes setFilters (the dead refresh branch revives)', () => {
+    const snapIdx = production.indexOf(norm(`const beforeViewMode = this.viewMode();`));
+    const setFiltersIdx = production.indexOf(norm(`this.store.setFilters(url.filter);`));
+    expect(snapIdx).toBeGreaterThan(-1);
+    expect(setFiltersIdx).toBeGreaterThan(snapIdx);
+  });
+
+  it('🟡3 — the stale-response guard guards BOTH subscribe arms', () => {
+    const guard = norm(`if (this.urlDeepLinkJobId() !== jobId) {`);
+    const count = production.split(guard).length - 1;
+    expect(count).toBeGreaterThanOrEqual(2);
+  });
+
+  it('🟡4/🟡7 — the epoch reset owns the dedup guards; the drawerOpen() half is gone', () => {
+    expect(production).toContain(norm(`if (jobId !== this.lastDeepLinkParam) {`));
+    expect(production).toContain(norm(`this.lastDeepLinkResolved = null;`));
+    expect(production).toContain(norm(`this.lastDeepLinkFetched = null;`));
+    // The pre-rev guard shape is GONE.
+    expect(production).not.toContain(
+      norm(`if (this.lastDeepLinkResolved === jobId && this.drawerOpen()) {`),
+    );
+  });
+
+  it('🟢8 — the dead 404/other-error arm split is collapsed (no status check)', () => {
+    expect(production).not.toContain(norm(`const status = err?.status ?? null;`));
+    expect(production).toContain(norm(`this.deepLinkMissingJobId.set(jobId);`));
+  });
+
+  it('🟢10 — the bare `?job=` strip rides the store → URL effect', () => {
+    const stripIdx = production.indexOf(norm(`typeof rawJobParam === 'string' && rawJobParam === ''`));
+    expect(stripIdx).toBeGreaterThan(-1);
+    expect(production).toContain(norm(`this.clearUrlDeepLink();`));
+  });
+
+  it('second-load cleanup: markUrlMigrationDone clears BOTH legacy keys (regex pin)', () => {
+    expect(componentSource).toMatch(
+      /private markUrlMigrationDone\(\): void \{\s*this\.urlMigrationDone\.set\(true\);\s*this\.clearLegacyLocalStorageKeys\(\);/,
+    );
+    expect(componentSource).toMatch(/localStorage\.removeItem\(this\.VIEW_MODE_KEY\)/);
+    expect(componentSource).toMatch(/localStorage\.removeItem\(this\.STORAGE_KEY\)/);
+  });
+
+  it('🔴1 — the toggle stops re-writing the legacy key once migration is done', () => {
+    expect(componentSource).toMatch(
+      /if \(!this\.urlMigrationDone\(\)\) \{\s*try \{\s*localStorage\.setItem\(this\.VIEW_MODE_KEY, mode\);/,
+    );
+  });
+
+  it('the dead tryRestoreViewMode seed site is deleted (root-cause removal, not symptom patch)', () => {
+    // Pins target the DEFINITIONS (doc comments may reference the
+    // retired names when explaining the fix).
+    expect(production).not.toContain(norm(`private tryRestoreViewMode(): void {`));
+    expect(production).not.toContain(norm(`this.tryRestoreViewMode();`));
+    expect(production).not.toContain(norm(`viewModeRestored = true;`));
   });
 });

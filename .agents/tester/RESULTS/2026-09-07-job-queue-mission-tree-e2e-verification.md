@@ -386,3 +386,80 @@ Honest gaps: `pending,dead_letter` union not live-probeable with this seed (0 pe
 1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (worktree + re-probe appends)
 2. `.agents/tester/PACKS.md` (jobs_combo row + regression_job_queue Last Run)
 3. `test/packs/jobs_combo_unit_test.sh` (untracked, executable, pin @ `19b40e49` — header comment still cites b8644dde, cosmetic docstring drift)
+
+## CLOSING Round — jobs-page arc @ `feature/jobs-page-improvement` `029719c1` (2026-09-12, worktree) — **VERDICT: P1/P5 PASS · P2/P4/P6 PASS-partial · P3 FAIL (wire-contract break) → ⚠️ FIX-FIRST on P3 before the single merge**
+
+Worktree `agents-ensemble-wt-jobs-page-plan` (main + other worktrees untouched). Stack: worktree daemon :8124 on disposable `ensemble_wt_jp` (boot line verified; dropped after; **zero prod contact**) + FE :4219 with /tmp proxy override (no repo mutations); zero LLM calls; rich SQL seed (245 dead + 65 done + 8 queued jobs; 4 missions incl. titled/untitled/stalled/paused; defer queue + 3 defer-pending + active-on-paused; defer-blocked = true, pending 3, holders 4). Artifacts: `/tmp/jp-wt/` (21 screenshots, 22 logs/HTML, 19 scripts, network captures).
+
+| Phase | Verdict | Evidence |
+|---|---|---|
+| P1 dead-filter kill | ✅ PASS | filter applied (network `limit=100&status=…&project_id=…`); persists across Queues↔All-work switch (7 cards stable); drawer Timeline populated (CREATED/STARTED/COMPLETED, no null gaps) |
+| P2 honesty + vscroll + visibility | ✅ PASS (partial) | banner verbatim "Showing newest 100 … may continue or may be complete — refine filters"; DOM 3-7 rows vs total 100 (scrollHeight 14256px = full virtual list); render guard clean (no dups); visibility: hidden 12s → 2 requests (throttled, not zero — CDP headless limitation, `defineProperty` workaround) |
+| **P3 mission grouping** | ❌ **FAIL — contract break** | fallbacks + counts + settled "(receipt)" chips + never-hide all ✓, **BUT every titled mission group shows fallback (`developer · Xm ago`) instead of the real title**: FE `jobs.component.ts:1015` reads `resp?.mission?.title` (`MissionGetResponse {mission: MissionSummary}`) while BE `/api/missions/{id}` returns **flat** fields (`title` at top level — API-confirmed via curl). Title enrichment dead on fresh load |
+| P4 defer-blocked | ✅ PASS (partial) | AMBER banner verbatim w/ count language; holders panel ≤1 interaction ("Review holders" → panel, kind=STALLED chip); force-complete **correctly DISABLED** by the WS4 mirrors-only gate for the seeded holder shape — CANCEL/CONFIRM end-to-end NOT exercised (no mirrors-only holder seeded; honest gap; disable is spec-correct) |
+| P5 URL + deep-links | ✅ PASS | `?project_id&status` survives reload; `?job=<id>` opens drawer directly; drawer shows full fields incl. RESULT-adjacent timeline + MESSAGE + METADATA; 4 copy actions present |
+| P6 DOM focus + ARIA | ✅ PASS (partial) | real DOM focus (`document.activeElement.id` = `jobs:row\|<id>` after ArrowDown — W1-class fix confirmed); `[role=tree]`×2 + `[role=treeitem]`×7 present (`group`=0 noted); capture timing-sensitive |
+| Regressions | ✅ ALL PASS | pill healthy; no h-scroll (1440==1440); filter-empty vs data-empty copy distinct + honest; degraded honesty (stale marker + retained data + Retry copy); 0 pageerrors; console = known Plane-CSP only |
+
+**Brackets**: full jest **88/88 suites, 3,156/3,156 tests** (exact brief expectation; +636 growth = jobs-page spec files; zero failures, drift-bracketed, --no-cache) · tsc **0 errors** · build SUCCESS with **10/10 known warning identities, 0 NEW** (jobs.component.scss 8.87→14.77 kB = expected arc growth, same identity; bundle 5.88 MB noted).
+
+**Merge-readiness: ⚠️ FIX-FIRST on P3.** One small contract fix (FE unwrap the flat mission response, or BE wrap it) + a re-probe of group-title rendering closes the arc. P2-visibility (throttle-not-zero = tooling artifact), P4 cancel/confirm-net (needs a mirrors-only holder seed), P6 group-role census remain as documented partial-coverage gaps, not defects.
+
+### Landing artifacts for giter (worktree dirty set)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (this append)
+2. `.agents/tester/PACKS.md` (frontend_full_unit_test + fe_static Last Run rows)
+3. `test/packs/frontend_full_unit_test.sh` (EXPECTED_BRANCH default re-pinned to this branch — pre-authorized)
+
+---
+
+## P3 Title Re-Probe @ `e38dea27` (2026-09-12, worktree) — **VERDICT: SPLIT — queues surface FIXED (all 4 checks PASS), all-work surface STILL FALLBACK (new root cause) → ⚠️ one more small FE fix before merge**
+
+Stack: worktree daemon :8125 on disposable `ensemble_wt_jp2` (boot line verified; dropped after; zero prod contact) + FE :4220 (/tmp proxy override); zero LLM calls; seed = 2 titled missions (8+5 jobs incl. settled receipts) + 1 untitled + missionless buckets.
+
+| Check | Queues view | All-work view |
+|---|---|---|
+| 1 Titled groups render REAL titles | ✅ verbatim `Mission With Title` / `Alpha Title Mission` in headers | ❌ ALL groups render `developer · 44m ago` fallback — real titles never appear |
+| 2 Honest fallback for untitled | ✅ `agentId · timeAgo` designed fallback | ✅ same |
+| 3 Wire consumption | ✅ GET `/api/missions/{id}` fired (bounded, ≤3/generation cap respected); responses FLAT; DOM title == API flat title | ❌ **ZERO `/api/missions/*` requests in 25s** — the fixed read path is never reached |
+| 4 Sanity | ✅ 0 pageerrors; known-bucket console (+1 environmental Plane CSP, prod-host framing from disposable daemon — unrelated); `Settled (receipt)` chip verified | (titled header absent → chip spot-check not completed — gap) |
+
+**Root cause (code-verified, second seam):** all-work projects `GET /api/work` rows through `workToJob()` (`frontend/src/app/models/work.model.ts`); the FE `Work` interface never declared `mission_id` (**BE `/api/work` ships it — live-verified**) → mapped `Job.mission_id` undefined → every group `missionId: null` → enrichment gate `if (!g.missionId) continue` skips ALL groups → no fetch → fallback forever. The `e38dea27` flat-read fix is correct at its seam but only reachable via the queues-view path.
+
+**Recommended fix (route to dev):** add `mission_id` (+ optionally `mission_ref`) to the `Work` interface and carry through `workToJob()` — closes the all-work half; the e38dea27 read then works on both surfaces.
+
+**Bracket:** `mission_tree_fe_targeted` re-pinned @ `e38dea27` — **PASS 103/103** (mission.service 14/14 + jobs-page.bindings.pins 89/89; zero failures).
+
+**Merge-readiness: ⚠️ NOT YET** — P3's letter ("group headers render real titles") holds on ONE of the two surfaces. The one-field interface fix + a ~3-min two-surface re-probe closes it. (Editing note: the bracket worker hit the known parallel-same-file lost-update trap during pin edits and recovered atomically — documented.)
+
+Artifacts: `/tmp/jp2-wt/` (probe JSONs per surface, scripts, screenshots incl. `grouped-allwork-fallback.png`, boot logs).
+
+### Landing artifacts for giter (worktree dirty set, 4 entries)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (arc appends incl. this)
+2. `.agents/tester/PACKS.md` (rows: frontend_full_unit_test, fe_static, mission_tree_fe_targeted)
+3. `test/packs/frontend_full_unit_test.sh` (EXPECTED_BRANCH re-pinned)
+4. `test/packs/mission_tree_fe_targeted_test.sh` (re-pinned @ e38dea27, 2-suite list)
+
+---
+
+## CLOSING GATE @ `670626a0` (2026-09-12, worktree) — **VERDICT: ✅ ALL PASS — mission-title fix verified on BOTH surfaces → merge proceeds**
+
+The `Work`-interface fix (`mission_id` carried through `workToJob()`) closes the e38dea27 split. Disposable `ensemble_wt_jp3` (boot line verified; dropped after; zero prod contact); daemon :8126 + FE :4221 (/tmp proxy override; zero LLM — dead base URL + kill-switches); drift-clean throughout.
+
+| Surface | `/api/missions/{id}` fetches | Titled groups | Untitled fallback | Missionless bucket | 0 pageerrors |
+|---|---|---|---|---|---|
+| QUEUES | 5 fired | `JP3 Title Alpha` / `JP3 Title Beta` — DOM == API flat title, exact | `No mission context` (honest) | `developer · just now` (designed) | ✅ |
+| **ALL-WORK (kill-shot)** | **5 fired (was 0 @ e38dea27)** | same real titles, exact match | same | same | ✅ |
+
+Wire shape FLAT on both surfaces (no wrapper). Console: known bucket only (pre-existing Plane CSP environmental). Screenshots/probes: `/tmp/jp3-wt/` (per-surface grouped + expanded captures, seed, probe JSONs).
+
+**Bracket**: `mission_tree_fe_targeted` @ `670626a0` — **PASS 116/116** (mission.service 14 + jobs bindings 89 + **work.model 13 NEW**; zero failures; sequential-edit discipline honored after the prior round's lost-update incident).
+
+**Arc summary (jobs-page, 3 gate rounds + 2 re-probes):** P1 ✅ · P2 ✅ (visibility=throttle, tooling artifact) · **P3 ✅ after two contract fixes** (flat-read `e38dea27` + Work-interface `670626a0`) · P4 ✅ (disable-gate correct; confirm-net unseeded, documented) · P5 ✅ · P6 ✅ (group-role census noted) · regressions ✅ all. Full jest 88/88 & 3,156/3,156 · tsc 0 · build 10-known/0-NEW.
+
+**FINAL VERDICT: ✅ READY TO MERGE.**
+
+### FINAL artifact list for giter (4 entries, worktree dirty set, zero extras — land + merge)
+1. `.agents/tester/RESULTS/2026-09-07-job-queue-mission-tree-e2e-verification.md` (all arc appends through this gate)
+2. `.agents/tester/PACKS.md` (rows: frontend_full_unit_test, fe_static_typecheck_build, mission_tree_fe_targeted)
+3. `test/packs/frontend_full_unit_test.sh` (EXPECTED_BRANCH re-pinned to feature/jobs-page-improvement)
+4. `test/packs/mission_tree_fe_targeted_test.sh` (re-pinned @ 670626a0, 3-suite union list)
