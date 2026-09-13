@@ -290,13 +290,21 @@ class TestP9NoCounterTheft:
     def test_engine_never_imports_s5_or_language_counters(self):
         """P-9 (structural): S5 derivation is zero-stored-state and the
         language counters are checkpoint channels — the engine touches
-        NEITHER (no imports, no symbol references)."""
+        NEITHER (no imports, no symbol references). Phase 2 introduces
+        ghost-promise helpers as graph.py top-level functions but the
+        engine module still must not import them (the engine stays
+        detector-agnostic; ghost detection is graph.py's concern, the
+        engine consumes a duck-typed :class:`GhostDetectionResult`)."""
         import daemon.services.symptom_repair_engine as mod
 
         src = inspect.getsource(mod)
         assert "_count_trailing_degenerate" not in src
         assert "_is_degenerate_ai_message" not in src
         assert "language_check" not in src
+        assert "_count_trailing_ghost" not in src
+        assert "_is_ghost_promise_message" not in src
+        assert "_build_truncated_detection" not in src
+        assert "_build_empty_post_ladder_detection" not in src
 
     async def test_repair_preserves_unrelated_history_verbatim(self):
         """Messages outside the loop window — including S5-class

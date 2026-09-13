@@ -165,12 +165,32 @@ class TestDegenerateReinvokeCap:
             llm_calls += 1
         assert llm_calls <= EMPTY_DEGENERATE_REINVOKE_CAP + 2
 
-    def test_ghost_promise_deliberately_not_capped(self):
-        # Doc L4: ghost-promise content is truthy real text under the
-        # shared predicate — the S5 cap owns the EMPTY re-invoke classes
-        # only. The ghost row keeps its pre-guard behavior.
+    def test_ghost_promise_capped_routes_agent_repair_ghost(self):
+        # Phase 1 (S5 cap): ghost-promise content is truthy real text
+        # under the shared predicate — the S5 cap owns the EMPTY
+        # re-invoke classes only. The ghost row kept its pre-guard
+        # bare "agent" behavior, never the S5 cap. The original test
+        # name was ``test_ghost_promise_deliberately_not_capped``
+        # (preserved for backward-compat with the 343-baseline
+        # assertion pin) — RENAMED 2026-09-13 to reflect the
+        # phase-2 OPPOSITE behavior: ghost DOES route the
+        # repair-flagged re-entry at the cap with master ON.
+        #
+        # Phase 2 (recovery-ladder B-3) adds a SECOND cap on the ghost
+        # row: GHOST_PROMISE_REINVOKE_CAP=3 with cap-before-surgery
+        # ordering. Below the cap: bare "agent" (shipped). At the cap
+        # with the master ladder switch ON: "agent_repair_ghost" (the
+        # repair-flagged re-entry). With the master OFF (the empty-guard-only `_restore_empty_guard_defaults` autouse does not touch the ladder switch; the symptom-repair-ladder default is ON, so this test asserts the ON-path routing): the
+        # cap routing is INERT — every route is "agent" byte-identical.
+        # This test runs with the master ON by default; the
+        # cap-emit "agent_repair_ghost" is expected at turn >=3.
         routes, _ = _simulate_storm(_ghost_promise, turns=6)
-        assert all(route == "agent" for route in routes)
+        # Master ON: below cap routes "agent"; at cap routes
+        # "agent_repair_ghost". Verify the cap triggers.
+        assert any(route == "agent_repair_ghost" for route in routes)
+        # And every "below cap" route is still the bare "agent"
+        # (preserved pre-phase-2 routing).
+        assert any(route == "agent" for route in routes)
 
     def test_cap_counting_helper(self):
         messages = [_real_human(), _reasoning_only(), _think_only(), _reasoning_only()]

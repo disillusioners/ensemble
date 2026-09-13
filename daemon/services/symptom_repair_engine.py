@@ -71,6 +71,7 @@ from typing import Any, ClassVar
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -102,6 +103,26 @@ MAX_VERBATIM_ARGS_CHARS = 500
 #: docs never collide on the id-keyed reducer, and the per-class seq
 #: parsers (this module's and ``_next_compaction_seq``) stay isolated.
 REPAIR_DOC_ID_PREFIX = "repair-"
+
+
+def _last_real_human_id(messages: list[BaseMessage]) -> str:
+    """Id of the LAST real (non-injected) ``HumanMessage``; ``''`` if none.
+
+    D-1 boundary-freshness marker source. Identifies the turn-boundary
+    human the surgery RETAINS so the OQ5 reset predicate in
+    ``daemon/graph.py`` can distinguish a genuinely NEW task episode
+    from the surgery's own retained history (whose tail is the ORIGINAL
+    HumanMessage when the removal window is fully trailing — the exact
+    shape that made ghost budget exhaustion unreachable). Injected
+    detection mirrors ``graph.py::_is_real_human_message`` via the SAME
+    compaction predicate (lazy import — cycle guard).
+    """
+    from ..compaction import _is_injected_message  # lazy: cycle guard
+
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage) and not _is_injected_message(msg):
+            return str(getattr(msg, "id", "") or "")
+    return ""
 
 
 class SymptomRepairAborted(Exception):
@@ -197,6 +218,14 @@ class SymptomRepairOutcome:
     #: Machine-readable abort reason (``summarizer-failed`` /
     #: ``persist-refused`` / ``budget-exhausted``).
     abort_reason: str | None = None
+    #: D-1 boundary-freshness marker: id of the LAST real
+    #: (non-injected) HumanMessage in the PRE-surgery history — the
+    #: turn-boundary human the surgery RETAINS. The OQ5 reset
+    #: predicate (``daemon/graph.py``) suppresses the mid-turn durable
+    #: budget reset when the tail human's id matches this marker, so
+    #: the reset fires ONLY for a real HumanMessage arriving AFTER a
+    #: repair — never for history the surgery itself retained.
+    boundary_human_id: str = ""
 
 
 class SymptomRepairEngine:
@@ -238,6 +267,85 @@ class SymptomRepairEngine:
             ),
             "post_repair_routing": "continue",
         },
+        # ── Phase 2 (B-1): ghost-promise ─────────────────────────────
+        # Router-detected (graph.py:3723, bare ``endswith(':')`` on
+        # trailing AIMessages). Bare ``"agent"`` re-invoke capped at
+        # GHOST_PROMISE_REINVOKE_CAP=3 (cap-before-surgery ordering —
+        # B-3). Evidence window: trailing ghost AIMessages from the
+        # last non-ghost boundary (ghost counter derives from the
+        # same walk shape as the S5 trailing-degenerate helper in
+        # ``daemon.graph`` but excluding tool-call AIMessages per
+        # P-1). Retention = all preceding messages with ORIGINAL ids
+        # (P-7).
+        "ghost": {
+            "description": (
+                "Trailing ghost-promise AIMessages (content "
+                "endswith(':') without tool_calls) at the router; "
+                "cap-before-surgery at GHOST_PROMISE_REINVOKE_CAP=3"
+            ),
+            "evidence_window_selector": "_select_ghost_evidence_window",
+            "summary_prompt": "ghost",
+            "retention": (
+                "hoisted-injected context + all preceding messages "
+                "with ORIGINAL ids (P-7); trailing ghost AIMessages "
+                "removed"
+            ),
+            "post_repair_routing": "continue",
+        },
+        # ── Phase 2 (C-1): truncated (finish_reason=length) ────────
+        # PRE-TERMINAL placement (ADR-0003 / OQ1 ruling) — fires ONCE
+        # after the shipped retry ladder exhausts and BEFORE the loud
+        # ERROR. Evidence window: the single truncated AIMessage.
+        # ``excerpt=`` preservation per OQ3 (architect call): the
+        # verbatim partial content is carried on the repair doc so
+        # repair does not silently drop user-facing text. Repair-doc
+        # invariant: ``excerpt=<verbatim original partial text>``
+        # round-trips through checkpoint serialize/deserialize byte-
+        # exact (T-11 / C-7).
+        "truncated": {
+            "description": (
+                "Truncated LLM response (finish_reason=length); "
+                "PRE-TERMINAL placement (ADR-0003); excerpt= verbatim "
+                "partial preservation per OQ3"
+            ),
+            "evidence_window_selector": "_select_truncated_evidence_window",
+            "summary_prompt": "truncated",
+            "retention": (
+                "hoisted-injected context + all preceding messages "
+                "with ORIGINAL ids (P-7); truncated AIMessage removed "
+                "but its text preserved as ``excerpt=`` field on the "
+                "repair doc"
+            ),
+            "post_repair_routing": "continue",
+        },
+        # ── Phase 2 (D-1): empty (S1) post-ladder ───────────────────
+        # PRE-TERMINAL placement (ADR-0003 / OQ1 ruling) — fires ONCE
+        # after the shipped retry ladder exhausts (EmptyLLMResponseError
+        # in retry scope at llm_error_classifier.py:907/:916) and
+        # BEFORE the loud ERROR. Evidence window: empty AIMessages
+        # post-nudge in the turn window (the second empty-after-nudge
+        # is the trigger per §8.1 nudge-allowance synthesis). Tool
+        # results are RETAINED with ORIGINAL ids (D-1 explicit; P-7
+        # id-tail applies). L1-L13 preservation, especially L6 nudge
+        # HumanMessages (P-5 sentinel re-emit).
+        "empty_post_ladder": {
+            "description": (
+                "Empty (S1) post-ladder: continuous-empty after the "
+                "nudge, raising EmptyLLMResponseError until the shipped "
+                "retry ladder exhausts; PRE-TERMINAL placement "
+                "(ADR-0003); tool results retained; L1-L13 preserved"
+            ),
+            "evidence_window_selector": (
+                "_select_empty_post_ladder_evidence_window"
+            ),
+            "summary_prompt": "empty_post_ladder",
+            "retention": (
+                "hoisted-injected context + tool results with ORIGINAL "
+                "ids (D-1); post-nudge empty AIMessages removed; L6 "
+                "nudge HumanMessages re-emitted (P-5)"
+            ),
+            "post_repair_routing": "continue",
+        },
     }
 
     #: Per-class summarizer prompt fragments (the preset's
@@ -247,8 +355,13 @@ class SymptomRepairEngine:
     #: summarizer uses the shipped ``REPAIR_SUMMARIZATION_PROMPT`` template
     #: (lazy-imported from ``daemon.graph``) directly, so there is no
     #: per-class prompt drift for the converted class.
+    #: The ghost/truncated/empty_post_ladder rows added in phase 2 are likewise placeholder keys, not symbols — per-class doc text lives inline in ``_build_repair_doc``.
+    # NOT YET WIRED (phase 2): nothing reads SUMMARY_PROMPTS
     SUMMARY_PROMPTS: ClassVar[dict[str, str]] = {
         "loop": "_loop_prompt",
+        "ghost": "_ghost_prompt",
+        "truncated": "_truncated_prompt",
+        "empty_post_ladder": "_empty_post_ladder_prompt",
     }
 
     def __init__(self, timeout_seconds: int = DEFAULT_SUMMARIZATION_TIMEOUT_S) -> None:
@@ -411,6 +524,7 @@ class SymptomRepairEngine:
             repair_message_id=doc.id or "",
             surgery_prefix=prefix,
             budget_consumed=True,
+            boundary_human_id=_last_real_human_id(context.messages),
         )
 
     # ── preset: loop class ───────────────────────────────────────────
@@ -472,6 +586,117 @@ class SymptomRepairEngine:
             if getattr(m, "id", None) in removal_ids
         ]
         return removal_ids, folded_units
+
+    # ── preset: ghost class (B-1/B-2) ─────────────────────────────────
+
+    @staticmethod
+    def _select_ghost_evidence_window(
+        detection: Any,
+        messages: list[BaseMessage],
+    ) -> tuple[set[str], list[BaseMessage]]:
+        """Ghost preset evidence-window selector.
+
+        Evidence window: trailing ghost-promise AIMessages from the last
+        non-ghost boundary (no tool_calls; ``content.rstrip().endswith(':')``).
+        Mirrors the SHIPPED S5 trailing-degenerate walk shape
+        (the ghost helper on ``daemon.graph``).
+        The SELECTOR here owns the removal-set assembly: walk the
+        same trailing ghost window, collect each ghost AIMessage's id,
+        run the P-8 orphan sweep (a ghost without tool_calls never
+        issues ToolMessages, so this is degenerate-empty but kept for
+        symmetry with the loop path).
+
+        Returns:
+            ``(removal_ids, removed_ghosts)`` — ids to remove and the
+            removed AIMessage objects (for telemetry).
+
+        Detection is the raw ``GhostDetectionResult``-shape dataclass
+        carried on ``context.detection`` (duck-typed: ``ghost_messages``
+        list of trailing AIMessages; ``trailing_count`` int). The
+        detector walks on the graph.py side (per turn) so the engine
+        stays detector-agnostic.
+
+        The ``messages`` parameter is unused for this class (the
+        detection object carries the window); it is retained for the
+        uniform selector dispatch signature shared with the loop preset.
+        """
+        # Duck-typed extraction — the dataclass lives in graph.py and
+        # is built there. Lazy import keeps graph ↔ services cycle safe.
+        ghost_msgs = list(getattr(detection, "ghost_messages", []) or [])
+        removal_ids: set[str] = set()
+        for msg in ghost_msgs:
+            mid = getattr(msg, "id", None)
+            if mid:
+                removal_ids.add(mid)
+        return removal_ids, ghost_msgs
+
+    # ── preset: truncated class (C-1) ─────────────────────────────────
+
+    @staticmethod
+    def _select_truncated_evidence_window(
+        detection: Any,
+        messages: list[BaseMessage],
+    ) -> tuple[set[str], list[BaseMessage]]:
+        """Truncated preset evidence-window selector.
+
+        Evidence window: the SINGLE truncated AIMessage
+        (``finish_reason=length``). The detection object carries the
+        AIMessage object (``truncated_message``) so the original text
+        survives verbatim into ``excerpt=`` on the repair doc (OQ3).
+
+        Returns:
+            ``(removal_ids, [truncated_ai])`` — one id to remove and
+            the truncated AIMessage (preserved for ``excerpt=``).
+
+        The pre-terminal placement (ADR-0003) means this runs AFTER
+        the retry ladder exhausts and BEFORE the loud ERROR; the
+        truncated AIMessage NEVER made it past ``validate_llm_response``
+        (:file:`daemon/response_validation.py:452-457`) so the LLM-bound
+        list does NOT contain it. The retained tail here is therefore
+        the FULL pre-LLM-invocation history (no walk needed; single-
+        message evidence window is by construction N=1).
+        """
+        truncated_ai = getattr(detection, "truncated_message", None)
+        removal_ids: set[str] = set()
+        removed: list[BaseMessage] = []
+        if truncated_ai is not None:
+            mid = getattr(truncated_ai, "id", None)
+            if mid:
+                removal_ids.add(mid)
+            removed.append(truncated_ai)
+        return removal_ids, removed
+
+    # ── preset: empty (S1) post-ladder class (D-1) ────────────────────
+
+    @staticmethod
+    def _select_empty_post_ladder_evidence_window(
+        detection: Any,
+        messages: list[BaseMessage],
+    ) -> tuple[set[str], list[BaseMessage]]:
+        """Empty post-ladder preset evidence-window selector.
+
+        Evidence window: empty AIMessages post-nudge in the turn
+        window (D-1). The detection object carries them in
+        ``empty_messages`` (duck-typed — built on the graph.py side).
+        Tool results are RETAINED with ORIGINAL ids (D-1 explicit); the
+        L6 nudge HumanMessages are RE-EMITTED at the head (P-5 sentinel
+        re-emit, mirrors the loop preset's hoist decision).
+
+        Returns:
+            ``(removal_ids, removed_empties)`` — ids to remove and the
+            empty AIMessage objects (for telemetry).
+
+        The ``messages`` parameter is unused for this class (the
+        detection object carries the window); it is retained for the
+        uniform selector dispatch signature shared with the loop preset.
+        """
+        empty_msgs = list(getattr(detection, "empty_messages", []) or [])
+        removal_ids: set[str] = set()
+        for msg in empty_msgs:
+            mid = getattr(msg, "id", None)
+            if mid:
+                removal_ids.add(mid)
+        return removal_ids, empty_msgs
 
     # ── summarizer (C-1/C-2/C-4) ─────────────────────────────────────
 
@@ -645,29 +870,137 @@ class SymptomRepairEngine:
           repetition count) with the LLM summary clearly LABELED as
           generated — the doc must not become a new hallucination vector
           (risk R4, DQ2-e).
+
+        Per-class doc variants:
+
+        * ``loop`` — verbatim tool name/args/repetition count
+          (P-1/P-7/P-8 partition, the canonical loop shape).
+        * ``ghost`` — verbatim ``content`` excerpt of the trailing
+          ghost-promise AIMessages (cap-bound, last <= cap fragments);
+          repair doc tells the LLM "what was attempted, trailing
+          colon-promise removed".
+        * ``truncated`` — verbatim ``excerpt=<original truncated text>``
+          field per OQ3 (architect call). The original partial content
+          is preserved so repair does not silently drop user-facing
+          text. Excerpt round-trips through checkpoint serialize/
+          deserialize byte-exact (T-11 / C-7 invariant).
+        * ``empty_post_ladder`` — count of empty AIMessages removed +
+          "tool results retained" directive; no verbatim text excerpts
+          (empties carry nothing — D-1 explicit).
         """
         from .context_messages import CONTEXT_KIND_SYMPTOM_REPAIR  # lazy
 
         detection = context.detection
         seq = self._next_doc_seq(context.messages, context.instance_id)
         doc_id = f"{REPAIR_DOC_ID_PREFIX}{context.instance_id}-{seq}"
-        content = (
-            f"[SYMPTOM REPAIR — {symptom_class}]\n\n"
-            f"The conversation history was repaired: repeated identical "
-            f"tool-call units were removed from context. The oldest "
-            f"occurrence (evidence unit) is retained below.\n\n"
-            f"Removed evidence (verbatim excerpts):\n"
-            f"- tool: {getattr(detection, 'tool_name', 'unknown')}\n"
-            f"- args (verbatim JSON): "
-            f"{json.dumps(getattr(detection, 'tool_args', {}), sort_keys=True)[:MAX_VERBATIM_ARGS_CHARS]}\n"
-            f"- consecutive repetitions removed: "
-            f"{max(int(getattr(detection, 'repetition_count', 1)) - 1, 0)}\n\n"
-            f"Attempted-work summary (LLM-generated — verify against the "
-            f"retained evidence before relying on it):\n"
-            f"{summary}\n\n"
-            f"Continue the task with a DIFFERENT approach; do not repeat "
-            f"the removed calls."
-        )
+
+        if symptom_class == "loop":
+            content = (
+                f"[SYMPTOM REPAIR — loop]\n\n"
+                f"The conversation history was repaired: repeated identical "
+                f"tool-call units were removed from context. The oldest "
+                f"occurrence (evidence unit) is retained below.\n\n"
+                f"Removed evidence (verbatim excerpts):\n"
+                f"- tool: {getattr(detection, 'tool_name', 'unknown')}\n"
+                f"- args (verbatim JSON): "
+                f"{json.dumps(getattr(detection, 'tool_args', {}), sort_keys=True)[:MAX_VERBATIM_ARGS_CHARS]}\n"
+                f"- consecutive repetitions removed: "
+                f"{max(int(getattr(detection, 'repetition_count', 1)) - 1, 0)}\n\n"
+                f"Attempted-work summary (LLM-generated — verify against the "
+                f"retained evidence before relying on it):\n"
+                f"{summary}\n\n"
+                f"Continue the task with a DIFFERENT approach; do not repeat "
+                f"the removed calls."
+            )
+        elif symptom_class == "ghost":
+            ghost_msgs = list(getattr(detection, "ghost_messages", []) or [])
+            trailing_count = int(getattr(detection, "trailing_count", 0))
+            excerpt_lines = []
+            for msg in ghost_msgs:
+                c = getattr(msg, "content", "") or ""
+                if isinstance(c, str):
+                    excerpt_lines.append(
+                        f"  - {c.rstrip()[:MAX_VERBATIM_ARGS_CHARS]}"
+                    )
+            excerpts_block = "\n".join(excerpt_lines) if excerpt_lines else (
+                "  - (no verbatim ghost fragments — detector carried "
+                "no ghost_messages list)"
+            )
+            content = (
+                f"[SYMPTOM REPAIR — ghost]\n\n"
+                f"The conversation history was repaired: trailing ghost-"
+                f"promise AIMessages (text ending with ':', no tool_call) "
+                f"were removed from context after the cap "
+                f"({trailing_count} trailing ghost re-invokes detected).\n\n"
+                f"Removed evidence (verbatim excerpts, in removal order, "
+                f"newest first):\n{excerpts_block}\n\n"
+                f"Attempted-work summary (LLM-generated — verify against the "
+                f"retained evidence before relying on it):\n"
+                f"{summary}\n\n"
+                f"Continue the task by EMITTING A TOOL_CALL on the next turn "
+                f"(or producing non-ghost final content). Do NOT emit text "
+                f"ending with ':' without a paired tool_call — that is the "
+                f"ghost-promise signature the detector caught."
+            )
+        elif symptom_class == "truncated":
+            # OQ3: verbatim ``excerpt=<original truncated text>`` is
+            # the partial-content preservation the architect ruled in.
+            # The excerpt is the AIMessage.content rendered VERBATIM
+            # (no truncation by this layer — the engine carries it
+            # full so the doc faithfully records what the LLM emitted
+            # before the token cutoff). Round-trip invariant (T-11):
+            # ``excerpt=`` survives checkpoint serialize/deserialize
+            # byte-exact (the doc is a SystemMessage; AIMessage.content
+            # is already a string; string round-trip is identity).
+            truncated_ai = getattr(detection, "truncated_message", None)
+            excerpt = ""
+            if truncated_ai is not None:
+                c = getattr(truncated_ai, "content", "")
+                if isinstance(c, str):
+                    excerpt = c
+                elif c is not None:
+                    excerpt = str(c)
+            content = (
+                f"[SYMPTOM REPAIR — truncated]\n\n"
+                f"The LLM response was truncated at the token limit "
+                f"(finish_reason=length). The partial completion is "
+                f"preserved verbatim below; the truncated AIMessage was "
+                f"removed from history.\n\n"
+                f"excerpt={excerpt}\n\n"
+                f"Attempted-work summary (LLM-generated — verify against the "
+                f"excerpt before relying on it):\n"
+                f"{summary}\n\n"
+                f"Continue the task by emitting a SHORTER response. The "
+                f"truncation was a length-limit, not a hallucination; the "
+                f"same approach with a tighter payload should succeed."
+            )
+        elif symptom_class == "empty_post_ladder":
+            empty_msgs = list(getattr(detection, "empty_messages", []) or [])
+            content = (
+                f"[SYMPTOM REPAIR — empty_post_ladder]\n\n"
+                f"The conversation history was repaired: empty AIMessages "
+                f"(empty-as-entire-answer) were removed from context after "
+                f"the shipped retry ladder exhausted. Tool results in the "
+                f"turn window are retained verbatim with ORIGINAL ids "
+                f"(per D-1 — tool calls/results survive).\n\n"
+                f"Removed evidence (count): {len(empty_msgs)} empty "
+                f"AIMessage(s)\n\n"
+                f"Attempted-work summary (LLM-generated — verify against the "
+                f"retained tool results before relying on it):\n"
+                f"{summary}\n\n"
+                f"Continue the task by producing a non-empty response "
+                f"(final answer or a tool_call). Tool results in the "
+                f"retained history are intact; the next LLM call sees the "
+                f"prior work."
+            )
+        else:
+            # Fallback: same shape as loop (defensive — unknown class
+            # is caught earlier by ``preset_for`` via ValueError).
+            content = (
+                f"[SYMPTOM REPAIR — {symptom_class}]\n\n"
+                f"{summary}"
+            )
+
         return SystemMessage(
             content=content,
             id=doc_id,

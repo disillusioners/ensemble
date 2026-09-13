@@ -111,12 +111,18 @@ class TestEngineSkeleton:
 
     def test_unknown_class_raises_loud(self):
         with pytest.raises(ValueError, match="symptom class"):
-            SymptomRepairEngine().preset_for("ghost")
+            SymptomRepairEngine().preset_for("not_a_real_class_xyz")
 
     def test_no_phase2_surfaces_preimplemented(self):
-        # Phase-1 enrollment is the LOOP class ONLY (ADR-0002) — no
-        # ghost/truncated/S1 presets may be pre-implemented.
-        assert sorted(SymptomRepairEngine.PRESETS) == ["loop"]
+        # Phase-1 enrollment is the LOOP class ONLY (ADR-0002); phase-2
+        # adds ghost / truncated / empty_post_ladder (USER AMENDMENT
+        # 2026-09-13). After phase-2 enrollment, all four classes are
+        # present and the gate-style "no fake classes are preimplemented"
+        # invariant is checked by ``test_unknown_class_raises_loud``
+        # above (``not_a_real_class_xyz`` is rejected loud).
+        assert sorted(SymptomRepairEngine.PRESETS) == sorted(
+            ["loop", "ghost", "truncated", "empty_post_ladder"]
+        )
 
 
 # ---------------------------------------------------------------------------
