@@ -580,6 +580,94 @@ class TestD1GhostBudgetSurvivesReentry:
             finally:
                 await conn.close()
 
+    async def test_genuine_reset_clears_marker_and_budget_stays_reset(
+        self, monkeypatch, caplog, tmp_path
+    ):
+        """COVERAGE-GAP PIN (re-gate mutation-ii, 2026-09-14): a genuine
+        new-turn boundary must CLEAR ``last_repair_boundary_human_id``
+        (the clear rides the SAME node return as the budget reset) —
+        the stale-marker mutation (marker never cleared on genuine
+        reset) passed the ENTIRE ladder family unnoticed. Also pins the
+        repair STAMP itself: after a durable ghost repair the marker
+        carries the id of the boundary human the surgery retained."""
+        latch = TurnRepairLatch()
+        provider = _ScriptedProvider(
+            [
+                # Turn 1: storm → durable ghost repair (marker stamped
+                # with the retained boundary human "h1") → final answer.
+                _ghost_ai("Step 1:", "g1"),
+                _ghost_ai("Step 2:", "g2"),
+                _ghost_ai("Step 3:", "g3"),
+                _final_answer("final-t1"),
+                # Turn 2: a genuinely NEW human episode, CLEAN turn —
+                # no symptom, no repair, so the marker must stay CLEAR
+                # (reset-cleared at entry, never re-stamped).
+                _final_answer("final-t2"),
+            ]
+        )
+
+        def _compile(g):
+            agent_node, ghost_node = _make_ghost_pair(provider, latch)
+            g.add_node("agent", agent_node)
+            g.add_node("agent_repair_ghost", ghost_node)
+
+        with _RealLangGraph():
+            compiled, cfg, conn, first_input = await _run_ghost_graph(
+                _compile,
+                tmp_path,
+                "d1-marker-clear",
+                {
+                    "messages": [HumanMessage(content="do thing", id="h1")],
+                    "repair_budget_used": 0,
+                    "pending_repair_ghost_terminal": None,
+                    "last_repair_boundary_human_id": "",
+                },
+            )
+            try:
+                with caplog.at_level(logging.INFO):
+                    await compiled.ainvoke(first_input, cfg)
+                st = await compiled.aget_state(cfg)
+                values = st.values
+
+                # Turn 1: the durable repair STAMPED the marker with the
+                # boundary human its surgery retained.
+                assert len(_doc_ids(values)) == 1
+                assert (
+                    values["last_repair_boundary_human_id"] == "h1"
+                ), values.get("last_repair_boundary_human_id")
+                assert values.get("repair_budget_used") == 1
+
+                # ── Turn 2: genuinely new human (different id).
+                with caplog.at_level(logging.INFO):
+                    await compiled.ainvoke(
+                        {
+                            "messages": [
+                                HumanMessage(content="again", id="h2")
+                            ]
+                        },
+                        cfg,
+                    )
+                st = await compiled.aget_state(cfg)
+                values = st.values
+
+                # Genuine reset fired (budget 1→0) AND the marker clear
+                # rode the SAME node return — the marker must be EMPTY
+                # after a clean new turn (never re-stamped: no repair).
+                reset_lines = [
+                    ln
+                    for ln in _symptom_lines(caplog)
+                    if "budget reset" in ln
+                ]
+                assert len(reset_lines) == 1, reset_lines
+                assert "(was 1)" in reset_lines[0]
+                assert values.get("repair_budget_used") == 0
+                assert (
+                    values["last_repair_boundary_human_id"] == ""
+                ), values.get("last_repair_boundary_human_id")
+                assert len(_doc_ids(values)) == 1  # no turn-2 repair
+            finally:
+                await conn.close()
+
 
 # ---------------------------------------------------------------------------
 # B-4 — per-class-per-turn latch (P-9 composition preserved)
