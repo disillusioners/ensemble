@@ -855,7 +855,8 @@ class TestMasterKillSwitchByteIdentical:
       an OFF soak).
     """
 
-    def test_master_off_ghost_returns_none_when_called(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_master_off_ghost_returns_none_when_called(self, monkeypatch):
         """With master OFF, ``_maybe_ghost_repair`` returns ``None``
         regardless of trailing-ghost count — the caller (the
         ``agent_repair_ghost`` node) falls through to the bare
@@ -872,23 +873,18 @@ class TestMasterKillSwitchByteIdentical:
             _ghost_ai("Step 3:", "g3"),
         ]
 
-        async def _run():
-            return await _maybe_ghost_repair(
-                messages=msgs,
-                full_messages=msgs,
-                instance_id="iid-1",
-                instance_short="iid-1"[:8],
-                config=None,
-                injected_msg=None,
-                system_prompt="sp",
-                llm_config={"model": "m"},
-                durable_budget_used=0,
-                turn_id="t1",
-            )
-
-        import asyncio
-
-        outcome = asyncio.get_event_loop().run_until_complete(_run())
+        outcome = await _maybe_ghost_repair(
+            messages=msgs,
+            full_messages=msgs,
+            instance_id="iid-1",
+            instance_short="iid-1"[:8],
+            config=None,
+            injected_msg=None,
+            system_prompt="sp",
+            llm_config={"model": "m"},
+            durable_budget_used=0,
+            turn_id="t1",
+        )
         assert outcome is None
 
     def test_master_off_ghost_routing_stays_bare_agent(self, monkeypatch):
