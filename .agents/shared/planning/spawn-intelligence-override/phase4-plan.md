@@ -27,6 +27,7 @@ Replace the `# FUTURE` extensibility seam at `daemon/services/long_tool_nudge.py
 |------|----------------|--------|
 | `daemon/services/long_tool_nudge.py` | `_build_long_tool_notice` function at L796-855; the rec list at L831-842; the `# FUTURE` placeholder at L843-849; the footer at L850-853. | Replace the placeholder with the real rec 4. |
 | `tests/unit/test_long_tool_nudge.py` | `TestU11NoticeStructure.test_five_sections_and_no_pause_resume_advice` at L537-551 (the specific pin at L546 is the target). The length test at L553-556. | Update the `# FUTURE` pin to the three new assertions; verify length threshold. |
+| `tests/integration/test_long_tool_nudge_e2e.py` | The e2e notice-content pin `assert "# FUTURE" in content` at :219. | **B1 (council review):** the e2e file pins the assembled notice through the real wiring — its `# FUTURE` assertion breaks the moment the seam is populated. Replace with the populated-seam assertions (task 5d) in the SAME commit as tasks 4-5c. |
 
 **Do NOT touch:** the rest of `daemon/services/long_tool_nudge.py` (the scanner, the kill-switch plumbing, the threshold resolver, the eligible-instance detector); `daemon/graph.py:8492-8506` (`wrapped_tools_node`); any file under `daemon/services/llm_load_balancer.py`; the `ENSEMBLE_LONG_TOOL_NUDGE_*` env-var family.
 
@@ -52,6 +53,7 @@ Replace the `# FUTURE` extensibility seam at `daemon/services/long_tool_nudge.py
 | 5a.iii | `assert notice.count("Re-spawn with high intelligence") == 1  # exactly one rec 4 (no double-implementation)` | 5 | Pinned. |
 | 5b | …confirm `(d)` is still labeled in the comment block — change `"# (d) extensibility seam"` to `"# (d) rec 4 re-spawn with high intelligence"`. | 5a | Comment updated. |
 | 5c | …confirm the OTHER 5-section pins are UNCHANGED: `# (a) header`, `# (b) why`, `# (c) rec 1`, `# (c) rec 2`, `# (e) footer`. | 5 | `git diff -U0` shows ONLY L546's 1-line replacement (+/-) AND the comment update at the end. |
+| 5d | …e2e parity (B1): in `tests/integration/test_long_tool_nudge_e2e.py`, REPLACE `assert "# FUTURE" in content` at :219 with `assert "model_tier" in content` AND `assert content.count("Re-spawn with high intelligence") == 1`. Lands in the SAME commit as tasks 4-5c (R4.1 / Gate 1 cover all three files). | 5c | e2e pin updated; old `# FUTURE` assertion removed; e2e file green. |
 | 6 | Verify the length test at `tests/unit/test_long_tool_nudge.py:553-556`. Read the threshold, then mentally add ~250 chars for rec 4 to the wedge notice. Decide whether the existing 1.5x threshold passes or needs loosening. | Task 4 | Threshold unchanged or justified loosening documented in the commit. |
 | 6a | …if the threshold passes (likely): no test change. | 6 | Add `# no threshold change needed` comment to the commit message body. |
 | 6b | …if it fails: bump the multiplier by 0.1 (e.g., 1.5x → 1.6x) AND add a comment explaining why. NEVER loosen by more than 2x of the original. | 6 | Threshold bumped; comment in commit. |
@@ -59,7 +61,7 @@ Replace the `# FUTURE` extensibility seam at `daemon/services/long_tool_nudge.py
 | 7a | …`TestU11NoticeStructure.test_five_sections_and_no_pause_resume_advice` is GREEN with the new pins. | 7 | Green. |
 | 7b | …`test_length_within_1_5x_wedge_notice` is GREEN (or GREEN post-relaxation). | 7 | Green. |
 | 7c | …ALL OTHER `TestU11*` and `TestU12*`-`TestU17*` tests are UNCHANGED-GREEN. | 7 | All green; no other regressions. |
-| 8 | Non-regression sweep: `uv run python -m pytest tests/unit -q -k "long_tool_nudge or spawn_intelligence"` to confirm Phase 1 + 4 are co-compatible. | Tasks 4-7 | All green. |
+| 8 | Non-regression sweep: `uv run python -m pytest tests/unit -q -k "long_tool_nudge or spawn_intelligence"` PLUS the e2e file: `uv run python -m pytest tests/integration/test_long_tool_nudge_e2e.py -q` (B1) — confirms Phase 1 + 4 are co-compatible AND the e2e wiring sees the populated seam. | Tasks 4-7 | All green, including the e2e file. |
 
 ## Test Plan
 
@@ -105,7 +107,7 @@ uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/unit/services/t
 
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|------|--------|------------|------------|
-| R4.1 | Test pin update and prod code change land in different commits (split) | High | Medium | Task 5 is in the SAME commit as Task 4. The acceptance gate explicitly requires a single `git commit` covering both file edits. |
+| R4.1 | Test pin update and prod code change land in different commits (split) | High | Medium | Task 5 is in the SAME commit as Task 4. The acceptance gate explicitly requires a single `git commit` covering both file edits. **B1:** the e2e pin (`tests/integration/test_long_tool_nudge_e2e.py` :219) is ALSO same-commit — Gate 1 covers all THREE files. |
 | R4.2 | Wording drift from `decisions.md` D4 verbatim spec | Low | Low | Task 4a pins the exact wording; the test pin `assert notice.count("Re-spawn with high intelligence") == 1` ensures the phrase is exact. |
 | R4.3 | Length test fails because 1.5x is too tight | Medium | Low | Task 6 forces a pre-emptive length check; relaxation is minor (≤2x of original) and documented. |
 | R4.4 | Rec 4 accidentally added as a 6th entry that still keeps the `# FUTURE` placeholder | Medium | Medium | Task 4 explicitly says: REPLACE the placeholder. Pin `assert notice.count("Re-spawn with high intelligence") == 1` enforces singleton. |
@@ -117,9 +119,9 @@ uv run python -m pytest tests/unit/test_long_tool_nudge.py tests/unit/services/t
 
 This phase is DONE when:
 
-1. `git log --oneline -1` shows the NEW commit contains BOTH `daemon/services/long_tool_nudge.py` AND `tests/unit/test_long_tool_nudge.py` in the same commit (verify with `git show --stat HEAD`).
-2. `git diff HEAD~1 -- daemon/services/long_tool_nudge.py` shows the change is STRICTLY in `lines: list[str] = [` block (within `_build_long_tool_notice`) — zero changes to the function signature, docstring, scanner class, or threshold resolver.
-3. `git diff HEAD~1 -- tests/unit/test_long_tool_nudge.py` shows the change is STRICTLY in `TestU11NoticeStructure.test_five_sections_and_no_pause_resume_advice` — zero changes to other test methods.
+1. `git log --oneline -1` shows the NEW commit contains ALL THREE of `daemon/services/long_tool_nudge.py`, `tests/unit/test_long_tool_nudge.py`, AND `tests/integration/test_long_tool_nudge_e2e.py` in the same commit (B1; verify with `git show --stat HEAD`).
+2. `git diff HEAD~1 -- daemon/services/long_tool_nudge.py` shows the change is STRICTLY in `lines: list[str] = [` block (within `_build_long_tool_notice`) — zero changes to the function signature, docstring, scanner class, or threshold resolver. AND `git diff HEAD~1 -- tests/integration/test_long_tool_nudge_e2e.py` shows ONLY the :219 assertion replacement (B1).
+3. `git diff HEAD~1 -- tests/unit/test_long_tool_nudge.py` shows the change is STRICTLY in `TestU11NoticeStructure.test_five_sections_and_no_pause_resume_advice` — zero changes to other test methods; the e2e file's diff is strictly the :219 assertion replacement (B1).
 4. `uv run python -m pytest tests/unit/test_long_tool_nudge.py -v` is 100% green (every `TestU11*` / `TestU12*` ... `TestU17*`).
 5. `grep -n "Re-spawn with high intelligence" daemon/services/long_tool_nudge.py` returns exactly 1 line.
 6. `grep -n "# FUTURE" daemon/services/long_tool_nudge.py` returns 0 lines (the placeholder is removed).

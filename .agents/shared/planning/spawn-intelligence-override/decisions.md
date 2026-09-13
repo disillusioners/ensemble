@@ -461,3 +461,12 @@ The plan-overview.md Non-Goals section is the canonical list. Decisions-level su
 - **Per spawn:** the loud `ValueError` stays as designed (D2) — the parent-facing contract; verbatim message adopted as phase2-plan.md task 4b.i (A2 / §2.1).
 
 Kill-switch semantics follow: setting a NON-ALLOWED model name (NOT an empty string) = soft-disable — boot WARN + every `model_tier="high"` call raises loud (empty/whitespace env = UNSET = default `"agentic"`; see A3/A4 and the A10 note under D11).
+
+## D14 — Tier-Path Model-Visibility Marker in the Tool Success Return
+
+**Owner-ratified 2026-09-14** (council review follow-up; recorded here because decisions.md is the ratification ledger).
+
+**Decision:** the tier-path SUCCESS return of the `spawn_instance` tool gains a one-line model-visibility marker — `model='agentic' (model_tier='high')` — so parents must SEE what model the child actually got (mirrors the existing fallback-notice pattern).
+
+- Composite return spec (implementation detail in phase2-plan.md task 4e; composition site `daemon/tools/instance.py:1924-1928`, relative to `fallback_notice` at `:1908-1910`): (1) UUID prefix preserved — `Successfully spawned instance: <uuid>` byte-identical incl. `child_count_line`; (2) `[NOTE]` supersede line only on the both-params path (D12); (3) visibility line `model='<resolved>' (model_tier='high')` on EVERY tier-path success; (4) legacy `fallback_notice` suppressed on the tier path (guarded on `model_tier is None`).
+- Pins: Pin X asserts startswith-id + `[NOTE]` substring + visibility line + persisted override = tier-mapped model (phase2-plan.md task 7g).
