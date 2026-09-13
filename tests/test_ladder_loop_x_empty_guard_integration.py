@@ -563,3 +563,179 @@ class TestJointLoopXEmptyGuard:
                     await conn.close()
         finally:
             _reset_symptom_repair_ladder_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_ladder_off_guard_on_pure_empty_storm(
+        self, monkeypatch, caplog, tmp_path
+    ):
+        """Fourth 2×2 arm: loop-ladder OFF × empty-guard ON.
+
+        The loop rung is DISABLED (master kill-switch=0) so the durable
+        budget MUST stay at 0, the shipped filter MUST NOT rewrite the
+        channel, and the empty-guard cap machinery is the SOLE repair
+        surface. With the guard ON, the S5 cap fires on the degenerate
+        streak, the cap fall-through still emits the nudge, and the
+        final answer reaches the channel — independent of the loop rung
+        (P-9 cross-budget contamination does not appear).
+
+        This is the symmetry of test_guard_off_ladder_on_still_repairs_bounded
+        (Loop ON × Empty OFF). Together they prove the two systems stay
+        decoupled: the loop rung owns its own budget + repair doc surface,
+        and the S5 degenerate-cap owns its own cap-fall-through → nudge
+        surface. Neither lane depends on the other's flag.
+        """
+        import daemon.response_validation as rv
+
+        # Loop ladder: OFF (master kill-switch = 0).
+        monkeypatch.setenv("ENSEMBLE_SYMPTOM_REPAIR_LADDER", "0")
+        monkeypatch.setenv("ENSEMBLE_REPAIR_LOOP_DURABLE", "0")
+        _reset_symptom_repair_ladder_for_tests()
+        # Empty-guard: ON (default — explicit reset for determinism).
+        rv._reset_empty_guard_config_for_tests()
+        try:
+            with _RealLangGraph():
+                import aiosqlite
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+                from langgraph.graph import END, START, MessagesState, StateGraph
+
+                # Defensive stub — the rung is OFF so this should never
+                # fire, but keeps the test future-proof if a future
+                # refactor routes degenerate repairs through the engine.
+                monkeypatch.setattr(
+                    SymptomRepairEngine,
+                    "_summarize",
+                    staticmethod(ok_summarizer),
+                )
+
+                # Pure degenerate streak: NO loop responses, so the
+                # shipped LoopRepairer / durable rung never engages.
+                # Only the S5 cap machinery can fire.
+                script = [
+                    _degenerate_response(0),
+                    _degenerate_response(1),
+                    _degenerate_response(2),
+                    # Cap fall-through → nudge/END. With the ladder OFF
+                    # there is no next rung to re-invoke, so the turn
+                    # terminates at the cap (bounded burn). No 4th LLM
+                    # call is consumed.
+                ]
+                provider = _ScriptedProvider(script)
+                slot = _StubLoopBreakerSlot()
+                agent_node = _make_agent_node(provider, slot)
+
+                from langgraph.graph import MessagesState
+
+                class _JointState(MessagesState):
+                    repair_budget_used: int
+
+                g = StateGraph(_JointState)
+                g.add_node("agent", agent_node)
+                g.add_node("tools", _tools_node)
+                g.add_node("nudge", nudge_node)
+                g.add_edge(START, "agent")
+                g.add_conditional_edges(
+                    "agent",
+                    should_continue,
+                    {
+                        "tools": "tools",
+                        "nudge": "nudge",
+                        "agent": "agent",
+                        END: END,
+                    },
+                )
+                g.add_edge("tools", "agent")
+                g.add_edge("nudge", "agent")
+
+                db_path = tmp_path / "joint_ladder_off_guard_on.db"
+                conn = await aiosqlite.connect(str(db_path))
+                saver = AsyncSqliteSaver(conn)
+                await saver.setup()
+                try:
+                    compiled = g.compile(checkpointer=saver)
+                    cfg = {
+                        "configurable": {
+                            "thread_id": "joint-ladder-off-guard-on"
+                        },
+                        "recursion_limit": 60,
+                    }
+                    with caplog.at_level(logging.INFO):
+                        await compiled.ainvoke(
+                            {
+                                "messages": [
+                                    HumanMessage(
+                                        content="run the empty task", id="h1"
+                                    )
+                                ],
+                                "repair_budget_used": 0,
+                            },
+                            cfg,
+                        )
+                    st = await compiled.aget_state(cfg)
+                    values = st.values
+                    final_ids = [
+                        getattr(m, "id", None) for m in values["messages"]
+                    ]
+
+                    # (i) Loop ladder OFF ⇒ durable budget MUST stay 0.
+                    # The repair-budget channel is owned by the ladder;
+                    # the empty-guard lane MUST NOT touch it (P-9).
+                    assert values.get("repair_budget_used", 0) == 0
+
+                    # (ii) Loop rung does NOT fire ⇒ slot.record_calls
+                    # is empty, no repair doc id appears in the channel.
+                    assert slot.record_calls == []
+                    assert not any(
+                        str(i).startswith(REPAIR_DOC_ID_PREFIX)
+                        for i in final_ids
+                    ), (
+                        "ladder OFF ⇒ no repair doc; got ids: "
+                        f"{[i for i in final_ids if str(i).startswith(REPAIR_DOC_ID_PREFIX)]!r}"
+                    )
+
+                    # (iii) Empty-guard ON ⇒ S5 cap fires on the
+                    # degenerate streak. The cap warning is the proof.
+                    cap_warns = [
+                        r.getMessage()
+                        for r in caplog.records
+                        if "degenerate re-invoke cap hit" in r.getMessage()
+                    ]
+                    assert cap_warns != [], (
+                        "empty-guard ON ⇒ S5 cap warning MUST fire on the "
+                        f"degenerate streak; got {cap_warns!r}"
+                    )
+
+                    # (iv) Provider burn bounded — exactly 3 LLM calls
+                    # consumed by the cap. The cap fall-through is the
+                    # only repair surface in this arm; with the ladder
+                    # OFF there is no next rung, so the turn terminates
+                    # at the cap (no unbounded run, no script exhaustion).
+                    assert len(provider.calls) == 3
+
+                    # (v) The 3 degenerate responses are retained verbatim
+                    # in the channel (no surgery — ladder OFF).
+                    for deg_id in ("deg-0", "deg-1", "deg-2"):
+                        assert deg_id in final_ids, (
+                            f"ladder OFF ⇒ degenerate response {deg_id} "
+                            f"MUST be retained verbatim; final_ids={final_ids!r}"
+                        )
+
+                    # (vi) [SYMPTOM] telemetry shows NO loop class (the
+                    # loop rung is OFF — partition-by-shape). S5 owns
+                    # its own [LLM-EMPTY] lane, so we do NOT expect any
+                    # SYMPTOM class=loop entry either.
+                    symptom_lines = [
+                        r.getMessage()
+                        for r in caplog.records
+                        if "[SYMPTOM]" in r.getMessage()
+                    ]
+                    assert not any(
+                        "class=loop" in l for l in symptom_lines
+                    ), (
+                        f"ladder OFF ⇒ no SYMPTOM class=loop telemetry; "
+                        f"got {symptom_lines!r}"
+                    )
+                finally:
+                    await conn.close()
+        finally:
+            _reset_symptom_repair_ladder_for_tests()
+            rv._reset_empty_guard_config_for_tests()
