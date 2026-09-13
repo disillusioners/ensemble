@@ -2007,6 +2007,31 @@ class LongToolCallNudgeConfig(BaseSettings):
         default=True,
         description="Enable the long-tool-call nudge scanner and delivery (kill-switch)",
     )
+    # Empty-string convention (ladder-family precedent — mirrors
+    # ``CompactionConfig._parse_proactive_enabled``). A bare
+    # ``LONG_TOOL_NUDGE_ENABLED=`` line in .env reaches pydantic as the
+    # empty string and would otherwise raise ``bool_parsing`` at boot
+    # (kill-switch crash on a typo-free config). Empty / whitespace-only
+    # → documented True default. ``"0"`` / ``"false"`` / ``"no"`` /
+    # ``"off"`` → False; ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"`` →
+    # True; ANY other non-empty string still raises (fail-loud
+    # contract preserved — 'maybe' / '2' / typos continue to crash
+    # boot loud per the kill-switch convention).
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _parse_long_tool_nudge_enabled(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return True  # documented default ON (restart-pending activation)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in _PROACTIVE_FALSE_BOOLS:
+                return False
+            if v in _PROACTIVE_TRUE_BOOLS:
+                return True
+            # Anything else passes through; pydantic raises with
+            # a clear type error so a typo is caught at startup.
+        return value
+
     interval_seconds: int = Field(
         default=60,
         ge=1,

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode  # noqa: F401 — kept importable: existing tests patch ``daemon.graph.ToolNode``
-from daemon.services.long_tool_nudge import (
-    LONG_TOOL_REGISTRY,
-    wrapped_tools_node,
-)
+# NOTE: ``daemon.services.long_tool_nudge`` is imported lazily inside
+# ``build_instance_graph`` (the single use site) to break the cold-start
+# cycle ``daemon.graph`` → ``daemon.services.__init__`` →
+# ``daemon.services.child_reports`` → ``..graph`` (partial). Realistic
+# daemon boots never trip it (they import ``daemon.config`` first), but
+# any cold entry point that touches ``daemon.graph`` first crashes. The
+# singleton + wrapper are still the canonical ones from
+# ``daemon.services.long_tool_nudge`` — only the resolution timing
+# moves. See ``tests/unit/test_long_tool_nudge_import_cycle.py``.
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import (
     BaseChatOpenAI,
@@ -7880,6 +7885,17 @@ def build_instance_graph(
         # disables the telemetry entirely.
         empty_streak_manager=manager,
     ))
+    # Function-local import (deferred from the graph.py module top to
+    # break the cold-start cycle through
+    # ``daemon.services.child_reports``). The singleton and wrapper
+    # are still the canonical ones from
+    # ``daemon.services.long_tool_nudge`` — only the resolution
+    # timing moves. By the time ``build_instance_graph`` runs, both
+    # modules are fully initialized.
+    from daemon.services.long_tool_nudge import (  # noqa: E402 — intentional function-local deferral
+        LONG_TOOL_REGISTRY,
+        wrapped_tools_node,
+    )
     graph.add_node(
         "tools",
         # Long-tool-nudge wrapper (long_tool_nudge.py): stamps every
