@@ -488,6 +488,18 @@ class LongToolNudgeRegistry:
                 parent_id = await lookup(child_id)
             else:
                 parent_id = await asyncio.to_thread(lookup, child_id)
+            # Defensive isawaitable post-check (this dispatch site).
+            # A ``functools.partial`` / wraps-decorated async attach or
+            # any sync wrapper that returns a coroutine evades
+            # ``iscoroutinefunction`` → the to_thread branch above
+            # returns the inner coroutine OBJECT unawaited (awaiting
+            # ``asyncio.to_thread`` only awaits the wrapper coroutine,
+            # not the inner value). ``parent_id`` would land as a
+            # coroutine truthy value, stamping ``parent_id=<coroutine>``
+            # — the exact wedge class fix-cycle 2 closed. Guard catches
+            # the awaitable on both branches and awaits it.
+            if inspect.isawaitable(parent_id):
+                parent_id = await parent_id
             return parent_id if parent_id else None
         except Exception:  # pragma: no cover - defensive
             logger.exception(

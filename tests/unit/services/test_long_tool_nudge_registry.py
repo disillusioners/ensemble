@@ -176,6 +176,110 @@ async def test_lookup_parent_for_awaits_async_callable(registry):
 
 
 @pytest.mark.asyncio
+async def test_lookup_parent_for_unwraps_partial_wrapped_async(registry):
+    """SURGICAL PIN: ``lookup_parent_for`` MUST yield a plain string
+    for a ``functools.partial``-wrapped async callable.
+
+    ``functools.partial`` over an ``async def`` historically evaded
+    ``inspect.iscoroutinefunction`` (Python <3.12), forcing the
+    pre-fix dispatch into the ``asyncio.to_thread`` branch which
+    returned the coroutine OBJECT unawaited (truthy → stamped as
+    ``parent_id=<coroutine>`` → re-introduces the EXACT critical
+    class fix-cycle 2 just closed: 0 nudges + RuntimeWarning spam).
+    On Python 3.13 ``iscoroutinefunction`` correctly detects the
+    partial so the async branch handles it; on older Pythons the
+    dispatch-site ``isawaitable`` guard catches the coroutine
+    object on both branches. Pin drives the partial-wrapped async
+    lookup end-to-end and asserts a plain STRING parent_id lands
+    in the stamp, regardless of which branch the dispatch takes.
+
+    See ``test_lookup_parent_for_unwraps_sync_wrapper_returning_coroutine``
+    for the actual red-green reproducer on Python 3.13 (a sync
+    wrapper that returns a coroutine — the shape that DOES evade
+    ``iscoroutinefunction`` on this version, since
+    ``functools.partial`` is correctly detected in Python 3.12+).
+    """
+    import functools
+
+    captured: list[str] = []
+
+    async def _async_lookup_impl(child_id: str, suffix: str) -> Optional[str]:
+        captured.append(child_id)
+        return f"partial-parent-{child_id}-{suffix}"
+
+    async_lookup_partial = functools.partial(_async_lookup_impl, suffix="X")
+    registry.attach_parent_lookup(async_lookup_partial)
+    result = await registry.lookup_parent_for("child-partial")
+    # Plain string, not a coroutine, not None — the bug signature.
+    assert isinstance(result, str), (
+        f"partial-wrapped async lookup MUST yield a plain string; "
+        f"got {type(result).__name__}: {result!r}"
+    )
+    assert result == "partial-parent-child-partial-X"
+    assert captured == ["child-partial"]
+
+
+@pytest.mark.asyncio
+async def test_lookup_parent_for_unwraps_sync_wrapper_returning_coroutine(
+    registry,
+):
+    """RED-GREEN REPRODUCER: a SYNC wrapper that returns a coroutine
+    MUST be awaited by ``lookup_parent_for``.
+
+    This is the actual bug shape that reproduces on Python 3.13.
+    ``iscoroutinefunction`` returns ``False`` for a plain ``def``
+    (regardless of what calling it yields), so the dispatch enters
+    the ``asyncio.to_thread`` branch. On the thread pool the wrapper
+    returns the inner coroutine object; ``asyncio.to_thread``'s
+    internal ``return await loop.run_in_executor(...)`` returns
+    THAT coroutine object — but only awaits the executor future,
+    NOT the inner coroutine. The OUTER ``await asyncio.to_thread(...)``
+    consumes the to_thread wrapper coroutine but receives the
+    INNER coroutine back unawaited. Without the ``isawaitable``
+    post-guard, ``parent_id`` is the coroutine object (truthy,
+    passes the ``if parent_id else None`` check) and the stamp
+    lands with ``parent_id=<coroutine>`` — exactly the wedge
+    class fix-cycle 2 closed.
+
+    The 3-line ``isawaitable`` guard catches the coroutine on both
+    dispatch branches and awaits it. Pin drives a sync wrapper
+    that returns a coroutine and asserts a plain STRING parent_id
+    lands in the stamp.
+    """
+    import inspect
+
+    captured: list[str] = []
+
+    async def _async_inner(child_id: str) -> str:
+        captured.append(child_id)
+        return f"sync-wrap-parent-{child_id}"
+
+    # SYNC function that returns the coroutine. ``iscoroutinefunction``
+    # is ``False``; calling it returns a coroutine. This is the
+    # shape that reproduces on Python 3.13 — ``functools.partial``
+    # does NOT reproduce here because 3.13 detects it.
+    def sync_wrapper_returning_coroutine(child_id: str):
+        return _async_inner(child_id)
+
+    # Sanity: the wrapper is NOT marked as a coroutine function
+    # (the dispatch will route it to the to_thread branch).
+    assert not inspect.iscoroutinefunction(sync_wrapper_returning_coroutine)
+
+    registry.attach_parent_lookup(sync_wrapper_returning_coroutine)
+    result = await registry.lookup_parent_for("child-sync-wrap")
+    # Plain string — not a coroutine, not None. The bug signature
+    # is ``result`` being a coroutine object that passes the
+    # truthy check.
+    assert isinstance(result, str), (
+        f"sync wrapper returning a coroutine MUST be awaited — a "
+        f"plain string is the only correct shape; got "
+        f"{type(result).__name__}: {result!r}"
+    )
+    assert result == "sync-wrap-parent-child-sync-wrap"
+    assert captured == ["child-sync-wrap"]
+
+
+@pytest.mark.asyncio
 async def test_lookup_parent_for_to_thread_sync_callable(registry):
     """Sync lookup stays on the ``asyncio.to_thread`` path.
 
@@ -196,3 +300,67 @@ async def test_lookup_parent_for_to_thread_sync_callable(registry):
     assert result == "sync-parent-child-sync"
     assert isinstance(result, str)
     assert sync_calls == ["child-sync"]
+
+
+def test_record_start_resolves_threshold_before_acquiring_lock():
+    """SURGICAL PIN: ``record_start`` threshold resolve MUST precede
+    ``async with self._lock`` acquisition (council fix-cycle 2 wedge fix).
+
+    The sync threshold resolver may run a slow PG read; running it
+    under the module singleton lock stalls every other instance's
+    stamp / clear / snapshot for the duration of the read. Cycle 2
+    moved the resolver to ``asyncio.to_thread`` BEFORE the lock —
+    the lock-held region only does in-memory dict ops. This test
+    pins that ordering structurally so a silent revert (move the
+    resolve back inside the lock) fails the suite without relying
+    on flaky lock-contention timing.
+
+    Mirrors the B6 structural-grep pattern in
+    ``test_long_tool_nudge_detector.py``: extract the function
+    source via ``inspect.getsource`` and assert both markers are
+    present (separately — so a rename of one or the other fails
+    LOUDLY, not silently passes), then assert the resolve marker
+    textually precedes the lock acquisition marker.
+    """
+    import inspect
+
+    from daemon.services.long_tool_nudge import LongToolNudgeRegistry
+
+    # Extract ``record_start`` source via the unbound method (the
+    # same path the B6 structural pin uses on the module). This
+    # is preferred over slicing the module source between
+    # ``async def record_start`` and the next ``def `` — the
+    # unbound-method extract tracks the def exactly and surfaces
+    # a clean IndentationError-equivalent if the function is
+    # renamed (the getsource call would still return the body
+    # but rename markers below would fail loudly).
+    record_start_src = inspect.getsource(LongToolNudgeRegistry.record_start)
+
+    # Both markers MUST be present. Asserting presence SEPARATELY
+    # means a future rename of one marker (e.g. ``to_thread`` →
+    # ``run_in_executor``) trips the pin loudly instead of
+    # silently passing because the relative-order check alone
+    # would not catch a missing one.
+    resolve_marker = "await asyncio.to_thread("
+    lock_marker = "async with self._lock:"
+    assert resolve_marker in record_start_src, (
+        f"record_start must pre-resolve the threshold via "
+        f"asyncio.to_thread (council fix-cycle 2 wedge fix); "
+        f"marker {resolve_marker!r} missing — did someone move "
+        f"the resolve back under the lock?"
+    )
+    assert lock_marker in record_start_src, (
+        f"record_start must acquire ``self._lock`` via "
+        f"``async with``; marker {lock_marker!r} missing — "
+        f"structural pin failed (lock acquisition renamed?)"
+    )
+
+    resolve_idx = record_start_src.index(resolve_marker)
+    lock_idx = record_start_src.index(lock_marker)
+    assert resolve_idx < lock_idx, (
+        f"threshold resolve must PRECEDE ``async with self._lock`` "
+        f"acquisition in record_start (council fix-cycle 2 wedge "
+        f"fix — a slow PG read under the lock stalls every other "
+        f"instance's stamp/clear/snapshot); got resolve at "
+        f"offset {resolve_idx} and lock at offset {lock_idx}"
+    )
