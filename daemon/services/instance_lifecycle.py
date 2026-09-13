@@ -1134,8 +1134,9 @@ def _resolve_intelligence_tier(
             boot snapshot (case preserved; the case-insensitive match
             is done here). ``None`` and empty tuple/list are both
             treated as "unrestricted" — pass-through with no WARN
-            (matches the existing ``_resolve_model_override`` empty
-            branch at ``instance_lifecycle.py:1263-1265``).
+            (matches the existing ``_resolve_model_override`` empty-
+            allowed branch — ``allowed_models`` empty → return
+            candidate unchanged; no validation, no warn).
         configured_model: The boot-snapshot value of
             ``manager.config.llm.spawn_intelligence_tier_high_model``
             (resolved once at boot from

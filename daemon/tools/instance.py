@@ -1949,7 +1949,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     f"silent-fallback path."
                 )
             # Success path — W7 canonical-name normalization against
-            # the allowlist (mirrors ``spawn_councilor`` at :2070-2078).
+            # the allowlist (mirrors the canonical-name normalization
+            # block in the ``spawn_councilor`` body — same
+            # case-insensitive lookup against ``allowed_models``).
             canonical_resolved = next(
                 (m for m in allowed_models_cfg if m.lower() == resolved.lower()),
                 resolved,

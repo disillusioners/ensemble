@@ -18,6 +18,11 @@ tests/test_spawn_intelligence_tier.py -v`` from the worktree root.
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
+from daemon.config import _resolve_intelligence_tier_high_model
 from daemon.services.instance_lifecycle import _resolve_intelligence_tier
 
 
@@ -267,3 +272,180 @@ def test_resolve_intelligence_tier_high_then_none_pure():
             f"resolver MUST NOT emit an error string on the None path "
             f"(allowed_models={allowed!r}); got: {err!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pin W1 — Boot-WARNING caplog pin (R-A6; phase1-plan task 2c)
+#
+# Pins the WARNING emission seam at daemon/config.py:3218-3224 so a future
+# refactor cannot accidentally:
+#   (a) swallow the WARNING (silent tier-mismatch on every boot),
+#   (b) promote it to a raise (a single misconfigured env var would
+#       brick the daemon at startup),
+#   (c) leak the WARNING on the clean-default path (boot noise),
+#   (d) break the empty=unset normalization contract that keeps the
+#       documented ``"agentic"`` default authoritative.
+#
+# Mirrors the ``tests/unit/test_injected_notes_absorb_boot_validation.py``
+# env-hygiene pattern (per-test monkeypatch + minimal tmp yaml) — see
+# that file for the broader precedent. The WARNING is emitted via
+# ``logger.warning(...)`` from the ``daemon.config`` logger, so
+# ``caplog.at_level(logging.WARNING, logger="daemon.config")`` is the
+# correct scope.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_FLAG = "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL"
+
+
+def _write_yaml(tmp_path, *, allowed_models: list[str]) -> str:
+    """Minimal loadable config.yaml — the boot WARNING only depends on
+    the resolved ``llm.allowed_models`` and the env var; the rest of
+    the config shape stays minimal so unrelated defaults stay inert."""
+    text = f"""
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "test-key"
+  model: "agentic"
+  allowed_models: {allowed_models!r}
+
+persistence:
+  db_path: "./data/instances.db"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(text)
+    return str(config_file)
+
+
+class TestLoadConfigBootWarning:
+    """Phase 5 follow-up: pin the R-A6 boot-WARNING contract end-to-end
+    via ``load_config`` + ``caplog``. Per-test env hygiene via
+    ``monkeypatch`` (matches ``test_llm_allowed_models_precedence`` /
+    ``test_injected_notes_absorb_boot_validation`` precedent)."""
+
+    def test_non_allowed_env_value_emits_one_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """(a) ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL="gpt-x"`` (NOT in
+        ``allowed_models``) → ``load_config`` emits exactly ONE
+        WARNING record. The record text carries (i) the env-var name,
+        (ii) the resolved value, (iii) the allowed list. ``load_config``
+        MUST NOT raise (R-A6: WARNING, not boot-fail)."""
+        monkeypatch.setenv(_FLAG, "gpt-x")
+        from daemon.config import load_config
+
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config(config_path=_write_yaml(tmp_path, allowed_models=["agentic", "coding"]))
+
+        # No raise + resolved value is installed as the boot snapshot.
+        assert cfg is not None
+        assert cfg.llm.spawn_intelligence_tier_high_model == "gpt-x"
+
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        tier_records = [
+            r for r in records
+            if "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+        ]
+        assert len(tier_records) == 1, (
+            f"exactly ONE boot WARNING expected; got: "
+            f"{[r.getMessage() for r in tier_records]}"
+        )
+
+        msg = tier_records[0].getMessage()
+        # (i) env var name
+        assert "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in msg, (
+            f"WARNING must name the env var; got: {msg!r}"
+        )
+        # (ii) resolved value
+        assert "gpt-x" in msg, (
+            f"WARNING must carry the resolved value; got: {msg!r}"
+        )
+        # (iii) allowed list — accept either bracket-or-string repr
+        # of the parsed CSV list (``['agentic', 'coding']`` from the
+        # shared ``_parse_csv_or_json_list`` helper).
+        assert "agentic" in msg and "coding" in msg, (
+            f"WARNING must name the allowed list; got: {msg!r}"
+        )
+
+    def test_allowed_env_value_emits_no_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """(b) ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL="agentic"`` IS in
+        ``allowed_models`` → ZERO WARNING records (clean boot). The
+        WARNING is mismatch-only — a clean config must NOT generate
+        log noise."""
+        monkeypatch.setenv(_FLAG, "agentic")
+        from daemon.config import load_config
+
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config(config_path=_write_yaml(tmp_path, allowed_models=["agentic", "coding"]))
+
+        assert cfg is not None
+        assert cfg.llm.spawn_intelligence_tier_high_model == "agentic"
+
+        tier_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+        ]
+        assert tier_records == [], (
+            f"clean config must not emit the tier-mismatch WARNING; "
+            f"got: {[r.getMessage() for r in tier_records]}"
+        )
+
+    def test_env_unset_resolves_to_default(self, tmp_path, monkeypatch, caplog):
+        """(c.1) Env var unset → resolved value is the documented default
+        ``"agentic"`` (via the empty=unset normalization). Drives
+        ``load_config`` end-to-end to keep the boot-snapshot + caplog
+        contract honest. No WARNING emitted (the default IS in the
+        allowlist)."""
+        monkeypatch.delenv(_FLAG, raising=False)
+        from daemon.config import load_config
+
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config(config_path=_write_yaml(tmp_path, allowed_models=["agentic", "coding"]))
+
+        assert cfg.llm.spawn_intelligence_tier_high_model == "agentic", (
+            f"env unset must resolve to default 'agentic'; got: "
+            f"{cfg.llm.spawn_intelligence_tier_high_model!r}"
+        )
+        tier_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL" in r.getMessage()
+        ]
+        assert tier_records == [], (
+            f"default-in-allowlist must not warn; got: "
+            f"{[r.getMessage() for r in tier_records]}"
+        )
+
+    def test_env_empty_string_normalizes_to_default(self, tmp_path, monkeypatch, caplog):
+        """(c.2) Env var set to empty string → resolved value is the
+        documented default ``"agentic"``. Bare ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL=``
+        in ``.env`` reaches ``os.environ`` as ``""``; ``_clean_env_value``
+        normalizes to UNSET (per the helper's contract — empty /
+        whitespace-only → ``None``). Drives ``load_config`` end-to-end
+        to keep the boot-snapshot contract honest."""
+        monkeypatch.setenv(_FLAG, "")
+        from daemon.config import load_config
+
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg = load_config(config_path=_write_yaml(tmp_path, allowed_models=["agentic", "coding"]))
+
+        assert cfg.llm.spawn_intelligence_tier_high_model == "agentic", (
+            f"env empty string must normalize to default 'agentic'; got: "
+            f"{cfg.llm.spawn_intelligence_tier_high_model!r}"
+        )
+
+    def test_resolver_helper_empty_value_normalizes_to_default(self):
+        """(c.3) Direct call to the boot-snapshot resolver
+        (``_resolve_intelligence_tier_high_model``) — pins the
+        empty=unset normalization at the helper boundary so a future
+        refactor cannot silently break it. ``None`` and ``""`` must
+        BOTH return the documented default; a non-empty string must
+        pass through trimmed."""
+        assert _resolve_intelligence_tier_high_model(None) == "agentic"
+        assert _resolve_intelligence_tier_high_model("") == "agentic"
+        assert _resolve_intelligence_tier_high_model("   ") == "agentic"
+        assert _resolve_intelligence_tier_high_model("gpt-5") == "gpt-5"
+        assert _resolve_intelligence_tier_high_model("  gpt-5  ") == "gpt-5"

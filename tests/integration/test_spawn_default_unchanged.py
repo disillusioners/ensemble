@@ -247,9 +247,7 @@ class TestResolverNotCalledOnDefaultPath:
                 ):
                     import asyncio
 
-                    result = asyncio.get_event_loop().run_until_complete(
-                        spawn_tool.coroutine(agent_id="coder")
-                    )
+                    result = asyncio.run(spawn_tool.coroutine(agent_id="coder"))
 
         # Sanity: the no-model_tier tool path produced a returned string
         # (the pool-selected spawn succeeded) and the resolver was not called.
