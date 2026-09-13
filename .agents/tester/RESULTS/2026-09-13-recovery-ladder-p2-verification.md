@@ -3,7 +3,7 @@
 **Date:** 2026-09-13
 **Branch:** `feature/hallucination-recovery-ladder-p2` — verified range `d658bf06` (base, latest merge) → `f1d976e3` (P2 impl) → `21e54bd1` (C1 fix) → `aaa1da21` (tidy); gate-added test-only commits through `0a9c9a79` + quick-fix commits (§7)
 **Worktrees:** `agents-ensemble-wt-recovery-ladder` (branch) + throwaway detached `agents-ensemble-wt-rlp2-head` @ `aaa1da21` + `agents-ensemble-wt-rlp2-base` @ `d658bf06` (attribution legs)
-**Verdict:** ❌ **NOT READY — 1 blocking product defect (D-1: ghost repair-budget never accumulates in natural runs → exhaustion backstop unreachable).** Everything else PASSES: master-OFF byte-identity ×4 classes, all three repair rungs (mechanism), restart durability on BOTH engines (incl. byte-exact `excerpt=` through REAL restart), reviewer-routed gaps closed with committed tests, full-suite attribution 0 OTHER branch-caused reds, ensure.md Core 4/4, PG parity idempotent, FE untouched. Fix D-1 (production, small — leader routes), re-run ghost exhaustion arm, then merge.
+**Verdict:** ❌ **NOT READY (initial gate @ `aaa1da21`)** — 1 blocking product defect (D-1: ghost repair-budget never accumulates in natural runs → exhaustion backstop unreachable). **→ ✅ OVERTURNED TO GO by the re-gate round @ `d2b3227f` (fix verified; see §10 — final verdict GO, merge-ready).**
 
 ---
 
@@ -105,3 +105,36 @@ Master `ENSEMBLE_SYMPTOM_REPAIR_LADDER` (default ON) remains restart-pending. Po
 ## 9. Gaps
 
 **None in verification coverage.** All 13 planned nodes completed; 14 worker dispatches + 1 A/B diff + 1 quick-fix (16 total), every dispatched pack reported, 0 re-dispatches, 0 stranded workers. Blocking item is a PRODUCT defect (D-1) routed to the leader, not a coverage gap.
+
+
+---
+
+## 10. RE-GATE ROUND — fix `d2b3227f` (D-1 direction 2 + B-4 TurnRepairLatch + B-6 class tokens) — ✅ FINAL VERDICT: GO
+
+**Stack:** `d9ce694e` (gate tip) → `d2b3227f` (developer fix) → re-gate test-only pins `4cd3e078` + `de120237`. 7 dispatches (D-1 fresh-harness re-proof, fix audit + 3 mutations, baselines, ensure Core, PG parity, full-suite A/B), 0 re-dispatches.
+
+### 10.1 D-1 closure — fresh harness on REAL `SessionState` (`/tmp/rlp2rg-d1/`)
+- **12-ghost natural storm ✅**: ZERO mid-turn budget-reset lines; budget 0→1 survives ghost-node re-entry; loud terminal reached (`[GHOST TERMINATION]`, id `repair-terminal-ghost-*`); carrier populated then cleared; `[SYMPTOM] class=ghost phase=terminal` telemetry. Burn 6 calls + 1 summarize.
+- **Spec delta (benign, by design)**: the briefed expectation (budgets [0,1,2,3], 3 repairs, exhaustion terminal) reflected pre-B-4 semantics. The B-4 turn latch (same commit) blocks 2nd+ repairs per turn → natural storms terminate EARLIER via the latch-escalated terminal (strictly stronger bound: 6+1 vs 12+3); budget exhaustion remains the cross-turn backstop. Dev test `test_natural_ghost_storm_reaches_loud_terminal_within_bounds` pins exactly this.
+- **Genuine-reset ✅** (stale-marker mirror): budget 1→0 on new real HumanMessage, marker cleared then re-stamped; second storm repairs 0→1. **Master-OFF ✅** with the new field (marker None, 0 `[SYMPTOM]`, bare re-invoke; ON contrast non-vacuous). **Marker restart-durability ✅** SQLite true-restart pure-read (budget=1 AND marker persisted) AND PG (§10.4).
+
+### 10.2 Fix audit (source + mutations)
+- **Marker lifecycle**: stale — clears return-carried on all three ghost returns + genuine-reset branch (no cross-turn leak); **crash-window ATOMIC** (marker+budget+surgery ride ONE superstep commit; latch RAM-only by design, durable budget backstops); restart — additive default `""`, checkpoint-durable. Benign residuals documented (carrier early-return marker-key omission heals next entry; pre-upgrade checkpoint edge self-heals).
+- **P-9 composition**: latch per-class-per-turn (`set[(instance, class)]`); ghost latch-block cannot block loop repair same-turn (pinned); loop rung structurally marker-immune.
+- **Latch-block escalation**: BOUNDED (one extra superstep, zero LLM invokes, recursion_limit outer backstop) + LOUD (WARN + `class=ghost phase=terminal action=escalate` + terminal content).
+- **B-6**: **23 `[SYMPTOM]` sites** (commit msg said 20 — cosmetic), ALL threaded; loop lines byte-identical via default; zero non-loop sites hardcode `class=loop`. Per-class soak greps now work.
+- **Mutations** (throwaway detached worktree, removed+pruned): (i) suppression disabled → **exactly 3 D-1 tests red** (claim re-proven); (ii) stale-marker-clear removed → **0/134 caught** → real coverage gap → **pin `4cd3e078`** (genuine-reset marker-clear + budget reset; mutation-verified red); (iii) latch removed → 2 red incl. storm-unbounded (latch load-bearing).
+- **Test addition `de120237`**: marker restart-durability pin (closes the only restart-durability gap; orthogonal to 4cd3e078).
+- Cosmetic: developer's "137 scoped" vs 134 observed on the specified 9-file set (count discrepancy, no impact).
+
+### 10.3 Baselines + ensure.md @ `d2b3227f`
+ladder_symptom 87/87 · ladder_durable_sqlite 3/3 · **emptyguard 343/343 byte-exact** · concurrency 98P/74S/0F canonical-exact · dev.sh `--timeout-graceful-shutdown 10` on launch line (102). Zero regression from the fix commit.
+
+### 10.4 PG parity @ `d2b3227f`
+Pack ×2 idempotent. **Regenerated** canaries on REAL `SessionState` (prior canaries confirmed frozen-state): ghost 8/8 (incl. `last_repair_boundary_human_id` durable across REAL PG restart), truncated 8/8 (excerpt byte-exact), empty 7/7 — ×2 idempotent, UUID-isolated. Cluster torn down cleanly.
+
+### 10.5 Full-suite attribution @ `d2b3227f` vs base `d658bf06`
+12 partitions, all set-equal: **0 HEAD-only / 0 base-only / 288 common — ZERO branch-caused reds.** Watchover family set-equal (49=49 broad; 38=38 narrow) → pre-existing, separate-dispatch. Prior gate quick-fixes `187ea05b`/`8809b3a2` verified GREEN. +66 net passes from the 5 new branch test files (all passing). Note: `4cd3e078`/`de120237` post-date `d2b3227f` — author-verified scoped, outside the partition run. Artifacts: `/tmp/rlp2rg-fs/`.
+
+### 10.6 FINAL VERDICT
+**✅ GO — merge-ready.** All initial-gate blockers and findings closed: D-1 fixed and adversarially verified (fresh harness + audit + mutations); B-4 latch shipped and load-bearing; B-6 class tokens live (phase-3 per-class soak keying unblocked). Remaining items are pre-existing (watchover separate-dispatch), cosmetic (commit-msg counts), or documented-benign residuals. Restart-activation per pause-first runbook; post-restart per-class soak via `[SYMPTOM] class=<c>` tokens.
