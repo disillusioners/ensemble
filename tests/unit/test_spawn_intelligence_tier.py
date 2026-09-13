@@ -327,6 +327,22 @@ class TestLoadConfigBootWarning:
     ``monkeypatch`` (matches ``test_llm_allowed_models_precedence`` /
     ``test_injected_notes_absorb_boot_validation`` precedent)."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_spawn_intelligence_tier_boot_warned(self, monkeypatch):
+        """Reset the module-level emit-once guard BEFORE each test so
+        cross-test ordering doesn't pollute WARNING counts (D-1
+        follow-up). Mirrors the sibling precedent at
+        ``test_llm_allowed_models_precedence.py::TestWarnDeprecatedAllowedModelsGuard``
+        — same module-level flag, same per-test reset, same idiom. The
+        guard globals live in ``daemon.config`` module scope and leak
+        across tests in a single pytest process; without this fixture,
+        the first test to fire the WARNING consumes the guard and any
+        later WARNING-asserting test silently sees zero records."""
+        import daemon.config as cfg
+        monkeypatch.setattr(
+            cfg, "_spawn_intelligence_tier_boot_warned", False
+        )
+
     def test_non_allowed_env_value_emits_one_warning(
         self, tmp_path, monkeypatch, caplog
     ):
@@ -381,6 +397,70 @@ class TestLoadConfigBootWarning:
         # (iv) allowed list — accept either bracket-or-string repr
         # of the parsed CSV list (``['agentic', 'coding']`` from the
         # shared ``_parse_csv_or_json_list`` helper).
+        assert "agentic" in msg and "coding" in msg, (
+            f"WARNING must name the allowed list; got: {msg!r}"
+        )
+
+    def test_two_load_config_calls_emit_exactly_one_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """D-1 follow-up pin: ``load_config()`` runs twice on the boot
+        path — ``daemon/api.py:245`` (lifespan startup) AND
+        ``daemon/services/attestation_resolver.py:513`` (judge-model
+        boot-log resolution). The mismatch WARNING must still emit
+        EXACTLY ONCE across BOTH calls thanks to the module-level
+        emit-once guard mirroring ``_allowed_models_deprecation_warned``
+        at ``daemon/config.py:2309``. Ops grep-count WARNINGs as health
+        signals; a permanent 2x count breaks exactly-N checks. Asserts:
+        (i) NO raise across both calls (R-A6 — WARNING, not boot-fail);
+        (ii) the resolved boot-snapshot is unchanged by the second call;
+        (iii) EXACTLY ONE ``tier`` WARNING record accumulates across the
+        two calls; (iv) the record still carries the M9 contract text
+        (field-name subject + ``[Config]`` prefix + resolved value +
+        allowed list). The autouse ``_reset_spawn_intelligence_tier_boot_warned``
+        fixture guarantees the guard starts fresh per test, so this is a
+        real exercise of the emit-once behavior — not a stale-flag
+        shadow."""
+        monkeypatch.setenv(_FLAG, "gpt-x")
+        from daemon.config import load_config
+
+        config_path = _write_yaml(tmp_path, allowed_models=["agentic", "coding"])
+        with caplog.at_level(logging.WARNING, logger="daemon.config"):
+            cfg1 = load_config(config_path=config_path)
+            cfg2 = load_config(config_path=config_path)
+
+        # (i) + (ii) — neither call raises; both return a resolved
+        # boot-snapshot carrying the non-allowed env value.
+        assert cfg1 is not None and cfg2 is not None
+        assert cfg1.llm.spawn_intelligence_tier_high_model == "gpt-x"
+        assert cfg2.llm.spawn_intelligence_tier_high_model == "gpt-x"
+
+        records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        tier_records = [
+            r for r in records
+            if "spawn_intelligence_tier_high_model" in r.getMessage()
+        ]
+        # (iii) — the core D-1 pin: exactly ONE tier WARNING across two
+        # load_config() invocations in the same process.
+        assert len(tier_records) == 1, (
+            f"exactly ONE boot WARNING expected across TWO load_config() "
+            f"calls (D-1 emit-once guard); got "
+            f"{len(tier_records)}: "
+            f"{[r.getMessage() for r in tier_records]}"
+        )
+
+        # (iv) — M9 contract text preserved (regression pin against a
+        # future refactor that touches the WARNING text or formatting).
+        msg = tier_records[0].getMessage()
+        assert "[Config]" in msg, (
+            f"WARNING must carry the [Config] log-forensics prefix; got: {msg!r}"
+        )
+        assert "spawn_intelligence_tier_high_model" in msg, (
+            f"WARNING must name the field; got: {msg!r}"
+        )
+        assert "gpt-x" in msg, (
+            f"WARNING must carry the resolved value; got: {msg!r}"
+        )
         assert "agentic" in msg and "coding" in msg, (
             f"WARNING must name the allowed list; got: {msg!r}"
         )

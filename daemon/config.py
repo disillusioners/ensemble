@@ -3139,6 +3139,17 @@ def resolve_injected_notes_absorb() -> bool:
     )
 
 
+# Emit-once guard for the ``spawn_intelligence_tier_high_model`` boot
+# WARNING (daemon/config.py:3254-3264). The boot path invokes
+# ``load_config`` twice (daemon/api.py:245 lifespan startup +
+# daemon/services/attestation_resolver.py:513 judge-model boot-log
+# resolution); both calls re-enter the WARNING emit. Ops grep-count
+# WARNINGs as health signals — a permanent 2x count breaks exactly-N
+# checks. Mirrors the sibling precedent ``_allowed_models_deprecation_warned``
+# at daemon/config.py:2309 (same module-level flag checked-and-set idiom).
+_spawn_intelligence_tier_boot_warned = False
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -3251,10 +3262,16 @@ def load_config(config_path: str | None = None) -> Config:
     # shared parser to mirror what pydantic's field validator will do.
     _allowed_raw = llm_config.get("allowed_models")
     _parsed_allowed_for_warn = _parse_csv_or_json_list(_allowed_raw)
-    if (
+    # Emit-once guard (D-1): the boot path runs ``load_config`` twice
+    # (daemon/api.py:245 + daemon/services/attestation_resolver.py:513);
+    # the WARNING must still fire exactly once per process. Mirrors the
+    # sibling precedent at :2309 (``_allowed_models_deprecation_warned``).
+    global _spawn_intelligence_tier_boot_warned
+    if not _spawn_intelligence_tier_boot_warned and (
         _parsed_allowed_for_warn
         and spawn_intelligence_tier_high_model not in _parsed_allowed_for_warn
     ):
+        _spawn_intelligence_tier_boot_warned = True
         logger.warning(
             "[Config] spawn_intelligence_tier_high_model resolves to '%s', "
             "which is NOT in allowed_models %s; model_tier='high' spawns "
