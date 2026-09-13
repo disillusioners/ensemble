@@ -59,6 +59,21 @@ Episode keying (AD-2 / AD-31, two levels, coexisting by design):
   would emit 5 instead of 1). Re-armed by a NEW ``tool_call_id``
   crossing after a successful close.
 
+  Episode orphan hygiene (B4, council fix-cycle 1): an episode is
+  only orphan-discarded after it has been UNTOUCHED for
+  ``STALE_STAMP_TTL_SECONDS`` (reused stamp-TTL constant; episodes
+  are RAM-only and restart-reset, so a long TTL is harmless). The
+  ``_episode_last_seen`` map records the last monotonic tick the
+  child had ANY stamp in-flight — refreshed on every tick where the
+  child appears in the live snapshot. The earlier
+  ``child_id not in live_children`` discard was unsafe: a 60s tick
+  landing in the wrapper's inter-batch gap (stamps momentarily empty
+  between batches) would discard the OPEN episode and re-arm the
+  next long call → one nudge per long call instead of one per wedge
+  episode (bd4b36ef replay must yield exactly 1 nudge). The
+  TTL-gated discard closes that wedge while still pruning truly
+  abandoned episodes.
+
 Canonical threshold precedence chain (AD-41 — stated once, every
 other mention refers back):
 
@@ -226,6 +241,16 @@ class LongToolNudgeRegistry:
         self._parent_lookup: Optional[
             Callable[[str], Optional[str]]
         ] = None
+        # Per-batch threshold cache (council fix-cycle 1, W1): the
+        # wrapper stamps at batch entry and clears at batch exit.
+        # Resolving the threshold ONCE at entry (RAM-only on the
+        # asyncio loop — the repo read happens inside the sync
+        # resolver and is the read that previously hit the hot path
+        # on the wrapper's finally) eliminates the per-batch
+        # ``resolve_threshold_for`` repo hit entirely. Cleared when
+        # the per-instance bucket is emptied so a stale value never
+        # leaks across batches.
+        self._batch_threshold_cache: dict[str, int] = {}
 
     # ── Attach points (lifespan-init only) ──
 
@@ -261,6 +286,11 @@ class LongToolNudgeRegistry:
         Idempotent per ``(instance_id, tool_call_id)``: a duplicate
         (the gather / resume-re-entry case) keeps the FIRST stamp —
         first-stamp-wins preserves the original ``started_at``.
+
+        Side effect: resolves and caches the per-batch threshold
+        for ``instance_id`` (council fix-cycle 1, W1) so the
+        wrapper's ``finally`` reads from RAM only — no sync repo
+        hit per batch on the asyncio hot path.
         """
         async with self._lock:
             stamps = self._stamps.get(instance_id)
@@ -271,6 +301,7 @@ class LongToolNudgeRegistry:
                     # AD-6 overflow: drop the oldest tracked instance.
                     dropped = next(iter(self._stamps))
                     del self._stamps[dropped]
+                    self._batch_threshold_cache.pop(dropped, None)
                     logger.warning(
                         "[LongToolNudge] registry overflow (>=%d instances) "
                         "— dropped stamps for instance %s",
@@ -284,11 +315,35 @@ class LongToolNudgeRegistry:
                 started_at=time.monotonic(),
                 parent_id=parent_id,
             )
+            # Per-batch threshold cache (W1): resolve ONCE at entry
+            # while we hold the lock (the resolver is sync; under
+            # the lock it's atomic and never blocks other awaits).
+            # The finally path's ``resolve_threshold_for`` reads
+            # from this cache — RAM only.
+            if instance_id not in self._batch_threshold_cache:
+                resolver = self._threshold_resolver
+                if resolver is not None:
+                    try:
+                        self._batch_threshold_cache[instance_id] = int(
+                            resolver(instance_id)
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "[LongToolNudge] record_start threshold "
+                            "resolver raised for %s — no cache entry",
+                            (instance_id or "")[:8],
+                        )
 
     async def clear(
         self, instance_id: str, tool_call_id: str
     ) -> Optional[_Stamp]:
-        """Clear one stamp; returns the cleared stamp (or ``None``)."""
+        """Clear one stamp; returns the cleared stamp (or ``None``).
+
+        When the last stamp for ``instance_id`` is cleared, the
+        per-batch threshold cache entry is evicted alongside (W1) —
+        prevents a stale cache value from leaking across batches
+        if the resolver was just hot-reloaded with a new default.
+        """
         async with self._lock:
             stamps = self._stamps.get(instance_id)
             if stamps is None:
@@ -296,13 +351,42 @@ class LongToolNudgeRegistry:
             stamp = stamps.pop(tool_call_id, None)
             if not stamps:
                 self._stamps.pop(instance_id, None)
+                self._batch_threshold_cache.pop(instance_id, None)
             return stamp
 
-    async def clear_for_instance(self, instance_id: str) -> list[_Stamp]:
-        """Clear every stamp for one instance (pause-cancel sweep)."""
+    async def clear_many(
+        self,
+        instance_id: str,
+        tool_call_ids: list[str],
+    ) -> list[tuple[str, _Stamp]]:
+        """Clear a batch of stamps under ONE lock acquisition (A5).
+
+        Council fix-cycle 1, A5 — the wrapper's per-batch finally
+        MUST clear every stamp in the batch regardless of how many
+        ``CancelledError`` deliveries the runtime makes. Doing the
+        clears under a single ``async with self._lock`` keeps the
+        loop body synchronous (no per-stamp ``await`` on the lock),
+        so a cancel arriving mid-loop cannot land between two
+        stamp clears and leak the rest of the batch to the AD-9a
+        TTL belt. Returns the cleared ``(tool_call_id, stamp)``
+        pairs in input order; the wrapper's logging/close path
+        iterates this list (best-effort — a cancel there loses
+        the log line but cannot leak stamps, since the clears
+        already committed atomically).
+        """
+        cleared: list[tuple[str, _Stamp]] = []
         async with self._lock:
-            stamps = self._stamps.pop(instance_id, None)
-        return list(stamps.values()) if stamps else []
+            stamps = self._stamps.get(instance_id)
+            if stamps is None:
+                return cleared
+            for tc_id in tool_call_ids:
+                stamp = stamps.pop(tc_id, None)
+                if stamp is not None:
+                    cleared.append((tc_id, stamp))
+            if not stamps:
+                self._stamps.pop(instance_id, None)
+                self._batch_threshold_cache.pop(instance_id, None)
+        return cleared
 
     async def snapshot(self) -> dict[str, dict[str, _Stamp]]:
         """Shallow copy so the scanner iterates without holding the lock."""
@@ -312,7 +396,19 @@ class LongToolNudgeRegistry:
     # ── Read helpers (scanner / wrapper) ──
 
     async def resolve_threshold_for(self, instance_id: str) -> int:
-        """Threshold via the attached resolver; defensive fallback otherwise."""
+        """Threshold via the cache, falling through to the resolver.
+
+        The per-batch cache (W1) eliminates the wrapper's finally
+        sync repo hit on the asyncio hot path. The cache is set by
+        ``record_start`` and evicted by ``clear`` (or by the
+        registry's overflow sweep) — when the cache is empty we
+        fall through to the attached resolver for back-compat with
+        any caller that does NOT go through ``record_start``.
+        """
+        async with self._lock:
+            cached = self._batch_threshold_cache.get(instance_id)
+        if cached is not None:
+            return cached
         resolver = self._threshold_resolver
         if resolver is not None:
             try:
@@ -326,12 +422,19 @@ class LongToolNudgeRegistry:
         return DEFAULT_THRESHOLD_FALLBACK
 
     async def lookup_parent_for(self, child_id: str) -> Optional[str]:
-        """``child_id -> parent_id`` via the attached lookup (or ``None``)."""
+        """``child_id -> parent_id`` via the attached lookup (or ``None``).
+
+        Council fix-cycle 1, W1: the attached sync lookup is run in
+        ``asyncio.to_thread`` so the wrapper's batch-entry path does
+        NOT block the event loop on the repo. The daemon's documented
+        wedge history at this exact seam (enqueue_message was moved to
+        to_thread for the same reason) makes the wrap mandatory.
+        """
         lookup = self._parent_lookup
         if lookup is None:
             return None
         try:
-            parent_id = lookup(child_id)
+            parent_id = await asyncio.to_thread(lookup, child_id)
             return parent_id if parent_id else None
         except Exception:  # pragma: no cover - defensive
             logger.exception(
@@ -447,42 +550,79 @@ def _wrapped_tools_node(
         try:
             return await bare.ainvoke(state, config)
         finally:
-            now = time.monotonic()
-            threshold = await registry.resolve_threshold_for(instance_id)
+            # A5 (council fix-cycle 1) — clear every stamp in ONE
+            # atomic lock acquisition (``registry.clear_many``),
+            # so the cancel-immune contract holds even if a
+            # ``CancelledError`` lands mid-batch. The clears are
+            # shielded so the outer task's cancel still propagates
+            # to the runtime (the runtime needs to see the cancel)
+            # while the inner ``clear_many`` completes the entire
+            # batch under a single lock — a cancel arriving at any
+            # point within the cleared-stamps window CANNOT leak
+            # remaining stamps to the AD-9a TTL belt. The
+            # post-clear logging + healthy-gated close are
+            # best-effort: a cancel there can lose a log line but
+            # CANNOT unwind the already-cleared stamps.
             short_instance = (instance_id or "")[:8]
+            tool_call_ids: list[str] = []
             for tc in tool_calls:
                 tc_id = (
-                    tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    tc.get("id")
+                    if isinstance(tc, dict)
+                    else getattr(tc, "id", None)
                 )
-                if not tc_id:
-                    continue
-                stamp = await registry.clear(instance_id, tc_id)
-                if stamp is None:
-                    continue
-                duration_seconds = now - stamp.started_at
-                threshold_crossed = duration_seconds > threshold
-                # (SC6) Per-completion duration record — logged
-                # REGARDLESS of crossing; this is the forensic line
-                # the bd4b36ef incident never had.
-                logger.info(
-                    "[LongToolNudge] TOOL_COMPLETED instance=%s tool_call_id=%s "
-                    "tool=%s duration_ms=%d threshold_seconds=%d threshold_crossed=%s",
+                if tc_id:
+                    tool_call_ids.append(tc_id)
+            try:
+                cleared_stamps = await asyncio.shield(
+                    registry.clear_many(instance_id, tool_call_ids)
+                )
+                # Threshold resolve + per-completion log + close-gate
+                # are best-effort: a cancel here can lose the log line
+                # but CANNOT leak stamps (cleared atomically above).
+                threshold = await asyncio.shield(
+                    registry.resolve_threshold_for(instance_id)
+                )
+                now = time.monotonic()
+                for tc_id, stamp in cleared_stamps:
+                    duration_seconds = now - stamp.started_at
+                    threshold_crossed = duration_seconds > threshold
+                    # (SC6) Per-completion duration record — logged
+                    # REGARDLESS of crossing; this is the forensic
+                    # line the bd4b36ef incident never had.
+                    logger.info(
+                        "[LongToolNudge] TOOL_COMPLETED instance=%s "
+                        "tool_call_id=%s tool=%s duration_ms=%d "
+                        "threshold_seconds=%d threshold_crossed=%s",
+                        short_instance,
+                        tc_id,
+                        stamp.tool_name,
+                        int(duration_seconds * 1000),
+                        threshold,
+                        threshold_crossed,
+                    )
+                    # Close-gate (AD-9 + AD-42 Option (ii),
+                    # canonical): a HEALTHY completion (< threshold)
+                    # closes the (parent, child) episode; a LONG
+                    # completion intentionally LEAVES it open.
+                    if stamp.parent_id and duration_seconds < threshold:
+                        await asyncio.shield(
+                            registry.close_episode_for(
+                                stamp.parent_id, instance_id
+                            )
+                        )
+            except asyncio.CancelledError:
+                # Propagate — the runtime already sees the cancel;
+                # stamps were cleared atomically above the propagate
+                # point. The shield above means clear_many ran to
+                # completion even though we did not get the return
+                # value, so the registry is empty for this batch.
+                raise
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "[LongToolNudge] finally-clear-loop error for %s",
                     short_instance,
-                    tc_id,
-                    stamp.tool_name,
-                    int(duration_seconds * 1000),
-                    threshold,
-                    threshold_crossed,
                 )
-                # Close-gate (AD-9 + AD-42 Option (ii), canonical): a
-                # HEALTHY completion (< threshold) closes the (parent,
-                # child) episode; a LONG completion intentionally LEAVES
-                # it open — that completion IS the wedge the parent was
-                # warned about, and closing on it would re-arm the next
-                # tool_call_id (the bd4b36ef replay would emit 5 nudges
-                # instead of 1).
-                if stamp.parent_id and duration_seconds < threshold:
-                    await registry.close_episode_for(stamp.parent_id, instance_id)
 
     return node
 
@@ -695,6 +835,13 @@ class LongToolNudgeScanner:
         # (AD-9 + AD-42 Option (ii)), re-armed by a NEW tool_call_id
         # after the close.
         self._active_episodes: set[tuple[str, str]] = set()
+        # EPISODE-TTL orphan gate (B4, council fix-cycle 1): per
+        # episode monotonic timestamp of the last tick the child had
+        # any stamp in-flight. An episode is only orphan-discarded
+        # once ``now - _episode_last_seen[entry] > STALE_STAMP_TTL_SECONDS``
+        # AND the child has no live stamps — the timestamp refresh
+        # lets the episode survive the wrapper's inter-batch gap.
+        self._episode_last_seen: dict[tuple[str, str], float] = {}
         # Future escalation hook — never gates firing in v1.
         self._nudge_counts: dict[tuple[str, str], int] = {}
 
@@ -741,10 +888,17 @@ class LongToolNudgeScanner:
         )
         return min(effective, self._hard_max_threshold_seconds)
 
-    def _read_parent_id(self, child_id: str) -> Optional[str]:
-        """Lazy ``child_id -> parent_id`` read (defer DB hit to crossing)."""
+    async def _read_parent_id(self, child_id: str) -> Optional[str]:
+        """Lazy ``child_id -> parent_id`` read (defer DB hit to crossing).
+
+        Council fix-cycle 1, W1: runs in ``asyncio.to_thread`` so a
+        slow repo hit on the lazy path does not wedge the scanner
+        tick. Called only when the wrapper's ``record_start`` ran
+        without the parent lookup attached (rare in production —
+        the lifespan attaches it before any wrapper turn).
+        """
         try:
-            instance = self._repo.get(child_id)
+            instance = await asyncio.to_thread(self._repo.get, child_id)
         except Exception:
             return None
         parent_id = getattr(instance, "parent_id", None)
@@ -752,9 +906,16 @@ class LongToolNudgeScanner:
 
     # ── Hand-off seam (scanner-bound; phase 2 replaces this body) ──
 
-    def _get_parent(self, parent_id: str) -> Any:
+    async def _get_parent(self, parent_id: str) -> Any:
+        """Council fix-cycle 1, W1: sync repo read off the event loop.
+
+        The scanner runs in an asyncio loop; ``_repo.get`` is a sync
+        DB read. Run it in ``asyncio.to_thread`` so a slow query on
+        the parent row does not wedge the scanner tick (same
+        rationale as the enqueue_message to_thread move).
+        """
         try:
-            return self._repo.get(parent_id)
+            return await asyncio.to_thread(self._repo.get, parent_id)
         except Exception:
             logger.exception(
                 "[LongToolNudge] parent read failed for %s",
@@ -783,8 +944,12 @@ class LongToolNudgeScanner:
         system nudges are foreground (AD-13). ``priority=0`` never
         resets leader-attestation counters (the reset branch requires
         ``priority == 1 AND msg_type == HUMAN.value``,
-        ``instance_messaging.py:1896-1902``) and queue-jumps priority-1
-        rows by claim order (``ORDER BY priority ASC``; AM-6).
+        ``instance_messaging.py:1896-1902``). Priority=0 only
+        queue-jumps the PARENT'S OTHER QUEUED MESSAGES via the
+        MessageQueue claim's ``ORDER BY priority ASC`` — it does NOT
+        queue-jump the graph-task claim lane (task/repository.py
+        carries no priority column on Task rows; council fix-cycle
+        1, W3).
         """
         # Phase-1 contract dispatch (stub / injected test seam) first —
         # the T6 contract tests pin these paths.
@@ -806,7 +971,7 @@ class LongToolNudgeScanner:
                 return False
 
         # ── Real delivery (phase 2) ──
-        parent = self._get_parent(parent_id)
+        parent = await self._get_parent(parent_id)
         if parent is None:
             logger.warning(
                 "[LongToolNudge] parent %s... not found — nudge skipped",
@@ -859,6 +1024,31 @@ class LongToolNudgeScanner:
             priority=0,
             metadata=metadata,
         )
+        # W2 (council fix-cycle 1) — post-enqueue terminal-parent
+        # TOCTOU re-check (AD-40 closure). The pre-read above only
+        # narrows the race window; a parent that transitions to a
+        # terminal status DURING the enqueue commit is revived
+        # anyway. We do NOT undo the durable enqueue (the nudge is
+        # already on the MessageQueue and will sit there harmless
+        # if the parent's eventual lifecycle disposes of it), we
+        # only surface the race in the log so the bug class is
+        # observable. The TOCTOU window is bounded by the enqueue
+        # txn commit time (sub-second in practice); a slow repo or
+        # a hung parent-flush daemon widens it but never escapes
+        # the per-instance error isolation at the tick level.
+        try:
+            post_status_obj = await self._get_parent(parent_id)
+            post_status = getattr(post_status_obj, "status", None)
+        except Exception:
+            post_status = None
+        if post_status in _TERMINAL_PARENT_STATUSES:
+            logger.warning(
+                "[LongToolNudge] post-enqueue terminal-parent race: "
+                "parent %s... is now %s — nudge already durable, no "
+                "rollback (AD-40 TOCTOU window)",
+                (parent_id or "")[:8],
+                post_status,
+            )
         # A5 direct-notify defense-in-depth (incident 33252 class):
         # the enqueue path already notified once internally; this
         # second direct pulse survives a lost-wake race. Idempotent on
@@ -883,7 +1073,12 @@ class LongToolNudgeScanner:
                 "not wired (legacy test fixture / pre-wiring lifespan)"
             )
         # The episode opens AFTER the durable enqueue committed.
+        # ``_episode_last_seen`` is the monotonic anchor the B4
+        # orphan sweep keys on; refresh it here so a tick landing in
+        # the wrapper's inter-batch gap cannot prematurely discard
+        # the episode (council fix-cycle 1, C1 mechanism choice b).
         self._active_episodes.add((parent_id, child_id))
+        self._episode_last_seen[(parent_id, child_id)] = time.monotonic()
         self._nudge_counts[(parent_id, child_id)] = 1
         return True
 
@@ -898,6 +1093,7 @@ class LongToolNudgeScanner:
         only (AD-9 + AD-42 Option (ii)). Idempotent.
         """
         self._active_episodes.discard((parent_id, child_id))
+        self._episode_last_seen.pop((parent_id, child_id), None)
         self._nudge_counts.pop((parent_id, child_id), None)
 
     # ── Scan tick ──
@@ -959,7 +1155,7 @@ class LongToolNudgeScanner:
                     if not parent_id:
                         # Stamps recorded before the parent lookup was
                         # attached — lazy repo read (defer to crossing).
-                        parent_id = self._read_parent_id(instance_id) or ""
+                        parent_id = await self._read_parent_id(instance_id) or ""
                     episode_ctx = LongToolNudgeEpisodeCtx(
                         child_id=instance_id,
                         parent_id=parent_id or "",
@@ -977,6 +1173,17 @@ class LongToolNudgeScanner:
                         # a successful fire.
                         self._fired_episodes.add((instance_id, tool_call_id))
                         stats["fired"] += 1
+                # (council fix-cycle 1, C1) ANY in-flight stamp for
+                # this child refreshes the episode TTL anchor — even
+                # if none crossed the threshold on this tick. A 60s
+                # tick landing in the wrapper's inter-batch gap (the
+                # bd4b36ef incident class: weak-model LLM gaps can
+                # exceed the scan interval) therefore cannot discard
+                # the OPEN episode.
+                for entry in list(self._active_episodes):
+                    _parent_id, child_id = entry
+                    if child_id == instance_id:
+                        self._episode_last_seen[entry] = time.monotonic()
             except Exception:
                 stats["errors"] += 1
                 logger.exception(
@@ -1003,8 +1210,12 @@ class LongToolNudgeScanner:
           ``(child_id, tool_call_id)`` no longer appears in the
           snapshot.
         * B4: discard orphan ``_active_episodes`` tuples whose child
-          stamp has fully cleared (a missed close can never
-          silently suppress future nudges forever).
+          stamp has fully cleared AND whose last-seen anchor is older
+          than ``STALE_STAMP_TTL_SECONDS`` (council fix-cycle 1, C1
+          option b). The TTL gate prevents the wrapper's inter-batch
+          gap from prematurely discarding an OPEN episode and
+          re-arming the next long call (bd4b36ef replay must yield
+          exactly 1 nudge).
         """
         now = time.monotonic()
         for instance_id, stamps in snapshot.items():
@@ -1017,6 +1228,9 @@ class LongToolNudgeScanner:
                 parent_id = stamp.parent_id or ""
                 if parent_id:
                     self._active_episodes.discard((parent_id, instance_id))
+                    self._episode_last_seen.pop(
+                        (parent_id, instance_id), None
+                    )
                 self._fired_episodes.discard((instance_id, tool_call_id))
                 logger.warning(
                     "[LongToolNudge] STALE_STAMP force-cleared instance=%s "
@@ -1038,9 +1252,20 @@ class LongToolNudgeScanner:
         live_children = set(snapshot.keys())
         for entry in list(self._active_episodes):
             _parent_id, child_id = entry
-            if child_id not in live_children:
-                self._active_episodes.discard(entry)
-                stats["orphan_episodes_discarded"] += 1
+            if child_id in live_children:
+                continue  # still in flight — refresh anchor above covers this
+            last_seen = self._episode_last_seen.get(entry)
+            if last_seen is None:
+                # Episode opened in a previous process incarnation
+                # (impossible — RAM-only) or seeded externally; treat
+                # as orphaned-on-arrival and respect the TTL.
+                last_seen = now
+                self._episode_last_seen[entry] = last_seen
+            if (now - last_seen) <= STALE_STAMP_TTL_SECONDS:
+                continue  # inter-batch gap — keep the episode open
+            self._active_episodes.discard(entry)
+            self._episode_last_seen.pop(entry, None)
+            stats["orphan_episodes_discarded"] += 1
 
 
 # ─── Lifespan loop ───────────────────────────────────────────────────────────

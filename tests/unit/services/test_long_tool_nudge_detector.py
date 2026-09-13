@@ -105,28 +105,49 @@ async def test_does_not_fire_below_threshold(registry, fake_clock):
 
 @pytest.mark.asyncio
 async def test_heartbeat_fresh_child_still_fires(registry, fake_clock):
-    """Regression pin (SC4 / TestLongToolNudgeScannerHeartbeatFreshStillFires).
+    """Council fix-cycle 1, B6 — structural heartbeat-independence pin.
 
-    Detection keys on in-flight stamp age ONLY — never on
-    TaskHeartbeat. A child whose heartbeat is fresh (beats every 30 s
-    while wedged mid-tool) MUST still be nudged. The stub here mimics
-    the watchdog's ``_has_recent_heartbeat`` live-rung gate returning
-    True (recent); the scanner has no heartbeat dependency at all —
-    this test fails loudly if one is ever added as a fire gate.
+    The scanner's fire boundary keys on in-flight stamp age ONLY —
+    never on ``TaskHeartbeat`` (which beats every 30 s independent
+    of tool execution; a wedged-mid-tool child stays
+    "heartbeat-fresh" forever, so a heartbeat-dependent fire gate
+    would never fire on the exact incident class the feature
+    exists to catch). The earlier heartbeat-stub test was never
+    wired into the scanner — it created the stub and never passed
+    it anywhere, so the test passed even if a heartbeat dependency
+    was silently introduced. This structural-grep pin replaces the
+    loose stub: it asserts the module source contains NO
+    ``TaskHeartbeat`` reference outside docstrings, so the pin
+    actually bites when a heartbeat dependency creeps in. The
+    runtime pin (the scanner fires on a wedged child) is then
+    re-checked by ``test_fires_strictly_above_threshold`` /
+    ``test_fires_once_per_tool_call_id`` / ``test_disabled_scanner_skips_tick``,
+    which DO drive the scanner through the real path.
     """
+    import inspect
 
-    class _FreshHeartbeatStub:
-        def seconds_since_last(self) -> int:
-            return 0  # heartbeat-fresh (beats every 30s, mid-tool)
+    import daemon.services.long_tool_nudge as lt_module
 
-        def is_recent(self) -> bool:
-            return True
+    source = inspect.getsource(lt_module)
+    # Strip docstrings (single- and triple-quoted) before searching —
+    # the module's docstring mentions TaskHeartbeat by name to
+    # document the invariant; we forbid references in CODE only.
+    import re
 
-    heartbeat = _FreshHeartbeatStub()
+    code_only = re.sub(r'"""[\s\S]*?"""', "", source)
+    code_only = re.sub(r"'''[\s\S]*?'''", "", code_only)
+    assert "TaskHeartbeat" not in code_only, (
+        "scanner must remain heartbeat-independent — a "
+        "TaskHeartbeat reference outside docstrings means the "
+        "feature would silently misfire on wedged-mid-tool "
+        "children (B6 council fix-cycle 1 pin)"
+    )
+
+    # Plus: the runtime behavior is still pinned — a stamp past
+    # the threshold fires regardless of any heartbeat concept.
     scanner = _scanner(registry)
     await _stamp(registry, "child-1", "call-1", fake_clock, age=1200)
     stats = await scanner.run_once()
-    assert heartbeat.is_recent() is True  # fresh in scope
     assert stats["fired"] == 1  # ...and the scanner fires anyway
 
 

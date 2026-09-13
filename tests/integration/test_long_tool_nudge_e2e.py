@@ -278,6 +278,100 @@ class TestLongToolNudgeE2E:
         assert len(rows) == 2  # duplicate nudge after restart — accepted
 
     @pytest.mark.asyncio
+    async def test_i3_restart_no_stamps_no_nudges(
+        self, engine, repo, registry
+    ):
+        """Council fix-cycle 1, W5 — restart-boundary regression pin.
+
+        Pins the OTHER half of the I3 contract: a fresh scanner with
+        an empty registry MUST NOT emit nudges (no phantom
+        revives). Pairs with ``test_i3_daemon_restart_resets_dedup``
+        above: ≤1 duplicate is the UPPER bound; 0 with no stamps is
+        the lower bound. Together they fully pin the AD-14 "≤1
+        duplicate nudge after restart" trade-off.
+        """
+        parent = _make_instance_row(
+            engine,
+            instance_id="i3b-parent",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _make_instance_row(
+            engine,
+            instance_id="i3b-child",
+            status=InstanceStatus.RUNNING.value,
+            parent_id=parent,
+        )
+        service, _pool = _real_messaging(engine)
+        scanner = LongToolNudgeScanner(
+            repo, manager=service, registry=registry, handoff_stub_enabled=False
+        )
+        # No stamp seeded — restart cold-start with empty registry.
+        stats = await self._run_tick(scanner)
+        assert stats["fired"] == 0
+        assert stats["instances_scanned"] == 0
+        assert _messages_for(engine, parent) == []
+
+    @pytest.mark.asyncio
+    async def test_i3_restart_one_duplicate_upper_bound(
+        self, engine, repo, registry
+    ):
+        """Council fix-cycle 1, W5 — restart-boundary regression pin.
+
+        Pins the EXACT upper bound of the AD-14 contract: a fresh
+        scanner observing ONE fresh stamp after restart emits
+        AT MOST one nudge (the post-restart one). Pre-restart state
+        contributes no phantom nudges. This is the "≤1 duplicate"
+        semantic the docstring claims — test failure means the
+        upper bound regressed (e.g., a new bug class that re-fires
+        a stamp the scanner already saw pre-restart, or a phantom
+        nudge from a dead-but-not-yet-GCed scanner instance).
+        """
+        parent = _make_instance_row(
+            engine,
+            instance_id="i3c-parent",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        _make_instance_row(
+            engine,
+            instance_id="i3c-child",
+            status=InstanceStatus.RUNNING.value,
+            parent_id=parent,
+        )
+        service, _pool = _real_messaging(engine)
+
+        # Pre-restart: scanner A fires once (counts as the "first
+        # nudge" of the duplicate pair).
+        scanner_a = LongToolNudgeScanner(
+            repo, manager=service, registry=registry, handoff_stub_enabled=False
+        )
+        _seed_stamp(registry, "i3c-child", call_id="call-pre-restart")
+        await self._run_tick(scanner_a)
+        assert len(_messages_for(engine, parent)) == 1
+
+        # Post-restart: scanner B with empty dedup state + ONE
+        # fresh stamp → exactly one MORE nudge (the duplicate).
+        scanner_b = LongToolNudgeScanner(
+            repo, manager=service, registry=registry, handoff_stub_enabled=False
+        )
+        _seed_stamp(registry, "i3c-child", call_id="call-post-restart")
+        await self._run_tick(scanner_b)
+
+        # EXACTLY one post-restart nudge (the duplicate) — no
+        # second duplicate, no phantom.
+        rows = _messages_for(engine, parent)
+        assert len(rows) == 2, (
+            f"≤1 duplicate after restart violated: got {len(rows)} "
+            f"nudges (expected 2 = 1 pre + 1 post-restart duplicate)"
+        )
+
+        # Follow-up ticks on the post-restart scanner with NO new
+        # stamps → no further nudges (the fresh dedup state holds
+        # for the fresh stamp; no phantom from dead scanner A).
+        for _ in range(3):
+            await self._run_tick(scanner_b)
+        assert len(_messages_for(engine, parent)) == 2
+
+    @pytest.mark.asyncio
     async def test_i4_paused_parent_no_nudge(self, engine, repo, registry, caplog):
         parent = _make_instance_row(
             engine, instance_id="i4-parent", status=InstanceStatus.PAUSED.value

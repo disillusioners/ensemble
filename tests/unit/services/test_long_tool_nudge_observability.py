@@ -209,3 +209,46 @@ async def test_no_leak_on_exception_one_line_still_emitted(
     records = _completed_records(caplog)
     assert len(records) == 1  # exactly one line — no duplicates on error
     assert await registry.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_completed_log_emitted_when_kill_switch_off(
+    lt_real, caplog
+):
+    """Council fix-cycle 1, W4 — SC9 invariant regression pin.
+
+    ``LONG_TOOL_NUDGE_ENABLED=0`` stops the SCANNER loop and (phase 3)
+    gates the ``set_instance_tunable`` writes. The wrapper's per-tool
+    stamping + the per-completion ``[LongToolNudge] TOOL_COMPLETED``
+    log line MUST continue when disabled — they are the duration
+    observability surface (SC6), independent of delivery. This test
+    pins the invariant: a disabled scanner does NOT silence the
+    forensic line that bd4b36ef needed and never had.
+    """
+    # Simulate the kill-switch OFF state without touching env vars:
+    # the wrapper has no reference to the scanner's enabled flag —
+    # the invariant holds regardless of whether the scanner is
+    # currently running. We assert via the line being emitted
+    # under the empty registry + no resolver/lookup attached (the
+    # exact shape the disabled lifespan leaves the registry in).
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real._wrapped_tools_node([sample_tool], registry)
+    # No close handler / resolver / lookup attached — the disabled
+    # shape. Stamp lifecycle must still complete and emit the log.
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        await _run(lt_real, node, _state(), _CONFIG)
+    records = _completed_records(caplog)
+    assert len(records) == 1, (
+        "TOOL_COMPLETED line must still emit when the scanner "
+        "kill-switch is OFF (SC6 observability is independent "
+        "of delivery — W4 council fix-cycle 1 regression pin)"
+    )
+    message = records[0].getMessage()
+    assert "inst-123" in message
+    assert "call-1" in message
+    assert "sample_tool" in message
+    assert "duration_ms=" in message
+    assert "threshold_seconds=" in message
+    assert "threshold_crossed=" in message
+    # And the stamp cleared — disabled does not leak either.
+    assert await registry.snapshot() == {}

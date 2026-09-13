@@ -3,8 +3,10 @@
 Pins: stale-stamp force-clear at age > 7200 s (7199 s does NOT
 trigger), episode close + dedup re-arm + WARN on the belt, a fresh
 tool_call_id on the same child firing normally afterwards, orphan
-``_active_episodes`` discard, orphan ``_fired_episodes`` discard, and
-the 7-key run_once stats shape.
+``_active_episodes`` survives the wrapper's inter-batch gap (council
+fix-cycle 1, C1), orphan ``_active_episodes`` is eventually discarded
+once untouched for ``STALE_STAMP_TTL_SECONDS``, and the 7-key
+``run_once`` stats shape.
 """
 
 from __future__ import annotations
@@ -124,12 +126,57 @@ class TestScannerStaleStampForceCloses:
 
 class TestScannerOrphanEpisodeClose:
     @pytest.mark.asyncio
-    async def test_orphan_active_episode_discarded(self, fake_clock):
+    async def test_orphan_active_episode_survives_inter_batch_gap(
+        self, fake_clock
+    ):
+        """Council fix-cycle 1, C1 — REGRESSION PIN (replaces the
+        pre-cycle ``test_orphan_active_episode_discarded``).
+
+        An episode whose child has no live stamps on this tick MUST
+        NOT be discarded — the wrapper's ``finally`` clears stamps
+        between batches, so a 60s tick landing in the inter-batch
+        gap must not re-arm the next long call (bd4b36ef replay
+        must yield exactly 1 nudge, not 5). The episode survives
+        until its ``_episode_last_seen`` anchor ages past
+        ``STALE_STAMP_TTL_SECONDS``.
+        """
+        registry = LongToolNudgeRegistry()
+        scanner = _scanner(registry)
+        # Seed an OPEN episode with no live stamps — emulates the
+        # scanner tick landing in the wrapper's inter-batch gap.
+        scanner._active_episodes.add(("parent-1", "child-gone"))
+        scanner._episode_last_seen[("parent-1", "child-gone")] = (
+            fake_clock.t
+        )
+        stats = await scanner.run_once()
+        # Episode survives the gap; orphan counter does NOT advance.
+        assert ("parent-1", "child-gone") in scanner._active_episodes
+        assert stats["orphan_episodes_discarded"] == 0
+
+    @pytest.mark.asyncio
+    async def test_orphan_active_episode_discarded_after_ttl(
+        self, fake_clock
+    ):
+        """Council fix-cycle 1, C1 — orphan IS eventually discarded
+        once untouched for ``STALE_STAMP_TTL_SECONDS``.
+
+        Pairs with the survival pin above: the TTL gate is what
+        keeps the wrapper's inter-batch gap from prematurely
+        discarding an OPEN episode, while still pruning truly
+        abandoned episodes (e.g., parent long-deleted via the
+        ``clear_for_instance`` or any other path the wrapper's
+        close-gate would have caught).
+        """
         registry = LongToolNudgeRegistry()
         scanner = _scanner(registry)
         scanner._active_episodes.add(("parent-1", "child-gone"))
+        # Episode last-seen well outside the TTL window.
+        scanner._episode_last_seen[("parent-1", "child-gone")] = (
+            fake_clock.t - STALE_STAMP_TTL_SECONDS - 1
+        )
         stats = await scanner.run_once()
         assert ("parent-1", "child-gone") not in scanner._active_episodes
+        assert ("parent-1", "child-gone") not in scanner._episode_last_seen
         assert stats["orphan_episodes_discarded"] == 1
 
     @pytest.mark.asyncio
@@ -138,9 +185,39 @@ class TestScannerOrphanEpisodeClose:
         scanner = _scanner(registry)
         await _stamp(registry, "child-1", "call-1", fake_clock, age=10)
         scanner._active_episodes.add(("parent-1", "child-1"))
+        scanner._episode_last_seen[("parent-1", "child-1")] = (
+            fake_clock.t
+        )
         stats = await scanner.run_once()
         assert ("parent-1", "child-1") in scanner._active_episodes
+        # The live stamp refreshes the TTL anchor — the anchor age
+        # after the sweep must be ≈ now (the refresh ran in the
+        # scan loop, before the orphan sweep).
+        assert scanner._episode_last_seen[("parent-1", "child-1")] == (
+            pytest.approx(fake_clock.t)
+        )
         assert stats["orphan_episodes_discarded"] == 0
+
+    @pytest.mark.asyncio
+    async def test_episode_anchor_refreshed_when_child_has_live_stamps(
+        self, fake_clock
+    ):
+        """A tick where the child has stamps (even below threshold)
+        refreshes the episode TTL anchor — the inter-batch survival
+        pin relies on this anchor being current."""
+        registry = LongToolNudgeRegistry()
+        scanner = _scanner(registry)
+        scanner._active_episodes.add(("parent-1", "child-1"))
+        scanner._episode_last_seen[("parent-1", "child-1")] = (
+            fake_clock.t - 5000
+        )
+        # Live stamp BELOW threshold (no fire) — but anchor must still
+        # refresh because the child is in the snapshot.
+        await _stamp(registry, "child-1", "call-1", fake_clock, age=10)
+        await scanner.run_once()
+        assert scanner._episode_last_seen[("parent-1", "child-1")] == (
+            pytest.approx(fake_clock.t)
+        )
 
 
 class TestScannerFiredEpisodesHygieneDiscard:

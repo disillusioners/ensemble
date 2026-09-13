@@ -613,6 +613,69 @@ def test_u17_episode_close_drops_count(registry):
     scanner.close_episode("parent-1", "child-1")  # idempotent no-op
 
 
+# ─── W2: post-enqueue terminal-parent TOCTOU re-check (council fix-cycle 1) ──
+
+
+class TestW2PostEnqueueTerminalParentTocTou:
+    """Council fix-cycle 1, W2 — AD-40 closure pin.
+
+    The pre-read at ``deliver_long_tool_nudge`` only narrows the
+    AD-40 terminal-parent TOCTOU window: a parent that transitions
+    to a terminal status DURING the enqueue commit is revived
+    anyway. The post-enqueue re-check surfaces the race in the log
+    (WARN) and asserts the nudge is durable (no rollback). Test
+    failures here mean a regression in the TOCTOU observability.
+    """
+
+    @pytest.mark.asyncio
+    async def test_post_enqueue_terminal_logs_warn_and_does_not_rollback(
+        self, registry, caplog
+    ):
+        scanner = _scanner(registry)
+        # Pre-read sees a running parent.
+        parent_running = _ParentStub("running")
+        # Post-enqueue sees a now-terminal parent.
+        parent_terminal = _ParentStub("completed")
+        scanner._repo.get = MagicMock(
+            side_effect=[parent_running, parent_terminal]
+        )
+        with caplog.at_level(
+            "WARNING", logger="daemon.services.long_tool_nudge"
+        ):
+            result = await scanner.deliver_long_tool_nudge(
+                "parent-1", "child-1", _ctx()
+            )
+        # The nudge is durable — the post-enqueue re-check is a
+        # no-op that surfaces the race; it does NOT roll back.
+        assert result is True
+        scanner._manager.enqueue_message.assert_awaited_once()
+        # And the race is observable in the log.
+        assert any(
+            "post-enqueue terminal-parent race" in r.message
+            for r in caplog.records
+        ), (
+            "W2 invariant: the post-enqueue re-check must surface "
+            "the race in a WARN log (AD-40 TOCTOU observability)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_post_enqueue_non_terminal_no_warn(self, registry, caplog):
+        """Sanity pin: a parent that stays non-terminal across the
+        enqueue emits NO TOCTOU WARN — the re-check is silent on
+        the happy path."""
+        scanner = _scanner(registry)
+        parent_running = _ParentStub("running")
+        scanner._repo.get = MagicMock(return_value=parent_running)
+        with caplog.at_level(
+            "WARNING", logger="daemon.services.long_tool_nudge"
+        ):
+            await scanner.deliver_long_tool_nudge("parent-1", "child-1", _ctx())
+        assert not any(
+            "post-enqueue terminal-parent race" in r.message
+            for r in caplog.records
+        )
+
+
 # ─── U18: DB-down tick isolation ─────────────────────────────────────────────
 
 

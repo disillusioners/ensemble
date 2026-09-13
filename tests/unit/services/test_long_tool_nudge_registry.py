@@ -2,10 +2,13 @@
 
 Pins: record/clear/snapshot concurrency under asyncio.gather (50
 writers + 1 reader); ``clear`` returns the cleared stamp;
-``clear_for_instance`` returns the right list and leaves no orphans;
-overflow cap drops the oldest instance with a WARN log; empty
-snapshot; duplicate ``(instance_id, tool_call_id)`` keeps the FIRST
-stamp (first-stamp-wins idempotency).
+``clear_many`` (council fix-cycle 1, A5) clears every requested
+stamp under one lock and evicts the per-batch threshold cache
+alongside; overflow cap drops the oldest instance with a WARN log;
+empty snapshot; duplicate ``(instance_id, tool_call_id)`` keeps the
+FIRST stamp (first-stamp-wins idempotency). Council fix-cycle 1:
+removed the ``clear_for_instance`` test (the method had no
+production callers and was deleted alongside).
 """
 
 from __future__ import annotations
@@ -53,19 +56,33 @@ async def test_clear_returns_cleared_stamp(registry):
 
 
 @pytest.mark.asyncio
-async def test_clear_for_instance_returns_all_and_leaves_no_orphans(registry):
-    await registry.record_start("inst-1", "call-1", "bash", "p")
-    await registry.record_start("inst-1", "call-2", "read_file", "p")
-    await registry.record_start("inst-2", "call-3", "bash", "p")
-    cleared = await registry.clear_for_instance("inst-1")
-    assert sorted(s.tool_call_id for s in cleared) == ["call-1", "call-2"]
-    snap = await registry.snapshot()
-    assert set(snap.keys()) == {"inst-2"}
+async def test_snapshot_empty_when_no_stamps(registry):
+    assert await registry.snapshot() == {}
 
 
 @pytest.mark.asyncio
-async def test_snapshot_empty_when_no_stamps(registry):
-    assert await registry.snapshot() == {}
+async def test_clear_many_clears_all_in_one_lock_acquisition(registry):
+    """Council fix-cycle 1, A5 — REGRESSION PIN for ``clear_many``.
+
+    The wrapper's per-batch finally calls ``clear_many`` with all
+    stamp ids from the current batch; the method must remove every
+    stamp under ONE lock acquisition (the cancel-immune contract
+    depends on this — a cancel between two stamp clears could
+    otherwise leak the rest to the AD-9a TTL belt). Test failure
+    here means a future refactor broke the single-lock guarantee.
+    """
+    await registry.record_start("inst-1", "call-1", "bash", "p")
+    await registry.record_start("inst-1", "call-2", "read_file", "p")
+    await registry.record_start("inst-2", "call-3", "bash", "p")
+    cleared = await registry.clear_many(
+        "inst-1", ["call-1", "call-2", "missing"]
+    )
+    assert sorted(tc_id for tc_id, _ in cleared) == ["call-1", "call-2"]
+    snap = await registry.snapshot()
+    # inst-1 is fully cleared and evicted; inst-2 is untouched.
+    assert set(snap.keys()) == {"inst-2"}
+    # Per-batch threshold cache evicted alongside (W1).
+    assert "inst-1" not in registry._batch_threshold_cache
 
 
 @pytest.mark.asyncio

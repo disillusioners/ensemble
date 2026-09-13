@@ -326,6 +326,65 @@ class TestWrappedToolsNodeCancelClearsStamps:
         assert await registry.snapshot() == {}  # finally cleared on cancel
 
 
+class TestWrappedToolsNodeA5CancelImmuneClear:
+    """Council fix-cycle 1, A5 — REGRESSION PIN for the
+    double-cancel-during-finally wedge that previously leaked
+    stamps to the AD-9a TTL belt. The wrapper's finally must clear
+    every stamp BEFORE returning, even if a ``CancelledError``
+    arrives mid-clear. The shield-based reordering pins this
+    contract: every batch's stamps are gone from the registry
+    after the wrapper returns, regardless of how the runtime
+    delivers the cancel.
+    """
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_batch_clears_all_stamps_on_cancel(
+        self, lt_real, monkeypatch
+    ):
+        """A batch of N tool_calls where the underlying ToolNode
+        raises ``CancelledError`` mid-ainvoke — every stamp from
+        this batch MUST be removed from the registry, not leaked
+        to the TTL belt."""
+        import asyncio
+
+        from langgraph.prebuilt import ToolNode as real_toolnode
+
+        class _CancellingToolNode(real_toolnode):  # type: ignore[misc, valid-type]
+            async def ainvoke(self, state, config=None, **kwargs):
+                raise asyncio.CancelledError()
+
+        _patch_langgraph_toolnode(lt_real, monkeypatch, _CancellingToolNode)
+        registry = lt_real.LongToolNudgeRegistry()
+        node = lt_real._wrapped_tools_node([sample_tool], registry)
+        # 3 tool_calls in one batch — the wrapper's finally must
+        # clear all 3 even when the inner ainvoke cancels.
+        state = _state()
+        state["messages"][0].tool_calls.extend(
+            [
+                {
+                    "name": "sample_tool",
+                    "args": {"x": "2"},
+                    "id": "call-b",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "sample_tool",
+                    "args": {"x": "3"},
+                    "id": "call-c",
+                    "type": "tool_call",
+                },
+            ]
+        )
+        with pytest.raises(BaseException):
+            await _run_through_real_graph(lt_real, node, state, _config())
+        # The A5 contract: every stamp from this batch is gone.
+        # (Pre-fix: a mid-clear cancel could leak stamps 2..N to
+        # the TTL belt — they would sit in the registry until the
+        # 7200s belt fired, observable as ``STALE_STAMP
+        # force-cleared`` warnings hours later.)
+        assert await registry.snapshot() == {}
+
+
 class TestWrappedToolsNodeHandleToolErrorsTrue:
     @pytest.mark.asyncio
     async def test_tool_error_returns_errormessage_no_raise(self, lt_real):
