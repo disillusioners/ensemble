@@ -352,6 +352,153 @@ class TestJointLoopXEmptyGuard:
                 await conn.close()
 
     @pytest.mark.asyncio
+    async def test_guard_off_ladder_on_still_repairs_bounded(
+        self, ladder_on, monkeypatch, caplog, tmp_path
+    ):
+        """Fourth 2×2 arm (review W1): ``ENSEMBLE_EMPTY_RESPONSE_GUARD=0``
+        with the ladder ON. The S5 degenerate-cap machinery is disabled,
+        but the DURABLE LOOP RUNG is independent of the empty-guard flag:
+        (i) the S5 cap warning does NOT fire, (ii) the durable repair
+        still runs, (iii) the durable budget still increments. Both
+        mechanisms' independence is the partition contract (P-9).
+
+        Runtime-flag note: the empty-guard kill-switch lives in the
+        ``daemon.response_validation`` module cache (installed by
+        ``load_config``) — the env var alone is inert at runtime, so this
+        arm drives ``install_empty_guard_config`` directly and restores
+        the documented defaults afterwards.
+        """
+        import daemon.response_validation as rv
+
+        rv.install_empty_guard_config(enabled=False, compaction_skip=False)
+        try:
+            with _RealLangGraph():
+                import aiosqlite
+                from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+                from langgraph.graph import END, START, MessagesState, StateGraph
+
+                async def _ok_summarizer(context, symptom_class):
+                    return "Stub summary of the loop."
+
+                monkeypatch.setattr(
+                    SymptomRepairEngine,
+                    "_summarize",
+                    staticmethod(_ok_summarizer),
+                )
+
+                script = [
+                    _loop_response(0),
+                    _loop_response(1),
+                    _loop_response(2),
+                    # Repair fires on the 4th agent entry; the provider
+                    # then degrades into UNGUARDED degenerate re-invokes
+                    # (guard OFF ⇒ no S5 cap, no cap fall-through nudge).
+                    _degenerate_response(0),
+                    _degenerate_response(1),
+                    _degenerate_response(2),
+                    AIMessage(content="final answer", id="final-1"),
+                ]
+                provider = _ScriptedProvider(script)
+                slot = _StubLoopBreakerSlot()
+                agent_node = _make_agent_node(provider, slot)
+
+                from langgraph.graph import MessagesState
+
+                class _JointState(MessagesState):
+                    repair_budget_used: int
+
+                g = StateGraph(_JointState)
+                g.add_node("agent", agent_node)
+                g.add_node("tools", _tools_node)
+                g.add_node("nudge", nudge_node)
+                g.add_edge(START, "agent")
+                g.add_conditional_edges(
+                    "agent",
+                    should_continue,
+                    {
+                        "tools": "tools",
+                        "nudge": "nudge",
+                        "agent": "agent",
+                        END: END,
+                    },
+                )
+                g.add_edge("tools", "agent")
+                g.add_edge("nudge", "agent")
+
+                db_path = tmp_path / "joint_guard_off.db"
+                conn = await aiosqlite.connect(str(db_path))
+                saver = AsyncSqliteSaver(conn)
+                await saver.setup()
+                try:
+                    compiled = g.compile(checkpointer=saver)
+                    cfg = {
+                        "configurable": {"thread_id": "joint-guard-off"},
+                        "recursion_limit": 60,
+                    }
+                    with caplog.at_level(logging.INFO):
+                        await compiled.ainvoke(
+                            {
+                                "messages": [
+                                    HumanMessage(
+                                        content="run the loop task", id="h1"
+                                    )
+                                ],
+                                "repair_budget_used": 0,
+                            },
+                            cfg,
+                        )
+                    st = await compiled.aget_state(cfg)
+                    values = st.values
+                    final_ids = [
+                        getattr(m, "id", None) for m in values["messages"]
+                    ]
+
+                    # (i) S5 cap warning does NOT fire with the guard OFF —
+                    # the derived trailing-degenerate counter is pinned to
+                    # 0, so the cap branch is unreachable.
+                    cap_warns = [
+                        r.getMessage()
+                        for r in caplog.records
+                        if "degenerate re-invoke cap hit" in r.getMessage()
+                    ]
+                    assert cap_warns == [], (
+                        "S5 cap warning must NOT fire with the empty-guard "
+                        f"OFF; got {cap_warns!r}"
+                    )
+
+                    # (ii) the durable repair STILL runs — the loop rung
+                    # does not depend on the empty-guard flag.
+                    assert len(slot.record_calls) == 1
+                    doc_ids = [
+                        i
+                        for i in final_ids
+                        if str(i).startswith(
+                            f"{REPAIR_DOC_ID_PREFIX}joint-guard-off-"
+                        )
+                    ]
+                    assert len(doc_ids) == 1
+                    assert "ai-1" not in final_ids and "ai-2" not in final_ids
+                    assert "ai-0" in final_ids  # evidence retained
+
+                    # (iii) the durable budget STILL increments.
+                    assert values.get("repair_budget_used") == 1
+
+                    # The run completes; no loop terminal, no wedge.
+                    assert values["messages"][-1].content == "final answer"
+                    symptom_lines = [
+                        r.getMessage()
+                        for r in caplog.records
+                        if "[SYMPTOM]" in r.getMessage()
+                    ]
+                    assert not any(
+                        "phase=terminal" in l for l in symptom_lines
+                    )
+                finally:
+                    await conn.close()
+        finally:
+            rv._reset_empty_guard_config_for_tests()
+
+    @pytest.mark.asyncio
     async def test_flags_off_preserves_shipped_routing_in_joint_run(
         self, monkeypatch, tmp_path
     ):

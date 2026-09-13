@@ -1776,29 +1776,39 @@ def _emit_symptom_telemetry(
     budget_used: int | None = None,
     budget_cap: int | None = None,
     detail: str = "",
+    axis: str | None = None,
 ) -> None:
     """Emit the unified ``[SYMPTOM]`` operator grep line (F-3, DQ4-b).
 
     Shape::
 
         [SYMPTOM] class=loop phase=<…> action=<…> budget=<used>/<cap> \\
-            instance=<short> turn=<task_id> detail=<one-liner>
+            axis=<ram-per-turn|durable-task> instance=<short> turn=<task_id> \\
+            detail=<one-liner>
 
-    Emitted ALONGSIDE the existing ``[LOOP BREAKER]`` lines (dual emit
-    during transition; consolidation is phase-3, OQ7). Intentionally NOT
-    gated by the ladder kill-switches (ADR-0008 / W1 KEEP precedent):
-    OFF-mode storms must stay visible during an OFF soak. Telemetry is
-    log-only — it never routes — so emission cannot change behavior.
+    ``axis`` (W3 review hardening) disambiguates WHICH budget expression
+    the ``budget=`` numbers belong to — the shipped path counts the
+    RAM-per-turn ``max_repairs`` counter while the durable rung counts
+    the checkpoint-persisted per-task budget; without the axis the two
+    are indistinguishable in a grep. Terminal lines are self-labeled via
+    their ``detail=`` reason and carry NO axis (the escalation is
+    axis-independent). Emitted ALONGSIDE the existing ``[LOOP BREAKER]``
+    lines (dual emit during transition; consolidation is phase-3, OQ7).
+    Intentionally NOT gated by the ladder kill-switches (ADR-0008 / W1
+    KEEP precedent): OFF-mode storms must stay visible during an OFF
+    soak. Telemetry is log-only — it never routes — so emission cannot
+    change behavior.
     """
     try:
         if budget_used is not None and budget_cap is not None:
             budget_part = f" budget={budget_used}/{budget_cap}"
         else:
             budget_part = " budget=-/-"
+        axis_part = f" axis={axis}" if axis and phase != "terminal" else ""
         line = (
             f"[SYMPTOM] class=loop phase={phase} action={action}"
-            f"{budget_part} instance={instance_short} turn={turn_id}"
-            f" detail={detail}"
+            f"{budget_part}{axis_part} instance={instance_short}"
+            f" turn={turn_id} detail={detail}"
         )
         if phase in ("terminal",) or action in ("abort", "escalate"):
             logger.warning(line)
@@ -1963,6 +1973,7 @@ async def _maybe_durable_loop_repair(
         action="fired",
         instance_short=instance_short,
         turn_id=turn_id,
+        axis="durable-task",
         detail=(
             f"{detection.repetition_count}x repeated "
             f"'{detection.tool_name}' (threshold "
@@ -2063,6 +2074,7 @@ async def _maybe_durable_loop_repair(
             action="abort",
             instance_short=instance_short,
             turn_id=turn_id,
+            axis="durable-task",
             budget_used=budget_used,
             budget_cap=SYMPTOM_REPAIR_BUDGET,
             detail=f"engine-raise: {type(rep_err).__name__}",
@@ -2080,6 +2092,7 @@ async def _maybe_durable_loop_repair(
             action="abort",
             instance_short=instance_short,
             turn_id=turn_id,
+            axis="durable-task",
             budget_used=budget_used,
             budget_cap=SYMPTOM_REPAIR_BUDGET,
             detail=(
@@ -2105,6 +2118,7 @@ async def _maybe_durable_loop_repair(
         action="fired",
         instance_short=instance_short,
         turn_id=turn_id,
+        axis="durable-task",
         budget_used=new_budget,
         budget_cap=SYMPTOM_REPAIR_BUDGET,
         detail=(
@@ -2251,6 +2265,7 @@ async def _maybe_repair_loop(
             action="skipped",
             instance_short=instance_short,
             turn_id=_turn_id_from_config(config, instance_id),
+            axis="ram-per-turn",
             budget_used=repair_count,
             budget_cap=loop_breaker_config.max_repairs,
             detail="ram-per-turn-cap-reached-continuing-original",
@@ -2269,6 +2284,7 @@ async def _maybe_repair_loop(
         action="fired",
         instance_short=instance_short,
         turn_id=_turn_id_from_config(config, instance_id),
+        axis="ram-per-turn",
         detail=(
             f"{detection.repetition_count}x repeated "
             f"'{detection.tool_name}' (transient repair path)"
@@ -2331,6 +2347,7 @@ async def _maybe_repair_loop(
             action="abort",
             instance_short=instance_short,
             turn_id=_turn_id_from_config(config, instance_id),
+            axis="ram-per-turn",
             detail=f"transient-repair-failed: {result.error}"[:200],
         )
         return messages, full_messages
@@ -2376,6 +2393,7 @@ async def _maybe_repair_loop(
         action="fired",
         instance_short=instance_short,
         turn_id=_turn_id_from_config(config, instance_id),
+        axis="ram-per-turn",
         budget_used=repair_count + 1,
         budget_cap=loop_breaker_config.max_repairs,
         detail="transient surgery (shipped path)",

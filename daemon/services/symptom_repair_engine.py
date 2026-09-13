@@ -245,6 +245,12 @@ class SymptomRepairEngine:
     ) -> SymptomRepairOutcome:
         """Execute the durable repair flow for a detected symptom.
 
+        Kill-switch contract: the CALLER is the gate — never invoke
+        ``repair()`` directly without consulting
+        ``get_symptom_repair_ladder_enabled()`` /
+        ``get_repair_loop_durable_enabled()`` (phase-2 enrollment safety:
+        every new class must inherit the same gating discipline).
+
         Steps (each failure mode fails OPEN — the caller continues the
         turn on the ORIGINAL messages):
 

@@ -130,6 +130,7 @@ def _make_agent(
     loop_breaker_config=None,
     llm=None,
     graph_ref=None,
+    compactor=None,
 ):
     from daemon.graph import create_agent_node as _can
 
@@ -141,7 +142,7 @@ def _make_agent(
     agent_node = create_agent_node(
         llm_with_tools=llm,
         system_prompt="you are a test assistant",
-        compactor=None,
+        compactor=compactor,
         graph_ref=graph_ref,
         config=None,
         llm_config={"model": "test-model", "model_vision": None},
@@ -643,6 +644,107 @@ class TestPlacementPins:
 
 
 # ---------------------------------------------------------------------------
+# W2 — L2-precall-skip BEHAVIORAL pin (stub compactor)
+# ---------------------------------------------------------------------------
+
+
+class TestL2PrecallSkipBehavioral:
+    """The skip guard (agent_node, precall site) must be pinned
+    BEHAVIORALLY, not only by source ordering: on the superstep where the
+    durable loop repair lands, ``_maybe_precall_compact_95`` must NOT be
+    consulted; on the next superstep it must. A regression deleting the
+    skip would let L2 compact the PRE-repair checkpoint channel and
+    return-carriedly resurrect the loop units the surgery just removed —
+    while the repair prefix and the compaction prefix fight over the same
+    node return (at most ONE durable channel rewrite may ride one
+    commit).
+
+    Mechanism: the precall hook is replaced by a counted AsyncMock
+    returning the module's no-op outcome, and agent_node is driven across
+    real supersteps (the harness mirrors the graph cycle: agent → tools →
+    agent). A MagicMock compactor is wired so the wiring is honest; the
+    mock at the seam is what makes the call COUNT observable without
+    depending on compaction-internal gating."""
+
+    async def test_precall_not_fired_on_repair_superstep_fired_on_next(
+        self, ladder_on, monkeypatch
+    ):
+        import daemon.graph as graph_module
+
+        def _ai_loop_response(seq: int) -> AIMessage:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": f"tc-{seq}",
+                        "name": "bash",
+                        "args": {"cmd": "ls"},
+                    }
+                ],
+                id=f"ai-{seq}",
+            )
+
+        def _tool_unit(seq: int) -> list:
+            tc = f"tc-{seq}"
+            return [
+                _ai_loop_response(seq),
+                ToolMessage(
+                    content=f"res-{seq}",
+                    tool_call_id=tc,
+                    name="bash",
+                    id=f"tm-{seq}",
+                ),
+            ]
+
+        _stub_engine_summarizer(monkeypatch)
+        precall_mock = AsyncMock(return_value=graph_module._PRECALL_NOOP)
+        monkeypatch.setattr(
+            graph_module, "_maybe_precall_compact_95", precall_mock
+        )
+
+        agent_node, _ = _make_agent(
+            loop_breaker_slot=_StubLoopBreakerSlot(),
+            compactor=MagicMock(),  # stub compactor — wiring is real
+            llm=_StubLLM(response=_ai_loop_response(9)),
+        )
+
+        # Supersteps 1-3: loop units accumulate — precall consulted each
+        # time (no repair yet).
+        state: dict = {"messages": [HumanMessage(content="go", id="h1")]}
+        for seq in range(3):
+            await agent_node(
+                {**state, "repair_budget_used": 0},
+                config={"configurable": {"thread_id": "iid-w2"}},
+            )
+            state = {"messages": [*state["messages"], *_tool_unit(seq)]}
+        assert precall_mock.await_count == 3
+
+        # Superstep 4: THREE identical units → durable repair fires → the
+        # precall hook must be SKIPPED on exactly this superstep.
+        result4 = await agent_node(
+            {**state, "repair_budget_used": 0},
+            config={"configurable": {"thread_id": "iid-w2"}},
+        )
+        # Proof the repair fired on this superstep: sentinel-first return.
+        assert isinstance(result4["messages"][0], RemoveMessage)
+        assert precall_mock.await_count == 3, (
+            "L2 precall hook must NOT be consulted on the repair superstep "
+            "(a fire here would compose two sentinel-first channel rewrites)"
+        )
+
+        # Superstep 5 (next superstep, post-repair): the hook is consulted
+        # again — the skip is scoped to the repair superstep only.
+        repaired = result4["messages"]
+        result5 = await agent_node(
+            {"messages": list(repaired), "repair_budget_used": 1},
+            config={"configurable": {"thread_id": "iid-w2"}},
+        )
+        assert precall_mock.await_count == 4
+        # No second repair on the clean channel.
+        assert not isinstance(result5["messages"][0], RemoveMessage)
+
+
+# ---------------------------------------------------------------------------
 # F-3 — [SYMPTOM] telemetry shape
 # ---------------------------------------------------------------------------
 
@@ -671,6 +773,8 @@ class TestSymptomTelemetry:
         assert "phase=detect action=fired" in joined
         assert "phase=repair action=fired" in joined
         assert "budget=1/3" in joined
+        # W3: non-terminal durable-rung lines carry the budget axis.
+        assert "axis=durable-task" in joined
         assert "instance=iid" in joined  # short id
         assert "turn=iid-tel" in joined
 
@@ -706,6 +810,9 @@ class TestSymptomTelemetry:
         assert "phase=detect action=fired" in joined
         assert "phase=repair action=fired" in joined
         assert "transient surgery (shipped path)" in joined
+        # W3: shipped-path lines carry the RAM-per-turn axis.
+        assert "axis=ram-per-turn" in joined
+        assert "axis=durable-task" not in joined
 
     async def test_terminal_emits_escalate_reason(self, ladder_on, caplog):
         agent_node, _ = _make_agent(
@@ -725,6 +832,9 @@ class TestSymptomTelemetry:
         joined = "\n".join(self._lines(caplog))
         assert "phase=terminal action=escalate" in joined
         assert "repair-budget-exhausted" in joined
+        # W3: terminal lines are self-labeled via detail= and carry NO axis.
+        terminal_lines = [l for l in self._lines(caplog) if "phase=terminal" in l]
+        assert terminal_lines and all("axis=" not in l for l in terminal_lines)
 
     async def test_abort_emits_repair_abort(self, ladder_on, monkeypatch, caplog):
         monkeypatch.setattr(
