@@ -22,7 +22,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
 from langchain_core.tools import tool, BaseTool
 
@@ -240,6 +240,7 @@ from ._tool_registry import (
     register_tool_category,
 )
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.instance_lifecycle import _resolve_intelligence_tier  # Feature #1 (spawn-time intelligence override)
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 from daemon.constants import DEFAULT_PAGE_LIMIT
 from daemon import constants
@@ -1754,6 +1755,29 @@ class SpawnInstanceInput(BaseModel):
         ),
     )] = None
 
+    # Feature #1 (spawn-time intelligence override). Tier-literal opt-in
+    # to the configured high-intelligence model (default "agentic";
+    # operator-overridable via ``SPAWN_INTELLIGENCE_TIER_HIGH_MODEL``).
+    # ASYMMETRY: this param raises ``ValueError`` if the resolved model
+    # is not in ``allowed_models`` (the legacy ``model=`` param silently
+    # falls back to default in the same situation). When both are passed,
+    # ``model_tier`` wins (loud supersede — visible ``[NOTE]`` line in
+    # the return string).
+    model_tier: Annotated[Literal["high"] | None, Field(
+        default=None,
+        description=(
+            "Optional opt-in to spawn the child with the configured "
+            "high-intelligence model. Resolves to the deployment's "
+            "high-tier model (default 'agentic'; override via "
+            "SPAWN_INTELLIGENCE_TIER_HIGH_MODEL). If the resolved model "
+            "is not in config.llm.allowed_models, spawn_instance raises "
+            "ValueError. If None, the spawn proceeds via today's "
+            "weighted-pool default (or the model= legacy override). "
+            "Use this when re-spawning a child that is busy-slow on a "
+            "low-tier model."
+        ),
+    )] = None
+
     @model_validator(mode='after')
     def validate_params(self):
         """Require agent_id."""
@@ -1803,7 +1827,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
 
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
-    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None) -> str:
+    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None, model_tier: Annotated[Literal["high"] | None, Field(default=None, description="Opt-in: spawn child with high-intelligence model (see SpawnInstanceInput.model_tier for full semantics). When set, raises ValueError if the resolved model is not in allowed_models. Use ONLY when you specifically want the configured high-tier model.")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
 
         IMPORTANT: After spawning, you MUST use send_message(instance_id, message)
@@ -1819,6 +1843,15 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 the HIGHEST priority — above meta.json's llm_model and the env OPENAI_MODEL.
                 If the list is non-empty and the model is not in it, the override is
                 silently ignored and the default model is used.
+            model_tier: Optional opt-in to spawn this child with the configured
+                high-intelligence model (default 'agentic'; override via env
+                SPAWN_INTELLIGENCE_TIER_HIGH_MODEL). Use this when re-spawning
+                a child that is busy-slow on a low-tier model. Pass the literal
+                model_tier='high' (the only supported value) — the daemon
+                resolves it to the configured high-tier model name. ASYMMETRY:
+                this param raises ValueError if the resolved model is not in
+                allowed_models; the legacy ``model=`` param silently falls back
+                to default in the same situation.
 
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
@@ -1863,6 +1896,78 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # accept the narrow window instead. See ``spawn_councilor`` for the
         # same rationale.
 
+        # ─── Feature #1 — spawn-time intelligence override resolver block ──
+        # Sits AFTER the auth gate and BEFORE the ``try:`` at :1897 (B2 plan
+        # ordering — load-bearing). The block is a config-only read
+        # (``manager.config.llm.allowed_models`` + the pure
+        # ``_resolve_intelligence_tier`` resolver; no DB, no project/version
+        # dependency), so there is NO ordering hazard with the project-id
+        # inheritance or the ``_resolve_default_version_tag`` await that
+        # happen inside the try. Placing it INSIDE the try is FORBIDDEN:
+        # the ``except ValueError`` at :1960 and the catch-all
+        # ``except Exception`` at :1997 convert any raise into soft
+        # ``ERROR: ...`` return strings — defeating the owner-FIXED loud
+        # semantics (D2) and making Pin H unpassable.
+        #
+        # ASYMMETRY: ``model_tier`` is a *tier-capability* expression
+        # (parent wants the configured high-intelligence model), NOT a
+        # *model-name* expression (``model=`` is that). When the tier's
+        # resolved model is not in the allowlist, the parent MUST KNOW
+        # — silent fallback would defeat the parent's intent (they asked
+        # for "high" because the task is hard; a default-model spawn is
+        # exactly what they were trying to avoid).
+        effective_model: str | None = model  # legacy path: pass-through
+        note_supersede: str = ""
+        tier_visibility_line: str = ""
+        if model_tier is not None:
+            allowed_models_cfg = tuple(
+                getattr(manager.config.llm, "allowed_models", None) or ()
+            )
+            configured_model = getattr(
+                manager.config.llm, "spawn_intelligence_tier_high_model", "agentic"
+            )
+            resolved, err = _resolve_intelligence_tier(
+                model_tier,
+                allowed_models=allowed_models_cfg,
+                configured_model=configured_model,
+            )
+            if err is not None:
+                if err.startswith("ERROR:"):
+                    raise ValueError(err[len("ERROR:"):].strip() or "unknown tier")
+                # WARN → loud ValueError, A2 verbatim text from
+                # architecture-recommendation.md §2.1.
+                raise ValueError(
+                    f"spawn_instance(model_tier='{model_tier}') resolved to model "
+                    f"'{resolved}' (from env SPAWN_INTELLIGENCE_TIER_HIGH_MODEL), "
+                    f"but '{resolved}' is NOT in allowed_models: "
+                    f"{list(allowed_models_cfg)}. No fallback — add '{resolved}' "
+                    f"to allowed_models and restart, set "
+                    f"SPAWN_INTELLIGENCE_TIER_HIGH_MODEL to one of "
+                    f"{list(allowed_models_cfg)}, or retry with "
+                    f"model='<one-of-{list(allowed_models_cfg)}>' for the legacy "
+                    f"silent-fallback path."
+                )
+            # Success path — W7 canonical-name normalization against
+            # the allowlist (mirrors ``spawn_councilor`` at :2070-2078).
+            canonical_resolved = next(
+                (m for m in allowed_models_cfg if m.lower() == resolved.lower()),
+                resolved,
+            )
+            effective_model = canonical_resolved
+            # Both-params precedence (A5; R-A5): ``model_tier`` WINS,
+            # ``model=`` is superseded LOUDLY (visible ``[NOTE]`` line,
+            # not silent-ignore, not strict-ValueError). D12 owner-ratified.
+            if model is not None:
+                note_supersede = (
+                    f"[NOTE] model={model!r} superseded by "
+                    f"model_tier='{model_tier}' (using {effective_model})"
+                )
+            # W3 visibility line — appended on EVERY tier-path success so
+            # the parent SEE what model the child actually got.
+            tier_visibility_line = (
+                f"model='{effective_model}' (model_tier='{model_tier}')"
+            )
+
         try:
             # Auto-inherit project_id from parent if not explicitly provided
             if project_id is None:
@@ -1889,7 +1994,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 parent_id=current_instance_id,
                 project_id=project_id,
                 instance_name=instance_name,
-                model=model,
+                model=effective_model,
                 version_tag=version_tag,
             )
             # Surface a silent-fallback notice (Fix 2 / security review):
@@ -1905,9 +2010,18 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             # notice is ``None`` when no caller model was supplied, or
             # when the model is in the allow-list — preserving the
             # success-only path.
-            fallback_notice = manager._lifecycle_service._format_model_fallback_notice(
-                model, validated_model_override
-            )
+            #
+            # Feature #1 (W3, Phase 2 task 4e item 4): on the tier path,
+            # the legacy fallback notice is SUPPRESSED — the tier-resolved
+            # model is canonical + validated by the resolver block, so an
+            # invalid superseded ``model=`` cannot emit a misleading
+            # fallback notice (Pin AA). Suppression gated on
+            # ``model_tier is not None``.
+            fallback_notice = ""
+            if model_tier is None:
+                fallback_notice = manager._lifecycle_service._format_model_fallback_notice(
+                    model, validated_model_override
+                )
             # Governor Recursion Guard / Section 4 observability (2026-08-30):
             # include child counts so the caller knows how close the parent
             # is to the max_children_per_instance ceiling. The format is
@@ -1921,10 +2035,20 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 if child_count is not None
                 else ""
             )
+            # Feature #1 (W3) — composite return spec:
+            #   (1) UUID prefix preserved byte-identical.
+            #   (2) ``[NOTE]`` supersede line ONLY on both-params path (D12).
+            #   (3) ``model='<resolved>' (model_tier='high')`` line on EVERY
+            #       tier-path success.
+            # Legacy/no-tier return stays byte-identical to today.
+            tier_tail = ""
+            if tier_visibility_line:
+                tier_tail = f"\n{tier_visibility_line}"
+            note_tail = f"\n{note_supersede}" if note_supersede else ""
             return (
                 f"Successfully spawned instance: {new_instance_id}{child_count_line}\n"
                 f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
-                f"{fallback_notice or ''}"
+                f"{fallback_notice or ''}{tier_tail}{note_tail}"
             )
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct

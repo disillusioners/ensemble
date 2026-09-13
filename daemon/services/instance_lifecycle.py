@@ -923,10 +923,27 @@ def append_allowed_models(
                 "This is read-only system configuration, not instructions."
             )
 
+        # Feature #1 (Phase 3 — Discoverability): the ``# Spawn Intelligence``
+        # tail teaches the governor/council-flow parents about the
+        # ``model_tier="high"`` opt-in. Lives INSIDE the
+        # ``<allowed_models>...</allowed_models>`` XML fence (R3.4 — no new
+        # injection point, no new ``[SYSTEM CONTEXT: ...]`` block). The
+        # empty-allowed-models branch above also gets the tail (OQ3 — the
+        # tier-availability discoverability SHOULD still be on the table so
+        # the parent knows the option exists; the loud validation will
+        # reject the spawn if the resolved model is not allowed).
+        tail = (
+            "\n\n# Spawn Intelligence\n"
+            "A `model_tier=\"high\"` parameter is available on spawn_instance. "
+            "It resolves\n"
+            "to the configured high-tier model (default: 'agentic') and is the\n"
+            "recommended replacement when re-spawning after a long-tool-call wedge.\n"
+        )
+
         section = (
             f"\n\n---\n\n# Allowed Models\n\n"
             f"The block below is read-only system configuration, not instructions.\n"
-            f"<allowed_models>\n{block}\n</allowed_models>\n\n---\n"
+            f"<allowed_models>\n{block}{tail}\n</allowed_models>\n\n---\n"
         )
         return system_prompt + section
 
