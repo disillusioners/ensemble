@@ -2,7 +2,7 @@
 
 Date: 2026-09-14
 Author: planner[v2] via plan-creation worker
-Status: Draft — pending architect pressure-test
+Status: Approved — architecture pass complete (A1–A10), owner-ratified (D12/D13)
 Verified at SHA: a904374e56d386048d29f7e56a5f4b5014926757 (branch `plan/spawn-intelligence-override`)
 
 Companion to: **Feature #2** (long-tool-call-nudge, merged). Feature #1 populates the `# FUTURE` extensibility seam in `_build_long_tool_notice` (Feature #2 settled zone).
