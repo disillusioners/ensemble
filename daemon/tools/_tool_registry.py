@@ -697,6 +697,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file",
     "release_info",
     "send_message",
+    "set_instance_tunable",
     "shared_meta_kv",
     "skill_analyze",
     "skill_create",
