@@ -651,8 +651,13 @@ class TestPreCall95CLEIsolation:
 
         source = inspect.getsource(graph_mod)
         hook_site = source.find("_maybe_precall_compact_95(\n")
+        # Anchor the invoke search AFTER the hook site. The substring
+        # "response = await loop.run_in_executor(\n" also matches as a
+        # suffix of "new_response = await loop.run_in_executor(\n" in
+        # the Phase-2 _maybe_pre_terminal_repair block (~:2749), so a
+        # global find would resolve a bogus earlier index.
         first_invoke = source.find(
-            "response = await loop.run_in_executor(\n"
+            "response = await loop.run_in_executor(\n", hook_site
         )
         cle_handler = source.find("except ContextLengthExceededError:")
         assert 0 < hook_site < first_invoke < cle_handler
