@@ -226,3 +226,90 @@ class TestRepairReturnCarriedCanary:
                 assert st2.values.get("repair_budget_used") == 1
             finally:
                 await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_revive_fresh_saver_no_stripped_replay_clean_walk(
+        self, tmp_path
+    ):
+        """T-2b (verify hardening): TRUE process-restart revive — a NEW
+        aiosqlite connection + NEW AsyncSqliteSaver instance over the SAME
+        file (RAM gone, checkpoint is the only state) — must present the
+        repaired channel exactly as committed:
+
+        * the stripped degenerate toolcall block is NOT replayed
+          (``ai-1/tm-1/ai-2/tm-2`` absent from the restored channel),
+        * the retained ORIGINAL-id evidence unit survives
+          (``ai-0``/``tm-0`` present),
+        * the repair doc is checkpointed (exactly one),
+        * the durable budget reads 1 from the RESTORED state, and
+        * an explicit detector walk over the restored tail finds NO live
+          loop — the checkpoint cannot re-trip on its own history.
+        """
+        with _RealLangGraph():
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            instance_id = "revive-fresh-saver-iid"
+            agent = _build_repair_agent(instance_id)
+            cfg = {"configurable": {"thread_id": instance_id}}
+            db_path = tmp_path / "repair_revive.db"
+
+            # Turn 1: degenerate history → repair fired + task-committed.
+            conn1 = await aiosqlite.connect(str(db_path))
+            saver1 = AsyncSqliteSaver(conn1)
+            await saver1.setup()
+            try:
+                g1 = _make_state_graph(agent).compile(checkpointer=saver1)
+                await g1.ainvoke(
+                    {
+                        "messages": [
+                            HumanMessage(content="go", id="h1"),
+                            *_loop_units(3),
+                        ],
+                        "repair_budget_used": 0,
+                    },
+                    cfg,
+                )
+            finally:
+                await conn1.close()  # process "exited": all RAM gone
+
+            # Revive: brand-new connection + saver over the SAME file.
+            conn2 = await aiosqlite.connect(str(db_path))
+            saver2 = AsyncSqliteSaver(conn2)
+            await saver2.setup()
+            try:
+                g2 = _make_state_graph(
+                    _build_repair_agent(instance_id)
+                ).compile(checkpointer=saver2)
+                st = await g2.aget_state(cfg)
+                ids = [
+                    getattr(m, "id", None) for m in st.values["messages"]
+                ]
+
+                # Stripped degenerate block is NOT replayed post-restore.
+                assert "ai-1" not in ids and "tm-1" not in ids
+                assert "ai-2" not in ids and "tm-2" not in ids
+                # Retained ORIGINAL-id evidence unit survives.
+                assert "ai-0" in ids and "tm-0" in ids
+                # Exactly ONE repair doc, checkpointed under its namespace.
+                doc_ids = [
+                    i
+                    for i in ids
+                    if str(i).startswith(
+                        f"{REPAIR_DOC_ID_PREFIX}{instance_id}-"
+                    )
+                ]
+                assert len(doc_ids) == 1
+                # Durable budget read from the RESTORED checkpoint state.
+                assert st.values.get("repair_budget_used") == 1
+
+                # Explicit detector walk over the restored tail: no live
+                # loop remains in the checkpointed channel.
+                assert (
+                    LoopDetector.scan(
+                        messages=list(st.values["messages"]), threshold=3
+                    )
+                    is None
+                )
+            finally:
+                await conn2.close()
