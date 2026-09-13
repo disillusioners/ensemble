@@ -121,7 +121,11 @@ from .response_validation import (
 )
 from .language_detection import detect_wrong_language
 from .utils import serialize_message
-from .config import LoopBreakerConfig
+from .config import (
+    LoopBreakerConfig,
+    get_repair_loop_durable_enabled,
+    get_symptom_repair_ladder_enabled,
+)
 # Lazy import below — module-level ``from .services.language_utils`` would
 # trigger daemon.services.__init__ → instance_lifecycle → compaction →
 # graph (cycle) before this module finishes loading.
@@ -1756,6 +1760,383 @@ class LoopRepairer:
         )
 
 
+def _turn_id_from_config(config: dict | None, instance_id: str) -> str:
+    """Extract the per-turn task id for telemetry (turn_id or thread_id)."""
+    return (
+        (config or {}).get("configurable", {}).get("turn_id") or instance_id
+    )
+
+
+def _emit_symptom_telemetry(
+    *,
+    phase: str,
+    action: str,
+    instance_short: str,
+    turn_id: str,
+    budget_used: int | None = None,
+    budget_cap: int | None = None,
+    detail: str = "",
+) -> None:
+    """Emit the unified ``[SYMPTOM]`` operator grep line (F-3, DQ4-b).
+
+    Shape::
+
+        [SYMPTOM] class=loop phase=<…> action=<…> budget=<used>/<cap> \\
+            instance=<short> turn=<task_id> detail=<one-liner>
+
+    Emitted ALONGSIDE the existing ``[LOOP BREAKER]`` lines (dual emit
+    during transition; consolidation is phase-3, OQ7). Intentionally NOT
+    gated by the ladder kill-switches (ADR-0008 / W1 KEEP precedent):
+    OFF-mode storms must stay visible during an OFF soak. Telemetry is
+    log-only — it never routes — so emission cannot change behavior.
+    """
+    try:
+        if budget_used is not None and budget_cap is not None:
+            budget_part = f" budget={budget_used}/{budget_cap}"
+        else:
+            budget_part = " budget=-/-"
+        line = (
+            f"[SYMPTOM] class=loop phase={phase} action={action}"
+            f"{budget_part} instance={instance_short} turn={turn_id}"
+            f" detail={detail}"
+        )
+        if phase in ("terminal",) or action in ("abort", "escalate"):
+            logger.warning(line)
+        else:
+            logger.info(line)
+    except Exception:  # noqa: BLE001 — telemetry must never break the turn
+        logger.debug("[SYMPTOM] telemetry emit failed", exc_info=True)
+
+
+def _is_real_human_message(msg: Any) -> bool:
+    """True for a REAL (non-injected) ``HumanMessage`` (B-3, OQ5).
+
+    Injected detection mirrors the compaction partition predicates
+    (``daemon/compaction.py::_is_injected_message`` /
+    ``daemon/services/context_messages.py::_make_context_message``):
+    operator injections, skill/context blocks and child-report drains all
+    carry ``additional_kwargs.injected_message=True`` — none of them is a
+    new user-visible task episode, so none may reset the durable repair
+    budget.
+    """
+    if not isinstance(msg, HumanMessage):
+        return False
+    from .compaction import _is_injected_message  # lazy: cycle guard
+
+    return not _is_injected_message(msg)
+
+
+#: Loop-class loud terminal message (D-1). Returned by ``agent_node``
+#: when the durable (or per-turn) repair budget is exhausted under the
+#: flag: an ``AIMessage`` with truthy content and NO tool_calls, so
+#: ``should_continue`` routes it to END — the loop class's loud terminal
+#: backstop. Replaces the shipped WARN+continue (the model never saw the
+#: WARN; continuing on the original degenerate history deterministically
+#: re-tripped the detector — pure burn, ADR-0005).
+_LOOP_TERMINAL_CONTENT = (
+    "[LOOP TERMINATION] This task is stopping because the agent repeated "
+    "the same tool call without progress and the recovery repair budget "
+    "is exhausted (0/3 successful repairs remaining). The agent was "
+    "stuck in a loop; automated recovery could not break it. "
+    "Please re-state or refine the task with more specific instructions, "
+    "or grant the missing access/data the agent was repeatedly requesting."
+)
+
+
+@dataclass
+class _DurableLoopOutcome:
+    """Result of the durable loop-breaker rung (``_maybe_durable_loop_repair``).
+
+    Attributes:
+        messages: Post-rung conversation list for the rest of the node
+            (ORIGINAL list when no repair fired).
+        full_messages: LLM-bound payload (post-rung), system prompt
+            included.
+        repair_prefix: Return-carried SENTINEL-FIRST surgery prefix —
+            ``[RemoveMessage(REMOVE_ALL_MESSAGES), *hoisted, *doc,
+            *tail]``. ``None`` when no durable repair landed this
+            invocation.
+        budget_used_new: The new durable budget value to carry on the
+            node return (``old + 1`` after a successful repair);
+            ``None`` when no repair landed.
+        terminal_message: Loud-terminal ``AIMessage`` when the budget is
+            exhausted — the caller skips the LLM invoke and returns this
+            as the final response.
+    """
+
+    messages: list[BaseMessage]
+    full_messages: list[BaseMessage]
+    repair_prefix: list[BaseMessage] | None = None
+    budget_used_new: int | None = None
+    terminal_message: AIMessage | None = None
+
+
+async def _maybe_durable_loop_repair(
+    *,
+    messages: list[BaseMessage],
+    full_messages: list[BaseMessage],
+    instance_id: str,
+    instance_short: str,
+    config: dict | None,
+    injected_msg: list[BaseMessage] | None,
+    system_prompt: str,
+    llm_config: dict | None,
+    loop_breaker_slot: LoopBreakerSlot | None,
+    loop_breaker_config: LoopBreakerConfig,
+    durable_budget_used: int,
+    turn_id: str,
+) -> _DurableLoopOutcome | None:
+    """Durable loop-breaker rung (phase-1 ladder; ADR-0002).
+
+    Runs the SAME ``LoopDetector.scan`` as the shipped path but routes
+    the repair through :class:`SymptomRepairEngine` — return-carried
+    sentinel surgery, durable budget, facade summarizer, loud-terminal
+    exhaustion. The caller (``agent_node``) invokes this BEFORE the
+    shipped :func:`_maybe_repair_loop` and skips the latter whenever a
+    non-``None`` outcome comes back (this function OWNS the rung when
+    the ladder flags are ON — the two paths must never both fire).
+
+    Gate contract (D-2 / P-11): returns ``None`` — and the caller falls
+    through to the shipped path byte-identically — when EITHER kill-switch
+    is OFF (``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` /
+    ``ENSEMBLE_REPAIR_LOOP_DURABLE``), the loop breaker is disabled, or
+    no slot is wired.
+
+    Budget expressions (B-2/B-4):
+        * per-TURN RAM ``max_repairs`` (``loop_breaker_slot``) — retained
+          unchanged as the per-turn expression;
+        * per-TASK durable ``repair_budget_used`` (GraphState) —
+          consulted before each attempt; at ``SYMPTOM_REPAIR_BUDGET``
+          the repair is refused and the rung ESCALATES.
+
+    Exhaustion (D-1): under the flag, hitting EITHER cap routes to the
+    loop class's loud terminal backstop (truthy-content ``AIMessage`` →
+    END) with ``[SYMPTOM] class=loop phase=terminal
+    reason=repair-budget-exhausted`` telemetry — replacing the shipped
+    WARN+continue, which continued on the original degenerate history.
+
+    Durability note: this function NEVER touches the graph/checkpoint —
+    the surgery is carried on the caller's NODE RETURN (P-10). The
+    shipped ``graph_ref``-binding guard does not apply here (nothing to
+    bind).
+    """
+    # ── gate (kill-switches first — every new branch gated BEFORE behavior)
+    if not (
+        get_symptom_repair_ladder_enabled()
+        and get_repair_loop_durable_enabled()
+    ):
+        return None
+    if loop_breaker_slot is None or not loop_breaker_config.enabled:
+        return None
+
+    from .services.symptom_repair_engine import (  # lazy: cycle guard
+        SYMPTOM_REPAIR_BUDGET,
+        SymptomRepairContext,
+        SymptomRepairEngine,
+    )
+
+    try:
+        detection = LoopDetector.scan(
+            messages=messages,
+            threshold=loop_breaker_config.threshold,
+            excluded_tools=loop_breaker_config.excluded_tools,
+        )
+    except Exception as det_err:  # noqa: BLE001 — detector crash must not freeze the node
+        logger.warning(
+            f"[LOOP BREAKER] scan failed for {instance_short}: "
+            f"{type(det_err).__name__}: {det_err}"
+        )
+        detection = None
+
+    if detection is None:
+        # No loop this turn: the shipped clean-turn auto-reset of the RAM
+        # per-turn counter is retained (B-2 — the per-turn expression
+        # stays exactly as shipped).
+        if loop_breaker_slot.get_repair_count(instance_id) > 0:
+            loop_breaker_slot.clear(instance_id)
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
+    _emit_symptom_telemetry(
+        phase="detect",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        detail=(
+            f"{detection.repetition_count}x repeated "
+            f"'{detection.tool_name}' (threshold "
+            f"{loop_breaker_config.threshold})"
+        ),
+    )
+
+    budget_used = int(durable_budget_used or 0)
+    repair_count = loop_breaker_slot.get_repair_count(instance_id)
+
+    # ── exhaustion checks (D-1): RAM per-turn cap OR durable per-task cap
+    if repair_count >= loop_breaker_config.max_repairs:
+        logger.warning(
+            f"[LOOP BREAKER] Instance {instance_short}: max "
+            f"repairs ({loop_breaker_config.max_repairs}) reached — "
+            f"escalating to loud terminal (repair-budget-exhausted)"
+        )
+        _emit_symptom_telemetry(
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-budget-exhausted: ram-per-turn-cap "
+                f"({repair_count}/{loop_breaker_config.max_repairs})"
+            ),
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages),
+            full_messages=list(full_messages),
+            terminal_message=AIMessage(
+                content=_LOOP_TERMINAL_CONTENT,
+                id=f"repair-terminal-{uuid.uuid4()}",
+            ),
+        )
+    if budget_used >= SYMPTOM_REPAIR_BUDGET:
+        logger.warning(
+            f"[LOOP BREAKER] Instance {instance_short}: durable repair "
+            f"budget exhausted ({budget_used}/{SYMPTOM_REPAIR_BUDGET}) — "
+            f"escalating to loud terminal (repair-budget-exhausted)"
+        )
+        _emit_symptom_telemetry(
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-budget-exhausted: durable-task-cap "
+                f"({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages),
+            full_messages=list(full_messages),
+            terminal_message=AIMessage(
+                content=_LOOP_TERMINAL_CONTENT,
+                id=f"repair-terminal-{uuid.uuid4()}",
+            ),
+        )
+
+    logger.warning(
+        f"[LOOP BREAKER] Instance {instance_short}: detected "
+        f"{detection.repetition_count}x repeated "
+        f"'{detection.tool_name}' calls. Triggering DURABLE repair "
+        f"(attempt {repair_count + 1}/{loop_breaker_config.max_repairs}, "
+        f"durable budget {budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+    )
+
+    engine = SymptomRepairEngine(
+        timeout_seconds=loop_breaker_config.summarization_timeout_seconds
+    )
+    engine_context = SymptomRepairContext(
+        detection=detection,
+        messages=list(messages),
+        llm_config=dict(llm_config or {}),
+        system_prompt=system_prompt,
+        injected_msg=list(injected_msg) if injected_msg else None,
+        summarization_timeout_seconds=(
+            loop_breaker_config.summarization_timeout_seconds
+        ),
+        instance_id=instance_id,
+        budget_used=budget_used,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+    )
+    try:
+        outcome = await engine.repair(engine_context, symptom_class="loop")
+    except Exception as rep_err:  # noqa: BLE001 — engine is guarded; a raise here must not wedge the node
+        logger.error(
+            f"[LOOP BREAKER] durable repair raised unexpectedly for "
+            f"{instance_short}: {type(rep_err).__name__}: {rep_err}"
+        )
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=f"engine-raise: {type(rep_err).__name__}",
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
+    if outcome.aborted or not outcome.success:
+        # Fail-open abort (summarizer failed / persist refused / engine
+        # refusal): NO surgery, budget NOT consumed, fall through to the
+        # next rung (shipped retry/failover/terminal backstops).
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"reason={outcome.abort_reason or 'unknown'} "
+                f"error={outcome.error or ''}"[:200]
+            ),
+        )
+        logger.error(
+            f"[LOOP BREAKER] durable repair aborted fail-open "
+            f"({outcome.abort_reason}): {outcome.error} — continuing "
+            f"with original messages"
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
+    # ── success: record the RAM per-turn expression + carry the durable
+    # increment + the surgery prefix on the caller's node return.
+    loop_breaker_slot.record_repair(instance_id, outcome.summary)
+    new_budget = budget_used + 1
+    _emit_symptom_telemetry(
+        phase="repair",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=turn_id,
+        budget_used=new_budget,
+        budget_cap=SYMPTOM_REPAIR_BUDGET,
+        detail=(
+            f"durable surgery: removing {detection.repetition_count - 1} "
+            f"loop unit(s) of '{detection.tool_name}'"
+        ),
+    )
+
+    new_messages = list(outcome.repaired_messages)
+    # C3 defensive re-append (mirrors the shipped path): the injected
+    # user messages live only in the caller's closure; if the engine's
+    # LLM-bound list does not already carry them, re-append so the retry
+    # sees the user's intent. Identity-of-ids guard prevents doubles
+    # (None-id short-circuit is correctness-critical — see the shipped
+    # comment at the same site in _maybe_repair_loop).
+    if injected_msg:
+        existing_ids = {
+            m.id for m in new_messages if getattr(m, "id", None) is not None
+        }
+        for msg in injected_msg:
+            if msg.id is None or msg.id not in existing_ids:
+                new_messages = list(new_messages) + [msg]
+                existing_ids.add(msg.id)
+    new_full_messages = [SystemMessage(content=system_prompt)] + list(new_messages)
+    return _DurableLoopOutcome(
+        messages=new_messages,
+        full_messages=new_full_messages,
+        repair_prefix=outcome.surgery_prefix,
+        budget_used_new=new_budget,
+    )
+
+
 async def _maybe_repair_loop(
     messages: list[BaseMessage],
     full_messages: list[BaseMessage],
@@ -1861,6 +2242,19 @@ async def _maybe_repair_loop(
             f"repairs ({loop_breaker_config.max_repairs}) reached, "
             f"forcing continuation with original messages"
         )
+        # [SYMPTOM] dual emit (F-3) — telemetry stays on OFF (W1 KEEP).
+        # This is the shipped WARN+continue exhaustion shape (D-2/T-8:
+        # byte-identical routing with the ladder OFF; the loud terminal
+        # replacement lives in _maybe_durable_loop_repair under ON).
+        _emit_symptom_telemetry(
+            phase="rung1",
+            action="skipped",
+            instance_short=instance_short,
+            turn_id=_turn_id_from_config(config, instance_id),
+            budget_used=repair_count,
+            budget_cap=loop_breaker_config.max_repairs,
+            detail="ram-per-turn-cap-reached-continuing-original",
+        )
         return messages, full_messages
 
     logger.warning(
@@ -1868,6 +2262,17 @@ async def _maybe_repair_loop(
         f"{detection.repetition_count}x repeated "
         f"'{detection.tool_name}' calls. Triggering repair "
         f"(attempt {repair_count + 1}/{loop_breaker_config.max_repairs})"
+    )
+    # [SYMPTOM] dual emit (F-3) — telemetry stays on OFF (W1 KEEP).
+    _emit_symptom_telemetry(
+        phase="detect",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=_turn_id_from_config(config, instance_id),
+        detail=(
+            f"{detection.repetition_count}x repeated "
+            f"'{detection.tool_name}' (transient repair path)"
+        ),
     )
 
     # Recoverable guard (Fix 2): if the graph reference has not been bound
@@ -1921,6 +2326,13 @@ async def _maybe_repair_loop(
             f"[LOOP BREAKER] Repair failed: {result.error}, "
             f"continuing with original messages"
         )
+        _emit_symptom_telemetry(
+            phase="repair_abort",
+            action="abort",
+            instance_short=instance_short,
+            turn_id=_turn_id_from_config(config, instance_id),
+            detail=f"transient-repair-failed: {result.error}"[:200],
+        )
         return messages, full_messages
 
     loop_breaker_slot.record_repair(instance_id, result.summary)
@@ -1958,6 +2370,15 @@ async def _maybe_repair_loop(
         f"LLM with {len(full_messages)} messages "
         f"(repair msg: "
         f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
+    )
+    _emit_symptom_telemetry(
+        phase="repair",
+        action="fired",
+        instance_short=instance_short,
+        turn_id=_turn_id_from_config(config, instance_id),
+        budget_used=repair_count + 1,
+        budget_cap=loop_breaker_config.max_repairs,
+        detail="transient surgery (shipped path)",
     )
     return messages, full_messages
 
@@ -2457,6 +2878,17 @@ class SessionState(MessagesState):
     # survive across resumed graph executions.
     language_check_retry: bool = False
     language_check_count: int = 0
+
+    # Hallucination-recovery ladder phase 1 (B-1): durable per-TASK repair
+    # budget. Persisted in checkpoints so restarts/revives no longer reset
+    # it (the shipped RAM ``max_repairs`` counter resets — the confirmed
+    # restart-replay defect this field closes). Incremented ATOMICALLY on
+    # SUCCESSFUL durable repair only (abort consumes nothing); reset to 0
+    # on a new REAL (non-injected) HumanMessage — OQ5 ruling (c), pinned
+    # per P1-R6: budget lifetime aligns with user-visible task episodes.
+    # Additive field with a default — SQLite + PG checkpoint compatible
+    # (old checkpoints deserialize with the documented default 0).
+    repair_budget_used: int = 0
 
     # Watchover per-turn denial counter (resets at agent node entry = turn
     # boundary). Phase 2 increments this on Deny; Phase 1 declares it for
@@ -4620,6 +5052,30 @@ def create_agent_node(
         if is_turn_boundary:
             watchover_state_reset["watchover_denial_count"] = 0
 
+        # ── Ladder phase 1 / B-3 (OQ5 PINNED): durable repair-budget reset
+        # ── policy ──
+        # The durable per-task repair budget RESETS on a new REAL
+        # (non-injected) HumanMessage — OQ5 ruling (c): budget lifetime
+        # aligns with user-visible task episodes. Pinned per P1-R6; if
+        # the architect re-rules, only this predicate and its test
+        # (TestRepairBudgetReset policy case) change. Injected
+        # HumanMessages (operator injections, skill/context blocks,
+        # child-report drains) carry ``injected_message=True`` and do NOT
+        # reset the budget. The reset RIDES the node return (durable
+        # channel write) — see ``return_value['repair_budget_used']`` at
+        # the return assembly.
+        _durable_budget_current = int(state.get("repair_budget_used", 0) or 0)
+        real_human_boundary = bool(messages) and _is_real_human_message(
+            messages[-1]
+        )
+        if real_human_boundary and _durable_budget_current != 0:
+            logger.info(
+                f"[SYMPTOM] budget reset: new real HumanMessage at turn "
+                f"boundary for {instance_short} "
+                f"(was {_durable_budget_current})"
+            )
+            _durable_budget_current = 0
+
         # ── Context Injection Restructure — Phase 3 / Task 4+5 ──────────
         # Hybrid Context Injection (2026-07-29): the slot returns a
         # ``(persistent_msgs, ephemeral_msgs)`` tuple. The persistent
@@ -5178,25 +5634,53 @@ def create_agent_node(
         # sees different context on the retry. Both are no-ops when their
         # respective slots are ``None`` (backward-compatible default).
         #
-        # The full detection+repair pipeline lives in ``_maybe_repair_loop``
-        # so the LLM-call site here stays readable. ``_lb_config.enabled`` is
-        # the kill switch — a config with ``enabled=False`` disables
-        # detection+repair entirely without callers having to thread
-        # ``None`` slots.
-        messages, full_messages = await _maybe_repair_loop(
-            messages,
-            full_messages,
-            instance_id,
-            instance_short,
-            config,
-            graph_ref,
-            injected_msgs,
-            system_prompt,
-            llm_config,
-            loop_breaker_slot,
-            loop_repairer,
-            _lb_config,
+        # Ladder phase 1 (A-3/B-4/D-2): when BOTH ladder kill-switches are
+        # ON (``ENSEMBLE_SYMPTOM_REPAIR_LADDER`` +
+        # ``ENSEMBLE_REPAIR_LOOP_DURABLE``, defaults) the DURABLE rung
+        # (``_maybe_durable_loop_repair``) OWNS the loop class — return-
+        # carried sentinel surgery + durable budget + facade summarizer +
+        # loud-terminal exhaustion. Its ``None`` outcome (either
+        # kill-switch OFF, breaker disabled, or no slot) falls through to
+        # the SHIPPED transient path byte-identically (P-11/T-8). The two
+        # paths must never both fire — exactly one owns the rung per
+        # invocation.
+        _durable_loop = await _maybe_durable_loop_repair(
+            messages=messages,
+            full_messages=full_messages,
+            instance_id=instance_id,
+            instance_short=instance_short,
+            config=config,
+            injected_msg=injected_msgs,
+            system_prompt=system_prompt,
+            llm_config=llm_config,
+            loop_breaker_slot=loop_breaker_slot,
+            loop_breaker_config=_lb_config,
+            durable_budget_used=_durable_budget_current,
+            turn_id=turn_id,
         )
+        if _durable_loop is not None:
+            messages = _durable_loop.messages
+            full_messages = _durable_loop.full_messages
+        else:
+            # The full detection+repair pipeline lives in
+            # ``_maybe_repair_loop`` so the LLM-call site here stays
+            # readable. ``_lb_config.enabled`` is the kill switch — a
+            # config with ``enabled=False`` disables detection+repair
+            # entirely without callers having to thread ``None`` slots.
+            messages, full_messages = await _maybe_repair_loop(
+                messages,
+                full_messages,
+                instance_id,
+                instance_short,
+                config,
+                graph_ref,
+                injected_msgs,
+                system_prompt,
+                llm_config,
+                loop_breaker_slot,
+                loop_repairer,
+                _lb_config,
+            )
 
         # C3-style re-append for report-injection messages: a successful
         # loop-breaker repair rebuilds ``full_messages`` from
@@ -5264,41 +5748,66 @@ def create_agent_node(
             )
 
         try:
-            # ── P1b: 95% pre-call reactive compaction (A.3 pinned site) ──
-            # Runs AFTER the loop-breaker repair + the injected-report /
-            # ephemeral re-appends so it observes the exact post-repair,
-            # LLM-bound payload (``full_messages`` with system prompt +
-            # injections prepended). Fires the shared seam with
-            # ``mid_turn=True`` and, on a real compaction, REBUILDS the
-            # payload from the post-compaction checkpoint state (the CLE
-            # handler's in-frame pattern). No-op outcome = proceed
-            # unchanged. Gated by the SAME kill-switch as the proactive
-            # gate (``compaction.proactive_enabled``); never raises.
-            _precall_outcome = await _maybe_precall_compact_95(
-                instance_id=instance_id,
-                instance_short=instance_short,
-                compactor=compactor,
-                graph_ref=graph_ref,
-                thread_config=config or {},
-                full_messages=full_messages,
-                system_prompt=system_prompt,
-                llm_config=llm_config,
-                injected_msgs=injected_msgs,
-                injected_report_msgs=injected_report_msgs,
-                ephemeral_context_msgs=ephemeral_context_msgs,
-                pairing_synthesized_msgs=pairing_synthesized_msgs,
-                precall_compaction_tap_slot=precall_compaction_tap_slot,
-            )
-            if _precall_outcome.rebuilt_payload is not None:
-                full_messages = _precall_outcome.rebuilt_payload
+            # ── Ladder phase 1 / D-1: loud terminal short-circuit ──
+            # When the durable rung exhausted the repair budget it hands
+            # back a truthy-content AIMessage (no tool_calls); returning
+            # it as THE response routes to END via should_continue — the
+            # loop class's loud terminal backstop. No LLM invoke, no
+            # precall compaction.
+            if _durable_loop is not None and _durable_loop.terminal_message is not None:
+                response = _durable_loop.terminal_message
+                _precall_outcome = _PRECALL_NOOP
+            else:
+                # ── P1b: 95% pre-call reactive compaction (A.3 pinned site) ──
+                # Runs AFTER the loop-breaker repair + the injected-report /
+                # ephemeral re-appends so it observes the exact post-repair,
+                # LLM-bound payload (``full_messages`` with system prompt +
+                # injections prepended). Fires the shared seam with
+                # ``mid_turn=True`` and, on a real compaction, REBUILDS the
+                # payload from the post-compaction checkpoint state (the CLE
+                # handler's in-frame pattern). No-op outcome = proceed
+                # unchanged. Gated by the SAME kill-switch as the proactive
+                # gate (``compaction.proactive_enabled``); never raises.
+                #
+                # Ladder phase 1: SKIPPED when the durable loop repair
+                # landed THIS invocation — at most ONE durable channel
+                # rewrite may ride a single node return (the repair prefix
+                # and the compaction prefix are both sentinel-first
+                # replacements of the WHOLE channel; composing them would
+                # resurrect the removed loop units — the compaction
+                # prefix's tail is derived from the pre-repair checkpoint).
+                # The repair already shrank history; compaction re-evaluates
+                # on the next superstep.
+                _precall_outcome = _PRECALL_NOOP
+                if not (
+                    _durable_loop is not None
+                    and _durable_loop.repair_prefix is not None
+                ):
+                    _precall_outcome = await _maybe_precall_compact_95(
+                        instance_id=instance_id,
+                        instance_short=instance_short,
+                        compactor=compactor,
+                        graph_ref=graph_ref,
+                        thread_config=config or {},
+                        full_messages=full_messages,
+                        system_prompt=system_prompt,
+                        llm_config=llm_config,
+                        injected_msgs=injected_msgs,
+                        injected_report_msgs=injected_report_msgs,
+                        ephemeral_context_msgs=ephemeral_context_msgs,
+                        pairing_synthesized_msgs=pairing_synthesized_msgs,
+                        precall_compaction_tap_slot=precall_compaction_tap_slot,
+                    )
+                if _precall_outcome.rebuilt_payload is not None:
+                    full_messages = _precall_outcome.rebuilt_payload
 
-            # Use run_in_executor to avoid blocking the event loop.
-            # This allows SSE streaming to continue while LLM processes.
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: current_llm.invoke(full_messages)
-            )
+                # Use run_in_executor to avoid blocking the event loop.
+                # This allows SSE streaming to continue while LLM processes.
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: current_llm.invoke(full_messages)
+                )
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
@@ -5620,7 +6129,54 @@ def create_agent_node(
         # prefix carries the post-compaction channel (injected + report
         # already inside; response stays last); pairing placeholders
         # re-add as id-keyed upserts (deterministic ids).
-        if _precall_outcome.outgoing_prefix is not None:
+        # Ladder phase 1 / A-3: when the durable loop repair landed THIS
+        # invocation, the node's OWN commit must LAND the surgery — the
+        # SENTINEL-FIRST repair prefix replaces the whole channel
+        # (``[REMOVE_ALL, *hoisted, *repair-doc, *retained-tail-with-
+        # original-ids]``, mirror of the compaction carrier). The closure-
+        # local riders follow in the SAME relative order as the no-prefix
+        # path (pairing → injected → report), then the response. Pairing
+        # placeholders whose parent AIMessage the surgery removed are
+        # DROPPED (an orphan ToolMessage would be API-invalid); every
+        # other rider appends at the sentinel boundary.
+        if (
+            _durable_loop is not None
+            and _durable_loop.repair_prefix is not None
+        ):
+            _repair_channel = list(_durable_loop.repair_prefix)
+            if pairing_synthesized_msgs:
+                _channel_ai_tc_ids = {
+                    tc.get("id", "")
+                    for m in _repair_channel
+                    if getattr(m, "tool_calls", None)
+                    for tc in (m.tool_calls or [])
+                    if tc.get("id", "")
+                }
+                _kept_pairing = [
+                    p
+                    for p in pairing_synthesized_msgs
+                    if getattr(p, "tool_call_id", "") in _channel_ai_tc_ids
+                ]
+                _dropped_pairing = len(pairing_synthesized_msgs) - len(
+                    _kept_pairing
+                )
+                if _dropped_pairing:
+                    logger.warning(
+                        f"[SymptomRepair] dropped {_dropped_pairing} "
+                        f"pairing placeholder(s) whose parent AIMessage "
+                        f"was removed by the loop surgery for "
+                        f"{instance_short}"
+                    )
+            else:
+                _kept_pairing = []
+            outgoing = [
+                *_repair_channel,
+                *_kept_pairing,
+                *injected_msgs,
+                *injected_report_msgs,
+                response,
+            ]
+        elif _precall_outcome.outgoing_prefix is not None:
             outgoing: list[BaseMessage] = [
                 *_precall_outcome.outgoing_prefix,
                 *pairing_synthesized_msgs,
@@ -5657,6 +6213,22 @@ def create_agent_node(
             **watchover_state_reset,
             'messages': outgoing,
         }
+        # Ladder phase 1 / B-2 + B-3 (OQ5 PINNED): carry the durable
+        # repair budget on the node return so the task commit persists it
+        # (checkpoint-persisted GraphState field — restart/revive can no
+        # longer reset it). Composition: OQ5 reset (new real
+        # non-injected HumanMessage → 0) is computed at node entry; a
+        # SUCCESSFUL durable repair increments atomically here. Abort
+        # consumes nothing (budget_used_new is None on abort). Carried on
+        # EVERY return — same-value overwrite is safe (the
+        # ``watchover_turn_id`` precedent) and keeps the channel fresh.
+        _budget_return = int(_durable_budget_current)
+        if (
+            _durable_loop is not None
+            and _durable_loop.budget_used_new is not None
+        ):
+            _budget_return = int(_durable_loop.budget_used_new)
+        return_value['repair_budget_used'] = _budget_return
         # P1b — carry the compaction dedup stamp on the node return so
         # it survives the task commit (the seam's mid-superstep stamp
         # write alone is superseded with the rest of the persist).
