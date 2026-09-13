@@ -903,6 +903,50 @@ class LoopBreakerSlot:
         return getter(instance_id)
 
 
+class TurnRepairLatch:
+    """Repair-once-per-turn RAM latch (ladder phase-2 B-4).
+
+    Per-``(instance_id, symptom_class)`` marker enforcing **at most one
+    durable repair per class per turn episode** (plan
+    ``phase2-plan.md`` B-4: "superstep-scoped RAM latch"; the unit-test
+    spec is "two symptoms same turn → only first fires repair; second
+    waits next turn"). Keyed PER CLASS so a cross-class same-turn
+    sequence keeps firing (P-9: loop repair + ghost repair in one turn
+    both land) — the latch caps each class, not the turn total; do not
+    conflate with the durable per-EPISODE budget (``repair_budget_used``),
+    which is per-task and checkpoint-persisted.
+
+    RAM-only BY DESIGN (plan wording): a restart mid-episode re-derives
+    episode state from the checkpoint (durable budget + the D-1
+    ``last_repair_boundary_human_id`` marker); the latch only bounds
+    within-turn repair storms. Cleared for ALL classes of an instance at
+    the ``agent_node`` real-human turn boundary — the SAME genuine-reset
+    branch that clears the D-1 marker — so a latch block can never leak
+    into the next episode.
+
+    ``None`` (the default everywhere) disables gating entirely: direct
+    node/rung test harnesses and any wiring that does not construct the
+    latch keep pre-B-4 behavior byte-identically.
+    """
+
+    def __init__(self) -> None:
+        self._marked: set[tuple[str, str]] = set()
+
+    def mark(self, instance_id: str, symptom_class: str) -> None:
+        """Record that ``symptom_class`` consumed its one repair this turn."""
+        self._marked.add((instance_id, symptom_class))
+
+    def is_set(self, instance_id: str, symptom_class: str) -> bool:
+        """True when ``symptom_class`` already repaired this turn."""
+        return (instance_id, symptom_class) in self._marked
+
+    def clear_instance(self, instance_id: str) -> None:
+        """Clear every class latch for ``instance_id`` (new turn episode)."""
+        self._marked = {
+            key for key in self._marked if key[0] != instance_id
+        }
+
+
 class WatchoverSlot:
     """Lightweight handle around InstanceManager watchover state.
 
@@ -1880,12 +1924,19 @@ def _emit_symptom_telemetry(
     budget_cap: int | None = None,
     detail: str = "",
     axis: str | None = None,
+    symptom_class: str = "loop",
 ) -> None:
     """Emit the unified ``[SYMPTOM]`` operator grep line (F-3, DQ4-b).
 
+    ``symptom_class`` threads the REAL class token (B-6) so each class
+    emits its own grep key (``class=ghost|truncated|empty_post_ladder|loop``);
+    the default keeps loop-path lines byte-identical with the pre-B-6
+    hard-coded emission. Log-only — zero routing impact; all emissions
+    remain inside their existing gates.
+
     Shape::
 
-        [SYMPTOM] class=loop phase=<…> action=<…> budget=<used>/<cap> \\
+        [SYMPTOM] class=<symptom_class> phase=<…> action=<…> budget=<used>/<cap> \\
             axis=<ram-per-turn|durable-task> instance=<short> turn=<task_id> \\
             detail=<one-liner>
 
@@ -1914,7 +1965,7 @@ def _emit_symptom_telemetry(
             budget_part = " budget=-/-"
         axis_part = f" axis={axis}" if axis and phase != "terminal" else ""
         line = (
-            f"[SYMPTOM] class=loop phase={phase} action={action}"
+            f"[SYMPTOM] class={symptom_class} phase={phase} action={action}"
             f"{budget_part}{axis_part} instance={instance_short}"
             f" turn={turn_id} detail={detail}"
         )
@@ -1942,6 +1993,49 @@ def _is_real_human_message(msg: BaseMessage) -> bool:
     from .compaction import _is_injected_message  # lazy: cycle guard
 
     return not _is_injected_message(msg)
+
+
+def _repair_boundary_reset_state(
+    state: dict,
+    messages: list[BaseMessage],
+) -> tuple[int, bool]:
+    """OQ5 durable-budget boundary reset, D-1 freshness-guarded.
+
+    Shared by the ``agent_node`` entry predicate and the
+    ``agent_repair_ghost`` node's defensive reset (both previously
+    duplicated the position-only check). Returns
+    ``(new_budget, did_reset)``.
+
+    Shipped policy (OQ5 ruling (c), P1-R6): the durable per-task repair
+    budget RESETS when the history tail is a REAL (non-injected)
+    HumanMessage — budget lifetime aligns with user-visible task
+    episodes.
+
+    D-1 fix (boundary-id-freshness): a position-only tail check ALSO
+    fires for history the repair SURGERY itself retained — the ghost
+    rung's fully-trailing removal window leaves the ORIGINAL
+    HumanMessage at ``messages[-1]``, so the ``agent_repair_ghost →
+    agent`` re-entry reset the budget 1→0 MID-TURN and budget
+    exhaustion became unreachable in natural runs. The reset now fires
+    only when the tail human's id DIFFERS from
+    ``last_repair_boundary_human_id`` — the id of the boundary human
+    the last successful repair retained. Same id ⇒ retained history
+    (suppress); different/absent id ⇒ genuinely new episode (reset).
+    """
+    budget = int(state.get("repair_budget_used", 0) or 0)
+    if (
+        not messages
+        or not _is_real_human_message(messages[-1])
+        or budget == 0
+    ):
+        return budget, False
+    marker = str(state.get("last_repair_boundary_human_id", "") or "")
+    tail_id = str(getattr(messages[-1], "id", "") or "")
+    if marker and tail_id == marker:
+        # D-1: the boundary human is the SAME message this turn's
+        # surgery retained — history, not a new episode. Suppress.
+        return budget, False
+    return 0, True
 
 
 #: Loop-class loud terminal message (D-1). Returned by ``agent_node``
@@ -1980,6 +2074,10 @@ class _DurableLoopOutcome:
         terminal_message: Loud-terminal ``AIMessage`` when the budget is
             exhausted — the caller skips the LLM invoke and returns this
             as the final response.
+        boundary_human_id: D-1 marker — id of the last real human in the
+            PRE-surgery history (from ``SymptomRepairOutcome``); carried
+            so the caller stamps ``last_repair_boundary_human_id`` on the
+            node return. Empty when no repair landed.
     """
 
     messages: list[BaseMessage]
@@ -1987,6 +2085,7 @@ class _DurableLoopOutcome:
     surgery_prefix: list[BaseMessage] | None = None
     budget_used_new: int | None = None
     terminal_message: AIMessage | None = None
+    boundary_human_id: str = ""
 
 
 async def _maybe_durable_loop_repair(
@@ -2003,6 +2102,7 @@ async def _maybe_durable_loop_repair(
     loop_breaker_config: LoopBreakerConfig,
     durable_budget_used: int,
     turn_id: str,
+    turn_repair_latch: "TurnRepairLatch | None" = None,
 ) -> _DurableLoopOutcome | None:
     """Durable loop-breaker rung (phase-1 ladder; ADR-0002).
 
@@ -2076,7 +2176,37 @@ async def _maybe_durable_loop_repair(
             messages=list(messages), full_messages=list(full_messages)
         )
 
+    # ── B-4 repair-once-per-turn latch (shared with P1): a second loop
+    # repair in the SAME turn is suppressed — the rung returns a
+    # no-repair outcome so the caller's shipped-path skip still holds
+    # (the two paths must never both fire) and the turn continues on
+    # the current history, exactly the shipped post-cap degradation
+    # shape. The latch releases at the next real-human turn boundary
+    # (agent_node's genuine-reset branch clears it).
+    if turn_repair_latch is not None and turn_repair_latch.is_set(
+        instance_id, "loop"
+    ):
+        _emit_symptom_telemetry(
+            symptom_class="loop",
+            phase="repair",
+            action="skipped",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            axis="durable-task",
+            budget_used=int(durable_budget_used or 0),
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                "repair-once-per-turn-latch: loop already repaired "
+                "this turn (budget "
+                f"{int(durable_budget_used or 0)}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages), full_messages=list(full_messages)
+        )
+
     _emit_symptom_telemetry(
+        symptom_class="loop",
         phase="detect",
         action="fired",
         instance_short=instance_short,
@@ -2108,6 +2238,7 @@ async def _maybe_durable_loop_repair(
     ) -> "_DurableLoopOutcome":
         logger.warning(log_message)
         _emit_symptom_telemetry(
+            symptom_class="loop",
             phase="terminal",
             action="escalate",
             instance_short=instance_short,
@@ -2183,6 +2314,7 @@ async def _maybe_durable_loop_repair(
             f"{instance_short}: {type(rep_err).__name__}: {rep_err}"
         )
         _emit_symptom_telemetry(
+            symptom_class="loop",
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2201,6 +2333,7 @@ async def _maybe_durable_loop_repair(
         # refusal): NO surgery, budget NOT consumed, fall through to the
         # next rung (shipped retry/failover/terminal backstops).
         _emit_symptom_telemetry(
+            symptom_class="loop",
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2227,6 +2360,7 @@ async def _maybe_durable_loop_repair(
     loop_breaker_slot.record_repair(instance_id, outcome.summary)
     new_budget = budget_used + 1
     _emit_symptom_telemetry(
+        symptom_class="loop",
         phase="repair",
         action="fired",
         instance_short=instance_short,
@@ -2256,11 +2390,15 @@ async def _maybe_durable_loop_repair(
                 new_messages = list(new_messages) + [msg]
                 existing_ids.add(msg.id)
     new_full_messages = [SystemMessage(content=system_prompt)] + list(new_messages)
+    # B-4: this class consumed its one repair for this turn.
+    if turn_repair_latch is not None:
+        turn_repair_latch.mark(instance_id, "loop")
     return _DurableLoopOutcome(
         messages=new_messages,
         full_messages=new_full_messages,
         surgery_prefix=outcome.surgery_prefix,
         budget_used_new=new_budget,
+        boundary_human_id=outcome.boundary_human_id,
     )
 
 
@@ -2276,6 +2414,7 @@ async def _maybe_ghost_repair(
     llm_config: dict | None,
     durable_budget_used: int,
     turn_id: str,
+    turn_repair_latch: "TurnRepairLatch | None" = None,
 ) -> _DurableLoopOutcome | None:
     """Ghost-promise repair rung (phase-2 ladder, ADR-0001/B-1).
 
@@ -2336,6 +2475,7 @@ async def _maybe_ghost_repair(
     )
 
     _emit_symptom_telemetry(
+        symptom_class="ghost",
         phase="detect",
         action="fired",
         instance_short=instance_short,
@@ -2357,6 +2497,7 @@ async def _maybe_ghost_repair(
             f"escalating to loud terminal (repair-budget-exhausted)"
         )
         _emit_symptom_telemetry(
+            symptom_class="ghost",
             phase="terminal",
             action="escalate",
             instance_short=instance_short,
@@ -2378,6 +2519,53 @@ async def _maybe_ghost_repair(
                     f"({trailing_ghost}x trailing colon-only re-invokes) "
                     f"and the durable repair budget "
                     f"({SYMPTOM_REPAIR_BUDGET}) is exhausted. The next "
+                    f"instance should produce a tool_call or a complete "
+                    f"final response on the first try."
+                ),
+                id=f"repair-terminal-ghost-{uuid.uuid4()}",
+            ),
+        )
+
+    # ── B-4 repair-once-per-turn latch: the ghost class already
+    # consumed its one repair this turn. A second cap-hit in the SAME
+    # turn means the first repair demonstrably did not take — silently
+    # falling through would re-open the unbounded shipped storm (the
+    # exact cycle the C1 carrier exists to kill), so the latch escalates
+    # through the SAME loud-terminal carrier with its own telemetry
+    # detail. Releases at the next real-human turn boundary.
+    if turn_repair_latch is not None and turn_repair_latch.is_set(
+        instance_id, "ghost"
+    ):
+        logger.warning(
+            f"[GHOST REPAIR] Instance {instance_short}: repair-once-"
+            f"per-turn latch set (ghost already repaired this turn, "
+            f"durable budget {budget_used}/{SYMPTOM_REPAIR_BUDGET}) — "
+            f"escalating to loud terminal (repair-once-per-turn-latch)"
+        )
+        _emit_symptom_telemetry(
+            symptom_class="ghost",
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-once-per-turn-latch: ghost already repaired "
+                f"this turn ({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _DurableLoopOutcome(
+            messages=list(messages),
+            full_messages=list(full_messages),
+            terminal_message=AIMessage(
+                content=(
+                    f"[GHOST TERMINATION] This task is stopping because "
+                    f"the agent repeated the ghost-promise pattern "
+                    f"({trailing_ghost}x trailing colon-only re-invokes) "
+                    f"after the ghost repair already ran this turn "
+                    f"(repair-once-per-turn latch; durable budget "
+                    f"{budget_used}/{SYMPTOM_REPAIR_BUDGET}). The next "
                     f"instance should produce a tool_call or a complete "
                     f"final response on the first try."
                 ),
@@ -2411,6 +2599,7 @@ async def _maybe_ghost_repair(
             f"{instance_short}: {type(rep_err).__name__}: {rep_err}"
         )
         _emit_symptom_telemetry(
+            symptom_class="ghost",
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2426,6 +2615,7 @@ async def _maybe_ghost_repair(
 
     if outcome.aborted or not outcome.success:
         _emit_symptom_telemetry(
+            symptom_class="ghost",
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2450,6 +2640,7 @@ async def _maybe_ghost_repair(
     # ── success: record the durable increment + carry the surgery prefix.
     new_budget = budget_used + 1
     _emit_symptom_telemetry(
+        symptom_class="ghost",
         phase="repair",
         action="fired",
         instance_short=instance_short,
@@ -2476,11 +2667,15 @@ async def _maybe_ghost_repair(
     new_full_messages = [SystemMessage(content=system_prompt)] + list(
         new_messages
     )
+    # B-4: this class consumed its one repair for this turn.
+    if turn_repair_latch is not None:
+        turn_repair_latch.mark(instance_id, "ghost")
     return _DurableLoopOutcome(
         messages=new_messages,
         full_messages=new_full_messages,
         surgery_prefix=outcome.surgery_prefix,
         budget_used_new=new_budget,
+        boundary_human_id=outcome.boundary_human_id,
     )
 
 
@@ -2516,9 +2711,14 @@ class _PreTerminalRepairOutcome:
         budget_used: The new durable budget value (carried on the
             node return; ``old`` when no repair landed).
         abort_reason: Machine-readable abort reason
-            (``"budget-exhausted"`` / ``"summarizer-failed"`` /
+            (``"budget-exhausted"`` / ``"turn-latch"`` /
+            ``"summarizer-failed"`` /
             ``"engine-raise"`` / ``"second-exception"``); ``None`` when
             ``recovered`` is True.
+        boundary_human_id: D-1 marker — id of the last real human in
+            the PRE-surgery history (from ``SymptomRepairOutcome``);
+            carried so the caller stamps
+            ``last_repair_boundary_human_id`` on the node return.
     """
 
     recovered: bool
@@ -2528,6 +2728,7 @@ class _PreTerminalRepairOutcome:
     surgery_prefix: list[BaseMessage] | None = None
     budget_used: int = 0
     abort_reason: str | None = None
+    boundary_human_id: str = ""
 
 
 async def _maybe_pre_terminal_repair(
@@ -2544,6 +2745,7 @@ async def _maybe_pre_terminal_repair(
     turn_id: str,
     exc: BaseException,
     current_llm: Any,
+    turn_repair_latch: "TurnRepairLatch | None" = None,
 ) -> _PreTerminalRepairOutcome | None:
     """Pre-terminal repair intercept (C-2 / D-2; ADR-0003 / OQ1 ruling).
 
@@ -2608,6 +2810,7 @@ async def _maybe_pre_terminal_repair(
     budget_used = int(durable_budget_used or 0)
 
     _emit_symptom_telemetry(
+        symptom_class=symptom_class,
         phase="detect",
         action="fired",
         instance_short=instance_short,
@@ -2629,6 +2832,7 @@ async def _maybe_pre_terminal_repair(
             f"pre-terminal repair (fall through to loud ERROR)"
         )
         _emit_symptom_telemetry(
+            symptom_class=symptom_class,
             phase="terminal",
             action="escalate",
             instance_short=instance_short,
@@ -2643,6 +2847,39 @@ async def _maybe_pre_terminal_repair(
         return _PreTerminalRepairOutcome(
             recovered=False,
             abort_reason="budget-exhausted",
+            budget_used=budget_used,
+        )
+
+    # ── B-4 repair-once-per-turn latch: this pre-terminal class already
+    # consumed its one repair this turn — refuse the intercept and fall
+    # through to the shipped loud ERROR (the same bounded lane the
+    # budget gate uses; the shipped loud-ERROR contract is preserved).
+    if turn_repair_latch is not None and turn_repair_latch.is_set(
+        instance_id, symptom_class
+    ):
+        logger.warning(
+            f"[{phase_label.upper()} REPAIR] Instance {instance_short}: "
+            f"repair-once-per-turn latch set ({symptom_class} already "
+            f"repaired this turn, durable budget "
+            f"{budget_used}/{SYMPTOM_REPAIR_BUDGET}) — refusing "
+            f"pre-terminal repair (fall through to loud ERROR)"
+        )
+        _emit_symptom_telemetry(
+            symptom_class=symptom_class,
+            phase="terminal",
+            action="escalate",
+            instance_short=instance_short,
+            turn_id=turn_id,
+            budget_used=budget_used,
+            budget_cap=SYMPTOM_REPAIR_BUDGET,
+            detail=(
+                f"repair-once-per-turn-latch: pre-terminal "
+                f"{phase_label} ({budget_used}/{SYMPTOM_REPAIR_BUDGET})"
+            ),
+        )
+        return _PreTerminalRepairOutcome(
+            recovered=False,
+            abort_reason="turn-latch",
             budget_used=budget_used,
         )
 
@@ -2674,6 +2911,7 @@ async def _maybe_pre_terminal_repair(
             f"{type(rep_err).__name__}: {rep_err}"
         )
         _emit_symptom_telemetry(
+            symptom_class=symptom_class,
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2691,6 +2929,7 @@ async def _maybe_pre_terminal_repair(
 
     if outcome.aborted or not outcome.success:
         _emit_symptom_telemetry(
+            symptom_class=symptom_class,
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2730,6 +2969,7 @@ async def _maybe_pre_terminal_repair(
     ] + list(new_messages)
 
     _emit_symptom_telemetry(
+        symptom_class=symptom_class,
         phase="repair",
         action="fired",
         instance_short=instance_short,
@@ -2761,6 +3001,7 @@ async def _maybe_pre_terminal_repair(
             f"repair, falling through to loud ERROR"
         )
         _emit_symptom_telemetry(
+            symptom_class=symptom_class,
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -2779,6 +3020,9 @@ async def _maybe_pre_terminal_repair(
             budget_used=new_budget,
         )
 
+    # B-4: this class consumed its one repair for this turn.
+    if turn_repair_latch is not None:
+        turn_repair_latch.mark(instance_id, symptom_class)
     return _PreTerminalRepairOutcome(
         recovered=True,
         response=new_response,
@@ -2786,6 +3030,7 @@ async def _maybe_pre_terminal_repair(
         full_messages=new_full_messages,
         surgery_prefix=outcome.surgery_prefix,
         budget_used=new_budget,
+        boundary_human_id=outcome.boundary_human_id,
     )
 
 
@@ -2899,6 +3144,7 @@ async def _maybe_repair_loop(
         # byte-identical routing with the ladder OFF; the loud terminal
         # replacement lives in _maybe_durable_loop_repair under ON).
         _emit_symptom_telemetry(
+            symptom_class="loop",
             phase="rung1",
             action="skipped",
             instance_short=instance_short,
@@ -2918,6 +3164,7 @@ async def _maybe_repair_loop(
     )
     # [SYMPTOM] dual emit (F-3) — telemetry stays on OFF (W1 KEEP).
     _emit_symptom_telemetry(
+        symptom_class="loop",
         phase="detect",
         action="fired",
         instance_short=instance_short,
@@ -2981,6 +3228,7 @@ async def _maybe_repair_loop(
             f"continuing with original messages"
         )
         _emit_symptom_telemetry(
+            symptom_class="loop",
             phase="repair_abort",
             action="abort",
             instance_short=instance_short,
@@ -3027,6 +3275,7 @@ async def _maybe_repair_loop(
         f"{result.repair_message_id[:16] if result.repair_message_id else '<no-id>'}...)"
     )
     _emit_symptom_telemetry(
+        symptom_class="loop",
         phase="repair",
         action="fired",
         instance_short=instance_short,
@@ -3562,6 +3811,22 @@ class SessionState(MessagesState):
     # unreachable); byte-identical to pre-fix behavior. Additive field
     # with a default ``None`` — old checkpoints deserialize unchanged.
     pending_repair_ghost_terminal: AIMessage | None = None
+
+    # Hallucination-recovery ladder phase 2 / D-1: boundary-freshness
+    # marker for the OQ5 durable-budget reset. Carries the id of the
+    # LAST real (non-injected) HumanMessage in the PRE-surgery history
+    # at the moment the last successful durable repair fired (stamped
+    # by every rung's surgery-success return via
+    # ``SymptomRepairOutcome.boundary_human_id``). The OQ5 reset
+    # predicate suppresses the mid-turn reset when the tail human's id
+    # equals this marker — the ghost surgery's retained tail ENDS with
+    # the ORIGINAL HumanMessage, which positionally looked like a "new
+    # turn" and reset the budget 1→0 mid-turn, making budget exhaustion
+    # unreachable in natural runs (12-ghost storm: 13 LLM calls, 4
+    # repairs, no terminal). Reset fires ONLY for a real HumanMessage
+    # whose id DIFFERS — a genuinely new episode. Additive field with
+    # default ``""`` — old checkpoints deserialize unchanged.
+    last_repair_boundary_human_id: str = ""
 
     # Watchover per-turn denial counter (resets at agent node entry = turn
     # boundary). Phase 2 increments this on Deny; Phase 1 declares it for
@@ -5766,6 +6031,7 @@ def create_agent_repair_ghost_node(
     *,
     llm_config: dict | None = None,
     system_prompt: str = "",
+    turn_repair_latch: "TurnRepairLatch | None" = None,
 ):
     """Create the ``agent_repair_ghost`` node (phase-2 ladder, B-3).
 
@@ -5823,10 +6089,26 @@ def create_agent_repair_ghost_node(
 
         # OQ5 reset: durable budget cleared on real (non-injected)
         # HumanMessage at turn boundary — same predicate the loop
-        # rung uses. Mirrors graph.py:5092-5102.
-        durable_budget_used = int(state.get("repair_budget_used", 0) or 0)
-        if messages and _is_real_human_message(messages[-1]) and durable_budget_used != 0:
-            durable_budget_used = 0
+        # rung uses. Mirrors graph.py:5092-5102. D-1: the reset is
+        # boundary-id-freshness-guarded (``_repair_boundary_reset_state``)
+        # so a human tail RETAINED by a prior surgery this turn cannot
+        # masquerade as a new episode; on a genuine reset the marker is
+        # cleared and the B-4 turn latch released below.
+        durable_budget_used, _ghost_boundary_reset = (
+            _repair_boundary_reset_state(state, messages)
+        )
+        if _ghost_boundary_reset:
+            logger.info(
+                f"[SYMPTOM] budget reset: new real HumanMessage at turn "
+                f"boundary for {instance_short} (ghost-node re-entry)"
+            )
+        # D-1 marker clear rides whichever return fires (a success stamp
+        # overwrites it with the fresh boundary id anyway).
+        _ghost_marker_clear: dict[str, Any] = (
+            {"last_repair_boundary_human_id": ""}
+            if _ghost_boundary_reset
+            else {}
+        )
 
         outcome = await _maybe_ghost_repair(
             messages=messages,
@@ -5839,6 +6121,7 @@ def create_agent_repair_ghost_node(
             llm_config=llm_config,
             durable_budget_used=durable_budget_used,
             turn_id=turn_id,
+            turn_repair_latch=turn_repair_latch,
         )
 
         # ── fall-through: no repair landed (gate off, below cap,
@@ -5851,7 +6134,7 @@ def create_agent_repair_ghost_node(
             outcome.terminal_message is None
             and outcome.surgery_prefix is None
         ):
-            return {}
+            return {**_ghost_marker_clear}
 
         # ── budget exhaustion (C1 fix): stash the loud terminal in
         # ``pending_repair_ghost_terminal`` instead of appending to
@@ -5873,6 +6156,7 @@ def create_agent_repair_ghost_node(
             return {
                 "pending_repair_ghost_terminal": outcome.terminal_message,
                 "repair_budget_used": durable_budget_used,
+                **_ghost_marker_clear,
             }
 
         # ── success: carry the surgery prefix as the state update.
@@ -5883,6 +6167,10 @@ def create_agent_repair_ghost_node(
         return_value: dict[str, Any] = {
             "messages": list(outcome.surgery_prefix),
             "repair_budget_used": outcome.budget_used_new,
+            # D-1: stamp the boundary human this surgery retained so the
+            # next agent_node entry SUPPRESSES the OQ5 reset for it (the
+            # retained tail ends with the ORIGINAL HumanMessage).
+            "last_repair_boundary_human_id": outcome.boundary_human_id,
         }
         return return_value
 
@@ -5910,6 +6198,7 @@ def create_agent_node(
     compaction_tap_slot: "MessageTapSlot | None" = None,
     precall_compaction_tap_slot: "MessageTapSlot | None" = None,
     empty_streak_manager: Any = None,
+    turn_repair_latch: "TurnRepairLatch | None" = None,
 ):
     """Create the agent node function with optional reactive compaction.
 
@@ -6136,17 +6425,30 @@ def create_agent_node(
         # reset the budget. The reset RIDES the node return (durable
         # channel write) — see ``return_value['repair_budget_used']`` at
         # the return assembly.
-        _durable_budget_current = int(state.get("repair_budget_used", 0) or 0)
-        real_human_boundary = bool(messages) and _is_real_human_message(
-            messages[-1]
+        #
+        # D-1 (boundary-id-freshness): the reset fires ONLY for a real
+        # HumanMessage arriving AFTER a repair — never for history the
+        # surgery itself retained. ``_repair_boundary_reset_state``
+        # suppresses the reset when the tail human's id equals the
+        # ``last_repair_boundary_human_id`` marker (the ghost rung's
+        # retained tail ends with the ORIGINAL HumanMessage, which the
+        # position-only check misread as a new episode → budget 1→0
+        # mid-turn → exhaustion unreachable). On a GENUINE reset the
+        # marker is cleared and the B-4 turn latch is released — both
+        # ride ``return_value`` at the return assembly.
+        _prior_durable_budget = int(state.get("repair_budget_used", 0) or 0)
+        _durable_budget_current, _repair_boundary_reset = (
+            _repair_boundary_reset_state(state, messages)
         )
-        if real_human_boundary and _durable_budget_current != 0:
+        if _repair_boundary_reset:
             logger.info(
                 f"[SYMPTOM] budget reset: new real HumanMessage at turn "
                 f"boundary for {instance_short} "
-                f"(was {_durable_budget_current})"
+                f"(was {_prior_durable_budget})"
             )
             _durable_budget_current = 0
+            if turn_repair_latch is not None:
+                turn_repair_latch.clear_instance(instance_id)
 
         # ── Context Injection Restructure — Phase 3 / Task 4+5 ──────────
         # Hybrid Context Injection (2026-07-29): the slot returns a
@@ -6734,6 +7036,7 @@ def create_agent_node(
             loop_breaker_config=_lb_config,
             durable_budget_used=_durable_budget_current,
             turn_id=turn_id,
+            turn_repair_latch=turn_repair_latch,
         )
         if _durable_loop is not None:
             messages = _durable_loop.messages
@@ -7161,6 +7464,7 @@ def create_agent_node(
                     turn_id=turn_id,
                     exc=e,
                     current_llm=current_llm,
+                    turn_repair_latch=turn_repair_latch,
                 )
                 if _pre_terminal_outcome is not None:
                     if (
@@ -7481,6 +7785,35 @@ def create_agent_node(
         ):
             _budget_return = int(_durable_loop.budget_used_new)
         return_value['repair_budget_used'] = _budget_return
+        # Ladder phase 2 / D-1: carry the boundary-freshness marker on
+        # the node return. A successful loop/pre-terminal surgery this
+        # invocation STAMPS the marker with the boundary human its
+        # surgery retained (pre-terminal precedence mirrors the budget
+        # precedence — its repaired tail was derived FROM the
+        # post-loop-surgery messages). A GENUINE turn-boundary reset at
+        # node entry (``_repair_boundary_reset``) CLEARS the marker so
+        # it can never leak into the next episode. When neither applies
+        # the key is omitted and the channel keeps its prior value
+        # (last-value channel semantics).
+        _boundary_marker_return: str | None = None
+        if (
+            _pre_terminal_outcome is not None
+            and _pre_terminal_outcome.recovered
+        ):
+            _boundary_marker_return = (
+                _pre_terminal_outcome.boundary_human_id or ""
+            )
+        elif (
+            _durable_loop is not None
+            and _durable_loop.budget_used_new is not None
+        ):
+            _boundary_marker_return = _durable_loop.boundary_human_id or ""
+        elif _repair_boundary_reset:
+            _boundary_marker_return = ""
+        if _boundary_marker_return is not None:
+            return_value['last_repair_boundary_human_id'] = (
+                _boundary_marker_return
+            )
         # P1b — carry the compaction dedup stamp on the node return so
         # it survives the task commit (the seam's mid-superstep stamp
         # write alone is superseded with the rest of the persist).
@@ -9655,6 +9988,12 @@ def build_instance_graph(
     # Late binding for graph reference
     graph_ref = [None]
 
+    # Ladder phase-2 B-4: ONE repair-once-per-turn RAM latch shared by
+    # the agent node (loop durable rung + pre-terminal intercept) and
+    # the ghost repair node. ``None``-default in both factories keeps
+    # direct-node test harnesses inert.
+    turn_repair_latch = TurnRepairLatch()
+
     graph = StateGraph(SessionState)
 
     # Add nodes - pass both vision and standard LLM. Phase 1 / C1 also
@@ -9699,6 +10038,8 @@ def build_instance_graph(
         # (non-gating). Duck-typed manager handle; ``None`` (tests)
         # disables the telemetry entirely.
         empty_streak_manager=manager,
+        # Ladder phase-2 B-4 / D-1: the shared per-turn repair latch.
+        turn_repair_latch=turn_repair_latch,
     ))
     # Phase 2 (B-3): ghost-promise repair node. The router emits
     # ``"agent_repair_ghost"`` from ``should_continue`` when the
@@ -9715,6 +10056,7 @@ def build_instance_graph(
         create_agent_repair_ghost_node(
             llm_config=llm_config_with_headers or llm_config,
             system_prompt=system_prompt,
+            turn_repair_latch=turn_repair_latch,
         ),
     )
     graph.add_edge("agent_repair_ghost", "agent")
@@ -10009,6 +10351,7 @@ __all__ = [
     "LoopBreakerConfig",
     "LoopRepairer",
     "LoopBreakerSlot",
+    "TurnRepairLatch",
     "WatchoverSlot",
     "ToolThrottleSlot",
     "InjectionSlot",

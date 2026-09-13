@@ -71,6 +71,7 @@ from typing import Any, ClassVar
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -102,6 +103,26 @@ MAX_VERBATIM_ARGS_CHARS = 500
 #: docs never collide on the id-keyed reducer, and the per-class seq
 #: parsers (this module's and ``_next_compaction_seq``) stay isolated.
 REPAIR_DOC_ID_PREFIX = "repair-"
+
+
+def _last_real_human_id(messages: list[BaseMessage]) -> str:
+    """Id of the LAST real (non-injected) ``HumanMessage``; ``''`` if none.
+
+    D-1 boundary-freshness marker source. Identifies the turn-boundary
+    human the surgery RETAINS so the OQ5 reset predicate in
+    ``daemon/graph.py`` can distinguish a genuinely NEW task episode
+    from the surgery's own retained history (whose tail is the ORIGINAL
+    HumanMessage when the removal window is fully trailing — the exact
+    shape that made ghost budget exhaustion unreachable). Injected
+    detection mirrors ``graph.py::_is_real_human_message`` via the SAME
+    compaction predicate (lazy import — cycle guard).
+    """
+    from ..compaction import _is_injected_message  # lazy: cycle guard
+
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage) and not _is_injected_message(msg):
+            return str(getattr(msg, "id", "") or "")
+    return ""
 
 
 class SymptomRepairAborted(Exception):
@@ -197,6 +218,14 @@ class SymptomRepairOutcome:
     #: Machine-readable abort reason (``summarizer-failed`` /
     #: ``persist-refused`` / ``budget-exhausted``).
     abort_reason: str | None = None
+    #: D-1 boundary-freshness marker: id of the LAST real
+    #: (non-injected) HumanMessage in the PRE-surgery history — the
+    #: turn-boundary human the surgery RETAINS. The OQ5 reset
+    #: predicate (``daemon/graph.py``) suppresses the mid-turn durable
+    #: budget reset when the tail human's id matches this marker, so
+    #: the reset fires ONLY for a real HumanMessage arriving AFTER a
+    #: repair — never for history the surgery itself retained.
+    boundary_human_id: str = ""
 
 
 class SymptomRepairEngine:
@@ -495,6 +524,7 @@ class SymptomRepairEngine:
             repair_message_id=doc.id or "",
             surgery_prefix=prefix,
             budget_consumed=True,
+            boundary_human_id=_last_real_human_id(context.messages),
         )
 
     # ── preset: loop class ───────────────────────────────────────────
