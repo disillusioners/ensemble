@@ -97,11 +97,11 @@
 
 ### AD-9: Episode dedup closes on `tool_end`, re-arms on a NEW `tool_call_id`; no escalation ladder in v1
 
-**Decision**: One nudge per `(parent_id, child_id)` episode. `close_episode(parent_id, child_id)` discards the dedup tuple (and the future-escalation counter) when phase 1's wrapper records the `tool_end` clear for the long call. The next crossing on a NEW `tool_call_id` is a fresh episode and re-nudges. Escalation (second/third nudge, operator page) is out of scope v1 — `_nudge_counts` is kept as a future hook but never gates firing. *(Resolves from: phase 2 D2-3, Task 5, U3.)*
+**Decision**: One nudge per `(parent_id, child_id)` wedge **episode** (D-A episode granularity). Consecutive tool calls WITHOUT an intervening healthy (<threshold) tool completion on the same child = ONE episode (the bd4b36ef replay of 5 sequential long calls asserts exactly 1 nudge). Re-arm deterministically on (a) a healthy tool completion (close-on-tool-end, the primary re-arm), OR (b) the AD-37 stamp-TTL belt (`STALE_STAMP_TTL_SECONDS=7200`) — the SIMPLER of the two belts on top of the close mechanism. `close_episode(parent_id, child_id)` discards the dedup tuple (and the future-escalation counter) when phase 1's wrapper records the `tool_end` clear for the long call. The next crossing on a NEW `tool_call_id` is a fresh episode and re-nudges. Escalation (second/third nudge, operator page) is out of scope v1 — `_nudge_counts` is kept as a future hook but never gates firing. The close mechanism (scanner-side snapshot-diff close OR wrapper-side close with scan-time-cached parent_id) is pinned in **AD-42** (B4) — pick ONE in the implementer's first pass and amend the chosen mechanism here. *(Resolves from: phase 2 D2-3, Task 5, U3.)*
 
-**Rationale**: The long-tool path has a reliable explicit close signal (`tool_end` from the wrapper's `finally`) — unlike the watchdog, which must re-derive from SQL because children can die silently. Closing on `tool_end` avoids both the false-negative of time-cooldowns and nudge spam on consecutive ticks.
+**Rationale**: The long-tool path has a reliable explicit close signal (`tool_end` from the wrapper's `finally`) — unlike the watchdog, which must re-derive from SQL because children can die silently. Closing on `tool_end` avoids both the false-negative of time-cooldowns and nudge spam on consecutive ticks. The belt is the cheap insurance against the rare case where a stamp never clears (wrapper regression, registry bug, kill-path race) — it forces a clear + close + re-arm at `4 × HARD_MAX`, a TTL no legitimate in-flight stamp can exceed (the process's task supervision cancels it first).
 
-**Limitation (accepted)**: if phase 1 ever misses a clear, the episode stays open and a genuinely-new long call is suppressed. Mitigation is the `finally`-block contract + `TestWrappedToolsNodeExceptionClearsStamps`/`CancelClearsStamps`.
+**Limitation (accepted)**: if phase 1 ever misses a clear, the episode stays open and a genuinely-new long call is suppressed. Mitigation is the `finally`-block contract + `TestWrappedToolsNodeExceptionClearsStamps`/`CancelClearsStamps` + the AD-37 belt (cleanup the leak, not prevent it).
 
 ---
 
@@ -117,7 +117,7 @@
 
 ### AD-11: `priority=0` (system lane) — a nudge NEVER resets leader-attestation counters
 
-**Decision**: The nudge enqueues with `priority=0`. The terminal-revive attestation-counter-reset branch requires `priority==1 AND msg_type==HUMAN` (`instance_messaging.py:1896-1902`), so a nudge that revives a WAITING_CHILDREN parent leaves `attestation_denied_count` / completion-gate state untouched. Pinned by U7 (unit) + I5 (integration). *(Resolves from: phase 2 D2-6.)*
+**Decision**: The nudge enqueues with `priority=0`. The terminal-revive attestation-counter-reset branch requires `priority==1 AND msg_type==HUMAN` (`instance_messaging.py:1896-1902`), so a nudge that revives a WAITING_CHILDREN parent leaves `attestation_denied_count` / completion-gate state untouched. **Side effect (intended, AM-6)**: claim order is `ORDER BY priority ASC, enqueued_at ASC` (`message_queue/repository.py:184`) — priority-0 nudges are claimed **ahead of** priority-1 user messages, including cross-instance scans. This is the watchdog wedge-notice precedent (system advisories queue-jump user traffic). Pinned by U7 (unit) + I5 (integration). *(Resolves from: phase 2 D2-6.)*
 
 **Rationale**: A system advisory must not corrupt an in-progress attestation episode as a side effect of waking its parent.
 
@@ -127,7 +127,7 @@
 
 ### AD-12: PAUSED parent = pre-check, single WARN, skip (no stat counter, no deferred delivery)
 
-**Decision**: `deliver_long_tool_nudge` reads `parent.status` FIRST; on PAUSED it logs one WARN and returns False — never raises into the scanner tick, and deliberately does NOT let the claim gate defer a stale notice to resume. *(Resolves from: phase 2 Task 3(a), D2-12, U5, I4; mirrors watchdog `:996-1009`.)*
+**Decision**: `deliver_long_tool_nudge` reads `parent.status` FIRST; on PAUSED it logs one WARN and returns False — never raises into the scanner tick, and deliberately does NOT let the claim gate defer a stale notice to resume. **Clarified semantics (AM-7):** retry-every-tick-while-paused, fire-on-resume with fresh numbers — the `_fired_episodes` stamp-level set is only updated on a *successful* fire, so a PAUSED parent skips the stamp advance and the same crossing remains eligible on resume. The WARN is per-tick while the condition holds. Pause-cascade ends the stamp (child task is cancelled → wrapper `finally` clears) → the episode never opens in this case. Acceptable trade-off; the operator is typically present during pause. *(Resolves from: phase 2 Task 3(a), D2-12, U5, I4; mirrors watchdog `:996-1009`.)*
 
 **Rationale**: The claim gate would defer the Task to resume anyway, but the notice's elapsed/threshold numbers would be stale by then. Skip is the cleaner contract. A dedicated metric hookup is out of scope v1; the WARN + `[LongToolNudge] tick stats` INFO line suffice for debugging.
 
@@ -161,9 +161,9 @@
 
 ### Config
 
-### AD-16: Nested `LongToolCallNudgeConfig(BaseSettings)` with `env_prefix="LONG_TOOL_NUDGE_"`, wired once on `EnsembleConfig`
+### AD-16: Nested `LongToolCallNudgeConfig(BaseSettings)` with `env_prefix="LONG_TOOL_NUDGE_"`, wired once on `EnsembleConfig` — ships in **Phase 1** (B1)
 
-**Decision**: A nested pydantic-settings class (`enabled`, `interval_seconds`, `default_threshold_seconds`) placed between `ReportIntegrityConfig` and `LanguageConfig`, wired via `long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)` immediately after the LoopBreaker wiring line. *(Resolves from: phase 2 D2-1, Task 7; caller-mandated decision (4).)*
+**Decision**: A nested pydantic-settings class (`enabled`, `interval_seconds`, `default_threshold_seconds`) placed between `ReportIntegrityConfig` and `LanguageConfig`, wired via `long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)` immediately after the LoopBreaker wiring line. **LANDING PHASE: Phase 1, not Phase 2** (AM-8 / B1 re-slice). Phase 1 must boot self-contained — the config class, the `HARD_MAX_THRESHOLD_SECONDS` constant, and the lifespan wiring all land together so Phase 2 owns delivery only and Phase 3 owns the tool only. *(Resolves from: phase 2 D2-1, Task 7 originally; relocated to phase 1 Task 7a.)*
 
 **Rationale**: Three independent infra-loop knobs grouped under one import path beat cluttering the 3000-line flat `ServicesConfig`; `LoopBreakerConfig` (`config.py:1737-1756`, wired `:2109`) is the closer precedent and the documented modern style.
 
@@ -171,9 +171,9 @@
 
 ---
 
-### AD-17: Env names `LONG_TOOL_NUDGE_ENABLED` / `LONG_TOOL_NUDGE_INTERVAL_SECONDS` / `LONG_TOOL_NUDGE_DEFAULT_THRESHOLD_SECONDS`
+### AD-17: Env names `LONG_TOOL_NUDGE_ENABLED` / `LONG_TOOL_NUDGE_INTERVAL_SECONDS` / `LONG_TOOL_NUDGE_DEFAULT_THRESHOLD_SECONDS` — landing in **Phase 1** (B1)
 
-**Decision**: The three env vars derive mechanically from the nested class's `env_prefix` + field names. Phase 1 consumes the dotted attribute path (`config.long_tool_nudge.*`) and fails LOUD ("long_tool_nudge config missing — phase 3 required") if the attribute is absent — never silently disables. Out-of-range env values fail fast at boot via `ge=`/`le=` validators. *(Resolves from: phase 1 D6 + phase 2 D2-1/Task 7 (U14–U16); caller-mandated decision (4).)*
+**Decision**: The three env vars derive mechanically from the nested class's `env_prefix` + field names. Phase 1 consumes the dotted attribute path (`config.long_tool_nudge.*`); phase 2 / phase 3 read the same frozen value. Out-of-range env values fail fast at boot via `ge=`/`le=` validators. **LANDING PHASE: Phase 1** (moved from phase 2 Task 7 originally). *(Resolves from: phase 1 D6 + phase 2 D2-1/Task 7 (U14–U16); caller-mandated decision (4).)*
 
 ---
 
@@ -185,7 +185,7 @@
 
 ### AD-19: Hard max is a safety invariant, NOT operator-tunable — three defense layers
 
-**Decision**: `1800` is enforced three ways, none env-tunable: the module constant, the `Field(le=HARD_MAX_THRESHOLD_SECONDS)` boot validator on `default_threshold_seconds`, and the runtime `min(metadata_or_default, HARD_MAX)` clamp in threshold resolution (second line of defense for values that bypass pydantic, e.g. a hand-edited metadata key). *(Resolves from: phase 2 D2-2; interacts with AD-30 (canonical home) and AD-24 (tool-side loud reject).)*
+**Decision**: `1800` is enforced three ways, none env-tunable: the module constant, the `Field(le=HARD_MAX_THRESHOLD_SECONDS)` boot validator on `default_threshold_seconds`, and the runtime `min(metadata_or_default, HARD_MAX)` clamp in threshold resolution (second line of defense for values that bypass pydantic, e.g. a hand-edited metadata key). The **floor** `MIN_THRESHOLD_SECONDS = 60` (AD-38) lives at the same canonical home and is enforced on BOTH sides — the tool's loud ValueError (Phase 3 `set_instance_tunable`) AND the scanner's `_resolve_threshold` (Phase 1: any hand-edited metadata value `< 60` falls back to the configured default). The full chain is stated in **AD-41** (the canonical threshold precedence chain — stated ONCE, every other mention refers back). *(Resolves from: phase 2 D2-2; interacts with AD-30 (canonical home), AD-24 (tool-side loud reject), AD-38 (floor both sides), AD-41 (precedence chain).)*
 
 ---
 
@@ -207,21 +207,21 @@
 
 ---
 
-### AD-22: Reject-vs-clamp — the tool LOUDLY RAISES on floor/ceiling violations; error-dict only for unknown keys; write ONLY via `set_metadata`
+### AD-22: Reject-vs-clamp — the tool LOUDLY RAISES on floor/ceiling violations; error-dict only for unknown keys; write ONLY via `set_metadata`; gated on `LONG_TOOL_NUDGE_ENABLED`
 
-**Decision**: `value` outside `[60, 1800]` → loud `raise ValueError` listing the valid range (mirrors `spawn_councilor` strict model-validation — the "no silent fallback" house style for hard constraints); a parent typing `18000` WANTED 18000 and must re-read, not receive a silent 1800. Wrong `key` → recoverable error-dict `{"error_code": "UNKNOWN_KEY"}` (mirrors `project_set_metadata` — the LLM self-corrects from the message). Non-int / bool (explicit bool trap) → ValueError. Writes go exclusively through `instance_repository.set_metadata` (`:2099`) — NEVER `update_instance`, which rejects `instance_metadata` with ValueError at `:1094-1121` (test-pinned). Return shape: `{instance_id, key, prior_value, effective_value = min(value, 1800), applied_at}`; `set_metadata` returning None → `{"error_code": "NOT_FOUND"}`. *(Resolves from: phase 3 D2, D3, Task 2; caller-mandated decision (2).)*
+**Decision**: `value` outside `[60, 1800]` → loud `raise ValueError` listing the valid range (mirrors `spawn_councilor` strict model-validation — the "no silent fallback" house style for hard constraints); a parent typing `18000` WANTED 18000 and must re-read, not receive a silent 1800. Wrong `key` → recoverable error-dict `{"error_code": "UNKNOWN_KEY"}` (mirrors `project_set_metadata` — the LLM self-corrects from the message). Non-int / bool (explicit bool trap) → ValueError. Writes go exclusively through `instance_repository.set_metadata` (`:2099`) — NEVER `update_instance`, which rejects `instance_metadata` with ValueError at `:1094-1121` (test-pinned). Return shape: `{instance_id, key, prior_value, effective_value = min(value, 1800), applied_at}`; `set_metadata` returning None → `{"error_code": "NOT_FOUND"}`. **KILL-SWITCH GATING (AD-39): when `LONG_TOOL_NUDGE_ENABLED=0`, the tool returns a clear `{"error_code": "FEATURE_DISABLED", "message": "long-tool-nudge is disabled by config"}` and writes NO metadata; stamp/log presence in the daemon continues by design (the kill-switch gates delivery + tool write, not the duration-observability line).** *(Resolves from: phase 3 D2, D3, Task 2; caller-mandated decision (2) + AD-39 owner decision 3.)*
 
 **Alternatives**: clamp + echo `{"warning": "clamped"}` — friendlier but hides mistakes; two-stage soft-warn/hard-reject — over-engineered.
 
 ---
 
-### AD-23: Tool category = existing `"instance"`; exposure = leader + planner + developer (pending AD-35 verification)
+### AD-23: Tool category = existing `"instance"`; exposure = category-wide by construction (RESOLVED, AM-3)
 
-**Decision**: No new category. Leader already allows `"instance"` (zero meta.json change); planner + developer each gain ONE line in `tools.allow`. Docs land in a NEW `docs/long-tool-nudge.md` (deep-linkable from `context_injection` heuristics + `tool_help`), with an optional one-line cross-ref only if a top-level operations doc exists. *(Resolves from: phase 3 D5, D8, D9, Tasks 5-6, 8-9.)*
+**Decision**: No new category. **Exposure is category-wide by construction** (RESOLVED via AM-3 architect verification) — every agent whose active `meta.json` allows `"instance"` receives the tool automatically (~15 agents today: leader, planner, developer, tester, governor, architect, coder, reviewer[v2], tidier[v2], wanderer, approver[v2], _mother, blueprinter, project-manager). Phase 3 Task 6 is a **conditional version-tag resolve** — read the ACTIVE `version_tag` per agent (planner[v2] / developer[v2] already allow `"instance"`; likely zero edits). Add `"instance"` only to a base-planner/developer variant that is actually resolved and missing it. Effective holder list documented in `docs/long-tool-nudge.md`. *(Resolves from: phase 3 D5, D8, D9, Tasks 5-6, 8-9; AM-3 RESOLVED.)*
 
 **Rationale**: A new `"instance_tuning"` category forces a leader change for zero net win. A dedicated doc crosses operations + agent-behaviour + system-policy boundaries and is easier to link than a section in a sprawling operations page.
 
-**Caveat**: exposure scope may narrow to leader-only if AD-35 verifies planner/developer cannot spawn children (a tuning tool is useless to an agent that holds no children) — the verification, not this AD, settles it.
+**Note (was caveat, now RESOLVED)**: the prior "exposure may narrow to leader-only" caveat was conditional on AD-35 verifying planner/developer spawn capability. AD-35 is now RESOLVED — the gateway is meta.json's `tools.allow` itself, and the active v2 variants already include `"instance"`.
 
 ---
 
@@ -243,9 +243,9 @@
 
 ---
 
-### AD-26: Threshold unit = seconds everywhere
+### AD-26: Threshold unit = seconds everywhere; floor enforced on BOTH sides
 
-**Decision**: The metadata key (`_seconds`), the env var (`_SECONDS`), the tool arg, and the scanner comparison are all integer seconds. Floor 60 prevents accidental micro-thresholds that would defeat the feature. *(Resolves from: phase 3 D10.)*
+**Decision**: The metadata key (`_seconds`), the env var (`_SECONDS`), the tool arg, and the scanner comparison are all integer seconds. Floor `MIN_THRESHOLD_SECONDS = 60` (AD-38, same canonical home as the hard max) prevents accidental micro-thresholds that would defeat the feature; enforced on BOTH sides — tool-side ValueError in `set_instance_tunable` AND scanner-side fallback in `_resolve_threshold` (any hand-edited metadata value `< 60` is treated as invalid and falls back to the configured default). *(Resolves from: phase 3 D10 + B4/AD-38.)*
 
 **Alternatives**: minutes (+ unit arg) — conversion hazards at the 60-second boundary; milliseconds — absurd precision for a 60-1800 s range.
 
@@ -279,11 +279,11 @@
 
 ---
 
-### AD-30 (R3): `HARD_MAX_THRESHOLD_SECONDS = 1800` lives in `daemon/services/long_tool_nudge.py`; BOTH `daemon/config.py` and `daemon/tools/instance.py` import it from there
+### AD-30 (R3): `HARD_MAX_THRESHOLD_SECONDS = 1800` (and `MIN_THRESHOLD_SECONDS = 60`, AD-38) live in `daemon/services/long_tool_nudge.py`; BOTH `daemon/config.py` and `daemon/tools/instance.py` import from there — landing in **Phase 1** (B1)
 
-**Decision**: One canonical home: the module constant in `daemon/services/long_tool_nudge.py` (phase 2 Task 1 stands). `daemon/config.py` imports it for the `le=` validator (import direction config→services is safe and already the house shape — config.py imports services constants elsewhere; the reverse, services importing config at module top, is what must be avoided for circularity). Phase 3's tool imports `HARD_MAX_THRESHOLD_SECONDS` from `daemon.services.long_tool_nudge` — NOT from `daemon.config`, and NOT under the name `MAX_THRESHOLD_SECONDS`. Phase 3's Task 5 wording ("Import `MAX_THRESHOLD_SECONDS` from `daemon.config`") and D7 are corrected accordingly; `TestFloorAndCeilingConstants` pins by importing the same OBJECT (identity, not just equality) from `daemon.services.long_tool_nudge`. *(Reconciles: phase 2 Task 1/7 vs phase 3 Task 5/D7. Phase 3 edited.)*
+**Decision**: One canonical home: the module constants in `daemon/services/long_tool_nudge.py` (defined in **Phase 1**, AM-8 / B1 re-slice). `daemon/config.py` imports `HARD_MAX_THRESHOLD_SECONDS` for the `le=` validator (import direction config→services is safe and already the house shape — config.py imports services constants elsewhere; the reverse, services importing config at module top, is what must be avoided for circularity). Phase 3's tool imports `HARD_MAX_THRESHOLD_SECONDS` AND `MIN_THRESHOLD_SECONDS` (AD-38) from `daemon.services.long_tool_nudge` — NOT from `daemon.config`, and NOT under aliases like `MAX_THRESHOLD_SECONDS`. `TestFloorAndCeilingConstants` pins by importing the same OBJECTS (identity, not just equality) from `daemon.services.long_tool_nudge`. *(Resolves from: phase 2 Task 1/7 vs phase 3 Task 5/D7 + B1/AM-8(a).)*
 
-**Rationale**: Phase 2's plan put the constant in the services module and made config a consumer; phase 3 D7 assumed a config-side export that phase 2 never declared. Import-direction sanity: `daemon/config.py` is imported by nearly everything, so config must not reach INTO a deeper services module that itself imports config — here the services module does NOT import config at module top, so config→services is acyclic. A `daemon.constants` re-export adds indirection for one symbol.
+**Rationale**: Phase 1's plan put the constant in the services module and made config a consumer; phase 3 D7 assumed a config-side export that phase 2 never declared. Import-direction sanity: `daemon/config.py` is imported by nearly everything, so config must not reach INTO a deeper services module that itself imports config — here the services module does NOT import config at module top, so config→services is acyclic. A `daemon.constants` re-export adds indirection for one symbol. The **re-slice to Phase 1** (AM-8(a)) keeps the constant next to its single use site (the scanner's threshold resolution), so phase 2 imports-and-only-delivers, while phase 3 imports-and-only-writes.
 
 ---
 
@@ -295,9 +295,9 @@
 
 ---
 
-### AD-32 (R6a — OPEN): Does `_tool_registry.py` cache resolved tool lists per-spawn?
+### AD-32 (R6a — RESOLVED): Tool-registry resolution is per-spawn-and-per-restore; meta.json is a per-process snapshot — daemon RESTART reaches all instances via restore-rebuild (AM-1)
 
-**Decision**: NOT resolved here. Phase 3 Task 7 must read `daemon/tools/_tool_registry.py` for cache behaviour before relying on the meta.json exposure: if resolution is per-spawn, document that `tools.allow` changes affect only newly-spawned instances (live instances need re-spawn); if per-call, no mitigation needed. *(Carried from phase 3 Risk 4.)*
+**Decision**: RESOLVED via architect verification (AM-1). Tool lists resolve per spawn AND per restore (`_tool_registry.py:15-18`, no resolved-list cache), but meta.json is **snapshotted once per process** (registry singleton, no runtime re-discover). BOTH a new tool and a `tools.allow` change therefore require a **daemon restart**; after restart, **all** instances receive them — newly-spawned via the spawn path, pre-existing via restore-path rehydration (`instance_lifecycle.py:1611/:1714/:3892/:3995`). **No silent-no-op failure mode.** Phase 3 Task 6 docs the full holder list in `docs/long-tool-nudge.md`. *(Was OPEN in prior revision; AM-1 closes it. Carried from phase 3 Risk 4.)*
 
 ---
 
@@ -307,21 +307,78 @@
 
 ---
 
-### AD-34 (caller-mandated, OPEN): Bounded per-call `bash` timeout
+### AD-34 (caller-mandated, DECIDED — STRICTLY DEFER): Bounded per-call `bash` timeout — visibility gap, not unboundedness; full ticket embedded in `architecture-recommendation.md` §3.1 (AM-4)
 
-**Decision**: NOT decided — explicitly out of scope v1 (non-goal: no per-tool hard-timeout enforcement; no 7200 s cap change). The bd4b36ef last bash ran ~30 min and never returned; a bounded per-call timeout (e.g. default `timeout_seconds` per call rather than per task-cap) would have cancelled cleanly and let the loop-breaker/parent path observe the tool result. Recorded as a future-feature candidate with the forensics attached. *(Resolves from: phase 1 D11; caller-mandated decision (6).)*
+**Decision**: **DECIDED — STRICTLY DEFER** (AM-4). The daemon's `bash` tool **already has** a per-call `timeout` kwarg — `timeout: int | float | None = 1800` (`bash.py:204`), validated `≤ 1800` (`:225-226`), enforced via `asyncio.wait_for(proc.wait(), timeout=...)` (`:327`). So nothing structural is missing; the bd4b36ef incident was a **visibility** gap, not an unboundedness gap — the last bash ran ~30 min and never returned, but a hard timeout would still leave the parent agent without a heads-up. The long-tool-nudge path closes the visibility side. Changing the default inside *this* feature would (a) violate its advisory-only contract (a hard timeout cancels the call — an action, not an advisory), (b) cross every agent's every bash call including legitimate long operations (this repo's own pytest suite, migrations, playwright), and (c) entangle two reviewable blast radii in one merge. v1 notice text must NOT reference the future env var (AD-8 structure locked). **Full follow-up ticket block is embedded verbatim in `architecture-recommendation.md` §3.1.** *(Resolves from: phase 1 D11; caller-mandated decision (6); AM-4 closes it.)*
+
+### AD-35 (R6b — RESOLVED): Exposure is category-wide by construction — no meta.json one-liners needed; phase 3 Task 6 is a conditional version-tag resolve (AM-3)
+
+**Decision**: RESOLVED via architect verification (AM-3). **Exposure is category-wide by construction** (no new category) — every agent whose active meta.json allows `"instance"` receives the tool automatically (~15 agents today: leader, planner, developer, tester, governor, architect, coder, reviewer[v2], tidier[v2], wanderer, approver[v2], _mother, blueprinter, project-manager). **Phase 3 Task 6 is now a conditional version-tag resolve**: read the ACTIVE `version_tag` per agent (planner[v2] / developer[v2] already allow `"instance"` — likely zero edits); add `"instance"` only to a base-planner/developer variant that is actually resolved and missing it. Worker is denied by the team-membership gate regardless. *(Was OPEN in prior revision; AM-3 closes it. Carried from phase 3 D9 / Risk on exposure.)*
+
+### AD-36 (R6c — RESOLVED): `get_metadata_value(instance_id, key) -> Any | None` is the verified scanner read (AM-12)
+
+**Decision**: RESOLVED via architect verification (AM-12). `get_metadata_value(instance_id, key)` is sync, single-key, no row hydrate, returns `None` on missing row / NULL / absent key, with JSON re-parse at `repository.py:1980`. It is the correct scanner read for `_resolve_threshold`. The fallback `repo.get(instance_id)` + dict access remains valid as defense-in-depth (one extra read) if a future regression breaks the signature. *(Was OPEN in prior revision; AM-12 closes it. Carried from phase 3 Risk 5.)*
 
 ---
 
-### AD-35 (R6b — OPEN): Can planner/developer spawn children at all?
+### AD-37: Stamp-TTL force-close belt — closes the missed-`tool_end` suppression failure mode (AM-5)
 
-**Decision**: NOT resolved here. Phase 3 D9's own text flags it: planner/developer `tools.allow` lists no `"instance"` category today, so their child-holding capability is unverified. If they cannot spawn children, exposure narrows to LEADER ONLY (the documented fallback) and the two meta.json one-liners are dropped. Verify during phase 3 Task 7 (registry category-resolution against each agent's effective allow-set). *(Carried from phase 3 D9 / Risk on exposure.)*
+**Decision**: At the end of every `run_once` tick, the scanner sweeps `registry.snapshot()` and for any stamp with `age > STALE_STAMP_TTL_SECONDS` (= `4 × HARD_MAX_THRESHOLD_SECONDS = 7200 s`):
+- `registry.clear(instance_id, tool_call_id)` — force-clear the stamp
+- `_active_episodes.discard((parent_id, child_id))` — close the (parent, child) episode
+- `_fired_episodes.discard((child_id, tool_call_id))` — re-arm the stamp-level fire dedup
+- `logger.warning("[LongToolNudge] STALE_STAMP force-cleared ...")` — DEBUG-grade audit trail
+
+The **TTL constant `STALE_STAMP_TTL_SECONDS = 7200`** lives at the canonical home (`daemon/services/long_tool_nudge.py`, alongside `HARD_MAX_THRESHOLD_SECONDS` and `MIN_THRESHOLD_SECONDS`). The constant is **decoupled from the effective graph-task cap** per P-1 (the source of the 7200 s effective cap was not reconciled: `constants.py:36 TASK_TIMEOUT_S=300` vs the incident forensics and `MainLoopBridge.run_async` — defined as a module constant, not derived). The hygiene sweep in the same pass: discard `_fired_episodes` entries whose `(child_id, tool_call_id)` no longer appears in the snapshot — prevents unbounded set growth from any clear-path that bypasses the scanner's bookkeeping. The same sweep also walks `_active_episodes` for orphan tuples whose child stamp has fully cleared — a missed `close_episode` can never silently suppress future nudges forever. Tests: `TestScannerStaleStampForceCloses` (synthetic age 7300 s → force-cleared on next tick; a fresh `tool_call_id` on the same child fires normally afterwards) + `TestScannerOrphanEpisodeClose` (orphan tuple in `_active_episodes` with no live stamp → discard on next tick) + `TestScannerFiredEpisodesHygieneDiscard` (orphan stamp-level tuple with cleared stamp → discard on next tick).
+
+**Rationale**: Zero false-positive risk — a *legitimate* in-flight stamp cannot exceed the graph-task lifetime (process task supervision cancels it first), so a `> 7200 s` stamp is by definition a leak. Belt cost ≈ 10 LOC + 3 tests; closes the silent-suppression failure mode that tests cannot forever prevent (future wrapper regression, registry bug, kill-path races). *(Resolves from: architecture-recommendation.md §3.3; B2; AM-5.)*
 
 ---
 
-### AD-36 (R6c — OPEN): `get_metadata_value` signature confirmation at `repository.py:1931`
+### AD-38: Floor `MIN_THRESHOLD_SECONDS = 60` enforced on BOTH sides — tool-side ValueError AND scanner-side fallback (D-A owner decision 4)
 
-**Decision**: NOT resolved here. Phase 3 Task 2 re-reads `:1931` at implementation time; if the signature differs (e.g. it is `get_metadata` returning the whole dict), fall back to `instance_repository.get(instance_id)` + `instance.instance_metadata.get(key)` (one extra read, same result). Phase 1's threshold resolution carries the same check. *(Carried from phase 3 Risk 5.)*
+**Decision**: The 60 s floor (`MIN_THRESHOLD_SECONDS = 60`, defined in the canonical home `daemon/services/long_tool_nudge.py` alongside `HARD_MAX_THRESHOLD_SECONDS`, AD-30) is enforced on **both sides**:
+- **Tool side (Phase 3, `set_instance_tunable`)**: `value < 60` → loud `raise ValueError` listing the valid range `[60, 1800]` (mirrors `spawn_councilor` strict-model-validation house style; the "no silent fallback" stance for hard constraints).
+- **Scanner read side (Phase 1, `_resolve_threshold`)**: if the resolved `instance_metadata.long_tool_call_threshold_seconds` is `None`, non-int, OR `< 60`, treat as invalid and fall back to `default_threshold_seconds`. This closes the read-side floor-bypass case where an operator hand-edits metadata (or a future tool regression writes a below-floor value) and the scanner silently uses it.
+
+The floor prevents accidental micro-thresholds that would defeat the feature (a 5 s threshold would re-fire on every normal CLI invocation). Test: `TestResolveThresholdFloorBypass` — mocked metadata of `30` falls back to the default; metadata of `60` is honored; metadata of `0` / `None` / `"60"` (string) fall back. *(Resolves from: D-A owner decision 4; AD-19 / AD-26 cross-reference.)*
+
+---
+
+### AD-39: `set_instance_tunable` is gated on `LONG_TOOL_NUDGE_ENABLED` — disabled ⇒ no metadata write, clear message (D-A owner decision 3)
+
+**Decision**: When `LONG_TOOL_NUDGE_ENABLED=0`, the `set_instance_tunable` tool returns `{"error_code": "FEATURE_DISABLED", "message": "long-tool-nudge is disabled by config (LONG_TOOL_NUDGE_ENABLED=0); no metadata written"}` and writes NO metadata. The per-completion `[LongToolNudge] TOOL_COMPLETED` log line and the stamp registry continue to tick by design when disabled — **stamp/log presence ≠ delivery**, the kill-switch gates delivery + tool write, not the duration-observability line. The config attribute is read via `config.long_tool_nudge.enabled` (Phase 1's `LongToolCallNudgeConfig`), so Phase 3 imports the gated-value decision rather than re-reading the env. A regression pin: the tool's `TestSetInstanceTunableGateKillSwitch` covers `enabled=False → returns FEATURE_DISABLED, no set_metadata call`; the stamp/log continuity is covered separately by T1-T7 (Phase 1, do not regress when the kill-switch flips). *(Resolves from: D-A owner decision 3; AD-22 cross-reference.)*
+
+---
+
+### AD-40: Terminal parents skip the nudge (TERMINATED/ERROR/FAILED + COMPLETED in v1) — never revive, just WARN-log (D-A owner decision 2)
+
+**Decision**: `deliver_long_tool_nudge` checks `parent.status` BEFORE the PAUSED branch. **ALL terminal statuses** — `COMPLETED`, `TERMINATED`, `ERROR`, `FAILED` — skip the nudge and emit a single WARN log per attempted fire; `enqueue_message` is NEVER called (no revive path on this feature). **Justification**: reviving a terminal parent to deliver an advisory nudge would wake a parent the operator explicitly stopped, and could corrupt state by triggering status-side-effects; the orphan-child terminal-class is owned by existing machinery (`terminate_instance` / cascade-resume / instance_lifecycle) and out of scope for this feature. In v1, COMPLETED parents are ALSO skip+WARN (no exception) — the WAITING_CHILDREN → RUNNING revive path (U12 + I2) remains valid for the non-terminal-RUNNING parents that are the common case. A future AD may re-enable revive on COMPLETED if telemetry shows a useful segment. Test pins: `TestDeliverLongToolNudgeTerminalParentSkips` — for each terminal status, assert `enqueue_message` called ZERO times, `logger.warning` called with the status, return value `False`, no exception into the scanner tick. The PAUSED test (U5) and the test pinning WAITING_CHILDREN→RUNNING revive (I2) remain unchanged. Any test that previously asserted terminal-revive DELIVERY (the early U13 / I2 draft variants) flips to skip+WARN assertions. *(Resolves from: D-A owner decision 2.)*
+
+---
+
+### AD-41: Canonical threshold precedence chain — stated ONCE, every other mention refers back (D-A owner decision 5)
+
+**Decision**: The **threshold precedence chain** is stated exactly once in the package — in the Working-Names Table of `plan-overview.md` — and every other mention (AD-9, AD-19, AD-22, AD-26, AD-38, AD-39, the phase plans, the docs, the tests) refers back to that single statement by name ("see canonical threshold precedence chain"). The chain (top to bottom):
+
+1. **Kill-switch** `LONG_TOOL_NUDGE_ENABLED` (default ON). When OFF: no scanner fires, no tool write, no delivery — but stamp registry and per-completion log line continue by design.
+2. **Per-child metadata key** `instance_metadata["long_tool_call_threshold_seconds"]` (read via `get_metadata_value(instance_id, key)` per AD-36). If absent / None / non-int / `< 60` (read-side floor bypass, AD-38) → fall through.
+3. **Env default** `LONG_TOOL_NUDGE_DEFAULT_THRESHOLD_SECONDS` (validated `ge=1 le=1800` at boot via `Field(le=HARD_MAX_THRESHOLD_SECONDS, default=900)`).
+4. **`min(·, HARD_MAX_THRESHOLD_SECONDS=1800)` clamp** (defense layer 2 — environment ceiling; AD-19).
+5. **Strict `>` comparison** in the scanner (`elapsed_seconds > effective_threshold`, matches watchdog `age > threshold` precedent, AD-4) — fire boundary.
+
+The same shape is referenced in the Phase 1 `_resolve_threshold` implementation, the Phase 3 tool's documented behaviour, and the docs. Future amendments to any rung MUST update the canonical statement AND broadcast to every reference. *(Resolves from: D-A owner decision 5.)*
+
+---
+
+### AD-42: Episode close mechanism — pick ONE (scanner-side snapshot-diff OR wrapper-side cached parent_id) and pin in phase 2 (B4)
+
+**Decision**: One mechanism is picked and pinned in phase 2 deliverable prose + the B4 follow-up hygiene. The two candidates:
+
+- **Option (i): Scanner-side snapshot-diff close.** The scanner holds a `_last_seen_stamps: dict[(child_id, tool_call_id), started_at]` snapshot from the prior `run_once`; at every tick, it computes `now_stamps - last_stamps`; ids that **dropped** between snapshots correspond to a `tool_end` event and trigger `close_episode(parent_id, child_id)` — but the scanner needs `parent_id` for that, so it reads it from the registry. Requires the scanner to capture `parent_id` at fire time and remember it for the close sweep. **No wrapper signature change.**
+- **Option (ii): Wrapper-side close with scan-time-cached parent_id.** The wrapper's `finally` block already runs on every `tool_end`; it can read `parent_id = state["configurable"]["thread_id"]` → `instance.parent_id` (sync, one read per clear) and call `close_episode` directly. The scanner keeps `_fired_episodes`; the wrapper has the cached parent_id. **Adds a parent_id read per tool call** — cheap (sync repo, no row hydrate).
+
+The **deciding trade-off**: (i) keeps `close_episode` out of the wrapper hot path but relies on snapshot diff to discover closes; (ii) makes the close authoritative on the `finally` path at one extra repo read per tool call. (ii) is the SIMPLER mechanism — the architect's recommendation (the wrapper's `finally` "must reliably close episodes"; the cached `parent_id` survives just long enough to make the close call) and is the explicit owner decision (B4: "The wrapper's `finally` must reliably close episodes even though the wrapper lacks parent_id (that's the point of the cached parent_id / snapshot-diff choice)"). **Phase 2 pick: Option (ii)** — wrapper-side close with cached `parent_id` read at clear time. Implementation: capture `parent_id` at `record_start` (one sync read per `tool_start`, mirrors D2 alt a for parents), pass it through the registry stamp shape (the `_Stamp` gains `parent_id` for the lifetime of the stamp), `finally` calls `close_episode(parent_id, child_id)` on the cached value. **The hygiene sweep extends to `_active_episodes`**: at end of `run_once`, discard orphan tuples whose child stamp has fully cleared — a missed close can never silently suppress future nudges forever (belt + suspenders, joins AD-37's TTL-belt cleanup). *(Resolves from: B4 owner decision.)*
 
 ---
 
@@ -365,11 +422,21 @@
 | phase3-plan.md | D6 | AD-24 |
 | phase3-plan.md | D7 | AD-30 (corrected import home) |
 | phase3-plan.md | D8 | AD-23 |
-| phase3-plan.md | D9 | AD-23, AD-35 (OPEN) |
-| phase3-plan.md | D10 | AD-26 |
+| phase3-plan.md | D9 | AD-23, AD-35 (RESOLVED, AM-3) |
+| phase3-plan.md | D10 | AD-26 (floor enforced both sides — see AD-38) |
 | synthesis dispatch | R1 | AD-28 |
 | synthesis dispatch | R2 | AD-29 |
-| synthesis dispatch | R3 | AD-30 |
+| synthesis dispatch | R3 | AD-30 (landing phase: 1) |
 | synthesis dispatch | R4 | AD-2, AD-31 |
 | synthesis dispatch | R5 | Working-Names Table in `plan-overview.md` |
-| synthesis dispatch | R6 | AD-32, AD-35, AD-36 (all OPEN) |
+| synthesis dispatch | R6 | AD-32 (RESOLVED, AM-1), AD-35 (RESOLVED, AM-3), AD-36 (RESOLVED, AM-12) |
+| doc-consolidation pass | D-A episode granularity | AD-9 (amended), AD-37 |
+| doc-consolidation pass | D-A terminal parents | AD-40 |
+| doc-consolidation pass | D-A set_instance_tunable kill-switch gating | AD-22 (cross-ref), AD-39 |
+| doc-consolidation pass | D-A floor unification both sides | AD-26 (cross-ref), AD-38 |
+| doc-consolidation pass | D-A canonical threshold precedence chain | AD-41 (statement location: Working-Names Table) |
+| doc-consolidation pass | B1 phase re-slice (config + constant + lifespan → Phase 1) | AD-16 (amended), AD-17 (amended), AD-20, AD-30 (amended) |
+| doc-consolidation pass | B2 stamp-TTL belt | AD-9 (amended), AD-37 |
+| doc-consolidation pass | B3 resolution fold-in | AD-1..AD-12 (all AM-resolved where applicable); AD-32/34/35/36 RESOLVED |
+| doc-consolidation pass | B4 close-mechanism pin | AD-42 (Option ii: wrapper-side cached parent_id) |
+| doc-consolidation pass | AM-1..AM-11 resolutions | AD-11 (queue-jump rationale), AD-12 (clarified semantics), AD-23 (RESOLVED), AD-34 (DECIDED — STRICTLY DEFER) |
