@@ -54,6 +54,17 @@ _SSE_HEADERS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _drain_singleton_registry():
+    """W4 test isolation: every test starts and ends with an EMPTY
+    daemon-wide registry — an entry leaked by one test (a mock stream
+    that never iterates/closes) would otherwise poison the shared
+    singleton for every later test."""
+    wd.reset_registry()
+    yield
+    wd.reset_registry()
+
+
 def _chunk(payload: bytes) -> bytes:
     """Frame one chunked-transfer payload."""
     return b"%x\r\n%s\r\n" % (len(payload), payload)
@@ -79,11 +90,15 @@ class TestStreamWatchdogRegistry:
         time.sleep(0.05)  # let the fresh stamp age past the threshold
         stale = reg.collect_stale(threshold_seconds=0.0001)
         assert stale == [entry]
+        # W2 semantics: collect_stale is read-only — the flag is stamped
+        # by claim() at unblock time (under the lock).
+        assert entry.force_closed is False
+        assert reg.claim(entry) is True
         assert entry.force_closed is True, (
-            "collect_stale must mark force_closed BEFORE the unblock fires"
+            "claim must mark force_closed atomically with the membership pop"
         )
-        reg.deregister(entry)
-        assert len(reg) == 0
+        assert len(reg) == 0, "claim pops the entry (no second claim possible)"
+        assert reg.claim(entry) is False, "double-claim must lose"
 
     def test_id_keyed_no_leak_across_entries(self):
         """Two entries from two handle_request calls (retry attempts)
@@ -795,3 +810,151 @@ class TestCleanLlmConfigWatchdogInjection:
             }
         )
         assert cleaned["http_client"] is custom
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Review fixes W1 / W2 / W4
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestCloseWithoutIterationDeregisters:
+    """W1: deregistration must not live only in the iteration finally —
+    a stream closed without being fully read must not leak its registry
+    entry (which would otherwise survive every sweep forever: 1
+    WARNING/s + unbounded registry growth)."""
+
+    def test_close_without_iteration_deregisters_sync(self):
+        reg = wd.StreamWatchdogRegistry()
+
+        def handler(request):
+            # Long-lived SSE iterator: the stream is abandoned before
+            # completion (close() is the ONLY exit path).
+            def endless():
+                while True:
+                    yield b": hb\n\n"
+
+            return httpx.Response(
+                200,
+                content=endless(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        transport = wd.WatchdogHTTPTransport(
+            httpx.MockTransport(handler), registry=reg
+        )
+        resp = transport.handle_request(
+            httpx.Request("POST", "http://test.local/x", json={})
+        )
+        assert len(reg) == 1
+        resp.close()  # abandon WITHOUT iterating
+        assert len(reg) == 0, (
+            "close-without-iteration must deregister the entry (W1)"
+        )
+        # And a sweep tick after the close finds nothing to abort — no
+        # eternal stale-entry WARNING loop. (Threshold 0: any remaining
+        # entry would be claimed regardless of stamp age — determinism
+        # via emptiness, not timing.)
+        assert wd.sweep_once(reg, 0.0) == 0
+        assert len(reg) == 0
+
+    async def test_aclose_without_iteration_deregisters_async(self):
+        """W1 async mirror: ``aclose()`` deregisters like the ``aiter``
+        finally does."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+
+        class EndlessAsync(httpx.AsyncByteStream):
+            async def aiter(self):
+                while True:
+                    yield b": hb\n\n"
+
+        stream = wd._WatchedAsyncStream(
+            inner=EndlessAsync(), entry=entry, registry=reg
+        )
+        assert len(reg) == 1
+        await stream.aclose()  # abandon WITHOUT aiter
+        assert len(reg) == 0, "aclose must deregister the entry (W1)"
+        assert wd.sweep_once(reg, 0.0) == 0
+
+
+class TestMembershipRecheckAtUnblock:
+    """W2: the force-unblock must re-check registry membership UNDER THE
+    LOCK at unblock time — a stream that completed between sweep
+    collection and the unblock must never have its (possibly pooled and
+    reassigned) socket touched. Deterministic lock-semantics test, NOT a
+    timing lottery."""
+
+    def test_unblock_skips_non_member_deterministic(self):
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10  # deterministically stale
+        # Sweep tick collects the (silent) entry...
+        assert reg.collect_stale(threshold_seconds=5.0) == [entry]
+        # ...but the stream COMPLETES first: its cleanup path
+        # deregisters under the same lock (the completion won the race).
+        reg.deregister(entry)
+        # The unblock now runs — membership re-check must skip it.
+        assert wd.sweep_once(reg, 5.0) == 0, (
+            "unblock on a non-member must be skipped (claimed == 0)"
+        )
+        entry.response.close.assert_not_called(), (
+            "an innocent completed stream must not be close()d"
+        )
+        entry.response.shutdown.assert_not_called()
+        assert entry.force_closed is False, (
+            "a lost-race entry must not be marked force-closed"
+        )
+
+    def test_unblock_claims_live_member(self):
+        """Positive control: a still-registered stale entry IS claimed,
+        marked, popped, and acted on."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10  # deterministically stale
+        assert wd.sweep_once(reg, 5.0) == 1
+        assert entry.force_closed is True
+        assert len(reg) == 0, "claimed entry is popped"
+        # The MagicMock response itself resolves as a "socket-like"
+        # object in the dig (auto-attrs), so the shutdown vehicle fires.
+        entry.response.shutdown.assert_called_once()
+        entry.response.close.assert_not_called()
+
+    def test_double_claim_second_losses(self):
+        """The same entry swept twice (two ticks) can only be claimed
+        once — the second tick's unblock must skip."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10  # deterministically stale
+        assert wd.sweep_once(reg, 5.0) == 1
+        assert wd.sweep_once(reg, 5.0) == 0, (
+            "second sweep must not re-abort the already-claimed entry"
+        )
+        assert entry.response.shutdown.call_count == 1
+
+
+class TestResetRegistry:
+    """W4: the shared singleton registry must be drainable for test
+    isolation — reset_cached_clients alone does not touch it."""
+
+    def test_reset_registry_drains_singleton(self):
+        # Use the REAL daemon-wide singleton (this is what leaks across
+        # tests when only the client cache is reset).
+        singleton = wd.STREAM_WATCHDOG_REGISTRY
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        singleton.register(entry)
+        assert len(singleton) == 1
+        wd.reset_cached_clients()  # must NOT drain the registry
+        assert len(singleton) == 1, (
+            "reset_cached_clients is not the registry reset (W4 premise)"
+        )
+        wd.reset_registry()
+        assert len(singleton) == 0
+
+    def test_drain_is_idempotent(self):
+        wd.reset_registry()
+        wd.reset_registry()  # no error on an already-empty registry
+        assert len(wd.STREAM_WATCHDOG_REGISTRY) == 0

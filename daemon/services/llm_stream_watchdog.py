@@ -130,8 +130,10 @@ class StreamWatchdogRegistry:
     Per-response entries: each ``handle_request`` mints a fresh entry,
     so no stale-timestamp state can leak across retry attempts (a new
     attempt = a new response = a new entry). ``deregister`` runs in the
-    wrapper stream's ``finally`` — normal completion, reader exception,
-    and forced abort all converge there.
+    wrapper stream's iteration ``finally`` — normal completion, reader
+    exception, and forced abort all converge there — AND in
+    ``close()``/``aclose()`` (W1: a stream closed without being fully
+    read must not leak its entry into the sweep forever).
     """
 
     def __init__(self) -> None:
@@ -146,6 +148,30 @@ class StreamWatchdogRegistry:
         with self._lock:
             self._entries.pop(id(entry), None)
 
+    def claim(self, entry: WatchedStreamEntry) -> bool:
+        """Pop ``entry`` and mark it force-closed — atomically.
+
+        The membership re-check + removal happen UNDER THE LOCK, so the
+        unblocker and the stream's own completion finalizer (which calls
+        ``deregister``) are mutually exclusive: whichever gets the lock
+        first wins, and the loser observes a non-member (W2). Returns
+        ``True`` when this caller won the claim (the entry was still a
+        live registry member) and it is safe to act on the stream;
+        ``False`` means the stream already completed/closed — the
+        watchdog must NOT touch its socket (it may already be back in
+        the pool serving an innocent request).
+        """
+        with self._lock:
+            if self._entries.pop(id(entry), None) is None:
+                return False
+            entry.force_closed = True
+            return True
+
+    def drain(self) -> None:
+        """Remove every entry (test seam — see :func:`reset_registry`)."""
+        with self._lock:
+            self._entries.clear()
+
     def touch(self, entry: WatchedStreamEntry) -> None:
         """Stamp wall-clock arrival of a byte chunk (hot path)."""
         with self._lock:
@@ -154,18 +180,21 @@ class StreamWatchdogRegistry:
                 live.last_byte_ts = time.time()
 
     def collect_stale(self, threshold_seconds: float) -> list[WatchedStreamEntry]:
-        """Return entries whose silence exceeds the threshold.
+        """Return (still-registered) entries whose silence exceeds the
+        threshold, oldest stamp first order not guaranteed.
 
-        Marks each returned entry ``force_closed=True`` (under the lock)
-        BEFORE any unblock is attempted, closing the race where the
-        reader surfaces the abort exception before the flag is set.
+        Read-only: entries stay registered here. The caller passes each
+        candidate through :meth:`claim` at unblock time — the membership
+        re-check under the lock — so a stream that completes between
+        collection and unblock is skipped, never force-aborted after the
+        fact (W2). The ``force_closed`` flag is stamped by :meth:`claim`,
+        not here.
         """
         now = time.time()
         stale: list[WatchedStreamEntry] = []
         with self._lock:
             for entry in self._entries.values():
                 if now - entry.last_byte_ts > threshold_seconds:
-                    entry.force_closed = True
                     stale.append(entry)
         return stale
 
@@ -197,7 +226,8 @@ class _WatchedSyncStream(httpx.SyncByteStream):
     (they legitimately prove the transport path is alive). When the
     watchdog force-aborts the blocked read, the surfaced exception is
     re-typed to :class:`StreamStalledError`; every other exception
-    propagates UNCHANGED. Deregisters in ``finally`` — no stale entries.
+    propagates UNCHANGED. Deregisters in the iteration ``finally`` AND
+    in ``close()`` (W1) — no stale entries on any exit path.
     """
 
     def __init__(
@@ -228,6 +258,13 @@ class _WatchedSyncStream(httpx.SyncByteStream):
             self._registry.deregister(entry)
 
     def close(self) -> None:
+        # W1: a stream closed WITHOUT being fully iterated (caller
+        # abandoned it, ``with client.stream(...)`` early exit) never
+        # reaches the iteration ``finally`` — deregister here too, or
+        # the entry survives every sweep forever (1 WARNING/s + unbounded
+        # registry growth). Idempotent: normal completion already popped
+        # the entry via the ``finally``.
+        self._registry.deregister(self._entry)
         self._inner.close()
 
 
@@ -236,7 +273,8 @@ class _WatchedAsyncStream(httpx.AsyncByteStream):
 
     The daemon's hot path is sync-only today (async client dormant) —
     this keeps the sync/async client symmetry of the gzip seam so a
-    future async migration inherits the watchdog for free.
+    future async migration inherits the watchdog for free. Deregisters
+    in the ``aiter`` ``finally`` AND in ``aclose()`` (W1 mirror).
     """
 
     def __init__(
@@ -267,6 +305,9 @@ class _WatchedAsyncStream(httpx.AsyncByteStream):
             self._registry.deregister(entry)
 
     async def aclose(self) -> None:
+        # W1 (async mirror): deregister on close-without-iteration —
+        # idempotent alongside the ``aiter`` ``finally``.
+        self._registry.deregister(self._entry)
         await self._inner.aclose()
 
 
@@ -404,20 +445,37 @@ def _find_network_sock(obj: object, max_depth: int = 12) -> socket.socket | None
     return None
 
 
-def _force_unblock(entry: WatchedStreamEntry, threshold_seconds: float) -> None:
+def _force_unblock(
+    entry: WatchedStreamEntry,
+    threshold_seconds: float,
+    registry: StreamWatchdogRegistry,
+) -> bool:
     """Abort one stalled stream. Never raises (fail-open per tick).
+
+    Returns ``True`` when this caller CLAIMED the entry (still a live
+    registry member at unblock time) and acted on it; ``False`` when the
+    membership re-check under the lock lost the race — the stream
+    already completed/closed and its socket may already be back in the
+    connection pool serving an innocent request (W2: never touch it).
 
     Primary vehicle: ``sock.shutdown(SHUT_RDWR)`` — spike-proven to
     wake a blocked ``recv()`` on macOS for both plain and TLS sockets
     (``response.close()`` and raw ``socket.close()`` do NOT). The
     reader's exception path then performs the normal httpcore/httpx
     cleanup (connection close + pool release), so the watchdog never
-    closes the fd itself. Fallback when the socket can't be resolved:
-    ``response.close()`` — frees the response for the between-chunks
-    case and is the best available action for the blocked case.
+    closes the fd itself. Two distinct fallbacks (W3, operationally
+    different): the socket chain doesn't resolve (unknown transport
+    shape / already torn down) vs ``shutdown()`` itself raising OSError.
     """
     try:
-        entry.force_closed = True
+        # W2: pop + force-close-mark atomically UNDER THE LOCK. The
+        # stream's own completion/cleanup path calls ``deregister`` on
+        # the same lock, so a stream that finished between sweep
+        # collection and this call is detected here as a non-member and
+        # skipped — its (possibly pooled, possibly reassigned) socket is
+        # never shutdown()ed.
+        if not registry.claim(entry):
+            return False
         silence = max(0.0, time.time() - entry.last_byte_ts)
         sock = _find_network_sock(entry.response)
         if sock is not None:
@@ -430,34 +488,49 @@ def _force_unblock(entry: WatchedStreamEntry, threshold_seconds: float) -> None:
                     silence,
                     threshold_seconds,
                 )
-                return
+                return True
             except OSError as exc:
+                # W3: distinct from the unresolvable-socket case — the
+                # transport WAS recognized but the shutdown syscall
+                # failed (typically: fd already closed by the peer /
+                # reader teardown racing the tick).
                 logger.warning(
-                    "[StreamWatchdog] shutdown() failed (%s) — falling "
-                    "back to response.close()",
+                    "[StreamWatchdog] stream stalled: no bytes for %.0fs "
+                    "(threshold=%.0fs) — shutdown() failed (%s); "
+                    "response.close() fallback applied",
+                    silence,
+                    threshold_seconds,
                     exc,
                 )
+        else:
+            # W3: the pinned private chain didn't resolve to a socket —
+            # unknown transport shape or the connection is already gone.
+            logger.warning(
+                "[StreamWatchdog] stream stalled: no bytes for %.0fs "
+                "(threshold=%.0fs) — socket unresolvable; "
+                "response.close() fallback applied",
+                silence,
+                threshold_seconds,
+            )
         entry.response.close()
-        logger.warning(
-            "[StreamWatchdog] stream stalled: no bytes for %.0fs "
-            "(threshold=%.0fs) — socket unresolvable, response.close() "
-            "fallback applied",
-            silence,
-            threshold_seconds,
-        )
+        return True
     except Exception:  # noqa: BLE001 — the tick must never raise
         logger.exception("[StreamWatchdog] force-unblock failed")
+        return False
 
 
 def sweep_once(
     registry: StreamWatchdogRegistry,
     threshold_seconds: float,
 ) -> int:
-    """One sweep pass; returns how many stalled streams were aborted."""
+    """One sweep pass; returns how many stalled streams were CLAIMED and
+    aborted (entries that lost the completion race are not counted)."""
     stale = registry.collect_stale(threshold_seconds)
+    claimed = 0
     for entry in stale:
-        _force_unblock(entry, threshold_seconds)
-    return len(stale)
+        if _force_unblock(entry, threshold_seconds, registry):
+            claimed += 1
+    return claimed
 
 
 def run_stream_watchdog_loop(
@@ -585,6 +658,19 @@ def reset_cached_clients() -> None:
     _watchdog_clients.clear()
 
 
+def reset_registry() -> None:
+    """Drain the daemon-wide ``STREAM_WATCHDOG_REGISTRY`` singleton.
+
+    Test-only seam (W4): ``reset_cached_clients`` rebuilds the client
+    singletons but the REGISTRY is process-lifetime — without this
+    drain, entries leaked by one test (a mock stream that never
+    iterates or closes) poison every later test that asserts on the
+    shared singleton. Production code must NOT call this — the
+    registry must survive across requests for the daemon's lifetime.
+    """
+    STREAM_WATCHDOG_REGISTRY.drain()
+
+
 __all__ = [
     "STREAM_WATCHDOG_REGISTRY",
     "StreamStalledError",
@@ -596,6 +682,7 @@ __all__ = [
     "make_watchdog_async_httpx_client",
     "make_watchdog_httpx_client",
     "reset_cached_clients",
+    "reset_registry",
     "run_stream_watchdog_loop",
     "sweep_once",
 ]

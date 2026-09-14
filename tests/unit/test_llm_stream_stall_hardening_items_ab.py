@@ -16,6 +16,12 @@ Item B (inject-if-absent):
 * ``clean_llm_config`` injects ``request_timeout`` strictly-if-absent
   (value from the ``default_request_timeout`` ClassVar); explicit
   values — including explicit ``None`` — are preserved verbatim.
+  The inject is a pure TIGHTENING ∞→610s, NOT wire-identical: sites
+  that omitted ``request_timeout`` previously had NO read deadline at
+  all (∞ — langchain always passes a timeout explicitly, so the
+  openai SDK's ``DEFAULT_TIMEOUT`` 600s fallback is unreachable from
+  langchain). Operators can tighten further via
+  ``OPENAI_REQUEST_TIMEOUT``.
 * Startup propagation pins: ``daemon/api.py`` and ``daemon/__main__.py``
   wire ``LLMConfig.request_timeout`` into the ClassVar.
 """
@@ -176,7 +182,11 @@ class TestAgentNodeCatchTuple:
 
 class TestRequestTimeoutInjectIfAbsent:
     """``clean_llm_config`` fills the deadline hole for sites that omit
-    ``request_timeout`` (title / keyword / child-reports ×2)."""
+    ``request_timeout`` (title / keyword / child-reports ×2): those
+    sites ran with NO HTTP read deadline at all (∞ — langchain always
+    passes a timeout explicitly, so the SDK's 600s default fallback is
+    unreachable); the inject tightens them ∞→610s. Tighten further via
+    ``OPENAI_REQUEST_TIMEOUT``."""
 
     def test_injects_default_when_absent(self):
         from daemon.graph import ThinkingChatOpenAI, clean_llm_config

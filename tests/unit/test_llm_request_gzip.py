@@ -302,17 +302,20 @@ def _protect_class_vars():
     from daemon.services.llm_gzip import reset_cached_clients
     from daemon.services.llm_stream_watchdog import (
         reset_cached_clients as reset_watchdog_clients,
+        reset_registry as reset_watchdog_registry,
     )
 
     saved = ThinkingChatOpenAI.default_request_gzip
     reset_cached_clients()
     reset_watchdog_clients()
+    reset_watchdog_registry()  # W4: drain the shared singleton registry
     try:
         yield
     finally:
         ThinkingChatOpenAI.default_request_gzip = saved
         reset_cached_clients()
         reset_watchdog_clients()
+        reset_watchdog_registry()
 
 
 # ═══════════════════════════════════════════════════════════════════

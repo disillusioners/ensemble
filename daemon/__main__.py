@@ -256,13 +256,18 @@ def main(run_preflight: bool = True):
     # Wire the L0 request-timeout inject-if-absent default
     # (llm-stream-stall-hardening). ``clean_llm_config`` reads this
     # ClassVar when a construction site omits ``request_timeout`` —
-    # see daemon/graph.py.
+    # those sites previously had NO read deadline at all (∞: langchain
+    # always passes timeout explicitly, so the SDK's 600s default
+    # fallback is unreachable), so the inject is a pure tightening
+    # ∞→610s. See daemon/graph.py.
     ThinkingChatOpenAI.default_request_timeout = int(
         config.llm.request_timeout
     )
     logger.info(
         f"[Config] default_request_timeout={ThinkingChatOpenAI.default_request_timeout}s "
-        f"(clean_llm_config injects it when a site omits request_timeout)"
+        f"(clean_llm_config injects it when a site omits request_timeout "
+        f"— tightening ∞→{ThinkingChatOpenAI.default_request_timeout}s; "
+        f"OPENAI_REQUEST_TIMEOUT controls it)"
     )
 
     # Wire the S5 degenerate re-invoke cap (empty-response-guard Phase 1).

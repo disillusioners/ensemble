@@ -3755,16 +3755,21 @@ def clean_llm_config(cfg: dict) -> dict:
         cleaned["stream_usage"] = True
     # L0 inject-if-absent (llm-stream-stall-hardening): give every
     # LangChain site an explicit HTTP deadline. When a site omits
-    # ``request_timeout``, langchain-openai passes ``timeout=None``
-    # down explicitly and the HTTP-layer read deadline is disabled —
-    # a hung first attempt then pins a ``to_thread`` worker until the
-    # (unbounded) socket gives up. Secondary sites (title generation,
-    # keyword extraction, child-reports ×2) hit exactly this hole.
+    # ``request_timeout``, langchain-openai passes ``timeout=None`` down
+    # EXPLICITLY (langchain always passes a timeout value) — the openai
+    # SDK treats an explicit ``None`` as given, so the HTTP-layer read
+    # deadline is NO deadline at all (∞). The SDK's own
+    # ``DEFAULT_TIMEOUT`` 600s fallback is unreachable from langchain
+    # precisely because a value is always passed. A hung first attempt
+    # therefore pinned a ``to_thread`` worker forever; secondary sites
+    # (title generation, keyword extraction, child-reports ×2) hit
+    # exactly this hole. This inject is a pure TIGHTENING ∞→610s — a
+    # deliberate behavior change for the omitted sites, NOT
+    # wire-identical. Operators can tighten further via
+    # OPENAI_REQUEST_TIMEOUT (LLMConfig.request_timeout, startup-wired
+    # into the ``default_request_timeout`` ClassVar read here).
     # STRICTLY inject-if-absent: callers that pass the key — including
-    # an explicit ``None`` — keep their value verbatim (behavior
-    # preservation for sites that already pass it). The value comes
-    # from the ``default_request_timeout`` ClassVar (startup-wired
-    # from ``LLMConfig.request_timeout``, default 610s).
+    # an explicit ``None`` — keep their value verbatim.
     if "request_timeout" not in cleaned:
         cleaned["request_timeout"] = ThinkingChatOpenAI.default_request_timeout
     # Outbound LLM HTTP clients — stream-liveness watchdog, ALWAYS ON
@@ -3786,10 +3791,13 @@ def clean_llm_config(cfg: dict) -> dict:
     # ``WatchdogHTTPTransport(GzipRequestTransport(httpx.HTTPTransport()))``
     # — watchdog outermost (owns the response stream), gzip inner
     # (mutates request bytes only). When False, the watchdog wraps a
-    # plain ``httpx.HTTPTransport()``. The client's limits / timeout /
+    # plain ``httpx.HTTPTransport()``. The client's connection-pool /
     # redirect settings mirror the OpenAI SDK defaults exactly (see
-    # ``llm_stream_watchdog._WATCHDOG_*``), so the always-on injection
-    # is wire-identical to the SDK-default path.
+    # ``llm_stream_watchdog._WATCHDOG_*``). Note this seam is NOT a
+    # no-op vs the SDK-default path: beyond the watchdog wrapping, the
+    # client carries its own 600s httpx ``Timeout`` fallback — and the
+    # L0 ``request_timeout`` inject above changes the effective read
+    # deadline for sites that omitted it from ∞ (no deadline) to 610s.
     #
     # Partial-override contract (unchanged): passing EITHER
     # ``http_client`` OR ``http_async_client`` (the caller-supplied
