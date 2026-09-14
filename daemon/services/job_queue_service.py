@@ -1105,13 +1105,60 @@ class JobQueueService:
         if job.admission_state == AdmissionState.ACTIVE.value:
             instance_id = job.instance_id
 
-            # Release any locks held by this job first
+            # Release any locks held by this job first.
+            # F2 hardening (joblock-leak fix, R6): the previous bare
+            # ``await`` left the lock orphaned whenever an
+            # ``asyncio.CancelledError`` fired during release (Python
+            # 3.8+ promotes ``CancelledError`` to a ``BaseException``
+            # so ``except Exception`` does NOT catch it — a
+            # cancellation mid-release silently leaked the lock).
+            # Mirror the hardened shape used elsewhere in
+            # ``daemon/services/watchover_service.py:625+`` —
+            # ``except (Exception, asyncio.CancelledError)`` —
+            # logging a WARNING so operators see the leak signal,
+            # then re-raising the cancellation so the caller's
+            # shutdown path stays intact. The periodic
+            # ``JobLockSweepService`` (F3) reclaims the orphaned
+            # lock on the next sweep tick.
             if job.queue_id and job.project_id:
-                await self._lock_manager.release_queue_lock(
-                    job.project_id, job.queue_id, job_id
-                )
+                try:
+                    await self._lock_manager.release_queue_lock(
+                        job.project_id, job.queue_id, job_id
+                    )
+                except (Exception, asyncio.CancelledError) as release_err:
+                    logger.warning(
+                        "_cancel_active_job: lock release failed "
+                        "(R6 hardening) for job %s... "
+                        "(project=%s, queue=%s): %s — periodic "
+                        "JobLockSweepService will reclaim",
+                        job_id[:8] if job_id else "?",
+                        job.project_id,
+                        job.queue_id,
+                        release_err,
+                    )
+                    if isinstance(
+                        release_err, asyncio.CancelledError
+                    ):
+                        raise
             elif job.project_id:
-                await self._lock_manager.release(job.project_id, job_id)
+                try:
+                    await self._lock_manager.release(
+                        job.project_id, job_id
+                    )
+                except (Exception, asyncio.CancelledError) as release_err:
+                    logger.warning(
+                        "_cancel_active_job: lock release failed "
+                        "(R6 hardening) for job %s... "
+                        "(project=%s): %s — periodic "
+                        "JobLockSweepService will reclaim",
+                        job_id[:8] if job_id else "?",
+                        job.project_id,
+                        release_err,
+                    )
+                    if isinstance(
+                        release_err, asyncio.CancelledError
+                    ):
+                        raise
 
             # Check if instance is still alive
             instance_alive = (
@@ -2438,6 +2485,17 @@ class JobQueueService:
                     # already uses ``future.result(timeout=5)`` — this
                     # makes the async / sync paths symmetric with a
                     # shared 5-second deadline.
+                    #
+                    # F2 hardening (joblock-leak fix, R1): the previous
+                    # ``except (asyncio.TimeoutError, Exception)``
+                    # missed ``asyncio.CancelledError`` (a
+                    # ``BaseException`` in Python 3.8+). A cancellation
+                    # mid-release silently leaked the lock. Mirror the
+                    # watchover_service.py:625+ shape — catch
+                    # ``asyncio.CancelledError`` explicitly, log the
+                    # leak signal, re-raise. The periodic
+                    # ``JobLockSweepService`` (F3) reclaims the
+                    # orphaned lock on the next tick.
                     await asyncio.wait_for(
                         self._lock_manager.release_queue_lock(
                             canonical_project_id,
@@ -2450,7 +2508,17 @@ class JobQueueService:
                     logger.warning(
                         f"_finalize_terminal: lock release timed out "
                         f"after 5s for job {canonical_job_id[:8]}..."
+                        " (R1 hardening) — periodic "
+                        "JobLockSweepService will reclaim"
                     )
+                except asyncio.CancelledError as cancel_exc:
+                    logger.warning(
+                        "_finalize_terminal: lock release "
+                        "cancelled (R1 hardening) for job %s... — "
+                        "periodic JobLockSweepService will reclaim",
+                        canonical_job_id[:8],
+                    )
+                    raise cancel_exc
                 except Exception as e:
                     logger.warning(
                         f"_finalize_terminal: failed to release lock "
@@ -2474,6 +2542,12 @@ class JobQueueService:
                     try:
                         # W3 fix: mirror Path 2's timeout so the
                         # instance-wide fallback cannot block forever.
+                        #
+                        # F2 hardening (R2): same shape as R1 —
+                        # catch ``asyncio.CancelledError`` to log the
+                        # leak signal before re-raising. The periodic
+                        # ``JobLockSweepService`` reclaims on the
+                        # next tick.
                         await asyncio.wait_for(
                             self._lock_manager.release_by_instance(
                                 canonical_instance_id
@@ -2486,7 +2560,19 @@ class JobQueueService:
                             f"release_by_instance timed out after 5s "
                             f"for instance "
                             f"{canonical_instance_id[:8]}..."
+                            " (R2 hardening) — periodic "
+                            "JobLockSweepService will reclaim"
                         )
+                    except asyncio.CancelledError as cancel_exc:
+                        logger.warning(
+                            "_finalize_terminal: "
+                            "release_by_instance cancelled "
+                            "(R2 hardening) for instance %s... — "
+                            "periodic JobLockSweepService will "
+                            "reclaim",
+                            canonical_instance_id[:8],
+                        )
+                        raise cancel_exc
                     except Exception as e:
                         logger.warning(
                             f"_finalize_terminal: failed to release "
@@ -3002,6 +3088,16 @@ class JobQueueService:
             # 2. Release lock AFTER transition attempt (success OR failure).
             # On failure, the job stays PROCESSING and the recovery sweep will
             # pick it up — which is the correct, race-free path.
+            #
+            # F2 hardening (joblock-leak fix, R4): the previous
+            # ``except Exception`` missed ``asyncio.CancelledError``
+            # (Python 3.8+ promotes it to ``BaseException``). A
+            # cancellation during release silently orphaned the lock.
+            # Mirror the watchover_service.py:625+ shape — catch
+            # both ``Exception`` and ``asyncio.CancelledError``, log
+            # the leak signal, re-raise. The periodic
+            # ``JobLockSweepService`` (F3) reclaims the orphaned
+            # lock on the next sweep tick.
             try:
                 await self._release_job_lock(
                     project_id=job.project_id,
@@ -3010,10 +3106,14 @@ class JobQueueService:
                     instance_id=job.instance_id,
                     release_by_instance=True,
                 )
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 logger.warning(
-                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                    f"Failed to release lock for job {job.job_id[:8]}...: "
+                    f"{e} (R4 hardening) — periodic "
+                    "JobLockSweepService will reclaim"
                 )
+                if isinstance(e, asyncio.CancelledError):
+                    raise
 
     async def _fail_job(self, job: JobItem, error_message: str) -> None:
         """Mark a job as failed and release its lock.
@@ -3036,6 +3136,11 @@ class JobQueueService:
             )
         finally:
             # 2. Release lock AFTER transition attempt (success OR failure).
+            #
+            # F2 hardening (joblock-leak fix, R5): same shape as R4 —
+            # catch ``asyncio.CancelledError`` to log the leak signal
+            # before re-raising. The periodic
+            # ``JobLockSweepService`` reclaims on the next tick.
             try:
                 await self._release_job_lock(
                     project_id=job.project_id,
@@ -3044,10 +3149,14 @@ class JobQueueService:
                     instance_id=job.instance_id,
                     release_by_instance=True,
                 )
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 logger.warning(
-                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                    f"Failed to release lock for job {job.job_id[:8]}...: "
+                    f"{e} (R5 hardening) — periodic "
+                    "JobLockSweepService will reclaim"
                 )
+                if isinstance(e, asyncio.CancelledError):
+                    raise
     
     async def _get_next_job(
         self,
@@ -4179,6 +4288,17 @@ class JobQueueService:
                 # Path 2: scoped release via the manager's
                 # ``release_queue_lock`` (delegates to
                 # ``LockRepository.release_by_job``).
+                #
+                # F2 hardening (joblock-leak fix, R7): the previous
+                # ``except Exception`` missed
+                # ``asyncio.CancelledError`` (Python 3.8+ promotes it
+                # to ``BaseException``). A cancellation during
+                # ``future.result(...)`` silently orphaned the lock.
+                # Mirror the watchover_service.py:625+ shape — catch
+                # both ``Exception`` and ``asyncio.CancelledError``
+                # and log the leak signal. The periodic
+                # ``JobLockSweepService`` (F3) reclaims on the next
+                # tick.
                 if self._loop and self._loop.is_running():
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -4190,10 +4310,12 @@ class JobQueueService:
                             self._loop,
                         )
                         future.result(timeout=5)
-                    except Exception as e:
+                    except (Exception, asyncio.CancelledError) as e:
                         logger.warning(
                             "_finalize_terminal_sync: lock release "
-                            "failed for job %s: %s",
+                            "failed (R7 hardening) for job %s: %s — "
+                            "periodic JobLockSweepService will "
+                            "reclaim",
                             canonical_job_id[:8],
                             e,
                         )
@@ -4202,11 +4324,14 @@ class JobQueueService:
                     # the lock release when the event loop was unset /
                     # closed, leaking the lock with no diagnostic. Log
                     # a WARNING so operators can trace which job's lock
-                    # was leaked and why the release was skipped.
+                    # was leaked and why the release was skipped. The
+                    # periodic JobLockSweepService also reclaims this
+                    # class of orphan on the next tick.
                     logger.warning(
                         "_finalize_terminal_sync skipped lock release "
                         "for job %s (project=%s, queue=%s, instance=%s) "
-                        "— event loop unavailable",
+                        "— event loop unavailable (R7 hardening) — "
+                        "periodic JobLockSweepService will reclaim",
                         canonical_job_id,
                         canonical_project_id,
                         canonical_queue_id,
@@ -4225,6 +4350,8 @@ class JobQueueService:
                         f"queue_id={canonical_queue_id!r})"
                     )
                     try:
+                        # F2 hardening (R7 sub-section): same
+                        # CancelledError-aware shape as Path 2 above.
                         future = asyncio.run_coroutine_threadsafe(
                             self._lock_manager.release_by_instance(
                                 canonical_instance_id,
@@ -4232,10 +4359,12 @@ class JobQueueService:
                             self._loop,
                         )
                         future.result(timeout=5)
-                    except Exception as e:
+                    except (Exception, asyncio.CancelledError) as e:
                         logger.warning(
-                            "_finalize_terminal_sync: lock release failed "
-                            "for %s: %s",
+                            "_finalize_terminal_sync: lock release "
+                            "failed (R7 hardening) for instance %s: "
+                            "%s — periodic JobLockSweepService will "
+                            "reclaim",
                             canonical_instance_id[:8],
                             e,
                         )
@@ -4243,12 +4372,14 @@ class JobQueueService:
                     # C3 fix: mirror Path 2's diagnostic for the
                     # instance-wide fallback. Without this, a
                     # close-during-finalize race leaks the lock with no
-                    # signal to the operator.
+                    # signal to the operator. The periodic
+                    # JobLockSweepService also reclaims this class.
                     logger.warning(
                         "_finalize_terminal_sync skipped "
                         "release_by_instance fallback for instance %s "
                         "(job=%s, project=%s, queue=%s) "
-                        "— event loop unavailable",
+                        "— event loop unavailable (R7 hardening) — "
+                        "periodic JobLockSweepService will reclaim",
                         canonical_instance_id,
                         canonical_job_id,
                         canonical_project_id,

@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
-from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobQueue, QueueType
+from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobLock, JobQueue, QueueType
 from ._idle_predicate_sql import background_busy_binds, background_busy_statement, defer_busy_binds, defer_busy_statement
 
 logger = logging.getLogger(__name__)
@@ -2265,6 +2265,46 @@ SET admission_state = 'queued',
                 )
             )
             result = session.exec(stmt)
+            # F1 (joblock-leak fix): atomic same-commit lock release.
+            # Mirrors the R8 pattern at
+            # ``job_feedback_observer.py:_finalize_job_db_sync:3977-3981``
+            # — the inline ``SELECT + DELETE`` rides the SAME
+            # ``session.commit()`` as the JobItem UPDATE so a
+            # process crash between the JobItem transition and the
+            # lock release cannot orphan the lock (which is the
+            # root-cause seam of the 7807e521 event-keying family
+            # the Fix-B inline writer previously delegated to).
+            # Without the same-commit release, the observer's
+            # ``_process_event`` -> ``_finalize_job_db_sync`` is
+            # the only path that releases locks for inline-mirror
+            # finalized rows, and it never fires when the Fix-B
+            # inline writer wins the SQL guard race (the bus
+            # never publishes a terminal event for an already-
+            # terminal row). The release is scoped to the job's
+            # instance_id (matches R8 + R9/R10 instance-scoped
+            # semantics) and is idempotent — a second concurrent
+            # writer sees ``rowcount == 0`` on the DELETE.
+            #
+            # Scope discipline preserved: only fires when WE won
+            # the SQL guard race (rowcount > 0 on the JobItem
+            # UPDATE). If we lost, the OTHER writer (observer's
+            # ``_finalize_job_db_sync`` or ``_terminate_instance_db_sync``)
+            # owns the lock release atomically.
+            locks_released = 0
+            instance_id_for_release = (
+                job.instance_id if job is not None else None
+            )
+            if (
+                instance_id_for_release is not None
+                and instance_id_for_release != ""
+            ):
+                lock_stmt = select(JobLock).where(
+                    JobLock.instance_id == instance_id_for_release
+                )
+                locks_to_release = list(session.exec(lock_stmt).all())
+                for lock in locks_to_release:
+                    session.delete(lock)
+                locks_released = len(locks_to_release)
             session.commit()
 
             if result.rowcount == 0:
@@ -2292,6 +2332,7 @@ SET admission_state = 'queued',
                 f"{job_id[:8]}... admission_state={current_admission}→done "
                 f"terminal_reason=completed "
                 f"(instance={job_after.instance_id[:8] if job_after.instance_id else '?'}...)"
+                f" locks_released={locks_released}"
             )
             return job_after
 
@@ -2471,6 +2512,37 @@ SET admission_state = 'queued',
                         terminal_reason="completed",
                     )
                 )
+                # F1 (joblock-leak fix, backstop variant): atomic
+                # same-commit lock release mirrors the inline writer
+                # and R8 (``job_feedback_observer.py:_finalize_job_db_sync:3977-3981``).
+                # The lock release rides the SAME ``session.commit()``
+                # as the JobItem UPDATE so a process crash between
+                # the JobItem transition and the lock release cannot
+                # orphan the lock. Scoped to the job's
+                # ``instance_id`` (same scope as R8/R9/R10). Idempotent
+                # — concurrent writers see ``rowcount == 0`` on the
+                # DELETE. Only fires when WE win the SQL guard race;
+                # if we lose, the OTHER writer
+                # (``_finalize_job_db_sync`` /
+                # ``_terminate_instance_db_sync``) owns the lock
+                # release atomically.
+                locks_released = 0
+                instance_id_for_release = (
+                    getattr(candidate, "instance_id", None)
+                )
+                if (
+                    instance_id_for_release is not None
+                    and instance_id_for_release != ""
+                ):
+                    lock_stmt = select(JobLock).where(
+                        JobLock.instance_id == instance_id_for_release
+                    )
+                    locks_to_release = list(
+                        session.exec(lock_stmt).all()
+                    )
+                    for lock in locks_to_release:
+                        session.delete(lock)
+                    locks_released = len(locks_to_release)
                 try:
                     result = session.exec(update_stmt)
                     session.commit()
@@ -2505,8 +2577,9 @@ SET admission_state = 'queued',
                 logger.info(
                     "reconcile_terminal_message_mirrors: message mirror "
                     "job %s... admission_state=%s→done "
-                    "terminal_task=%s terminal_reason=completed",
-                    job_id[:8], source_state, task_status,
+                    "terminal_task=%s terminal_reason=completed "
+                    "locks_released=%d",
+                    job_id[:8], source_state, task_status, locks_released,
                 )
                 reconciled.append(_ReapedTerminalMessageMirror(
                     job_id=refreshed.job_id,
@@ -3933,9 +4006,13 @@ SET admission_state = 'queued',
           conjunct anyway, so the trigger is a no-op for message
           orphans as well.)
         * ``trg_job_locks_active_guard`` only fires on INSERT/UPDATE
-          of ``job_locks``. The reaper never touches ``job_locks``
-          (a real orphan has no lock row to delete), so this
-          trigger cannot fire.
+          of ``job_locks``. The reaper's lock-release DELETE is
+          guarded by ``job_id NOT IN (active job ids)`` — the same
+          atomic invariant as ``LockRepository.clear_terminal_job_locks``.
+          Once the JobItem UPDATE commits to ``admission_state='done'``
+          (this method runs both writes in ONE ``engine.begin()``
+          transaction), the JobItem is no longer in the active
+          set, and ``trg_job_locks_active_guard`` is satisfied.
 
         A bare ``UPDATE … SET admission_state='done'`` therefore
         works against a real PG trigger suite without any bypass.
@@ -3948,6 +4025,18 @@ SET admission_state = 'queued',
         fail the ``trg_job_locks_active_guard`` check at COMMIT
         (the matching active JobItem is already 'done' by then).
         The whole branch is removed in this round.
+
+        F5 (joblock-leak fix): atomic same-commit lock release.
+        Mirrors the F1 inline writer and R8/R9/R10 — the
+        JobItem UPDATE and the ``job_locks`` DELETE ride the SAME
+        ``engine.begin()`` transaction so a process crash between
+        the JobItem transition and the lock release cannot orphan
+        the lock. The lock release is scoped to the JobItem's
+        ``instance_id`` (matches R8 instance-scoped semantics).
+        If the JobItem has no ``instance_id`` (a virtual-job row
+        that holds no per-queue lock), the DELETE is skipped —
+        the orphan reaper's existing docstring claim ("a real
+        orphan has no lock row to delete") holds for that class.
 
         Args:
             job_id: Target orphan ``JobItem.job_id``.
@@ -3962,7 +4051,25 @@ SET admission_state = 'queued',
             or ``None`` if the row no longer matches the orphan
             predicate (e.g. a concurrent finalize flipped it).
         """
+        # F5 atomic release: do the JobItem UPDATE and the lock
+        # DELETE in a SINGLE ``engine.begin()`` block so they
+        # commit atomically. The instance_id is captured INSIDE
+        # the transaction (before the UPDATE) so the DELETE can
+        # scope to the right row; if the row is missing, we
+        # return ``None`` before issuing either write.
         with self.engine.begin() as conn:  # type: ignore[arg-type]
+            instance_row = conn.execute(
+                text(
+                    "SELECT instance_id FROM job_queue_items "
+                    "WHERE job_id = :job_id "
+                    "  AND deleted_at IS NULL"
+                ),
+                {"job_id": job_id},
+            ).first()
+            if instance_row is None:
+                return None
+            instance_id_for_release = instance_row[0]
+
             result = conn.execute(
                 text(
                     "UPDATE job_queue_items "
@@ -3981,8 +4088,29 @@ SET admission_state = 'queued',
             )
             rowcount = result.rowcount or 0
 
-        if rowcount == 0:
-            return None
+            if rowcount == 0:
+                # Concurrent finalize flipped the row first — we
+                # lost the race. The OTHER writer owns the lock
+                # release atomically. No-op on the lock side too.
+                return None
+
+            # F5 atomic release: DELETE locks scoped to the same
+            # instance_id in the SAME transaction. Mirrors the R8
+            # in-session pattern + the F1 inline writer's lock
+            # release + ``LockRepository.clear_terminal_job_locks``
+            # SQL semantics (``job_id NOT IN (active job ids)``).
+            # The JobItem UPDATE just flipped
+            # ``admission_state='active' → 'done'`` so the job_id
+            # is no longer in the active set; the DELETE is the
+            # standard terminal-job lock cleanup.
+            if instance_id_for_release:
+                conn.execute(
+                    text(
+                        "DELETE FROM job_locks "
+                        "WHERE instance_id = :instance_id"
+                    ),
+                    {"instance_id": instance_id_for_release},
+                )
 
         with SQLModelSession(self.engine) as session:
             return session.get(JobItem, job_id)

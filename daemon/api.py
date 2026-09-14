@@ -705,6 +705,47 @@ async def lifespan(app: FastAPI):
         )
 
     # ─────────────────────────────────────────────────────────────
+    # F3 — joblock-leak fix (2026-09-14). Periodic reclaim sweep
+    # for ``job_locks`` rows orphaned by the live daemon. The
+    # companion startup sweep (above) clears orphans left by a
+    # PREVIOUS process that died mid-execution; this steady-state
+    # sweep reclaims locks left behind by the LIVE daemon (F1
+    # inline writer races, F2 cancellation mid-release, F5
+    # ``force_finalize_orphan`` reaps). The method
+    # ``JobLockManager.cleanup_terminal_job_locks`` has existed
+    # since C12 but was DEAD CODE — no periodic caller. F3 wires
+    # it into ``JobLockSweepService`` and the daemon lifespan.
+    # ALWAYS-ON infrastructure (no kill-switch env var — per the
+    # project owner's HARD POLICY on Batch A); the interval knob
+    # tunes reclaim responsiveness vs DB load. Out-of-range
+    # values FAIL FAST AT BOOT via pydantic ValidationError
+    # (deliberate, council-approved behavior).
+    from daemon.services.job_lock_sweep import (
+        DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS,
+        JobLockSweepService,
+    )
+    job_lock_sweep_interval = (
+        config.services.job_lock_sweep_interval_seconds
+    )
+    job_lock_sweep = JobLockSweepService(
+        job_lock_manager=job_lock_manager,
+        interval_seconds=job_lock_sweep_interval,
+    )
+    if job_lock_sweep_interval < 1:
+        logger.error(
+            f"JobLockSweepService DISABLED — interval="
+            f"{job_lock_sweep_interval}s below the floor of 1s"
+        )
+    else:
+        job_lock_sweep.start()
+        app.state.job_lock_sweep = job_lock_sweep
+        logger.info(
+            f"JobLockSweepService started: interval="
+            f"{job_lock_sweep_interval}s (default "
+            f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
@@ -1395,6 +1436,21 @@ async def lifespan(app: FastAPI):
                 f"OrphanWatcherSweepService shutdown error: {e}"
             )
         app.state.orphan_watcher_sweep = None
+
+    # --- JobLockSweepService shutdown (F3) ---
+    # Stop the periodic reclaim sweep BEFORE the manager shuts down
+    # so any in-flight reclaim tick completes before the DB
+    # connection closes. Mirrors the OrphanWatcherSweepService
+    # shutdown shape (graceful stop with WARNING on failure).
+    job_lock_sweep = getattr(app.state, "job_lock_sweep", None)
+    if job_lock_sweep is not None:
+        try:
+            await job_lock_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"JobLockSweepService shutdown error: {e}"
+            )
+        app.state.job_lock_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down
