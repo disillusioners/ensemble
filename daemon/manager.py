@@ -3691,6 +3691,40 @@ class InstanceManager:
             )
             return None
 
+    def has_live_graph_task(self, instance_id: str) -> bool:
+        """Return ``True`` when a live (not-done) LangGraph task exists.
+
+        Dispatch-lane stranding fix (feature/fix-question-resume-stuck,
+        2026-09-14 — DEFECT A defensive seam). ``status == "running"`` is
+        only a valid signal for the RAM-FIFO injection lane when a live
+        graph consumer exists to drain ``_pending_injections``. A
+        spawn-created child that was cascade-paused and cascade-resumed
+        WITHOUT ever being dispatched reads ``status="running"`` while
+        having NO graph (zero task/message/checkpoint rows) — the
+        pre-fix injection lane silently stranded such dispatches in
+        memory forever (incident 2026-09-14: leader send_message →
+        "[Injection] Appended pending message ... queue_depth=1" with no
+        graph to ever drain it → tree wedged at WAITING_CHILDREN).
+
+        The three injection-lane consumers (``routers/messages.py``,
+        ``tools/instance.py``, ``tools/job_queue.py`` — the
+        ``INJECTION_ELIGIBLE_STATUSES`` consumer set) MUST call this
+        BEFORE choosing the in-memory lane; a ``False`` result routes
+        the send through the durable enqueue pipeline instead.
+
+        Read-only — no state mutation, no facade-forwarding implications.
+
+        Args:
+            instance_id: Target instance identifier.
+
+        Returns:
+            ``True`` iff ``_graph_tasks[instance_id]`` exists AND is not
+            done. A missing entry (never dispatched, or daemon restart
+            cleared the in-memory registry) returns ``False``.
+        """
+        task = self._graph_tasks.get(instance_id)
+        return task is not None and not task.done()
+
     async def wait_for_instance_quiescent(
         self, instance_id: str, timeout: float = 30.0
     ) -> bool:

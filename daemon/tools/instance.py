@@ -799,7 +799,14 @@ def _is_null_workdir(value: str | None) -> bool:
 # Status taxonomy (verified at implementation time):
 #
 #   INJECTION-ELIGIBLE (helper returns ``"injection"``):
-#     RUNNING, WAITING_CHILDREN  →  ``Manager.set_injection(...)``.
+#     RUNNING  →  ``Manager.set_injection(...)``. NOTE (DEFECT A fix,
+#     2026-09-14): the helper stays a PURE status→route mapping; the
+#     live-graph verification (``manager.has_live_graph_task``) lives
+#     at the CALL SITE — a ``running`` target with no live graph is
+#     downgraded to the durable enqueue lane there, because the
+#     RAM-FIFO injection lane is only valid for a live mid-turn graph.
+#     (WAITING_CHILDREN no longer routes here — B1 fix, 2026-09-11:
+#     WC always takes the durable enqueue wake turn.)
 #
 #   TERMINAL-REVIVE (helper returns ``"enqueue-revive"``):
 #     COMPLETED, TERMINATED, ERROR, FAILED  →  ``Manager.enqueue_message``
@@ -863,6 +870,11 @@ def _route_send_message(
             takes the RAM-FIFO injection route). The caller should
             invoke ``manager.set_injection(...)`` and DROP the
             queue-busy guard (status is the source of truth per D11).
+            DEFECT A fix (2026-09-14): the caller MUST additionally
+            verify ``manager.has_live_graph_task(...)`` at the call
+            site — a ``running`` target with no live graph is
+            downgraded to ``"enqueue"`` there. This helper stays a
+            pure status→route mapping.
           * ``"enqueue-revive"`` — terminal state (COMPLETED / TERMINATED /
             ERROR / FAILED). The caller should invoke
             ``manager.enqueue_message(...)`` (which already revives the
@@ -2712,7 +2724,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         HTTP API based on the target's status at the moment of
         invocation:
 
-          * ``RUNNING`` / ``WAITING_CHILDREN`` → INJECTION
+          * ``RUNNING`` (with a LIVE graph consumer — verified via
+            ``manager.has_live_graph_task``) → INJECTION
             (``manager.set_injection(...)``). The message lands in the
             target's live turn on the next ``agent_node`` pass. Tool
             pairing safety is preserved by the existing
@@ -2728,6 +2741,15 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             tag parser and the ``metadata`` channel live in
             ``enqueue_message``'s pipeline) and would be lost or land
             as raw tag text on the injection branch.
+            EXCEPTION (DEFECT A fix, 2026-09-14): a ``running`` target
+            with NO live graph consumer (spawn-created child that was
+            cascade-paused and cascade-resumed without ever being
+            dispatched) routes via ENQUEUE — the durable dispatch
+            pipeline. The RAM-FIFO injection lane is valid ONLY for a
+            live mid-turn graph; without one the injected message
+            would sit in ``_pending_injections`` forever (silent
+            stranding). ``manager.has_live_graph_task`` is the
+            verifier.
           * ``COMPLETED`` / ``TERMINATED`` / ``ERROR`` / ``FAILED`` →
             REVIVE + ENQUEUE. All four terminal states flow through the
             shared ``_prepare_enqueued_message`` path
@@ -3000,6 +3022,50 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         ):
             routed_via = "enqueue"
 
+        # ── DEFECT A (dispatch-lane stranding fix, 2026-09-14): live-graph
+        # guard on the injection lane ─────────────────────────────────────
+        # ``status == "running"`` is only a valid signal for the RAM-FIFO
+        # injection lane when a LIVE graph consumer exists to drain
+        # ``_pending_injections`` on its next agent_node pass. A
+        # spawn-created child that was cascade-paused and cascade-resumed
+        # WITHOUT ever being dispatched reads ``status="running"`` while
+        # having NO graph (zero task/message/checkpoint rows — the resume
+        # is a bare DB flip PAUSED→RUNNING and
+        # ``resume_processing_job`` routes it to
+        # ``internal_child_noop``). The pre-fix code took the injection
+        # branch for such targets: ``set_injection`` appended to the
+        # in-memory FIFO ("[Injection] Appended pending message ...
+        # queue_depth=1") and NOTHING ever drained it — the dispatch was
+        # silently stranded and the leader's completion gate then saw
+        # "live children" and wedged the tree at WAITING_CHILDREN.
+        #
+        # The fix: verify ``manager.has_live_graph_task(...)`` before
+        # choosing the in-memory lane. No live graph → durable
+        # ``enqueue_message`` dispatch (same-second task + message
+        # materialization, mirroring the healthy fresh-spawn contrast).
+        # NEVER silently strand a dispatch in memory.
+        #
+        # Placement mirrors the enqueue-only parameter override above:
+        # deliberately at the CALL SITE (after the pure status→route
+        # helper) so ``_route_send_message`` stays a pure mapping and the
+        # exhaustive enum-state tests keep pinning it unchanged.
+        if routed_via == "injection" and not manager.has_live_graph_task(
+            instance_id
+        ):
+            logger.info(
+                "agent_send_message injection lane downgraded to durable "
+                "enqueue (no live graph consumer on running target)",
+                extra={
+                    "event": "agent_send_message",
+                    "caller_iid": current_instance_id,
+                    "target_iid": instance_id,
+                    "routed_via": "enqueue_graphless_guard",
+                    "prior_status": prior_status,
+                    "content_len": len(message),
+                },
+            )
+            routed_via = "enqueue"
+
         # ── PAUSED reject (Task 5, R-O1 verbatim) ──────────────────────────
         # Architect §2-O1 verdict: REJECT (do NOT auto-resume). The user
         # API auto-resumes PAUSED targets — the agent-tool path
@@ -3219,7 +3285,9 @@ Phase 1 (agent-instance-tools) routes the message through the same
 delivery machinery as the user-facing HTTP API, based on the target's
 status at the moment of invocation:
 
-  * ``RUNNING`` → INJECTION via ``Manager.set_injection(...)``. The
+  * ``RUNNING`` (with a LIVE graph consumer — verified via
+    ``Manager.has_live_graph_task``) → INJECTION via
+    ``Manager.set_injection(...)``. The
     message lands in the target's live turn on the next ``agent_node``
     pass. Tool-pairing safety is preserved by the existing
     ``_ensure_tool_result_pairing`` guard at ``daemon/graph.py:2893``

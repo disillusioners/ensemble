@@ -2301,6 +2301,46 @@ def create_job_tools(
             # RAM FIFO; the agent_node consumes it on its next LLM
             # call. Byte-identical to pre-T7 behavior for RUNNING; for
             # flag-OFF WC this is the documented revert path.
+            #
+            # DEFECT A (dispatch-lane stranding fix, 2026-09-14): a
+            # ``running`` target with NO live graph consumer must NOT
+            # take the RAM-FIFO lane — nothing would ever drain
+            # ``_pending_injections`` and the message would be silently
+            # stranded in memory (incident 2026-09-14: spawn-created
+            # children cascade-paused + cascade-resumed without ever
+            # being dispatched read ``running`` while graphless). Same
+            # durable-wake treatment as the WC branch above: busy
+            # pre-check, then ``enqueue_message`` (same-second task +
+            # message materialization), returning the ``"enqueued"``
+            # shape instead of ``"injected"``.
+            if not manager.has_live_graph_task(instance_id):
+                if getattr(manager, "_task_repo", None) is not None:
+                    has_inflight = await asyncio.to_thread(
+                        manager._task_repo.has_instance_busy, instance_id
+                    )
+                    if has_inflight:
+                        return {
+                            "error": (
+                                f"Instance {instance_id} has a task still "
+                                "in flight — wait for it to complete "
+                                "first (job_inject busy pre-check on "
+                                "graphless running target)."
+                            )
+                        }
+                caller = current_instance_id or "unknown"
+                result = await manager.enqueue_message(
+                    instance_id=instance_id,
+                    message=message,
+                    source=f"internal_agent:{caller}",
+                )
+                return {
+                    "job_id": job_id,
+                    "instance_id": instance_id,
+                    "status": "enqueued",
+                    "message_id": getattr(result, "message_id", None),
+                    "queued": True,
+                }
+
             entry = manager.set_injection(instance_id, message)
             pending_count = manager.get_injection_count(instance_id)
 

@@ -246,6 +246,18 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
 })
 
+# DEFECT A (dispatch-lane stranding fix, feature/fix-question-resume-stuck,
+# 2026-09-14): membership in this set is NECESSARY but NOT SUFFICIENT for
+# the RAM-FIFO injection lane. Every consumer MUST additionally verify a
+# live graph consumer exists (``InstanceManager.has_live_graph_task``)
+# before calling ``set_injection`` — a spawn-created child that was
+# cascade-paused and cascade-resumed WITHOUT ever being dispatched reads
+# ``running`` while having no graph (zero task/message/checkpoint rows),
+# and an injection into it is stranded in memory forever (the graph that
+# would drain ``_pending_injections`` never runs). Graphless ``running``
+# targets route through the durable enqueue pipeline instead. The
+# constant itself stays a pure status set (single-home, config-free).
+
 # Terminal instance statuses — companion to ``INJECTION_ELIGIBLE_STATUSES``
 # above. The four instance statuses that ``send_message``'s routing helper
 # (``daemon/tools/instance.py::_route_send_message``) maps to the

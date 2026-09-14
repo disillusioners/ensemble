@@ -426,7 +426,22 @@ async def send_message(
     # RAM-FIFO injection route was removed entirely; WC now ALWAYS
     # routes through durable enqueue). Returns 200 ``MessageResponse``
     # (not 202).
-    if current_status in INJECTION_ELIGIBLE_STATUSES:
+    #
+    # DEFECT A (dispatch-lane stranding fix, 2026-09-14): ``running``
+    # status alone is NOT sufficient for the RAM-FIFO injection lane —
+    # a live graph consumer must exist to drain ``_pending_injections``
+    # on its next agent_node pass. A spawn-created child that was
+    # cascade-paused and cascade-resumed WITHOUT ever being dispatched
+    # reads ``running`` while having NO graph; injecting into it would
+    # silently strand the message in memory (incident 2026-09-14).
+    # ``manager.has_live_graph_task`` is the verifier; a graphless
+    # target falls through to the durable enqueue path below
+    # (``enqueue_message_job`` — same-second task + JobItem
+    # materialization), and the user gets the 200 enqueued response
+    # instead of a 202 that nothing would ever honor.
+    if current_status in INJECTION_ELIGIBLE_STATUSES and (
+        manager.has_live_graph_task(instance_id)
+    ):
         live_hub = _get_live_hub(request)
 
         # message-display-latency Phase 1: mint the stable server-side
