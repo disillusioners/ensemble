@@ -3164,8 +3164,14 @@ class JobFeedbackObserver:
           2. Instance status update to COMPLETED/ERROR (status, updated_at,
              last_activity_at, version bump). Skipped if already terminal
              OR if the row is missing.
-          3. Lock release — DELETE every ``job_locks`` row where
-             ``instance_id`` matches. Inlined here (instead of calling
+          3. Lock release — DELETE the ``job_locks`` rows keyed by THIS
+             job's own ``job_id`` (W1 job-scoped release — NOT
+             instance-wide: a sibling concurrent job's lock or a
+             post-revive successor's lock on the same instance MUST
+             survive; canonical job-keyed shape is
+             ``LockRepository.release_by_job``; ``job_id`` alone
+             because ``JobItem`` partition keys are nullable).
+             Inlined here (instead of calling
              ``LockRepository.release_by_instance`` which opens its own
              session — a separate transaction that would defeat the
              atomicity we need).
@@ -3177,10 +3183,17 @@ class JobFeedbackObserver:
         Phase 2.5 (Task 2.5.4, D13 consumption-site rewrite): the
         ``job_id`` parameter is now ``str | None``. When ``job_id is
         None`` (post-D13 MESSAGE path — no ``JobItem`` exists for the
-        instance), Step 1 is skipped entirely and Steps 2+3 still run.
+        instance), Step 1 is skipped entirely and Step 2 still runs.
         This is the **least disruptive** option per the plan: the
-        instance transition (Step 2) and lock release (Step 3) are
-        critical — they MUST fire even without a JobItem. The JobItem
+        instance transition (Step 2) is critical — it MUST fire even
+        without a JobItem. The lock release (Step 3) is W1
+        job-scoped: on the ``job_id=None`` path the finalized virtual
+        job cannot hold a lock of its own (``job_locks.job_id`` is
+        non-nullable; virtual jobs never acquire per-queue locks), so
+        the release correctly no-ops — releasing instance-wide there
+        could only ever delete OTHER jobs' locks (the W1 defect
+        class). Stale/unrelated locks are reclaimed by
+        ``JobLockSweepService``. The JobItem
         UPDATE (Step 1) is redundant in the no-JobItem case (there is
         nothing to UPDATE). The bus gate (premature-finalization
         defense) and the in-session gate are preserved regardless
@@ -3969,16 +3982,31 @@ class JobFeedbackObserver:
                 instance_was_terminal = False
                 _b_violation_report = b_report
 
-            # ─── Step 3: Lock release ───
+            # ─── Step 3: Lock release (W1 job-scoped) ───
             # Inline the SQL instead of calling
             # ``LockRepository.release_by_instance`` (which opens its own
             # session — a separate transaction that would defeat the
-            # atomicity we need). Same SELECT + DELETE pattern.
-            lock_stmt = select(JobLock).where(JobLock.instance_id == instance_id)
-            locks = session.exec(lock_stmt).all()
-            released = len(locks)
-            for lock in locks:
-                session.delete(lock)
+            # atomicity we need). Same SELECT + DELETE pattern, scoped
+            # to THIS job's own ``job_id`` (W1 job-scoped release — NOT
+            # instance-wide: a sibling concurrent job's lock or a
+            # post-revive successor's lock on the same instance MUST
+            # survive this finalize; canonical job-keyed shape is
+            # ``LockRepository.release_by_job``; ``job_id`` alone
+            # because ``JobItem`` partition keys are nullable).
+            # When ``job_id is None`` (post-D13 MESSAGE path) the
+            # finalized virtual job cannot hold a lock of its own
+            # (``job_locks.job_id`` is non-nullable; virtual jobs never
+            # acquire per-queue locks) — the old instance-wide DELETE
+            # could only ever delete OTHER jobs' locks there, so the
+            # release correctly no-ops. Stale/unrelated locks are
+            # reclaimed by ``JobLockSweepService`` (bounded sweep).
+            released = 0
+            if job_id is not None:
+                lock_stmt = select(JobLock).where(JobLock.job_id == job_id)
+                locks = session.exec(lock_stmt).all()
+                released = len(locks)
+                for lock in locks:
+                    session.delete(lock)
 
             # ─── Single commit for ALL three DB writes ───
             session.commit()

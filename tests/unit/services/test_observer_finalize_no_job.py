@@ -9,23 +9,37 @@ eliminated MESSAGE ``JobItem`` creation). The
   * Step 1 (JobItem UPDATE PROCESSING → COMPLETED/FAILED) is SKIPPED
     entirely — there is no row to update.
   * Step 2 (Instance status update → COMPLETED/ERROR) still runs.
-  * Step 3 (Lock release — DELETE every ``job_locks`` row where
-    ``instance_id`` matches) still runs.
+  * Step 3 (Lock release — W1 job-scoped, keyed by THIS job's
+    ``job_id``) correctly releases nothing here: with no ``JobItem``
+    the finalized virtual job holds no lock of its own.
 
 The bus gate (``_bus_count_pending_for_target_sync > 0``) is preserved
 regardless of ``job_id`` — the gates protect the instance, not the
 JobItem.
 
+W1 (job-scoped lock release, 2026-09-15): Step 3 is now scoped to the
+finalized job's OWN ``job_id``. On the ``job_id=None`` path the
+finalized virtual job cannot hold a lock of its own
+(``job_locks.job_id`` is non-nullable; virtual jobs never acquire
+per-queue locks), so Step 3 releases NOTHING there — the previous
+instance-wide DELETE could only ever delete OTHER jobs' locks (the W1
+defect class). Crash-cleanup backstops: ``JobLockSweepService``
+(terminal-job locks, ≤90s) + F5 ``force_finalize_orphan`` (stuck-active
+jobs). The None-path pins below were updated to this contract; the
+"leaked lock is recovered here" expectation they previously encoded is
+superseded by those backstops.
+
 Test surface (Task 2.5.12):
 
   * ``_finalize_job_db_sync(job_id=None, ...)`` transitions the
-    instance to COMPLETED and releases every per-instance lock.
+    instance to COMPLETED and releases NO locks (job-scoped Step 3:
+    nothing of the virtual job's own to release).
   * Step 1's no-op path is verified by asserting no ``JobItem`` row
     is touched (and no error is raised).
   * The instance status guard (already-terminal → skip) still works
     in the no-JobItem branch.
-  * The ERROR path (terminal_status="error") also runs Steps 2+3
-    with ``job_id=None``.
+  * The ERROR path (terminal_status="error") also runs Step 2 with
+    ``job_id=None``.
 
 Run with::
 
@@ -290,24 +304,31 @@ class TestObserverFinalizeNoJob:
             f"got {inst.status!r}"
         )
 
-        # 5. Step 3 ran: locks released.
-        assert result.locks_released == 2, (
-            f"Step 3 must release BOTH seeded JobLock rows; "
-            f"got locks_released={result.locks_released}"
+        # 5. Step 3 (W1 job-scoped): releases NOTHING on the
+        # job_id=None path — the virtual job holds no lock of its
+        # own; the seeded locks belong to OTHER jobs and survive
+        # (pre-fix: instance-wide DELETE removed them all).
+        assert result.locks_released == 0, (
+            "W1: job_id=None → nothing of this finalize's own to "
+            "release; locks_released must be 0."
         )
-        assert _count_locks(engine, iid) == 0, (
-            "every JobLock for the instance must be deleted by Step 3"
+        assert _count_locks(engine, iid) == 2, (
+            "W1: other-job locks must survive the None-path finalize "
+            "(pre-fix this was 0 — instance-wide release)."
         )
 
     def test_error_path_with_no_job_id(
         self, engine, _wire_bus_mock
     ):
-        """ERROR path: ``job_id=None, terminal_status="error"`` → ERROR + lock release.
+        """ERROR path: ``job_id=None, terminal_status="error"`` → ERROR
+        transition, no lock release.
 
         Sister scenario to the COMPLETED happy path: the no-JobItem
-        ERROR path must also run Steps 2+3 — Step 1 is still skipped
-        because there is no ``JobItem`` row to fail, but the instance
-        transitions to ``error`` and the lock is released.
+        ERROR path must still run Step 2 — Step 1 is still skipped
+        because there is no ``JobItem`` row to fail, the instance
+        transitions to ``error``, and the W1 job-scoped Step 3
+        releases nothing (the seeded lock belongs to another job and
+        survives).
         """
         write_guard = WritePauseGuard()
         observer = _make_observer(engine, write_guard)
@@ -328,7 +349,11 @@ class TestObserverFinalizeNoJob:
         assert result.terminal_status == InstanceStatus.ERROR.value
         inst = _read_instance(engine, iid)
         assert inst.status == InstanceStatus.ERROR.value
-        assert _count_locks(engine, iid) == 0
+        assert result.locks_released == 0
+        assert _count_locks(engine, iid) == 1, (
+            "W1: the other-job lock must survive the None-path ERROR "
+            "finalize."
+        )
 
     def test_already_terminal_instance_skipped_without_error(
         self, engine, _wire_bus_mock
@@ -342,9 +367,12 @@ class TestObserverFinalizeNoJob:
         ``instance.status`` write — preserving the pre-existing
         terminal state.
 
-        The lock release still runs (Step 3 is unconditional), so a
-        leaked lock from a prior crash is recovered even when the
-        instance is already terminal.
+        W1: the lock release is job-scoped — with ``job_id=None``
+        there is nothing of this finalize's own to release, so the
+        seeded (other-job) lock survives. A leaked lock from a prior
+        crash is reclaimed by ``JobLockSweepService`` (terminal-job
+        locks, ≤90s) or F5 ``force_finalize_orphan`` (stuck-active
+        jobs) — not incidentally here.
         """
         write_guard = WritePauseGuard()
         observer = _make_observer(engine, write_guard)
@@ -360,15 +388,15 @@ class TestObserverFinalizeNoJob:
             error_message=None,
         )
 
-        # Skip the write — but Step 3 still runs.
+        # Skip the write — Step 3 is job-scoped (releases nothing).
         assert result.skip is False
         assert result.instance_was_terminal is True
         inst = _read_instance(engine, iid)
         # Status preserved (no clobber).
         assert inst.status == InstanceStatus.COMPLETED.value
-        # Locks released even on the skip-write path.
-        assert _count_locks(engine, iid) == 0
-        assert result.locks_released == 1
+        # W1: other-job lock survives; nothing released.
+        assert _count_locks(engine, iid) == 1
+        assert result.locks_released == 0
 
     def test_missing_instance_skipped_without_error(
         self, engine, _wire_bus_mock
@@ -381,14 +409,16 @@ class TestObserverFinalizeNoJob:
         the caller's downstream side effects (SSE / CompletionRegistry
         / lifecycle event) are skipped via that flag.
 
-        A leaked lock for the (now-gone) instance is still released —
-        the SELECT-then-DELETE pattern in Step 3 is a no-op when no
-        locks exist.
+        W1: the lock release is job-scoped — with ``job_id=None``
+        nothing of this finalize's own is released, so the seeded
+        (other-job) lock survives. (The docstring's
+        SELECT-then-DELETE pattern in Step 3 is a no-op when the
+        job-scoped predicate matches no rows.)
         """
         write_guard = WritePauseGuard()
         observer = _make_observer(engine, write_guard)
 
-        # Do NOT seed the instance. Seed only a lock to test Step 3.
+        # Do NOT seed the instance. Seed only a lock to probe Step 3.
         ghost_id = "ghost-instance"
         _seed_lock(engine, instance_id=ghost_id)
         # Confirm the ghost instance truly is missing.
@@ -406,9 +436,9 @@ class TestObserverFinalizeNoJob:
 
         assert result.skip is False
         assert result.instance_was_terminal is True
-        # Step 3 still ran (and released the leaked lock).
-        assert _count_locks(engine, ghost_id) == 0
-        assert result.locks_released == 1
+        # W1: job-scoped Step 3 — the other-job lock survives.
+        assert _count_locks(engine, ghost_id) == 1
+        assert result.locks_released == 0
 
     def test_no_job_id_with_no_step1_failure(
         self, engine, _wire_bus_mock
@@ -432,7 +462,7 @@ class TestObserverFinalizeNoJob:
         _seed_lock(engine, instance_id=iid)
 
         # Should not raise despite job_id=None — Step 1 is skipped,
-        # Step 2+3 run.
+        # Step 2 runs (and W1 job-scoped Step 3 releases nothing).
         result = observer._finalize_job_db_sync(
             job_id=None,
             instance_id=iid,
@@ -443,7 +473,11 @@ class TestObserverFinalizeNoJob:
 
         assert result.skip is False
         assert result.terminal_status == InstanceStatus.COMPLETED.value
-        assert _count_locks(engine, iid) == 0
+        assert result.locks_released == 0
+        assert _count_locks(engine, iid) == 1, (
+            "W1: the other-job lock must survive the None-path "
+            "finalize."
+        )
 
 
 # ─── B.S.1-ii: (b) declared-waiting predicate-attached LOG at the ────────────
