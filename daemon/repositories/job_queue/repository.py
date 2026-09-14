@@ -2266,8 +2266,8 @@ SET admission_state = 'queued',
             )
             result = session.exec(stmt)
             # F1 (joblock-leak fix): atomic same-commit lock release.
-            # Mirrors the R8 pattern at
-            # ``job_feedback_observer.py:_finalize_job_db_sync:3977-3981``
+            # Mirrors the R8 pattern: the in-transaction job-keyed
+            # SELECT+DELETE release inside ``_finalize_job_db_sync``
             # — the inline ``SELECT + DELETE`` rides the SAME
             # ``session.commit()`` as the JobItem UPDATE so a
             # process crash between the JobItem transition and the
@@ -2540,7 +2540,8 @@ SET admission_state = 'queued',
                 )
                 # F1 (joblock-leak fix, backstop variant): atomic
                 # same-commit lock release mirrors the inline writer
-                # and R8 (``job_feedback_observer.py:_finalize_job_db_sync:3977-3981``).
+                # and R8 — the in-transaction job-keyed SELECT+DELETE
+                # release inside ``_finalize_job_db_sync``.
                 # The lock release rides the SAME ``session.commit()``
                 # as the JobItem UPDATE so a process crash between
                 # the JobItem transition and the lock release cannot

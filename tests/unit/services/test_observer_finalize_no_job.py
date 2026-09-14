@@ -50,10 +50,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -62,7 +60,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, JobLock, AdmissionState
+from daemon.repositories.job_queue.models import JobItem, JobLock
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.dependency_bus.models import (  # noqa: F401
     DependencyWatcher,
@@ -239,13 +237,14 @@ class TestObserverFinalizeNoJob:
     """``_finalize_job_db_sync`` with ``job_id=None``.
 
     Verifies the post-D13 no-JobItem path (Phase 2.5 / Task 2.5.4):
-    Step 1 is skipped, Steps 2+3 still run.
+    Step 1 is skipped; Step 2 still runs; Step 3 is a W1 job-scoped
+    no-op (the virtual job holds no lock of its own).
     """
 
     def test_step1_skipped_instance_reaches_completed(
         self, engine, _wire_bus_mock
     ):
-        """Happy path: ``job_id=None`` → instance COMPLETED, locks released.
+        """Happy path: ``job_id=None`` → instance COMPLETED, OTHER jobs' locks survive.
 
         Steps:
 
@@ -256,8 +255,8 @@ class TestObserverFinalizeNoJob:
           3. Verify Step 1 was skipped: no ``JobItem`` row was
              touched, no error was raised for the missing row.
           4. Verify Step 2 ran: ``instance.status`` is now COMPLETED.
-          5. Verify Step 3 ran: every ``JobLock`` for the instance is
-             deleted.
+          5. Verify Step 3 (W1 job-scoped) no-ops: locks keyed to
+             other jobs' ``job_id`` survive.
 
         Returns the ``_FinalizeJobResult`` so callers can fire
         post-commit side effects (SSE, CompletionRegistry, lifecycle
@@ -268,8 +267,8 @@ class TestObserverFinalizeNoJob:
 
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
-        lock_a = _seed_lock(engine, instance_id=iid, queue_id="queue-A")
-        lock_b = _seed_lock(engine, instance_id=iid, queue_id="queue-B")
+        _seed_lock(engine, instance_id=iid, queue_id="queue-A")
+        _seed_lock(engine, instance_id=iid, queue_id="queue-B")
         assert _count_locks(engine, iid) == 2
         assert _count_jobs(engine, iid) == 0, (
             "post-D13 path: no MESSAGE JobItem is seeded for the "
@@ -401,7 +400,7 @@ class TestObserverFinalizeNoJob:
     def test_missing_instance_skipped_without_error(
         self, engine, _wire_bus_mock
     ):
-        """Instance row missing → skip both writes, locks released if any.
+        """Instance row missing → skip both writes; locks keyed to other jobs survive (W1 job-scoped).
 
         Defensive path: if the ``instances`` row was deleted between
         the pre-fetch and the WriteGuardSession, ``_finalize_job_db_sync``
@@ -411,9 +410,9 @@ class TestObserverFinalizeNoJob:
 
         W1: the lock release is job-scoped — with ``job_id=None``
         nothing of this finalize's own is released, so the seeded
-        (other-job) lock survives. (The docstring's
-        SELECT-then-DELETE pattern in Step 3 is a no-op when the
-        job-scoped predicate matches no rows.)
+        (other-job) lock survives. The helper's Step 3 (job-scoped
+        SELECT-then-DELETE) is a no-op when the job-scoped predicate
+        matches no rows.
         """
         write_guard = WritePauseGuard()
         observer = _make_observer(engine, write_guard)
@@ -448,7 +447,8 @@ class TestObserverFinalizeNoJob:
         The pre-D13 ``InvalidTransitionError`` short-circuit (status
         mismatch on concurrent transition) does NOT apply in the
         ``job_id=None`` branch — there is no ``JobItem`` to mismatch
-        on. The helper must fall through to Steps 2+3 unconditionally.
+        on. The helper must fall through to Step 2 unconditionally;
+        Step 3 is a W1 job-scoped no-op on this path.
 
         This test directly verifies that property by calling the
         helper with a non-existent ``instance_id`` — the only thing

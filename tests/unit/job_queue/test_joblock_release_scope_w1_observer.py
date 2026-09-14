@@ -58,7 +58,6 @@ import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock
-from daemon.services import job_feedback_observer as _observer_module
 from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.write_pause_guard import WritePauseGuard
@@ -131,7 +130,6 @@ def _seed_instance(
     status: str = InstanceStatus.RUNNING.value,
 ) -> str:
     instance_id = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
-    now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as session:
         session.add(
             Instance(
