@@ -225,7 +225,24 @@ def _make_fake_llm_class(
     mock_instance = MagicMock()
     mock_instance.invoke.side_effect = _next
 
-    return (lambda **kwargs: mock_instance), mock_instance
+    def _factory(**kwargs):
+        return mock_instance
+
+    # dd43a7f1 (2026-08-25) made ``clean_llm_config`` read
+    # ``ThinkingChatOpenAI.default_streaming`` (graph.py:3733) and
+    # ``default_request_gzip`` (graph.py:3768) before constructing the
+    # LLM. The factory we patch in here is a plain function, so without
+    # this class-attr shim the access raises
+    # ``AttributeError: 'function' object has no attribute 'default_streaming'``.
+    # Mirrors the same shape used in
+    # ``tests/unit/test_watchover_decision.py`` (``_make_fake_llm_class``
+    # / ``_capture_llm_factory``) and the canonical ``_StubClient`` /
+    # ``_FakeChatClient`` in ``tests/unit/test_symptom_repair_engine.py``
+    # + ``tests/unit/test_symptom_repair_engine_failover_e2e.py``.
+    _factory.default_streaming = False
+    _factory.default_request_gzip = False
+
+    return _factory, mock_instance
 
 
 # =============================================================================
