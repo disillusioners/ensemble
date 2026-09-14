@@ -285,3 +285,6 @@
 
 
 - Addendum (same pass): dispatcher close-out caught 3 further Steps-2+3 straggler claims (observer :1188-1195/:1450-1456/:3933, 'runs/running Steps 2+3 unconditionally' variants) — fixed in the stragglers commit; :753/:2028 reviewed correct-in-context (chain-label/fan-out rationale, not Step-3-dependent); :3937 debug string kept (control-flow-accurate).
+
+
+- Addendum 2 (same pass): full-context re-read of the remain-set found 2 final stale None-path claims — :3745 "Steps 2+3 still run unconditionally" (dispatcher had mis-adjudicated from a truncated window; apply-worker's flag was correct) and :1637 "per-instance lock release is already done" — fixed in the final stragglers commit. :2289/:753/:2028/:1637-label/:3942-log confirmed correct-in-context (chain-label/sequencing/control-flow claims). Lesson: adjudicate doc-truth grep hits on FULL sentences + path scoping, never truncated first-line windows; count-based remain-sets require full-context verification.

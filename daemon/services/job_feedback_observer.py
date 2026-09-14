@@ -1639,8 +1639,10 @@ class JobFeedbackObserver:
             # The JobItem-only re-arm below is skipped when no
             # ``JobItem`` exists. The instance-level side effects
             # (Steps 2+3 in ``_finalize_job_db_sync``) have already
-            # committed inside the WriteGuardSession; the per-instance
-            # lock release is already done — there is nothing further
+            # committed inside the WriteGuardSession; Step 3's
+            # job-scoped release is a W1 no-op when no JobItem exists
+            # (no lock of its own to release — locks keyed to other
+            # jobs' ``job_id`` survive) — there is nothing further
             # to re-arm at the JobItem layer. The bus's own
             # watcher/generation state IS the re-arm signal.
             if (
@@ -3746,8 +3748,10 @@ class JobFeedbackObserver:
             #
             # Phase 2.5 (Task 2.5.4): Step 1 is **skipped** when
             # ``job_id is None`` — the post-D13 MESSAGE path where no
-            # ``JobItem`` exists for the instance. Steps 2+3 (instance
-            # status + lock release) still run unconditionally. The
+            # ``JobItem`` exists for the instance. Step 2 (instance
+            # status) still runs unconditionally; Step 3 (lock release)
+            # is a W1 job-scoped no-op on this path (the virtual job
+            # holds no lock of its own). The
             # ``InvalidTransitionError`` short-circuit (status-mismatch
             # on concurrent transition) does not apply in this branch
             # — there is no JobItem to mismatch on. The conditional
