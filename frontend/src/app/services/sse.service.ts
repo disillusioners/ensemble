@@ -104,6 +104,169 @@ export function parseCommandProgressEvent(
   return event;
 }
 
+// ── SSE transcript error rows (D2 gap fix, 2026-09-14) ─────────────────────
+//
+// The daemon emits LOUD failure terminals the transcript never rendered:
+//   - ``error`` SSE events — two wire shapes exist:
+//       (a) hub lane  (LiveEventHub.stream_error, sole caller
+//           instance_messaging.py streaming except-branch):
+//           ``{"instance_id", "event_type": "error",
+//              "error": {"error": <str>, "stage": "streaming",
+//                        "message_id": <uuid>}}``  — ``error`` is a DICT;
+//       (b) shutdown lane (messages.py SSE generator, server_shutdown):
+//           ``{"error": "server_shutdown"}``  — ``error`` is a bare STRING
+//           with NO ``instance_id``.
+//     The pre-fix listener did ``String(data.error)`` — for shape (a) that
+//     rendered the literal "[object Object]" into ``latestError`` and
+//     nothing into the transcript at all.
+//   - ``status_change`` events with ``status === "error"`` (e.g.
+//     error_reporting.py child-error path):
+//     ``{"instance_id", "event_type": "status_change", "status": "error",
+//       "agent_id"?}`` — carries NO error-detail text; the row renders a
+//     fixed title only.
+//
+// The builders below turn either payload into a synthetic ``Message`` row
+// (``role: 'system'`` + ``sseError`` meta) that flows through the EXISTING
+// id-keyed merge contract (``upsertMessage`` / ``mergeMessagesById``):
+//   - idempotent by construction — same id upserts in place, never
+//     duplicates;
+//   - rows are FE-local (the server never persists them), so merge-mode
+//     REST refetches preserve them as local-only entries;
+//   - the daemon NEVER replays error/status_change events on reconnect
+//     (connect replays only question_pack + context_usage), so occurrence
+//     distinctness is safe: the status lane mints its id from a monotonic
+//     per-service sequence (each genuine occurrence visible), while the
+//     error lane derives a fully content-deterministic id from the
+//     payload's ``message_id`` + text.
+
+/** Detail cap — matches the backend's 500-char description convention;
+ *  longer exception text is truncated with an ellipsis. */
+export const SSE_ERROR_DETAIL_MAX_CHARS = 500;
+
+/** Truncate a raw error detail for transcript rendering. */
+export function truncateSseErrorDetail(text: string): string {
+  if (text.length <= SSE_ERROR_DETAIL_MAX_CHARS) return text;
+  return text.slice(0, SSE_ERROR_DETAIL_MAX_CHARS) + '…';
+}
+
+/**
+ * Extract the human-readable detail text from an ``error`` SSE payload's
+ * ``error`` field, which is a DICT (hub lane) or a STRING (shutdown lane).
+ * Unknown dict shapes fall back to JSON so the row never renders
+ * "[object Object]".
+ */
+export function extractSseErrorText(errorField: unknown): string {
+  if (typeof errorField === 'string') return errorField;
+  if (errorField && typeof errorField === 'object') {
+    const e = errorField as Record<string, unknown>;
+    if (typeof e['error'] === 'string') return e['error'];
+    if (typeof e['detail'] === 'string') return e['detail'];
+    if (typeof e['message'] === 'string') return e['message'];
+    try {
+      return JSON.stringify(errorField);
+    } catch {
+      return String(errorField);
+    }
+  }
+  return '';
+}
+
+/**
+ * Build the synthetic transcript row for an ``error`` SSE event payload
+ * (already JSON-parsed by the listener). Returns ``null`` when the payload
+ * is not an object, belongs to another instance, or carries no recoverable
+ * instance scope — the row would otherwise bleed into the wrong channel.
+ *
+ * Row id is content-deterministic:
+ * ``sse-error:{instance_id}:{message_id|adhoc}:{detail}`` — identical
+ * payloads collapse onto one row (idempotent), distinct failures on the
+ * same ``message_id`` stay distinct.
+ */
+export function buildSseErrorEventRow(
+  data: unknown,
+  currentInstanceId: string | null,
+): Message | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const payloadInstance =
+    typeof d['instance_id'] === 'string' && d['instance_id']
+      ? (d['instance_id'] as string)
+      : currentInstanceId;
+  // The shutdown lane omits ``instance_id``; fall back to the attached
+  // channel (same rule as the existing ``latestError`` handling). No
+  // instance scope at all → cannot place the row → drop.
+  if (!payloadInstance) return null;
+  if (currentInstanceId && payloadInstance !== currentInstanceId) return null;
+
+  const rawError = d['error'];
+  const detailText = truncateSseErrorDetail(extractSseErrorText(rawError));
+  let stage: string | null = null;
+  let messageKey = 'adhoc';
+  if (rawError && typeof rawError === 'object') {
+    const e = rawError as Record<string, unknown>;
+    if (typeof e['stage'] === 'string' && e['stage']) stage = e['stage'];
+    if (typeof e['message_id'] === 'string' && e['message_id']) {
+      messageKey = e['message_id'];
+    }
+  }
+
+  return {
+    message_id: `sse-error:${payloadInstance}:${messageKey}:${detailText}`,
+    role: 'system',
+    content: detailText,
+    created_at: new Date().toISOString(),
+    instance_id: payloadInstance,
+    sseError: {
+      source: 'error',
+      title: stage
+        ? `Message processing failed (${stage})`
+        : 'Message processing failed',
+      stage,
+    },
+  };
+}
+
+/**
+ * Build the synthetic transcript row for a ``status_change`` SSE payload
+ * with ``status === "error"``. Returns ``null`` for any other status,
+ * non-object payloads, cross-instance events, or payloads with no
+ * recoverable instance scope.
+ *
+ * The wire carries NO event id and NO detail text, so the row id embeds a
+ * monotonic ``seq`` (service-lifetime counter, never reset — see the
+ * listener) to keep genuine repeat occurrences visible; the daemon's
+ * no-replay contract for status events (connect replays only
+ * question_pack + context_usage) makes this duplicate-safe.
+ */
+export function buildSseStatusErrorRow(
+  data: unknown,
+  currentInstanceId: string | null,
+  seq: number,
+): Message | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  if (d['status'] !== 'error') return null;
+  const payloadInstance =
+    typeof d['instance_id'] === 'string' && d['instance_id']
+      ? (d['instance_id'] as string)
+      : currentInstanceId;
+  if (!payloadInstance) return null;
+  if (currentInstanceId && payloadInstance !== currentInstanceId) return null;
+
+  return {
+    message_id: `sse-status-error:${payloadInstance}:${seq}`,
+    role: 'system',
+    content: '',
+    created_at: new Date().toISOString(),
+    instance_id: payloadInstance,
+    sseError: {
+      source: 'status_change',
+      title: 'Instance entered error state',
+      stage: null,
+    },
+  };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -206,6 +369,14 @@ export class SseService {
   // matching tool_call or assistant_message arrives, so a tool_result that
   // races ahead of its tool_call is not lost. Cleared on disconnect.
   private pendingToolOutputs = new Map<string, string>();
+
+  /**
+   * Monotonic sequence for ``status_change{error}`` transcript row ids
+   * (D2 gap fix). Never reset — not even by ``clearEvents()`` — so an id
+   * minted for one occurrence can never be re-minted for a different one
+   * within the service lifetime.
+   */
+  private statusErrorSeq = 0;
 
   /**
    * True after the current EventSource observed a connection-level error
@@ -474,6 +645,22 @@ export class SseService {
             this.pendingPurgeInstanceId.set(data.instance_id as string);
             this.pendingPurgeRequest.update(n => n + 1);
           }
+
+          // Transcript error row (D2 gap fix, 2026-09-14): surface
+          // ``status_change{error}`` as an always-visible system row via
+          // the existing id-keyed upsert. The monotonic sequence keeps
+          // genuine repeat error transitions distinct (the wire carries
+          // no event id); the daemon never replays status events on
+          // reconnect, so this is duplicate-safe. Existing signal
+          // semantics above are unchanged.
+          if (data.status === 'error') {
+            const row = buildSseStatusErrorRow(
+              data,
+              this.currentInstanceId,
+              ++this.statusErrorSeq,
+            );
+            if (row) this.upsertMessage(row);
+          }
         } catch (err) {
           console.error('[SSE] Failed to parse status_change:', err);
         }
@@ -668,13 +855,30 @@ export class SseService {
           
           this.events.update(evts => [...evts, { type: 'error', data }]);
           this.isStreaming.set(false);
-          
+
           if (data.error) {
             this.latestError.set({
-              message: String(data.error),
+              message: extractSseErrorText(data.error),
               instance_id: data.instance_id || this.currentInstanceId || undefined,
             });
           }
+
+          // Transcript error row (D2 gap fix, 2026-09-14): build a
+          // synthetic system row from the parsed payload — handles BOTH
+          // wire shapes (hub dict lane with stage/message_id, and the
+          // bare-string server_shutdown lane) and upserts through the
+          // id-keyed message mirror so reconnects/refetches never
+          // duplicate it.
+          //
+          // The ``latestError`` banner ABOVE also routes through
+          // ``extractSseErrorText`` so dict-shaped hub-lane errors render
+          // a readable message instead of "[object Object]". This is the
+          // follow-up to dd0a6926 — that commit left the banner's old
+          // ``String(data.error)`` decoder in place deliberately. Same
+          // helper as the transcript row → single source of truth for
+          // hub-lane error decoding.
+          const errorRow = buildSseErrorEventRow(data, this.currentInstanceId);
+          if (errorRow) this.upsertMessage(errorRow);
         } catch {
           // If we can't parse, it's a connection error
           console.error('[SSE] Connection error');

@@ -179,6 +179,19 @@ export interface InstanceListResponse {
 }
 
 // Message types (aligned with backend UnifiedMessage)
+/**
+ * Metadata for an FE-synthesized SSE error transcript row (D2 gap fix,
+ * 2026-09-14). ``title`` is pre-rendered by the pure row builder in
+ * ``sse.service.ts`` so the template stays dumb; ``source`` records which
+ * SSE event kind produced the row; ``stage`` is the daemon-side pipeline
+ * stage when the ``error`` payload carries one (today: ``"streaming"``).
+ */
+export interface SseErrorMeta {
+  source: 'error' | 'status_change';
+  title: string;
+  stage?: string | null;
+}
+
 export interface Message {
   message_id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -223,6 +236,18 @@ export interface Message {
   failed?: boolean;
   /** Error reason surfaced in the failed-state UI. */
   errorReason?: string;
+  /**
+   * SSE transcript error row metadata (FE-synthetic — never persisted
+   * server-side, never present on REST-fetched messages). Present ONLY on
+   * rows synthesized from SSE ``error`` / ``status_change{error}`` events
+   * (D2 gap fix, 2026-09-14): the row's ``content`` carries the truncated
+   * human-readable detail and this meta carries the pre-rendered title +
+   * provenance so the transcript can render a visually distinct,
+   * always-visible error card (``hasVisibleContent`` exempt — the user
+   * must always see that the instance errored, same rationale as the
+   * compaction-doc exception).
+   */
+  sseError?: SseErrorMeta;
   /**
    * Queue context the original send was routed to (defect #5 retry
    * fix, 2026-08-31, must-fix #2). Set on the bubble when the chat
