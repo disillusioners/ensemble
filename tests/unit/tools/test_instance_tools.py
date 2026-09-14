@@ -5520,3 +5520,153 @@ class TestSubtreeStatusReadOnly:
         await tool.coroutine(status_filter="paused")
 
         manager.count_pending_and_running_tasks_by_instance.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# DEFECT A (dispatch-lane stranding fix, 2026-09-14) — running-but-
+# graphless targets must take the DURABLE enqueue lane, never the
+# in-memory injection lane. Incident 2026-09-14: a spawn-created child
+# cascade-paused + cascade-resumed WITHOUT ever being dispatched reads
+# ``status="running"`` while having no live graph; the pre-fix code took
+# the injection branch and the dispatch sat in ``_pending_injections``
+# forever ("[Injection] Appended pending message ... queue_depth=1").
+# ---------------------------------------------------------------------------
+
+
+class TestRunningGraphlessDurableFallback:
+    """``running`` + NO live graph consumer → durable enqueue, never
+    ``set_injection``. The live-graph check
+    (``manager.has_live_graph_task``) runs at the send_message call
+    site AFTER the pure status→route helper.
+    """
+
+    async def test_running_without_live_graph_enqueues_not_injects(self):
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            # No live graph: the spawn-created, cascade-resumed child.
+            manager.has_live_graph_task = MagicMock(return_value=False)
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("target-id", "real task")
+
+        # Durable dispatch happened.
+        manager.enqueue_message.assert_awaited_once()
+        # The in-memory injection lane was NOT touched — nothing is
+        # ever stranded in ``_pending_injections``.
+        manager.set_injection.assert_not_called()
+        # The result text is the ENQUEUE text (durable pipeline), not
+        # the injection text.
+        assert "Message queued and sent to target-id" in result
+        assert "Message injected into" not in result
+
+    async def test_graphless_enqueue_goes_through_queue_busy_guard(self):
+        """The durable lane re-engages the queue-busy guard (dropped on
+        the injection branch) — a graphless target with a busy durable
+        queue gets the busy error instead of a second queued turn."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=False)
+            manager.get_queue_stats = AsyncMock(
+                return_value={"pending_count": 2, "processing_count": 0}
+            )
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("target-id", "real task")
+
+        manager.enqueue_message.assert_not_awaited()
+        manager.set_injection.assert_not_called()
+        assert "already has a message in progress" in result
+
+    async def test_graphless_guard_is_consulted_with_target_id(self):
+        """The live-graph check receives the TARGET instance id (not the
+        caller's) — the routing decision is about the target's turn."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=False)
+            send_message = _get_send_message_tool(manager)
+
+            await send_message.coroutine("target-id", "real task")
+
+        manager.has_live_graph_task.assert_called_once_with("target-id")
+
+    async def test_graphless_downgrade_logs_observability_line(self, caplog):
+        """The downgrade is LOUD (structured ``routed_via=
+        enqueue_graphless_guard`` log) — the incident's signature was
+        silence. Mirrors the Task 3b provenance logging contract."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=False)
+            send_message = _get_send_message_tool(manager)
+
+            with caplog.at_level(
+                logging.INFO, logger="daemon.tools.instance"
+            ):
+                await send_message.coroutine("target-id", "real task")
+
+        downgrade_records = [
+            r for r in caplog.records
+            if getattr(r, "event", None) == "agent_send_message"
+            and getattr(r, "routed_via", None) == "enqueue_graphless_guard"
+        ]
+        assert downgrade_records, (
+            "expected a structured downgrade log line with "
+            "routed_via=enqueue_graphless_guard"
+        )
+        assert downgrade_records[0].target_iid == "target-id"
+
+
+class TestRunningLiveGraphInjectionPreserved:
+    """Regression pin: a GENUINELY-running target (live mid-turn graph)
+    still takes the injection lane — the DEFECT A guard must not
+    overcorrect into always-enqueue.
+    """
+
+    async def test_running_with_live_graph_still_injects(self):
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            # Live graph: the default fixture pins the live case
+            # explicitly so an accidental default-flip fails HERE.
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            send_message = _get_send_message_tool(manager)
+
+            result = await send_message.coroutine("target-id", "hi")
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message.assert_not_awaited()
+        assert "Message injected into running target" in result
+        # The W3 stranding caveat stays injection-branch-only.
+        assert "pause-loss parity with the user messages API" in result
+
+    async def test_live_graph_check_happens_before_injection(self):
+        """Ordering pin: the guard consults ``has_live_graph_task``
+        BEFORE ``set_injection`` — a target whose graph dies between
+        the two calls is handled by downstream logic, but the DECISION
+        must be graph-first."""
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            manager = _make_manager(status="running")
+            manager.has_live_graph_task = MagicMock(return_value=True)
+            send_message = _get_send_message_tool(manager)
+
+            await send_message.coroutine("target-id", "hi")
+
+        manager.has_live_graph_task.assert_called_once()
+        assert manager.has_live_graph_task.call_count == 1
+        manager.set_injection.assert_called_once()
