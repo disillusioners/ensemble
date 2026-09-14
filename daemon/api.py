@@ -727,23 +727,21 @@ async def lifespan(app: FastAPI):
     job_lock_sweep_interval = (
         config.services.job_lock_sweep_interval_seconds
     )
+    # ``job_lock_sweep_interval`` is bounded by pydantic ``ge=1`` on
+    # ``ServicesConfig.job_lock_sweep_interval_seconds`` — out-of-range
+    # values fail fast at boot with ValidationError. No runtime
+    # DISABLED branch here; the floor is enforced upstream.
     job_lock_sweep = JobLockSweepService(
         job_lock_manager=job_lock_manager,
         interval_seconds=job_lock_sweep_interval,
     )
-    if job_lock_sweep_interval < 1:
-        logger.error(
-            f"JobLockSweepService DISABLED — interval="
-            f"{job_lock_sweep_interval}s below the floor of 1s"
-        )
-    else:
-        job_lock_sweep.start()
-        app.state.job_lock_sweep = job_lock_sweep
-        logger.info(
-            f"JobLockSweepService started: interval="
-            f"{job_lock_sweep_interval}s (default "
-            f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
-        )
+    job_lock_sweep.start()
+    app.state.job_lock_sweep = job_lock_sweep
+    logger.info(
+        f"JobLockSweepService started: interval="
+        f"{job_lock_sweep_interval}s (default "
+        f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
+    )
 
     # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio

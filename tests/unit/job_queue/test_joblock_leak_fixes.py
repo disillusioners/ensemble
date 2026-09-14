@@ -52,10 +52,12 @@ for a sample proof runbook (run on a pre-fix worktree).
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -72,7 +74,10 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import Decision, JobQueueRepository
+from daemon.repositories.job_queue import (
+    JobRepository,
+)
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import (
     AdmissionState,
@@ -83,6 +88,7 @@ from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_lock_sweep import JobLockSweepService
+from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_state_machine import (
     InvalidTransitionError,
     job_state_machine,
@@ -157,6 +163,61 @@ def job_lock_sweep(lock_manager) -> JobLockSweepService:
         job_lock_manager=lock_manager,
         interval_seconds=1,
     )
+
+
+@pytest.fixture
+def job_queue_service(
+    job_repo: JobRepository,
+    lock_manager: JobLockManager,
+) -> JobQueueService:
+    """A real ``JobQueueService`` wired for F2 (R6/R7) hardening tests.
+
+    ``queue_repo`` is a MagicMock (only ``find_jobs_by_instance`` is
+    consulted in non-retry paths; the boundary tests use the SQL path
+    directly). ``instance_manager`` is None — ``_is_instance_alive``
+    short-circuits to False on None (job_queue_service.py:1848-1849)
+    so the R6 cancellation test exercises the lock-release catch +
+    re-raise path WITHOUT cascading into ``terminate_instance``.
+
+    Tests that exercise a particular release-site behavior replace
+    ``service._lock_manager.release_queue_lock`` /
+    ``service._lock_manager.release`` with an AsyncMock that raises
+    or returns a controlled value. Tests that need a running event
+    loop for ``_finalize_terminal_sync`` use ``_start_loop_in_thread``
+    (mirrors ``tests/job_queue/test_seam_invariants.py:1395``).
+    """
+    service = JobQueueService(
+        repository=job_repo,
+        lock_manager=lock_manager,
+        queue_repo=MagicMock(spec=JobQueueRepository),
+        instance_manager=None,
+    )
+    return service
+
+
+def _start_loop_in_thread():
+    """Spin up a background event loop and return ``(loop, thread, stop)``.
+
+    The sync twin dispatches its async lock release via
+    ``asyncio.run_coroutine_threadsafe`` onto ``self._loop``. For
+    that to actually run the lock-release coroutine, the loop must
+    be running — ``new_event_loop()`` alone leaves
+    ``loop.is_running()`` False and the boundary's
+    ``if self._loop and self._loop.is_running()`` guard falls
+    through to the R7 WARNING branch.
+
+    Mirrors ``tests/job_queue/test_seam_invariants.py:_start_loop_in_thread``.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    def stop():
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+    return loop, thread, stop
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -772,40 +833,111 @@ class TestJobLockSweepReclaimsTerminalJobLocks:
 
 
 class TestF2R6CancellationMidRelease:
-    """F2 R6 hardening: ``_cancel_active_job`` releases the lock
-    inside ``try/except (Exception, asyncio.CancelledError)`` — a
+    """F2 R6 hardening: ``cancel_job`` (the public entry to
+    ``_cancel_active_job``) releases the lock inside
+    ``try/except (Exception, asyncio.CancelledError)`` — a
     cancellation mid-release logs a WARNING + re-raises so the
     caller's shutdown path stays intact.
 
-    The periodic sweep (F3) reclaims the orphaned lock on the next
-    tick.
-
     Pre-fix: the bare ``await`` had no exception handling. A
     cancellation mid-release silently orphaned the lock AND
-    swallowed the cancellation (the asyncio.run_until_complete
-    would see a CancelledError that did not propagate to the
-    caller).
+    swallowed the cancellation.
+
+    Acceptance: the rewritten tests actually invoke ``cancel_job``
+    with a raising mock ``release_queue_lock`` — they exercise the
+    production hardening, not just the mock's behavior. The
+    sweep-reclaim contract (the recovery seam for leaks the hardening
+    could not prevent) gets its own dedicated test below.
     """
 
     @pytest.mark.asyncio
-    async def test_cancellation_logs_and_re_raises(
-        self, engine, lock_manager, job_lock_sweep
+    async def test_cancellation_mid_release_propagates_and_logs(
+        self, engine, job_repo, job_queue_service, caplog
     ):
-        """A cancellation mid-release MUST be visible to the caller
-        (re-raised) and the leak must be reclaimable by the periodic
-        sweep.
+        """A ``asyncio.CancelledError`` raised from inside
+        ``release_queue_lock`` during ``cancel_job`` MUST:
 
-        The hardened call site (``_cancel_active_job`` at
-        ``daemon/services/job_queue_service.py:1108+``) wraps the
-        release in ``try/except (Exception, asyncio.CancelledError)``
-        so the cancellation is logged + re-raised rather than
-        silently swallowed. The lock stays orphaned in-memory (the
-        release never committed); the periodic
-        ``JobLockSweepService`` reclaims it on the next tick.
+        1. Reach the caller's ``pytest.raises`` (``CancelledError`` is
+           a ``BaseException`` since Python 3.8, so ``except
+           Exception`` does NOT catch it — the production hardening
+           explicitly catches ``(Exception, asyncio.CancelledError)``
+           then re-raises via ``isinstance`` discriminator at
+           ``daemon/services/job_queue_service.py:1139-1142``).
+        2. Be surfaced as a WARNING with the ``(R6 hardening)``
+           marker so operators see the leak.
+        3. NOT silently swallow the cancellation — the caller's
+           shutdown path stays intact.
 
-        Pre-fix: the bare ``await`` had no exception handling — a
-        cancellation mid-release silently orphaned the lock AND
-        swallowed the cancellation.
+        Pre-fix: the bare ``await self._lock_manager.release_queue_lock(...)``
+        had no exception handling. A cancellation mid-release
+        silently orphaned the lock AND swallowed the cancellation
+        (``asyncio.run_until_complete`` would see a ``CancelledError``
+        that did not propagate to the caller).
+        """
+        import logging
+
+        instance_id = _seed_instance(engine)
+        job = _seed_message_job(
+            engine, instance_id=instance_id, admission_state="active"
+        )
+        _acquire_lock(engine, instance_id=instance_id, job_id=job.job_id)
+
+        # Replace the lock_manager's release_queue_lock with one
+        # that raises CancelledError mid-release. The hardening in
+        # ``cancel_job`` MUST catch + log + re-raise.
+        release_calls: list[tuple[str, str, str]] = []
+
+        async def cancel_release(project_id, queue_id, job_id):
+            release_calls.append((project_id, queue_id, job_id))
+            raise asyncio.CancelledError(
+                "simulated mid-release cancel"
+            )
+
+        job_queue_service._lock_manager.release_queue_lock = cancel_release
+
+        # The hardened call site (job_queue_service.py:1124-1142)
+        # catches CancelledError, logs a WARNING, then re-raises.
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.job_queue_service"
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await job_queue_service.cancel_job(job.job_id)
+
+        # (a) CancelledError propagated to caller — re-raise worked.
+        # (b) WARNING logged with the R6 marker.
+        r6_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "(R6 hardening)" in r.getMessage()
+            and "_cancel_active_job" in r.getMessage()
+        ]
+        assert r6_records, (
+            "F2 R6 hardening: cancel_job MUST log a WARNING naming "
+            "the (R6 hardening) marker when release_queue_lock "
+            "raises CancelledError. caplog records: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        # (c) release_queue_lock was attempted (the catch block ran).
+        assert release_calls == [("p1", "q1", job.job_id)], (
+            "R6: the hardened call site MUST attempt the lock "
+            "release before catching the CancelledError. "
+            f"Got: {release_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_cancel_lock_reclaimed_by_sweep(
+        self, engine, job_repo, lock_manager, job_lock_sweep, job_queue_service
+    ):
+        """The recovery seam for the R6 hardening: when the
+        hardening catches a CancelledError and re-raises, the lock
+        is NOT deleted (the release never committed). The periodic
+        ``JobLockSweepService.sweep_once`` reclaims it once the
+        job reaches a terminal ``admission_state``.
+
+        Companion to ``test_cancellation_mid_release_propagates_and_logs``
+        — split so each test pins exactly one contract (the
+        hardening OR the recovery seam), not both. Pre-fix this
+        class leaked forever (no sweep + no atomic release).
         """
         instance_id = _seed_instance(engine)
         job = _seed_message_job(
@@ -813,29 +945,20 @@ class TestF2R6CancellationMidRelease:
         )
         _acquire_lock(engine, instance_id=instance_id, job_id=job.job_id)
 
-        # Build a lock_manager whose release raises CancelledError.
-        from unittest.mock import AsyncMock
-
         async def cancel_release(*args, **kwargs):
             raise asyncio.CancelledError("simulated mid-release cancel")
 
-        lock_manager.release_queue_lock = AsyncMock(
-            side_effect=cancel_release
-        )
+        lock_manager.release_queue_lock = AsyncMock(side_effect=cancel_release)
 
-        # The hardened call site catches CancelledError, logs, and
-        # re-raises. The lock stays orphaned (the release never
-        # committed); the periodic sweep reclaims it.
         with pytest.raises(asyncio.CancelledError):
-            await lock_manager.release_queue_lock("p1", "q1", job.job_id)
+            await job_queue_service.cancel_job(job.job_id)
 
         # Lock is still present (release never committed); the
-        # sweep reclaims on the next tick. The job is still
-        # ACTIVE — the sweep only reclaims TERMINAL-job locks, so
-        # we need to finalize the job first to simulate the
-        # natural-fix terminal transition (the inline writer's
-        # atomic release would have done this, but here we
-        # simulate the cancellation interrupting it).
+        # sweep reclaims only TERMINAL-job locks, so we finalize
+        # the job first to simulate the natural-fix terminal
+        # transition (the inline writer's atomic release would
+        # have done this, but here we simulate the cancellation
+        # interrupting it).
         with engine.begin() as conn:
             conn.execute(
                 text(
@@ -854,6 +977,246 @@ class TestF2R6CancellationMidRelease:
             "release)."
         )
         assert _lock_count(engine, instance_id) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# F2 — ``_finalize_terminal_sync`` hardening (R7) — sync twin CancelledError
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestF2R7FinalizeTerminalSyncHardening:
+    """F2 R7 hardening: the sync twin
+    ``_finalize_terminal_sync`` (called from worker-thread contexts like
+    ``trigger_next_job_sync``) also releases locks via
+    ``asyncio.run_coroutine_threadsafe`` and must catch
+    ``asyncio.CancelledError`` around ``future.result(...)``. The
+    pre-fix code used bare ``except Exception``, which silently
+    orphaned the lock when Python 3.8+ promoted
+    ``asyncio.CancelledError`` to a ``BaseException``.
+
+    Two branches need pinning:
+
+    (a) **Event-loop-unavailable branch** (job_queue_service.py:4322-4339):
+        when ``self._loop`` is unset OR not running, the sync twin
+        must log a WARNING naming the leaked job's
+        ``project_id`` / ``queue_id`` / ``instance_id`` so operators
+        can trace the leak. The sweep (F3) reclaims it on the next
+        tick. Pre-fix this branch silently no-op'd the release
+        with NO diagnostic.
+
+    (b) **``future.result()`` CancelledError branch**
+        (job_queue_service.py:4303-4321): a ``CancelledError``
+        raised from ``future.result(timeout=5)`` MUST be caught +
+        logged + NOT re-raised. The sweep reclaims. Pre-fix the bare
+        ``except Exception`` missed it; the cancellation either
+        propagated (orphaning the lock + confusing the worker
+        thread) or was silently dropped.
+
+    Module docstring claimed R7 coverage but no test exercised
+    either branch — this class closes that gap.
+    """
+
+    def test_event_loop_unavailable_logs_r7_warning_no_raise(
+        self, engine, job_repo, job_queue_service, caplog
+    ):
+        """R7 branch (a): with ``self._loop`` unset, the sync twin's
+        lock-release path is unreachable (it requires a running loop
+        for ``asyncio.run_coroutine_threadsafe``). The hardening
+        logs a WARNING with the R7 marker naming the leaked job's
+        ``project_id``, ``queue_id``, and ``instance_id`` — operators
+        can trace which lock was orphaned. No exception propagates
+        (the lock release is a soft-fail; the sweep recovers).
+
+        Pre-fix: this branch silently no-op'd the release with NO
+        diagnostic.
+        """
+        import logging
+
+        instance_id = _seed_instance(engine)
+        job = _seed_message_job(
+            engine, instance_id=instance_id, admission_state="active"
+        )
+        _acquire_lock(engine, instance_id=instance_id, job_id=job.job_id)
+
+        # Critical: ensure no loop is set so the "loop unavailable"
+        # branch (else-clause at job_queue_service.py:4322-4339)
+        # fires instead of the run_coroutine_threadsafe path.
+        job_queue_service._loop = None
+
+        # If the loop-unavailable branch is wired correctly, the
+        # sync twin MUST NOT attempt any lock release.
+        release_called: list[tuple] = []
+
+        async def _should_not_run(*args, **kwargs):
+            release_called.append((args, kwargs))
+            return True
+
+        job_queue_service._lock_manager.release_queue_lock = _should_not_run
+        job_queue_service._lock_manager.release_by_instance = _should_not_run
+
+        # Act — invoke the sync twin with caplog capturing WARNING+ records.
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.job_queue_service"
+        ):
+            canonical_job_id, _final_status = (
+                job_queue_service._finalize_terminal_sync(
+                    instance_id=instance_id,
+                    decision=Decision.NO_RETRY,
+                    job_id=job.job_id,
+                )
+            )
+
+        # The sync twin should return the canonical job_id (it
+        # found the job and ran the SQL UPDATE). The lock-release
+        # step is what we are pinning here.
+        assert canonical_job_id == job.job_id
+
+        # (a) WARNING emitted with the R7 marker.
+        r7_records = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "(R7 hardening)" in r.getMessage()
+            and "_finalize_terminal_sync skipped lock release" in r.getMessage()
+        ]
+        assert r7_records, (
+            "R7 branch (a): when the event loop is unavailable, "
+            "_finalize_terminal_sync MUST log a WARNING naming the "
+            "(R7 hardening) marker. caplog records: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        warning_msg = r7_records[0].getMessage()
+        # The WARNING must name the leaked job's identity so
+        # operators can trace which lock was orphaned.
+        assert job.job_id[:8] in warning_msg, (
+            f"R7 WARNING must name the leaked job_id. Got: {warning_msg!r}"
+        )
+        assert "p1" in warning_msg, (
+            f"R7 WARNING must name the project_id. Got: {warning_msg!r}"
+        )
+        assert "q1" in warning_msg, (
+            f"R7 WARNING must name the queue_id. Got: {warning_msg!r}"
+        )
+        assert instance_id in warning_msg, (
+            f"R7 WARNING must name the instance_id. Got: {warning_msg!r}"
+        )
+
+        # Lock manager MUST NOT have been called (loop unavailable).
+        assert release_called == [], (
+            "Lock release must not be attempted when the event loop "
+            "is unavailable — the R7 WARNING is the operator-facing "
+            f"signal. Got: {release_called}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_future_result_cancelled_error_caught_and_logged(
+        self, engine, job_repo, job_queue_service, caplog
+    ):
+        """R7 branch (b): when ``self._loop`` IS running and the
+        lock release coroutine raises ``CancelledError``, the sync
+        twin's `try/except (Exception, asyncio.CancelledError)`
+        around ``future.result(timeout=5)`` MUST catch it, log a
+        WARNING with the R7 marker, and NOT re-raise — the
+        cancellation would otherwise confuse the worker thread that
+        called this sync method.
+
+        Pre-fix: the bare ``except Exception`` did NOT catch
+        ``asyncio.CancelledError`` (Python 3.8+ promotes it to
+        ``BaseException``). The cancellation either propagated
+        (orphaning the lock + crashing the worker thread) or was
+        silently dropped depending on the call-site.
+        """
+        import logging
+
+        instance_id = _seed_instance(engine)
+        job = _seed_message_job(
+            engine, instance_id=instance_id, admission_state="active"
+        )
+        _acquire_lock(engine, instance_id=instance_id, job_id=job.job_id)
+
+        # Replace release_queue_lock with a stub that yields once
+        # then raises CancelledError. The future.result() in the sync
+        # twin surfaces CancelledError exactly as a real cancellation
+        # would.
+        async def cancel_release(*args, **kwargs):
+            # Yield once so the coroutine is actually scheduled on
+            # the running loop (otherwise run_coroutine_threadsafe
+            # returns immediately without giving the cancellation a
+            # chance to fire mid-flight).
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError(
+                "simulated sync-twin mid-release cancel"
+            )
+
+        job_queue_service._lock_manager.release_queue_lock = cancel_release
+
+        # Start a live event loop on a background thread so the
+        # sync twin's run_coroutine_threadsafe actually executes.
+        loop, _thread, stop_loop = _start_loop_in_thread()
+        job_queue_service.set_event_loop(loop)
+
+        try:
+            # Act — invoke the sync twin. Pre-fix this would
+            # propagate CancelledError to the caller (or be silently
+            # dropped if the bare except Exception path masked it).
+            # The R7 hardening catches + logs + DOES NOT re-raise.
+            with caplog.at_level(
+                logging.WARNING,
+                logger="daemon.services.job_queue_service",
+            ):
+                canonical_job_id, _final_status = (
+                    job_queue_service._finalize_terminal_sync(
+                        instance_id=instance_id,
+                        decision=Decision.NO_RETRY,
+                        job_id=job.job_id,
+                    )
+                )
+
+            # The sync twin returns the canonical job_id — the SQL
+            # UPDATE succeeded; only the lock-release step is
+            # exercised by this test.
+            assert canonical_job_id == job.job_id
+
+            # (b) WARNING emitted with the R7 marker.
+            r7_records = [
+                r for r in caplog.records
+                if r.levelno >= logging.WARNING
+                and "(R7 hardening)" in r.getMessage()
+                and "_finalize_terminal_sync: lock release failed"
+                in r.getMessage()
+            ]
+            assert r7_records, (
+                "R7 branch (b): future.result() raising "
+                "CancelledError MUST be caught and logged with the "
+                "(R7 hardening) marker. caplog records: "
+                f"{[r.getMessage() for r in caplog.records]}"
+            )
+            warning_msg = r7_records[0].getMessage()
+            assert job.job_id[:8] in warning_msg, (
+                f"R7 WARNING must name the leaked job_id. "
+                f"Got: {warning_msg!r}"
+            )
+
+            # The lock is still present (release never committed);
+            # the periodic sweep reclaims it once the job is
+            # terminal. The job is now terminal (the sync twin
+            # transitioned it to 'done'), so a sweep should reclaim.
+            from daemon.services.job_lock_sweep import (
+                JobLockSweepService,
+            )
+
+            sweep = JobLockSweepService(
+                job_lock_manager=job_queue_service._lock_manager,
+                interval_seconds=1,
+            )
+            cleared = await sweep.sweep_once()
+            assert cleared == 1, (
+                "Sweep reclaims the lock orphaned by a cancelled "
+                "sync-twin release. Pre-fix this class leaked "
+                "forever (no sweep + no hardening)."
+            )
+            assert _lock_count(engine, instance_id) == 0
+        finally:
+            stop_loop()
 
 
 # ─────────────────────────────────────────────────────────────────────
