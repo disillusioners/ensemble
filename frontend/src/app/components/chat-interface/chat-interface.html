@@ -48,6 +48,22 @@
           <!-- Message content -->
           <div class="message-content" [class.align-right]="message.role === 'user'">
 
+            <!-- SSE transcript error row (D2 gap fix, 2026-09-14).
+                 Synthesized FE-side from ``error`` / ``status_change{error}``
+                 SSE events; renders regardless of the system-prompt toggle.
+                 Additive branch — no existing (click)/(keydown) bindings
+                 touched. -->
+            @if (message.sseError) {
+              <div class="sse-error-row" data-testid="sse-error-row" role="alert">
+                <div class="sse-error-header">
+                  <span class="sse-error-icon" aria-hidden="true">⛔</span>
+                  <span class="sse-error-title">{{ message.sseError.title }}</span>
+                </div>
+                @if (message.content) {
+                  <pre class="sse-error-detail">{{ message.content }}</pre>
+                }
+              </div>
+            }
             <!-- Compaction fold-with-preview card (compaction-output-
                  structure §9). The single-document compaction doc
                  (id prefix ``compaction-global-``) renders COLLAPSED by

@@ -710,6 +710,45 @@ $cyan: #06b6d4;
   }
 }
 
+// SSE transcript error row (D2 gap fix, 2026-09-14). Visually distinct
+// full-width notice card for FE-synthesized ``error`` /
+// ``status_change{error}`` rows — same red family as the failed-send
+// panel above, but panel-shaped (no agent bubble) so it reads as a
+// system notice rather than a message.
+.sse-error-row {
+  max-width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.5rem 0.75rem;
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 0.5rem;
+}
+
+.sse-error-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #fca5a5;
+}
+
+.sse-error-icon {
+  font-size: 0.875rem;
+  color: #ef4444;
+}
+
+.sse-error-detail {
+  margin: 0.375rem 0 0;
+  padding: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #d1d5db;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
 // Mermaid diagram styling for dark theme.
 // Note: `.mermaid` and the overlay buttons below are injected into the
 // DOM via `innerHTML` by the mermaid library / `MermaidActionsService`,

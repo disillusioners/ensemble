@@ -506,7 +506,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     // prefix): they carry the user-facing fold card (compaction-output-
     // structure §9), so they stay visible regardless of the toggle —
     // the user must always see that context was compacted.
+    // EXCEPTION — SSE error rows (``sseError`` meta, D2 gap fix
+    // 2026-09-14): synthesized from ``error`` / ``status_change{error}``
+    // SSE events, so they stay visible regardless of the toggle — the
+    // user must always see that the instance errored.
     if (message.role === 'system') {
+      if (message.sseError) {
+        return true;
+      }
       if (this.isCompactionDoc(message)) {
         return this.hasMeaningfulContent(message);
       }
