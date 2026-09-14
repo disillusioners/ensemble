@@ -1463,6 +1463,41 @@ class ServicesConfig(BaseSettings):
             "incidents does NOT change what survives the restart."
         ),
     )
+    # F3 (joblock-leak fix): periodic sweep cadence for
+    # ``JobLockSweepService``. The startup-time
+    # ``recover_stale_job_locks`` (in ``daemon/api.py``) clears
+    # orphans from a previous process that died mid-execution; this
+    # knob governs the steady-state companion that reclaims locks
+    # left behind by the live daemon (F1 inline writers that won
+    # the SQL guard race before ``_finalize_job_db_sync`` could
+    # release the lock; F2 R6/R7 cancellations that aborted
+    # mid-release; F5 ``force_finalize_orphan`` reaps). The sweep
+    # is ALWAYS-ON infrastructure (no kill-switch env var — per
+    # the project owner's HARD POLICY on Batch A); the interval
+    # knob tunes reclaim responsiveness vs DB load. Default 90s
+    # shares the A3 cadence. Lower = faster reclaim but more DB
+    # scans; floor 1s prevents spin. Out-of-range values FAIL FAST
+    # AT BOOT via pydantic ValidationError. Override via
+    # SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS.
+    job_lock_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "F3 — joblock-leak fix (2026-09-14): how often the "
+            "``JobLockSweepService`` reclaim tick runs (seconds). "
+            "Default 90s shares the A3 cadence. The sweep calls "
+            "``JobLockManager.cleanup_terminal_job_locks`` which "
+            "delegates to ``LockRepository.clear_terminal_job_locks`` "
+            "(DELETEs rows whose job is no longer in {queued, active}). "
+            "Reclaims locks orphaned by F1 inline writer races, F2 "
+            "cancellation mid-release, and F5 orphan reaps. "
+            "ALWAYS-ON infrastructure (no kill-switch env var — per "
+            "the project owner's HARD POLICY on Batch A); the "
+            "interval knob tunes responsiveness vs DB load. "
+            "Floor 1s; out-of-range values FAIL FAST AT BOOT. "
+            "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
     lease_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description=(

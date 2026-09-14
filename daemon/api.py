@@ -9,11 +9,12 @@ factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-
 nudge scanner, the dead-letter service, the job-queue reconcile,
-and the per-instance lazy-import graph cache (each a single, large
-``try / except`` block keyed on construction-time failure), and
-(c) global error handlers (``HTTPException`` shim, request-validation
-handler, the startup-shutdown banner). Co-locating app factory +
-lifespan wiring + middleware + error handlers is the project-house
+the job-lock reclaim sweep, and the per-instance lazy-import graph
+cache (each a single, large ``try / except`` block keyed on
+construction-time failure), and (c) global error handlers
+(``HTTPException`` shim, request-validation handler, the
+startup-shutdown banner). Co-locating app factory + lifespan
+wiring + middleware + error handlers is the project-house
 pattern (mirror ``daemon/services/long_tool_nudge.py`` module-
 band rationale) — the alternative (splitting lifespan across
 ``daemon/api_lifespan.py``) would force every router to import two
@@ -703,6 +704,48 @@ async def lifespan(app: FastAPI):
             f"{orphan_sweep_grace}s (default "
             f"{DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS}s)"
         )
+
+    # ─────────────────────────────────────────────────────────────
+    # F3 — joblock-leak fix (2026-09-14). Periodic reclaim sweep
+    # for ``job_locks`` rows orphaned by the live daemon. The
+    # companion startup sweep (above) clears orphans left by a
+    # PREVIOUS process that died mid-execution; this steady-state
+    # sweep reclaims locks left behind by the LIVE daemon (F1
+    # inline writer races, F2 cancellation mid-release, F5
+    # ``force_finalize_orphan`` reaps). The method
+    # ``JobLockManager.cleanup_terminal_job_locks`` has existed
+    # since C12 but was DEAD CODE — no periodic caller. F3 wires
+    # it into ``JobLockSweepService`` and the daemon lifespan.
+    # ALWAYS-ON infrastructure (no kill-switch env var — per the
+    # project owner's HARD POLICY on Batch A); the interval knob
+    # tunes reclaim responsiveness vs DB load. Out-of-range
+    # values FAIL FAST AT BOOT via pydantic ValidationError
+    # (deliberate, council-approved behavior).
+    from daemon.services.job_lock_sweep import (
+        DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS,
+        JobLockSweepService,
+    )
+    job_lock_sweep_interval = (
+        config.services.job_lock_sweep_interval_seconds
+    )
+    # ``job_lock_sweep_interval`` is bounded by pydantic ``ge=1`` on
+    # ``ServicesConfig.job_lock_sweep_interval_seconds`` — out-of-range
+    # values fail fast at boot with ValidationError. No runtime
+    # DISABLED branch here; the floor is enforced upstream.
+    # ``JobLockSweepService.__init__`` additionally clamps via
+    # ``max(1, int(interval_seconds))``, so the lifespan-side floor
+    # needs no DISABLED branch (unlike ``OrphanWatcherSweepService``).
+    job_lock_sweep = JobLockSweepService(
+        job_lock_manager=job_lock_manager,
+        interval_seconds=job_lock_sweep_interval,
+    )
+    job_lock_sweep.start()
+    app.state.job_lock_sweep = job_lock_sweep
+    logger.info(
+        f"JobLockSweepService started: interval="
+        f"{job_lock_sweep_interval}s (default "
+        f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
+    )
 
     # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
@@ -1395,6 +1438,21 @@ async def lifespan(app: FastAPI):
                 f"OrphanWatcherSweepService shutdown error: {e}"
             )
         app.state.orphan_watcher_sweep = None
+
+    # --- JobLockSweepService shutdown (F3) ---
+    # Stop the periodic reclaim sweep BEFORE the manager shuts down
+    # so any in-flight reclaim tick completes before the DB
+    # connection closes. Mirrors the OrphanWatcherSweepService
+    # shutdown shape (graceful stop with WARNING on failure).
+    job_lock_sweep = getattr(app.state, "job_lock_sweep", None)
+    if job_lock_sweep is not None:
+        try:
+            await job_lock_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"JobLockSweepService shutdown error: {e}"
+            )
+        app.state.job_lock_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down
@@ -2334,6 +2392,9 @@ def create_app() -> FastAPI:
 
     return app
 
+
+# Create app instance for convenience
+app = create_app()
 
 # Create app instance for convenience
 app = create_app()
