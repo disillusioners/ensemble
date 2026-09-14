@@ -3767,47 +3767,55 @@ def clean_llm_config(cfg: dict) -> dict:
     # from ``LLMConfig.request_timeout``, default 610s).
     if "request_timeout" not in cleaned:
         cleaned["request_timeout"] = ThinkingChatOpenAI.default_request_timeout
-    # Outbound LLM request-body gzip compression (opt-in). When
-    # ``default_request_gzip`` is True and the caller has NOT already
+    # Outbound LLM HTTP clients — stream-liveness watchdog, ALWAYS ON
+    # (llm-stream-stall-hardening L2). When the caller has NOT already
     # supplied an ``http_client`` / ``http_async_client`` kwarg, attach
-    # the gzip-enabled httpx clients (from ``daemon.services.llm_gzip``)
-    # so every outbound LLM HTTP request body is gzip-compressed on
-    # the wire and ``Content-Encoding: gzip`` is stamped (Content-Length
-    # auto-corrected). When the flag is OFF (default), this branch is
-    # a no-op — the langchain-openai client uses its built-in default
-    # httpx clients and the wire is byte-identical to the pre-feature
-    # state. Sites that want to bypass the gzip wrapping for a
-    # specific LLM pass plain ``http_client`` / ``http_async_client``
-    # kwargs explicitly — those values are preserved verbatim (the
-    # ``not in cleaned`` guards).
+    # the watchdog-wrapped module singletons so every SSE response
+    # stream is monitored for byte-silence: a stalled stream (heartbeat
+    # stop = transport death) is force-aborted within
+    # ``LLMConfig.stream_stall_threshold_seconds`` (default 45s) instead
+    # of waiting out the 610s read deadline, and the forced abort rides
+    # the existing tenacity timeout budget (StreamStalledError
+    # subclasses httpx.ReadTimeout). See
+    # ``daemon/services/llm_stream_watchdog.py`` for the delivery
+    # vehicle (transport shutdown — response.close() does NOT wake a
+    # blocked recv; spike-proven).
     #
-    # Partial-override contract: passing EITHER ``http_client`` OR
-    # ``http_async_client`` (the caller-supplied value, even ``None``,
-    # counts as "present" — the ``not in cleaned`` checks test for key
-    # membership) opts the LLM out of gzip wrapping entirely on BOTH
-    # sync and async paths. There is no partial gzip — you cannot pass
-    # a gzip ``http_client`` and a plain ``http_async_client`` (or vice
-    # versa) and have one path gzipped while the other is not. To
-    # enable gzip, pass NEITHER — the function injects the gzip-enabled
-    # module singletons for both. If a caller actually needs one path
-    # gzipped and the other not (uncommon; test-only), they must build
-    # both clients by hand and pass both kwargs explicitly, bypassing
-    # this function.
+    # Gzip composition: when ``default_request_gzip`` is True the
+    # injected client is
+    # ``WatchdogHTTPTransport(GzipRequestTransport(httpx.HTTPTransport()))``
+    # — watchdog outermost (owns the response stream), gzip inner
+    # (mutates request bytes only). When False, the watchdog wraps a
+    # plain ``httpx.HTTPTransport()``. The client's limits / timeout /
+    # redirect settings mirror the OpenAI SDK defaults exactly (see
+    # ``llm_stream_watchdog._WATCHDOG_*``), so the always-on injection
+    # is wire-identical to the SDK-default path.
+    #
+    # Partial-override contract (unchanged): passing EITHER
+    # ``http_client`` OR ``http_async_client`` (the caller-supplied
+    # value, even ``None``, counts as "present" — the ``not in cleaned``
+    # checks test for key membership) opts the LLM out of the watchdog
+    # wrapping entirely on BOTH sync and async paths. There is no
+    # partial injection — you cannot pass a custom ``http_client`` and
+    # get the watchdog-wrapped ``http_async_client``. If a caller
+    # actually needs one path wrapped and the other not (uncommon;
+    # test-only), they must build both clients by hand and pass both
+    # kwargs explicitly, bypassing this function.
     if (
-        ThinkingChatOpenAI.default_request_gzip
-        and "http_client" not in cleaned
+        "http_client" not in cleaned
         and "http_async_client" not in cleaned
     ):
-        # Lazy import: ``daemon.services.llm_gzip`` pulls in httpx,
-        # but the project already depends on httpx. Keeping the import
-        # local avoids an extra import-ordering surprise in the rare
-        # test paths that touch ``daemon.graph`` without the LLM
-        # services loaded.
-        from .services.llm_gzip import get_or_build_gzip_clients
+        # Lazy import: keeps ``daemon.graph`` import-time cost flat and
+        # avoids an import-ordering surprise in the rare test paths that
+        # touch ``daemon.graph`` without the LLM services loaded (same
+        # rationale as the gzip lazy import this replaces).
+        from .services.llm_stream_watchdog import get_or_build_watchdog_clients
 
-        gzip_sync, gzip_async = get_or_build_gzip_clients()
-        cleaned["http_client"] = gzip_sync
-        cleaned["http_async_client"] = gzip_async
+        wd_sync, wd_async = get_or_build_watchdog_clients(
+            use_gzip=ThinkingChatOpenAI.default_request_gzip
+        )
+        cleaned["http_client"] = wd_sync
+        cleaned["http_async_client"] = wd_async
     return cleaned
 
 

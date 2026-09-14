@@ -36,6 +36,7 @@ warnings.filterwarnings(
 import time
 import sys
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 import asyncio
 import json
@@ -903,6 +904,49 @@ async def lifespan(app: FastAPI):
             app.state.long_tool_nudge_task = None
             logger.info("Long-tool-nudge scanner disabled by config")
 
+    # ── LLM stream-liveness watchdog (llm-stream-stall-hardening L2) ──
+    # Daemon-wide tick thread sweeping watched SSE streams. The
+    # transports inside the injected LLM http clients and this loop
+    # MUST share the module-level ``STREAM_WATCHDOG_REGISTRY``
+    # singleton — importing it explicitly here (a per-call or
+    # per-thread registry silently no-ops the whole feature; same
+    # identity discipline as the LONG_TOOL_REGISTRY pin above).
+    # Always-on per fix/flag policy — ``stream_stall_threshold_seconds``
+    # is a tuning-only knob (no disable value); a tick/sweep failure is
+    # logged and retried next tick, so watchdog breakage degrades to
+    # the pre-feature 610s read-deadline behavior, never to a crash.
+    from daemon.services.llm_stream_watchdog import (
+        STREAM_WATCHDOG_REGISTRY,
+        run_stream_watchdog_loop,
+    )
+    try:
+        _stream_watchdog_stop = threading.Event()
+        _stream_watchdog_thread = threading.Thread(
+            target=run_stream_watchdog_loop,
+            args=(
+                STREAM_WATCHDOG_REGISTRY,
+                float(config.llm.stream_stall_threshold_seconds),
+                _stream_watchdog_stop,
+            ),
+            name="llm-stream-watchdog",
+            daemon=True,
+        )
+        _stream_watchdog_thread.start()
+        app.state.llm_stream_watchdog_thread = _stream_watchdog_thread
+        app.state.llm_stream_watchdog_stop = _stream_watchdog_stop
+        logger.info(
+            f"[StreamWatchdog] started: "
+            f"threshold={config.llm.stream_stall_threshold_seconds}s"
+        )
+    except Exception as stream_watchdog_boot_exc:
+        app.state.llm_stream_watchdog_thread = None
+        app.state.llm_stream_watchdog_stop = None
+        logger.error(
+            f"[StreamWatchdog] DISABLED — thread start failed: "
+            f"{stream_watchdog_boot_exc}",
+            exc_info=True,
+        )
+
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
     if reconciled > 0:
@@ -1417,6 +1461,35 @@ async def lifespan(app: FastAPI):
                 f"Long-tool-nudge scanner shutdown error: {e}"
             )
     app.state.long_tool_nudge_task = None
+
+    # LLM stream-liveness watchdog shutdown (llm-stream-stall-hardening).
+    # Set the stop event (the loop's ``wait(interval)`` returns within
+    # one tick) then join with a small timeout; a daemon thread that
+    # fails to stop in time still dies with the process.
+    _stream_watchdog_stop = getattr(
+        app.state, "llm_stream_watchdog_stop", None
+    )
+    _stream_watchdog_thread = getattr(
+        app.state, "llm_stream_watchdog_thread", None
+    )
+    if _stream_watchdog_stop is not None:
+        try:
+            _stream_watchdog_stop.set()
+        except Exception as e:  # noqa: BLE001 — shutdown keeps going
+            logger.warning(f"[StreamWatchdog] stop-event set failed: {e}")
+    if _stream_watchdog_thread is not None:
+        try:
+            if _stream_watchdog_thread.is_alive():
+                _stream_watchdog_thread.join(timeout=5.0)
+            if _stream_watchdog_thread.is_alive():
+                logger.warning(
+                    "[StreamWatchdog] thread did not stop within 5s "
+                    "(daemon thread — will die with the process)"
+                )
+        except Exception as e:  # noqa: BLE001 — shutdown keeps going
+            logger.warning(f"[StreamWatchdog] shutdown error: {e}")
+    app.state.llm_stream_watchdog_thread = None
+    app.state.llm_stream_watchdog_stop = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the

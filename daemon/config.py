@@ -158,6 +158,29 @@ class LLMConfig(BaseSettings):
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=610, description="Request timeout in seconds (default: 11 minutes)")
 
+    # LLM stream-liveness watchdog threshold (llm-stream-stall-hardening
+    # L2). When a streaming (SSE) LLM response delivers no bytes —
+    # content OR heartbeat keep-alive — for longer than this many
+    # wall-clock seconds, the watchdog force-aborts the blocked read
+    # (transport shutdown) and the forced abort rides the existing
+    # timeout retry budget via StreamStalledError (an
+    # httpx.ReadTimeout subclass). Healthy streams always carry bytes
+    # within ~one heartbeat interval (~10-15s on the primary proxy), so
+    # 45s (~3-4x cadence) discriminates a dead transport without
+    # false-aborting long thinking pauses. ALWAYS-ON — this is a
+    # tuning-only knob (repo fix/flag policy: no disable value; the
+    # ge=10 floor keeps the value honest). Override via
+    # OPENAI_STREAM_STALL_THRESHOLD_SECONDS.
+    stream_stall_threshold_seconds: int = Field(
+        default=45,
+        ge=10,
+        description=(
+            "Seconds of SSE byte-silence (wall clock) before the stream "
+            "watchdog force-aborts the stalled response. Floor 10s; "
+            "default 45s (~3-4x the proxy heartbeat cadence)."
+        ),
+    )
+
     # Models for which reasoning_content echo is DISABLED: reasoning_content
     # from a previous turn is echoed back in subsequent assistant messages
     # for every model EXCEPT those whose name case-insensitively

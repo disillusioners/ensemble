@@ -290,8 +290,9 @@ _LARGE_USER_MESSAGE = (
 @pytest.fixture(autouse=True)
 def _protect_class_vars():
     """Reset ``ThinkingChatOpenAI.default_request_gzip`` AND the
-    gzip-client singleton around every test so a class-var leak
-    from one test cannot poison the next.
+    gzip-client singletons AND the watchdog-client singletons around
+    every test so a class-var leak from one test cannot poison the
+    next.
 
     The ``clean_env`` autouse fixture (tests/conftest.py) already
     clears ``OPENAI_*`` env vars; this fixture additionally scrubs
@@ -299,14 +300,19 @@ def _protect_class_vars():
     """
     from daemon.graph import ThinkingChatOpenAI
     from daemon.services.llm_gzip import reset_cached_clients
+    from daemon.services.llm_stream_watchdog import (
+        reset_cached_clients as reset_watchdog_clients,
+    )
 
     saved = ThinkingChatOpenAI.default_request_gzip
     reset_cached_clients()
+    reset_watchdog_clients()
     try:
         yield
     finally:
         ThinkingChatOpenAI.default_request_gzip = saved
         reset_cached_clients()
+        reset_watchdog_clients()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -447,13 +453,16 @@ class TestDisabledPassthrough:
 
     def test_disabled_clean_llm_config_attaches_no_gzip_client(self):
         """With ``default_request_gzip=False``, ``clean_llm_config``
-        must NOT inject ``http_client`` or ``http_async_client``
-        kwargs — even when the caller passes ``http_client=None``
-        explicitly. The langchain-openai client then uses its
-        built-in default httpx clients, so the wire path is
-        byte-identical to the pre-feature state.
+        injects the WATCHDOG-wrapped clients (always-on, L2) but the
+        transport chain must contain NO ``GzipRequestTransport`` — the
+        gzip-disabled path stays gzip-free (the old "no client at all"
+        contract was superseded by the llm-stream-stall-hardening
+        always-on watchdog injection; the NO-GZIP-ON-DISABLED spirit is
+        pinned here).
         """
         from daemon.graph import ThinkingChatOpenAI, clean_llm_config
+        from daemon.services.llm_gzip import GzipRequestTransport
+        from daemon.services.llm_stream_watchdog import WatchdogHTTPTransport
 
         original = ThinkingChatOpenAI.default_request_gzip
         ThinkingChatOpenAI.default_request_gzip = False
@@ -461,14 +470,28 @@ class TestDisabledPassthrough:
             cleaned = clean_llm_config(
                 {"model": "gpt-4o", "api_key": "test", "base_url": PROXY_BASE_URL}
             )
-            assert "http_client" not in cleaned, (
-                "clean_llm_config must NOT inject http_client when "
-                "default_request_gzip is False (zero behavior change contract)"
+            # Watchdog clients ARE injected (always-on watchdog, L2).
+            assert isinstance(cleaned.get("http_client"), httpx.Client), (
+                "clean_llm_config must inject a sync httpx.Client "
+                "(watchdog-wrapped) even when default_request_gzip is False"
             )
-            assert "http_async_client" not in cleaned, (
-                "clean_llm_config must NOT inject http_async_client when "
-                "default_request_gzip is False (zero behavior change contract)"
+            assert isinstance(cleaned.get("http_async_client"), httpx.AsyncClient), (
+                "clean_llm_config must inject an async httpx.AsyncClient "
+                "(watchdog-wrapped) even when default_request_gzip is False"
             )
+            # ... but the transport chain contains NO gzip transport.
+            sync_transport = cleaned["http_client"]._transport
+            assert isinstance(sync_transport, WatchdogHTTPTransport), (
+                "injected sync client must be watchdog-wrapped"
+            )
+            assert not isinstance(sync_transport._inner, GzipRequestTransport), (
+                "gzip-OFF path must NOT compose a GzipRequestTransport "
+                "into the injected client"
+            )
+            assert not any(
+                isinstance(part, GzipRequestTransport)
+                for part in [sync_transport._inner]
+            ), "no gzip transport anywhere in the disabled-path chain"
         finally:
             ThinkingChatOpenAI.default_request_gzip = original
 
