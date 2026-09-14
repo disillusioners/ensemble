@@ -3,6 +3,7 @@ import {
   buildSseStatusErrorRow,
   SSE_ERROR_DETAIL_MAX_CHARS,
   truncateSseErrorDetail,
+  extractSseErrorText,
 } from './sse.service';
 import { mergeMessagesById } from './message-merge.util';
 import type { Message } from '../models';
@@ -167,7 +168,10 @@ describe('buildSseErrorEventRow — staleness + malformed guards', () => {
       INSTANCE_A,
     );
     expect(row).not.toBeNull();
-    // Falls through extractSseErrorText's string checks → JSON fallback.
+    // When ``error`` is undefined, ``extractSseErrorText`` returns ''
+    // (the helper's last-resort JSON fallback only fires for *unknown
+    // object shapes*, not for missing values). The row's content is
+    // therefore the empty string here — never "[object Object]".
     expect(row!.content).not.toContain('[object Object]');
   });
 });
@@ -332,5 +336,54 @@ describe('production-source identity pins (render-side wiring)', () => {
     expect(src).toContain('buildSseErrorEventRow(data, this.currentInstanceId)');
     expect(src).toContain('buildSseStatusErrorRow(');
     expect(src).toContain("data.status === 'error'");
+  });
+
+  it('banner wiring: latestError routes through extractSseErrorText (not String(data.error))', () => {
+    // Regression pin — dd0a6926 left the pre-fix ``String(data.error)``
+    // decoder at the banner call site. This follow-up routes it through
+    // the shared helper so dict-shaped hub-lane errors render a
+    // readable message instead of "[object Object]".
+    const src = readSource('src/app/services/sse.service.ts');
+    expect(src).toContain('extractSseErrorText(data.error)');
+    expect(src).not.toMatch(/latestError\.set\(\s*\{\s*message:\s*String\(data\.error\)/);
+  });
+});
+
+// ── extractSseErrorText — banner decoder (follow-up to dd0a6926) ────────────
+// The ``latestError`` banner now reuses this helper instead of its old
+// ``String(data.error)`` decoder. Plain-TS real-import style (house style:
+// the helper is exercised directly, no EventSource / no TestBed).
+// Three wire shapes must each render a usable message — the bug class is
+// dict-shaped hub-lane errors rendering the literal "[object Object]".
+
+describe('extractSseErrorText — banner decoder (latestError reuse)', () => {
+  it('decodes dict-shaped error into a readable message (NOT [object Object])', () => {
+    // Hub-lane shape per daemon/services/live_event_hub.py:202-218.
+    const text = extractSseErrorText({
+      error: 'LLM provider returned empty response',
+      stage: 'streaming',
+      message_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    });
+    expect(text).toBe('LLM provider returned empty response');
+    expect(text).not.toContain('[object Object]');
+  });
+
+  it('returns bare-string error verbatim', () => {
+    // Shutdown-lane shape per daemon/services/instance_messaging.py.
+    expect(extractSseErrorText('server_shutdown')).toBe('server_shutdown');
+  });
+
+  it('returns safe JSON-stringified text for an unknown object shape', () => {
+    // No ``error`` / ``detail`` / ``message`` key — last-resort JSON
+    // fallback must still produce readable text, never "[object Object]".
+    const text = extractSseErrorText({ unexpected: { nested: true } });
+    expect(text).not.toContain('[object Object]');
+    expect(text).toContain('"unexpected"');
+    expect(text).toContain('"nested"');
+  });
+
+  it('returns "" for null / undefined (no JSON fallback when no error is present)', () => {
+    expect(extractSseErrorText(undefined)).toBe('');
+    expect(extractSseErrorText(null)).toBe('');
   });
 });

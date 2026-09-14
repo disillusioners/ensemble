@@ -155,7 +155,7 @@ export function truncateSseErrorDetail(text: string): string {
  * Unknown dict shapes fall back to JSON so the row never renders
  * "[object Object]".
  */
-function extractSseErrorText(errorField: unknown): string {
+export function extractSseErrorText(errorField: unknown): string {
   if (typeof errorField === 'string') return errorField;
   if (errorField && typeof errorField === 'object') {
     const e = errorField as Record<string, unknown>;
@@ -858,7 +858,7 @@ export class SseService {
 
           if (data.error) {
             this.latestError.set({
-              message: String(data.error),
+              message: extractSseErrorText(data.error),
               instance_id: data.instance_id || this.currentInstanceId || undefined,
             });
           }
@@ -868,7 +868,15 @@ export class SseService {
           // wire shapes (hub dict lane with stage/message_id, and the
           // bare-string server_shutdown lane) and upserts through the
           // id-keyed message mirror so reconnects/refetches never
-          // duplicate it. Existing ``latestError`` semantics unchanged.
+          // duplicate it.
+          //
+          // The ``latestError`` banner ABOVE also routes through
+          // ``extractSseErrorText`` so dict-shaped hub-lane errors render
+          // a readable message instead of "[object Object]". This is the
+          // follow-up to dd0a6926 — that commit left the banner's old
+          // ``String(data.error)`` decoder in place deliberately. Same
+          // helper as the transcript row → single source of truth for
+          // hub-lane error decoding.
           const errorRow = buildSseErrorEventRow(data, this.currentInstanceId);
           if (errorRow) this.upsertMessage(errorRow);
         } catch {
