@@ -2281,9 +2281,21 @@ SET admission_state = 'queued',
             # inline writer wins the SQL guard race (the bus
             # never publishes a terminal event for an already-
             # terminal row). The release is scoped to the job's
-            # instance_id (matches R8 + R9/R10 instance-scoped
-            # semantics) and is idempotent — a second concurrent
-            # writer sees ``rowcount == 0`` on the DELETE.
+            # OWN ``job_id`` (W1 job-scoped release — NOT
+            # instance-wide: a sibling concurrent job's lock or a
+            # post-revive successor's lock on the same instance MUST
+            # survive this finalize; canonical job-keyed shape is
+            # ``LockRepository.release_by_job``). ``job_id`` alone is
+            # the scoping key — not the full ``(project_id,
+            # queue_id, job_id)`` triple — because
+            # ``JobItem.project_id``/``queue_id`` are nullable
+            # (virtual jobs); keying the DELETE on them could
+            # silently no-op and resurrect the F1 leak class.
+            # ``JobLock.job_id`` is a UUID-minted, indexed,
+            # non-nullable column, so job_id alone uniquely
+            # identifies the job's own lock rows. The release is
+            # idempotent — a second concurrent writer sees
+            # ``rowcount == 0`` on the DELETE.
             #
             # Benign no-op on race loss: the DELETE is
             # staged and committed alongside the JobItem UPDATE
@@ -2303,8 +2315,12 @@ SET admission_state = 'queued',
                 instance_id_for_release is not None
                 and instance_id_for_release != ""
             ):
+                # W1: job-scoped — releases ONLY this job's own lock
+                # rows (the guard above is kept solely to preserve
+                # the base behavior for virtual-job rows, which hold
+                # no per-queue lock).
                 lock_stmt = select(JobLock).where(
-                    JobLock.instance_id == instance_id_for_release
+                    JobLock.job_id == job_id
                 )
                 locks_to_release = list(session.exec(lock_stmt).all())
                 for lock in locks_to_release:
@@ -2528,8 +2544,15 @@ SET admission_state = 'queued',
                 # The lock release rides the SAME ``session.commit()``
                 # as the JobItem UPDATE so a process crash between
                 # the JobItem transition and the lock release cannot
-                # orphan the lock. Scoped to the job's
-                # ``instance_id`` (same scope as R8/R9/R10). Idempotent
+                # orphan the lock. Scoped to the job's OWN
+                # ``job_id`` (W1 job-scoped release — NOT
+                # instance-wide: a sibling concurrent job's lock or
+                # a post-revive successor's lock on the same
+                # instance MUST survive this reconcile; canonical
+                # job-keyed shape is
+                # ``LockRepository.release_by_job``; ``job_id``
+                # alone because the ``JobItem`` partition keys are
+                # nullable). Idempotent
                 # — concurrent writers see ``rowcount == 0`` on the
                 # DELETE.
                 #
@@ -2551,8 +2574,12 @@ SET admission_state = 'queued',
                     instance_id_for_release is not None
                     and instance_id_for_release != ""
                 ):
+                    # W1: job-scoped — releases ONLY this job's own
+                    # lock rows (the guard above is kept solely to
+                    # preserve the base behavior for virtual-job
+                    # rows, which hold no per-queue lock).
                     lock_stmt = select(JobLock).where(
-                        JobLock.instance_id == instance_id_for_release
+                        JobLock.job_id == job_id
                     )
                     locks_to_release = list(
                         session.exec(lock_stmt).all()
@@ -4056,8 +4083,13 @@ SET admission_state = 'queued',
         JobItem UPDATE and the ``job_locks`` DELETE ride the SAME
         ``engine.begin()`` transaction so a process crash between
         the JobItem transition and the lock release cannot orphan
-        the lock. The lock release is scoped to the JobItem's
-        ``instance_id`` (matches R8 instance-scoped semantics).
+        the lock. The lock release is scoped to the orphan job's
+        OWN ``job_id`` (W1 job-scoped release — NOT instance-wide:
+        a sibling concurrent job's lock or a post-revive
+        successor's lock on the same instance MUST survive this
+        reap; canonical job-keyed shape is
+        ``LockRepository.release_by_job``; ``job_id`` alone
+        because the ``JobItem`` partition keys are nullable).
         If the JobItem has no ``instance_id`` (a virtual-job row
         that holds no per-queue lock), the DELETE is skipped —
         the orphan reaper's existing docstring claim ("a real
@@ -4119,12 +4151,12 @@ SET admission_state = 'queued',
                 # release atomically. No-op on the lock side too.
                 return None
 
-            # F5 atomic release: DELETE locks scoped to the same
-            # instance_id in the SAME transaction. Mirrors the R8
-            # in-session pattern + the F1 inline writer's lock
-            # release + ``LockRepository.clear_terminal_job_locks``
-            # SQL semantics (``job_id NOT IN (active job ids)``).
-            # The JobItem UPDATE just flipped
+            # F5 atomic release (W1 job-scoped): DELETE the orphan
+            # job's OWN lock rows in the SAME transaction. Mirrors
+            # the F1 inline writer's job-scoped lock release + the
+            # ``LockRepository.release_by_job`` job-keyed shape (NOT
+            # instance-wide — sibling/successor locks on the same
+            # instance survive). The JobItem UPDATE just flipped
             # ``admission_state='active' → 'done'`` so the job_id
             # is no longer in the active set; the DELETE is the
             # standard terminal-job lock cleanup.
@@ -4132,9 +4164,9 @@ SET admission_state = 'queued',
                 conn.execute(
                     text(
                         "DELETE FROM job_locks "
-                        "WHERE instance_id = :instance_id"
+                        "WHERE job_id = :job_id"
                     ),
-                    {"instance_id": instance_id_for_release},
+                    {"job_id": job_id},
                 )
 
         with SQLModelSession(self.engine) as session:
