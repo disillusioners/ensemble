@@ -504,6 +504,106 @@ class TestMessageProcessingErrorsLaneForEmptyResponse:
         )
         assert kwargs["message_id"] == "msg-1"
 
+    def test_exhaustion_marker_mints_validation_error_exhausted_lane(self):
+        """A validation-family exception stamped with
+        ``RETRY_BUDGET_EXHAUSTED_MARKER`` routes to the NEW
+        ``validation_error_exhausted`` lane.
+
+        The marker is set by the agent_node loud-ERROR handler
+        (daemon/graph.py, exhaustion-severity stamp) exactly when the
+        retries-burned terminal re-raises; ``_classify_error_type`` mints
+        the dedicated lane so ``CRITICAL_ERROR_TYPES``
+        (error_reporting.py) can severity-map it critical WITHOUT
+        broadening the critical class to every ``validation_error``.
+        """
+        from daemon.constants import RETRY_BUDGET_EXHAUSTED_MARKER
+        from daemon.response_validation import (
+            EmptyLLMResponseError,
+            LLMResponseValidationError,
+        )
+        from daemon.services.message_processing_errors import (
+            _classify_error_type,
+        )
+
+        # All validation-family shapes must mint the exhaustion lane
+        # when stamped (the name-matching branch is shared).
+        for exc in (
+            LLMResponseValidationError("validation failed"),
+            EmptyLLMResponseError(
+                "empty response — provider failure",
+                response=AIMessage(content=""),
+            ),
+        ):
+            setattr(exc, RETRY_BUDGET_EXHAUSTED_MARKER, True)
+            assert (
+                _classify_error_type(exc) == "validation_error_exhausted"
+            ), (
+                f"stamped {type(exc).__name__} must classify as "
+                f"'validation_error_exhausted', got "
+                f"{_classify_error_type(exc)!r}"
+            )
+
+    def test_exhaustion_lane_is_critical_plain_validation_error_stays_warning(self):
+        """Severity-contract pin: ONLY the exhaustion lane joins
+        ``CRITICAL_ERROR_TYPES``; plain ``validation_error`` stays out.
+
+        This is the precise-scope guard for the promotion — the critical
+        class must NOT absorb every validation error, so a repaired-away
+        or otherwise non-graph validation error keeps its warning
+        severity (error_reporting.py: ``severity = "critical" if
+        error_type in CRITICAL_ERROR_TYPES else "warning"``).
+        """
+        from daemon.services.error_reporting import CRITICAL_ERROR_TYPES
+
+        assert "validation_error_exhausted" in CRITICAL_ERROR_TYPES, (
+            "the retries-burned validation terminal must severity-map "
+            "critical via CRITICAL_ERROR_TYPES"
+        )
+        assert "validation_error" not in CRITICAL_ERROR_TYPES, (
+            "plain validation_error must stay OUT of the critical class "
+            "(severity warning) — only the stamped exhaustion terminal "
+            "promotes"
+        )
+        # Pre-existing critical class unchanged.
+        assert {"max_retries_exceeded", "circuit_breaker_open"} <= (
+            CRITICAL_ERROR_TYPES
+        )
+
+    def test_unstamped_validation_errors_keep_legacy_warning_lane(self):
+        """Transient/side-channel validation errors are UNCHANGED: an
+        unstamped exception keeps the legacy ``validation_error`` lane
+        (severity warning). Covers directly-constructed exceptions and
+        any non-graph propagate path — the marker is the ONLY route into
+        the exhaustion lane.
+        """
+        from daemon.response_validation import (
+            EmptyLLMResponseError,
+            LLMResponseValidationError,
+        )
+        from daemon.services.message_processing_errors import (
+            _classify_error_type,
+        )
+
+        # Explicitly UNstamped (marker absent AND false-valued).
+        for exc in (
+            LLMResponseValidationError("validation failed"),
+            EmptyLLMResponseError(
+                "empty response — provider failure",
+                response=AIMessage(content=""),
+            ),
+        ):
+            assert (
+                _classify_error_type(exc) == "validation_error"
+            ), (
+                f"unstamped {type(exc).__name__} must keep the legacy "
+                f"'validation_error' lane, got {_classify_error_type(exc)!r}"
+            )
+            setattr(exc, "retry_budget_exhausted", False)
+            assert _classify_error_type(exc) == "validation_error", (
+                "a false-valued marker must behave exactly like an "
+                "absent marker"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Test (a)/(b)/(c): graph-level continuous-empty → ERROR lineage
@@ -750,3 +850,67 @@ class TestContinuousEmptyGraphEndToEnd:
         )
         assert ai_messages[0].content == "Here is your answer."
         assert isinstance(messages[-1], AIMessage)
+
+    @pytest.mark.asyncio
+    async def test_e_loud_exhaustion_stamps_retry_budget_exhausted_marker(
+        self, real_graph_module
+    ):
+        """(e) REAL-graph wiring pin for the exhaustion-severity stamp.
+
+        The continuous-empty exhaustion terminal that escapes the REAL
+        graph carries ``RETRY_BUDGET_EXHAUSTED_MARKER`` — set by the
+        agent_node loud-ERROR handler — and therefore classifies to the
+        ``validation_error_exhausted`` lane (severity critical via
+        ``CRITICAL_ERROR_TYPES``). This is the wiring half of the
+        promotion: the lane/membership pins above prove the mapping,
+        this test proves the REAL pipeline actually stamps.
+
+        Scenario mirrors (c) (no backup, bounded loud exhaustion) — the
+        budget is burned (3 attempts), the SAME EmptyLLMResponseError
+        object propagates, now carrying the marker.
+        """
+        from daemon.constants import RETRY_BUDGET_EXHAUSTED_MARKER
+        from daemon.response_validation import EmptyLLMResponseError
+        from daemon.services.message_processing_errors import (
+            _classify_error_type,
+        )
+
+        stub_llm = _stub_llm(return_value=_empty_ai())
+        wrapped = _build_wrapped_llm(
+            stub_llm=stub_llm,
+            failover_controller=None,  # matches production "no backup"
+            transient_attempts=3,
+            timeout_attempts=3,
+        )
+        graph, _ = _build_one_node_graph(
+            real_graph_module,
+            wrapped,
+            retry_config={"transient_attempts": 3, "timeout_attempts": 3},
+        )
+
+        raised, _messages = await _drive_one_turn(graph, "Do the thing")
+
+        # Same bounded loud-exhaustion shape as (c).
+        assert stub_llm.invoke.call_count == 3, (
+            f"expected 3 attempts (bounded retry budget), "
+            f"got {stub_llm.invoke.call_count}"
+        )
+        assert isinstance(raised, EmptyLLMResponseError), (
+            f"expected the graph to re-raise EmptyLLMResponseError, "
+            f"got {type(raised).__name__}: {raised}"
+        )
+
+        # THE PIN: the exception that escapes the REAL graph is stamped
+        # with the exhaustion marker and mints the critical lane.
+        assert getattr(raised, RETRY_BUDGET_EXHAUSTED_MARKER, None) is True, (
+            "the loud-exhaustion exception must carry "
+            f"{RETRY_BUDGET_EXHAUSTED_MARKER}=True so the error-report "
+            "lane promotes it to critical severity"
+        )
+        assert (
+            _classify_error_type(raised) == "validation_error_exhausted"
+        ), (
+            f"stamped exhaustion terminal must classify as "
+            f"'validation_error_exhausted', got "
+            f"{_classify_error_type(raised)!r}"
+        )

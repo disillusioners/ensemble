@@ -291,3 +291,65 @@ class TestRecoveryGuidanceHintConstant:
         )
         assert "spawn a new child instance" in respawn_line
         assert "continue the task" in respawn_line
+
+
+# ---------------------------------------------------------------------------
+# Severity classification (monitoring-followups: exhaustion promotion)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorReportSeverityClassification:
+    """The real ``_send_error_report`` severity mapping.
+
+    Drives the SAME real async path as the hint tests above and asserts
+    the ``**Severity:**`` line of the enqueued parent report:
+
+    * ``validation_error_exhausted`` (the retries-burned validation
+      terminal minted by ``_classify_error_type`` when the agent_node
+      loud-ERROR handler stamps ``RETRY_BUDGET_EXHAUSTED_MARKER``) maps
+      CRITICAL — the promotion under test;
+    * plain ``validation_error`` stays WARNING — the precise-scope guard
+      (a repaired-away/transient validation error must never become
+      critical noise);
+    * the pre-existing critical class is unchanged.
+    """
+
+    @staticmethod
+    async def _severity_line_for(error_type: str) -> str:
+        message = await _send_error_report_and_get_message(
+            error="provider failure — retries burned",
+            error_type=error_type,
+        )
+        return next(
+            line for line in message.splitlines() if "**Severity:**" in line
+        )
+
+    @pytest.mark.asyncio
+    async def test_exhausted_validation_lane_maps_critical(self):
+        severity_line = await self._severity_line_for(
+            "validation_error_exhausted"
+        )
+        assert severity_line == "**Severity:** critical", (
+            f"the retries-burned validation terminal must map critical, "
+            f"got {severity_line!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_plain_validation_error_stays_warning(self):
+        severity_line = await self._severity_line_for("validation_error")
+        assert severity_line == "**Severity:** warning", (
+            f"plain validation_error must stay warning (only the "
+            f"stamped exhaustion terminal promotes), got {severity_line!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_preexisting_critical_types_unchanged(self):
+        critical_line = await self._severity_line_for("max_retries_exceeded")
+        assert critical_line == "**Severity:** critical"
+        breaker_line = await self._severity_line_for("circuit_breaker_open")
+        assert breaker_line == "**Severity:** critical"
+
+    @pytest.mark.asyncio
+    async def test_default_execution_error_stays_warning(self):
+        severity_line = await self._severity_line_for("execution_error")
+        assert severity_line == "**Severity:** warning"

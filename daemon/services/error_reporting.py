@@ -24,7 +24,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Error report severity classification
-CRITICAL_ERROR_TYPES = frozenset({"max_retries_exceeded", "circuit_breaker_open"})
+CRITICAL_ERROR_TYPES = frozenset({
+    "max_retries_exceeded",
+    "circuit_breaker_open",
+    # Exhaustion terminal of the validation lane (monitoring-followups):
+    # a validation-family exception stamped ``retry_budget_exhausted`` by
+    # the agent_node loud-ERROR handler — i.e. the provider-failure
+    # terminal with the FULL retry budget burned (transient attempts +
+    # HA failover). Minted by ``_classify_error_type``
+    # (message_processing_errors.py); see ``RETRY_BUDGET_EXHAUSTED_MARKER``
+    # (daemon/constants.py). Plain (non-exhaustion) ``validation_error``
+    # deliberately stays warning — only the retries-burned terminal is
+    # critical.
+    "validation_error_exhausted",
+})
 # "Recoverable" here means RESUME semantics (an operator/automation can still
 # revive the instance) — NOT the same vocabulary as RECOVERY_GUIDANCE_HINT's
 # "cannot be recovered by waiting", which is about autonomous self-healing.
