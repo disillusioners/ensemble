@@ -214,6 +214,19 @@ def _make_fake_llm_class(
     def _factory(**kwargs):
         return mock_instance
 
+    # dd43a7f1 (2026-08-25) made ``clean_llm_config`` read
+    # ``ThinkingChatOpenAI.default_streaming`` / ``default_request_gzip``
+    # (graph.py:3733 + 3768) before constructing the LLM. The factory we
+    # patch in here is a plain function, so without these class-attr
+    # shims the access raises
+    # ``AttributeError: 'function' object has no attribute 'default_streaming'``.
+    # Mirrors the ``_StubClient`` shape used by
+    # ``tests/unit/test_symptom_repair_engine.py:392-398`` and the
+    # ``_FakeChatClient`` shape in
+    # ``tests/unit/test_symptom_repair_engine_failover_e2e.py:161-173``.
+    _factory.default_streaming = False
+    _factory.default_request_gzip = False
+
     return _factory, mock_instance
 
 
@@ -755,7 +768,14 @@ class TestWatchoverEvaluatorEvaluate:
     async def test_max_denials_property_reads_config(self):
         """``max_denials`` property returns configured value (default 3)."""
         manager = make_manager()
-        with patch("daemon.graph.ThinkingChatOpenAI", lambda **k: MagicMock()):
+        # ``clean_llm_config`` reads ``default_streaming`` /
+        # ``default_request_gzip`` from the patched symbol
+        # (graph.py:3733, 3768); mirrors the same shim used in
+        # ``_make_fake_llm_class``.
+        _lambda_factory = lambda **k: MagicMock()
+        _lambda_factory.default_streaming = False
+        _lambda_factory.default_request_gzip = False
+        with patch("daemon.graph.ThinkingChatOpenAI", _lambda_factory):
             e_default = WatchoverEvaluator(
                 manager=manager,
                 llm_config={"model": "test"},
@@ -835,6 +855,12 @@ class TestWatchoverMessageStructure:
 
         def _factory(**kwargs):
             return llm_instance
+
+        # Class attrs read by ``clean_llm_config`` (graph.py:3733, 3768) —
+        # see the matching note in ``_make_fake_llm_class`` for the
+        # post-dd43a7f1 contract.
+        _factory.default_streaming = False
+        _factory.default_request_gzip = False
 
         return _factory, llm_instance, captured
 
