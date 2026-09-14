@@ -61,6 +61,16 @@ def _make_fake_llm_class(
     def _factory(**kwargs):
         return mock_instance
 
+    # dd43a7f1 (2026-08-25) made ``clean_llm_config`` read
+    # ``ThinkingChatOpenAI.default_streaming`` (graph.py:3733) and
+    # ``default_request_gzip`` (graph.py:3768) before constructing the
+    # LLM. Mirrors the same shape used in
+    # ``tests/unit/test_watchover_decision.py::_make_fake_llm_class`` and
+    # the canonical ``_StubClient`` in
+    # ``tests/unit/test_symptom_repair_engine.py``.
+    _factory.default_streaming = False
+    _factory.default_request_gzip = False
+
     return _factory, mock_instance
 
 
@@ -137,6 +147,13 @@ class TestWatcherContextBuilderHappyPath:
 
         def _capture_factory(**kwargs):
             return mock_instance
+
+        # dd43a7f1 (2026-08-25) made ``clean_llm_config`` read
+        # ``ThinkingChatOpenAI.default_streaming`` (graph.py:3733) and
+        # ``default_request_gzip`` (graph.py:3768) before constructing
+        # the LLM — see the matching note in ``_make_fake_llm_class``.
+        _capture_factory.default_streaming = False
+        _capture_factory.default_request_gzip = False
 
         factory = _capture_factory
         with patch("daemon.graph.ThinkingChatOpenAI", factory):
@@ -479,6 +496,13 @@ class TestWatcherContextBuilderLazyLlm:
         def _tracking_factory(**kwargs):
             factory_calls.append(kwargs)
             return MagicMock(invoke=MagicMock(return_value=MagicMock(content="## Agent Activity")))
+
+        # dd43a7f1 (2026-08-25) made ``clean_llm_config`` read
+        # ``ThinkingChatOpenAI.default_streaming`` (graph.py:3733) and
+        # ``default_request_gzip`` (graph.py:3768) before constructing
+        # the LLM — see the matching note in ``_make_fake_llm_class``.
+        _tracking_factory.default_streaming = False
+        _tracking_factory.default_request_gzip = False
 
         manager = _make_manager_with_llm(_tracking_factory)
 

@@ -41,7 +41,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from daemon.constants import MAX_ERROR_LEN
+from daemon.constants import MAX_ERROR_LEN, RETRY_BUDGET_EXHAUSTED_MARKER
 
 if TYPE_CHECKING:
     pass
@@ -138,6 +138,19 @@ def _classify_error_type(e: Exception) -> str:
         "APIResponseValidationError",
         "EmptyLLMResponseError",
     ):
+        # Exhaustion promotion (monitoring-followups): the agent_node
+        # loud-ERROR handler (daemon/graph.py) stamps validation-family
+        # exceptions with ``RETRY_BUDGET_EXHAUSTED_MARKER`` — for this
+        # family, reaching that handler means the full retry budget
+        # (transient attempts + HA failover) is burned. A stamped
+        # exception is the retries-burned EXHAUSTION terminal and mints
+        # its own lane so ``CRITICAL_ERROR_TYPES`` (error_reporting.py)
+        # severity-maps it critical. Unstamped validation errors keep
+        # the legacy ``validation_error`` lane (severity warning)
+        # unchanged — a directly-constructed or non-graph-path
+        # validation error never becomes critical noise.
+        if getattr(e, RETRY_BUDGET_EXHAUSTED_MARKER, False):
+            return "validation_error_exhausted"
         return "validation_error"
 
     # Transient API errors (shouldn't reach here, but just in case)

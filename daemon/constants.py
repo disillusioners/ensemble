@@ -539,6 +539,22 @@ def is_reserved_source(source: str | None) -> bool:
 #     test_helper_is_deliberately_case_sensitive``.
 
 
+# Exhaustion-severity marker (monitoring-followups). Stamped as an
+# exception attribute by the agent_node loud-ERROR handler
+# (daemon/graph.py) on validation-family exceptions the moment they
+# reach that handler — which for this family can only happen after the
+# retry budget is burned (both classes are unconditional
+# TRANSIENT_EXCEPTIONS members, the sole raise site
+# (``validate_llm_response``) lives INSIDE the retry scope, and the
+# ``Retrying(reraise=True)`` wrapper hands the original exception over
+# only when the predicate refuses further attempts). Read by
+# ``_classify_error_type`` (daemon/services/message_processing_errors.py)
+# to mint the ``validation_error_exhausted`` lane, which
+# ``CRITICAL_ERROR_TYPES`` (daemon/services/error_reporting.py)
+# severity-maps to critical. Plain validation errors keep the legacy
+# ``validation_error`` lane (severity warning).
+RETRY_BUDGET_EXHAUSTED_MARKER: str = "retry_budget_exhausted"
+
 # ── Report Integrity (wc-wake-report-integrity Wave 1) ────────────────────────
 #
 # S3 scoping note (council follow-up, 2026-08-30): the Wave-1

@@ -116,6 +116,10 @@ from .llm_error_classifier import (
     TransientAPIError,
     _truncate_error,
 )
+# Exhaustion-severity stamp (monitoring-followups): attribute name shared
+# with the error-report classifier (message_processing_errors.py) via the
+# leaf constants module — see daemon/constants.py.
+from .constants import RETRY_BUDGET_EXHAUSTED_MARKER
 from .response_validation import (
     EmptyLLMResponseError,
     LLMResponseValidationError,
@@ -7442,6 +7446,34 @@ def create_agent_node(
             # Master OFF (USER AMENDMENT 2026-09-13 / ADR-0009):
             # byte-identical routing. The intercept is INERT; the
             # original ``raise`` fires unchanged.
+
+            # ── Exhaustion-severity stamp (monitoring-followups) ─────
+            # A validation-family exception can only REACH this handler
+            # after its retry budget is burned: both classes are
+            # unconditional TRANSIENT_EXCEPTIONS members, the sole
+            # raise site (``validate_llm_response``) lives INSIDE the
+            # retry scope (llm_error_classifier.py:916), and the
+            # ``Retrying(reraise=True)`` wrapper (graph.py:_build_retrying)
+            # hands the original exception over only when the retry
+            # predicate refuses further attempts. Stamp it so the
+            # error-report classifier mints the
+            # ``validation_error_exhausted`` lane — severity-mapped
+            # critical by ``CRITICAL_ERROR_TYPES`` — while unstamped
+            # validation errors keep the legacy warning lane. Every
+            # exit from this handler re-raises the SAME ``e`` object
+            # (the Phase-2 pre-terminal repair never raises — it folds
+            # a second exception into ``abort_reason="second-exception"``
+            # and falls through to the loud ERROR below), so one stamp
+            # here covers all three loud-ERROR raise sites. Non-retryable
+            # shapes that escape here on attempt 1 (BadRequestError,
+            # auth, non-matching APIError) are NOT validation-family
+            # and are never stamped. Repair-recovered turns absorb the
+            # exception entirely — the stamp never propagates.
+            if isinstance(
+                e,
+                (LLMResponseValidationError, openai.APIResponseValidationError),
+            ):
+                setattr(e, RETRY_BUDGET_EXHAUSTED_MARKER, True)
             if (
                 get_symptom_repair_ladder_enabled()
                 and isinstance(e, LLMResponseValidationError)
