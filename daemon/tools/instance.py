@@ -1,6 +1,6 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: ~4630 lines (2026-09-13 post-phase-3-tunables-move).
+Module size: ~4850 lines (2026-09-14 dispatch-lane stranding fix).
 Originally aimed for the 1000-3000 line band; post-move we are ~1600
 lines over the band. Routing logic (``_route_send_message``,
 ``_make_workdir_aware``, ``_make_instance_id_aware``) and the tool
@@ -895,6 +895,14 @@ def _route_send_message(
         ``prior_status`` is the target's status string at the moment of
         routing — surfaced so the tool result can communicate it back to
         the calling LLM (e.g. "Instance was completed — revived ...").
+
+        Log-field pseudo-value (NOT a route value): the structured-log
+        field ``routed_via`` may also carry ``"enqueue_graphless_guard"``
+        at the call site when the graphless guard downgrades an eligible
+        RUNNING target to the durable enqueue lane. The final route value
+        in that case is ``"enqueue"``; ``"enqueue_graphless_guard"``
+        stamps the downgrade reason in the log payload only
+        (~:3052-3067).
     """
     # Lazy import — circular-import breaker (mirrors the pattern at the
     # governor-guard helper above; ``daemon.tools`` sits below

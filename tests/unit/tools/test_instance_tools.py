@@ -5602,8 +5602,6 @@ class TestRunningGraphlessDurableFallback:
         """The downgrade is LOUD (structured ``routed_via=
         enqueue_graphless_guard`` log) — the incident's signature was
         silence. Mirrors the Task 3b provenance logging contract."""
-        import logging as _logging
-
         with patch(
             "daemon.tools.instance._check_team_membership",
             return_value=None,
@@ -5613,7 +5611,7 @@ class TestRunningGraphlessDurableFallback:
             send_message = _get_send_message_tool(manager)
 
             with caplog.at_level(
-                _logging.INFO, logger="daemon.tools.instance"
+                logging.INFO, logger="daemon.tools.instance"
             ):
                 await send_message.coroutine("target-id", "real task")
 

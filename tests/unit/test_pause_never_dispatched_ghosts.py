@@ -35,7 +35,6 @@ Test layout:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -287,7 +286,7 @@ def _build_lifecycle(engine: Engine) -> tuple[InstanceLifecycleService, MagicMoc
 class TestPauseCascadeSkipsNeverDispatchedGhosts:
     @pytest.mark.asyncio
     async def test_ghosts_skipped_dispatched_child_still_pauses(self, engine):
-        ids = _seed_tree(engine)
+        _seed_tree(engine)
         service, _, captured = _build_lifecycle(engine)
 
         result = await service.pause_instance_cascade("leader")
@@ -320,7 +319,7 @@ class TestPauseCascadeSkipsNeverDispatchedGhosts:
         the ``running``+``internal_child_noop`` limbo never forms, and
         the parent-completion gate's ghost filter keeps excluding them.
         """
-        ids = _seed_tree(engine)
+        _seed_tree(engine)
         service, _, captured = _build_lifecycle(engine)
 
         await service.pause_instance_cascade("leader")

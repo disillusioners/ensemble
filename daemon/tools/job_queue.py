@@ -412,13 +412,25 @@ integrity, B1 RESOLVED 2026-09-11 — the legacy
 was REMOVED; WC ALWAYS routes through durable enqueue).
 
 Routing (split):
-  * ``RUNNING`` → RAM FIFO injection via
+  * ``RUNNING`` with a live graph → RAM FIFO injection via
     ``InstanceManager.set_injection(...)`` (byte-identical to pre-
     wc-wake behavior). The ``agent_node`` consumes the entry on its
     next LLM call and threads it into the conversation as a fresh
     ``HumanMessage``. Returns ``{status: \"injected\", pending_count,
     content, timestamp}``. Status flag (``injection_pending`` SSE) is
     unchanged.
+  * ``RUNNING`` without a live graph (graphless / never-dispatched,
+    e.g. spawn-created child cascade-paused + cascade-resumed without
+    ever being dispatched) → durable wake enqueue via
+    ``manager.enqueue_message(source=f\"internal_agent:{caller}\")``
+    — same-second task + message materialization, busy pre-check
+    included (mirrors the WC branch below; same
+    ``has_instance_busy`` gate via ``manager._task_repo``).
+    Returns ``{job_id, instance_id, status: \"enqueued\",
+    message_id, queued: True}``. No ``injection_pending`` SSE under
+    this path (the FE sees the message via the normal turn-start
+    ``user_message`` pre-emit). Guard site:
+    ``if not manager.has_live_graph_task(instance_id):`` (~:2316).
 
   * ``WAITING_CHILDREN`` → durable wake enqueue via
     ``manager.enqueue_message(source=f\"internal_agent:{caller}\")``
@@ -444,11 +456,13 @@ statuses are rejected with the eligibility error.
 
 Unlike ``job_continue`` (which creates a new Task and requires the
 instance to be IDLE/terminal), ``job_inject`` piggybacks on the
-existing turn for RUNNING targets — it does NOT spawn a new job, does
-NOT interrupt tool execution, and does NOT race with the active
-``enqueue_message_job`` path. For WC (B1), ``job_inject`` moves to
-``enqueue_message`` and DOES create a new first-class turn (durable
-wake) — the same primitive the agent-tool send_message uses.
+existing turn for RUNNING targets WITH a live graph — it does NOT
+spawn a new job, does NOT interrupt tool execution, and does NOT
+race with the active ``enqueue_message_job`` path. For WC (B1) and
+for graphless RUNNING targets (dispatch-lane stranding fix, guard
+at ~:2316), ``job_inject`` moves to ``enqueue_message`` and DOES
+create a new first-class turn (durable wake) — the same primitive
+the agent-tool send_message uses.
 
 Return shape (m2 fix, LOCKED C1-D3 Option A, 2026-08-30): the
 ``queued`` flag on the WC branch (B1: the only branch; was flag-ON WC

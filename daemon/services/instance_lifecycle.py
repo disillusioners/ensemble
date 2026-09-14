@@ -3069,7 +3069,17 @@ class InstanceLifecycleService:
 
         Returns dict with:
           - paused_ids: list of all instance IDs that were paused
-          - skipped_ids: list of instance IDs that were already paused (skipped)
+          - skipped_ids: list of instance IDs that were skipped (not
+            paused). Classes derived from the per-node loop (see
+            :3162-3256): nodes not found in the DB (``meta is None``,
+            :3166-3169), nodes already ``paused`` (:3177), nodes in a
+            terminal status from ``TERMINAL_STATUSES`` (:3178), never-
+            dispatched ghost children matched by
+            ``repo.filter_never_dispatched_ids`` (:3190), and nodes
+            whose pause raised an exception in the per-node try block
+            (:3254). Also populated by the early-return guard at
+            :3104-3106 (no tree found) which seeds
+            ``[instance_id]`` directly.
         """
         repo = self._manager._instance_repository
 

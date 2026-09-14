@@ -3714,6 +3714,16 @@ class InstanceManager:
 
         Read-only — no state mutation, no facade-forwarding implications.
 
+        Contract: this method MUST NOT raise. It is a read-only
+        in-memory state introspection (``dict.get`` + ``task.done()``)
+        with no DB calls and no locks. All three call sites
+        (``tools/instance.py:3052``, ``routers/messages.py``,
+        ``tools/job_queue.py:2316``) invoke it unguarded — they
+        branch on the returned ``bool`` to choose between the RAM-FIFO
+        injection lane and the durable enqueue lane. Raising here
+        would surface as an uncaught ``KeyError``/``AttributeError``
+        in the caller and strand the dispatch.
+
         Args:
             instance_id: Target instance identifier.
 
