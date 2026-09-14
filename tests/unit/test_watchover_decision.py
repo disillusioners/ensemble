@@ -225,6 +225,7 @@ def _make_fake_llm_class(
     # ``_FakeChatClient`` shape in
     # ``tests/unit/test_symptom_repair_engine_failover_e2e.py:161-173``.
     _factory.default_streaming = False
+    _factory.default_request_timeout = 610
     _factory.default_request_gzip = False
 
     return _factory, mock_instance
@@ -774,6 +775,7 @@ class TestWatchoverEvaluatorEvaluate:
         # ``_make_fake_llm_class``.
         _lambda_factory = lambda **k: MagicMock()
         _lambda_factory.default_streaming = False
+        _lambda_factory.default_request_timeout = 610
         _lambda_factory.default_request_gzip = False
         with patch("daemon.graph.ThinkingChatOpenAI", _lambda_factory):
             e_default = WatchoverEvaluator(
@@ -860,6 +862,7 @@ class TestWatchoverMessageStructure:
         # see the matching note in ``_make_fake_llm_class`` for the
         # post-dd43a7f1 contract.
         _factory.default_streaming = False
+        _factory.default_request_timeout = 610
         _factory.default_request_gzip = False
 
         return _factory, llm_instance, captured

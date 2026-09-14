@@ -573,12 +573,19 @@ class TestEdgeCaseFlagFlipMidProcess:
       process lifetime.
     """
 
-    def test_flag_off_clean_does_not_attach_http_client(self):
-        """Flag=False initially: clean_llm_config returns cfg WITHOUT http_client."""
+    def test_flag_off_clean_does_not_attach_gzip_client(self):
+        """Flag=False: clean_llm_config attaches the WATCHDOG-wrapped
+        clients (always-on, L2) whose transport chain contains NO
+        GzipRequestTransport, and the gzip singletons stay UNBUILT
+        (llm-stream-stall-hardening superseded the old no-client-at-all
+        contract; the no-gzip-on-disabled contract is preserved).
+        """
         from daemon.services import llm_gzip as gzip_mod
+        from daemon.services import llm_stream_watchdog as wd_mod
         from daemon.graph import ThinkingChatOpenAI, clean_llm_config
 
         gzip_mod.reset_cached_clients()
+        wd_mod.reset_cached_clients()
         original = ThinkingChatOpenAI.default_request_gzip
         try:
             ThinkingChatOpenAI.default_request_gzip = False
@@ -587,29 +594,40 @@ class TestEdgeCaseFlagFlipMidProcess:
                 "api_key": "test",
                 "base_url": "https://test.local/v1",
             })
-            assert "http_client" not in cleaned, (
-                "flag=False: clean_llm_config must NOT attach http_client "
-                "(zero-behavior-change contract)"
+            # Watchdog clients ARE attached (always-on).
+            assert isinstance(cleaned["http_client"], httpx.Client), (
+                "flag=False: watchdog-wrapped client must still be attached"
             )
-            assert "http_async_client" not in cleaned, (
-                "flag=False: clean_llm_config must NOT attach http_async_client"
-            )
-            # Singleton must NOT have been built on the disabled path.
+            assert isinstance(cleaned["http_async_client"], httpx.AsyncClient)
+            # ... but with NO gzip transport in the chain.
+            from daemon.services.llm_gzip import GzipRequestTransport
+
+            assert not isinstance(
+                cleaned["http_client"]._transport._inner, GzipRequestTransport
+            ), "flag=False: no gzip transport may be composed"
+            # Gzip singletons must NOT have been built on this path.
             assert gzip_mod._gzip_sync_client is None, (
-                "flag=False: singleton must not be built "
-                "(disabled path is zero-behavior-change)"
+                "flag=False: gzip singleton must not be built "
+                "(the watchdog path composes its own transports)"
             )
             assert gzip_mod._gzip_async_client is None
         finally:
             ThinkingChatOpenAI.default_request_gzip = original
             gzip_mod.reset_cached_clients()
+            wd_mod.reset_cached_clients()
 
-    def test_flag_on_clean_attaches_singleton(self):
-        """Flag=True: clean_llm_config attaches the singleton gzip client."""
+    def test_flag_on_clean_attaches_watchdog_singleton_with_gzip_inner(self):
+        """Flag=True: clean_llm_config attaches the module-level WATCHDOG
+        singleton whose transport wraps the gzip transport (watchdog
+        outermost). The old llm_gzip singleton is NOT the attached
+        client anymore — the watchdog path composes its own."""
         from daemon.services import llm_gzip as gzip_mod
+        from daemon.services import llm_stream_watchdog as wd_mod
+        from daemon.services.llm_gzip import GzipRequestTransport
         from daemon.graph import ThinkingChatOpenAI, clean_llm_config
 
         gzip_mod.reset_cached_clients()
+        wd_mod.reset_cached_clients()
         original = ThinkingChatOpenAI.default_request_gzip
         try:
             ThinkingChatOpenAI.default_request_gzip = True
@@ -621,21 +639,24 @@ class TestEdgeCaseFlagFlipMidProcess:
             assert "http_client" in cleaned, (
                 "flag=True: clean_llm_config must attach http_client"
             )
-            assert "http_async_client" in cleaned, (
-                "flag=True: clean_llm_config must attach http_async_client"
+            assert "http_async_client" in cleaned
+            # The attached client IS the watchdog module singleton...
+            assert cleaned["http_client"] is wd_mod._watchdog_clients[True][0], (
+                "flag=True: clean_llm_config must attach the watchdog "
+                "singleton instance (connection-pool consolidation contract)"
             )
-            # The attached client IS the module-level singleton.
-            assert cleaned["http_client"] is gzip_mod._gzip_sync_client, (
-                "flag=True: clean_llm_config must attach the singleton "
-                "instance (connection-pool consolidation contract)"
+            # ... and its transport wraps the gzip transport innermost.
+            transport = cleaned["http_client"]._transport
+            assert isinstance(transport, wd_mod.WatchdogHTTPTransport)
+            assert isinstance(transport._inner, GzipRequestTransport), (
+                "flag=True: watchdog-outermost / gzip-inner composition"
             )
-            assert cleaned["http_async_client"] is gzip_mod._gzip_async_client, (
-                "flag=True: clean_llm_config must attach the singleton "
-                "async instance"
-            )
+            # The old gzip singletons are NOT the attached clients.
+            assert cleaned["http_client"] is not gzip_mod._gzip_sync_client
         finally:
             ThinkingChatOpenAI.default_request_gzip = original
             gzip_mod.reset_cached_clients()
+            wd_mod.reset_cached_clients()
 
     def test_flag_flip_off_after_singleton_built_does_not_detach(self):
         """Flag=False AFTER the singleton was built: future cleans do NOT
@@ -646,12 +667,16 @@ class TestEdgeCaseFlagFlipMidProcess:
         not PAST state. The singleton, once built, persists.
         """
         from daemon.services import llm_gzip as gzip_mod
+        from daemon.services import llm_stream_watchdog as wd_mod
+        from daemon.services.llm_gzip import GzipRequestTransport
         from daemon.graph import ThinkingChatOpenAI, clean_llm_config
 
         gzip_mod.reset_cached_clients()
+        wd_mod.reset_cached_clients()
         original = ThinkingChatOpenAI.default_request_gzip
         try:
-            # Phase 1: flag=True builds the singleton.
+            # Phase 1: flag=True builds the flag=True-composition
+            # watchdog singleton.
             ThinkingChatOpenAI.default_request_gzip = True
             cleaned_on = clean_llm_config({
                 "model": "test",
@@ -659,9 +684,19 @@ class TestEdgeCaseFlagFlipMidProcess:
                 "base_url": "https://test.local/v1",
             })
             assert "http_client" in cleaned_on
-            singleton_after_phase1 = gzip_mod._gzip_sync_client
+            singleton_after_phase1 = wd_mod._watchdog_clients[True][0]
             assert singleton_after_phase1 is not None, (
-                "phase 1: singleton must be built on first flag=True call"
+                "phase 1: watchdog flag=True singleton must be built on "
+                "the first flag=True call"
+            )
+            assert isinstance(
+                singleton_after_phase1._transport._inner, GzipRequestTransport
+            )
+            # The gzip module singletons are NOT built by this path.
+            assert gzip_mod._gzip_sync_client is None, (
+                "clean_llm_config composes its own gzip transport inside "
+                "the watchdog client — the raw-SDK gzip singleton stays "
+                "unbuilt"
             )
 
             # Phase 2: flag=False — singleton must STILL exist (production
@@ -673,20 +708,31 @@ class TestEdgeCaseFlagFlipMidProcess:
                 "api_key": "test",
                 "base_url": "https://test.local/v1",
             })
-            assert "http_client" not in cleaned_off, (
-                "flag=False: subsequent clean_llm_config must NOT "
-                "attach http_client (class var is the gate at call time)"
+            # flag=False now attaches the WATCHDOG singleton (always-on)
+            # — the flag only changes the INNER composition.
+            assert cleaned_off["http_client"] is not cleaned_on["http_client"], (
+                "flag=False: subsequent clean_llm_config must attach the "
+                "gzip-free watchdog composition, not the gzip one "
+                "(class var is the gate at call time)"
             )
-            assert "http_async_client" not in cleaned_off
-            # Singleton still lives in memory (process-lifetime).
-            assert gzip_mod._gzip_sync_client is singleton_after_phase1, (
-                "flag=False: singleton must persist (process-lifetime) "
-                "even after the gate flips off — the flag flip affects "
-                "FUTURE construction, not PAST state"
+            from daemon.services.llm_gzip import GzipRequestTransport
+
+            assert not isinstance(
+                cleaned_off["http_client"]._transport._inner,
+                GzipRequestTransport,
+            ), "flag=False: composition must be gzip-free"
+            # flag=True watchdog singleton still lives in memory
+            # (process-lifetime).
+            assert wd_mod._watchdog_clients[True][0] is singleton_after_phase1, (
+                "flag=False: flag=True watchdog singleton must persist "
+                "(process-lifetime) even after the gate flips off — the "
+                "flag flip affects FUTURE construction, not PAST state"
             )
+            assert gzip_mod._gzip_sync_client is None
         finally:
             ThinkingChatOpenAI.default_request_gzip = original
             gzip_mod.reset_cached_clients()
+            wd_mod.reset_cached_clients()
 
 
 # ═══════════════════════════════════════════════════════════════════════
