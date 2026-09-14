@@ -1112,14 +1112,13 @@ class JobQueueService:
             # 3.8+ promotes ``CancelledError`` to a ``BaseException``
             # so ``except Exception`` does NOT catch it — a
             # cancellation mid-release silently leaked the lock).
-            # Mirror the hardened shape used elsewhere in
-            # ``daemon/services/watchover_service.py:625+`` —
-            # ``except (Exception, asyncio.CancelledError)`` —
-            # logging a WARNING so operators see the leak signal,
-            # then re-raising the cancellation so the caller's
-            # shutdown path stays intact. The periodic
-            # ``JobLockSweepService`` (F3) reclaims the orphaned
-            # lock on the next sweep tick.
+            # Catch ``(Exception, asyncio.CancelledError)``, log a
+            # WARNING (deliberate addition vs the
+            # ``watchover_service.py:625+`` shape, which logs
+            # nothing, so operators get the leak signal), then
+            # re-raise ``CancelledError`` so the caller's shutdown
+            # path stays intact. The periodic ``JobLockSweepService``
+            # (F3) reclaims the orphaned lock on the next sweep tick.
             if job.queue_id and job.project_id:
                 try:
                     await self._lock_manager.release_queue_lock(
@@ -2490,10 +2489,13 @@ class JobQueueService:
                     # ``except (asyncio.TimeoutError, Exception)``
                     # missed ``asyncio.CancelledError`` (a
                     # ``BaseException`` in Python 3.8+). A cancellation
-                    # mid-release silently leaked the lock. Mirror the
-                    # watchover_service.py:625+ shape — catch
-                    # ``asyncio.CancelledError`` explicitly, log the
-                    # leak signal, re-raise. The periodic
+                    # mid-release silently leaked the lock. Catch
+                    # ``(Exception, asyncio.CancelledError)``, log a
+                    # WARNING (deliberate addition vs the
+                    # ``watchover_service.py:625+`` shape, which logs
+                    # nothing, so operators get the leak signal), then
+                    # re-raise ``CancelledError`` so the caller's
+                    # shutdown path stays intact. The periodic
                     # ``JobLockSweepService`` (F3) reclaims the
                     # orphaned lock on the next tick.
                     await asyncio.wait_for(
@@ -2543,11 +2545,15 @@ class JobQueueService:
                         # W3 fix: mirror Path 2's timeout so the
                         # instance-wide fallback cannot block forever.
                         #
-                        # F2 hardening (R2): same shape as R1 —
-                        # catch ``asyncio.CancelledError`` to log the
-                        # leak signal before re-raising. The periodic
-                        # ``JobLockSweepService`` reclaims on the
-                        # next tick.
+                        # F2 hardening (R2): catch
+                        # ``(Exception, asyncio.CancelledError)``, log
+                        # a WARNING (deliberate addition vs the
+                        # ``watchover_service.py:625+`` shape, which
+                        # logs nothing, so operators get the leak
+                        # signal), then re-raise ``CancelledError`` so
+                        # the caller's shutdown path stays intact.
+                        # The periodic ``JobLockSweepService``
+                        # reclaims orphaned locks on the next tick.
                         await asyncio.wait_for(
                             self._lock_manager.release_by_instance(
                                 canonical_instance_id
@@ -3093,11 +3099,13 @@ class JobQueueService:
             # ``except Exception`` missed ``asyncio.CancelledError``
             # (Python 3.8+ promotes it to ``BaseException``). A
             # cancellation during release silently orphaned the lock.
-            # Mirror the watchover_service.py:625+ shape — catch
-            # both ``Exception`` and ``asyncio.CancelledError``, log
-            # the leak signal, re-raise. The periodic
-            # ``JobLockSweepService`` (F3) reclaims the orphaned
-            # lock on the next sweep tick.
+            # Catch ``(Exception, asyncio.CancelledError)``, log a
+            # WARNING (deliberate addition vs the
+            # ``watchover_service.py:625+`` shape, which logs
+            # nothing, so operators get the leak signal), then
+            # re-raise ``CancelledError`` so the caller's shutdown
+            # path stays intact. The periodic ``JobLockSweepService``
+            # (F3) reclaims the orphaned lock on the next sweep tick.
             try:
                 await self._release_job_lock(
                     project_id=job.project_id,
@@ -3137,10 +3145,14 @@ class JobQueueService:
         finally:
             # 2. Release lock AFTER transition attempt (success OR failure).
             #
-            # F2 hardening (joblock-leak fix, R5): same shape as R4 —
-            # catch ``asyncio.CancelledError`` to log the leak signal
-            # before re-raising. The periodic
-            # ``JobLockSweepService`` reclaims on the next tick.
+            # F2 hardening (joblock-leak fix, R5): catch
+            # ``(Exception, asyncio.CancelledError)``, log a WARNING
+            # (deliberate addition vs the
+            # ``watchover_service.py:625+`` shape, which logs
+            # nothing, so operators get the leak signal), then
+            # re-raise ``CancelledError`` so the caller's shutdown
+            # path stays intact. The periodic ``JobLockSweepService``
+            # reclaims orphaned locks on the next tick.
             try:
                 await self._release_job_lock(
                     project_id=job.project_id,
@@ -4294,11 +4306,13 @@ class JobQueueService:
                 # ``asyncio.CancelledError`` (Python 3.8+ promotes it
                 # to ``BaseException``). A cancellation during
                 # ``future.result(...)`` silently orphaned the lock.
-                # Mirror the watchover_service.py:625+ shape — catch
-                # both ``Exception`` and ``asyncio.CancelledError``
-                # and log the leak signal. The periodic
-                # ``JobLockSweepService`` (F3) reclaims on the next
-                # tick.
+                # Catch both ``Exception`` and
+                # ``asyncio.CancelledError``, log a WARNING, and
+                # deliberately do NOT re-raise — a sync twin on a
+                # worker thread cannot usefully propagate
+                # ``CancelledError``; the periodic
+                # ``JobLockSweepService`` (F3) reclaims the orphaned
+                # lock on the next tick.
                 if self._loop and self._loop.is_running():
                     try:
                         future = asyncio.run_coroutine_threadsafe(
@@ -4350,8 +4364,14 @@ class JobQueueService:
                         f"queue_id={canonical_queue_id!r})"
                     )
                     try:
-                        # F2 hardening (R7 sub-section): same
-                        # CancelledError-aware shape as Path 2 above.
+                        # F2 hardening (R7 sub-section): catch both
+                        # ``Exception`` and ``asyncio.CancelledError``,
+                        # log a WARNING, and deliberately do NOT
+                        # re-raise — a sync twin on a worker thread
+                        # cannot usefully propagate
+                        # ``CancelledError``; the periodic
+                        # ``JobLockSweepService`` (F3) reclaims the
+                        # orphaned lock on the next tick.
                         future = asyncio.run_coroutine_threadsafe(
                             self._lock_manager.release_by_instance(
                                 canonical_instance_id,

@@ -9,11 +9,12 @@ factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-
 nudge scanner, the dead-letter service, the job-queue reconcile,
-and the per-instance lazy-import graph cache (each a single, large
-``try / except`` block keyed on construction-time failure), and
-(c) global error handlers (``HTTPException`` shim, request-validation
-handler, the startup-shutdown banner). Co-locating app factory +
-lifespan wiring + middleware + error handlers is the project-house
+the job-lock reclaim sweep, and the per-instance lazy-import graph
+cache (each a single, large ``try / except`` block keyed on
+construction-time failure), and (c) global error handlers
+(``HTTPException`` shim, request-validation handler, the
+startup-shutdown banner). Co-locating app factory + lifespan
+wiring + middleware + error handlers is the project-house
 pattern (mirror ``daemon/services/long_tool_nudge.py`` module-
 band rationale) — the alternative (splitting lifespan across
 ``daemon/api_lifespan.py``) would force every router to import two
@@ -731,6 +732,9 @@ async def lifespan(app: FastAPI):
     # ``ServicesConfig.job_lock_sweep_interval_seconds`` — out-of-range
     # values fail fast at boot with ValidationError. No runtime
     # DISABLED branch here; the floor is enforced upstream.
+    # ``JobLockSweepService.__init__`` additionally clamps via
+    # ``max(1, int(interval_seconds))``, so the lifespan-side floor
+    # needs no DISABLED branch (unlike ``OrphanWatcherSweepService``).
     job_lock_sweep = JobLockSweepService(
         job_lock_manager=job_lock_manager,
         interval_seconds=job_lock_sweep_interval,
@@ -2388,6 +2392,9 @@ def create_app() -> FastAPI:
 
     return app
 
+
+# Create app instance for convenience
+app = create_app()
 
 # Create app instance for convenience
 app = create_app()

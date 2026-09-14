@@ -2285,14 +2285,14 @@ SET admission_state = 'queued',
             # semantics) and is idempotent — a second concurrent
             # writer sees ``rowcount == 0`` on the DELETE.
             #
-            # Benign double-release on race loss: the DELETE is
+            # Benign no-op on race loss: the DELETE is
             # staged and committed alongside the JobItem UPDATE
             # regardless of who wins the SQL guard race. If a
             # concurrent writer (observer's ``_finalize_job_db_sync``
             # or ``_terminate_instance_db_sync``) already
             # transitioned the JobItem, our UPDATE ``rowcount == 0``
             # (logged below as a DEBUG no-op), but the lock DELETE
-            # still commits. That is a benign double-release — the
+            # still commits. That is a benign no-op on race loss — the
             # second DELETE returns ``rowcount == 0`` against an
             # already-empty slot, no observable effect.
             locks_released = 0
@@ -2318,7 +2318,7 @@ SET admission_state = 'queued',
                 # state on commit — most likely the observer's
                 # ``_finalize_job_db_sync`` or
                 # ``_terminate_instance_db_sync``. The lock DELETE
-                # above is a benign double-release on race loss
+                # above is a benign no-op on race loss
                 # (the other writer already released the same lock);
                 # we still return ``None`` because our JobItem UPDATE
                 # was a no-op.
@@ -2326,7 +2326,8 @@ SET admission_state = 'queued',
                     f"finalize_mirror_job_at_completion: job "
                     f"{job_id[:8]}... — SQL guard lost the race "
                     f"(rowcount=0; concurrent writer won; benign "
-                    f"double-release of lock already committed)"
+                    f"no-op on race loss — DELETE returned 0 rows; "
+                    f"the winning writer already released the lock)"
                 )
                 return None
 
@@ -2532,15 +2533,15 @@ SET admission_state = 'queued',
                 # — concurrent writers see ``rowcount == 0`` on the
                 # DELETE.
                 #
-                # Benign double-release on race loss: the DELETE is
+                # Benign no-op on race loss: the DELETE is
                 # staged and committed alongside the JobItem UPDATE
                 # regardless of who wins the SQL guard race. If a
                 # concurrent writer (``_finalize_job_db_sync`` /
                 # ``_terminate_instance_db_sync``) already
                 # transitioned the JobItem, our UPDATE ``rowcount ==
                 # 0`` (logged below as a DEBUG no-op), but the lock
-                # DELETE still commits. That is a benign double-release
-                # — the second DELETE returns ``rowcount == 0``
+                # DELETE still commits. That is a benign no-op on race
+                # loss — the second DELETE returns ``rowcount == 0``
                 # against an already-empty slot, no observable effect.
                 locks_released = 0
                 instance_id_for_release = (
@@ -2588,8 +2589,9 @@ SET admission_state = 'queued',
                     # no-op.
                     logger.debug(
                         "reconcile_terminal_message_mirrors: job %s... "
-                        "SQL guard lost the race; benign double-release "
-                        "of lock already committed by the winner",
+                        "SQL guard lost the race; benign no-op on "
+                        "race loss (DELETE returned 0 rows; the "
+                        "winning writer already released the lock)",
                         job_id[:8],
                     )
                     continue

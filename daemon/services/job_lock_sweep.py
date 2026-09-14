@@ -60,17 +60,21 @@ touched.
 
 Modeling: borrows the asyncio-task + cancel/await lifecycle pattern
 from ``daemon/services/eligible_pending_sweep.py`` (A3) and the
-daemon/api.py lifespan wiring from the same service. The sweep itself
-is a single async method — bounded DB read, structured log, NO new
-admission-state writers / JobItem creators / ``work_id`` mints; the
-census stays at 23/1/0.
+daemon/api.py lifespan wiring from the same service — but unlike A3,
+this service does NOT use an ``asyncio.Event`` stop_event for
+polite shutdown. The loop exits via ``task.cancel()`` + the loop's
+``CancelledError`` handler (``_stopping`` is a defensive flag for
+the rare path where the loop has not yet entered ``asyncio.sleep``,
+NOT the primary exit). The sweep itself is a single async method —
+bounded DB read, structured log, NO new admission-state writers /
+JobItem creators / ``work_id`` mints; the census stays at 23/1/0.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.services.job_lock_manager import JobLockManager
@@ -186,10 +190,13 @@ class JobLockSweepService:
     async def sweep_once(self) -> int:
         """Run a single reclaim tick. Returns the rowcount deleted.
 
-        Public entry point so the daemon/api.py lifespan startup can
-        run a synchronous first sweep before the periodic loop takes
-        over, and so tests can exercise a single tick without
-        spawning the asyncio task.
+        Public entry point so tests can exercise a single tick
+        deterministically without spawning the asyncio task. Returns
+        the rowcount of locks deleted (an int — deliberately narrower
+        than ``EligiblePendingSweepService.sweep_once``'s dict shape).
+        The daemon lifespan starts the periodic loop exclusively via
+        ``start()``; no synchronous pre-tick is wired — the first
+        reclaim tick runs after the first interval sleep.
         """
         try:
             cleared = await self._job_lock_manager.cleanup_terminal_job_locks()
@@ -216,9 +223,13 @@ class JobLockSweepService:
         """Periodic tick loop — exits on ``stop()`` cancellation.
 
         Sleeps ``interval_seconds`` between ticks; ``asyncio.sleep``
-        raises ``CancelledError`` promptly when ``stop()`` cancels
-        the task. Mirrors the ``EligiblePendingSweepService``
-        pattern (``daemon/services/eligible_pending_sweep.py:178``).
+        raises ``CancelledError`` promptly when ``stop()`` invites
+        the task via ``task.cancel()``. The loop does NOT use
+        ``EligiblePendingSweepService``'s ``asyncio.Event``
+        ``stop_event``-driven early-exit pattern — the ``_stopping``
+        flag is only a defensive guard for the path between
+        ``sweep_once`` return and the next ``asyncio.sleep`` call,
+        not the primary exit mechanism.
         """
         try:
             while not self._stopping:

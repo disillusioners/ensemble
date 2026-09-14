@@ -1,7 +1,7 @@
 """Acceptance tests for the joblock-leak fix (F1-F5, branch feature/fix-joblock-leak).
 
 The 2026-09-14 incident pinned the 7807e521 event-keying family as the
-root cause of a 8.5-hour production lane starvation: the Fix-B inline
+root cause of a 8h45m production lane starvation: the Fix-B inline
 mirror writer (``finalize_mirror_job_at_completion``) and the F-1
 backstop (``reconcile_terminal_message_mirrors``) transitioned the
 ``admission_state='active' → 'done'`` BUT did NOT release the
@@ -62,10 +62,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, SQLModel
 
 # Register every model on ``SQLModel.metadata`` BEFORE ``create_all`` —
-# mirrors the harness in ``tests/job_queue/test_orphan_reaper.py``.
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
@@ -89,10 +88,6 @@ from daemon.repositories.task.repository import TaskRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_lock_sweep import JobLockSweepService
 from daemon.services.job_queue_service import JobQueueService
-from daemon.services.job_state_machine import (
-    InvalidTransitionError,
-    job_state_machine,
-)
 
 
 # ─────────────────────────────────────────────────────────────────────
