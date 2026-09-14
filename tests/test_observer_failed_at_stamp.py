@@ -142,7 +142,17 @@ def _seed_job(engine: Engine, *, instance_id: str) -> JobItem:
     return item
 
 
-def _seed_lock(engine: Engine, *, instance_id: str) -> str:
+def _seed_lock(
+    engine: Engine,
+    *,
+    instance_id: str,
+    job_id: str | None = None,
+    lock_slot: int = 0,
+) -> str:
+    """Seed a ``job_locks`` row. W1 re-contract: ``job_id`` is
+    prop-able so a lock can be keyed to the DRIVEN finalize's job
+    (own-lock direction) or left random (an unrelated job's lock —
+    must SURVIVE under the job-scoped release)."""
     lid = f"lock-{uuid.uuid4().hex[:8]}"
     with Session(engine) as s:
         s.add(
@@ -150,9 +160,9 @@ def _seed_lock(engine: Engine, *, instance_id: str) -> str:
                 lock_id=lid,
                 project_id="test-project",
                 queue_id="default",
-                job_id=f"job-{uuid.uuid4().hex[:8]}",
+                job_id=job_id or f"job-{uuid.uuid4().hex[:8]}",
                 instance_id=instance_id,
-                lock_slot=0,
+                lock_slot=lock_slot,
             )
         )
         s.commit()
@@ -170,6 +180,19 @@ def _count_locks(engine: Engine, instance_id: str) -> int:
     with Session(engine) as s:
         return len(
             list(s.exec(select(JobLock).where(JobLock.instance_id == instance_id)).all())
+        )
+
+
+def _lock_count_for_job(engine: Engine, job_id: str) -> int:
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        return (
+            conn.execute(
+                text("SELECT COUNT(*) FROM job_locks WHERE job_id = :job_id"),
+                {"job_id": job_id},
+            ).scalar()
+            or 0
         )
 
 
@@ -221,6 +244,17 @@ class TestFailedAtStamp:
         rejected the row (rowcount=0) because its SQL guard requires
         ``failed_at IS NOT NULL``. This test exercises the full
         end-to-end stamp→retry chain.
+
+        W1 re-contract (job-scoped lock release): the lock contract
+        asserted here used the OLD instance-wide doctrine — a lock
+        seeded under an INDEPENDENT random job_id was expected to be
+        deleted instance-wide. Under W1 the release is keyed by the
+        driven finalize's ``job_id``, so the seeded lock is now keyed
+        to the DRIVEN job (must release — own-lock direction) and a
+        second lock under an unrelated job_id is added (must SURVIVE
+        — survives-direction; a genuinely-orphaned other-job lock is
+        reclaimed by ``JobLockSweepService`` ≤90s / F5, not by this
+        finalize). The stamp + retryability assertions are unchanged.
         """
         # Mirror the prod incident shape: RUNNING instance + active
         # JobItem + lock held by the worker (the observer finalizes
@@ -228,7 +262,11 @@ class TestFailedAtStamp:
         # the reconciler used to wrongly stamp).
         instance_id = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         job = _seed_job(engine, instance_id=instance_id)
-        _seed_lock(engine, instance_id=instance_id)
+        driven_lock = _seed_lock(engine, instance_id=instance_id, job_id=job.job_id)
+        _unrelated_job_id = f"job-{uuid.uuid4().hex[:8]}"
+        unrelated_lock = _seed_lock(
+            engine, instance_id=instance_id, job_id=_unrelated_job_id, lock_slot=1
+        )
 
         observer = _make_observer(engine)
 
@@ -255,7 +293,18 @@ class TestFailedAtStamp:
         )
 
         # Side-effects still happened (lock released, instance updated).
-        assert _count_locks(engine, instance_id) == 0
+        # W1 job-scoped: exactly the DRIVEN job's own lock released;
+        # the unrelated job's lock SURVIVES (both directions).
+        assert _lock_count_for_job(engine, job.job_id) == 0, (
+            "W1 own-release direction: the driven job's own lock must "
+            "release same-commit on the FAILED finalize."
+        )
+        assert _lock_count_for_job(engine, _unrelated_job_id) == 1, (
+            "W1 survives-direction: the unrelated job's lock must "
+            "SURVIVE the driven finalize (instance-wide release is "
+            "the condemned defect class)."
+        )
+        assert _count_locks(engine, instance_id) == 1
 
         # Strong form 2: the retry acceptance contract — the strongest
         # assertion possible per the amendment's intent ("rows must
