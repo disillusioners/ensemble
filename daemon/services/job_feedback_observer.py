@@ -1189,9 +1189,11 @@ class JobFeedbackObserver:
         # Phase 2.5 (Task 2.5.6): pass the _ProcessingJobContext to
         # ``_finalize_job``. ``ctx.job_id`` may be ``None`` (post-D13
         # MESSAGE path) — ``_finalize_job_db_sync`` handles that by
-        # skipping Step 1 (no JobItem UPDATE) and running Steps 2+3
-        # (instance status + lock release) unconditionally. The
-        # terminal transition fires regardless.
+        # skipping Step 1 (no JobItem UPDATE); Step 2 (instance status)
+        # runs unconditionally; Step 3 (lock release) is a W1
+        # job-scoped no-op on this path (the virtual job holds no lock
+        # of its own; locks keyed to other jobs' ``job_id`` MUST
+        # SURVIVE). The terminal transition fires regardless.
         await self._finalize_job(
             ctx, instance_id, status_to_finalize, error=error_for_finalize
         )
@@ -1450,9 +1452,11 @@ class JobFeedbackObserver:
         (instance_id + job_id) rather than a ``JobItem``. When
         ``ctx.job_id is None`` (post-D13 MESSAGE path — no
         ``JobItem`` exists for the message-driven instance),
-        ``_finalize_job_db_sync`` skips Step 1 (JobItem UPDATE)
-        and runs Steps 2+3 (instance status + lock release)
-        unconditionally. The downstream side effects
+        ``_finalize_job_db_sync`` skips Step 1 (JobItem UPDATE);
+        Step 2 (instance status) runs unconditionally; Step 3 (lock
+        release) is a W1 job-scoped no-op on this path (the virtual
+        job holds no lock of its own; locks keyed to other jobs'
+        ``job_id`` MUST SURVIVE). The downstream side effects
         (``notify_watchers``, ``_trigger_next_job``) are also
         skipped — there is no JobItem to notify watchers of, and
         any follow-up work is claimed via the WorkerPool path,
@@ -3930,7 +3934,8 @@ class JobFeedbackObserver:
                         )
             else:
                 # Phase 2.5 (Task 2.5.4): no JobItem to update.
-                # Fall through to Steps 2+3 unconditionally.
+                # Fall through to Step 2 unconditionally; Step 3 is a
+                # W1 job-scoped no-op on this path.
                 logger.debug(
                     f"Observer: Step 1 (JobItem UPDATE) skipped — "
                     f"no JobItem for instance {instance_id[:8]}... "

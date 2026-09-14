@@ -282,3 +282,6 @@
 - Backlog: instance_id_for_release rename + guard→`if job_id is not None` migration (semantics differ for virtual-job rows — needs test pin; W-series); guard idiom unify (truthy vs explicit ×3); W1 narrative ×6 product-site condensation (F5 copy already drifted — dropped release_by_job ref); _release_job_locks_in_session helper ×4 sites; tests/unit/job_queue/ conftest+_harness meta-refactor (7 private engine fixtures now); _acquire_lock↔_seed_lock naming; engine-param annotations; reaped[0] destructure; observer :3153 5-vs-3-step docstring (pre-existing); :1473 release_by_instance narrative (pre-existing, different path).
 - Foreign-residue: 1 untracked file (tests/postgres/test_joblock_release_scope_w1_pg.py) — excluded, left for giter.
 - Pattern lesson (hard-coded line-range cites, 2nd family hit): :3977-3981 range cited ×2 rotted within ONE commit of its introduction (W1 added ~30 lines above it). Cite mechanisms, never line ranges, in mirror-cites.
+
+
+- Addendum (same pass): dispatcher close-out caught 3 further Steps-2+3 straggler claims (observer :1188-1195/:1450-1456/:3933, 'runs/running Steps 2+3 unconditionally' variants) — fixed in the stragglers commit; :753/:2028 reviewed correct-in-context (chain-label/fan-out rationale, not Step-3-dependent); :3937 debug string kept (control-flow-accurate).
