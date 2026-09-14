@@ -680,8 +680,14 @@ def wrapped_tools_node(
                     threshold_crossed = duration_seconds > threshold
                     # (SC6) Per-completion duration record — logged
                     # REGARDLESS of crossing; this is the forensic
-                    # line the bd4b36ef incident never had.
-                    logger.info(
+                    # line the bd4b36ef incident never had. Level is
+                    # conditional on `threshold_crossed`: INFO when the
+                    # threshold was crossed (the signal the operator
+                    # cares about), DEBUG otherwise (routine telemetry).
+                    # The line format and fields are BYTE-IDENTICAL
+                    # across both levels — only the level moves.
+                    _log = logger.info if threshold_crossed else logger.debug
+                    _log(
                         "[LongToolNudge] TOOL_COMPLETED instance=%s "
                         "tool_call_id=%s tool=%s duration_ms=%d "
                         "threshold_seconds=%d threshold_crossed=%s",

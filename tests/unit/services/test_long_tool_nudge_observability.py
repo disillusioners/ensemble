@@ -11,6 +11,8 @@ the wrapper delegates to the real ``ToolNode``.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
@@ -82,10 +84,13 @@ def _completed_records(caplog):
 async def test_log_line_fields_and_marker(lt_real, caplog):
     registry = lt_real.LongToolNudgeRegistry()
     node = lt_real.wrapped_tools_node([sample_tool], registry)
-    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+    # Non-crossed completion logs at DEBUG (routine telemetry).
+    with caplog.at_level("DEBUG", logger="daemon.services.long_tool_nudge"):
         await _run(lt_real, node, _state(), _CONFIG)
     records = _completed_records(caplog)
     assert len(records) == 1
+    # Pin level explicitly: a fast (non-crossed) completion is DEBUG.
+    assert records[0].levelno == logging.DEBUG
     message = records[0].getMessage()
     assert "[LongToolNudge] TOOL_COMPLETED" in message
     assert "inst-123" in message  # 8-char truncation per watchdog convention
@@ -122,6 +127,8 @@ async def test_threshold_crossed_true_for_long_completion(
         await _run(lt_real, node, _state(), _CONFIG)
     records = _completed_records(caplog)
     assert len(records) == 1
+    # Pin level explicitly: a crossed completion logs at INFO (the signal).
+    assert records[0].levelno == logging.INFO
     assert "threshold_crossed=True" in records[0].getMessage()
     assert "duration_ms=1200000" in records[0].getMessage()
 
@@ -155,10 +162,12 @@ async def test_threshold_crossed_false_at_exact_boundary(
         )
 
     registry.record_start = boundary_record  # type: ignore[method-assign]
-    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+    # Boundary == threshold is non-crossed → DEBUG.
+    with caplog.at_level("DEBUG", logger="daemon.services.long_tool_nudge"):
         await _run(lt_real, node, _state(), _CONFIG)
     records = _completed_records(caplog)
     assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
     message = records[0].getMessage()
     assert "duration_ms=900000" in message
     assert "threshold_seconds=900" in message
@@ -174,12 +183,14 @@ async def test_no_leak_on_exception_one_line_still_emitted(
     # handle_tool_errors=True converts the tool's raise into an error
     # ToolMessage (no node-level exception) — the stamp clears
     # normally on the error path and the completion line still emits.
-    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+    # Fast completion → DEBUG.
+    with caplog.at_level("DEBUG", logger="daemon.services.long_tool_nudge"):
         result = await _run(lt_real, node, _state(name="boom_tool"), _CONFIG)
     tm = result["messages"][-1]
     assert "Error" in tm.content
     records = _completed_records(caplog)
     assert len(records) == 1  # exactly one line — no duplicates on error
+    assert records[0].levelno == logging.DEBUG
     assert await registry.snapshot() == {}
 
 
@@ -207,7 +218,10 @@ async def test_completed_log_emitted_when_kill_switch_off(
     node = lt_real.wrapped_tools_node([sample_tool], registry)
     # No close handler / resolver / lookup attached — the disabled
     # shape. Stamp lifecycle must still complete and emit the log.
-    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+    # Non-crossed completion under kill-switch OFF → DEBUG (continuity
+    # pin: line still emitted, only the level moves; SC6 observability
+    # is independent of delivery).
+    with caplog.at_level("DEBUG", logger="daemon.services.long_tool_nudge"):
         await _run(lt_real, node, _state(), _CONFIG)
     records = _completed_records(caplog)
     assert len(records) == 1, (
@@ -215,6 +229,8 @@ async def test_completed_log_emitted_when_kill_switch_off(
         "kill-switch is OFF (SC6 observability is independent "
         "of delivery — W4 council fix-cycle 1 regression pin)"
     )
+    # Pin level: non-crossed under kill-switch OFF → DEBUG.
+    assert records[0].levelno == logging.DEBUG
     message = records[0].getMessage()
     assert "inst-123" in message
     assert "call-1" in message
@@ -224,3 +240,43 @@ async def test_completed_log_emitted_when_kill_switch_off(
     assert "threshold_crossed=" in message
     # And the stamp cleared — disabled does not leak either.
     assert await registry.snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_completed_log_crossed_under_kill_switch_off_logs_info(
+    lt_real, caplog, monkeypatch
+):
+    """Council fix-cycle 1, W4 — SC9 continuity + signal both hold.
+
+    Companion to ``test_completed_log_emitted_when_kill_switch_off``:
+    prove that under the kill-switch OFF shape (no resolver / no
+    lookup), a CROSSED completion still emits the TOOL_COMPLETED line
+    at INFO (the operator signal). Both halves of the W4 invariant
+    hold — non-crossed emits at DEBUG (continuity), crossed emits at
+    INFO (continuity + signal).
+    """
+    clock = FakeClock()
+    monkeypatch.setattr(lt_real, "time", clock)
+    registry = lt_real.LongToolNudgeRegistry()
+    node = lt_real.wrapped_tools_node([sample_tool], registry)
+    original_record = registry.record_start
+
+    async def aging_record(
+        instance_id, tool_call_id, tool_name, parent_id=None
+    ):
+        await original_record(instance_id, tool_call_id, tool_name, parent_id)
+        registry._stamps[instance_id][tool_call_id].started_at = (
+            clock.t - 1200
+        )
+
+    registry.record_start = aging_record  # type: ignore[method-assign]
+    # Disable shape: no resolver/lookup attached. Capture at INFO so a
+    # silent DEBUG regression cannot satisfy this pin.
+    with caplog.at_level("INFO", logger="daemon.services.long_tool_nudge"):
+        await _run(lt_real, node, _state(), _CONFIG)
+    records = _completed_records(caplog)
+    assert len(records) == 1
+    # Crossed completion under kill-switch OFF → INFO (the signal).
+    assert records[0].levelno == logging.INFO
+    assert "threshold_crossed=True" in records[0].getMessage()
+    assert "duration_ms=1200000" in records[0].getMessage()
