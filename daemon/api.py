@@ -280,6 +280,17 @@ async def lifespan(app: FastAPI):
         f"(clean_llm_config attaches gzip httpx clients when True; "
         f"OPENAI_REQUEST_GZIP env var controls it)"
     )
+    # Wire the L0 request-timeout inject-if-absent default
+    # (llm-stream-stall-hardening). ``clean_llm_config`` reads this
+    # ClassVar when a construction site omits ``request_timeout`` —
+    # see daemon/graph.py.
+    ThinkingChatOpenAI.default_request_timeout = int(
+        config.llm.request_timeout
+    )
+    daemon_logger.info(
+        f"[Config] default_request_timeout={ThinkingChatOpenAI.default_request_timeout}s "
+        f"(clean_llm_config injects it when a site omits request_timeout)"
+    )
 
     # Wire the S5 degenerate re-invoke cap (empty-response-guard Phase 1).
     # Mirrors __main__.py — the router reads the graph module global on

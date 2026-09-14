@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import uuid
+import httpx
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
@@ -3352,6 +3353,20 @@ class ThinkingChatOpenAI(ChatOpenAI):
     # on the response side.
     default_request_gzip: ClassVar[bool] = False
 
+    # Default HTTP request timeout (seconds) for ``clean_llm_config``
+    # inject-if-absent (llm-stream-stall-hardening L0). The daemon sets
+    # this from ``LLMConfig.request_timeout`` at startup (see
+    # ``daemon/__main__.py`` and ``daemon/api.py``), BEFORE any instance
+    # is created — same ClassVar propagation pattern as
+    # ``default_streaming`` / ``default_request_gzip``. Sites that OMIT
+    # ``request_timeout`` in their config dict (title generation,
+    # keyword extraction, child-reports ×2) get this value injected so
+    # a hung first attempt can never pin a ``to_thread`` worker past
+    # the configured deadline (the same latent bug class the LCA judge
+    # fixed per-site in d6e30d9d). Strictly inject-if-ABSENT: a caller
+    # that passes the key (even ``None``) keeps its value verbatim.
+    default_request_timeout: ClassVar[int] = 610
+
     def _should_echo_reasoning(self) -> bool:
         """Return True if reasoning_content echo is enabled for the current model.
 
@@ -3738,6 +3753,20 @@ def clean_llm_config(cfg: dict) -> dict:
     # Respect explicit caller opt-outs (stream_usage=False).
     if "stream_usage" not in cleaned:
         cleaned["stream_usage"] = True
+    # L0 inject-if-absent (llm-stream-stall-hardening): give every
+    # LangChain site an explicit HTTP deadline. When a site omits
+    # ``request_timeout``, langchain-openai passes ``timeout=None``
+    # down explicitly and the HTTP-layer read deadline is disabled —
+    # a hung first attempt then pins a ``to_thread`` worker until the
+    # (unbounded) socket gives up. Secondary sites (title generation,
+    # keyword extraction, child-reports ×2) hit exactly this hole.
+    # STRICTLY inject-if-absent: callers that pass the key — including
+    # an explicit ``None`` — keep their value verbatim (behavior
+    # preservation for sites that already pass it). The value comes
+    # from the ``default_request_timeout`` ClassVar (startup-wired
+    # from ``LLMConfig.request_timeout``, default 610s).
+    if "request_timeout" not in cleaned:
+        cleaned["request_timeout"] = ThinkingChatOpenAI.default_request_timeout
     # Outbound LLM request-body gzip compression (opt-in). When
     # ``default_request_gzip`` is True and the caller has NOT already
     # supplied an ``http_client`` / ``http_async_client`` kwarg, attach
@@ -7424,7 +7453,19 @@ def create_agent_node(
                 lambda: current_llm.invoke(compact_messages)
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
-                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError) as e:
+                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError,
+                httpx.TimeoutException) as e:
+            # ``httpx.TimeoutException`` joins the tuple (L1 log-truth
+            # fix, llm-stream-stall-hardening): mid-stream timeouts
+            # surface as bare httpx exceptions (the SDK wraps only
+            # request-level ones as APITimeoutError). Without this
+            # member, an EXHAUSTED timeout budget re-raised from
+            # tenacity landed in the generic ``except Exception``
+            # below and logged "Unexpected error after retries" —
+            # misleading, same lie family as the classifier catch-all.
+            # With it, exhausted mid-stream timeouts route through this
+            # handler (loud ERROR + severity stamping) like their
+            # request-level siblings.
             # ── Hallucination-recovery ladder PHASE 2 (C-2 / D-2):
             # PRE-TERMINAL intercept for truncated and empty_post_ladder
             # (ADR-0003 / OQ1=pre-terminal-now). When the master ladder
