@@ -405,11 +405,18 @@ class TestN8HotPathPin:
         task_mock.instance_id = "inst-x"
         task_mock.error = None
         task_mock.result = None
+        # D1/tz-fix resolve_work shape: the dual-backed lookup also
+        # consults the JobItem side; a Task-only work_id (report lane)
+        # has no JobItem, so the job lookup returns None.
+        task_mock.started_at = None
+        task_mock.completed_at = None
         task_repo_mock.get_by_work_id = MagicMock(return_value=task_mock)
+        job_repo_mock = MagicMock(spec=JobRepository)
+        job_repo_mock.get = MagicMock(return_value=None)
 
         resolver = WorkResolverService(
             task_repo_mock,
-            MagicMock(spec=JobRepository),
+            job_repo_mock,
             MagicMock(),
         )
         derived = resolver.per_kind_status_for(

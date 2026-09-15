@@ -3,6 +3,8 @@
 import logging
 from typing import Any
 
+from daemon.services.timestamps import to_utc_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -139,10 +141,10 @@ def _job_to_response(
         # previous WorkRecord-derived serialization re-rendered a
         # parsed datetime (normalising e.g. 'Z' → '+00:00'), so the
         # create response and a later get could disagree byte-wise.
-        # ``job`` is always present in this composition (both
-        # branches project a JobItem row), so reading it here is
-        # safe for the work_record path too.
-        created_at = job.created_at
+        # ``to_utc_iso`` passes str values through UNCHANGED (the
+        # real TEXT column shape) and only serializes non-str inputs
+        # (defensive for datetime-shaped fixtures).
+        created_at = to_utc_iso(job.created_at)
     else:
         # Legacy fallback path. Execution state comes straight off
         # the JobItem mirror columns — used by older tests / partial
@@ -178,8 +180,9 @@ def _job_to_response(
         # Legacy timing: read directly from the JobItem mirror columns.
         started_at = None
         completed_at = None
-        # D3: JobItem TEXT verbatim (byte-stable).
-        created_at = job.created_at
+        # D3: JobItem TEXT verbatim (byte-stable via to_utc_iso's
+        # str pass-through).
+        created_at = to_utc_iso(job.created_at)
 
     return JobResponse(
         job_id=job.job_id,
