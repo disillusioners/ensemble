@@ -265,7 +265,12 @@ class _WatchedSyncStream(httpx.SyncByteStream):
         # registry growth). Idempotent: normal completion already popped
         # the entry via the ``finally``.
         self._registry.deregister(self._entry)
-        self._inner.close()
+        # Production guard: a sync close() against an async stream raises
+        # RuntimeError inside httpx. Deregistration already happened, and
+        # the async stream's cleanup belongs to the async client — skip
+        # the inner close rather than raise from a cleanup path.
+        if isinstance(self._inner, httpx.SyncByteStream):
+            self._inner.close()
 
 
 class _WatchedAsyncStream(httpx.AsyncByteStream):
@@ -308,7 +313,10 @@ class _WatchedAsyncStream(httpx.AsyncByteStream):
         # W1 (async mirror): deregister on close-without-iteration —
         # idempotent alongside the ``aiter`` ``finally``.
         self._registry.deregister(self._entry)
-        await self._inner.aclose()
+        # Production guard (async mirror): aclose() against a sync
+        # stream would raise — skip rather than raise from cleanup.
+        if isinstance(self._inner, httpx.AsyncByteStream):
+            await self._inner.aclose()
 
 
 # ─── Transports ──────────────────────────────────────────────────────
@@ -453,10 +461,14 @@ def _force_unblock(
     """Abort one stalled stream. Never raises (fail-open per tick).
 
     Returns ``True`` when this caller CLAIMED the entry (still a live
-    registry member at unblock time) and acted on it; ``False`` when the
-    membership re-check under the lock lost the race — the stream
-    already completed/closed and its socket may already be back in the
-    connection pool serving an innocent request (W2: never touch it).
+    registry member at unblock time) and acted on it; ``False`` when
+    either (a) the membership re-check under the lock lost the race —
+    the stream already completed/closed and its socket may already be
+    back in the connection pool serving an innocent request (W2: never
+    touch it) — or (b) an unexpected error occurred after the claim, in
+    which case a best-effort ``response.close()`` has been attempted and
+    the entry is popped either way (no leak; the sweep will not retry
+    this entry).
 
     Primary vehicle: ``sock.shutdown(SHUT_RDWR)`` — spike-proven to
     wake a blocked ``recv()`` on macOS for both plain and TLS sockets
@@ -477,14 +489,25 @@ def _force_unblock(
         if not registry.claim(entry):
             return False
         silence = max(0.0, time.time() - entry.last_byte_ts)
+        # D3 (forensic ordering): the stall-abort ATTEMPT is logged
+        # FIRST, before any fallback-failure detail — an incident grep
+        # on [LLM-WATCHDOG-STALL] always finds the detection line even
+        # when the primary vehicle subsequently fails.
+        logger.warning(
+            "[LLM-WATCHDOG-STALL] stream stalled: no bytes for %.0fs "
+            "(threshold=%.0fs) — abort attempt starting",
+            silence,
+            threshold_seconds,
+        )
         sock = _find_network_sock(entry.response)
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
                 logger.warning(
-                    "[StreamWatchdog] stream stalled: no bytes for %.0fs "
-                    "(threshold=%.0fs) — forced transport shutdown "
-                    "(StreamStalledError will ride the timeout retry budget)",
+                    "[LLM-WATCHDOG-STALL] stream stalled: no bytes for "
+                    "%.0fs (threshold=%.0fs) — forced transport shutdown "
+                    "(StreamStalledError will ride the timeout retry "
+                    "budget)",
                     silence,
                     threshold_seconds,
                 )
@@ -495,27 +518,33 @@ def _force_unblock(
                 # failed (typically: fd already closed by the peer /
                 # reader teardown racing the tick).
                 logger.warning(
-                    "[StreamWatchdog] stream stalled: no bytes for %.0fs "
-                    "(threshold=%.0fs) — shutdown() failed (%s); "
+                    "[StreamWatchdog] shutdown() failed (%s); "
                     "response.close() fallback applied",
-                    silence,
-                    threshold_seconds,
                     exc,
                 )
         else:
             # W3: the pinned private chain didn't resolve to a socket —
             # unknown transport shape or the connection is already gone.
             logger.warning(
-                "[StreamWatchdog] stream stalled: no bytes for %.0fs "
-                "(threshold=%.0fs) — socket unresolvable; "
-                "response.close() fallback applied",
-                silence,
-                threshold_seconds,
+                "[StreamWatchdog] socket unresolvable; "
+                "response.close() fallback applied"
             )
         entry.response.close()
         return True
     except Exception:  # noqa: BLE001 — the tick must never raise
         logger.exception("[StreamWatchdog] force-unblock failed")
+        # D1: the entry is already CLAIMED (popped) — no sweep can retry
+        # it, and at sites with an explicit ``request_timeout=None``
+        # nothing else will ever wake the blocked reader. Attempt the
+        # close() fallback best-effort so claim-then-abandon cannot drop
+        # the abort entirely.
+        try:
+            entry.response.close()
+        except Exception:  # noqa: BLE001 — cleanup is best-effort here
+            logger.debug(
+                "[StreamWatchdog] post-error response.close() also failed",
+                exc_info=True,
+            )
         return False
 
 
@@ -524,7 +553,10 @@ def sweep_once(
     threshold_seconds: float,
 ) -> int:
     """One sweep pass; returns how many stalled streams were CLAIMED and
-    aborted (entries that lost the completion race are not counted)."""
+    aborted. ``_force_unblock`` returns False both on a lost completion
+    race AND on an unexpected post-claim error (best-effort close is
+    attempted in the latter); the entry is popped either way — no leak,
+    and the sweep cannot retry it."""
     stale = registry.collect_stale(threshold_seconds)
     claimed = 0
     for entry in stale:

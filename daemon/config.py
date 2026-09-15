@@ -177,7 +177,10 @@ class LLMConfig(BaseSettings):
         description=(
             "Seconds of SSE byte-silence (wall clock) before the stream "
             "watchdog force-aborts the stalled response. Floor 10s; "
-            "default 45s (~3-4x the proxy heartbeat cadence)."
+            "default 45s. Probe-evidenced 2026-09-15 (round 2): both "
+            "proxies heartbeat at ~5.0s cadence (max observed 5.8s), "
+            "max legitimate inter-content gap 3.9s — 45s ≈ 9x the "
+            "measured cadence, kept as default."
         ),
     )
 

@@ -29,6 +29,7 @@ that vehicle end-to-end through the real httpx/httpcore stack.
 
 from __future__ import annotations
 
+import ast
 import gzip
 import inspect
 import socket
@@ -458,8 +459,20 @@ class TestRealSocketStallAbort:
                 "budget routing with zero classifier change)"
             )
             assert "stream stalled: no bytes for" in str(outcome)
-            assert elapsed < 8.0, (
-                f"abort took {elapsed:.1f}s — must be near the 0.8s "
+            # Timing band: abort fires on the first tick AFTER
+            # silence exceeds the threshold, and last_byte_ts >= t0
+            # (the heartbeat was touched after the reader started), so
+            # elapsed >= threshold is a hard lower bound — proves the
+            # watchdog never aborts prematurely. Upper bound tightened
+            # to ~3x threshold (round-2): well under the 610s deadline,
+            # with macOS scheduling margin.
+            assert elapsed >= 0.8, (
+                f"abort fired at {elapsed:.2f}s — EARLIER than the "
+                "0.8s threshold; premature abort would false-kill "
+                "healthy streams"
+            )
+            assert elapsed < 2.4, (
+                f"abort took {elapsed:.1f}s — must be near 3x the 0.8s "
                 "threshold, not the 610s read deadline"
             )
             assert len(reg) == 0, "forced abort must deregister the entry"
@@ -732,22 +745,81 @@ class TestConfigKnob:
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _api_ast():
+    """Parse daemon/api.py into an AST (importing it would boot the app
+    factory — ``app = create_app()`` runs at module scope)."""
+    import ast as _ast
+
+    return _ast.parse((DAEMON_DIR / "api.py").read_text())
+
+
 class TestApiLifespanWiringPins:
-    def test_api_starts_and_stops_the_tick_thread(self):
-        src = (DAEMON_DIR / "api.py").read_text()
-        assert "from daemon.services.llm_stream_watchdog import" in src
-        assert "run_stream_watchdog_loop" in src
-        assert "STREAM_WATCHDOG_REGISTRY" in src, (
+    """Lifespan wiring pins at AST-SYMBOL level (round-2 upgrade from
+    raw text greps): the watchdog symbols must be IMPORTED by api.py
+    and actually REFERENCED in the started Thread call — a rename or a
+    dangling import fails these, while a comment mentioning the symbol
+    alone does not satisfy them."""
+
+    def test_api_imports_and_starts_the_watchdog_loop(self):
+        tree = _api_ast()
+        # ImportFrom daemon.services.llm_stream_watchdog names...
+        imported = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "daemon.services.llm_stream_watchdog"
+            ):
+                imported.update(alias.name for alias in node.names)
+        assert "run_stream_watchdog_loop" in imported
+        assert "STREAM_WATCHDOG_REGISTRY" in imported, (
             "lifespan must import the daemon-wide REGISTRY singleton "
             "(identity requirement)"
         )
-        assert 'name="llm-stream-watchdog"' in src
-        assert "llm_stream_watchdog_stop" in src, "shutdown stop-event"
-        assert "llm_stream_watchdog_thread" in src, "shutdown join"
+        # ...and the loop symbol is the TARGET of a started Thread.
+        thread_targets = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(
+                node.func, ast.Attribute
+            ) and node.func.attr == "Thread":
+                for kw in node.keywords:
+                    if kw.arg == "target" and isinstance(kw.value, ast.Name):
+                        thread_targets.append(kw.value.id)
+        assert "run_stream_watchdog_loop" in thread_targets, (
+            "run_stream_watchdog_loop must be the target= of a "
+            "threading.Thread(...) call in api.py (started, not just "
+            "imported)"
+        )
+
+    def test_api_references_registry_and_shutdown_state(self):
+        """Symbol-level: the registry singleton and the shutdown
+        stop-event/thread state names are loaded somewhere in api.py
+        (Attribute/Name nodes, not comments)."""
+        names = set()
+        for node in ast.walk(_api_ast()):
+            if isinstance(node, ast.Name):
+                names.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                names.add(node.attr)
+        assert "STREAM_WATCHDOG_REGISTRY" in names
+        assert "llm_stream_watchdog_stop" in names, "shutdown stop-event"
+        assert "llm_stream_watchdog_thread" in names, "shutdown join"
 
     def test_lifespan_passes_configured_threshold(self):
-        src = (DAEMON_DIR / "api.py").read_text()
-        assert "config.llm.stream_stall_threshold_seconds" in src
+        """The threshold kwarg rides the REAL config attribute chain
+        ``config.llm.stream_stall_threshold_seconds`` (AST attribute
+        chain, not a substring)."""
+        chains = set()
+        for node in ast.walk(_api_ast()):
+            if isinstance(node, ast.Attribute):
+                parts = []
+                cur = node
+                while isinstance(cur, ast.Attribute):
+                    parts.append(cur.attr)
+                    cur = cur.value
+                if isinstance(cur, ast.Name):
+                    parts.append(cur.id)
+                chains.add(".".join(reversed(parts)))
+        assert "config.llm.stream_stall_threshold_seconds" in chains
 
     def test_tick_loop_stops_promptly(self):
         """The loop's ``stop_event.wait(interval)`` shutdown shape."""
@@ -958,3 +1030,138 @@ class TestResetRegistry:
         wd.reset_registry()
         wd.reset_registry()  # no error on an already-empty registry
         assert len(wd.STREAM_WATCHDOG_REGISTRY) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Round-2: D2 (W3 fallback texts pinned via caplog) + telemetry token
+# ═══════════════════════════════════════════════════════════════════
+
+
+class _OSErrorSock:
+    """Socket-like stub whose shutdown() always fails."""
+
+    def fileno(self) -> int:
+        return -1
+
+    def shutdown(self, how: int) -> None:
+        raise OSError("test-injected shutdown failure")
+
+
+class TestW3FallbackMessagesPinned:
+    """D2: the two W3 fallback paths emit operationally DISTINCT
+    messages — a revert to the conflated single message must fail this
+    pin. Both texts asserted via caplog on real _force_unblock runs."""
+
+    def test_shutdown_oserror_message(self, caplog, monkeypatch):
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10
+        monkeypatch.setattr(wd, "_find_network_sock", lambda resp: _OSErrorSock())
+        with caplog.at_level("WARNING", logger="daemon.services.llm_stream_watchdog"):
+            assert wd.sweep_once(reg, 5.0) == 1
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "shutdown() failed" in joined, (
+            "W3: the OSError fallback must carry its DISTINCT "
+            "'shutdown() failed' message"
+        )
+        assert "socket unresolvable" not in joined, (
+            "the two W3 fallbacks must never bleed into each other"
+        )
+        assert "response.close() fallback applied" in joined
+        entry.response.close.assert_called_once()
+
+    def test_unresolvable_socket_message(self, caplog, monkeypatch):
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10
+        monkeypatch.setattr(wd, "_find_network_sock", lambda resp: None)
+        with caplog.at_level("WARNING", logger="daemon.services.llm_stream_watchdog"):
+            assert wd.sweep_once(reg, 5.0) == 1
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "socket unresolvable" in joined, (
+            "W3: the unresolvable-socket fallback must carry its DISTINCT "
+            "'socket unresolvable' message"
+        )
+        assert "shutdown() failed" not in joined, (
+            "the two W3 fallbacks must never bleed into each other"
+        )
+        assert "response.close() fallback applied" in joined
+        entry.response.close.assert_called_once()
+
+    def test_stall_abort_lines_carry_telemetry_token(self, caplog, monkeypatch):
+        """Telemetry token: every stall-abort line (detection + success)
+        carries the single greppable [LLM-WATCHDOG-STALL] prefix; the
+        fallback FAILURE detail lines keep the plain [StreamWatchdog]
+        prefix (they are diagnostics, not abort records)."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10
+        monkeypatch.setattr(wd, "_find_network_sock", lambda resp: _OSErrorSock())
+        with caplog.at_level("WARNING", logger="daemon.services.llm_stream_watchdog"):
+            assert wd.sweep_once(reg, 5.0) == 1
+        stall_lines = [
+            rec.getMessage() for rec in caplog.records
+            if "[LLM-WATCHDOG-STALL]" in rec.getMessage()
+        ]
+        assert len(stall_lines) >= 1, "abort attempt line must carry the token"
+        assert any("abort attempt starting" in ln for ln in stall_lines)
+        assert any("no bytes for" in ln for ln in stall_lines)
+
+    def test_success_line_carries_token_and_full_content(self, caplog):
+        """The forced-shutdown SUCCESS line keeps its existing message
+        content (round-2 constraint) under the new token prefix."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10
+        with caplog.at_level("WARNING", logger="daemon.services.llm_stream_watchdog"):
+            assert wd.sweep_once(reg, 5.0) == 1
+        success_lines = [
+            rec.getMessage() for rec in caplog.records if "forced transport shutdown" in rec.getMessage()
+        ]
+        assert len(success_lines) == 1
+        assert success_lines[0].startswith("[LLM-WATCHDOG-STALL]"), (
+            "success line must carry the [LLM-WATCHDOG-STALL] token"
+        )
+        assert "no bytes for" in success_lines[0]
+        assert "StreamStalledError will ride the timeout retry budget" in success_lines[0]
+
+
+class TestPostClaimErrorBestEffortClose:
+    """D1: an unexpected post-claim error must attempt the close()
+    fallback and still pop the entry (claim-then-abandon must never
+    drop the abort; no leak either way)."""
+
+    def test_post_claim_error_attempts_close_and_pops(self, caplog, monkeypatch):
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        reg.register(entry)
+        entry.last_byte_ts = time.time() - 10
+
+        def boom(resp):
+            raise RuntimeError("dig exploded")
+
+        monkeypatch.setattr(wd, "_find_network_sock", boom)
+        with caplog.at_level("WARNING", logger="daemon.services.llm_stream_watchdog"):
+            assert wd.sweep_once(reg, 5.0) == 0, (
+                "post-claim error must report False (not counted as aborted)"
+            )
+        entry.response.close.assert_called_once(), (
+            "best-effort close() must run in the outer except (D1)"
+        )
+        assert len(reg) == 0, "entry popped either way — no leak"
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "force-unblock failed" in joined
+
+    def test_lost_race_still_returns_false_without_close(self):
+        """The W2 lost-race path is UNCHANGED by D1: no close attempted
+        for a non-member (that socket may be serving someone else)."""
+        reg = wd.StreamWatchdogRegistry()
+        entry = wd.WatchedStreamEntry(response=MagicMock())
+        # never registered — the claim loses immediately
+        assert wd._force_unblock(entry, 5.0, reg) is False
+        entry.response.close.assert_not_called()
+        entry.response.shutdown.assert_not_called()
