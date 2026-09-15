@@ -185,6 +185,25 @@ def _find_near_duplicate_entry(
     return None
 
 
+def _is_active_critical_note(entry: Any) -> bool:
+    """R21 entry-gate predicate — an entry counts as ACTIVE iff its
+    ``superseded_by_id`` is ``None``.
+
+    Shared helper applied at the 3 external surfaces that pass
+    ``list_critical_notes`` through unfiltered (R21, LOCKED-L 2026-09-15).
+    Defensive against the empty-string class (a stray empty ``""``
+    pointer must NOT bypass the filter — ``is not None`` is the
+    authoritative comparison). Accepts either a SQLModel row, a
+    ``CriticalNotes`` BaseModel, or a plain dict (the surfaces pass
+    different shapes, so the predicate duck-types).
+    """
+    if isinstance(entry, dict):
+        sid = entry.get("superseded_by_id")
+    else:
+        sid = getattr(entry, "superseded_by_id", None)
+    return sid is None
+
+
 def _eviction_candidates(entries: list[CriticalNotes]) -> list[CriticalNotes]:
     """Return the entries that WOULD be evicted, oldest-first among lowest priority.
 

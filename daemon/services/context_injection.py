@@ -534,9 +534,19 @@ def _mcp_rag_hint(
             "(pass these to MCP RAG tools to scope results to this project)."
         )
         if critical_notes:
+            # R21 entry gate (LOCKED-L 2026-09-15): drop superseded rows
+            # at THIS external pass-through surface (the renderer
+            # received the raw list from an upstream caller — typically
+            # the ``external_opencode.py`` preload path, but defensively
+            # filter again here so any future caller shape can't leak
+            # a superseded row into the hint). ``is not None`` defends
+            # against the stray empty-string class too.
+            active_notes = [
+                note for note in critical_notes
+                if isinstance(note, dict) and note.get("superseded_by_id") is None
+            ]
             rendered = [
-                line for note in critical_notes
-                if isinstance(note, dict)
+                line for note in active_notes
                 for line in [_format_critical_note(note)]
                 if line is not None
             ]

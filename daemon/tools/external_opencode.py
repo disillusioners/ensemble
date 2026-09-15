@@ -490,7 +490,16 @@ def create_opencode_tools(
                 pass
             try:
                 notes = manager._project_repository.list_critical_notes(project_id)
-                critical_notes = [n.to_dict() for n in notes]
+                # R21 entry-gate (LOCKED-L 2026-09-15): drop superseded
+                # rows at the EXTERNAL pass-through surface so they
+                # never leak into the hint / shared-context render.
+                # Strict ``is not None`` comparison — defends against
+                # the stray empty-string class too.
+                active_notes = [
+                    n for n in notes
+                    if n.superseded_by_id is None
+                ]
+                critical_notes = [n.to_dict() for n in active_notes]
             except Exception:
                 pass
 

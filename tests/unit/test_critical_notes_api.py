@@ -45,9 +45,21 @@ def create_mock_project(
 
 
 def create_mock_critical_note(note_dict: dict) -> MagicMock:
-    """Create a mock CriticalNote that has to_dict() method."""
+    """Create a mock CriticalNote that has to_dict() method.
+
+    Critical-Notes Phase-2 R21 entry gate (LOCKED-L 2026-09-15):
+    the API surface that builds ``critical_notes`` field on
+    ``ProjectResponse`` filters superseded rows at fetch time
+    (``is None`` strict comparison — defends against the
+    stray empty-string class too). The mock fixture MUST set
+    ``superseded_by_id=None`` explicitly so legacy tests don't
+    accidentally exercise the new gate path; MagicMock would
+    otherwise return a truthy MagicMock object instead of
+    ``None`` and EVERY test row would fail the filter.
+    """
     mock_note = MagicMock()
     mock_note.to_dict.return_value = note_dict
+    mock_note.superseded_by_id = None
     return mock_note
 
 
