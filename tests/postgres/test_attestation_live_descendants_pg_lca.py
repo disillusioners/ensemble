@@ -215,6 +215,26 @@ def _build_pg_manager(
     manager.count_live_descendants = MethodType(
         InstanceManager.count_live_descendants, manager
     )
+    # 2026-09-12 LCA busy trigger suppression — both the new
+    # ``count_busy_descendants`` sibling AND the shared private BFS
+    # helper ``_count_descendants_busy_and_live`` (which the live-
+    # descendants public facade calls internally since the 2026-09-12
+    # refactor) MUST be bound onto the stub. The mirror change was
+    # applied to ``tests/integration/test_attestation_live_descendants
+    # .py``; this PG-dialect canary family covers the same BFS shape
+    # under the PG engine. Missing the private helper surfaces as
+    # ``AttributeError: '_PGStubManager' object has no attribute
+    # '_count_descendants_busy_and_live'`` inside the live BFS, which
+    # the gate's DB seam converts to ``live_descendants=-1`` AND
+    # ``busy_descendants=-1`` in the canonical log row — that
+    # fail-open silent surface is exactly the regression the
+    # integration test for the same migration caught and pinned.
+    manager.count_busy_descendants = MethodType(
+        InstanceManager.count_busy_descendants, manager
+    )
+    manager._count_descendants_busy_and_live = MethodType(
+        InstanceManager._count_descendants_busy_and_live, manager
+    )
     return manager
 
 

@@ -1003,12 +1003,54 @@ The completion gate's ALLOW branches also fire a word-count trigger on the LAST 
 
 Format-string placeholder count grows 28 → 31 (drift pin in `test_length_log_placeholder_count_is_31`). Tuple-discipline: the three new fields ride alongside the canonical tuple in the SAME format-string log line (same shape as the supplementary conditional-attestation and marker fields).
 
+### LCA busy trigger suppression (2026-09-12, user request — false-positive hint fix)
+
+A leader awaiting a healthy child (RUNNING/WAITING/WAITING_CHILDREN) writing a short mid-work ACK triggers BOTH the marker substring scan AND the length trigger on the ALLOW path — pre-fix this would call the judge, return `is_complete_report=false`, and inject a checkpoint-durable Completion Check Note on essentially every awaiting turn-end. The hint on healthy waits is noise. The LCA busy trigger suppression disarms the WHOLE trigger when at least one descendant is in the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}` — NO judge call, NO route-(b) hint, plain allow. The marker/length signal STAYS RECORDED on the canonical log row for forensics.
+
+**Trigger-site:** `daemon/services/attestation_gate.py:993-1037`. If `busy_descendants > 0 AND trigger_fires` ⇒ the WHOLE trigger is SUPPRESSED ENTIRELY:
+* `trigger_source=""` (cleared — the cheap-allow signal; logged as `<none>`)
+* `trigger_suppressed_by="busy_descendants"` stamped (the additive GateDecision field)
+* `marker_hit`, `marker_terms`, `length_trigger`, `final_word_count` STAY RECORDED for observability
+* `marker_path=""` (no judge fires — no path to record; logged as `<none>`)
+
+**Busy subset:** `InstanceManager.count_busy_descendants(instance_id) -> int` counts descendants in `{RUNNING, WAITING, WAITING_CHILDREN}` ONLY. PAUSED is NOT busy (suspect, not healthy — the trigger stays armed so a stuck child is caught). Conditional-live dormant `IDLE`/`QUEUED` are NOT busy either (no execution — work is merely en route; the trigger stays armed so en-route-only work is caught). Terminal `COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` are excluded. The busy subset is derived from the SAME BFS as `count_live_descendants` via the shared private helper `InstanceManager._count_descendants_busy_and_live` — single source of truth for the descendant scan.
+
+**Graph-node short-circuit:** `daemon/graph.py:5161-5168` adds `and not decision.trigger_suppressed_by` to the existing `decision.marker_hit or decision.length_trigger` check. When the gate has stamped a non-empty `trigger_suppressed_by` on the decision, the entire judge block short-circuits — NO `judge_completion_report_async` call, NO route-(b) hint injection, NO counter write, plain allow.
+
+**Suspect-pending protections UNCHANGED:** PAUSED descendants (maybe stuck — trigger stays armed), en-route-only work (IDLE + pending message OR IDLE + unsettled job — maybe lost). The deny path + the two-set live semantics are UNTOUCHED. Deny with RUNNING children is structurally impossible — `live_descendants > 0` blocks it.
+
+**Dry-mode:** busy suppression is log-only, NO judge call, NO hint, plain allow (dry-mode `allow unconditionally` posture preserved end-to-end). Operators grep `event=leader_completion_gate decision=dry_log trigger_suppressed_by=busy_descendants` to see dry-mode soak rows where the trigger was suppressed.
+
+**Kill-switch:** busy suppression is independent of `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`. The suppression disarms the trigger BEFORE the kill-switch check, so the kill-switch continues to apply on non-suppressed paths exactly as before. No new `ENSEMBLE_*` flags are introduced (fix/flag policy 7d5285aa — behavior fixes ship always-on).
+
+**Log schema (additive, two new fields):**
+
+* `busy_descendants` (int, ≥0) — count of descendants in the unconditional-busy subset. 0 when the root is not found OR no descendants exist OR every descendant is terminal/PAUSED/dormant. Always stamped on the result; meaningful even when the trigger doesn't fire.
+* `trigger_suppressed_by` (str, default `""`) — name of the suppressor that disarmed the trigger, or `""` when the trigger was not suppressed. Currently only `"busy_descendants"` is defined. Logged as `<none>` on every other path.
+
+Format-string placeholder count grows 31 → 33 (drift pin in `test_length_log_placeholder_count_is_33`). Tuple-discipline: the two new fields ride alongside the canonical tuple in the SAME format-string log line.
+
+**Forensics recipe:**
+
+```bash
+# How often is the trigger suppressed by busy descendants? (per-tree-state observability)
+grep "event=leader_completion_gate trigger_suppressed_by=busy_descendants" data/logs/ensemble.log | wc -l
+
+# Confirm the trigger WOULD have fired but for busy suppression (marker_hit=True + suppressed):
+grep "event=leader_completion_gate.*marker_hit=True.*trigger_suppressed_by=busy_descendants" data/logs/ensemble.log
+
+# Per-decision-class breakdown (the suppression lives on ALLOW / ALLOWED_LEGITIMATE_PENDING_WAKEUP / DRY_LOG):
+grep "event=leader_completion_gate.*trigger_suppressed_by=busy_descendants" data/logs/ensemble.log \
+  | awk '{for(i=1;i<=NF;i++) if ($i ~ /^decision=/) {print $i}}' | sort | uniq -c
+```
+
 ### References
 
-- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (marker scan); D-ENTRY 2026-09-12 (length trigger); F1 amendment 2026-09-12 (Shape A landed)
-- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-M1..AC-M16 (marker scan acceptance); AC-L1..AC-L19 (length trigger acceptance)
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-11 (marker scan); D-ENTRY 2026-09-12 (length trigger); D-ENTRY 2026-09-12 (LCA busy trigger suppression); F1 amendment 2026-09-12 (Shape A landed); D-ENTRY 2026-09-12 (import-typo fix)
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-M1..AC-M16 (marker scan acceptance); AC-L1..AC-L19 (length trigger acceptance); AC-BUSY-1..AC-BUSY-15 (LCA busy trigger suppression acceptance)
 - `daemon/services/attestation_marker_scanner.py` — pure-function scanners (marker substring + length word-count) + `SHORT_REPORT_WORD_THRESHOLD` constant
-- `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 placeholders)
+- `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 → 33 placeholders); busy trigger suppression at `evaluate():993-1037`
 - `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
-- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring (extended to `decision.marker_hit or decision.length_trigger` for the OR-composition)
-- `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (32 tests; +9 length-trigger tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring (extended to `decision.marker_hit or decision.length_trigger` for the OR-composition, with `and not decision.trigger_suppressed_by` short-circuit)
+- `daemon/manager.py` — `count_busy_descendants` (new LCA input) + `_count_descendants_busy_and_live` shared BFS helper
+- `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (42 tests; +11 LCA busy trigger suppression tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)

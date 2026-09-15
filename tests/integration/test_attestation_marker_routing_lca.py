@@ -169,6 +169,7 @@ def _make_node(
         manager.count_pending_children.return_value = 0
         manager.get_queued_or_expected_wakeups.return_value = 0
         manager.count_live_descendants.return_value = 0
+        manager.count_busy_descendants.return_value = 0
         manager.enqueue_message = MagicMock()
         manager.revive = MagicMock()
         manager.send_message = MagicMock()
@@ -433,6 +434,7 @@ def test_scenario_b_markers_judge_no_real_pending_allows_with_hint(monkeypatch, 
     manager.count_pending_children.return_value = 1  # REAL pending
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -645,6 +647,7 @@ def test_scenario_d2_xxx_with_real_pending_allows_with_hint(
     manager.count_pending_children.return_value = 1  # REAL pending
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -734,6 +737,7 @@ def test_scenario_d3_wrapper_fault_routes_conservatively(monkeypatch, caplog):
     manager2.count_pending_children.return_value = 1
     manager2.get_queued_or_expected_wakeups.return_value = 0
     manager2.count_live_descendants.return_value = 0
+    manager2.count_busy_descendants.return_value = 0
     manager2.enqueue_message = MagicMock()
     manager2.revive = MagicMock()
     manager2.send_message = MagicMock()
@@ -794,6 +798,7 @@ class _ConfigLessManagerStub:
         self.count_pending_children = MagicMock(return_value=0)
         self.get_queued_or_expected_wakeups = MagicMock(return_value=0)
         self.count_live_descendants = MagicMock(return_value=0)
+        self.count_busy_descendants = MagicMock(return_value=0)
         self.enqueue_message = MagicMock()
         self.revive = MagicMock()
         self.send_message = MagicMock()

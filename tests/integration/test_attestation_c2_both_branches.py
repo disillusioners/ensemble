@@ -124,6 +124,10 @@ def make_manager(pending_children=0, wakeups=0, live_descendants=0):
     # Third R2 input (2026-09-06) — defaulted to 0 so the C2-both-branches
     # matrix exercises the "no live descendants" R2 deny predicate.
     manager.count_live_descendants = MagicMock(return_value=live_descendants)
+    # Fourth LCA input (2026-09-12) — busy descendants trigger
+    # suppression. Defaulted to 0; tests that exercise suppression
+    # override per-test. Mirrors the third-input pattern above.
+    manager.count_busy_descendants = MagicMock(return_value=0)
     # keep the question-pause router inert
     manager.is_question_pause_requested = MagicMock(return_value=False)
     # keep watchover passthrough inert (slot reads this via getattr)
