@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.timestamps import to_utc_iso
 from daemon.services.work_status import _derive_legacy_status
 from daemon.services.mission_resolver import mission_ref_to_dict
 from daemon.repositories.job_queue.models import (
@@ -135,15 +136,12 @@ def _job_to_response(
         # response stays in sync with the resolver's view.
         started_at = work_record.started_at
         completed_at = work_record.completed_at
-        # ``created_at`` is a tz-aware datetime on WorkRecord; the
-        # JobResponse schema expects an ISO-8601 string. Normalise
-        # via the resolver's helper-equivalent inline format so the
-        # wire output always carries the ``+00:00`` offset.
-        created_at = work_record.created_at
-        if created_at is not None:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=_tz.utc)
-            created_at = created_at.isoformat()
+        # ``created_at`` is a datetime on WorkRecord; the JobResponse
+        # schema expects an ISO-8601 string. Route through the shared
+        # serialization boundary (tz fix) so the wire output always
+        # carries the explicit offset and every read surface emits
+        # the same shape.
+        created_at = to_utc_iso(work_record.created_at)
     else:
         # Legacy fallback path. Execution state comes straight off
         # the JobItem mirror columns — used by older tests / partial

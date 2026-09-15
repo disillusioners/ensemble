@@ -29,6 +29,7 @@ from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.timestamps import coerce_to_aware_utc
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -3669,12 +3670,9 @@ class JobRecoveryService:
             parsed = datetime.fromisoformat(str(value))
         except (TypeError, ValueError):
             return None
-        if parsed.tzinfo is None:
-            # JobItem stores naive ISO strings in some
-            # code paths; assume UTC for the grace
-            # comparison.
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
+        # Shared assume-UTC companion (tz fix) — naive ISO strings
+        # are assumed UTC for the grace comparison.
+        return coerce_to_aware_utc(parsed)
 
     async def _pattern_f_finalize_dead(
         self,

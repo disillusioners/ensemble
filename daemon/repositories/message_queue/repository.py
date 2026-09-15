@@ -37,9 +37,8 @@ def _coerce_datetime(value: Any) -> datetime | None:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    # Shared assume-UTC companion (tz fix).
+    return coerce_to_aware_utc(dt)
 
 
 def _coerce_json(value: Any, *, as_dict: bool = False, as_list: bool = False) -> Any:

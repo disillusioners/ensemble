@@ -119,6 +119,7 @@ from sqlalchemy import text
 from sqlalchemy import TextClause
 
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.services.timestamps import coerce_to_aware_utc, to_utc_iso
 from daemon.repositories.job_queue import _idle_predicate_sql
 from daemon.routers.schemas import DeferBlockHolderResponse
 
@@ -415,9 +416,8 @@ def _parse_timestamp(value: Any) -> datetime | None:
             parsed = datetime.fromisoformat(str(value))
         except (TypeError, ValueError):
             return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    # Shared sort/compare companion (tz fix): naive → assume-UTC.
+    return coerce_to_aware_utc(parsed)
 
 
 def _normalize_since(value: Any) -> str | None:
@@ -429,7 +429,8 @@ def _normalize_since(value: Any) -> str | None:
     """
     parsed = _parse_timestamp(value)
     if parsed is not None:
-        return parsed.isoformat()
+        # Shared serialization boundary (tz fix).
+        return to_utc_iso(parsed)
     if value is None:
         return None
     return str(value)

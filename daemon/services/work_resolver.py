@@ -68,6 +68,7 @@ from daemon.repositories.task.models import Task
 # helper is shared with the resolver module so all Fix-C read surfaces
 # emit the same keys in lock-step. Always-on since WS3 (the
 # M1 mission-projection kill-switch was removed).
+from daemon.services.timestamps import coerce_to_aware_utc, to_utc_iso
 from daemon.services.mission_resolver import (
     mission_projection_to_dict as _mission_projection_to_dict,
 )
@@ -392,12 +393,12 @@ class WorkRecord:
 def _serialize_created_at(value: datetime | None) -> str | None:
     """Return an ISO-8601 string for ``value``, or ``None``.
 
-    Task rows give us a tz-aware or naive ``datetime``; JobItem rows
-    give us a tz-aware parsed string already. JSON serialisation
-    needs a string. Naive datetimes are coerced to UTC before
-    formatting so the output always carries the ``+00:00`` offset —
-    frontend code can rely on tz-awareness without parsing the string
-    for missing-offset edge cases.
+    Thin delegate to the shared serialization boundary
+    (``daemon.services.timestamps.to_utc_iso``) so every read surface
+    emits the SAME wire shape: aware values serialize as UTC with the
+    explicit ``+00:00`` offset; naive values follow the documented
+    assume-UTC policy (legacy +07-digit rows render 7h-off until the
+    backfill repairs them — repair is centralized, not per-site).
 
     Args:
         value: A ``datetime`` (tz-aware or naive) or ``None``.
@@ -405,11 +406,7 @@ def _serialize_created_at(value: datetime | None) -> str | None:
     Returns:
         An ISO-8601 string, or ``None`` if ``value`` is ``None``.
     """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat()
+    return to_utc_iso(value)
 
 
 # ── Reverse canonical → source status map ─────────────────────────────────
@@ -703,9 +700,9 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
+        return coerce_to_aware_utc(value)
     try:
-        return datetime.fromisoformat(value)
+        return coerce_to_aware_utc(datetime.fromisoformat(value))
     except (ValueError, TypeError):
         logger.debug("work_resolver: unparseable created_at value %r", value)
         return None
@@ -732,7 +729,8 @@ def _normalize_sort_key(value: datetime | None) -> datetime:
     floor = datetime.min.replace(tzinfo=timezone.utc)
     if value is None:
         return floor
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    coerced = coerce_to_aware_utc(value)
+    return coerced if coerced is not None else floor
 
 
 def _parse_task_result_summary(task: Task) -> str | None:
@@ -780,18 +778,7 @@ def _serialize_instance_datetime(value: Any) -> str | None:
     Returns:
         An ISO-8601 string, or ``None``.
     """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    if isinstance(value, str):
-        # ISO-8601 strings pass through verbatim. Already UTC for
-        # ``created_at`` / ``updated_at`` (set via
-        # ``datetime.now(timezone.utc).isoformat()`` in the model).
-        return value
-    return None
+    return to_utc_iso(value)
 
 
 def _instance_started_at(

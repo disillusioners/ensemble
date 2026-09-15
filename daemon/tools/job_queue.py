@@ -2128,10 +2128,14 @@ def create_job_tools(
                 elapsed_seconds = 0.0
             else:
                 try:
-                    created = datetime.fromisoformat(created_raw)
-                    if created.tzinfo is None:
-                        created = created.replace(tzinfo=UTC)
-                    elapsed_seconds = (datetime.now(UTC) - created).total_seconds()
+                    from daemon.services.timestamps import coerce_to_aware_utc
+
+                    created = coerce_to_aware_utc(
+                        datetime.fromisoformat(created_raw)
+                    )
+                    elapsed_seconds = (
+                        datetime.now(UTC) - created
+                    ).total_seconds()
                 except Exception as e:
                     logger.warning(
                         "Failed to parse created_at %r for instance %s: %s: %s",

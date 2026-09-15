@@ -16,6 +16,13 @@ from sqlalchemy import Boolean, Column, Index, Integer, text
 from sqlmodel import SQLModel, Field
 
 
+def _to_utc_iso(value):
+    """``to_utc_iso`` wrapper with the deferred-import cycle guard."""
+    from daemon.services.timestamps import to_utc_iso
+
+    return to_utc_iso(value)
+
+
 def _default_created_at_naive_utc() -> datetime:
     """Naive-UTC ``created_at`` default for Task rows (DC-A fix).
 
@@ -295,8 +302,11 @@ class Task(SQLModel, table=True):
             "is_background": self.is_background,
             "result": result_data,
             "error": self.error,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at else None,
+            # Shared serialization boundary (tz fix): naive-UTC
+            # digits render assume-UTC with the explicit offset on
+            # the wire. Deferred import — see _default_created_at.
+            "created_at": _to_utc_iso(self.created_at),
+            "started_at": _to_utc_iso(self.started_at),
+            "completed_at": _to_utc_iso(self.completed_at),
+            "last_heartbeat_at": _to_utc_iso(self.last_heartbeat_at),
         }
