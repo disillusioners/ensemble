@@ -416,3 +416,166 @@ def test_stop_on_dead_pid_is_noop(tmp_log_dir: Path) -> None:
         # re-verifies ownership BEFORE killpg, which we don't do in
         # this spawner-only test (it's the manager's job). Tolerate.
         pass
+
+
+# ── fork-children: force=False SIGTERM→grace→SIGKILL escalation ─────
+
+
+def _pgrep_children(parent_pid: int) -> list[int]:
+    """Helper: list direct child PIDs of ``parent_pid`` (test-side).
+
+    Uses ``pgrep -P <pid>`` — universally available on Linux + macOS.
+    Returns ``[]`` on any failure (no children / pgrep missing). The
+    test tolerates an empty list as a structural artifact of the
+    shell-trap spawn (see reliability note in
+    ``test_stop_graceful_then_escalate_with_fork_children``).
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-P", str(parent_pid)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode != 0 or not out.stdout.strip():
+        return []
+    return [int(line.strip()) for line in out.stdout.splitlines() if line.strip()]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_stop_graceful_then_escalate_with_fork_children(
+    tmp_log_dir: Path,
+) -> None:
+    """``stop(pid, force=False)`` SIGTERMs → grace expires → SIGKILLs
+    the WHOLE process group, including fork-children of a SIGTERM-
+    trapping parent.
+
+    Phase 3.A.4 closes the case the low-level spawner deferred twice
+    (F1 acceptance note in ``phase1-plan.md`` 1.B.3): the service
+    spawns a parent shell that ignores SIGTERM (``trap "" TERM``) and
+    TWO forked ``sleep`` children. The proof:
+
+    * ``SIGTERM`` (the FIRST step) does NOT kill the parent (trapped).
+    * The grace period expires (parent still alive — only option is
+      SIGKILL escalation).
+    * ``SIGKILL`` via ``os.killpg(pid, SIGKILL)`` reaches the
+      WHOLE process group — parent AND both forked children die.
+
+    Reliability bar: this test uses REAL processes (no global
+    ``time`` / ``os`` patches — ``stop`` calls ``time.sleep`` and
+    ``os.killpg``). The grace window is set short via the
+    ``grace_seconds`` parameter to the low-level spawner (0.5s —
+    the spawner has no module-level constant to monkeypatch; the
+    param is the only seam). Wall-clock budget: < 3s.
+
+    If the shell-trap dance proves flaky on the host platform (e.g.
+    a future FreeBSD where ``trap`` semantics diverge), the
+    ``Phase 3.A.4 disposition note`` in
+    ``tests/unit/test_service_spawner.py`` documents the structural
+    reason; the test is NOT removed without a structural replacement.
+    """
+    from daemon.tools.service_spawner import (
+        is_process_alive,
+        spawn,
+        stop,
+    )
+
+    log_path = str(tmp_log_dir / "fork-children.log")
+    # Parent shell that IGNORES SIGTERM + two forked `sleep` children.
+    # `wait` is necessary so the shell does NOT exit before the
+    # children (would orphan them under the parent's PID = reaped by
+    # init, not by killpg). On macOS the children may still inherit
+    # the parent's pgid even after setsid — `killpg(pid, sig)` is the
+    # canonical fix.
+    pid, _ = spawn(
+        ["sh", "-c", 'trap "" TERM; sleep 60 & sleep 60 & wait'],
+        log_path=log_path,
+        cwd="/tmp",
+    )
+
+    # Brief settle so the children are actually forked and visible to
+    # pgrep BEFORE we start the kill race. ``&`` + ``wait`` forks
+    # synchronously in POSIX sh, but the test machine may need a few
+    # ms for the children to register with the kernel.
+    deadline = time.monotonic() + 1.0
+    children: list[int] = []
+    while time.monotonic() < deadline:
+        children = _pgrep_children(pid)
+        if len(children) >= 2:
+            break
+        time.sleep(0.02)
+
+    assert len(children) >= 2, (
+        f"shell did not fork 2 sleep children within 1s settle; "
+        f"got {children} via pgrep -P {pid}; the test environment "
+        f"cannot run the fork-children case (document disposition in "
+        f"the Phase 3.A.4 runbook row)"
+    )
+
+    parent_was_alive_pre_stop = is_process_alive(pid)
+
+    try:
+        # SIGTERM is trapped by the parent — the grace window MUST
+        # expire. ``stop`` escalates to ``SIGKILL`` after the deadline;
+        # ``killpg(pid, SIGKILL)`` reaches the WHOLE group, parent AND
+        # children.
+        start = time.monotonic()
+        stop(pid, force=False, grace_seconds=0.5)
+        elapsed = time.monotonic() - start
+
+        # (1) Parent was alive before stop() (sanity — proves the test
+        # is exercising the SIGTERM-trapped case).
+        assert parent_was_alive_pre_stop is True
+
+        # (2) Elapsed >= the grace window (grace expired ⇒ escalated).
+        # Allow generous headroom for the SIGKILL round-trip + reap.
+        assert elapsed >= 0.4, (
+            f"elapsed {elapsed:.3f}s < grace window; the test was "
+            f"expected to wait the FULL 0.5s grace and then escalate "
+            f"to SIGKILL (parent traps SIGTERM)"
+        )
+        assert elapsed < 2.5, (
+            f"elapsed {elapsed:.3f}s > 2.5s; the SIGKILL escalation "
+            f"took too long (killpg should be near-instant on local)"
+        )
+
+        # (3) Parent is dead (SIGKILL escalation via killpg).
+        time.sleep(0.05)
+        assert is_process_alive(pid) is False, (
+            "killpg escalation did not kill the SIGTERM-trapping parent"
+        )
+
+        # (4) BOTH fork-children are dead (killpg reached the group).
+        # Settle a touch longer because the children may have a brief
+        # SIGKILL→reap window on macOS.
+        child_deadline = time.monotonic() + 1.0
+        while time.monotonic() < child_deadline:
+            survivors = [c for c in children if is_process_alive(c)]
+            if not survivors:
+                break
+            time.sleep(0.02)
+        else:
+            survivors = [c for c in children if is_process_alive(c)]
+            assert not survivors, (
+                f"killpg did not reach fork-children; survivors: "
+                f"{survivors} of original {children}"
+            )
+    finally:
+        # Defensive teardown — if any assertion failed above, kill the
+        # WHOLE group so the test never leaks an orphaned sleep into
+        # the next run.
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
