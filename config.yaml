@@ -241,6 +241,44 @@ compaction:
   min_messages_before_compaction: 10
   summarization_chunk_threshold: 0.60
 
+# Critical Notes — tiered loading & maintenance (always-on per D4; NO
+# ENSEMBLE_* env vars exist for this section — config-layer tuning only,
+# rollback = redeploy the previous build).
+critical_notes:
+  # Max pinned notes in the always-injected core tier. Pinning beyond
+  # this REJECTS with demotion candidates named (reject-don't-evict).
+  core_cap: 8
+  # RESERVED Phase 2 (no consumer yet): max selected tail notes per
+  # first turn.
+  tail_cap: 6
+  # RESERVED Phase 2 (no consumer yet): hard char cap on the notes
+  # section of the injected block.
+  section_char_cap: 12000
+  # RESERVED Phase 2 (no consumers yet): BM25/vector fusion weights +
+  # minimum fusion score for tail selection (BlueprintMatcher parity).
+  fusion_bm25_weight: 0.4
+  fusion_vector_weight: 0.6
+  fusion_threshold: 0.30
+  # RESERVED Phase 2 (no consumer yet): priority floor size when fusion
+  # under-selects.
+  floor_count: 2
+  # reference bound: the tool REJECTS longer references on write
+  # (authoritative); injection-side truncation is a defensive backstop
+  # for legacy rows only.
+  reference_max: 500
+  # RESERVED Phase 2 (no consumer yet): query truncation for
+  # embed/BM25 input.
+  query_max_chars: 2000
+  # Staleness horizon (days since last_reviewed_at) for STALE marks and
+  # proposal-only archive candidates in list surfaces.
+  stale_days: 90
+  # RESERVED Phase 2 (no consumer yet): lazy embedding mint cap per
+  # first-turn read.
+  mint_cap_per_read: 10
+  # RESERVED Phase 3: quick-LLM selection stage. Ships false and
+  # unimplemented. NO env var exists for this knob (D4).
+  llm_select: false
+
 # Worker Pool and Background Services
 services:
   # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts

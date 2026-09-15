@@ -341,6 +341,16 @@ async def lifespan(app: FastAPI):
     )
     await manager.initialize()
 
+    # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
+    # the LIVE engine, which only exists after manager.initialize().
+    # Injected here rather than inside load_config — config load runs
+    # before any engine exists, and the previous in-load_config probe
+    # imported a nonexistent ``get_db_engine`` (deferred on every
+    # boot). Best-effort / never raises.
+    from daemon.config import probe_critical_notes_boot_state
+
+    probe_critical_notes_boot_state(engine=manager.engine)
+
     # Execution Gate: clear any leases left behind by a previous
     # process that died mid-execution. Done HERE (and awaited) so
     # the first ``gate.run`` after startup is guaranteed to see a

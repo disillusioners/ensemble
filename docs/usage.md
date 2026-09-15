@@ -510,7 +510,7 @@ project_cn_add(
 
 **Duplicate Handling**: Only exact normalized-summary matches count as near-duplicates — there is no automatic merging. A colliding add is REJECTED with an error naming the collided entry (id + summary). Near-duplicate detection is **cross-category** by design: the matcher compares normalized summary text only, so a re-tag of the same wording in a different category still collides. To recategorize, pass `entry_id` of the colliding entry on a follow-up `project_cn_add` call — `category` is now forwarded on the explicit update path, so the change is visible on the returned dict.
 
-**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `source_agent`. `category` is included so a recategorize is visible, never silent.
+**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `detail_ref`, `source_agent`. `category` is included so a recategorize is visible, never silent.
 
 **Cap**: At 50 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
@@ -528,6 +528,37 @@ project_cn_remove(
   entry_id="entry-uuid"
 )
 ```
+
+#### project_cn_pin
+
+```javascript
+project_cn_pin(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  entry_id="entry-uuid",
+  pinned=true
+)
+```
+
+#### project_cn_supersede
+
+```javascript
+project_cn_supersede(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  old_id="entry-uuid-old",
+  new_id="entry-uuid-new"
+)
+```
+
+#### project_cn_backfill_embeddings
+
+```javascript
+project_cn_backfill_embeddings(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  batch_size=10
+)
+```
+
+One-shot embeddings backfill (Phase 2): mints cached embeddings for every note row that still lacks one (legacy pre-Phase-2 rows, or rows whose write-time embed failed). **Idempotent** — only rows without a cached embedding are candidates, so already-minted rows are never re-embedded and a second run is a no-op. Fail-open per row: one bad row never aborts the batch; failures log under `[CriticalNotes:Degraded]` and are counted. Omit `project_id` to sweep ALL projects. Budget: ~250ms/embed (~15s for 50 notes) — run during a quiet window. Returns the counts summary `[CriticalNotes:backfill] minted=N skipped=K failed=M total=T project=X`.
 
 ---
 
