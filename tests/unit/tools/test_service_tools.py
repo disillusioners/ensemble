@@ -221,6 +221,56 @@ def test_full_doc_documents_exit_code_none(manager_stub: SimpleNamespace) -> Non
     )
 
 
+@pytest.mark.parametrize("tool_name", ["service_status", "service_stop"])
+def test_full_doc_documents_exit_code_none_for_status_and_stop(
+    manager_stub: SimpleNamespace, tool_name: str
+) -> None:
+    """F10 / A4 pin — ``_full_doc_`` for ``service_status`` AND
+    ``service_stop`` documents affirmative ``exit_code: int | None``
+    semantics.
+
+    Extension of the existing ``test_full_doc_documents_exit_code_none``
+    pin (which covers ``service_start`` only). Per F10/A4, the LLMs
+    that READ the docs for these tools must see the exit_code-equals-
+    None semantics where they actually observe EXITED rows:
+
+    * ``service_status`` reconciles PID liveness inline and returns
+      EXITED rows on dead/recycled PIDs.
+    * ``service_stop`` is the canonical producer of EXITED rows on
+      graceful / forced termination.
+
+    The soft assertion mirrors the existing pin style: prefer the
+    explicit ``exit_code: int | None`` phrasing; fall back to
+    ``exit_code`` + ``None`` co-occurrence (so a doc that names the
+    field and explains the sentinel still passes; a doc that only
+    names the field without explaining the None semantics fails).
+
+    Note for the docs lane: as of this pin's authoring, neither
+    ``service_status._full_doc_`` nor ``service_stop._full_doc_``
+    carries the explicit ``exit_code: int | None`` wording — the
+    existing ``service_start._full_doc_`` is the only doc that does.
+    This test therefore acts as a tripwire until the docs catch up.
+    """
+    from daemon.tools.service_tools import create_service_tools
+
+    tools = create_service_tools(
+        manager=manager_stub,
+        current_instance_id="inst-test",
+        agent_id="worker",
+    )
+    target_tool = next(t for t in tools if getattr(t, "name", None) == tool_name)
+    full_doc = getattr(target_tool, "_full_doc_", "")
+    assert ("exit_code: int | None" in full_doc) or (
+        "exit_code" in full_doc and "None" in full_doc
+    ), (
+        f"{tool_name}._full_doc_ must document exit_code=None for "
+        f"deaths not observed via service_stop (F10 / A4 approver gate). "
+        f"Mirror the service_start._full_doc_ wording: '``exit_code: int | None`` "
+        f"on EXITED rows — ``None`` is the canonical value for deaths NOT "
+        f"observed via service_stop'."
+    )
+
+
 def test_full_doc_documents_cross_instance_stop_semantics(
     manager_stub: SimpleNamespace,
 ) -> None:
