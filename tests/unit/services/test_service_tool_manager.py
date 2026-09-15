@@ -270,6 +270,83 @@ def test_f2_duplicate_name_uses_python_pre_check(
     asyncio.run(_stop(manager, "dup-1", force=True))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_f2_integrity_error_killpg_orphan(
+    manager: ServiceToolManager, repo: ServiceRepo, monkeypatch
+) -> None:
+    """F2 lost-race branch: ``IntegrityError`` on insert ⇒ killpg(SIGKILL) the orphan.
+
+    ``repo.insert`` is mocked to raise ``sqlalchemy.exc.IntegrityError``
+    (what the partial UNIQUE index ``idx_service_tracking_name_active``
+    raises when a concurrent caller won the same-name race) while a
+    REAL ``/bin/sleep 30`` child is spawned. The manager MUST
+    ``os.killpg(pid, SIGKILL)`` the just-spawned orphan and return
+    ``{"status": "name_in_use", "reason": "concurrent_start_won_race"}``.
+    Without this branch the child leaks as a live, untracked,
+    kill-exempt OS process (spec D3, decisions.md L381-393).
+    """
+    import daemon.services.service_tool_manager as _stm
+
+    # Spy on the spawner seam (delegating wrapper) to capture the REAL
+    # pid — needed for the finally-cleanup even if asserts fail.
+    spawned: list[int | None] = [None]
+    real_spawn = _stm.spawner_spawn
+
+    def _spying_spawn(argv, log_path, cwd=None):  # noqa: ANN001
+        pid, start_time = real_spawn(argv, log_path, cwd)
+        spawned[0] = pid
+        return pid, start_time
+
+    monkeypatch.setattr(_stm, "spawner_spawn", _spying_spawn)
+
+    killpg_calls = _recording_killpg(monkeypatch)
+
+    def _losing_insert(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise IntegrityError(
+            "INSERT INTO service_tracking ... (partial UNIQUE index)",
+            {"name": "f2-race"},
+            None,
+        )
+
+    monkeypatch.setattr(repo, "insert", _losing_insert)
+
+    try:
+        result = asyncio.run(
+            _start(manager, "f2-race", ["/bin/sleep", "30"], cwd="/tmp")
+        )
+    finally:
+        # The real child must die even on assertion failure — the
+        # recorder replaced ``os.killpg`` at the manager seam, so use
+        # the pre-patch real killpg for this fallback.
+        _hard_kill(spawned[0])
+
+    assert result["status"] == "name_in_use"
+    assert result["reason"] == "concurrent_start_won_race"
+    assert result["pid"] == spawned[0]
+
+    # Exactly one killpg: SIGKILL against the just-spawned orphan.
+    assert killpg_calls == [(spawned[0], signal.SIGKILL)], (
+        f"F2 violation: expected exactly one SIGKILL on the orphan, "
+        f"got {killpg_calls}"
+    )
+
+    # The loser MUST NOT leave a row behind (the concurrent winner
+    # owns the name — the row insert never committed).
+    assert repo.get_by_name_any_status("f2-race") is None
+
+    # The real child is actually dead (the recorder FORWARDED the
+    # SIGKILL — record-then-forward, never a no-op patch).
+    settle_deadline = time.monotonic() + 2.0
+    while is_process_alive(spawned[0]) and time.monotonic() < settle_deadline:
+        time.sleep(0.05)
+    assert not is_process_alive(spawned[0]), (
+        "F2 violation: the orphaned child survived the killpg(SIGKILL)"
+    )
+
+
 # ── A1 + F1 — PID-reuse defense ─────────────────────────────────────
 
 
@@ -382,6 +459,286 @@ def test_stop_pid_already_dead_returns_pid_dead(
     result = asyncio.run(_stop(manager, "dead-1", force=False))
     assert result["status"] == "exited"
     assert result["reason"] == "pid_dead"
+
+
+# ── F1 — PID-recycle branches (deterministic, anti-hang seams) ──────
+#
+# Seam rules for these tests (Phase 1.B review follow-ups — the prior
+# attempt hung on violations of exactly these):
+#
+#   * ``os.killpg`` is patched ONLY as a record-then-FORWARD recorder
+#     (``_recording_killpg``) — the real signal is always delivered,
+#     so no real child spawned here can ever become unkillable.
+#   * ``get_process_start_time`` is patched at the MANAGER-MODULE seam
+#     and returns DISTINCT INTEGER tokens (``row.start_time`` vs
+#     ``row.start_time + 987_654_321``) — never float comparisons.
+#   * The pre-kill test's clock patch replaces the ``time`` NAME
+#     inside the manager module ONLY (``_ManagerClockShim``) — the
+#     ``asyncio`` event loop keeps the REAL ``time`` module, so
+#     ``asyncio.sleep`` can never hang on a fake clock.
+#   * Grace/poll constants are monkeypatched tiny so each test <2s.
+
+
+_REAL_KILLPG = os.killpg  # captured at import time — NEVER a test patch
+
+
+def _recording_killpg(monkeypatch) -> list[tuple[int, int]]:
+    """Patch ``os.killpg`` at the manager seam as record-then-forward.
+
+    The recorder appends ``(pid, sig)`` and then DELEGATES to the real
+    ``os.killpg`` — signals are always really delivered, so real test
+    children die on schedule even while we assert on the recording.
+    """
+    calls: list[tuple[int, int]] = []
+
+    def _record_and_forward(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+        _REAL_KILLPG(pid, sig)
+
+    monkeypatch.setattr(
+        "daemon.services.service_tool_manager.os.killpg", _record_and_forward
+    )
+    return calls
+
+
+def _hard_kill(pid: int | None) -> None:
+    """Best-effort REAL SIGKILL cleanup for a spawned test child.
+
+    Uses the import-time ``_REAL_KILLPG`` so it never routes through
+    the recorder (keeping ``killpg_calls`` recordings assertion-clean)
+    and works even while the recorder patch is active.
+    """
+    if pid is None:
+        return
+    try:
+        _REAL_KILLPG(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class _ManagerClockShim:
+    """Deterministic ``time.monotonic`` for the MANAGER module only.
+
+    Installed as ``daemon.services.service_tool_manager.time`` (the
+    module NAME binding) so ``asyncio`` and every other module keep
+    the REAL ``time`` module — the event-loop clock is never faked,
+    which is what makes this hang-proof. ``monotonic()`` pops scripted
+    INTEGER ticks; when the script runs dry it keeps INCREASING
+    (monotonic contract) so any pending loop condition exits. All
+    other attributes delegate to the real module.
+    """
+
+    def __init__(self, ticks: list[int]) -> None:
+        self._ticks = list(ticks)
+        self.now: int = ticks[0]
+
+    def monotonic(self) -> int:
+        if self._ticks:
+            self.now = self._ticks.pop(0)
+        else:
+            self.now += 1_000
+        return self.now
+
+    def __getattr__(self, name: str):  # noqa: ANN204
+        return getattr(time, name)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_stop_pre_signal_recycle_returns_pid_recycled(
+    manager: ServiceToolManager, repo: ServiceRepo, monkeypatch
+) -> None:
+    """F1 layer (a): pre-signal re-verify mismatch ⇒ ``pid_recycled``, NO signal.
+
+    The FIRST ``get_process_start_time`` read (stop() ~L462) returns a
+    MISMATCHED integer token ⇒ the manager returns
+    ``{"status": "exited", "reason": "pid_recycled"}`` WITHOUT ever
+    calling ``os.killpg`` — a signal against the recycled PID would
+    kill an unrelated user process (the exact hazard F1 closes).
+    """
+    asyncio.run(_start(manager, "recycle-pre", ["sleep", "60"], cwd="/tmp"))
+    row = repo.get_by_name("recycle-pre")
+    assert row is not None and row.pid is not None and row.start_time is not None
+
+    mismatched_token = row.start_time + 987_654_321  # DISTINCT INTEGER
+
+    monkeypatch.setattr(
+        "daemon.services.service_tool_manager.get_process_start_time",
+        lambda pid: mismatched_token,
+    )
+    killpg_calls = _recording_killpg(monkeypatch)
+
+    try:
+        result = asyncio.run(_stop(manager, "recycle-pre", force=False))
+    finally:
+        # No signal was sent on this path — the child is still alive.
+        _hard_kill(row.pid)
+
+    assert result["status"] == "exited"
+    assert result["reason"] == "pid_recycled"
+    assert result["pid"] == row.pid
+
+    # NO signal was sent — the (forwarding) recorder stayed empty.
+    assert killpg_calls == [], (
+        f"F1 violation: killpg fired despite pre-signal recycle: {killpg_calls}"
+    )
+
+    # Row marked EXITED (the name slot is released).
+    reread = repo.get_by_name_any_status("recycle-pre")
+    assert reread is not None
+    assert reread.status == ServiceStatus.EXITED.value
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_stop_recycle_during_grace_no_escalation(
+    manager: ServiceToolManager, repo: ServiceRepo, monkeypatch
+) -> None:
+    """F1 layer (b): recycle detected mid-grace ⇒ no SIGKILL escalation.
+
+    Read #1 (pre-signal re-verify) MATCHES so the initial SIGTERM goes
+    out; every later read (grace iterations) returns the mismatched
+    token ⇒ the FIRST grace iteration detects the recycle and returns
+    ``reason="pid_recycled_during_grace"``. The recorder must contain
+    exactly the initial SIGTERM — never a SIGKILL escalation.
+    """
+    asyncio.run(_start(manager, "recycle-grace", ["sleep", "60"], cwd="/tmp"))
+    row = repo.get_by_name("recycle-grace")
+    assert row is not None and row.pid is not None and row.start_time is not None
+
+    reads: list[int] = []
+
+    def scripted_read(pid: int) -> int:
+        reads.append(pid)
+        # Read #1 = pre-signal re-verify → MATCH (SIGTERM goes out).
+        # Every later read = grace iteration → MISMATCH (recycled).
+        return row.start_time if len(reads) == 1 else row.start_time + 987_654_321
+
+    monkeypatch.setattr(
+        "daemon.services.service_tool_manager.get_process_start_time",
+        scripted_read,
+    )
+    killpg_calls = _recording_killpg(monkeypatch)
+
+    import daemon.services.service_tool_manager as _stm
+
+    # Tiny grace window (<0.2s): the first grace iteration (~poll
+    # interval in) already sees the mismatch, so runtime ≈ poll+ε.
+    monkeypatch.setattr(_stm, "DEFAULT_STOP_GRACE_SECONDS", 0.15)
+    monkeypatch.setattr(_stm, "DEFAULT_GRACE_POLL_INTERVAL_SECONDS", 0.05)
+
+    try:
+        result = asyncio.run(_stop(manager, "recycle-grace", force=False))
+    finally:
+        _hard_kill(row.pid)
+
+    assert result["status"] == "exited"
+    assert result["reason"] == "pid_recycled_during_grace"
+    assert result["pid"] == row.pid
+
+    # ≥2 reads: the pre-signal re-verify plus at least one grace
+    # iteration (the mismatch was detected DURING grace, not before
+    # the signal).
+    assert len(reads) >= 2, (
+        f"expected ≥1 grace re-verify after the pre-signal read; "
+        f"got {len(reads)} reads"
+    )
+
+    # Exactly ONE killpg: the initial SIGTERM. No SIGKILL escalation —
+    # the recycled PID is now an unrelated process.
+    assert killpg_calls == [(row.pid, signal.SIGTERM)], (
+        f"F1 violation: expected exactly one SIGTERM, got {killpg_calls}"
+    )
+
+    reread = repo.get_by_name_any_status("recycle-grace")
+    assert reread is not None
+    assert reread.status == ServiceStatus.EXITED.value
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_stop_recycle_pre_kill_returns_pid_recycled_pre_kill(
+    manager: ServiceToolManager, repo: ServiceRepo, monkeypatch
+) -> None:
+    """F1 layer (c): pre-kill re-verify mismatch ⇒ ``pid_recycled_pre_kill``, NO SIGKILL.
+
+    Scripted via the manager-scoped fake clock (``_ManagerClockShim``,
+    manager module keeps the REAL grace constant 5.0 — the fake clock
+    compresses the window; only the poll interval is patched tiny)::
+
+        clock 1000          → deadline = 1000 + 5.0 = 1005
+        clock 1001..1004    → 4 grace iterations, each read MATCHES
+        clock 1006 ≥ 1005   → loop exits WITHOUT break (never "dies")
+        pre-kill read       → MISMATCH (token flip keyed on clock ≥ deadline)
+
+    ⇒ ``reason="pid_recycled_pre_kill"``, recorder holds ONLY the
+    initial SIGTERM, SIGKILL escalation never reached.
+    """
+    asyncio.run(_start(manager, "recycle-prekill", ["sleep", "60"], cwd="/tmp"))
+    row = repo.get_by_name("recycle-prekill")
+    assert row is not None and row.pid is not None and row.start_time is not None
+
+    import daemon.services.service_tool_manager as _stm
+
+    clock = _ManagerClockShim([1000, 1001, 1002, 1003, 1004, 1006])
+    monkeypatch.setattr(_stm, "time", clock)
+
+    deadline_token = 1005  # first clock read (1000) + real grace 5.0
+
+    reads: list[int] = []
+
+    def flip_on_deadline(pid: int) -> int:
+        reads.append(pid)
+        # MATCH while the fake clock is inside the grace window;
+        # MISMATCH from the first read at/after the deadline — which
+        # is exactly the loop-else pre-kill re-verify.
+        if clock.now < deadline_token:
+            return row.start_time
+        return row.start_time + 987_654_321
+
+    monkeypatch.setattr(
+        "daemon.services.service_tool_manager.get_process_start_time",
+        flip_on_deadline,
+    )
+    killpg_calls = _recording_killpg(monkeypatch)
+
+    # Only the poll interval is shrunk (real sleeps × 4 ≈ 0.2s wall);
+    # DEFAULT_STOP_GRACE_SECONDS stays 5.0 — the fake clock governs.
+    monkeypatch.setattr(_stm, "DEFAULT_GRACE_POLL_INTERVAL_SECONDS", 0.05)
+
+    try:
+        result = asyncio.run(_stop(manager, "recycle-prekill", force=False))
+    finally:
+        _hard_kill(row.pid)
+
+    assert result["status"] == "exited"
+    assert result["reason"] == "pid_recycled_pre_kill"
+    assert result["pid"] == row.pid
+
+    # The loop really ITERATED with matches before the pre-kill flip:
+    # 6 reads = 1 pre-signal + 4 grace + 1 pre-kill (deterministic —
+    # the fake clock scripts exactly 4 in-window checks).
+    assert len(reads) == 6, (
+        f"expected 6 ownership reads (1 pre-signal + 4 grace + 1 "
+        f"pre-kill), got {len(reads)}"
+    )
+
+    # Exactly ONE killpg: the initial SIGTERM — the SIGKILL escalation
+    # must NOT fire on a pre-kill recycle.
+    assert killpg_calls == [(row.pid, signal.SIGTERM)], (
+        f"F1 violation: SIGKILL escalation fired on pre-kill recycle; "
+        f"got {killpg_calls}"
+    )
+
+    reread = repo.get_by_name_any_status("recycle-prekill")
+    assert reread is not None
+    assert reread.status == ServiceStatus.EXITED.value
 
 
 # ── A2 — async grace path ───────────────────────────────────────────

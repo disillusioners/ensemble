@@ -409,7 +409,9 @@ def test_service_start_then_stop_smoke(manager_stub: SimpleNamespace, tmp_path) 
             stop_tool.ainvoke({"name": "smoke-test-1", "force": True})
         )
         assert isinstance(stop_result, dict)
-        assert stop_result.get("status") in ("exited", "running"), (
+        # force=True always returns "exited" (stop() marks the row
+        # EXITED on both the killpg-success and pid_dead branches).
+        assert stop_result.get("status") == "exited", (
             f"stop result unexpected: {stop_result!r}"
         )
     finally:
