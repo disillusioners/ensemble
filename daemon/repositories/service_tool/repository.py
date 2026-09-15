@@ -17,11 +17,18 @@ Layering notes (per
 ``.agents/shared/planning/service-tool/research-persistence-migrations.md``
 Q2):
 
-* Reads via ``engine.connect()`` (NOT ``sqlmodel.Session``) — the
-  SQLite write-lock regression fix documented at
-  ``daemon/repositories/task/repository.py:116-130``. Read-only
-  connections release at exit, so a later ``engine.begin()`` for a
-  write never collides on the file lock.
+* Reads via ``SQLModelSession`` (pure SELECTs through the ORM) —
+  this deliberately deviates from the
+  ``daemon/repositories/task/repository.py`` ``engine.connect()``-
+  for-reads pattern (rationale documented there at lines 116-130).
+  Pure SELECT through ``SQLModelSession`` acquires no SQLite write
+  lock, so the historical write-lock regression class does not
+  re-trigger here, and ``session.get()`` / ``session.exec(select(...))``
+  return a fully-populated object with no extra round-trip. The
+  single exception is ``get_by_id``: the cheap existence-check
+  SELECT uses ``engine.connect()`` (same rationale as
+  task/repository.py) and a ``SQLModelSession.get()`` re-read then
+  hydrates the row.
 * Multi-statement atomic writes via ``engine.begin()`` — one
   transaction per write site.
 * Single-row ORM writes go through ``sqlmodel.Session`` for
@@ -352,8 +359,10 @@ class ServiceRepo:
         """Return all ``STARTING`` / ``RUNNING`` rows (newest first).
 
         Powers the Phase 3 ``service_list`` tool's "currently running"
-        projection. Reads via ``engine.connect()`` so the read does
-        not collide with a later write transaction's write-lock.
+        projection. Reads via ``SQLModelSession`` — the same lock-
+        safe pure-SELECT pattern documented at module level (pure
+        SELECTs acquire no write lock, so this does not collide
+        with a later write transaction's write-lock).
         """
         with SQLModelSession(self.engine) as session:
             stmt = (
