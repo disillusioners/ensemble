@@ -53,6 +53,7 @@ from daemon.tools._tool_registry import (
     PRIVILEGED_TOOL_CATEGORIES,
     discover_source_only_tool_names,
 )
+from daemon.tools.instance import INNATE_SKILL_TOOL_CATEGORIES
 
 # Repo root: tests/unit/tools/test_service_registration.py -> parents[3].
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -108,6 +109,69 @@ class TestStaticRegistrationChecklist:
         the exact-equality side is pinned in the three pin files;
         this asserts the membership side."""
         assert SERVICE_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
+
+
+# ── 3.B.3b innate-skill ∩ privileged isolation pin (architect rider) ──────
+
+
+class TestInnateSkillPrivilegedIsolation:
+    """3.B.3b — closure on the architect-rider gap flagged during the
+    service-tool review (plan: ``.agents/shared/planning/service-tool/
+    phase3-plan.md`` task 3.B.3b).
+
+    ``expand_allow_for_innate_skills`` (~``daemon/tools/instance.py:186``)
+    appends the categories mapped from an agent's innate skills to its
+    allow list REGARDLESS of whether those categories are privileged.
+    That is the design — innate-skill tool access should "just work"
+    without every agent having to repeat the skill's category in
+    ``tools.allow``. But it has a structural consequence: ANY mapping
+    in ``INNATE_SKILL_TOOL_CATEGORIES`` whose value-set intersects
+    ``PRIVILEGED_TOOL_CATEGORIES`` would silently default-grant a
+    default-deny category to every agent declaring that innate skill —
+    a far more dangerous bypass than the chart-vs-instance mapping
+    caught earlier (see
+    ``tests/test_tool_filter.py:test_chart_innate_skill_adds_chart_category_not_instance``).
+    ``service`` being added to the privileged set on D4 Option A made
+    this worth pinning: any future agent declaring
+    ``innate_skills: ["service-tools-skill"]`` would default-grant
+    system-process-spawning authority without ever naming ``service``
+    in its ``tools.allow``.
+
+    The pin screams on any such future mapping — the regression
+    printout names the offending category(ies) AND the current
+    privileged set so the next debugger sees the trap without
+    re-reading source.
+    """
+
+    def test_innate_skill_categories_disjoint_from_privileged(self) -> None:
+        """No value-set in ``INNATE_SKILL_TOOL_CATEGORIES`` may
+        intersect the privileged-set. Empty intersection is the
+        structural invariant — fail with names + current privileged
+        set so a regression printout is self-explanatory."""
+        innate_union: set[str] = set().union(
+            *INNATE_SKILL_TOOL_CATEGORIES.values()
+        )
+        offending = innate_union & PRIVILEGED_TOOL_CATEGORIES
+        assert offending == set(), (
+            f"innate-skill categories intersect "
+            f"PRIVILEGED_TOOL_CATEGORIES: offending={sorted(offending)}; "
+            f"current privileged set={sorted(PRIVILEGED_TOOL_CATEGORIES)}; "
+            f"the offending categories would be default-granted to every "
+            f"agent declaring the hosting innate skill, bypassing the D4 "
+            f"Option A default-deny seam (architect-rider 3.B.3b)"
+        )
+
+    def test_innate_skill_categories_not_vacuously_empty(self) -> None:
+        """Positive control: the dict has real entries — the negative
+        pin above is meaningful, not accidentally green because the
+        dict became empty. Cheap insurance against a future refactor
+        that empties the dict and silently disables the negative pin."""
+        union: set[str] = set().union(*INNATE_SKILL_TOOL_CATEGORIES.values())
+        assert union, (
+            "INNATE_SKILL_TOOL_CATEGORIES has no entries — the negative "
+            "intersection pin is vacuously clean and not testing anything. "
+            "Either restore real entries or delete this pin pair."
+        )
 
 
 # ── Decorator order (1.B's file — pinned here, not edited here) ──────────────
