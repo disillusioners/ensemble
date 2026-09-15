@@ -9,7 +9,6 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import CheckConstraint, Column, ForeignKey, Integer, String, UniqueConstraint

@@ -174,9 +174,13 @@ async def _maybe_tiered_critical_notes(
             default trees, but the caller already routes those
             to the scope guide branch so this path is only
             entered for real projects).
-        active_notes: The pre-fetched list of critical-note dicts
-            (already R21-filtered to active-only by the
-            orchestrator's R21 entry-gate plumbing).
+        active_notes: The pre-fetched list of critical-note dicts.
+            May contain SUPERSEDED rows (the production caller's
+            ``_fetch_project_payload`` reads the unfiltered
+            ``list_critical_notes``) — the R21 entry pre-filter
+            below excludes them from selection competition (M1
+            fix) while the render-all fallbacks keep returning
+            the caller's list verbatim.
         user_query: The first-turn user message text. Empty /
             whitespace-only ⇒ renderer falls through to core +
             floor (no fusion).
@@ -187,16 +191,27 @@ async def _maybe_tiered_critical_notes(
             ``self._project_repository`` (duck-typed).
 
     Returns:
-        A flat list of selected note dicts, in render order
-        (pinned first by R19 priority sort, then tail in fusion
-        score order, then the sentinel hint line encoded as a
-        trailing dict — see :func:`_format_critical_notes_section`
-        for the drop-count consumption contract).
+        Tuple ``(notes, pre_ordered)``:
+
+        * ``notes`` — the selected note dicts. In render order
+          when ``pre_ordered`` is ``True``: pinned first (R19
+          priority sort), then tail in fusion-score order, then
+          the sentinel hint line encoded on the trailing dict
+          (see :func:`_format_critical_notes_section` for the
+          drop-count consumption contract). Render-all paths
+          return the caller's list VERBATIM (identity preserved —
+          byte-identity pin) with ``pre_ordered=False``, so the
+          renderer applies the legacy R19 re-sort.
+        * ``pre_ordered`` — ``True`` only for the tiered path,
+          telling the renderer to preserve the fusion order
+          instead of re-sorting (spec §4.2/R19: tail entries are
+          score-ordered in the injected block).
 
     Failure modes
 
     * ``pinned_count == 0`` → render-all (legacy shape) —
-      bypasses selection entirely, returns ``active_notes`` as-is.
+      bypasses selection entirely, returns ``(active_notes,
+      False)``.
     * Selector raises → :func:`_emit_critical_notes_log` writes a
       degraded-prefix WARNING, then render-all is returned.
     * Vector stage unavailable → BM25-only rank, floor picks up
@@ -205,7 +220,24 @@ async def _maybe_tiered_critical_notes(
       ``[CriticalNotes:Degraded] stage=lazy_mint reason=...``.
     """
     if not active_notes:
-        return []
+        return [], False
+
+    # M1 (R21 gap at the internal seam): the production caller passes
+    # UNFILTERED rows, so superseded rows previously competed in
+    # fusion, inflated ``dropped_count``, and — worst case — a
+    # ``__hint_drop_count`` sentinel landing on a superseded tail row
+    # was dropped by the renderer's R21 filter WITH the sentinel,
+    # silently losing the hint line. Filter the selection POOL here
+    # via the canonical gate predicate; the render-all fallbacks
+    # below still return the caller's list verbatim (the renderer's
+    # own R21 filter keeps the rendered output byte-identical).
+    from daemon.services.critical_note_gate import is_active_critical_note
+
+    candidate_pool = [
+        n for n in active_notes if is_active_critical_note(n)
+    ]
+    if not candidate_pool:
+        return [], False
 
     # ── Gate: pinned_count >= 1 activates tiered; else render-all ────
     pinned_count = await asyncio.to_thread(
@@ -222,11 +254,11 @@ async def _maybe_tiered_critical_notes(
             "[CriticalNotes] tiered=gated_off total=%d pinned_count=%d "
             "instance=%s (render-all fallback per §4.2 #8 — no pin to "
             "anchor the core tier).",
-            len(active_notes),
+            len(candidate_pool),
             pinned_count,
             (instance_id or "")[:12],
         )
-        return active_notes
+        return active_notes, False
 
     # ── Tiered path: build embeddings map + cached query embedding ───
     embeddings_map = await asyncio.to_thread(
@@ -280,7 +312,7 @@ async def _maybe_tiered_critical_notes(
     # ── Run the selector (pure; isolated for unit tests) ───────────────
     try:
         result = select_critical_notes_for_injection(
-            active_notes=active_notes,
+            active_notes=candidate_pool,
             query=user_query,
             embeddings_map=embeddings_map,
             query_embedding=cached_query_embed,
@@ -297,7 +329,7 @@ async def _maybe_tiered_critical_notes(
             (instance_id or "")[:12],
             type(e).__name__,
         )
-        return active_notes
+        return active_notes, False
 
     # ── Routine telemetry ──────────────────────────────────────────────
     _emit_critical_notes_log(result.telemetry)
@@ -310,11 +342,13 @@ async def _maybe_tiered_critical_notes(
     # entry to emit the canonical hint line. We attach it to the
     # final tail entry when dropped_count > 0; if tail is empty
     # (everything was rendered-all and hit the cap), the hint
-    # still surfaces — attach to the last pinned entry.
+    # still surfaces — attach to the last pinned entry. The pool is
+    # active-only (M1 pre-filter), so the sentinel ALWAYS lands on a
+    # row the renderer's R21 filter keeps.
     if result.dropped_count > 0 and output:
         output[-1]["__hint_drop_count"] = result.dropped_count
 
-    return output
+    return output, True
 
 
 def _emit_critical_notes_log(telemetry: dict[str, Any]) -> None:
@@ -524,6 +558,25 @@ async def _lazy_mint_embeddings(
         return 0
 
     minted = 0
+    # B1 fix: build the embedder ONCE with the repo's EXPLICIT engine
+    # (same pattern as ``_embed_query``). The previous engineless
+    # ``embed_critical_note_text(text)`` call hit a dead lazy-import
+    # inside the builder and degraded to ``no_engine`` — the lazy-mint
+    # window never minted a single vector.
+    from daemon.services.critical_notes_embedding import (
+        DEFAULT_EMBEDDING_MODEL,
+        build_critical_notes_embedder,
+        resolve_critical_notes_embedding_model,
+    )
+
+    embedder = build_critical_notes_embedder(
+        model=DEFAULT_EMBEDDING_MODEL,
+        engine=getattr(repo, "engine", None),
+    )
+    if embedder is None:
+        return 0
+    stamped_model = resolve_critical_notes_embedding_model()
+
     for note_id in ids:
         try:
             note_dict = await asyncio.to_thread(
@@ -545,14 +598,17 @@ async def _lazy_mint_embeddings(
             )
             if not text:
                 continue
-            vector = await embed_critical_note_text(text)
+            vector = await embed_critical_note_text(
+                text, embedding_service=embedder,
+            )
             if not vector:
                 continue
             await asyncio.to_thread(
                 repo.set_critical_note_embedding,
                 note_id,
                 vector,
-                "text-embedding-3-small",
+                # Model the embed call actually resolved to (item 7).
+                stamped_model,
                 len(vector),
             )
             minted += 1

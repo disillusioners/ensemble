@@ -1635,11 +1635,27 @@ class SQLModelProjectRepository:
                 import asyncio
 
                 from daemon.services.critical_notes_embedding import (
+                    DEFAULT_EMBEDDING_MODEL,
+                    build_critical_notes_embedder,
                     embed_critical_note_text,
                 )
 
+                # B1 fix: build the embedder with the EXPLICIT engine
+                # (captured above). The previous engineless call hit a
+                # dead lazy-import inside the builder and degraded to
+                # ``no_engine`` on every write — no vector was ever
+                # minted. Same pattern as the orchestrator's
+                # ``_embed_query`` (the surviving template).
+                service = build_critical_notes_embedder(
+                    model=DEFAULT_EMBEDDING_MODEL, engine=engine,
+                )
+                if service is None:
+                    return
+
                 async def _embed() -> list[float] | None:
-                    return await embed_critical_note_text(text)
+                    return await embed_critical_note_text(
+                        text, embedding_service=service,
+                    )
 
                 # Use a fresh asyncio.run() so we own the loop;
                 # the surrounding sync context has no loop. This
@@ -1652,11 +1668,18 @@ class SQLModelProjectRepository:
                 # Persist the result on the SAME engine that
                 # hosts the note row — the FK-self relationship
                 # requires it.
+                from daemon.services.critical_notes_embedding import (
+                    resolve_critical_notes_embedding_model,
+                )
+
                 repo = type(self)(engine)
                 repo.set_critical_note_embedding(
                     note_id=note_id,
                     embedding=vector,
-                    model="text-embedding-3-small",
+                    # Stamp the model the embed call ACTUALLY resolved
+                    # to (env overrides honored) — not a hardcoded
+                    # literal (item 7).
+                    model=resolve_critical_notes_embedding_model(),
                     dims=len(vector),
                 )
             except Exception as e:
@@ -2127,6 +2150,11 @@ class SQLModelProjectRepository:
                 .where(
                     CriticalNoteModel.project_id == project_id,
                     CriticalNoteModel.id.notin_(embedded_subq),
+                    # Item 5 (hardening): never mint vectors for dead
+                    # rows — a superseded note will never re-enter the
+                    # injection pool, so its embedding is unreachable
+                    # work (and a wasted embed-API call).
+                    CriticalNoteModel.superseded_by_id.is_(None),
                 )
                 .order_by(CriticalNoteModel.created_at.asc())
                 .limit(limit)
@@ -2162,27 +2190,38 @@ class SQLModelProjectRepository:
                 return "skipped"
             from daemon.services.critical_notes_embedding import (
                 DEFAULT_EMBEDDING_MODEL,
+                build_critical_notes_embedder,
                 embed_critical_note_text,
                 make_embed_input,
+                resolve_critical_notes_embedding_model,
             )
 
             text = make_embed_input(note.summary or "", note.reference)
             if not text:
                 return "skipped"
             # Same sync-bridge pattern as ``_fire_and_forget_embed``:
-            # fresh asyncio.run() so we own the loop; the embedding
-            # service builds its own engine-bound plumbing (a
-            # construction failure surfaces as a ``None`` vector →
-            # skipped, per the fail-open contract).
+            # fresh asyncio.run() so we own the loop; the embedder is
+            # built with THIS repo's engine (B1 fix — the engineless
+            # call degraded to ``no_engine`` on every row, so backfill
+            # never minted anything).
             import asyncio
 
-            vector = asyncio.run(embed_critical_note_text(text))
+            service = build_critical_notes_embedder(
+                model=DEFAULT_EMBEDDING_MODEL, engine=self.engine,
+            )
+            if service is None:
+                return "skipped"
+            vector = asyncio.run(
+                embed_critical_note_text(text, embedding_service=service)
+            )
             if not vector:
                 return "skipped"
             self.set_critical_note_embedding(
                 note_id=note_id,
                 embedding=vector,
-                model=DEFAULT_EMBEDDING_MODEL,
+                # Stamp the model the embed call ACTUALLY resolved to
+                # (env overrides honored) — not a hardcoded literal.
+                model=resolve_critical_notes_embedding_model(),
                 dims=len(vector),
             )
             return "minted"

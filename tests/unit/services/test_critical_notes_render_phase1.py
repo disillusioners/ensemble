@@ -149,3 +149,81 @@ class TestBuilderLevelGuarantees:
         assert "⚠️" not in section
         assert "~~" not in section
         assert "days ago" not in section
+
+
+class TestPreOrderedRenderMode:
+    """Item 10 (spec §4.2/R19 render-order contract): the tiered path's
+    tail arrives in FUSION-score order — the renderer must preserve it
+    verbatim (``pre_ordered=True``) instead of applying the legacy R19
+    re-sort. The legacy mode (default) keeps the re-sort byte-identical.
+    """
+
+    @staticmethod
+    def _fusion_ordered_notes():
+        """Pinned row + tail whose fusion order DIFFERS from the
+        legacy priority/recency order: fusion-1st is priority=medium
+        (would sort LAST under the legacy re-sort), fusion-2nd is
+        high, fusion-3rd critical.
+        """
+        return [
+            _note(id="p-1", pinned=True, priority="critical",
+                  summary="PINNED-ROW"),
+            _note(id="t-1", priority="medium", summary="FUSION-FIRST"),
+            _note(id="t-2", priority="high", summary="FUSION-SECOND"),
+            _note(id="t-3", priority="critical", summary="FUSION-THIRD"),
+        ]
+
+    def test_pre_ordered_mode_preserves_fusion_order(self):
+        notes = self._fusion_ordered_notes()
+        section = _format_critical_notes_section(notes, pre_ordered=True)
+        idx_pinned = section.index("PINNED-ROW")
+        idx_first = section.index("FUSION-FIRST")
+        idx_second = section.index("FUSION-SECOND")
+        idx_third = section.index("FUSION-THIRD")
+        # Tail renders in EXACTLY the input (fusion) order — the
+        # medium-priority fusion winner stays AHEAD of the critical
+        # row, which the legacy re-sort would have moved to the front.
+        assert idx_pinned < idx_first < idx_second < idx_third
+
+    def test_pre_ordered_mode_still_filters_superseded_and_emits_hint(self):
+        notes = self._fusion_ordered_notes()
+        notes[-1]["__hint_drop_count"] = 2
+        notes.append(_note(id="dead", summary="DEAD-ROW",
+                           superseded_by_id="p-1"))
+        section = _format_critical_notes_section(notes, pre_ordered=True)
+        # R21 filter + sentinel consumption still active in
+        # pre-ordered mode.
+        assert "DEAD-ROW" not in section
+        assert "2 additional notes not shown" in section
+
+    def test_default_mode_keeps_legacy_r19_resort(self):
+        notes = self._fusion_ordered_notes()
+        section = _format_critical_notes_section(notes)
+        # Legacy mode re-sorts by priority: critical tail row first,
+        # the medium-priority fusion winner last.
+        idx_third = section.index("FUSION-THIRD")
+        idx_second = section.index("FUSION-SECOND")
+        idx_first = section.index("FUSION-FIRST")
+        assert idx_third < idx_second < idx_first
+
+    def test_block_level_tail_order_matches_fusion_order(self):
+        """Builder-level pin: with ``notes_pre_ordered=True`` the tail
+        order INSIDE the injected block == fusion order."""
+        from unittest.mock import MagicMock
+
+        project = MagicMock()
+        project.to_dict.return_value = {
+            "project_id": "p1", "critical_notes": [],
+        }
+        notes = self._fusion_ordered_notes()
+        msg = build_project_context_message(
+            project, notes, [], instance_id="i-order",
+            notes_pre_ordered=True,
+        )
+        assert msg is not None
+        content = msg.content
+        idx_pinned = content.index("PINNED-ROW")
+        idx_first = content.index("FUSION-FIRST")
+        idx_second = content.index("FUSION-SECOND")
+        idx_third = content.index("FUSION-THIRD")
+        assert idx_pinned < idx_first < idx_second < idx_third

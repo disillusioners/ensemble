@@ -3831,52 +3831,14 @@ def load_config(config_path: str | None = None) -> Config:
         _cn.fusion_threshold,
         _cn.llm_select,
     )
-    # Phase-2 boot-state probe (architect §4.2 [#8]): the
-    # ``projects_with_pins=N/M total_pinned=K`` state segment.
-    # Best-effort — the engine may not be ready yet (early
-    # ``load_config`` paths) and a failure here MUST NOT block
-    # boot. Operators grep this segment to confirm the
-    # tiered-activation gate status at startup.
-    try:
-        from .repositories.factory import get_db_engine
-        from .repositories.project.repository import (
-            SQLModelProjectRepository,
-        )
-
-        eng = get_db_engine()
-        proj_repo = SQLModelProjectRepository(eng)
-        all_projects = proj_repo.list_projects()
-        projects_with_pins = 0
-        total_pinned = 0
-        for proj in all_projects:
-            pid = getattr(proj, "project_id", None)
-            if not pid:
-                continue
-            count = int(
-                proj_repo.count_pinned_critical_notes(pid)
-            )
-            total_pinned += count
-            if count > 0:
-                projects_with_pins += 1
-        logger.info(
-            "[CriticalNotes:state] tiered=true projects_with_pins=%d/%d "
-            "total_pinned=%d (gating active when projects_with_pins>=1 per §4.2 #8; "
-            "projects without pins fall back to render-all)",
-            projects_with_pins,
-            len(all_projects),
-            total_pinned,
-        )
-    except Exception as e:
-        # Best-effort probe. Boot-state visibility is a nice-to-have,
-        # not a gate; the feature is always-on regardless of probe
-        # outcome. A ``projects_with_pins=N/M total_pinned=K`` follow-up
-        # line will appear in the FIRST first-turn log instead.
-        logger.info(
-            "[CriticalNotes:state] tiered=true projects_with_pins=?/? "
-            "total_pinned=? (probe deferred — %s: %s)",
-            type(e).__name__,
-            e,
-        )
+    # Phase-2 boot-state probe (architect §4.2 [#8]): moved OUT of
+    # ``load_config`` (B2 fix — the original inline probe imported a
+    # nonexistent ``get_db_engine`` from the repositories factory, so
+    # it raised ImportError on EVERY boot and permanently logged the
+    # deferred branch). The probe needs the LIVE engine, which does
+    # not exist at config-load time; it is now injected from the api
+    # lifespan via :func:`probe_critical_notes_boot_state` once
+    # ``manager.initialize()`` has built ``manager.engine``.
 
     # Empty-response-guard Phase 1 (item 5) — install the RESOLVED
     # guard knobs into the response_validation module cache and emit
@@ -3964,6 +3926,71 @@ def load_config(config_path: str | None = None) -> Config:
     )
 
     return config
+
+
+def probe_critical_notes_boot_state(*, engine: Any) -> None:
+    """Emit the Phase-2 ``[CriticalNotes:state]`` boot-state probe line.
+
+    Reports the ``projects_with_pins=N/M total_pinned=K`` segment the
+    architecture recommendation §4.2 [#8] defines: operators grep this
+    line to confirm the tiered-activation gate status at startup
+    (gating active when ``projects_with_pins >= 1``; projects without
+    pins fall back to the render-all shape).
+
+    B2 wiring choice — INJECTION, not construction: the probe lives at
+    the api lifespan (``daemon/api.py``), called right after
+    ``manager.initialize()`` with the manager's LIVE shared engine.
+    The original in-``load_config`` site could not receive an engine
+    (config load runs before any engine exists) and its fallback
+    imported a nonexistent ``get_db_engine``, so the probe deferred on
+    every boot. Injecting the live reference avoids constructing a
+    second long-lived engine purely for a probe.
+
+    Best-effort / never raises: any failure logs the deferred ``?/?``
+    variant under the same canonical prefix. State VISIBILITY, not a
+    gate — the feature is always-on regardless of probe outcome.
+
+    Args:
+        engine: The live shared SQLAlchemy engine (``manager.engine``).
+    """
+    try:
+        from .repositories.project.repository import (
+            SQLModelProjectRepository,
+        )
+
+        proj_repo = SQLModelProjectRepository(engine)
+        all_projects = proj_repo.list_projects()
+        projects_with_pins = 0
+        total_pinned = 0
+        for proj in all_projects:
+            pid = getattr(proj, "project_id", None)
+            if not pid:
+                continue
+            count = int(
+                proj_repo.count_pinned_critical_notes(pid)
+            )
+            total_pinned += count
+            if count > 0:
+                projects_with_pins += 1
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=%d/%d "
+            "total_pinned=%d (gating active when projects_with_pins>=1 per §4.2 #8; "
+            "projects without pins fall back to render-all)",
+            projects_with_pins,
+            len(all_projects),
+            total_pinned,
+        )
+    except Exception as e:
+        # Best-effort probe. Boot-state visibility is a nice-to-have,
+        # not a gate; the feature is always-on regardless of probe
+        # outcome. A ``projects_with_pins=N/M total_pinned=K`` follow-up
+        # line will appear in the FIRST first-turn log instead.
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=?/? "
+            "total_pinned=? (probe deferred — %s: %s)",
+            type(e).__name__,
+            e,
+        )
 
 
 # Convenience function for getting the config

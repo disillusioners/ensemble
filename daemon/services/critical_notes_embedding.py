@@ -157,6 +157,26 @@ def make_embed_input(summary: str, reference: str | None) -> str:
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
 
+def resolve_critical_notes_embedding_model() -> str:
+    """Return the embedding model name the critical-notes pipeline uses.
+
+    Resolution mirrors :func:`build_critical_notes_embedder`: the
+    env-resolved :class:`SkillEvolutionConfig.embedding_model` when a
+    config object can be built, else ``DEFAULT_EMBEDDING_MODEL``.
+    Mint sites stamp THIS value (not a hardcoded literal) so the
+    ``critical_note_embeddings.model`` audit column records the model
+    the embed call actually used.
+    """
+    try:
+        from daemon.config import SkillEvolutionConfig
+
+        return (
+            SkillEvolutionConfig().embedding_model or DEFAULT_EMBEDDING_MODEL
+        )
+    except Exception:
+        return DEFAULT_EMBEDDING_MODEL
+
+
 def build_critical_notes_embedder(
     *, model: str, engine: Any | None = None
 ) -> Any | None:
@@ -170,11 +190,14 @@ def build_critical_notes_embedder(
     Args:
         model: Embedding model name (audit value).
         engine: The SQLAlchemy engine that hosts the note tables
-            (``SQLModelProjectRepository.engine``). When ``None``
-            the helper attempts a lazy fallback via the project's
-            default-engine singleton. Failure modes here ALL log
-            under the ``[CriticalNotes:Degraded]`` prefix and
-            return ``None`` so callers can degrade gracefully.
+            (``SQLModelProjectRepository.engine``). REQUIRED in
+            practice — callers pass ``repo.engine`` explicitly
+            (B1 fix: the previous lazy fallback imported
+            ``get_default_engine`` from the nonexistent
+            ``daemon.services.persistence`` module, so engineless
+            calls ALWAYS degraded to ``no_engine`` and no vector
+            was ever minted). ``None`` logs ``no_engine`` and
+            returns ``None`` so callers degrade gracefully.
 
     Returns:
         A :class:`SkillEmbeddingService` ready to call
@@ -193,44 +216,54 @@ def build_critical_notes_embedder(
         )
         return None
 
+    # B1: engine is caller-supplied, period. The previous fallback
+    # (``from daemon.services.persistence import get_default_engine``)
+    # referenced a module that does not exist, so the except branch
+    # swallowed a ModuleNotFoundError on EVERY call and the whole
+    # pipeline silently went BM25-only.
+    if engine is None:
+        logger.info(
+            "[CriticalNotes:Degraded] stage=embed reason=no_engine"
+        )
+        return None
+
+    # B1 (same dead-pipeline class): the service MUST carry a real
+    # embedding config — ``SkillEmbeddingService.embed_text`` reads
+    # ``self.config.embedding_model`` unconditionally, so the previous
+    # ``config=None`` made every real embed call raise AttributeError
+    # inside ``embed_text`` (absorbed as ``api_failure`` → None vector
+    # → permanent BM25-only even with a live engine). A default
+    # ``SkillEvolutionConfig`` resolves ``embedding_model`` (+
+    # ``EMBEDDING_*`` env overrides) exactly like the skill path.
+    llm_dict: dict[str, Any] = {"model": model}
     try:
-        if engine is None:
-            try:
-                from daemon.services.persistence import get_default_engine
+        from daemon.config import SkillEvolutionConfig
 
-                engine = get_default_engine()
-            except Exception:
-                engine = None
+        service_config: Any = SkillEvolutionConfig()
+        llm_dict.update(
+            {
+                "base_url": getattr(service_config, "embedding_base_url", None),
+                "api_key": getattr(service_config, "embedding_api_key", None),
+                "model": (
+                    getattr(service_config, "embedding_model", None) or model
+                ),
+            }
+        )
+    except Exception as e:
+        # Config construction failing means the embedding model name
+        # itself is unresolvable — degrade (callers treat None as
+        # "skip — BM25-only", same contract as every other rung).
+        logger.info(
+            "[CriticalNotes:Degraded] stage=embed reason=service_unavailable "
+            "err=%s",
+            type(e).__name__,
+        )
+        return None
 
-        if engine is None:
-            logger.info(
-                "[CriticalNotes:Degraded] stage=embed reason=no_engine"
-            )
-            return None
-
+    try:
         repo = SkillEmbeddingRepository(engine)
-        llm_dict: dict[str, Any] = {"model": model}
-        try:
-            from daemon.config import get_embedding_config
-
-            emb_cfg = get_embedding_config()
-            llm_dict.update(
-                {
-                    "base_url": getattr(emb_cfg, "base_url", None),
-                    "api_key": getattr(emb_cfg, "api_key", None),
-                    "model": getattr(emb_cfg, "model", None) or model,
-                }
-            )
-        except Exception:
-            # ``get_embedding_config`` may not exist in all build
-            # configurations; fall back to the default model
-            # string. The embedding service falls back to
-            # llm_config["base_url"] / llm_config["api_key"]
-            # internally when explicit overrides are absent.
-            pass
-
         return SkillEmbeddingService(
-            config=None,
+            config=service_config,
             embedding_repo=repo,
             llm_config=llm_dict,
         )

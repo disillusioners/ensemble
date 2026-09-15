@@ -304,10 +304,11 @@ def select_critical_notes_for_injection(
         routine INFO line.
 
     Notes:
-        * ``dropped_count`` excludes the truncated-for-char-cap
-          drop events — the hint-line message and operators
-          triage those separately (architecture-recommendation
-          §4.6 [#10]).
+        * ``dropped_count`` INCLUDES the truncated-for-char-cap
+          drop events: the count is ``n_active - kept`` after the
+          Stage-7 char budget, so notes cut purely by the cap are
+          counted as dropped (and surface in the hint line) even
+          though they passed the fusion gate.
         * The floor is applied AFTER fusion: under-selection is
           defined as "fewer than ``tail_cap`` rows made it past
           the threshold gate"; the floor then fills the gap
@@ -417,6 +418,11 @@ def select_critical_notes_for_injection(
     tail_ordered = tail_after_gate[: cfg.tail_cap]
 
     # ── Stage 7: char budget + dropped count ──────────────────────────────
+    # NOTE: the PINNED tier is EXEMPT from the char cap — it renders
+    # in full and only the tail budget shrinks. Realistic worst-case
+    # bound: core_cap (8) × ~764 chars/row ≈ 6.1k chars, comfortably
+    # inside the 12k section cap, so the exemption cannot silently
+    # blow the injected budget.
     pinned_chars = sum(_estimate_note_chars(n) for n in pinned_ordered)
     tail_remaining = max(0, cfg.section_char_cap - pinned_chars)
     final_tail, truncated = _enforce_char_cap(tail_ordered, tail_remaining)

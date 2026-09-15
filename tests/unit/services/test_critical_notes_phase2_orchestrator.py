@@ -192,9 +192,10 @@ class TestGatingFallback:
 
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
-        out = await _maybe_tiered_critical_notes(
+        notes_dicts = _active_dicts(mgr._project_repository)
+        out, _pre = await _maybe_tiered_critical_notes(
             project_id="proj-test",
-            active_notes=_active_dicts(mgr._project_repository),
+            active_notes=notes_dicts,
             user_query="anything",
             instance_id="i-gated-off",
             manager=mgr,
@@ -203,6 +204,13 @@ class TestGatingFallback:
         # no hint sentinel).
         assert len(out) == 5
         assert all("__hint_drop_count" not in n for n in out)
+        # Item 6 (byte-identity strengthen): VERBATIM return — the
+        # fallback must hand back the caller's list object itself,
+        # not a filtered/copied/reordered derivative.
+        assert out is notes_dicts
+        # Render-all is NOT pre-ordered: the renderer applies the
+        # legacy R19 re-sort for this shape.
+        assert _pre is False
 
     @pytest.mark.asyncio
     async def test_pins_activate_tiered_path(self, monkeypatch):
@@ -227,7 +235,7 @@ class TestGatingFallback:
 
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
-        out = await _maybe_tiered_critical_notes(
+        out, _pre = await _maybe_tiered_critical_notes(
             project_id="proj-test",
             active_notes=_active_dicts(mgr._project_repository),
             user_query="alpha",
@@ -381,7 +389,7 @@ class TestDegradationLadder:
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
         with caplog.at_level(logging.INFO):
-            out = await _maybe_tiered_critical_notes(
+            out, _pre = await _maybe_tiered_critical_notes(
                 project_id="proj-test",
                 active_notes=[
                     n.to_dict()
@@ -441,7 +449,7 @@ class TestDegradationLadder:
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
         with caplog.at_level(logging.INFO):
-            out = await _maybe_tiered_critical_notes(
+            out, _pre = await _maybe_tiered_critical_notes(
                 project_id="proj-test",
                 active_notes=[
                     n.to_dict()
@@ -481,7 +489,7 @@ class TestDegradationLadder:
 
         mgr = FakeManager(BrokenRepo())
         with caplog.at_level(logging.INFO):
-            out = await _maybe_tiered_critical_notes(
+            out, _pre = await _maybe_tiered_critical_notes(
                 project_id="proj-test",
                 active_notes=[
                     n.to_dict()
@@ -569,7 +577,7 @@ class TestHintSentinelAttachment:
 
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
-        out = await _maybe_tiered_critical_notes(
+        out, _pre = await _maybe_tiered_critical_notes(
             project_id="proj-test",
             active_notes=[
                 n.to_dict()
@@ -651,3 +659,119 @@ class TestLazyMintEmbedderConstructionFailure:
         assert minted == 0
         # Nothing was persisted — every row degraded to skip.
         assert mgr._project_repository._embeddings_map == {}
+
+
+# ---------------------------------------------------------------------------
+# M1 (R21 seam) + item 10 (fusion-order preservation)
+# ---------------------------------------------------------------------------
+
+
+class TestR21EntryPreFilter:
+    """M1: the production caller passes UNFILTERED rows; the
+    orchestrator must pre-filter superseded rows out of the selection
+    pool so they neither compete in fusion, inflate ``dropped_count``,
+    nor (worst case) carry the ``__hint_drop_count`` sentinel on a row
+    the renderer's R21 filter would drop WITH the sentinel.
+    """
+
+    @staticmethod
+    def _mixed_store():
+        """1 pinned + 10 active + 3 superseded rows (deterministic)."""
+        pinned = FakeNote("pin-1", pinned=True)
+        active = [FakeNote(f"a-{i}") for i in range(10)]
+        superseded = [
+            FakeNote(f"s-{i}", superseded_by_id="a-0") for i in range(3)
+        ]
+        return pinned, active, superseded
+
+    @pytest.mark.asyncio
+    async def test_superseded_rows_never_compete_and_sentinel_lands_active(
+        self, monkeypatch
+    ):
+        pinned, active, superseded = self._mixed_store()
+        mgr = _make_manager(
+            pinned_count=1,
+            active_notes=[pinned] + active + superseded,
+        )
+
+        import daemon.services.critical_notes_embedding as emb_mod
+
+        def _stub(*, model, engine):
+            return None
+
+        monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
+
+        # Mirror the production caller: the FULL unfiltered dict list
+        # (superseded rows included).
+        unfiltered = _active_dicts(mgr._project_repository)
+        assert sum(
+            1 for n in unfiltered if n["superseded_by_id"] is not None
+        ) == 3
+
+        out, pre_ordered = await _maybe_tiered_critical_notes(
+            project_id="proj-test",
+            active_notes=unfiltered,
+            user_query="kubernetes",
+            instance_id="i-m1-mixed",
+            manager=mgr,
+        )
+        # Tiered path IS pre-ordered (item 10 flag).
+        assert pre_ordered is True
+
+        # No superseded row anywhere in the selection output.
+        out_ids = {n["id"] for n in out}
+        assert out_ids & {"s-0", "s-1", "s-2"} == set()
+        assert all(
+            n.get("superseded_by_id") is None for n in out
+        )
+
+        # Hint-count correctness: dropped_count is computed against the
+        # ACTIVE pool only (11 rows = 1 pinned + 10 active), NOT the
+        # unfiltered input (14). The selector kept pinned + floor-2,
+        # so dropped = 11 - 3 = 8 — and the sentinel carries exactly
+        # that value.
+        candidate_pool = 11
+        expected_dropped = candidate_pool - len(out)
+        assert expected_dropped == 8
+        sentinel = out[-1].get("__hint_drop_count")
+        assert sentinel == expected_dropped
+        # M1 core hazard closed: the sentinel lands on an ACTIVE row,
+        # so the renderer's R21 filter cannot drop it with the line.
+        assert out[-1].get("superseded_by_id") is None
+
+
+class TestTieredFusionOrderPreserved:
+    """Item 10 (spec §4.2/R19): the tiered path returns the tail in
+    fusion-score order and flags it ``pre_ordered=True``; the render-all
+    fallbacks return the caller's list with ``pre_ordered=False``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tiered_output_flags_pre_ordered_true(
+        self, monkeypatch
+    ):
+        pinned = FakeNote("p-1", pinned=True)
+        unpinned = [FakeNote(f"u-{i}") for i in range(3)]
+        mgr = _make_manager(
+            pinned_count=1,
+            active_notes=[pinned] + unpinned,
+        )
+
+        import daemon.services.critical_notes_embedding as emb_mod
+
+        def _stub(*, model, engine):
+            return None
+
+        monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
+
+        out, pre_ordered = await _maybe_tiered_critical_notes(
+            project_id="proj-test",
+            active_notes=_active_dicts(mgr._project_repository),
+            user_query="alpha",
+            instance_id="i-fusion-order",
+            manager=mgr,
+        )
+        assert pre_ordered is True
+        # Pinned row first (R19 core tier), tail follows in the
+        # selector's scored order.
+        assert out[0]["id"] == "p-1"
