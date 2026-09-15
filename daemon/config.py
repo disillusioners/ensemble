@@ -165,8 +165,9 @@ class LLMConfig(BaseSettings):
     # (transport shutdown) and the forced abort rides the existing
     # timeout retry budget via StreamStalledError (an
     # httpx.ReadTimeout subclass). Healthy streams always carry bytes
-    # within ~one heartbeat interval (~10-15s on the primary proxy), so
-    # 45s (~3-4x cadence) discriminates a dead transport without
+    # within ~one heartbeat interval (~5.0s on both prod proxies,
+    # 2026-09-15 probe; max legit inter-batch gap ~3.9s), so
+    # 45s (~9x cadence) discriminates a dead transport without
     # false-aborting long thinking pauses. ALWAYS-ON — this is a
     # tuning-only knob (repo fix/flag policy: no disable value; the
     # ge=10 floor keeps the value honest). Override via
@@ -177,7 +178,10 @@ class LLMConfig(BaseSettings):
         description=(
             "Seconds of SSE byte-silence (wall clock) before the stream "
             "watchdog force-aborts the stalled response. Floor 10s; "
-            "default 45s (~3-4x the proxy heartbeat cadence)."
+            "default 45s. Probe-evidenced 2026-09-15 (round 2): both "
+            "proxies heartbeat at ~5.0s cadence (max observed 5.8s), "
+            "max legitimate inter-content gap 3.9s — 45s ≈ 9x the "
+            "measured cadence, kept as default."
         ),
     )
 
