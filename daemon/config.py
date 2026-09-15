@@ -3092,6 +3092,8 @@ def _resolve_service_tool_max_concurrent(ens_value: str | None, yaml_value: Any)
         )
     if yaml_value is None:
         return 10  # documented default (D5)
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return 10  # defensive — yaml shipped an empty string
     return _parse_service_tool_int(
         yaml_value, env_name="services.service_tool.max_concurrent"
     )
@@ -3113,6 +3115,8 @@ def _resolve_service_tool_reconcile_interval(ens_value: str | None, yaml_value: 
         )
     if yaml_value is None:
         return 90  # documented default (D6)
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return 90  # defensive — yaml shipped an empty string
     return _parse_service_tool_int(
         yaml_value, env_name="services.service_tool_reconcile_interval_seconds"
     )

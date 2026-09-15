@@ -105,9 +105,7 @@ class ServiceReconciliationService:
         interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS,
         starting_grace_seconds: int = DEFAULT_STARTING_GRACE_SECONDS,
     ) -> None:
-        # A9: narrowest collaborator — the repo directly, NOT via
-        # ServiceManager (production wiring passes
-        # ``manager._service_tool_manager.repo``).
+        # A9: repo injected directly (api.py wiring passes service_tool_manager.repo).
         self._repo = repo
         self._interval_seconds = max(1, int(interval_seconds))
         self._starting_grace_seconds = max(0, int(starting_grace_seconds))
