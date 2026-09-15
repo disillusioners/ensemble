@@ -16,6 +16,20 @@ from sqlalchemy import Boolean, Column, Index, Integer, text
 from sqlmodel import SQLModel, Field
 
 
+def _default_created_at_naive_utc() -> datetime:
+    """Naive-UTC ``created_at`` default for Task rows (DC-A fix).
+
+    Deferred import: ``daemon.services.__init__`` eagerly imports the
+    service classes (which import this module), so a module-level
+    ``from daemon.services.timestamps import now_utc_naive`` would
+    create a circular import. The deferred path resolves at first
+    instantiation, well after module load.
+    """
+    from daemon.services.timestamps import now_utc_naive
+
+    return now_utc_naive()
+
+
 class TaskType(str, enum.Enum):
     """Task type enum.
 
@@ -216,8 +230,12 @@ class Task(SQLModel, table=True):
     # Error storage
     error: str | None = Field(default=None)
 
-    # Timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Timestamps. Naive-UTC digits (DC-A fix): the columns are
+    # ``timestamp without time zone`` on PostgreSQL — an aware
+    # default would render in the session TimeZone (+07 in
+    # production) and store local digits. Readers that need an aware
+    # value coerce via ``coerce_to_aware_utc`` (assume-UTC policy).
+    created_at: datetime = Field(default_factory=_default_created_at_naive_utc)
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
 

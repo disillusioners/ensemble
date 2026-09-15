@@ -62,7 +62,13 @@ class MessageQueue(SQLModel, table=True):
         sa_column=Column("metadata", JSONBType)
     )
     
-    enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Naive-UTC digits (DC-A fix): the timestamp columns on this
+    # table are tz-naive on PostgreSQL — an aware default would
+    # render in the session TimeZone (+07 in production) and store
+    # local digits.
+    enqueued_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
     processing_started_at: datetime | None = Field(default=None)
     last_activity_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)

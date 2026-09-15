@@ -22,7 +22,11 @@ from sqlmodel import Session as SQLModelSession, select, col
 
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.feature_flags import TURN_RECONCILER_DIRECT_WRITE_PARITY
-from daemon.services.timestamps import now_utc_iso, now_utc_naive
+from daemon.services.timestamps import (
+    now_utc,
+    now_utc_iso,
+    now_utc_naive,
+)
 from daemon.services.turn_transitions import (
     _TransitionContext,
     AbortTurn,
@@ -161,7 +165,9 @@ class TaskRepository:
                 instance_id=instance_id,
                 message_id=message_id,
                 status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
+                # Naive-UTC digits for the naive created_at column
+                # (DC-A fix).
+                created_at=now_utc_naive(),
             )
             db_session.add(task)
             db_session.commit()
@@ -809,7 +815,10 @@ class TaskRepository:
             List of PENDING ``Task`` rows older than ``age_seconds``
             with a NULL ``last_heartbeat_at``.
         """
-        threshold = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        # Naive-UTC frame (DC-A fix) — created_at stores naive-UTC
+        # digits; comparing against an aware threshold makes PG cast
+        # the column through the session TimeZone (+07).
+        threshold = now_utc_naive() - timedelta(seconds=age_seconds)
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(Task)
@@ -943,8 +952,10 @@ class TaskRepository:
                 f"threshold_seconds must be >= 0; got "
                 f"{threshold_seconds!r}"
             )
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # last_heartbeat_at digits.
         threshold = (
-            datetime.now(timezone.utc)
+            now_utc_naive()
             - timedelta(seconds=threshold_seconds)
         )
         with SQLModelSession(self.engine) as db_session:
@@ -1410,8 +1421,12 @@ class TaskRepository:
         Returns:
             Claimed Task object or None if no pending tasks ready.
         """
-        now = datetime.now(timezone.utc)
-        now_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + now.strftime("%z")
+        now_aware = now_utc()
+        # Naive-UTC digits for naive timestamp binds (DC-A fix —
+        # unaware binds into naive cols are stored verbatim; aware
+        # binds render in the PG session TimeZone and drop the offset).
+        now_naive = now_utc_naive()
+        now_str = now_aware.strftime("%Y-%m-%dT%H:%M:%S.%f") + now_aware.strftime("%z")
 
         # Cross-system guard scope: the report lane (PROCESS_REPORT)
         # bypasses the job-coordination exclusion entirely — reports
@@ -1746,7 +1761,7 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
                 "worker_id": worker_id,
-                "started_at": now,
+                "started_at": now_naive,
                 "status_pending": TaskStatus.PENDING.value,
                 # Per-instance guard (line ~1074) keeps
                 # ``status='running'`` semantics to preserve the
@@ -2007,7 +2022,9 @@ class TaskRepository:
             True if the heartbeat was applied, False if the task no
             longer exists or is no longer RUNNING.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive last_heartbeat_at column
+        # (DC-A fix: aware binds render in the PG session TimeZone).
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             result = conn.execute(
                 text("""
@@ -2143,7 +2160,8 @@ class TaskRepository:
         if work_id is None:
             return None
 
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive completed_at column (DC-A fix).
+        now = now_utc_naive()
         result_json = json.dumps(result)
 
         with self.engine.begin() as session:
@@ -2257,7 +2275,8 @@ class TaskRepository:
         if work_id is None:
             return None
 
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive completed_at column (DC-A fix).
+        now = now_utc_naive()
 
         with self.engine.begin() as session:
             # Read prior status INSIDE the same transaction so we know
@@ -2376,7 +2395,9 @@ class TaskRepository:
             is a valid no-op (instance had no PENDING tasks, or they
             were already claimed/cancelled by a concurrent caller).
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at column
+        # (DC-A fix).
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             result = conn.execute(
                 text(
@@ -2428,7 +2449,9 @@ class TaskRepository:
         Returns:
             List of stale running tasks.
         """
-        threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # heartbeat/started digits.
+        threshold = now_utc_naive() - timedelta(minutes=threshold_minutes)
 
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Task).where(
@@ -2457,7 +2480,9 @@ class TaskRepository:
         Liveness signal: predicate is on ``COALESCE(last_heartbeat_at,
         started_at)`` so live long-running tasks aren't reset.
         """
-        threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # heartbeat/started digits.
+        threshold = now_utc_naive() - timedelta(minutes=threshold_minutes)
         count = 0
 
         with SQLModelSession(self.engine) as db_session:
@@ -3110,7 +3135,9 @@ class TaskRepository:
 
         Returns the count of updated rows (0 or 1 in normal operation).
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at /
+        # completed_at columns (DC-A fix).
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             result = conn.execute(text("""
                 UPDATE task SET status = :status_cancelled,
@@ -3229,7 +3256,9 @@ class TaskRepository:
             Number of Task rows transitioned to CANCELLED
             (``result.rowcount``).
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at /
+        # completed_at columns (DC-A fix).
+        now = now_utc_naive()
         params: dict[str, Any] = {
             "status_cancelled": TaskStatus.CANCELLED.value,
             "cancel_requested_true": True,
@@ -3503,7 +3532,11 @@ class TaskRepository:
             # produce multi-day delays. Deadline-bounded callers
             # (usage-limit W5) pass an explicit schedule derived from
             # the episode anchor instead.
-            now = datetime.now(timezone.utc)
+            # Aware instant for the offset-bearing next_retry_at TEXT
+            # arithmetic (%z strftime needs tzinfo); naive-UTC digits
+            # for the child row's naive created_at column (DC-A fix).
+            now_aware = now_utc()
+            now_naive = now_utc_naive()
             if next_retry_at is not None:
                 scheduled_at = next_retry_at
             else:
@@ -3511,7 +3544,7 @@ class TaskRepository:
                     backoff_base * (2 ** current_retry_count),
                     backoff_max,
                 )
-                scheduled_at = now + timedelta(seconds=delay_seconds)
+                scheduled_at = now_aware + timedelta(seconds=delay_seconds)
             next_retry_at_str = (
                 scheduled_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
                 + scheduled_at.strftime("%z")
@@ -3536,7 +3569,7 @@ class TaskRepository:
                 "message_id": parent_row.message_id,
                 "retry_count": new_retry_count,
                 "next_retry_at": next_retry_at_str,
-                "created_at": now,
+                "created_at": now_naive,
                 "cancel_requested": False,
                 "retry_scheduled": False,
                 "is_deferred": bool(parent_row.is_deferred)
@@ -3600,7 +3633,9 @@ class TaskRepository:
         Returns True if the flag was set, False if task not found,
         already cancelled, or retry already scheduled.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at column
+        # (DC-A fix).
+        now = now_utc_naive()
 
         with self.engine.begin() as conn:
             # Use bound parameters with Python booleans so the boolean
@@ -3634,7 +3669,9 @@ class TaskRepository:
         Liveness signal: predicate is on ``COALESCE(last_heartbeat_at,
         started_at)`` so live long-running tasks aren't flagged.
         """
-        threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # heartbeat/started digits.
+        threshold = now_utc_naive() - timedelta(minutes=threshold_minutes)
 
         with self.engine.begin() as conn:
             # Use bound parameter with Python False so the boolean
@@ -3699,7 +3736,9 @@ class TaskRepository:
         if work_id is None:
             return None
 
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at /
+        # completed_at columns (DC-A fix).
+        now = now_utc_naive()
         error_text = f"Task cancelled: {reason}" if reason else None
 
         with self.engine.begin() as session:
@@ -3889,7 +3928,11 @@ class TaskRepository:
         ``('running', 'failed')`` status.
         """
         retry_task = None
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive cancel_requested_at /
+        # completed_at gate binds (DC-A fix); the aware instant is
+        # kept for the offset-bearing next_retry_at TEXT arithmetic.
+        now_naive = now_utc_naive()
+        now_aware = now_utc()
         parent_error = f"Force cancelled: {reason}"
 
         # Deadline-bounded deferral (usage-limit path via stale recovery
@@ -3907,7 +3950,7 @@ class TaskRepository:
                 "task_id": task_id,
                 "status_cancelled": TaskStatus.CANCELLED.value,
                 "cancel_requested_true": True,
-                "now": now,
+                "now": now_naive,
                 "error": parent_error,
                 "retry_scheduled_true": True,
                 "retry_scheduled_false": False,
@@ -3956,7 +3999,7 @@ class TaskRepository:
                     backoff_base * (2 ** current_retry_count),
                     backoff_max,
                 )
-                scheduled_at = now + timedelta(seconds=delay_seconds)
+                scheduled_at = now_aware + timedelta(seconds=delay_seconds)
             next_retry_at_str = (
                 scheduled_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
                 + scheduled_at.strftime("%z")
@@ -3971,7 +4014,7 @@ class TaskRepository:
                 "message_id": parent_row.message_id,
                 "retry_count": new_retry_count,
                 "next_retry_at": next_retry_at_str,
-                "created_at": now,
+                "created_at": now_naive,
                 "cancel_requested": False,
                 "retry_scheduled": False,
                 "is_deferred": bool(parent_row.is_deferred)

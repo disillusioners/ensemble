@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+
+from daemon.services.timestamps import now_utc
 import logging
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -2199,7 +2201,9 @@ class JobFeedbackObserver:
                         job_id=ctx.job_id,
                         from_status="processing",
                         to_status="failed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        # TEXT-column stamp (tz fix): shared aware-ISO
+                        # producer keeps the legacy format byte-stable.
+                        completed_at=now_utc_iso(),
                         error_message=f"Job finalization failed: {e}",
                         # failed_at stamp (paused-race amendment,
                         # 2026-08-25): the W3 fail-safe IS the failed
@@ -2210,7 +2214,7 @@ class JobFeedbackObserver:
                         # unchanged (not in ``_REMOVED_JOB_COLUMNS``),
                         # keeping the row retryable via
                         # ``atomic_retry``.
-                        failed_at=datetime.now(timezone.utc).isoformat(),
+                        failed_at=now_utc_iso(),
                     )
                     logger.info(
                         f"Observer: fail-safe transitioned job "
@@ -3737,8 +3741,15 @@ class JobFeedbackObserver:
             # stale state from a prior incident.
             _gate_defer_counts.pop(instance_id, None)
 
-            now = datetime.now(timezone.utc).isoformat()
-            now_dt = datetime.now(timezone.utc)
+            # µs-twin mint (tz fix): ONE aware instant; the TEXT
+            # twin (updated_at) keeps the aware-ISO format, the
+            # naive-column twin (last_activity_at) carries naive-UTC
+            # digits of the SAME instant (the µs-match between the
+            # twins is a D7 backfill detection heuristic and must
+            # survive).
+            now_dt_aware = now_utc()
+            now = now_dt_aware.isoformat()
+            now_dt = now_dt_aware.replace(tzinfo=None)
 
             # ─── Step 1: Job atomic transition (in-session UPDATE) ───
             # Mirrors ``JobRepository.atomic_transition`` but inside our

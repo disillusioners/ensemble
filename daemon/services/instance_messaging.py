@@ -7,6 +7,8 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
+
+from daemon.services.timestamps import now_utc_naive
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -1684,7 +1686,8 @@ class InstanceMessagingService:
                 priority=priority,
                 images=images,
                 message_metadata=metadata or {},
-                enqueued_at=datetime.now(timezone.utc),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                enqueued_at=now_utc_naive(),
             )
             session.add(db_message)
 
@@ -1792,7 +1795,10 @@ class InstanceMessagingService:
                     instance_id=instance_id,
                     message_id=message_id,
                     status=TaskStatus.PENDING.value,
-                    created_at=datetime.now(timezone.utc),
+                    # Naive-UTC digits for the naive created_at column
+                    # (DC-A fix). This is the dispatch-mint stamp the
+                    # job-view started_at derives from (D1).
+                    created_at=now_utc_naive(),
                     is_deferred=is_deferred_for_task,
                     is_background=is_background,
                     # ``work_id`` is the linkage handle for the
@@ -1907,7 +1913,9 @@ class InstanceMessagingService:
                                 f"attestation_denied_count and "
                                 f"completion_gate_escalated"
                             )
-                instance.last_activity_at = datetime.now(timezone.utc)
+                # Naive-UTC digits (DC-A fix): last_activity_at is a
+                # tz-naive column on PostgreSQL.
+                instance.last_activity_at = now_utc_naive()
                 instance.version = (instance.version or 1) + 1
             else:
                 logger.warning(
@@ -1922,14 +1930,15 @@ class InstanceMessagingService:
                 "role": role,
                 "content": message,
                 "source": source,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_utc_iso(),
             }
             event = Event(
                 instance_id=instance_id,
                 message_id=message_id,
                 kind=EventKind.MESSAGE_RECEIVED.value,
                 data=json.dumps(message_data),
-                created_at=datetime.now(timezone.utc),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                created_at=now_utc_naive(),
             )
             session.add(event)
 
