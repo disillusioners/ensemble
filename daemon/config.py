@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, Dict
 
 import yaml
-from pydantic import AliasChoices, Field, ConfigDict, model_validator, field_validator
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Single source of truth for the non-status transient-channel pattern
@@ -2088,6 +2088,95 @@ class ContextMessagesConfig(BaseSettings):
         return value
 
 
+class CriticalNotesConfig(BaseModel):
+    """Critical-notes tiered loading + maintenance knobs (Phase 1).
+
+    Deliberately a PLAIN ``BaseModel`` — NOT ``BaseSettings`` — so the
+    knob set has NO environment-variable binding of any kind. D4 (user
+    ruling, 2026-09-15): the feature is always-on and tuned at the
+    config layer ONLY; the ``ENSEMBLE_*`` env family is NOT extended
+    (there is no kill-switch; rollback = redeploy the previous build).
+    A ``BaseSettings`` subclass would mechanically mint
+    ``CRITICAL_NOTES_*`` env names via ``env_prefix`` — an env layer in
+    everything but spelling — so the stronger no-env-by-construction
+    shape is used instead.
+
+    Knobs (§4.7 as amended by leader ruling N3 — the v1 ``tiered`` knob
+    is DROPPED entirely; always-on has no shape switch):
+
+    Phase-1 consumers:
+    * ``core_cap`` (8) — max pinned notes in the always-injected core
+      tier; the 9th pin REJECTS with demotion candidates named.
+    * ``reference_max`` (500) — tool-reject bound (authoritative) +
+      injection-side truncation bound (defensive backstop only).
+    * ``stale_days`` (90) — STALE marking + archive-candidate horizon
+      in the list/housekeeping surface.
+
+    Reserved Phase-2/3 fields — defaults ONLY, no consumer machinery
+    ships in Phase 1: ``tail_cap``, ``section_char_cap``,
+    ``fusion_bm25_weight``, ``fusion_vector_weight``,
+    ``fusion_threshold``, ``floor_count``, ``query_max_chars``,
+    ``mint_cap_per_read``.
+
+    N7 (D4 compliance): the reserved Phase-3 knob ``llm_select`` gets
+    NO ``ENSEMBLE_*`` env var — like every knob in this section it is
+    config.yaml-only, and this class's plain-BaseModel shape makes an
+    env binding structurally impossible.
+    """
+
+    core_cap: int = Field(
+        default=8, ge=1,
+        description="Max pinned notes in the always-injected core tier (reject-don't-evict beyond this).",
+    )
+    tail_cap: int = Field(
+        default=6, ge=0,
+        description="RESERVED Phase 2: max selected tail notes per first turn. No Phase-1 consumer.",
+    )
+    section_char_cap: int = Field(
+        default=12000, ge=0,
+        description="RESERVED Phase 2: hard char cap on the notes section of the injected block. No Phase-1 consumer.",
+    )
+    fusion_bm25_weight: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: BM25 fusion weight (BlueprintMatcher parity). No Phase-1 consumer.",
+    )
+    fusion_vector_weight: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: vector fusion weight. No Phase-1 consumer.",
+    )
+    fusion_threshold: float = Field(
+        default=0.30, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: minimum fusion score for tail selection. No Phase-1 consumer.",
+    )
+    floor_count: int = Field(
+        default=2, ge=0,
+        description="RESERVED Phase 2: priority floor size when fusion under-selects. No Phase-1 consumer.",
+    )
+    reference_max: int = Field(
+        default=500, ge=1,
+        description="Tool-reject bound for reference (authoritative) + injection truncation bound (defensive).",
+    )
+    query_max_chars: int = Field(
+        default=2000, ge=1,
+        description="RESERVED Phase 2: query truncation for embed/BM25 input. No Phase-1 consumer.",
+    )
+    stale_days: int = Field(
+        default=90, ge=1,
+        description="Staleness horizon for STALE marks + archive-candidate proposals in list surfaces.",
+    )
+    mint_cap_per_read: int = Field(
+        default=10, ge=0,
+        description="RESERVED Phase 2: lazy embedding mint cap per first-turn read. No Phase-1 consumer.",
+    )
+    llm_select: bool = Field(
+        default=False,
+        description=(
+            "RESERVED Phase 3 (C2 quick-LLM stage). Ships false and "
+            "unimplemented. NO env var exists for this knob (D4)."
+        ),
+    )
+
+
 class LongToolCallNudgeConfig(BaseSettings):
     """Configuration for the long-tool-call nudge scanner.
 
@@ -2318,6 +2407,9 @@ class Config(BaseSettings):
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
     context_messages: ContextMessagesConfig = Field(
         default_factory=ContextMessagesConfig
+    )
+    critical_notes: CriticalNotesConfig = Field(
+        default_factory=CriticalNotesConfig
     )
 
 
@@ -3058,6 +3150,45 @@ def _resolve_vscode_webview_csp_fix_from_sources(
     return bool(yaml_value)
 
 
+def _resolve_critical_notes_llm_select(yaml_value: Any) -> bool:
+    """Explicit resolver for the reserved ``critical_notes.llm_select`` knob.
+
+    Mirror of the ``_resolve_compaction_model`` pattern, adapted to a
+    knob that has NO env source: pydantic-settings gives a passed-in
+    init kwarg priority over env vars (the inversion trap), so the
+    value is resolved EXPLICITLY in ``load_config`` and handed to the
+    model as a normalized bool instead of a raw ``None`` (an explicit
+    yaml ``llm_select: null`` would otherwise raise ``bool_type`` and
+    crash boot).
+
+    N7 / D4 compliance: this knob — like every ``critical_notes.``
+    knob — gets NO ``ENSEMBLE_*`` env var. ``CriticalNotesConfig`` is a
+    plain ``BaseModel`` (not ``BaseSettings``), so no env binding exists
+    at all; the only sources are config.yaml and the documented default
+    (``False`` until Phase 3).
+
+    Accepted inputs: ``bool`` passthrough; ``None`` / blank string →
+    default ``False``; the shared permissive bool vocabulary
+    (:data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`)
+    for string spellings; anything else raises so a yaml typo is caught
+    at startup.
+    """
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return False  # documented default — reserved knob, Phase 3
+    if isinstance(yaml_value, str):
+        s = yaml_value.strip().lower()
+        if not s or s in _PROACTIVE_FALSE_BOOLS:
+            return False
+        if s in _PROACTIVE_TRUE_BOOLS:
+            return True
+    raise ValueError(
+        f"Invalid critical_notes.llm_select value {yaml_value!r} — "
+        f"expected a boolean (0/false/no/off or 1/true/yes/on)"
+    )
+
+
 def _resolve_vscode_binary_path(
     yaml_value: str | None,
     *,
@@ -3431,6 +3562,30 @@ def load_config(config_path: str | None = None) -> Config:
         )
     )
     config_dict["context_messages"] = context_messages_config
+
+    # critical-notes-retrieval Phase 1 (D4): the section is ALWAYS
+    # present in ``config_dict`` so an env-free deployment (no
+    # ``critical_notes:`` key in yaml) gets the documented defaults.
+    # ``llm_select`` is resolved EXPLICITLY (mirroring the resolvers
+    # above) so a yaml ``null`` normalizes to the reserved default
+    # instead of crashing pydantic bool validation. There is NO env
+    # read here BY DESIGN — D4: no ``ENSEMBLE_*`` env var exists for
+    # any knob in this section (see CriticalNotesConfig docstring).
+    critical_notes_config: Dict[str, Any] = {}
+    raw_critical_notes = processed_config.get("critical_notes")
+    if isinstance(raw_critical_notes, dict):
+        # Drop null values so partial yaml sections (``key:`` with no
+        # value) fall through to documented defaults rather than
+        # crashing nested-model validation (skill_evolution/blueprint
+        # None-strip precedent). A section that is present but entirely
+        # null (``critical_notes:`` with no keys) is treated as absent.
+        critical_notes_config = {
+            k: v for k, v in raw_critical_notes.items() if v is not None
+        }
+    critical_notes_config["llm_select"] = _resolve_critical_notes_llm_select(
+        critical_notes_config.get("llm_select")
+    )
+    config_dict["critical_notes"] = critical_notes_config
     # Boot-time validation for the injected-notes absorb kill-switch
     # (``ENSEMBLE_INJECTED_NOTES_ABSORB``). The resolver is read-at-call by
     # ``daemon/compaction.py::_injected_note_absorbed_ids``; invoking it
@@ -3595,6 +3750,43 @@ def load_config(config_path: str | None = None) -> Config:
         "[VSCode] webview_csp_fix=%s (env %s)",
         config.vscode.webview_csp_fix,
         ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
+    )
+
+    # critical-notes-retrieval Phase 1 — install the Phase-1 consumer
+    # knobs into the tool + render module caches and emit the boot INFO
+    # state line HERE, at config-resolution time (same S13
+    # reviewer-gate rationale as the KV-ambient / vscode-CSP installs:
+    # the line MUST stay on the boot path so a quiet-daemon boot-log
+    # grep never false-fails). Lazy imports — config.py must not import
+    # tool/graph-adjacent modules at module load. D4: this line is
+    # state VISIBILITY, not a switch — the feature is always-on and the
+    # ENSEMBLE_* env family is NOT extended (rollback = redeploy the
+    # previous build).
+    from .tools.critical_notes import install_critical_notes_config
+    from .services.context_messages import install_critical_notes_render_config
+
+    install_critical_notes_config(
+        core_cap=config.critical_notes.core_cap,
+        reference_max=config.critical_notes.reference_max,
+        stale_days=config.critical_notes.stale_days,
+    )
+    install_critical_notes_render_config(
+        reference_max=config.critical_notes.reference_max,
+    )
+    _cn = config.critical_notes
+    logger.info(
+        "[CriticalNotes] core_cap=%s tail_cap=%s section_char_cap=%s "
+        "floor_count=%s reference_max=%s stale_days=%s "
+        "mint_cap_per_read=%s llm_select=%s (llm_select reserved "
+        "Phase-3; always-on per D4 — no ENSEMBLE_* env flag)",
+        _cn.core_cap,
+        _cn.tail_cap,
+        _cn.section_char_cap,
+        _cn.floor_count,
+        _cn.reference_max,
+        _cn.stale_days,
+        _cn.mint_cap_per_read,
+        _cn.llm_select,
     )
 
     # Empty-response-guard Phase 1 (item 5) — install the RESOLVED

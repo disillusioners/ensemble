@@ -396,14 +396,101 @@ def _format_relative_time_standalone(created_at: Any) -> str:
     return f"{years} year{'s' if years != 1 else ''} ago"
 
 
+# ── Phase-1 critical-notes render knobs (config-installed; D4) ────────────────
+#
+# Render-side reference bound (§4.4 #11, defensive backstop only — the
+# tool-layer write REJECT is authoritative). Tuned by
+# ``config.yaml → critical_notes.reference_max`` via
+# :func:`install_critical_notes_render_config` from ``load_config``. NO
+# ``ENSEMBLE_*`` env var exists for this (D4: config-layer tuning only).
+#
+# N5 — Phase-1 budget derivation: with summaries tool-capped at 200
+# chars and references render-bounded at 500, the injected notes block
+# worst case ≈ store cap 50 × (summary 200 + reference 500 + per-row
+# markdown overhead ≈ 30) ≈ **35k chars** (~9k tokens) — down from the
+# unbounded ≈100k+ legacy worst case. Phase 2 adds the 12k
+# ``section_char_cap`` on top; this phase's bound alone already cuts
+# the ceiling roughly 3×.
+_CRITICAL_NOTES_DEFAULT_REFERENCE_MAX = 500
+_critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+
+# R19 injected-block ordering: pinned tier first (priority
+# critical→high→medium, recency within tier), then the remainder
+# (priority→recency). Phase 2 replaces the remainder ordering with
+# fusion-score order; the pinned tier ordering stays.
+_CRITICAL_NOTES_PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2}
+
+
+def install_critical_notes_render_config(*, reference_max: int | None = None) -> None:
+    """Install boot-resolved render knobs (called once from ``load_config``).
+
+    ``None`` leaves the current value untouched (partial yaml block →
+    documented default). Mirrors the ``_install_vscode_webview_csp_fix``
+    module-cache pattern.
+    """
+    global _critical_notes_reference_max
+    if reference_max is not None:
+        _critical_notes_reference_max = int(reference_max)
+
+
+def reset_critical_notes_render_config() -> None:
+    """Restore documented defaults (test isolation helper)."""
+    global _critical_notes_reference_max
+    _critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+
+
+def _resolve_critical_notes_reference_max() -> int:
+    """Return the effective render-side reference bound."""
+    return _critical_notes_reference_max
+
+
+def _order_critical_notes_for_injection(notes: list[dict]) -> list[dict]:
+    """Order the injected notes block (R19 — injected block ONLY).
+
+    Pinned rows first, then the remainder; within each group priority
+    ascending (critical→high→medium) and recency descending (newest
+    first) within a priority tier. Two-pass stable sort: recency desc
+    first, then a stable priority sort preserves recency inside tiers.
+    Unparseable/missing ``created_at`` sorts last within its pass
+    (empty string vs ISO strings under ``reverse=True``).
+    """
+    pinned = [n for n in notes if n.get("pinned")]
+    rest = [n for n in notes if not n.get("pinned")]
+
+    def _recency_desc(seq: list[dict]) -> list[dict]:
+        return sorted(seq, key=lambda n: (n.get("created_at") or ""), reverse=True)
+
+    def _priority_then_recency(seq: list[dict]) -> list[dict]:
+        return sorted(
+            _recency_desc(seq),
+            key=lambda n: _CRITICAL_NOTES_PRIORITY_RANK.get(n.get("priority", ""), 3),
+        )
+
+    return _priority_then_recency(pinned) + _priority_then_recency(rest)
+
+
 def _format_critical_notes_section(critical_notes: list[dict]) -> str:
     """Render the critical-notes subsection used by the project builder.
 
-    Layout: priority icon + bracketed category + optional reference.
+    Phase-1 render contract (critical-notes-retrieval, R19):
+
+    - SUPERSEDED rows are never injected (``superseded_by_id`` set).
+    - Ordering is scoped to the INJECTED BLOCK ONLY: pinned rows first
+      (priority critical→high→medium, recency within tier), then the
+      remainder (priority→recency). ``project_cn_list`` order stays
+      ``created_at`` DESC — the tool surface is unchanged.
+    - ``reference`` is bounded at the render bound below with a
+      truncation suffix. This is the DEFENSIVE backstop only — the
+      write-side tool REJECT is authoritative (reject-first precedence);
+      truncation exists solely for rows that predate or bypass the
+      bound. ``detail_ref`` is NEVER injected (list/router reads only).
+    - No strike-through / staleness marks here — those render in the
+      list/housekeeping surfaces (R19); the injected block stays clean.
 
     Args:
         critical_notes: List of dicts with ``priority``, ``category``,
-            ``summary``, optional ``reference``. Non-dict entries are
+            ``summary``, optional ``reference`` / ``pinned`` /
+            ``superseded_by_id`` / ``created_at``. Non-dict entries are
             silently skipped (matches the legacy defensive contract).
 
     Returns:
@@ -420,14 +507,30 @@ def _format_critical_notes_section(critical_notes: list[dict]) -> str:
         "medium": "🟢",
     }
 
+    # Phase-1 injected rows: ALL non-superseded notes. (Tiered tail
+    # selection + the 12k section cap are Phase 2 — this phase only
+    # bounds references and orders the block.)
+    injected = [
+        e for e in critical_notes
+        if isinstance(e, dict) and not e.get("superseded_by_id")
+    ]
+    if not injected:
+        return ""
+
     rendered: list[str] = ["\n### ⚡ Critical Notes"]
-    for entry in critical_notes:
-        if not isinstance(entry, dict):
-            continue
+    for entry in _order_critical_notes_for_injection(injected):
         icon = priority_icon.get(entry.get("priority", ""), "⚪")
         category = entry.get("category", "")
         summary = entry.get("summary", "")
         reference = entry.get("reference")
+        if isinstance(reference, str) and len(reference) > _resolve_critical_notes_reference_max():
+            # Defensive backstop ONLY (§4.4 #11): legacy pre-bound rows
+            # or non-tool write paths. The tool layer REJECTS >bound on
+            # write — reject-first, truncation is never the alternative.
+            reference = (
+                reference[:_resolve_critical_notes_reference_max()]
+                + "… (truncated — project_cn_list for full text)"
+            )
         ref_str = f" *(ref: {reference})*" if reference else ""
         rendered.append(f"- {icon} **[{category}]** {summary}{ref_str}")
 

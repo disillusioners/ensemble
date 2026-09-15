@@ -79,6 +79,42 @@ ALTER TABLE users ADD COLUMN email TEXT;
 | Created date | `-- Created: YYYY-MM-DD` | When the migration was created |
 | Author | `-- Author: name` | Who created the migration |
 | Description | `-- Description: text` | What the migration does |
+| Precondition | `-- PRECONDITION: sqlite>=3.35.0` | Driver version floor (see below) |
+
+### Preconditions (driver-gated migrations)
+
+A migration can declare a **driver precondition** with a header marker:
+
+```sql
+-- PRECONDITION: sqlite>=3.35.0
+```
+
+**Mechanism (pinned 2026-09-15, N4 ruling — discoverable ledger columns,
+NOT inline checks):**
+
+1. `MigrationFile.parse` extracts the marker (same header-parsing family
+   as `-- MANUAL: TRUE`) into `MigrationFile.precondition`. Grammar:
+   `<engine>>=<semver>`; the only engine defined today is `sqlite`
+   (unknown engines fail CLOSED — they evaluate as not-satisfied).
+2. `MigrationRunner.apply_migration` evaluates the precondition BEFORE
+   executing any SQL (`SELECT sqlite_version()` semver compare).
+3. On failure the runner records a **skip-ledger row**: the row lands in
+   `schema_migrations` with `skip_reason` (the failure reason) and
+   `precondition` (the declared token) populated, a WARNING is logged,
+   and boot proceeds normally. Because `get_applied_versions` counts the
+   skip row as applied, the migration **never re-fires** and **never
+   fails boot**.
+4. `rollback_migration` evaluates the same precondition: on failure the
+   DOWN SQL is skipped (it would error on a schema element that was
+   never dropped) but the ledger row is still cleared so a re-apply can
+   proceed.
+5. Ledger discoverability: `SchemaMigration.precondition` /
+   `SchemaMigration.skip_reason` (also auto-added to pre-existing
+   `schema_migrations` tables by `runner.py::_sync_migrations_table_schema`).
+
+Use this for version-gated DDL such as `DROP COLUMN` (SQLite ≥ 3.35.0).
+Canonical example:
+`versions/20260915_120001_drop_projects_critical_notes_json.sql`.
 
 ### Parsing Rules
 

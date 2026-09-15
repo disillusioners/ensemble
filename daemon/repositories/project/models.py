@@ -43,6 +43,19 @@ class CriticalNotes(BaseModel):
     priority: str
     summary: str
     reference: str | None = None
+    # ── Lifecycle columns (critical-notes-retrieval Phase 1, 2026-09-15) ──
+    # Wire shape MUST equal storage shape (dual-surface same-commit rule):
+    # these mirror CriticalNoteModel below so
+    # ``CriticalNotes(**note.to_dict())`` round-trips in the tool layer.
+    # ``superseded_by_id`` is a SOFT self-reference (plain str, no DB FK —
+    # integrity is enforced leader-only at the tool layer; a hard FK would
+    # give dialect-divergent cascade behavior between PG and SQLite).
+    pinned: bool = False
+    pinned_at: str | None = None
+    pinned_by: str | None = None
+    superseded_by_id: str | None = None
+    last_reviewed_at: str | None = None
+    detail_ref: str | None = None
 
     @field_validator('category')
     @classmethod
@@ -157,6 +170,40 @@ class CriticalNoteModel(SQLModel, table=True):
     priority: str = Field(default="")
     summary: str = Field(default="")
     reference: str | None = Field(default=None)
+    # ── Lifecycle columns (critical-notes-retrieval Phase 1, 2026-09-15) ──
+    # Additive columns from architecture-recommendation §5.1. DDL lineage:
+    #   * fresh DBs (both drivers) get them from create_all() right here;
+    #   * existing SQLite DBs get them from the ordered migration
+    #     ``daemon/migrations/versions/20260915_120000_critical_notes_lifecycle.sql``
+    #     (runner is SQLite-only);
+    #   * existing PG DBs get them from the idempotent
+    #     ``_ensure_postgres_columns`` mirror in ``daemon/manager.py``
+    #     (partial indexes are NOT expressible via create_all — they are
+    #     mirrored there with ``CREATE INDEX IF NOT EXISTS ... WHERE ...``).
+    #
+    # ``superseded_by_id`` is a SOFT self-reference (plain TEXT, no DB-level
+    # FK): a hard FK would give dialect-divergent ON DELETE behavior (PG
+    # enforces, SQLite defaults OFF) and would make the cascade question a
+    # database-internal side effect. Integrity is enforced leader-only in
+    # the tool layer (``daemon/tools/critical_notes.py``) — the only write
+    # surface. Removal semantics (incl. what happens to rows pointing at a
+    # removed id) are documented EXACTLY at the ``project_cn_remove`` site.
+    #
+    # ``last_reviewed_at`` is backfilled ``= created_at`` by both the
+    # migration and the PG mirror (NULL-guarded UPDATE). It is declared
+    # non-optional here so fresh lineages are NOT NULL; the migration-added
+    # column is nullable on legacy lineages (SQLite cannot ADD COLUMN NOT
+    # NULL without a constant default) — every write path populates it, and
+    # read surfaces treat NULL as "fall back to created_at", so the drift
+    # is behaviorally inert.
+    pinned: bool = Field(default=False)
+    pinned_at: str | None = Field(default=None)
+    pinned_by: str | None = Field(default=None)
+    superseded_by_id: str | None = Field(default=None)
+    last_reviewed_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    detail_ref: str | None = Field(default=None)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -170,6 +217,12 @@ class CriticalNoteModel(SQLModel, table=True):
             "priority": self.priority,
             "summary": self.summary,
             "reference": self.reference,
+            "pinned": self.pinned,
+            "pinned_at": self.pinned_at,
+            "pinned_by": self.pinned_by,
+            "superseded_by_id": self.superseded_by_id,
+            "last_reviewed_at": self.last_reviewed_at,
+            "detail_ref": self.detail_ref,
         }
 
 

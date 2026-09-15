@@ -1478,6 +1478,7 @@ class SQLModelProjectRepository:
         priority: str,
         summary: str,
         reference: str | None = None,
+        detail_ref: str | None = None,
     ) -> CriticalNoteModel:
         """Add a new critical note to a project.
         
@@ -1487,8 +1488,11 @@ class SQLModelProjectRepository:
             category: Note category.
             priority: Note priority.
             summary: Note summary text.
-            reference: Optional reference URL/path.
-            
+            reference: Optional reference URL/path (≤500 chars, enforced
+                at the tool layer — this repository trusts its callers).
+            detail_ref: Optional unbounded detail text. NEVER injected
+                into context blocks — reachable via list reads only.
+                
         Returns:
             The created CriticalNoteModel instance.
         """
@@ -1501,8 +1505,14 @@ class SQLModelProjectRepository:
                 priority=priority,
                 summary=summary,
                 reference=reference,
+                detail_ref=detail_ref,
                 created_at=now,
                 updated_at=now,
+                # Lifecycle contract: ANY leader write stamps the review
+                # clock (architecture-recommendation §4.4). For a fresh
+                # insert this equals created_at — the same value the
+                # migration backfill produces for legacy rows.
+                last_reviewed_at=now,
             )
             session.add(note)
             session.commit()
@@ -1543,8 +1553,11 @@ class SQLModelProjectRepository:
             session.commit()
             return True
 
-    # Allowed fields for update (security: prevent overwriting id/project_id)
-    _ALLOWED_UPDATES = {"source_agent", "category", "priority", "summary", "reference"}
+    # Allowed fields for update (security: prevent overwriting id/project_id).
+    # ``detail_ref`` joins in Phase 1 (critical-notes-retrieval): an
+    # entry_id update may set detail but passing None keeps the existing
+    # value (same non-None guard as every other field below).
+    _ALLOWED_UPDATES = {"source_agent", "category", "priority", "summary", "reference", "detail_ref"}
 
     def update_critical_note(
         self,
@@ -1557,7 +1570,8 @@ class SQLModelProjectRepository:
         Args:
             project_id: The project ID.
             entry_id: The note entry ID to update.
-            **updates: Fields to update (source_agent, category, priority, summary, reference).
+            **updates: Fields to update (source_agent, category, priority,
+                summary, reference, detail_ref).
             
         Returns:
             The updated CriticalNoteModel if found, None otherwise.
@@ -1572,10 +1586,149 @@ class SQLModelProjectRepository:
                 if key in self._ALLOWED_UPDATES and value is not None:
                     setattr(note, key, value)
             note.updated_at = now
+            # Lifecycle contract (architecture-recommendation §4.4): ANY
+            # leader write refreshes the staleness clock. ``updated_at``
+            # alone cannot serve — repo-internal touches (pin/supersede)
+            # also bump it, but a content re-affirmation MUST reset the
+            # "last reviewed N days ago" numerator explicitly.
+            note.last_reviewed_at = now
             
             session.commit()
             session.refresh(note)
             return note
+
+    def pin_critical_note(
+        self,
+        project_id: str,
+        entry_id: str,
+        pinned: bool,
+        pinned_by: str = "",
+    ) -> CriticalNoteModel | None:
+        """Pin or unpin a critical note (leader-explicit curation act).
+
+        Args:
+            project_id: The project ID.
+            entry_id: The note entry ID.
+            pinned: True to pin (core tier), False to unpin.
+            pinned_by: Instance/agent id performing the pin (audit).
+
+        Returns:
+            The updated CriticalNoteModel if found, None otherwise.
+        """
+        with Session(self.engine) as session:
+            note = session.get(CriticalNoteModel, entry_id)
+            if note is None or note.project_id != project_id:
+                return None
+
+            now = datetime.now(timezone.utc).isoformat()
+            note.pinned = pinned
+            if pinned:
+                # Audit columns record the LAST pin; an unpin keeps them
+                # as history (they are audit fields, not state — derived
+                # state is ``pinned AND NOT superseded``).
+                note.pinned_at = now
+                note.pinned_by = pinned_by or None
+            # Any leader write refreshes the review clock (§4.4) — an
+            # unpin is a curation act too.
+            note.last_reviewed_at = now
+            note.updated_at = now
+
+            session.commit()
+            session.refresh(note)
+            return note
+
+    def supersede_critical_note(
+        self,
+        project_id: str,
+        old_id: str,
+        new_id: str,
+    ) -> CriticalNoteModel | None:
+        """Mark ``old_id`` as superseded by ``new_id`` (leader-explicit).
+
+        Sets ``old.superseded_by_id = new_id`` and refreshes the old
+        row's review clock. The old row stays in the store (history),
+        disappears from injection, and renders struck-through in list
+        surfaces.
+
+        Args:
+            project_id: The project ID.
+            old_id: The row being superseded (must be active — the tool
+                layer refuses an already-superseded row as ``old``).
+            new_id: The superseding row (same project).
+
+        Returns:
+            The updated old CriticalNoteModel if found, None otherwise.
+        """
+        with Session(self.engine) as session:
+            note = session.get(CriticalNoteModel, old_id)
+            if note is None or note.project_id != project_id:
+                return None
+
+            now = datetime.now(timezone.utc).isoformat()
+            note.superseded_by_id = new_id
+            # Supersede bumps last_reviewed_at (§4.4 guard list) — the
+            # row was just reviewed-and-retired by a leader action.
+            note.last_reviewed_at = now
+            note.updated_at = now
+
+            session.commit()
+            session.refresh(note)
+            return note
+
+    def count_pinned_critical_notes(self, project_id: str) -> int:
+        """Count PINNED + ACTIVE notes for a project (core-tier size).
+
+        Superseded pins don't count toward the core cap: the derived
+        PINNED state is ``pinned AND NOT superseded`` (§4.5), and only
+        the derived state reaches the always-injected core tier.
+
+        Args:
+            project_id: The project ID.
+
+        Returns:
+            Number of pinned, non-superseded notes.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(CriticalNoteModel)
+                .where(
+                    CriticalNoteModel.project_id == project_id,
+                    CriticalNoteModel.pinned == True,  # noqa: E712
+                    CriticalNoteModel.superseded_by_id.is_(None),
+                )
+            )
+            return len(list(session.exec(stmt)))
+
+    def clear_superseded_by_pointers(self, project_id: str, entry_id: str) -> list[str]:
+        """Nullify every ``superseded_by_id`` pointer targeting ``entry_id``.
+
+        Used ONLY by the ``project_cn_remove(cascade=True)`` path. The
+        pointers become dangling when their target is removed; nullifying
+        returns those rows to ACTIVE (they re-enter the injection pool).
+        Callers MUST surface the re-activated ids in the tool response —
+        an un-supersede must never be silent.
+
+        Args:
+            project_id: The project ID.
+            entry_id: The id being removed.
+
+        Returns:
+            The ids of rows that were re-activated (pointers cleared).
+        """
+        with Session(self.engine) as session:
+            stmt = select(CriticalNoteModel).where(
+                CriticalNoteModel.project_id == project_id,
+                CriticalNoteModel.superseded_by_id == entry_id,
+            )
+            pointing = list(session.exec(stmt))
+            reactivated = [n.id for n in pointing]
+            now = datetime.now(timezone.utc).isoformat()
+            for note in pointing:
+                note.superseded_by_id = None
+                note.updated_at = now
+            if pointing:
+                session.commit()
+            return reactivated
 
     def count_critical_notes(self, project_id: str) -> int:
         """Count critical notes for a project.
