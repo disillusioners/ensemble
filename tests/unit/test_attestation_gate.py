@@ -94,6 +94,12 @@ def make_manager(pending_children=0, wakeups=0, live_descendants=0):
     # Tests that need a non-zero live-descendant count override via
     # this kwarg (or use MagicMock side_effect on a per-test basis).
     manager.count_live_descendants = MagicMock(return_value=live_descendants)
+    # Fourth LCA input (2026-09-12) — busy descendants trigger
+    # suppression (defaulted to 0; tests that exercise the suppression
+    # branch override per-test). See
+    # ``tests/unit/test_attestation_marker_wiring.py`` for the
+    # suppression test family.
+    manager.count_busy_descendants = MagicMock(return_value=0)
     return manager
 
 

@@ -92,6 +92,12 @@ def make_manager(pending_children=0, wakeups=0, live_descendants=0):
     # would silently inflate the predicate (MagicMock > 0 is True),
     # which is why this default matters.
     manager.count_live_descendants = MagicMock(return_value=live_descendants)
+    # Fourth LCA input (2026-09-12) — busy descendants trigger
+    # suppression. Defaulted to 0 for the dry-mode suite — leaving
+    # it as a MagicMock would crash the gate's `busy_descendants > 0`
+    # check (`'>' not supported between instances of 'MagicMock' and
+    # 'int'`), making the dry-mode log-only path fail-open.
+    manager.count_busy_descendants = MagicMock(return_value=0)
     manager.is_question_pause_requested = MagicMock(return_value=False)
     manager.is_watchover_enabled = MagicMock(return_value=False)
     # Forbidden dual-delivery surface — asserted NOT called on dry.

@@ -5165,6 +5165,23 @@ def create_attestation_gate_node(
                 Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             )
             and (decision.marker_hit or decision.length_trigger)
+            # 2026-09-12 LCA busy trigger suppression — when
+            # ``trigger_suppressed_by`` is set on the decision (the
+            # gate found at least one busy descendant in the
+            # unconditional-busy subset ``{RUNNING, WAITING,
+            # WAITING_CHILDREN}``), the WHOLE marker/length trigger
+            # is suppressed ENTIRELY: NO judge call, NO route-(b)
+            # hint, plain allow. The marker/length signal STAYS
+            # RECORDED on the canonical ``event=leader_completion_
+            # gate`` log row inside ``evaluate()`` for forensics —
+            # ``trigger_source`` is force-cleared to ``""`` and
+            # ``trigger_suppressed_by`` carries the suppressor name.
+            # PAUSED is NOT busy (suspect, not healthy) — the
+            # trigger stays armed on PAUSED so a stuck child is
+            # caught. Dormant IDLE/QUEUED is NOT busy (no
+            # execution) — also keeps the trigger armed so
+            # en-route-only work is caught.
+            and not decision.trigger_suppressed_by
         ):
             try:
                 from .services.attestation_judge_resolver import (

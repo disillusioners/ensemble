@@ -200,6 +200,39 @@ def attestation_manager_factory():
                 )
                 return bound(target_instance_id)
 
+            # Fourth LCA input (2026-09-12) — count of busy
+            # descendants ({RUNNING, WAITING, WAITING_CHILDREN} only).
+            # Same delegation pattern as count_live_descendants above
+            # (delegates to the real facade via MethodType so the
+            # gate-level tests exercise the production two-set
+            # semantics with a single source of truth). PAUSED is NOT
+            # busy (suspect, not healthy) — the LCA trigger-suppression
+            # feature keeps the marker/length trigger armed on PAUSED.
+            def count_busy_descendants(self, target_instance_id: str) -> int:
+                from types import MethodType
+
+                bound = MethodType(
+                    InstanceManager.count_busy_descendants, self
+                )
+                return bound(target_instance_id)
+
+            # Private BFS helper (2026-09-12 refactor — single source
+            # of truth for the descendant scan, shared by both
+            # ``count_live_descendants`` and ``count_busy_descendants``).
+            # Must be present on the stub so MethodType-bound
+            # ``count_busy_descendants`` resolves it via ``self.``
+            # without AttributeError (the gate's DB seam converts the
+            # error into ``busy_descendants=-1``).
+            def _count_descendants_busy_and_live(
+                self, target_instance_id: str
+            ) -> tuple[int, int]:
+                from types import MethodType
+
+                bound = MethodType(
+                    InstanceManager._count_descendants_busy_and_live, self
+                )
+                return bound(target_instance_id)
+
             @staticmethod
             def is_watchover_enabled(_target_instance_id: str) -> bool:
                 return False

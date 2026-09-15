@@ -16,6 +16,8 @@ def test_dry_log_has_complete_schema_and_stale_attestation_diagnostic(caplog):
     manager = MagicMock()
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     messages = [
         AIMessage(
@@ -63,6 +65,8 @@ def test_dry_mode_does_not_touch_ledger_or_increment_counter(caplog):
     manager = MagicMock()
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
         result = evaluate(

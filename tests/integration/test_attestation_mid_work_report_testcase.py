@@ -467,22 +467,34 @@ async def test_scenario_a_children_out_allow_with_hint(
     """Scenario A: leader says "Ending turn" while 3 children are RUNNING.
 
     Tree state: 3 RUNNING children (unconditional-live under the two-set
-    facade ⇒ live_descendants=3). With pending=0, wakeups=0, live=3:
+    facade ⇒ live_descendants=3 AND busy_descendants=3). With
+    pending=0, wakeups=0, live=3:
 
     * Primary gate (attestation_gate.py branch 5): decision =
       ``allowed_legitimate_pending_wakeup`` (live!=0 — the legitimate
       wakeup is in flight via a live descendant).
-    * Marker scan: fires on ALLOW path ⇒ marker_hit=True,
-      marker_terms="ending turn", length_trigger=True (26w < 150),
-      trigger_source="markers+length".
-    * Marker judge: stubbed (no complete report) + something pending
-      ⇒ path (b) ⇒ ALLOW + checkpoint-durable COMPLETION_CHECK_NOTE_TEXT
-      hint. NO nudge, NO counter increment, NO re-route — the turn
-      still ends so the expected wake-up can arrive.
+    * LCA busy trigger suppression (2026-09-12): busy_descendants=3 >
+      0 ⇒ the WHOLE marker/length trigger is SUPPRESSED ENTIRELY
+      (NO judge call, NO route-(b) hint, plain allow). The
+      marker/length signal STAYS RECORDED on the canonical log row
+      for observability (``marker_hit=True``, ``marker_terms="ending
+      turn"``, ``length_trigger=True``, ``final_word_count=26``),
+      ``trigger_source=""`` (cleared), and
+      ``trigger_suppressed_by="busy_descendants"`` stamped.
+    * Counter does NOT increment on un-attested allow.
 
-    If the wrapper-fault path (d) fires instead of clean (b), the same
-    ALLOW + hint behavior still holds — both branches inject the hint.
-    The hint IS the primary deliverable; this test asserts its presence.
+    This test is the regression pin for the LCA busy trigger
+    suppression feature (the 2026-09-12 user request — false-positive
+    hint fix on healthy waits). Pre-fix behavior was: markers + length
+    both fire on the ALLOW path ⇒ judge-no + real pending ⇒ path
+    (b) ⇒ ALLOW + checkpoint-durable Completion Check Note hint.
+    Post-fix behavior: trigger is suppressed; NO judge, NO hint,
+    plain allow. The leader awaiting a healthy RUNNING child is
+    allowed silently without injecting a Completion Check Note that
+    would otherwise appear on essentially every awaiting turn-end.
+
+    See ``.agents/shared/planning/leader-completion-attestation/
+    decisions.md`` D-ENTRY 2026-09-12 (LCA busy trigger suppression).
     """
     repo, _leader = attestation_repository
 
@@ -550,6 +562,12 @@ async def test_scenario_a_children_out_allow_with_hint(
         "marker_judge_line": marker_judge_line,
         "marker_terms": _field_from_line(decision_line or "", "marker_terms"),
         "trigger_source": _field_from_line(decision_line or "", "trigger_source"),
+        "trigger_suppressed_by": _field_from_line(
+            decision_line or "", "trigger_suppressed_by"
+        ),
+        "busy_descendants": _field_from_line(
+            decision_line or "", "busy_descendants"
+        ),
         "marker_path": _field_from_line(decision_line or "", "marker_path"),
         "marker_hit": _field_from_line(decision_line or "", "marker_hit"),
         "length_trigger": _field_from_line(decision_line or "", "length_trigger"),
@@ -567,63 +585,90 @@ async def test_scenario_a_children_out_allow_with_hint(
         "hint_messages": [m.content for m in _hints(messages)],
     }
 
-    # ── Hard assertions on path-(b) contract ─────────────────────────
+    # ── Hard assertions on LCA busy trigger suppression (NEW behavior) ──
+    # Decision is still an ALLOW flavor (live!=0 ⇒ legitimate pending
+    # wakeup branch) — the leader's turn can end.
     assert _is_allow_flavor(captured["decision"]), (
-        f"Expected an ALLOW flavor on path (b); got "
+        f"Expected an ALLOW flavor on healthy-wait allow path; got "
         f"decision={captured['decision']!r}. Decision line: "
         f"{decision_line!r}"
     )
+    # The marker/length signal STAYS RECORDED for observability
+    # (spec point 2 — "Still compute marker_hit/length_trigger for
+    # the LOG; log trigger_source='' plus a NEW additive GateDecision
+    # field trigger_suppressed_by='busy_descendants'").
     assert "ending turn" in (captured["marker_terms"] or ""), (
-        f"Expected 'ending turn' in marker_terms; got "
-        f"{captured['marker_terms']!r}"
+        f"Expected 'ending turn' in marker_terms (still recorded "
+        f"for observability); got {captured['marker_terms']!r}"
     )
-    assert captured["trigger_source"] == "markers+length", (
-        f"Transcript is short (26w) AND contains 'ending turn' → both "
-        f"triggers fire; expected 'markers+length', got "
-        f"{captured['trigger_source']!r}"
+    assert captured["marker_hit"] == "True", (
+        f"Expected marker_hit=True (still recorded for observability); "
+        f"got {captured['marker_hit']!r}"
     )
-    assert captured["final_word_count"] == str(len(VERBATIM_TRANSCRIPT.split())), (
-        f"final_word_count {captured['final_word_count']} != computed "
-        f"{len(VERBATIM_TRANSCRIPT.split())}"
+    assert captured["length_trigger"] == "True", (
+        f"Expected length_trigger=True (still recorded for "
+        f"observability); got {captured['length_trigger']!r}"
     )
     assert int(captured["final_word_count"]) < 150, (
         "Test invariant broken: transcript should be brevity-class"
     )
-    # Counter does NOT increment on un-attested allow.
-    after = repo.get(INSTANCE_ID)
-    assert after.attestation_denied_count == 0, (
-        f"Counter must stay 0 on un-attested allow; got "
-        f"attestation_denied_count={after.attestation_denied_count}"
+    # TRIGGER SOURCE IS CLEARED (the cheap-allow signal) — this is
+    # the spec point 2 contract: "log trigger_source='' plus a NEW
+    # additive GateDecision field trigger_suppressed_by='busy_descendants'".
+    # A suppressed trigger MUST NOT log "markers+length" — that would
+    # be a regression (the trigger wasn't suppressed).
+    assert captured["trigger_source"] == "<none>", (
+        f"trigger_source MUST be cleared on busy suppression "
+        f"(expecting '<none>'); got {captured['trigger_source']!r}. "
+        f"A non-empty trigger_source on a busy descendant means the "
+        f"trigger wasn't suppressed."
     )
-
-    # The judge MUST be invoked when markers+length both fire on the
-    # ALLOW path. With ``manager.config`` attached (see setup above),
-    # the marker-path wrapper reaches our stub instead of failing the
-    # buggy ``from ..config import load_config`` else-branch.
-    assert captured["judge_stub_calls"] >= 1, (
-        "Judge stub MUST be called when markers + length both fire on "
-        "the ALLOW path. Test invariant broken if judge_completion_report_"
-        "async was never reached (see JOB 1 follow-up report)."
+    assert captured["trigger_suppressed_by"] == "busy_descendants", (
+        f"Expected trigger_suppressed_by='busy_descendants' on "
+        f"healthy-wait suppression; got "
+        f"{captured['trigger_suppressed_by']!r}"
+    )
+    assert captured["busy_descendants"] == "3", (
+        f"Expected busy_descendants=3 with 3 RUNNING children; got "
+        f"{captured['busy_descendants']!r}"
     )
     assert captured["live_descendants"] == "3", (
         f"Expected live_descendants=3 with 3 RUNNING children; got "
         f"{captured['live_descendants']!r}"
     )
 
-    # The hint IS the COMPLETION_CHECK_NOTE_TEXT, verbatim, in a HumanMessage.
-    hints = _hints(messages)
-    assert len(hints) == 1, (
-        f"Expected exactly one path-(b) hint; got {len(hints)}. "
-        f"Hint messages found: {captured['hint_messages']}"
-    )
-    assert hints[0].content == COMPLETION_CHECK_NOTE_TEXT, (
-        "Hint content must match COMPLETION_CHECK_NOTE_TEXT verbatim"
+    # ── Hard assertions on suppressed contract (NEW behavior) ──
+    # The judge MUST NOT be called when busy suppression is active.
+    # Pre-fix this asserted `>= 1`; post-fix it asserts `== 0`
+    # because the trigger is suppressed and the judge block in
+    # graph.py short-circuits via `not decision.trigger_suppressed_by`.
+    assert captured["judge_stub_calls"] == 0, (
+        "Judge stub MUST NOT be called when busy suppression is "
+        "active (3 RUNNING children ⇒ busy_descendants=3 > 0 ⇒ "
+        "WHOLE trigger suppressed). Got judge_stub_calls="
+        f"{captured['judge_stub_calls']}"
     )
 
-    # NO nudge on path (b) — the (b)-path is "allow + hint", not deny.
+    # NO Completion Check Note hint on healthy waits — that IS the
+    # LCA busy trigger suppression fix. Pre-fix this asserted `== 1`
+    # (the buggy behavior). Post-fix asserts `== 0` because the
+    # trigger is suppressed BEFORE the judge fires, so the hint
+    # injection path is never reached.
+    hints = _hints(messages)
+    assert len(hints) == 0, (
+        f"Expected NO path-(b) hint on healthy waits (LCA busy "
+        f"trigger suppression). Got {len(hints)} hint(s). "
+        f"Hint messages found: {captured['hint_messages']}. "
+        f"This is the 2026-09-12 user-requested false-positive "
+        f"hint fix."
+    )
+
+    # NO nudge on healthy-wait allow — the trigger is suppressed
+    # ENTIRELY so neither path (a) deny+nudge nor path (b) hint
+    # injection fires.
     assert _nudges(messages) == [], (
-        f"Path (b) must NOT inject a nudge; found "
-        f"{[m.additional_kwargs for m in _nudges(messages)]}"
+        f"Busy suppression MUST NOT inject a nudge on healthy waits; "
+        f"found {[m.additional_kwargs for m in _nudges(messages)]}"
     )
 
     # Counter does NOT increment on un-attested allow.
@@ -633,28 +678,26 @@ async def test_scenario_a_children_out_allow_with_hint(
         f"attestation_denied_count={after.attestation_denied_count}"
     )
 
-    # The hint MUST be the TRUE path-(b) hint (delivered via the
-    # checkpoint-durable completion-check-note machinery, not the
-    # wrapper-fault (d) routing). With manager.config attached, the
-    # marker judge stub IS reached → judge=no + something-pending
-    # → branch (b). The deciding log line carries
-    # ``[AttestationGate] marker-path b instance=...``.
-    assert "marker-path b " in log_text, (
-        f"Expected TRUE path (b) marker routing (judge-no + "
-        f"something-pending → ALLOW + hint). With manager.config "
-        f"attached, the marker judge MUST reach the stub and route "
-        f"to path (b). Log excerpt: " + log_text[:3000]
+    # No marker-path judge log row — the trigger was suppressed.
+    assert "marker-path " not in log_text, (
+        f"Expected NO marker-path routing (trigger suppressed); got "
+        f"a marker-path log line. Log excerpt: " + log_text[:3000]
     )
     assert "fail_safe_marker" not in log_text, (
-        f"Expected NO fail_safe_marker_d wrapper fault (the buggy "
-        f"``from ..config import load_config`` else-branch at "
-        f"graph.py:3429 should be bypassed). Log excerpt: "
+        f"Expected NO fail_safe_marker_d wrapper fault; log excerpt: "
         + log_text[:3000]
     )
 
-    # Print the hint verbatim — primary deliverable.
-    print(f"\n=== TEST A — Path (b) HINT MESSAGE (verbatim) ===")
-    print(hints[0].content)
+    # ── Diagnostic print (the post-fix behavior is "plain allow") ──
+    print(f"\n=== TEST A — LCA BUSY TRIGGER SUPPRESSION ===")
+    print(f"  decision={captured['decision']}")
+    print(f"  trigger_source={captured['trigger_source']}")
+    print(f"  trigger_suppressed_by={captured['trigger_suppressed_by']}")
+    print(f"  busy_descendants={captured['busy_descendants']}")
+    print(f"  live_descendants={captured['live_descendants']}")
+    print(f"  judge_stub_calls={captured['judge_stub_calls']}")
+    print(f"  hint_count={captured['hint_count']}")
+    print(f"  nudge_count={captured['nudge_count']}")
     print("=== END HINT ===\n")
     print(f"=== TEST A — diagnostics: {json.dumps(captured, indent=2)} ===")
 
@@ -1144,16 +1187,25 @@ async def test_scenario_a_live_judge(
 
     Same shape as test_scenario_a_children_out_allow_with_hint: 3
     RUNNING children, verbatim mid-work transcript. The judge stub is
-    NOT installed; the production ``judge_completion_report_async``
-    runs against the real quick model (5-30s latency expected).
+    NOT installed.
 
-    Verdict is CAPTURED, not asserted. Expected per the spec (mid-work
-    phrasing is NOT a completion report):
-      ``is_complete_report=false`` → branch (b) → ALLOW + hint.
+    NEW behavior (LCA busy trigger suppression, 2026-09-12) — the
+    WHOLE marker/length trigger is suppressed ENTIRELY when
+    busy_descendants > 0 (3 RUNNING children ⇒ busy=3). NO judge
+    call fires; the leader is allowed silently without a Completion
+    Check Note hint. Pre-fix the real judge would have been called
+    and (per the spec on mid-work phrasing) returned
+    ``is_complete_report=false`` → branch (b) → ALLOW + hint — but
+    that hint on healthy waits IS the false-positive class this
+    feature removes.
 
-    If the live judge disagrees or errors, that is a FINDING to
-    report, not a test failure — this test only asserts that a judge
-    result was logged and a decision followed.
+    The test now verifies the LIVE judge was NOT called (busy
+    suppression disarmed the trigger). Verdict is CAPTURED, not
+    asserted. Expected per the new contract: judge row absent
+    (trigger suppressed); trigger_suppressed_by="busy_descendants";
+    trigger_source="<none>" (cleared); no hint; no nudge; plain
+    allow. The transcript is the verbatim mid-work phrasing used
+    throughout this testcase.
     """
     repo, _leader = attestation_repository
 
@@ -1236,6 +1288,12 @@ async def test_scenario_a_live_judge(
         ),
         "marker_terms": _field_from_line(last_canonical or "", "marker_terms"),
         "trigger_source": _field_from_line(last_canonical or "", "trigger_source"),
+        "trigger_suppressed_by": _field_from_line(
+            last_canonical or "", "trigger_suppressed_by"
+        ),
+        "busy_descendants": _field_from_line(
+            last_canonical or "", "busy_descendants"
+        ),
         "final_word_count": _field_from_line(
             last_canonical or "", "final_word_count"
         ),
@@ -1246,23 +1304,60 @@ async def test_scenario_a_live_judge(
         "nudge_count": len(_nudges(messages)),
     }
 
-    # The judge row MUST exist in the log (proves the real call fired).
-    assert marker_judge_line is not None, (
-        "LIVE judge row missing — the real _invoke_judge_llm did not "
-        "run. Log excerpt: " + log_text[:3000]
+    # LCA busy trigger suppression (2026-09-12) — the WHOLE trigger
+    # is suppressed ENTIRELY on healthy waits. Pre-fix this test
+    # asserted `marker_judge_line is not None` (the real judge fired
+    # and returned is_complete_report=false → path b → hint). Post-fix
+    # the judge MUST NOT be called because busy suppression short-
+    # circuits the judge block in graph.py at the trigger_suppressed_
+    # by check. The trigger signal STAYS RECORDED for observability
+    # but no judge row is emitted.
+    assert marker_judge_line is None, (
+        "LIVE judge MUST NOT be called when busy suppression is "
+        "active (3 RUNNING children ⇒ busy_descendants=3 ⇒ WHOLE "
+        "trigger suppressed). Got a marker_judge_line: "
+        f"{marker_judge_line!r}. This is the 2026-09-12 "
+        f"false-positive hint fix — pre-fix the live judge fired "
+        f"and (per mid-work phrasing) would have returned "
+        f"is_complete_report=false → branch (b) → hint injection."
     )
 
-    # A decision MUST follow the judge (the gate cannot stall).
+    # Suppression signal must be present on the canonical log row.
+    assert captured["trigger_suppressed_by"] == "busy_descendants", (
+        f"Expected trigger_suppressed_by='busy_descendants' on the "
+        f"healthy-wait suppression; got "
+        f"{captured['trigger_suppressed_by']!r}"
+    )
+    assert captured["trigger_source"] == "<none>", (
+        f"Expected trigger_source cleared on suppression "
+        f"(expecting '<none>'); got {captured['trigger_source']!r}"
+    )
+    assert captured["busy_descendants"] == "3", (
+        f"Expected busy_descendants=3 with 3 RUNNING children; got "
+        f"{captured['busy_descendants']!r}"
+    )
+
+    # No hint on healthy waits — that IS the LCA busy trigger
+    # suppression fix (the false-positive class).
+    assert captured["hint_count"] == 0, (
+        f"Expected NO Completion Check Note hint on healthy waits; "
+        f"got hint_count={captured['hint_count']}"
+    )
+    assert captured["nudge_count"] == 0, (
+        f"Expected NO nudge on healthy-wait allow; got "
+        f"nudge_count={captured['nudge_count']}"
+    )
+
+    # A decision MUST follow the gate (the gate cannot stall).
     assert (
         _is_allow_flavor(captured["decision"])
         or captured["decision"] == "denied"
     ), (
-        f"Gate must reach a decision after the live judge; got "
+        f"Gate must reach a decision; got "
         f"decision={captured['decision']!r}"
     )
 
     print(f"\n=== TEST A-LIVE — diagnostics: {json.dumps(captured, indent=2)} ===")
-    print(f"\n=== TEST A-LIVE — marker_judge_line:\n{marker_judge_line} ===")
 
 
 @pytest.mark.asyncio

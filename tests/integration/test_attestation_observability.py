@@ -30,6 +30,10 @@ def _manager():
     # Third R2 input (2026-09-06) — defaulted to 0; the observability
     # matrix exercises the "no live descendants" R2 deny predicate.
     manager.count_live_descendants.return_value = 0
+    # Fourth LCA input (2026-09-12) — defaulted to 0; observability
+    # matrix tests the basic deny-predicate path which requires
+    # busy_descendants = 0 (no busy suppression).
+    manager.count_busy_descendants.return_value = 0
     return manager
 
 
