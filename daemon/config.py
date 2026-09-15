@@ -3780,6 +3780,9 @@ def load_config(config_path: str | None = None) -> Config:
     # previous build).
     from .tools.critical_notes import install_critical_notes_config
     from .services.context_messages import install_critical_notes_render_config
+    from .services.critical_notes_selection_orchestrator import (
+        install_critical_notes_selection_config,
+    )
 
     install_critical_notes_config(
         core_cap=config.critical_notes.core_cap,
@@ -3789,10 +3792,22 @@ def load_config(config_path: str | None = None) -> Config:
     install_critical_notes_render_config(
         reference_max=config.critical_notes.reference_max,
     )
+    install_critical_notes_selection_config(
+        tail_cap=config.critical_notes.tail_cap,
+        section_char_cap=config.critical_notes.section_char_cap,
+        fusion_bm25_weight=config.critical_notes.fusion_bm25_weight,
+        fusion_vector_weight=config.critical_notes.fusion_vector_weight,
+        fusion_threshold=config.critical_notes.fusion_threshold,
+        floor_count=config.critical_notes.floor_count,
+        query_max_chars=config.critical_notes.query_max_chars,
+        mint_cap_per_read=config.critical_notes.mint_cap_per_read,
+    )
     _cn = config.critical_notes
-    # Phase-1 ACTIVE knobs on the primary line (ops-grep target);
-    # RESERVED Phase-2/3 knobs on a dedicated follow-up line so the
-    # primary line stays short and meaningful for the always-on path.
+    # Phase-1 ACTIVE knobs on the primary line (ops-grep target, pinned
+    # by tests/test_critical_notes_migrations.py and the runtime
+    # anchor grep). Phase-2 ADDS new knobs via the dedicated
+    # follow-up line so the primary line stays short and meaningful
+    # for the always-on path.
     logger.info(
         "[CriticalNotes] core_cap=%s reference_max=%s stale_days=%s "
         "(always-on per D4 — no ENSEMBLE_* env flag)",
@@ -3804,8 +3819,8 @@ def load_config(config_path: str | None = None) -> Config:
         "[CriticalNotes:reserved] tail_cap=%s section_char_cap=%s "
         "floor_count=%s query_max_chars=%s mint_cap_per_read=%s "
         "fusion_bm25_weight=%s fusion_vector_weight=%s fusion_threshold=%s "
-        "llm_select=%s (all RESERVED Phase-2/3; defaults only — "
-        "no consumer machinery ships in Phase 1; no ENSEMBLE_* env flag, D4)",
+        "llm_select=%s (all CONSUMED Phase-2; defaults only — "
+        "no ENSEMBLE_* env flag, D4)",
         _cn.tail_cap,
         _cn.section_char_cap,
         _cn.floor_count,
@@ -3816,6 +3831,52 @@ def load_config(config_path: str | None = None) -> Config:
         _cn.fusion_threshold,
         _cn.llm_select,
     )
+    # Phase-2 boot-state probe (architect §4.2 [#8]): the
+    # ``projects_with_pins=N/M total_pinned=K`` state segment.
+    # Best-effort — the engine may not be ready yet (early
+    # ``load_config`` paths) and a failure here MUST NOT block
+    # boot. Operators grep this segment to confirm the
+    # tiered-activation gate status at startup.
+    try:
+        from .repositories.factory import get_db_engine
+        from .repositories.project.repository import (
+            SQLModelProjectRepository,
+        )
+
+        eng = get_db_engine()
+        proj_repo = SQLModelProjectRepository(eng)
+        all_projects = proj_repo.list_projects()
+        projects_with_pins = 0
+        total_pinned = 0
+        for proj in all_projects:
+            pid = getattr(proj, "project_id", None)
+            if not pid:
+                continue
+            count = int(
+                proj_repo.count_pinned_critical_notes(pid)
+            )
+            total_pinned += count
+            if count > 0:
+                projects_with_pins += 1
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=%d/%d "
+            "total_pinned=%d (gating active when projects_with_pins>=1 per §4.2 #8; "
+            "projects without pins fall back to render-all)",
+            projects_with_pins,
+            len(all_projects),
+            total_pinned,
+        )
+    except Exception as e:
+        # Best-effort probe. Boot-state visibility is a nice-to-have,
+        # not a gate; the feature is always-on regardless of probe
+        # outcome. A ``projects_with_pins=N/M total_pinned=K`` follow-up
+        # line will appear in the FIRST first-turn log instead.
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=?/? "
+            "total_pinned=? (probe deferred — %s: %s)",
+            type(e).__name__,
+            e,
+        )
 
     # Empty-response-guard Phase 1 (item 5) — install the RESOLVED
     # guard knobs into the response_validation module cache and emit

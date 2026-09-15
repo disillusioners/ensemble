@@ -14,7 +14,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
-from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel, ProjectMetadataRecord
+from .models import (
+    Project,
+    ProjectTagLink,
+    ProjectShortnameLink,
+    ProjectStatus,
+    ProjectType,
+    ProjectHistoryEntry,
+    CriticalNoteModel,
+    CriticalNoteEmbeddingModel,
+    ProjectMetadataRecord,
+)
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
 from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock, DeadLetterItem, JobQueue
@@ -1517,7 +1527,40 @@ class SQLModelProjectRepository:
             session.add(note)
             session.commit()
             session.refresh(note)
-            return note
+            # Capture the row data we need for the post-commit
+            # best-effort embed INSIDE the session block (SQLAlchemy
+            # disconnects the instance after the session closes).
+            note_id = note.id
+            embed_input = self._build_critical_note_embed_input(
+                summary=summary,
+                reference=reference,
+            )
+
+        # Phase 2 (§4.2): write-time embed is best-effort, fail-open.
+        # The note row is committed BEFORE this call so an embed
+        # failure CANNOT roll the write back. Two safety nets stack
+        # here:
+        #   (a) The thread-dispatched runner catches every exception
+        #       and emits one [CriticalNotes:Degraded] log line —
+        #       see _fire_and_forget_embed.
+        #   (b) The outer call site ALSO swallows raises so a buggy
+        #       call signature / monkeypatched raise cannot crash
+        #       the writer mid-flight. Both layers log; the note
+        #       ALWAYS survives.
+        if embed_input:
+            try:
+                self._fire_and_forget_embed(
+                    note_id=note_id, text=embed_input,
+                )
+            except Exception as e:
+                logger.info(
+                    "[CriticalNotes:Degraded] stage=embed reason=fire_exc "
+                    "note_id=%s err=%s",
+                    note_id,
+                    type(e).__name__,
+                )
+
+        return note
 
     def get_critical_note(self, project_id: str, entry_id: str) -> CriticalNoteModel | None:
         """Get a specific critical note by ID.
@@ -1534,6 +1577,104 @@ class SQLModelProjectRepository:
             if note is None or note.project_id != project_id:
                 return None
             return note
+
+    # --------------------------------------------------------
+    # CRITICAL NOTE EMBEDDINGS (Phase 2 internal helpers)
+    # --------------------------------------------------------
+
+    def _build_critical_note_embed_input(
+        self,
+        *,
+        summary: str,
+        reference: str | None,
+    ) -> str:
+        """Compose the embed input for a critical note (§4.2).
+
+        Delegates to the shared helper so the write-time path,
+        the lazy-mint path, and the explicit-backfill command
+        all see the same shape (``summary + reference[:800]``).
+        """
+        # Lazy import keeps the project repository module import
+        # graph free of the embedding pipeline at module-load
+        # time — the embed is only needed when actually firing.
+        from daemon.services.critical_notes_embedding import (
+            make_embed_input,
+        )
+
+        return make_embed_input(summary=summary, reference=reference)
+
+    def _fire_and_forget_embed(
+        self,
+        *,
+        note_id: str,
+        text: str,
+    ) -> None:
+        """Run the embed call asynchronously; never raise.
+
+        The write path triggers this after ``session.commit()``
+        returns. The note row is already persisted, so any
+        failure here just leaves the note BM25-only (the lazy
+        mint window picks it up later).
+
+        Implementation note: we use a daemon thread so the call
+        can fire from a synchronous DB-write context without
+        depending on the caller holding an event loop. The
+        daemon's SQLAlchemy engine is GREENLET-safe (it lives
+        on its own connection pool, decoupled from the writer
+        thread).
+        """
+        import threading
+
+        # Capture the engine reference at fire-time — sharing
+        # ``self.engine`` with the writer's session-safe. The
+        # pooled connections are independent per thread.
+        engine = self.engine
+
+        def _runner() -> None:
+            try:
+                import asyncio
+
+                from daemon.services.critical_notes_embedding import (
+                    embed_critical_note_text,
+                )
+
+                async def _embed() -> list[float] | None:
+                    return await embed_critical_note_text(text)
+
+                # Use a fresh asyncio.run() so we own the loop;
+                # the surrounding sync context has no loop. This
+                # is the recommended pattern for sync entry
+                # points calling once-per-async-coroutine work.
+                vector = asyncio.run(_embed())
+                if not vector:
+                    return
+
+                # Persist the result on the SAME engine that
+                # hosts the note row — the FK-self relationship
+                # requires it.
+                repo = type(self)(engine)
+                repo.set_critical_note_embedding(
+                    note_id=note_id,
+                    embedding=vector,
+                    model="text-embedding-3-small",
+                    dims=len(vector),
+                )
+            except Exception as e:
+                # Final catch-all so the embed never propagates
+                # back into the write path. Every failure mode
+                # is one [CriticalNotes:Degraded] log line away.
+                logger.info(
+                    "[CriticalNotes:Degraded] stage=embed reason=runner_exc "
+                    "note_id=%s err=%s",
+                    note_id,
+                    type(e).__name__,
+                )
+
+        thread = threading.Thread(
+            target=_runner, daemon=True,
+            name=f"cn-embed-{note_id[:8]}",
+        )
+        thread.start()
 
     def remove_critical_note(self, project_id: str, entry_id: str) -> bool:
         """Remove a critical note by ID.
@@ -1580,11 +1721,30 @@ class SQLModelProjectRepository:
             note = session.get(CriticalNoteModel, entry_id)
             if note is None or note.project_id != project_id:
                 return None
-            
+
             now = datetime.now(timezone.utc).isoformat()
+            # Snapshot which text-bearing fields actually changed
+            # so the embed hook only re-fires when the embed input
+            # would change — a category-only update keeps the
+            # existing cached vector (saves an embed call).
+            text_fields_changed = (
+                "summary" in self._ALLOWED_UPDATES
+                and "summary" in updates
+                and updates.get("summary") is not None
+            ) or (
+                "reference" in self._ALLOWED_UPDATES
+                and "reference" in updates
+                and updates.get("reference") is not None
+            )
+            new_summary: str | None = None
+            new_reference: str | None = None
             for key, value in updates.items():
                 if key in self._ALLOWED_UPDATES and value is not None:
                     setattr(note, key, value)
+                    if key == "summary":
+                        new_summary = value
+                    elif key == "reference":
+                        new_reference = value
             note.updated_at = now
             # Lifecycle contract (architecture-recommendation §4.4): ANY
             # leader write refreshes the staleness clock. ``updated_at``
@@ -1592,10 +1752,55 @@ class SQLModelProjectRepository:
             # also bump it, but a content re-affirmation MUST reset the
             # "last reviewed N days ago" numerator explicitly.
             note.last_reviewed_at = now
-            
+
             session.commit()
             session.refresh(note)
-            return note
+            note_id = note.id
+            # Re-derive embed input AFTER the update — when text
+            # fields are unchanged the snapshot equals the prior
+            # value and the embed call would mint an identical
+            # vector anyway, but skipping it saves an embed call
+            # when only category/priority/detail_ref changed.
+            embed_input = self._build_critical_note_embed_input(
+                summary=new_summary if new_summary is not None else note.summary,
+                reference=new_reference if new_reference is not None else note.reference,
+            ) if text_fields_changed else ""
+
+        # Phase 2 (§4.2): clearing-then-re-embedding on text update.
+        # A stale vector against the new text would silently rank
+        # under the wrong query — clear first, then fire the new
+        # embed. Both calls are best-effort and log under the
+        # [CriticalNotes:Degraded] prefix on failure. The outer
+        # call site swallows any raise from the dispatch helper so
+        # a writer-side bug never propagates back through the
+        # tool layer (the write itself is already committed).
+        if text_fields_changed:
+            try:
+                self.clear_critical_note_embedding(note_id)
+            except Exception:
+                # The cache-clear IS important (a stale embedding
+                # would silently mis-rank), but the write itself
+                # already committed and we never block on this.
+                # Op-visibility lives in [CriticalNotes:Degraded].
+                logger.info(
+                    "[CriticalNotes:Degraded] stage=cache_clear "
+                    "note_id=%s reason=clear_failed",
+                    note_id,
+                )
+            if embed_input:
+                try:
+                    self._fire_and_forget_embed(
+                        note_id=note_id, text=embed_input,
+                    )
+                except Exception as e:
+                    logger.info(
+                        "[CriticalNotes:Degraded] stage=embed reason=fire_exc "
+                        "note_id=%s err=%s",
+                        note_id,
+                        type(e).__name__,
+                    )
+
+        return note
 
     def pin_critical_note(
         self,
@@ -1732,10 +1937,10 @@ class SQLModelProjectRepository:
 
     def count_critical_notes(self, project_id: str) -> int:
         """Count critical notes for a project.
-        
+
         Args:
             project_id: The project ID.
-            
+
         Returns:
             Number of critical notes.
         """
@@ -1746,3 +1951,184 @@ class SQLModelProjectRepository:
                 .where(CriticalNoteModel.project_id == project_id)
             ).one()
             return count
+
+    # --------------------------------------------------------
+    # CRITICAL NOTE EMBEDDINGS (Phase 2, 2026-09-15)
+    # --------------------------------------------------------
+
+    def get_critical_note_embedding(
+        self, note_id: str
+    ) -> CriticalNoteEmbeddingModel | None:
+        """Return the cached embedding row for ``note_id``, or ``None``.
+
+        ``None`` indicates either (a) the note has never been
+        embedded yet (legacy / pre-Phase-2 row) or (b) an embedding
+        call failed and the row was never persisted. Read-side
+        callers MUST treat ``None`` as "BM25-only, no vector score"
+        — the degradation ladder (§4.6) absorbs the missing vector
+        by emitting ``[CriticalNotes:Degraded]
+        stage=vector_rank reason=embed_unavailable`` and falling
+        through to the BM25 path.
+        """
+        with Session(self.engine) as session:
+            return session.get(CriticalNoteEmbeddingModel, note_id)
+
+    def list_critical_note_embeddings_for_project(
+        self, project_id: str
+    ) -> dict[str, list[float]]:
+        """Return ``{note_id: embedding}`` for every embedded note in a project.
+
+        Read-side fuel for the fusion re-rank stage: the
+        ``assemble_context_messages`` orchestrator joins this map
+        against the BM25 prefilter shortlist and drops the union's
+        complement (no row, vector stage skips that candidate).
+
+        Returns:
+            Mapping from ``note_id`` to its embedding vector
+            (already deserialized from the JSON column to a plain
+            ``list[float]``). Notes with no cached row are absent
+            from the mapping.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(CriticalNoteEmbeddingModel)
+                .join(
+                    CriticalNoteModel,
+                    CriticalNoteEmbeddingModel.note_id == CriticalNoteModel.id,
+                )
+                .where(CriticalNoteModel.project_id == project_id)
+            )
+            rows = list(session.exec(stmt))
+            return {row.note_id: list(row.embedding) for row in rows}
+
+    def set_critical_note_embedding(
+        self,
+        note_id: str,
+        embedding: list[float],
+        model: str,
+        dims: int,
+    ) -> CriticalNoteEmbeddingModel:
+        """Insert (or replace) the cached embedding row for ``note_id``.
+
+        Used by:
+
+        * **Write-time embed** — :meth:`add_critical_note` /
+          :meth:`update_critical_note` call this best-effort after
+          committing the note row; an embed failure skips the call
+          entirely (the note ranks BM25-only).
+        * **Lazy mint cap window** — :meth:`mint_critical_note_embeddings_capped`
+          is the per-first-turn-read bounded refill (capped at the
+          ``mint_cap_per_read`` config knob).
+        * **Explicit backfill** — :meth:`backfill_critical_note_embeddings`
+          is the one-shot maintenance command (idempotent
+          ``WHERE embedding IS NULL`` style refresh).
+
+        Args:
+            note_id: Primary key (FK-self to ``critical_notes.id``).
+            embedding: Plain ``list[float]`` (deserialized; the
+                cross-driver ``JSONBType`` adapter handles the
+                dialect-neutral persistence).
+            model: Embedding model name (audit column — switching
+                models invalidates every row, makes re-mint visible).
+            dims: Vector length (also captured from the array, but
+                a separate column keeps the provider-reported
+                length queryable without deserializing).
+
+        Returns:
+            The persisted :class:`CriticalNoteEmbeddingModel`.
+
+        Raises:
+            IntegrityError: If ``note_id`` does not exist in
+                ``critical_notes`` (the FK-self CASCADE enforces
+                referential integrity at write time). Caller
+                decides whether to surface or absorb.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with Session(self.engine) as session:
+            existing = session.get(CriticalNoteEmbeddingModel, note_id)
+            if existing is not None:
+                existing.embedding = list(embedding)
+                existing.model = model
+                existing.dims = dims
+                existing.minted_at = now
+            else:
+                row = CriticalNoteEmbeddingModel(
+                    note_id=note_id,
+                    embedding=list(embedding),
+                    model=model,
+                    dims=dims,
+                    minted_at=now,
+                )
+                session.add(row)
+            session.commit()
+            # Refresh from the DB so the returned instance carries
+            # the committed state (engine dialect parity — SQLite
+            # and PG both want this refresh after the write).
+            out = session.get(CriticalNoteEmbeddingModel, note_id)
+            return out
+
+    def clear_critical_note_embedding(self, note_id: str) -> int:
+        """Delete the cached embedding row for ``note_id``.
+
+        Used on ``update_critical_note`` so a note whose
+        ``summary`` / ``reference`` changed clears the stale vector
+        — the next first-turn read re-embeds via the lazy-mint
+        window. The note survives (the update already committed
+        the text change); only the cache row goes.
+
+        Returns:
+            ``1`` if a row was deleted, ``0`` if no cached row
+            existed.
+        """
+        with Session(self.engine) as session:
+            stmt = text(
+                "DELETE FROM critical_note_embeddings WHERE note_id = :nid"
+            )
+            result = session.execute(stmt, {"nid": note_id})
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def list_critical_note_ids_needing_embedding(
+        self,
+        project_id: str,
+        *,
+        limit: int,
+    ) -> list[str]:
+        """Return up to ``limit`` note ids for the project that have no
+        cached embedding row.
+
+        Idempotent backfill fuel (architecture-recommendation §5.4
+        [#9]): the explicit one-shot maintenance command and the
+        lazy-mint cap window both call this to scope the work to
+        the project's actual population (not the whole store).
+
+        Args:
+            project_id: Project to scope the backfill to.
+            limit: Maximum number of ids to return. Used to cap the
+                lazy-mint window at ``mint_cap_per_read``. Returns
+                at most ``limit`` rows, no partial re-ordering.
+
+        Returns:
+            List of ``note_id`` strings that need an embedding.
+            Order: ``created_at`` ASC (oldest-first) so a maintenance
+            command makes monotonic progress across calls.
+        """
+        with Session(self.engine) as session:
+            # Anti-join: notes WITH NO matching embedding row. SQL
+            # pattern is the LEFT JOIN / IS NULL idiom; we use the
+            # SQLAlchemy-native `notin_` against the subquery
+            # projection (covers both engines without dialect
+            # branching).
+            embedded_subq = (
+                select(CriticalNoteEmbeddingModel.note_id)
+            )
+            stmt = (
+                select(CriticalNoteModel.id)
+                .where(
+                    CriticalNoteModel.project_id == project_id,
+                    CriticalNoteModel.id.notin_(embedded_subq),
+                )
+                .order_by(CriticalNoteModel.created_at.asc())
+                .limit(limit)
+            )
+            return [row for row in session.exec(stmt)]
