@@ -4741,14 +4741,22 @@ Returns:
 
 
 def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
-    """Remove privileged-category tools from a default-allow (unfiltered) list.
+    """Strip default-deny categories from a default-allow (unfiltered) list.
 
-    R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
-    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``)
-    are opt-in-only — an agent reaches them ONLY through an explicit
-    ``tools.allow`` entry naming the category or one of its tools. The
-    default-allow paths below (no tools config at all, or an empty
-    allow+deny pair — e.g. ``watcher``) would otherwise default-grant them.
+    BEHAVIORAL criterion (rewritten per D4 Option A, 2026-09-15):
+    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today:
+    ``system_upgrade``, ``system-log``, ``ens-db``, ``service``) are
+    never default-granted — an agent reaches them ONLY through an
+    explicit ``tools.allow`` entry naming the category or one of its
+    tools. The default-allow paths below (no tools config at all, or an
+    empty allow+deny pair — e.g. ``watcher``) would otherwise
+    default-grant them.
+
+    The set is the behavioral union of default-deny categories, NOT a
+    trust-tier hierarchy: "privileged" here answers exactly one
+    question — "does this category need filter-level default-deny?"
+    (persistent, daemon-escaping authority no registry-scoped kill
+    site can reach) — and does NOT rank categories by trust.
 
     Defense-in-depth with the ``resolve_tool_filter`` empty-allow branch:
     that one covers the empty-allow + non-empty-deny universe construction;

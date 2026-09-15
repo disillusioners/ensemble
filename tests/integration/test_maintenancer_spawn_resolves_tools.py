@@ -285,14 +285,18 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly the three categories
-    after W1-P2 (R-SR16 — silent additions are visible by pin)."""
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly the four categories
+    after the service-tool Phase 1 add (D4 Option A, 2026-09-15 —
+    R-SR16 silent additions are visible by pin; this is pin file 3
+    of 3 per the A14 triple-pin discovery — the pin the original
+    D4 list missed)."""
 
-    def test_privileged_categories_contains_three_entries(self) -> None:
+    def test_privileged_categories_contains_four_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
+            "service",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:
