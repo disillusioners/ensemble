@@ -3529,7 +3529,10 @@ class TaskRepository:
                 "retry_scheduled_false": False,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_failed": TaskStatus.FAILED.value,
-                "now": datetime.now(timezone.utc),
+                # Naive-UTC digits for the naive cancel_requested_at /
+                # completed_at gate binds (DC-A fix; twin of the
+                # force-cancel gate below).
+                "now": now_utc_naive(),
             }
             if not bypass_retry_budget:
                 gate_params["max_retries"] = max_retries
