@@ -4,6 +4,8 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+
+from daemon.services.timestamps import now_utc_naive
 from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
@@ -214,7 +216,8 @@ class ErrorReportingService:
                 message = session.get(MessageQueue, message_id)
                 if message:
                     message.status = MessageStatus.FAILED.value
-                    message.completed_at = datetime.now(timezone.utc)
+                    # Naive-UTC digits (DC-A fix) — naive column bind.
+                    message.completed_at = now_utc_naive()
 
             # d) Capture child instance_id; the completion cascade below
             # uses ``bus.count_pending_for_target_sync`` as the SOLE
@@ -237,7 +240,9 @@ class ErrorReportingService:
 
                 session.expire(parent)
                 parent = session.get(Instance, parent_id)
-                parent.last_activity_at = datetime.now(timezone.utc)
+                # Naive-UTC digits (DC-A fix): last_activity_at is a
+                # tz-naive column on PostgreSQL.
+                parent.last_activity_at = now_utc_naive()
                 parent.version = (parent.version or 1) + 1
 
                 # NOTE: parent.children cache column was dropped in Phase 4.

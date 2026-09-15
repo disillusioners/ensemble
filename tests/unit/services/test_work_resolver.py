@@ -186,6 +186,8 @@ def _seed_task(
     error: str | None = None,
     project_id: str | None = "test-project",
     created_at: datetime | None = None,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
     seed_instance: bool = True,
     task_type: str = "process_message",
     is_deferred: bool = False,
@@ -239,6 +241,10 @@ def _seed_task(
             result=result,
             error=error,
             created_at=created,
+            # D1 timing columns (tz fix, Phase 3) — naive-UTC digits
+            # in the seeds mirror the production writer contract.
+            started_at=started_at,
+            completed_at=completed_at,
             is_deferred=is_deferred,
         )
         s.add(task)
@@ -599,40 +605,50 @@ class TestResolveWork:
 
         assert record is None
 
-    def test_resolve_work_task_shadows_job_with_same_id(
+    def test_resolve_work_dual_backed_jobitem_wins_created_at(
         self, engine, resolver
     ):
-        """Task-first lookup order means a Task row's ``work_id`` shadows
-        any JobItem row that happens to share the value (defence against
-        the theoretical UUID collision case).
+        """D3 (tz fix, Phase 3): a dual-backed work_id (JobItem +
+        linked Task sharing job_id == work_id) resolves through the
+        JobItem — the JobItem owns created_at (byte-stable TEXT) and
+        the Task owns execution timing. This kills the DC-C
+        shadow-row substitution where the task-first branch overrode
+        created_at with the Task row's naive digits.
 
-        Phase 4 partial collapse: Tasks are report-only. The seeded
-        Task uses ``process_report`` so it surfaces a
-        ``kind="report"`` record.
+        The pre-fix behavior (task-first shadow, ``kind="report"``)
+        was the defect: the dispatch flow always links the two rows,
+        so the shadow fired on EVERY dispatched job.
         """
-        # Both tables get the same identifier — only one row can win.
         shared_id = str(uuid.uuid4())
         _seed_instance(engine, instance_id="inst-shadow")
+        started = datetime(2026, 9, 15, 14, 10, 1, 441308)
         _seed_task(
             engine,
             work_id=shared_id,
             instance_id="inst-shadow",
-            task_type="process_report",
+            task_type="process_message",
             status=TaskStatus.RUNNING.value,
+            started_at=started,
         )
+        job_created = "2026-09-15T14:09:59.500140+00:00"
         _seed_job(
             engine,
             job_id=shared_id,
             status=AdmissionState.ACTIVE.value,
             instance_id="inst-shadow",
+            created_at=job_created,
         )
 
         record = resolver.resolve_work(shared_id)
 
-        # The task-first branch wins. Phase 4 partial collapse:
-        # report Task → ``kind="report"``.
+        # JobItem wins the record; created_at is the JobItem TEXT
+        # value; started_at comes from the Task row (D1).
         assert record is not None
-        assert record.kind == "report"
+        assert record.kind == "job"
+        assert record.created_at is not None
+        assert record.created_at.isoformat() == "2026-09-15T14:09:59.500140+00:00"
+        assert record.started_at == "2026-09-15T14:10:01.441308+00:00"
+        assert record.completed_at is None
 
     def test_resolve_work_task_without_instance_returns_none_agent_id(
         self, engine, resolver

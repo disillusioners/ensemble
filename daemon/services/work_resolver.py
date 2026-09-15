@@ -68,6 +68,7 @@ from daemon.repositories.task.models import Task
 # helper is shared with the resolver module so all Fix-C read surfaces
 # emit the same keys in lock-step. Always-on since WS3 (the
 # M1 mission-projection kill-switch was removed).
+from daemon.services.timestamps import coerce_to_aware_utc, to_utc_iso
 from daemon.services.mission_resolver import (
     mission_projection_to_dict as _mission_projection_to_dict,
 )
@@ -195,18 +196,17 @@ class WorkRecord:
       helper returns ``None`` for unparseable JobItem strings rather
       than raise.
     * ``started_at`` / ``completed_at`` — execution-timing fields
-      sourced from the joined ``Instance`` row when one is available
-      (Phase 1, Job as Queue Proxy). ``Instance.last_activity_at`` is
-      the best proxy for ``started_at`` (it advances the first time
-      the worker thread takes the work unit). ``Instance.updated_at``
-      is the best proxy for ``completed_at`` — for terminal instances
-      the last write before reaching a terminal status flips
-      ``updated_at`` to the transition time. ``Instance.created_at``
-      (ISO string) is a tertiary fallback when ``last_activity_at``
-      is not set. ISO-8601 strings on the wire — either parsed from
-      the Instance columns or sourced directly from the JobItem
-      mirror columns (``JobItem.started_at`` / ``JobItem.completed_at``)
-      which are still populated during Phase 1's transition period.
+      sourced from the linked TASK row (D1, tz fix Phase 3).
+      ``Task.started_at`` is the dispatch/claim stamp (set atomically
+      by ``TaskRepository.claim_pending_task``); ``Task.completed_at``
+      is the terminal finalize stamp (complete/fail/cancel paths).
+      PENDING work (no Task row or unclaimed Task) surfaces ``None``
+      for ``started_at``; non-terminal work surfaces ``None`` for
+      ``completed_at``. The Instance columns are deliberately NOT
+      consulted — ``last_activity_at`` is overwritten by unrelated
+      instance activity and drifted from true work-start under the
+      previous (Phase 1) sourcing. ISO-8601 strings on the wire via
+      the shared ``to_utc_iso`` boundary.
     * ``job_type`` / ``mission_liveness`` — Fix C read-model split.
       ``job_type`` is the JobItem-side discriminator (``"task"`` for
       mission, ``"message"`` for mirror; ``None`` for Task-backed
@@ -328,10 +328,13 @@ class WorkRecord:
         carries the ``+00:00`` offset — frontend code can rely on
         tz-awareness without parsing the string.
 
-        ``started_at`` / ``completed_at`` are passed through as ISO-8601
-        strings (already ISO on the JobItem side; ``_isoformat_or_none``
-        in :meth:`_job_to_record` formats the ``Instance.last_activity_at``
-        ``datetime`` value).
+        ``started_at`` / ``completed_at`` are ISO-8601 strings sourced
+        from the linked Task row (D1, tz fix Phase 3):
+        ``task.started_at`` is the dispatch/claim stamp and
+        ``task.completed_at`` the terminal finalize stamp. A pending
+        job (no claimed Task row) surfaces no ``started_at``; a
+        non-terminal job surfaces no ``completed_at``.
+        ``Instance.last_activity_at`` is deliberately not consulted.
 
         Fix C: ``job_type`` and ``mission_liveness`` are emitted on
         every record (``None`` for Task-backed records, by design —
@@ -392,12 +395,21 @@ class WorkRecord:
 def _serialize_created_at(value: datetime | None) -> str | None:
     """Return an ISO-8601 string for ``value``, or ``None``.
 
-    Task rows give us a tz-aware or naive ``datetime``; JobItem rows
-    give us a tz-aware parsed string already. JSON serialisation
-    needs a string. Naive datetimes are coerced to UTC before
-    formatting so the output always carries the ``+00:00`` offset —
-    frontend code can rely on tz-awareness without parsing the string
-    for missing-offset edge cases.
+    Thin delegate to the shared serialization boundary
+    (``daemon.services.timestamps.to_utc_iso``) so every read surface
+    emits the SAME wire shape: aware values serialize as UTC with the
+    explicit ``+00:00`` offset; naive values follow the documented
+    assume-UTC policy (legacy +07-digit rows render 7h-off until the
+    backfill repairs them — repair is centralized, not per-site).
+
+    Wire-nuance (documented, not normalized): this boundary
+    re-serializes parsed datetimes to the canonical ``+00:00``
+    ISO shape, so a stored ``Z``-suffixed TEXT ``created_at`` can
+    read back as ``...+00:00`` on ``GET /api/work`` (which emits
+    :meth:`WorkRecord.to_dict`) — while the ``/api/jobs`` family
+    passes the raw stored strings through verbatim. Same instant,
+    different suffix rendering; aligning the two would be a wire
+    contract change, not a tidy.
 
     Args:
         value: A ``datetime`` (tz-aware or naive) or ``None``.
@@ -405,11 +417,7 @@ def _serialize_created_at(value: datetime | None) -> str | None:
     Returns:
         An ISO-8601 string, or ``None`` if ``value`` is ``None``.
     """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat()
+    return to_utc_iso(value)
 
 
 # ── Reverse canonical → source status map ─────────────────────────────────
@@ -703,9 +711,9 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
+        return coerce_to_aware_utc(value)
     try:
-        return datetime.fromisoformat(value)
+        return coerce_to_aware_utc(datetime.fromisoformat(value))
     except (ValueError, TypeError):
         logger.debug("work_resolver: unparseable created_at value %r", value)
         return None
@@ -732,7 +740,8 @@ def _normalize_sort_key(value: datetime | None) -> datetime:
     floor = datetime.min.replace(tzinfo=timezone.utc)
     if value is None:
         return floor
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    coerced = coerce_to_aware_utc(value)
+    return coerced if coerced is not None else floor
 
 
 def _parse_task_result_summary(task: Task) -> str | None:
@@ -780,118 +789,74 @@ def _serialize_instance_datetime(value: Any) -> str | None:
     Returns:
         An ISO-8601 string, or ``None``.
     """
-    if value is None:
+    return to_utc_iso(value)
+
+
+def _task_started_at(
+    task_timing: "tuple[datetime | None, datetime | None] | None",
+) -> str | None:
+    """Resolve the ``started_at`` value for a WorkRecord (D1).
+
+    D1 timing semantics (``feature/fix-job-queue-timestamps-tz``,
+    Phase 3): job-view ``started_at`` is TRUE WORK-START sourced
+    from the Task row — ``task.started_at`` is the dispatch/claim
+    stamp (set atomically by ``TaskRepository.claim_pending_task``
+    when a worker takes the task; it is RETAINED across retries
+    only insofar as each retry mints a fresh Task row with its own
+    claim stamp). A PENDING job (no Task row yet, or a Task whose
+    ``started_at`` is NULL because no worker has claimed it) shows
+    NO ``started_at``.
+
+    The previous Phase-5 sourcing (``Instance.last_activity_at``
+    with ``Instance.created_at`` fallback) was WRONG for job
+    timing: ``last_activity_at`` is bumped by unrelated instance
+    activity (revives, terminal mirrors, parent cascades), so it
+    drifted arbitrarily from the actual work-start. Its writers are
+    now naive-UTC digits (commit 3) but the column is no longer
+    consulted for job timing at all.
+
+    Args:
+        task_timing: Optional ``(started_at, completed_at)`` tuple
+            from the linked Task row (``work_id`` linkage). ``None``
+            means no Task row exists for this work unit.
+
+    Returns:
+        An ISO-8601 string, or ``None`` (pending / unclaimed).
+    """
+    if task_timing is None:
         return None
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-    if isinstance(value, str):
-        # ISO-8601 strings pass through verbatim. Already UTC for
-        # ``created_at`` / ``updated_at`` (set via
-        # ``datetime.now(timezone.utc).isoformat()`` in the model).
-        return value
-    return None
+    return to_utc_iso(task_timing[0])
 
 
-def _instance_started_at(
-    instance: "Instance | None",
-    job: JobItem,
+def _task_completed_at(
+    task_timing: "tuple[datetime | None, datetime | None] | None",
 ) -> str | None:
-    """Resolve the ``started_at`` value for a JobItem-backed WorkRecord.
+    """Resolve the ``completed_at`` value for a WorkRecord (D1).
 
-    Phase 5 (Job as Queue Proxy) precedence — Instance-side authoritative:
+    D1: job-view ``completed_at`` is the Task row's terminal finalize
+    stamp — ``task.completed_at`` (set by ``complete_task`` /
+    ``fail_task`` / the cancel paths in the same transaction as the
+    terminal status flip). A non-terminal work unit (no Task row, or
+    a Task with NULL ``completed_at``) surfaces ``None`` — a
+    non-terminal job never reports a completion time.
 
-    1. ``Instance.last_activity_at`` — the worker pool's first heartbeat
-       on the instance; the closest analogue to "work began".
-    2. ``Instance.created_at`` — the Instance row's creation time as a
-       fallback when ``last_activity_at`` has not been set yet (e.g. a
-       freshly-spawned instance that has not yet checked in).
-    3. Fallback ``None`` — the previous ``job.started_at`` JobItem mirror
-       column was dropped in Phase B (see phase5-breakage-inventory
-       B10). The Instance-side sources above are now authoritative; if
-       neither is populated, the function returns ``None`` rather than
-       reading the deprecated column.
+    The previous Phase-5 sourcing (``Instance.updated_at`` on
+    terminal instances) conflated "the instance row was last
+    written" with "this work unit finished" — the instance keeps
+    receiving writes (attestation counters, mission fields) after a
+    work unit settles, so the value drifted forward over time.
 
     Args:
-        instance: Optional pre-fetched Instance row. ``None`` falls
-            through to the ``None`` fallback (no JobItem mirror to
-            consult under Phase 5).
-        job: The JobItem row. Retained for API symmetry with the
-            completed_at resolver below; no attributes on it are read
-            directly after Phase 5.
+        task_timing: Optional ``(started_at, completed_at)`` tuple
+            from the linked Task row. ``None`` means no Task row
+            exists for this work unit.
 
     Returns:
-        An ISO-8601 string, or ``None`` if no timing source is available.
+        An ISO-8601 string, or ``None`` (not yet terminal).
     """
-    if instance is not None:
-        value = _serialize_instance_datetime(instance.last_activity_at)
-        if value is not None:
-            return value
-        value = _serialize_instance_datetime(instance.created_at)
-        if value is not None:
-            return value
-    # Phase 5: ``job.started_at`` mirror column was dropped from the
-    # JobItem model in Phase B. The Instance-side sources above are
-    # authoritative; fall through to ``None`` rather than reading the
-    # deprecated column.
-    return None
-
-
-def _instance_completed_at(
-    instance: "Instance | None",
-    *,
-    instance_status_canonical: str,
-    job: JobItem,
-) -> str | None:
-    """Resolve the ``completed_at`` value for a JobItem-backed WorkRecord.
-
-    Phase 5 (Job as Queue Proxy) precedence — Instance-side authoritative:
-
-    1. ``Instance.updated_at`` — only meaningful when the Instance is
-       in a terminal state. ``updated_at`` is the last write before the
-       terminal transition (the transaction that flips ``status`` and
-       the Instance mirrors is one DB write — see ``_finalize_job_db_sync``
-       Step 2).
-    2. Fallback ``None`` — the previous ``job.completed_at`` JobItem mirror
-       column was dropped in Phase B (see phase5-breakage-inventory
-       B10). The Instance-side sources above are now authoritative; if
-       the Instance is non-terminal (or absent) the function returns
-       ``None`` rather than reading the deprecated column.
-
-    A non-terminal Instance is treated as "not yet completed" — we
-    surface ``None`` rather than the Instance ``updated_at`` so the
-    API contract matches the ``JobResponse`` semantics (a non-terminal
-    job should never report a completion time).
-
-    Args:
-        instance: Optional pre-fetched Instance row.
-        instance_status_canonical: The canonical status already
-            computed for this WorkRecord (``"processing"``, ``"completed"``,
-            ``"failed"``, ``"cancelled"``, ``"paused"``, etc.).
-        job: The JobItem row whose mirror ``completed_at`` is the fallback.
-
-    Returns:
-        An ISO-8601 string, or ``None``.
-    """
-    terminal_canonical = {
-        "completed",
-        "failed",
-        "cancelled",
-        "dead_letter",
-    }
-    if (
-        instance is not None
-        and instance_status_canonical in terminal_canonical
-    ):
-        value = _serialize_instance_datetime(instance.updated_at)
-        if value is not None:
-            return value
-    # Phase 5: ``job.completed_at`` mirror column was dropped from the
-    # JobItem model in Phase B. The Instance-side sources above are
-    # authoritative; fall through to ``None`` rather than reading the
-    # deprecated column.
-    return None
+    if task_timing is None:
+        return None
+    return to_utc_iso(task_timing[1])
 
 
 # ── WorkResolverService ────────────────────────────────────────────────────
@@ -1035,11 +1000,17 @@ class WorkResolverService:
     def resolve_work(self, work_id: str) -> WorkRecord | None:
         """Resolve a ``work_id`` to its :class:`WorkRecord`, or ``None``.
 
-        Lookup order is task-first, then job. The Task branch is
-        retained in Phase 4 partial collapse for **report** work_ids
-        (``process_report`` / ``send_report`` Task rows). The JobItem
-        branch handles message-driven work (turns are JobItems
-        post-collapse).
+        Both tables are consulted — Task by ``work_id``, JobItem by
+        primary key. Dual-backed work units (dispatch flow: the
+        JobItem and its linked Task share ``work_id == job_id``)
+        resolve to the JobItem record with the Task's execution
+        timing fed through: D3 keeps ``created_at`` byte-stable from
+        the JobItem TEXT column, D1 sources ``started_at`` /
+        ``completed_at`` from the Task row (the DC-C shadow-row
+        substitution where a task-first branch overrode
+        ``created_at`` is gone). Task-only rows are the report lane
+        (``process_report`` / ``send_report``); Job-only rows are
+        message-driven work (turns are JobItems post-collapse).
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
@@ -1051,7 +1022,23 @@ class WorkResolverService:
         """
         # Task branch: indexed unique lookup on Task.work_id.
         task = self._task_repo.get_by_work_id(work_id)
+        job = self._job_repo.get(work_id)
+        if task is not None and job is not None:
+            # Dual-backed work unit (dispatch flow: the JobItem and
+            # its linked Task share work_id == job_id). D3: the
+            # JobItem owns created_at (byte-stable TEXT column); D1:
+            # the Task row owns execution timing. Building the
+            # record from the JobItem (with the Task's timing fed
+            # through) keeps BOTH invariants and kills the DC-C
+            # shadow-row substitution where the task-first branch
+            # overrode created_at with the Task row's naive digits.
+            return self._job_to_record(
+                job,
+                task_timing=(task.started_at, task.completed_at),
+            )
         if task is not None:
+            # Task-only work unit (report lane). D4: timing sourced
+            # from the Task row inside _task_to_record.
             return self._task_to_record(task)
 
         # Job branch: PK lookup on JobItem.job_id. The JobItem
@@ -1060,7 +1047,6 @@ class WorkResolverService:
         # caller-supplied ``work_id`` is compared against the JobItem
         # PK directly — no separate work_id column on the JobItem
         # side, the PK IS the work_id.
-        job = self._job_repo.get(work_id)
         if job is not None:
             return self._job_to_record(job)
 
@@ -1087,8 +1073,10 @@ class WorkResolverService:
         token matches the row's kind without duplicating the token
         map.
 
-        Lookup order matches :meth:`resolve_work` (task-first, then
-        job). For a Task-backed WorkRecord the canonical status is the
+        Lookup order matches :meth:`resolve_work` (dual-backed
+        dispatch rows resolve to the JobItem record; task-only rows
+        resolve to the report-lane Task record). For a task-only
+        (report-lane) WorkRecord the canonical status is the
         Task's mapped value (``completed`` / ``failed`` / ``cancelled``
         / ``processing`` / ``pending`` / ``paused``); for a mirror
         JobItem the per-kind dispatch flips ``completed`` to
@@ -1377,9 +1365,19 @@ class WorkResolverService:
                 mission_fields_by_id = self._batch_mission_fields(
                     instances_by_id
                 )
+                # D1 timing batch (tz fix, Phase 3): ONE Task SELECT
+                # for the whole page's job_ids so started_at /
+                # completed_at source from the Task rows without a
+                # per-row lookup (S4 query-budget pattern).
+                task_timing_by_work_id = (
+                    self._task_repo.get_timing_by_work_ids(
+                        {j.job_id for j in jobs}
+                    )
+                )
             else:
                 instances_by_id = {}
                 mission_fields_by_id = {}
+                task_timing_by_work_id = {}
             if root_only and jobs:
                 # Batch-resolve which of the JobItems' backing
                 # instances are children (parent_id IS NOT NULL).
@@ -1397,6 +1395,7 @@ class WorkResolverService:
                         j,
                         instance=instances_by_id.get(j.instance_id),
                         mission_fields=mission_fields_by_id.get(j.instance_id),
+                        task_timing=task_timing_by_work_id.get(j.job_id),
                     )
                     for j in jobs
                     if j.instance_id is None or j.instance_id not in child_instance_ids
@@ -1407,6 +1406,7 @@ class WorkResolverService:
                         j,
                         instance=instances_by_id.get(j.instance_id),
                         mission_fields=mission_fields_by_id.get(j.instance_id),
+                        task_timing=task_timing_by_work_id.get(j.job_id),
                     )
                     for j in jobs
                 )
@@ -1485,6 +1485,11 @@ class WorkResolverService:
         """
         if instance is None:
             instance = self._lookup_instance(task.instance_id)
+        # D1 timing: Task-backed records source execution timing from
+        # the SAME row (started_at = claim stamp, completed_at =
+        # terminal stamp) so detail and list surfaces agree (no NULL
+        # asymmetry — DC-G).
+        task_timing = (task.started_at, task.completed_at)
         return WorkRecord(
             work_id=task.work_id,
             kind=_kind_from_task_type(task.task_type),
@@ -1495,6 +1500,8 @@ class WorkResolverService:
             result_summary=_parse_task_result_summary(task),
             error=task.error,
             created_at=task.created_at,
+            started_at=_task_started_at(task_timing),
+            completed_at=_task_completed_at(task_timing),
             # Phase 1 F1: surface ``task.message_id`` so the WorkRecord
             # carries the same correlation key as JobItem-backed records.
             # Tasks have a native ``message_id`` column populated at
@@ -1515,6 +1522,7 @@ class WorkResolverService:
         job: JobItem,
         instance: "Instance | None" = None,
         mission_fields: "tuple[str | None, int | None, str | None] | None" = None,
+        task_timing: "tuple[datetime | None, datetime | None] | None" = None,
     ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
@@ -1762,10 +1770,12 @@ class WorkResolverService:
             if instance is None and job.instance_id is not None:
                 # Single-row ``resolve_work`` path — no pre-fetched
                 # instance yet. Look it up lazily before consulting
-                # ``MissionResolver`` so ``_instance_started_at`` /
-                # ``_instance_completed_at`` and the mission fields
-                # all see the same row (pre-WS3 this lookup was
-                # kill-switch-gated; the gate is gone).
+                # ``MissionResolver`` so the mission fields (and the
+                # mirror-row ``mission_liveness`` consult above) all
+                # see the same row (pre-WS3 this lookup was
+                # kill-switch-gated; the gate is gone). D1: execution
+                # timing does NOT ride on the instance — it arrives
+                # via ``task_timing`` from the Task row.
                 instance = self._lookup_instance(job.instance_id)
             mission_id, mission_epoch, mission_terminal_reason = (
                 self._mission_fields_for_instance(instance)
@@ -1802,17 +1812,19 @@ class WorkResolverService:
                 (job.job_metadata or {}).get("message_id")
                 if isinstance(job.job_metadata, dict) else None
             ),
-            # Timing: prefer the Instance columns when an Instance row
-            # was provided (or just looked up above). ``last_activity_at``
-            # is the worker's first heartbeat, which is the closest
-            # analogue to "work began". ``updated_at`` is the last
-            # write; for a terminal Instance that flips to terminal in
-            # one transaction, ``updated_at`` IS the completion time.
-            # Both fields degrade to the JobItem mirror when no
-            # Instance is available — the mirror is still populated
-            # during Phase 1's transition period.
-            started_at=_instance_started_at(instance, job),
-            completed_at=_instance_completed_at(instance, instance_status_canonical=status, job=job),
+            # D1 timing semantics (tz fix, Phase 3): execution
+            # timing comes from the TASK row, not the Instance.
+            # ``task.started_at`` is the dispatch/claim stamp (set by
+            # claim_pending_task); ``task.completed_at`` is the
+            # terminal finalize stamp. PENDING jobs (no Task row, or
+            # unclaimed Task) show NO started_at; non-terminal jobs
+            # show NO completed_at. ``Instance.last_activity_at`` is
+            # deliberately NOT consulted — it is overwritten by
+            # unrelated instance activity (revives, cascades, parent
+            # bookkeeping) and drifted arbitrarily from true
+            # work-start under the previous sourcing.
+            started_at=_task_started_at(task_timing),
+            completed_at=_task_completed_at(task_timing),
             # Fix C — additive read-model split fields. ``job_type``
             # is the JobItem-side discriminator; ``mission_liveness``
             # is the canonical status of the linked Instance for

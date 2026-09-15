@@ -391,9 +391,10 @@ def _parse_since(value: str | None) -> datetime | None:
             value,
         )
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    # Shared sort/compare companion (tz fix): naive → assume-UTC.
+    from daemon.services.timestamps import coerce_to_aware_utc
+
+    return coerce_to_aware_utc(parsed)
 
 
 def _resolve_paged(
@@ -511,9 +512,12 @@ def _parse_iso_for_compare(value: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(normalised)
     except (TypeError, ValueError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    # Shared sort/compare companion (tz fix): naive → assume-UTC
+    # (the documented policy — new rows carry naive-UTC digits by
+    # construction; legacy +07-digit rows read 7h-off until backfill).
+    from daemon.services.timestamps import coerce_to_aware_utc
+
+    return coerce_to_aware_utc(parsed)
 
 
 def _is_mission_terminal(record: "MissionRecord") -> bool:

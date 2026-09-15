@@ -1,8 +1,9 @@
 """Job Queue CRUD API endpoints."""
 
 import logging
-from datetime import timezone as _tz
 from typing import Any
+
+from daemon.services.timestamps import to_utc_iso
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -92,12 +93,13 @@ def _job_to_response(
     ``cancelled_at`` execution field (derivable from
     ``Instance.status == TERMINATED``, which Phase 4 will surface).
     Execution timing (``started_at`` / ``completed_at``) is sourced
-    from the WorkRecord, which reads ``Instance.last_activity_at``
-    (with ``Instance.created_at`` as fallback) for ``started_at``
-    and ``Instance.updated_at`` for ``completed_at`` on terminal
-    instances — the ``Instance`` table has carried these columns
-    since the original schema, and they are the authoritative
-    execution timestamps under the Job-as-Queue-Proxy model.
+    from the WorkRecord, which reads the linked TASK row (D1, tz
+    fix Phase 3): ``Task.started_at`` is the dispatch/claim stamp,
+    ``Task.completed_at`` the terminal finalize stamp. PENDING jobs
+    show no ``started_at``; non-terminal jobs show no
+    ``completed_at``. The Instance columns are deliberately not
+    consulted for job timing (``last_activity_at`` is bumped by
+    unrelated instance activity).
 
     Args:
         job: The ``JobItem`` row to project.
@@ -127,23 +129,22 @@ def _job_to_response(
         instance_id = work_record.instance_id
         result_summary = work_record.result_summary
         error_message = work_record.error
-        # Timing: the WorkRecord carries ``started_at`` / ``completed_at``
-        # already sourced from the Instance columns
-        # (``last_activity_at`` → ``started_at``,
-        # ``updated_at`` → ``completed_at``) with the JobItem mirror
-        # as a fallback. Prefer the WorkRecord value so the API
+        # Timing: the WorkRecord carries ``started_at`` /
+        # ``completed_at`` sourced from the linked Task row (D1, tz
+        # fix Phase 3). Prefer the WorkRecord value so the API
         # response stays in sync with the resolver's view.
         started_at = work_record.started_at
         completed_at = work_record.completed_at
-        # ``created_at`` is a tz-aware datetime on WorkRecord; the
-        # JobResponse schema expects an ISO-8601 string. Normalise
-        # via the resolver's helper-equivalent inline format so the
-        # wire output always carries the ``+00:00`` offset.
-        created_at = work_record.created_at
-        if created_at is not None:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=_tz.utc)
-            created_at = created_at.isoformat()
+        # D3 (tz fix, Phase 3): ``created_at`` is sourced from the
+        # JobItem TEXT column VERBATIM — byte-stable across
+        # create → dispatch → get on list AND detail views. The
+        # previous WorkRecord-derived serialization re-rendered a
+        # parsed datetime (normalising e.g. 'Z' → '+00:00'), so the
+        # create response and a later get could disagree byte-wise.
+        # ``to_utc_iso`` passes str values through UNCHANGED (the
+        # real TEXT column shape) and only serializes non-str inputs
+        # (defensive for datetime-shaped fixtures).
+        created_at = to_utc_iso(job.created_at)
     else:
         # Legacy fallback path. Execution state comes straight off
         # the JobItem mirror columns — used by older tests / partial
@@ -179,7 +180,9 @@ def _job_to_response(
         # Legacy timing: read directly from the JobItem mirror columns.
         started_at = None
         completed_at = None
-        created_at = job.created_at
+        # D3: JobItem TEXT verbatim (byte-stable via to_utc_iso's
+        # str pass-through).
+        created_at = to_utc_iso(job.created_at)
 
     return JobResponse(
         job_id=job.job_id,
@@ -192,17 +195,13 @@ def _job_to_response(
         queue_id=job.queue_id,
         instance_id=instance_id,
         created_at=created_at,
-        # Phase 1 (Job as Queue Proxy): timing fields are sourced
-        # from the Instance via the resolver (``last_activity_at``
-        # → ``started_at``, ``updated_at`` → ``completed_at``), with
-        # the JobItem mirror columns as a defensive fallback for
-        # callers on the legacy branch. The previous Phase 1
-        # implementation hardcoded ``None`` for both fields based on
-        # an incorrect "Instance has no timing columns" claim — the
-        # Instance table has had ``last_activity_at`` /
-        # ``created_at`` / ``updated_at`` / ``paused_at`` since the
-        # original schema, and they are the authoritative execution
-        # timestamps under the new model.
+        # D1 (tz fix, Phase 3): timing fields are sourced from the
+        # linked Task row via the resolver (``Task.started_at`` is
+        # the dispatch/claim stamp; ``Task.completed_at`` the
+        # terminal finalize stamp). PENDING jobs show no
+        # ``started_at``; non-terminal jobs show no ``completed_at``.
+        # The legacy fallback branch (no WorkRecord) stays ``None``
+        # for both.
         started_at=started_at,
         completed_at=completed_at,
         result_summary=result_summary,

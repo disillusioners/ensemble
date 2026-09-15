@@ -742,7 +742,7 @@ class TestListWorkSplitFields:
         for record in records:
             assert record.job_type == "message"
             assert record.mission_liveness == "processing"
-        assert call_count <= 4, (
+        assert call_count <= 5, (
             f"N+1 regression: list_work(5 mirror rows) issued "
             f"{call_count} SQL queries on the shared engine. "
             f"Batched path must be bounded (job_repo SELECT + at most "

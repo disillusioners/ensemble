@@ -23,7 +23,9 @@ read/write access to the daemon's own database via the shared
   ``pool_timeout=10s`` (LEADER ADJUDICATION #5 — serialized
   semantics, no queueing pileup). PG ``connect_args``:
   ``statement_timeout=60s``, ``lock_timeout=10s``,
-  ``idle_in_transaction_session_timeout=60s``. Kill-switch:
+  ``idle_in_transaction_session_timeout=60s``, plus the daemon
+  engine's UTC session option (``-c timezone=UTC`` via
+  ``PG_SESSION_CONNECT_ARGS`` — B2/B3 parity). Kill-switch:
   ``ENSEMBLE_REPAIR_ENABLED`` (default ON per the wave dispatch
   contract — flag-OFF returns byte-identical no-op per the
   kill-switch flag-ON/OFF contract).
@@ -93,6 +95,7 @@ from ._tool_registry import register_tool_category
 from .db_tools import _validate_select_only
 from .upgrade_journal import iso_plus, mint_nonce, now_iso, parse_iso_utc
 from daemon.repositories.ens_db.models import RepairLog
+from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -445,7 +448,9 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
     ``pool_recycle=3600``, ``pool_timeout=10s``. PG-only
     ``connect_args`` timeouts are applied when the underlying URL is
     a PostgreSQL dialect — SQLite ignores them silently (architect
-    §7.5 — dual-engine parity).
+    §7.5 — dual-engine parity). The PG options also carry the daemon
+    engine's UTC session (``PG_SESSION_CONNECT_ARGS``) so the repair
+    path reads/writes the same clock frame as the repositories.
 
     **R13 standing guard:** the returned engine is created from the
     shared ``engine.url`` and is NOT registered with the user-
@@ -476,12 +481,19 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
         pool_timeout=REPAIR_POOL_TIMEOUT_S,
     )
     if is_pg:
+        # The UTC session option rides the SAME libpq ``options``
+        # parameter as the timeout options, sourced from the daemon
+        # engine factory's ``PG_SESSION_CONNECT_ARGS`` so the repair
+        # path's SQL-side ``now()`` readers evaluate in the same frame
+        # the naive-UTC digit writers stamp (B2/B3 class-closing fix,
+        # daemon/repositories/factory.py).
         kwargs["connect_args"] = {
             "options": (
                 f"-c statement_timeout={REPAIR_STATEMENT_TIMEOUT_MS} "
                 f"-c lock_timeout={REPAIR_LOCK_TIMEOUT_MS} "
                 f"-c idle_in_transaction_session_timeout="
-                f"{REPAIR_IDLE_IN_TXN_TIMEOUT_MS}"
+                f"{REPAIR_IDLE_IN_TXN_TIMEOUT_MS} "
+                f"{PG_SESSION_CONNECT_ARGS['options']}"
             ),
         }
     else:

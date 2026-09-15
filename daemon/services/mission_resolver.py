@@ -98,6 +98,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from daemon.services.timestamps import to_utc_iso
 from daemon.services.work_status import _STATUS_CANONICAL_MAP
 
 if TYPE_CHECKING:
@@ -851,16 +852,16 @@ class MissionResolver:
             terminal_reason=terminal_reason,
             epoch=epoch,
             linked_jobs=list(linked_jobs) if linked_jobs is not None else [],
+            # Shared serialization boundary (tz fix): naive
+            # last_activity_at digits render assume-UTC (documented
+            # policy); Instance.created_at TEXT passes through
+            # verbatim.
             started_at=(
-                instance.last_activity_at.isoformat()
+                to_utc_iso(instance.last_activity_at)
                 if instance.last_activity_at is not None
                 else instance.created_at
             ),
-            last_activity_at=(
-                instance.last_activity_at.isoformat()
-                if instance.last_activity_at is not None
-                else None
-            ),
+            last_activity_at=to_utc_iso(instance.last_activity_at),
             # Mission tree panel fields — pure reads off the already-
             # loaded row's ``instance_metadata`` (the ``title`` /
             # ``initiative_message`` properties). ZERO extra queries:
