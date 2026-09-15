@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .context_tools import resolve_context_dir
+from .critical_note_gate import is_active_critical_note
 
 logger = logging.getLogger(__name__)
 
@@ -539,11 +540,14 @@ def _mcp_rag_hint(
             # received the raw list from an upstream caller — typically
             # the ``external_opencode.py`` preload path, but defensively
             # filter again here so any future caller shape can't leak
-            # a superseded row into the hint). ``is not None`` defends
-            # against the stray empty-string class too.
+            # a superseded row into the hint). The superseded check is
+            # routed through the shared predicate
+            # (``daemon.services.critical_note_gate``); the isinstance
+            # guard stays so non-dict shapes keep dropping (the
+            # predicate alone would pass them as ACTIVE).
             active_notes = [
                 note for note in critical_notes
-                if isinstance(note, dict) and note.get("superseded_by_id") is None
+                if isinstance(note, dict) and is_active_critical_note(note)
             ]
             rendered = [
                 line for note in active_notes

@@ -2132,3 +2132,152 @@ class SQLModelProjectRepository:
                 .limit(limit)
             )
             return [row for row in session.exec(stmt)]
+
+    def _list_project_ids_with_critical_notes(self) -> list[str]:
+        """Distinct project ids that own at least one critical-note row.
+
+        Fuel for the store-wide backfill mode (``project_id=None``):
+        the per-project candidate query is scoped, so the unscoped
+        command enumerates the projects first and iterates.
+        """
+        with Session(self.engine) as session:
+            stmt = select(CriticalNoteModel.project_id).distinct()
+            return [row for row in session.exec(stmt)]
+
+    def _backfill_single_critical_note(
+        self, project_id: str, note_id: str
+    ) -> str:
+        """Mint one note's embedding; never raises.
+
+        Returns ``"minted"`` (vector persisted), ``"skipped"`` (no
+        embed input / embedder unavailable / empty vector — the row
+        stays BM25-only), or ``"failed"`` (an exception was raised
+        and absorbed; logged under ``[CriticalNotes:Degraded]``).
+        """
+        try:
+            note = self.get_critical_note(project_id, note_id)
+            if note is None:
+                # Row vanished between listing and fetch — nothing
+                # left to embed; counts as skipped, not failed.
+                return "skipped"
+            from daemon.services.critical_notes_embedding import (
+                DEFAULT_EMBEDDING_MODEL,
+                embed_critical_note_text,
+                make_embed_input,
+            )
+
+            text = make_embed_input(note.summary or "", note.reference)
+            if not text:
+                return "skipped"
+            # Same sync-bridge pattern as ``_fire_and_forget_embed``:
+            # fresh asyncio.run() so we own the loop; the embedding
+            # service builds its own engine-bound plumbing (a
+            # construction failure surfaces as a ``None`` vector →
+            # skipped, per the fail-open contract).
+            import asyncio
+
+            vector = asyncio.run(embed_critical_note_text(text))
+            if not vector:
+                return "skipped"
+            self.set_critical_note_embedding(
+                note_id=note_id,
+                embedding=vector,
+                model=DEFAULT_EMBEDDING_MODEL,
+                dims=len(vector),
+            )
+            return "minted"
+        except Exception as e:
+            logger.info(
+                "[CriticalNotes:Degraded] stage=backfill reason=row_exc "
+                "note_id=%s err=%s",
+                note_id,
+                type(e).__name__,
+            )
+            return "failed"
+
+    def backfill_critical_note_embeddings(
+        self,
+        project_id: str | None = None,
+        *,
+        batch_size: int = 10,
+    ) -> str:
+        """One-shot embeddings backfill (architecture-recommendation
+        §5.4(a)) — the explicit maintenance command.
+
+        Iterates :meth:`list_critical_note_ids_needing_embedding` in
+        ``batch_size`` batches (idempotent — only rows WITHOUT a
+        cached embedding are candidates, so already-minted rows are
+        never re-embedded and a second run is a no-op). With
+        ``project_id=None`` the command sweeps every project that
+        owns at least one note.
+
+        Fail-open per row: one bad row never aborts the batch —
+        each failure is absorbed, logged under the
+        ``[CriticalNotes:Degraded]`` prefix, and counted. A row that
+        persistently fails cannot loop the batch walker (each examined
+        id is marked processed regardless of outcome).
+
+        Budget note: ~250ms/embed at the shared recipe — a 50-note
+        store backfills in ~15s. Operators/leaders run this
+        deliberately via the ``project_cn_backfill_embeddings`` tool.
+
+        Args:
+            project_id: Scope the backfill to one project, or
+                ``None`` to sweep all projects.
+            batch_size: Candidate-batch size per listing round
+                (mirrors the lazy-mint cap window's chunking).
+
+        Returns:
+            The counts summary line (also emitted to the log):
+            ``[CriticalNotes:backfill] minted=N skipped=K failed=M
+            total=T project=X`` where ``X`` is the project id or
+            ``all`` when unscoped.
+        """
+        minted = 0
+        skipped = 0
+        failed = 0
+        project_ids = (
+            [project_id]
+            if project_id is not None
+            else self._list_project_ids_with_critical_notes()
+        )
+        for pid in project_ids:
+            processed: set[str] = set()
+            while True:
+                try:
+                    candidates = [
+                        nid
+                        for nid in self.list_critical_note_ids_needing_embedding(
+                            pid, limit=batch_size,
+                        )
+                        if nid not in processed
+                    ]
+                except Exception as e:
+                    logger.info(
+                        "[CriticalNotes:Degraded] stage=backfill "
+                        "reason=list_failed project=%s err=%s",
+                        pid,
+                        type(e).__name__,
+                    )
+                    break
+                if not candidates:
+                    break
+                for note_id in candidates:
+                    processed.add(note_id)
+                    outcome = self._backfill_single_critical_note(
+                        pid, note_id,
+                    )
+                    if outcome == "minted":
+                        minted += 1
+                    elif outcome == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
+        total = minted + skipped + failed
+        label = project_id if project_id is not None else "all"
+        summary = (
+            f"[CriticalNotes:backfill] minted={minted} skipped={skipped} "
+            f"failed={failed} total={total} project={label}"
+        )
+        logger.info(summary)
+        return summary

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.project import HistoryEntryType
+from daemon.services.critical_note_gate import is_active_critical_note
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
 from daemon.services.workspace_guard import WorkspaceGuard
 from .schemas import (
@@ -108,12 +109,14 @@ def _get_critical_notes_safe(repo: SQLModelProjectRepository, project_id: str) -
     """
     try:
         notes = repo.list_critical_notes(project_id)
-        # R21 entry gate — strict is-not-None comparison so a stray
-        # empty-string pointer is also dropped (e.g. a legacy row whose
-        # superseded_by_id was cleared to "" instead of NULL).
+        # R21 entry gate — routed through the shared predicate
+        # (``daemon.services.critical_note_gate``); strict is-not-None
+        # comparison so a stray empty-string pointer is also dropped
+        # (e.g. a legacy row whose superseded_by_id was cleared to ""
+        # instead of NULL).
         return [
             note.to_dict() for note in notes
-            if note.superseded_by_id is None
+            if is_active_critical_note(note)
         ]
     except Exception as e:
         logger.warning(f"Failed to fetch critical notes for project {project_id}: {e}")

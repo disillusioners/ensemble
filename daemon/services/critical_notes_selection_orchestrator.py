@@ -335,6 +335,18 @@ def _emit_critical_notes_log(telemetry: dict[str, Any]) -> None:
         floor_applied,
         instance,
     )
+    # §4.6 parity — when the floor rung applied (the selector's
+    # under-selection safety net), ALSO emit a line under the
+    # ops-alertable Degraded prefix so a clean-window review can
+    # grep the prefix alone and still see floor activation. The
+    # instance id is truncated to 12 chars (idempotent with the
+    # selector's telemetry-side truncation).
+    if floor_applied:
+        logger.info(
+            "[CriticalNotes:Degraded] stage=floor reason=under_selection "
+            "instance=%s",
+            (instance or "")[:12],
+        )
 
 
 def _emit_critical_notes_hint(dropped: int) -> None:

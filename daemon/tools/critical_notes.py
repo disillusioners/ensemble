@@ -47,6 +47,13 @@ from ..repositories.project.models import (
     CriticalNoteModel,
 )
 from ..repositories.project.repository import SQLModelProjectRepository
+from ..services.critical_note_gate import (
+    # R21 canonical home for the entry-gate predicate (cycle-neutral
+    # module) — re-exported under the historical private name so the
+    # filter-survey tests and any in-module callers keep resolving it
+    # from this module.
+    is_active_critical_note as _is_active_critical_note,
+)
 from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "critical_notes"
@@ -185,23 +192,11 @@ def _find_near_duplicate_entry(
     return None
 
 
-def _is_active_critical_note(entry: Any) -> bool:
-    """R21 entry-gate predicate — an entry counts as ACTIVE iff its
-    ``superseded_by_id`` is ``None``.
-
-    Shared helper applied at the 3 external surfaces that pass
-    ``list_critical_notes`` through unfiltered (R21, LOCKED-L 2026-09-15).
-    Defensive against the empty-string class (a stray empty ``""``
-    pointer must NOT bypass the filter — ``is not None`` is the
-    authoritative comparison). Accepts either a SQLModel row, a
-    ``CriticalNotes`` BaseModel, or a plain dict (the surfaces pass
-    different shapes, so the predicate duck-types).
-    """
-    if isinstance(entry, dict):
-        sid = entry.get("superseded_by_id")
-    else:
-        sid = getattr(entry, "superseded_by_id", None)
-    return sid is None
+# NOTE: ``_is_active_critical_note`` is no longer defined here — the
+# R21 entry-gate predicate was relocated to the cycle-neutral module
+# ``daemon/services/critical_note_gate.py`` and is re-exported above
+# under its historical private name (the tools package cannot be a
+# module-level dependency of ``daemon.services.context_injection``).
 
 
 def _eviction_candidates(entries: list[CriticalNotes]) -> list[CriticalNotes]:
@@ -833,6 +828,50 @@ Returns:
     The updated old entry dict (superseded_by_id set), or an error dict
     on any guard violation."""
 
-    return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede]
+    @register_tool_category(CATEGORY_NAME)
+    @tool
+    def project_cn_backfill_embeddings(
+        project_id: str | None = None,
+        batch_size: int = 10,
+    ) -> str:
+        """One-shot embeddings backfill for critical notes. Use tool_help() for details."""
+        if project_id is not None:
+            project = repo.get(project_id)
+            if not project:
+                return f"Project '{project_id}' not found"
+        return repo.backfill_critical_note_embeddings(
+            project_id, batch_size=batch_size,
+        )
 
-    return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede]
+    project_cn_backfill_embeddings._full_doc_ = """One-shot embeddings backfill for critical notes (Phase 2, §5.4(a)).
+
+Mints cached embeddings for every note row that still lacks one
+(legacy pre-Phase-2 rows, plus rows whose write-time embed failed).
+IDEMPOTENT: only rows without a cached embedding are candidates, so
+already-minted rows are never re-embedded and a second run is a no-op.
+Fail-open per row: one bad row never aborts the batch; every failure
+is logged under the ``[CriticalNotes:Degraded]`` prefix and counted.
+
+RATIONALE (leader veto point): D3 makes the leader the curation owner
+and the critical-notes tool layer is this feature's sanctioned write
+surface — there is deliberately NO HTTP write endpoint for backfill
+(hard constraint). Runtime laziness stays bounded by the per-read
+mint cap; this command is the unbounded, deliberate complement.
+
+Budget: ~250ms/embed at the shared recipe (~15s for 50 notes). Run
+during a quiet window; each embed call is synchronous here (unlike
+the fire-and-forget write path) so the returned counts are exact.
+
+Args:
+    project_id: Scope to one project, or omit/None to sweep ALL
+        projects that own at least one note.
+    batch_size: Candidate-batch size per listing round (default 10).
+
+Returns:
+    Counts summary string:
+    ``[CriticalNotes:backfill] minted=N skipped=K failed=M total=T project=X``
+    (X = project id, or ``all`` when unscoped)."""
+
+    return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede, project_cn_backfill_embeddings]
+
+    return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede, project_cn_backfill_embeddings]

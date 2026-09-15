@@ -342,3 +342,121 @@ class TestEmbeddingModel:
         # (Phase 2 architecture-recommendation §5.1 [#6] —
         # dialect-neutral storage via JSONBType adapter).
         assert CriticalNoteEmbeddingModel.__tablename__ == "critical_note_embeddings"
+
+
+# ─── 6. Explicit one-shot backfill command (§5.4(a)) ─────────────────────
+
+
+class TestBackfillCommand:
+    """``backfill_critical_note_embeddings`` — the explicit one-shot
+    maintenance command (architecture-recommendation §5.4(a)).
+
+    The embed call is stubbed at the
+    ``daemon.services.critical_notes_embedding`` module boundary (the
+    repo lazily imports it at call time), so these tests stay
+    synchronous and deterministic while exercising the REAL batch
+    walker + persistence surface on a real SQLite repo.
+    """
+
+    @staticmethod
+    def _stub_embed(monkeypatch, *, vector=None, fail_ids=()):
+        """Patch ``embed_critical_note_text`` with a deterministic fake.
+
+        ``fail_ids`` maps note-id-ish text markers to raising — tests
+        pass summaries containing the marker to route specific rows
+        into the exception path.
+        """
+        import daemon.services.critical_notes_embedding as emb_mod
+
+        calls: list[str] = []
+
+        async def _fake_embed(text, **kwargs):
+            calls.append(text)
+            for marker in fail_ids:
+                if marker in text:
+                    raise RuntimeError(f"simulated embed failure: {marker}")
+            return list(vector) if vector is not None else [0.1, 0.2, 0.3]
+
+        monkeypatch.setattr(emb_mod, "embed_critical_note_text", _fake_embed)
+        return calls
+
+    def test_mints_legacy_rows_and_emits_summary_line(self, repo, monkeypatch):
+        for i in range(3):
+            _add_note(repo, summary=f"legacy row {i}")
+        self._stub_embed(monkeypatch)
+
+        summary = repo.backfill_critical_note_embeddings("p1")
+
+        # Summary line contract (also asserted at the tool layer).
+        assert summary == (
+            "[CriticalNotes:backfill] minted=3 skipped=0 failed=0 "
+            "total=3 project=p1"
+        )
+        # Every note now has a cached row with the stubbed vector.
+        for note in repo.list_critical_notes("p1"):
+            row = repo.get_critical_note_embedding(note.id)
+            assert row is not None
+            assert list(row.embedding) == [0.1, 0.2, 0.3]
+
+    def test_idempotent_second_run_mints_nothing_and_leaves_rows(self, repo, monkeypatch):
+        note = _add_note(repo, summary="idempotence pin")
+        self._stub_embed(monkeypatch, vector=[0.4, 0.5])
+
+        first = repo.backfill_critical_note_embeddings("p1")
+        assert "minted=1" in first
+        before = repo.get_critical_note_embedding(note.id)
+
+        # A DIFFERENT vector from the stub on the second run — the
+        # already-minted row must NOT be re-embedded (idempotence pin).
+        self._stub_embed(monkeypatch, vector=[0.9, 0.9])
+        second = repo.backfill_critical_note_embeddings("p1")
+
+        assert "minted=0 skipped=0 failed=0 total=0" in second
+        after = repo.get_critical_note_embedding(note.id)
+        assert list(after.embedding) == [0.4, 0.5]  # untouched
+        assert after.minted_at == before.minted_at
+
+    def test_fail_open_one_bad_row_others_still_minted(self, repo, monkeypatch):
+        bad = _add_note(repo, summary="boom row will fail")
+        good_a = _add_note(repo, summary="healthy row A")
+        good_b = _add_note(repo, summary="healthy row B")
+        self._stub_embed(monkeypatch, fail_ids=("boom",))
+
+        summary = repo.backfill_critical_note_embeddings("p1")
+
+        # The bad row failed; the healthy rows still minted — one bad
+        # row never aborts the batch.
+        assert "minted=2" in summary
+        assert "failed=1" in summary
+        assert "total=3" in summary
+        for good in (good_a, good_b):
+            assert repo.get_critical_note_embedding(good.id) is not None
+        # The failed row has no cached row (fail-open, BM25-only).
+        assert repo.get_critical_note_embedding(bad.id) is None
+
+    def test_scoped_to_project_leaves_other_projects_unminted(self, repo, monkeypatch):
+        _add_note(repo, project_id="p1", summary="in scope")
+        _add_note(repo, project_id="p2", summary="out of scope")
+        self._stub_embed(monkeypatch)
+
+        summary = repo.backfill_critical_note_embeddings("p1")
+
+        assert "minted=1" in summary
+        assert summary.endswith("project=p1")
+        # p2's row was never examined.
+        p2_note = repo.list_critical_notes("p2")[0]
+        assert repo.get_critical_note_embedding(p2_note.id) is None
+
+    def test_unscoped_sweeps_all_projects(self, repo, monkeypatch):
+        _add_note(repo, project_id="p1", summary="p1 row")
+        _add_note(repo, project_id="p2", summary="p2 row")
+        self._stub_embed(monkeypatch)
+
+        summary = repo.backfill_critical_note_embeddings(None)
+
+        # project=all in the summary; both projects minted.
+        assert "minted=2" in summary
+        assert summary.endswith("project=all")
+        for pid in ("p1", "p2"):
+            note = repo.list_critical_notes(pid)[0]
+            assert repo.get_critical_note_embedding(note.id) is not None

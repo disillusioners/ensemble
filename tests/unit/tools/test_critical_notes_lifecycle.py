@@ -660,3 +660,82 @@ class TestReviewConditions:
         assert result["priority"] == "critical"
         assert "pin_suggestion" in result
         assert result["id"] in result["pin_suggestion"]
+
+
+# ─── FIX-1 deliverable: project_cn_backfill_embeddings (§5.4(a)) ─────────
+
+
+class TestProjectCnBackfillEmbeddings:
+    """The one-shot embeddings backfill verb — leader-only maintenance.
+
+    Exercised through the tool closure against the REAL repository;
+    the embed call is stubbed at the
+    ``daemon.services.critical_notes_embedding`` module boundary so
+    the test stays synchronous and deterministic.
+    """
+
+    @staticmethod
+    def _stub_embed(monkeypatch, *, vector=(0.1, 0.2, 0.3)):
+        import daemon.services.critical_notes_embedding as emb_mod
+
+        async def _fake_embed(text, **kwargs):
+            return list(vector)
+
+        monkeypatch.setattr(emb_mod, "embed_critical_note_text", _fake_embed)
+
+    def test_happy_path_summary_line_shape_and_persistence(
+        self, tools, repo, project_id, monkeypatch
+    ):
+        make_note(tools, project_id=project_id, summary="backfill alpha")
+        make_note(tools, project_id=project_id, summary="backfill beta")
+        self._stub_embed(monkeypatch)
+
+        # batch_size=1 forces multiple listing rounds — pins the
+        # batch-walker loop, not just a single batch.
+        result = tools["project_cn_backfill_embeddings"].invoke(
+            {"project_id": project_id, "batch_size": 1}
+        )
+
+        assert isinstance(result, str)
+        assert result == (
+            "[CriticalNotes:backfill] minted=2 skipped=0 failed=0 "
+            f"total=2 project={project_id}"
+        )
+        for note in repo.list_critical_notes(project_id):
+            row = repo.get_critical_note_embedding(note.id)
+            assert row is not None
+            assert list(row.embedding) == [0.1, 0.2, 0.3]
+
+    def test_idempotent_second_call_mints_zero(
+        self, tools, repo, project_id, monkeypatch
+    ):
+        make_note(tools, project_id=project_id, summary="backfill once")
+        self._stub_embed(monkeypatch)
+
+        first = tools["project_cn_backfill_embeddings"].invoke(
+            {"project_id": project_id}
+        )
+        assert "minted=1" in first
+
+        second = tools["project_cn_backfill_embeddings"].invoke(
+            {"project_id": project_id}
+        )
+        assert "minted=0 skipped=0 failed=0 total=0" in second
+
+    def test_unknown_project_refused_like_sibling_verbs(
+        self, tools, project_id, monkeypatch
+    ):
+        self._stub_embed(monkeypatch)
+        result = tools["project_cn_backfill_embeddings"].invoke(
+            {"project_id": "no-such-project"}
+        )
+        assert result == "Project 'no-such-project' not found"
+
+    def test_verb_is_registered_and_factory_exposes_it(self, repo):
+        from daemon.tools._tool_registry import KNOWN_TOOL_NAMES
+
+        names = [t.name for t in create_critical_notes_tools(repo)]
+        assert "project_cn_backfill_embeddings" in names
+        # The static fallback universe carries the verb too (frozen
+        # binary discoverability — same mechanism as the Phase-1 verbs).
+        assert "project_cn_backfill_embeddings" in KNOWN_TOOL_NAMES

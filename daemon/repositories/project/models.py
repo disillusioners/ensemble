@@ -295,10 +295,9 @@ class CriticalNoteEmbeddingModel(SQLModel, table=True):
 
     note_id: str = Field(
         sa_column=Column(
-            String,
+            String(64),
             ForeignKey("critical_notes.id", ondelete="CASCADE"),
             primary_key=True,
-            max_length=64,
         )
     )
     embedding: list[float] = Field(

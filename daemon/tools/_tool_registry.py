@@ -650,6 +650,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "project_add_shortname",
     "project_add_tag",
     "project_cn_add",
+    "project_cn_backfill_embeddings",
     "project_cn_list",
     "project_cn_pin",
     "project_cn_remove",

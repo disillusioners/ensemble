@@ -549,6 +549,17 @@ project_cn_supersede(
 )
 ```
 
+#### project_cn_backfill_embeddings
+
+```javascript
+project_cn_backfill_embeddings(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  batch_size=10
+)
+```
+
+One-shot embeddings backfill (Phase 2): mints cached embeddings for every note row that still lacks one (legacy pre-Phase-2 rows, or rows whose write-time embed failed). **Idempotent** — only rows without a cached embedding are candidates, so already-minted rows are never re-embedded and a second run is a no-op. Fail-open per row: one bad row never aborts the batch; failures log under `[CriticalNotes:Degraded]` and are counted. Omit `project_id` to sweep ALL projects. Budget: ~250ms/embed (~15s for 50 notes) — run during a quiet window. Returns the counts summary `[CriticalNotes:backfill] minted=N skipped=K failed=M total=T project=X`.
+
 ---
 
 ## 7. Projects

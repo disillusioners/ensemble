@@ -343,7 +343,7 @@ Tools are organized into categories. Each agent's `meta.json` controls which cat
 | **Help** | `help` | Get help on available tools | `tool_help` |
 | **Project Management** | `project` | Create, update, manage projects | `project_create`, `project_get`, `project_list`, `project_update`, `project_set_status`, `project_add_tag`, `project_link`, etc. |
 | **Job Queue** | `job` | Create and manage jobs | `job_create`, `job_get`, `job_list`, `job_cancel`, `job_retry`, `queue_create`, `watch_job`, etc. |
-| **Critical Notes** | `critical_notes` | Project-scoped lessons and insights | `project_cn_add`, `project_cn_list`, `project_cn_remove`, `project_cn_pin`, `project_cn_supersede` |
+| **Critical Notes** | `critical_notes` | Project-scoped lessons and insights | `project_cn_add`, `project_cn_list`, `project_cn_remove`, `project_cn_pin`, `project_cn_supersede`, `project_cn_backfill_embeddings` |
 | **Project History** | `project_history` | Chronological project event tracking | `project_history_add`, `project_history_list`, `project_history_search`, `project_history_delete` |
 | **RAG** | `rag` | RAG knowledge management (LightRAG) | `rag_insert_text`, `rag_query`, `rag_query_data`, `rag_create_entity`, `rag_get_graph`, etc. |
 | **Knowledge** | `knowledge` | Explore and record project knowledge | `explore`, `experience` |

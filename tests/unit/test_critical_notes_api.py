@@ -340,3 +340,84 @@ class TestCriticalNotesSchemaValidation:
         assert hasattr(response, "critical_notes")
         # Note: Pydantic v2 with Field(default=None) will set the field to None by default
         # The _project_to_response function converts None to [] for the actual API responses
+
+
+class TestGetCriticalNotesSafeFilter:
+    """FIX-4 (Phase-2 review): router-level pins proving
+    ``_get_critical_notes_safe`` DROPS superseded rows at the API
+    surface — both the ordinary pointer shape and the 0b defensive
+    empty-string shape. Only ACTIVE rows survive into
+    ``ProjectResponse.critical_notes``.
+    """
+
+    @staticmethod
+    def _repo_with_notes(notes):
+        mock_repo = MagicMock()
+        mock_repo.list_critical_notes = MagicMock(return_value=notes)
+        return mock_repo
+
+    def test_superseded_by_id_row_dropped(self):
+        active = create_mock_critical_note(
+            {"id": "a-1", "summary": "active note", "superseded_by_id": None}
+        )
+        superseded = create_mock_critical_note(
+            {"id": "s-1", "summary": "old note", "superseded_by_id": "x-1"}
+        )
+        superseded.superseded_by_id = "x-1"
+
+        out = _get_critical_notes_safe(self._repo_with_notes([active, superseded]), "p1")
+
+        assert [d["id"] for d in out] == ["a-1"]
+        mock_row = out[0]
+        assert mock_row["summary"] == "active note"
+
+    def test_empty_string_pointer_row_dropped_too(self):
+        """0b defensive case: a stray ``""`` pointer must NOT bypass
+        the filter (the empty string is falsy-but-not-None; the gate
+        is strictly is-not-None via the shared predicate).
+        """
+        active = create_mock_critical_note(
+            {"id": "a-2", "summary": "active note", "superseded_by_id": None}
+        )
+        empty_pointer = create_mock_critical_note(
+            {"id": "e-1", "summary": "cleared-to-empty", "superseded_by_id": ""}
+        )
+        empty_pointer.superseded_by_id = ""
+
+        out = _get_critical_notes_safe(
+            self._repo_with_notes([active, empty_pointer]), "p1"
+        )
+
+        assert [d["id"] for d in out] == ["a-2"]
+
+    def test_only_active_rows_survive_mixed_surface(self):
+        """The router surface keeps ONLY the active rows from a mixed
+        population (active + superseded + empty-pointer).
+        """
+        active = create_mock_critical_note(
+            {"id": "a-3", "summary": "keep me", "superseded_by_id": None}
+        )
+        superseded = create_mock_critical_note(
+            {"id": "s-2", "summary": "drop me", "superseded_by_id": "x-2"}
+        )
+        superseded.superseded_by_id = "x-2"
+        empty_pointer = create_mock_critical_note(
+            {"id": "e-2", "summary": "drop me too", "superseded_by_id": ""}
+        )
+        empty_pointer.superseded_by_id = ""
+
+        out = _get_critical_notes_safe(
+            self._repo_with_notes([active, superseded, empty_pointer]), "p1"
+        )
+
+        assert [d["id"] for d in out] == ["a-3"]
+
+    def test_repo_error_still_returns_empty_list(self):
+        """The fail-open contract is preserved through the shared
+        predicate wiring: a raising repo yields ``[]``.
+        """
+        mock_repo = MagicMock()
+        mock_repo.list_critical_notes = MagicMock(
+            side_effect=RuntimeError("repo down")
+        )
+        assert _get_critical_notes_safe(mock_repo, "p1") == []

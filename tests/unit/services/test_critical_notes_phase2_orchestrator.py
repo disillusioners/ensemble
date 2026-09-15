@@ -32,6 +32,7 @@ from daemon.services.critical_notes_selection_orchestrator import (
     _count_pinned_critical_notes,
     _emit_critical_notes_hint,
     _emit_critical_notes_log,
+    _lazy_mint_embeddings,
     _list_critical_note_embeddings_for_project,
     _maybe_tiered_critical_notes,
     install_critical_notes_selection_config,
@@ -273,6 +274,48 @@ class TestRoutineTelemetry:
         assert any(
             "[CriticalNotes] hint_drop_count=8" in rec.message
             for rec in caplog.records
+        )
+
+    def test_floor_degraded_line_fires_when_floor_applied(self, caplog):
+        """FIX-5 (§4.6 parity): when the floor rung applied, the
+        orchestrator ALSO emits the ops-alertable Degraded line
+        ``stage=floor reason=under_selection`` — a clean-window
+        review that greps only the Degraded prefix still sees floor
+        activation.
+        """
+        telemetry = {
+            "selected": 5,
+            "total": 12,
+            "floor_applied": True,
+            "instance_id": "deadbeef0001",
+        }
+        with caplog.at_level(logging.INFO):
+            _emit_critical_notes_log(telemetry)
+        assert any(
+            "[CriticalNotes:Degraded] stage=floor "
+            "reason=under_selection instance=deadbeef0001"
+            in rec.message
+            for rec in caplog.records
+        )
+
+    def test_floor_degraded_line_absent_when_floor_not_applied(self, caplog):
+        """No floor rung → no Degraded floor line (the routine line
+        alone carries floor_applied=False).
+        """
+        telemetry = {
+            "selected": 7,
+            "total": 12,
+            "floor_applied": False,
+            "instance_id": "deadbeef0002",
+        }
+        with caplog.at_level(logging.INFO):
+            _emit_critical_notes_log(telemetry)
+        assert not any(
+            "stage=floor" in rec.message for rec in caplog.records
+        )
+        # The routine line still fired with floor_applied=False.
+        assert any(
+            "floor_applied=False" in rec.message for rec in caplog.records
         )
 
     def test_hint_not_emitted_when_zero(self, caplog):
@@ -568,3 +611,43 @@ class TestConfigInstaller:
         install_critical_notes_selection_config(tail_cap=4)
         # No assertion here — the install must not raise; the
         # config operates via module-cached state.
+
+
+# ---------------------------------------------------------------------------
+# OPTIONAL-CHEAP pin: embedding_service=None lazy-mint degrade path
+# ---------------------------------------------------------------------------
+
+
+class TestLazyMintEmbedderConstructionFailure:
+    @pytest.mark.asyncio
+    async def test_construction_failure_degrades_without_raising(
+        self, monkeypatch
+    ):
+        """When the embedder CANNOT be constructed
+        (``build_critical_notes_embedder`` → ``None``), the lazy-mint
+        window takes the ``embedding_service=None`` path inside
+        ``embed_critical_note_text``, absorbs the ``None`` vector per
+        row, and returns ``minted=0`` WITHOUT raising — the read path
+        continues BM25-only.
+        """
+        import daemon.services.critical_notes_embedding as emb_mod
+
+        notes = [FakeNote(f"lm-{i}") for i in range(3)]
+        mgr = _make_manager(pinned_count=1, active_notes=notes)
+
+        def _stub(**kwargs):
+            return None
+
+        monkeypatch.setattr(
+            emb_mod, "build_critical_notes_embedder", _stub
+        )
+
+        minted = await _lazy_mint_embeddings(
+            project_id="proj-test",
+            manager=mgr,
+            cap=5,
+        )
+
+        assert minted == 0
+        # Nothing was persisted — every row degraded to skip.
+        assert mgr._project_repository._embeddings_map == {}
