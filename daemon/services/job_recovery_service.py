@@ -3657,8 +3657,8 @@ class JobRecoveryService:
         comparison.
 
         JobItem stores ``created_at`` as an ISO-8601
-        string (per the model default factory at
-        ``daemon/repositories/job_queue/models.py:349``).
+        string (per the model default factory in
+        ``daemon/repositories/job_queue/models.py``).
         A malformed or missing value is a defensive
         concern — the ``recover_on_startup`` and Pattern
         (a) paths assume well-formed timestamps; we

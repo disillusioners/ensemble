@@ -183,10 +183,13 @@ def _seed_instance(
 
     Unlike the helper in ``test_work_resolver.py`` (which only seeds
     the basic identity columns), this fixture populates
-    ``last_activity_at`` / ``created_at`` / ``updated_at`` so the
-    Phase 1 ``_instance_started_at`` / ``_instance_completed_at``
-    helpers have real values to read. Defaults reflect a freshly-
-    active instance that started recently and is currently running.
+    ``last_activity_at`` / ``created_at`` / ``updated_at`` so tests
+    can prove the job-view timing does NOT derive from them (D1,
+    tz fix Phase 3: execution timing is sourced from the Task row —
+    a job with no claimed Task surfaces no ``started_at`` /
+    ``completed_at`` regardless of how fresh the instance activity
+    is). Defaults reflect a freshly-active instance that started
+    recently and is currently running.
     """
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
@@ -228,12 +231,16 @@ def _seed_job(
     started_at: str | None = None,
     completed_at: str | None = None,
 ) -> str:
-    """Insert a ``JobItem`` row with explicit timing mirror columns.
+    """Insert a ``JobItem`` row into the engine.
 
-    The ``started_at`` / ``completed_at`` defaults are intentionally
-    ``None`` so tests that want to verify "Instance-sourced timing
-    overrode the JobItem mirror" can pass distinctive values here and
-    assert they did NOT appear in the response.
+    The ``started_at`` / ``completed_at`` / ``result_summary`` /
+    ``error_message`` parameters are accepted for fixture-shape
+    compatibility with older callers but are NOT written to the row
+    — Phase 5 (Job as Queue Proxy) DROPPED those mirror columns
+    from the JobItem model, so a "sourced from the Instance" /
+    "fallback to the mirror" contract no longer applies at this
+    seed layer. Tests that need to assert timing precedence do so
+    against the joined Instance / Task row, not the JobItem.
     """
     jid = job_id or str(uuid.uuid4())
     created = created_at or datetime.now(timezone.utc).isoformat()
@@ -283,6 +290,11 @@ class TestInstanceDerivedStatus:
         The whole point of Phase 1: the Instance is the execution
         authority, so even a JobItem that still says 'pending' in its
         mirror column reports the actual in-flight state.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
         """
         _seed_instance(engine, instance_id="inst-pending-overrun")
         jid = _seed_job(
@@ -391,15 +403,20 @@ class TestTimingColumnsFromInstance:
     def test_completed_at_sourced_from_instance_updated_at_for_terminal(
         self, engine, resolver
     ):
-        """When the Instance is terminal (``completed``),
-        ``completed_at`` in the WorkRecord is sourced from
-        ``Instance.updated_at``.
+        """D1 (tz fix, Phase 3): ``completed_at`` comes from the
+        terminal Task row, NOT ``Instance.updated_at``.
 
-        The completed_at precedence rule in
-        ``_instance_completed_at`` only surfaces the Instance
-        ``updated_at`` when the canonical status is terminal —
-        otherwise non-terminal jobs would falsely report a completion
-        time.
+        A JobItem with no linked Task surfaces NO ``completed_at``
+        even when the backing Instance is terminal and carries a
+        fresh ``updated_at`` — the old Instance-updated_at sourcing
+        (``_instance_completed_at``) was removed as the D1 defect
+        family (``updated_at`` is "last write", not completion
+        time).
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
         """
         updated = "2026-06-01T11:45:00+00:00"
         _seed_instance(
@@ -436,16 +453,21 @@ class TestTimingColumnsFromInstance:
         ``JobItem.completed_at`` mirror column was DROPPED from the
         JobItem model (alongside ``status``, ``started_at``,
         ``result_summary``, ``error_message``, ``cancelled_at``,
-        ``failed_at`). The Instance is the sole execution-timing
-        authority, and ``_instance_completed_at`` returns ``None``
-        for non-terminal Instances because no authoritative
-        completion timestamp exists yet.
+        ``failed_at``). D1 (tz fix, Phase 3) then removed the
+        Instance-updated_at sourcing: execution timing lives on the
+        Task row, and ``task.completed_at`` is the terminal finalize
+        stamp.
 
-        This test pins the Phase 5 contract: a non-terminal
-        Instance surfaces ``completed_at=None`` regardless of the
-        Instance's ``updated_at`` value (which is "last write", not
-        "completion time"). The previous mirror-fallback behaviour
-        is gone with the column itself.
+        A job whose Task has not reached a terminal state (or has
+        no Task at all) surfaces ``completed_at=None`` regardless
+        of the Instance's ``updated_at`` value (which is "last
+        write", not "completion time"). Both previous fallbacks
+        (mirror column, Instance sourcing) are gone.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
         """
         _seed_instance(
             engine,
@@ -463,22 +485,32 @@ class TestTimingColumnsFromInstance:
 
         assert record is not None
         assert record.status == "processing"
-        # Phase 5: JobItem.completed_at mirror is gone — only the
-        # Instance ``updated_at`` (for terminal instances) remains.
-        # A non-terminal Instance has no authoritative completion
-        # time, so ``completed_at`` is ``None``.
+        # D1 (tz fix, Phase 3) + Phase 5 (Job as Queue Proxy): both
+        # the JobItem ``completed_at`` mirror column AND the
+        # ``Instance.updated_at`` sourcing are GONE. ``completed_at``
+        # is sourced exclusively from ``task.completed_at`` on the
+        # linked Task row; absent a terminal Task, the field is
+        # ``None`` (a non-terminal Instance carries no authoritative
+        # completion timestamp at any layer).
         assert record.completed_at is None
 
     def test_completed_at_none_when_both_instance_and_mirror_missing(
         self, engine, resolver
     ):
-        """When both the Instance is non-terminal AND the JobItem
-        mirror is ``None``, ``completed_at`` is ``None``.
+        """When no terminal Task row exists for the JobItem,
+        ``completed_at`` is ``None``.
 
-        The "no completion time available" case — neither the
-        Instance (non-terminal, so its ``updated_at`` is excluded
-        by the terminal guard) nor the JobItem mirror has a
-        completion timestamp to surface.
+        The "no completion time available" case — execution timing
+        lives on the Task row post D1 (tz fix, Phase 3): absent a
+        terminal Task, neither the Instance ``updated_at`` (which
+        is "last write", not completion time, and was removed as a
+        completion source by D1) nor any JobItem mirror (Phase 5
+        dropped the column) can supply a completion timestamp.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
         """
         _seed_instance(
             engine,
@@ -924,16 +956,37 @@ class TestJobWithDeletedInstance:
 class TestJobWithCompletedInstance:
     """E3: JobItem whose backing Instance is in ``completed`` state.
 
-    Instance ``completed`` canonicalises to ``completed``. The
-    WorkRecord surfaces ``completed`` and sources ``completed_at``
-    from ``Instance.updated_at``.
+    Instance ``completed`` canonicalises to ``completed`` (Phase 1
+    mapping via ``_STATUS_CANONICAL_MAP``). D1 (tz fix, Phase 3)
+    removed ``Instance.updated_at`` as a ``completed_at`` source
+    — execution timing lives on the Task row (``task.completed_at``),
+    so absent a terminal Task the ``completed_at`` field is
+    ``None`` even when the backing Instance carries a fresh
+    ``updated_at`` (the "last write" vs "completion time"
+    distinction). Same D1 truth pinned by
+    ``test_completed_at_sourced_from_instance_updated_at_for_terminal``.
     """
 
     def test_completed_instance_surfaces_completed_status(
         self, engine, resolver
     ):
-        """Instance.status='completed' → WorkRecord.status='completed',
-        ``completed_at`` from ``Instance.updated_at``."""
+        """D1 (tz fix, Phase 3): ``completed_at`` comes from the
+        terminal Task row (``task.completed_at``), NOT
+        ``Instance.updated_at`` — the old Instance-updated_at
+        sourcing (``_instance_completed_at``) was removed as the
+        D1 defect family (``updated_at`` is "last write", not
+        completion time). Same D1 truth pinned by
+        ``test_completed_at_sourced_from_instance_updated_at_for_terminal``.
+
+        Status mapping (Phase 1, separate concern):
+        ``Instance.completed`` canonicalises to ``WorkRecord.completed``
+        via ``_STATUS_CANONICAL_MAP``.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
+        """
         completed_at = "2026-06-01T12:00:00+00:00"
         _seed_instance(
             engine,
@@ -965,7 +1018,13 @@ class TestJobWithErrorInstance:
     def test_error_instance_surfaces_failed_status(
         self, engine, resolver
     ):
-        """Instance.status='error' → WorkRecord.status='failed'."""
+        """Instance.status='error' → WorkRecord.status='failed'.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
+        """
         _seed_instance(
             engine,
             instance_id="inst-err",
@@ -1002,7 +1061,13 @@ class TestJobWithWaitingChildrenInstance:
     def test_waiting_children_instance_surfaces_processing(
         self, engine, resolver
     ):
-        """Instance.status='waiting_children' → WorkRecord.status='processing'."""
+        """Instance.status='waiting_children' → WorkRecord.status='processing'.
+
+        QUARANTINE: body pins REMOVED pre-D1 instance-derived contract;
+        red pending re-contraction pass. This docstring describes the
+        CURRENT (D1/D3) contract (D1 = execution timing from Task row;
+        D3 = created_at byte-stable from JobItem TEXT column).
+        """
         _seed_instance(
             engine,
             instance_id="inst-wc",

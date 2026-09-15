@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from daemon.services.timestamps import now_utc
+from daemon.services.timestamps import now_utc_naive
 from pathlib import Path
 from typing import Any
 from langgraph.graph.state import CompiledStateGraph
@@ -7223,7 +7223,7 @@ class InstanceManager:
                     inst_row.status = InstanceStatus.RUNNING.value
                     # Naive-UTC digits (DC-A fix): last_activity_at
                     # is a tz-naive column on PostgreSQL.
-                    inst_row.last_activity_at = now_utc().replace(tzinfo=None)
+                    inst_row.last_activity_at = now_utc_naive()
                     inst_row.version = (inst_row.version or 1) + 1
                     inst_row.updated_at = datetime.now(timezone.utc).isoformat()
                     session.add(inst_row)
@@ -7738,7 +7738,7 @@ class InstanceManager:
                                 type=MessageType.COMPLETION_REPORT.value,
                                 status=MessageStatus.FAILED.value,
                                 priority=0,
-                                enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                                enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                             )
                         )
                         logger.info(
@@ -7766,7 +7766,7 @@ class InstanceManager:
                             type=MessageType.COMPLETION_REPORT.value,
                             status=MessageStatus.READY.value,
                             priority=0,
-                            enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                            enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                         )
                     )
                     if existing_task is None:
@@ -8152,7 +8152,7 @@ class InstanceManager:
                     type=MessageType.COMPLETION_REPORT.value,
                     status=MessageStatus.FAILED.value,
                     priority=0,
-                    enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                    enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                 )
             )
         else:
@@ -8168,7 +8168,7 @@ class InstanceManager:
                     type=MessageType.COMPLETION_REPORT.value,
                     status=MessageStatus.READY.value,
                     priority=0,
-                    enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                    enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                 )
             )
 
@@ -8392,7 +8392,7 @@ class InstanceManager:
                                 type=MessageType.COMPLETION_REPORT.value,
                                 status=MessageStatus.FAILED.value,
                                 priority=0,
-                                enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                                enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                             )
                         )
                         logger.info(
@@ -8420,7 +8420,7 @@ class InstanceManager:
                             type=MessageType.COMPLETION_REPORT.value,
                             status=MessageStatus.READY.value,
                             priority=0,
-                            enqueued_at=now_utc().replace(tzinfo=None),  # naive-UTC digits (DC-A fix)
+                            enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                         )
                     )
                     if existing_task is None:

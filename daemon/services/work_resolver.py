@@ -328,10 +328,13 @@ class WorkRecord:
         carries the ``+00:00`` offset — frontend code can rely on
         tz-awareness without parsing the string.
 
-        ``started_at`` / ``completed_at`` are passed through as ISO-8601
-        strings (already ISO on the JobItem side; ``_isoformat_or_none``
-        in :meth:`_job_to_record` formats the ``Instance.last_activity_at``
-        ``datetime`` value).
+        ``started_at`` / ``completed_at`` are ISO-8601 strings sourced
+        from the linked Task row (D1, tz fix Phase 3):
+        ``task.started_at`` is the dispatch/claim stamp and
+        ``task.completed_at`` the terminal finalize stamp. A pending
+        job (no claimed Task row) surfaces no ``started_at``; a
+        non-terminal job surfaces no ``completed_at``.
+        ``Instance.last_activity_at`` is deliberately not consulted.
 
         Fix C: ``job_type`` and ``mission_liveness`` are emitted on
         every record (``None`` for Task-backed records, by design —
@@ -398,6 +401,15 @@ def _serialize_created_at(value: datetime | None) -> str | None:
     explicit ``+00:00`` offset; naive values follow the documented
     assume-UTC policy (legacy +07-digit rows render 7h-off until the
     backfill repairs them — repair is centralized, not per-site).
+
+    Wire-nuance (documented, not normalized): this boundary
+    re-serializes parsed datetimes to the canonical ``+00:00``
+    ISO shape, so a stored ``Z``-suffixed TEXT ``created_at`` can
+    read back as ``...+00:00`` on ``GET /api/work`` (which emits
+    :meth:`WorkRecord.to_dict`) — while the ``/api/jobs`` family
+    passes the raw stored strings through verbatim. Same instant,
+    different suffix rendering; aligning the two would be a wire
+    contract change, not a tidy.
 
     Args:
         value: A ``datetime`` (tz-aware or naive) or ``None``.
@@ -988,11 +1000,17 @@ class WorkResolverService:
     def resolve_work(self, work_id: str) -> WorkRecord | None:
         """Resolve a ``work_id`` to its :class:`WorkRecord`, or ``None``.
 
-        Lookup order is task-first, then job. The Task branch is
-        retained in Phase 4 partial collapse for **report** work_ids
-        (``process_report`` / ``send_report`` Task rows). The JobItem
-        branch handles message-driven work (turns are JobItems
-        post-collapse).
+        Both tables are consulted — Task by ``work_id``, JobItem by
+        primary key. Dual-backed work units (dispatch flow: the
+        JobItem and its linked Task share ``work_id == job_id``)
+        resolve to the JobItem record with the Task's execution
+        timing fed through: D3 keeps ``created_at`` byte-stable from
+        the JobItem TEXT column, D1 sources ``started_at`` /
+        ``completed_at`` from the Task row (the DC-C shadow-row
+        substitution where a task-first branch overrode
+        ``created_at`` is gone). Task-only rows are the report lane
+        (``process_report`` / ``send_report``); Job-only rows are
+        message-driven work (turns are JobItems post-collapse).
 
         Args:
             work_id: The UUID4 work identifier (Task.work_id or
@@ -1055,8 +1073,10 @@ class WorkResolverService:
         token matches the row's kind without duplicating the token
         map.
 
-        Lookup order matches :meth:`resolve_work` (task-first, then
-        job). For a Task-backed WorkRecord the canonical status is the
+        Lookup order matches :meth:`resolve_work` (dual-backed
+        dispatch rows resolve to the JobItem record; task-only rows
+        resolve to the report-lane Task record). For a task-only
+        (report-lane) WorkRecord the canonical status is the
         Task's mapped value (``completed`` / ``failed`` / ``cancelled``
         / ``processing`` / ``pending`` / ``paused``); for a mirror
         JobItem the per-kind dispatch flips ``completed`` to
@@ -1750,10 +1770,12 @@ class WorkResolverService:
             if instance is None and job.instance_id is not None:
                 # Single-row ``resolve_work`` path — no pre-fetched
                 # instance yet. Look it up lazily before consulting
-                # ``MissionResolver`` so ``_instance_started_at`` /
-                # ``_instance_completed_at`` and the mission fields
-                # all see the same row (pre-WS3 this lookup was
-                # kill-switch-gated; the gate is gone).
+                # ``MissionResolver`` so the mission fields (and the
+                # mirror-row ``mission_liveness`` consult above) all
+                # see the same row (pre-WS3 this lookup was
+                # kill-switch-gated; the gate is gone). D1: execution
+                # timing does NOT ride on the instance — it arrives
+                # via ``task_timing`` from the Task row.
                 instance = self._lookup_instance(job.instance_id)
             mission_id, mission_epoch, mission_terminal_reason = (
                 self._mission_fields_for_instance(instance)

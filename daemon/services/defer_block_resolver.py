@@ -77,14 +77,16 @@ Holder semantics (docs §8.5)
     as ``live`` by construction).
 * ``since`` (normalized ISO-8601, naive → UTC — the
   ``_parse_job_created_at`` pattern in ``job_recovery_service.py``:
-  ``instances.last_activity_at`` is TEXT on PG (tz-naive) vs SQLite
-  (tz-aware)): paused holders report ``paused_at`` (falling back to
-  ``updated_at``/``created_at``); live AND stalled holders report
-  ``last_activity_at`` (falling back through ``updated_at``/
-  ``created_at`` — stalled holders have no live task to bump
-  ``last_activity_at`` recently, so the timestamp is the most-recent
-  prior activity stamp); instance-less witnesses report the JobItem's
-  own ``created_at``.
+  ``instances.last_activity_at`` arrives as a naive-UTC ``datetime``
+  (canonical column shape post-tz-fix — see ``_parse_timestamp`` below);
+  ``created_at`` / ``updated_at`` / ``paused_at`` arrive as ISO-8601
+  TEXT and go through the same parse path): paused holders report
+  ``paused_at`` (falling back to ``updated_at``/``created_at``); live
+  AND stalled holders report ``last_activity_at`` (falling back through
+  ``updated_at``/``created_at`` — stalled holders have no live task to
+  bump ``last_activity_at`` recently, so the timestamp is the
+  most-recent prior activity stamp); instance-less witnesses report
+  the JobItem's own ``created_at``.
 * Ordering: paused holders first (the operator-priority AMBER
   witnesses), then stalled (the operator-actionable mirrors-only
   witnesses), then live — each ascending by ``instance_id`` —
@@ -403,9 +405,12 @@ class DeferBlockSnapshot:
 def _parse_timestamp(value: Any) -> datetime | None:
     """Defensive parse of an instance/job timestamp into UTC-aware
     ``datetime`` — the ``_parse_job_created_at`` pattern
-    (``job_recovery_service.py:2997``): ``instances.last_activity_at``
-    is TEXT, tz-naive on PG and tz-aware on SQLite; naive values are
-    assumed UTC. Returns ``None`` for NULL/unparseable values.
+    (``job_recovery_service.py``). Post tz fix the sources arrive
+    either as naive-UTC ``datetime`` digits (the
+    ``instances.last_activity_at`` column) or as ISO-8601 TEXT
+    (``created_at`` / ``updated_at`` / ``paused_at``); naive values
+    are assumed UTC (documented policy). Returns ``None`` for
+    NULL/unparseable values.
     """
     if value is None:
         return None

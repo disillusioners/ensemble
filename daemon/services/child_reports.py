@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from daemon.services.timestamps import now_utc
+from daemon.services.timestamps import now_utc, now_utc_naive
 
 from sqlalchemy import exists, func, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
@@ -1040,7 +1040,7 @@ Provide a concise summary:"""
 
         # Naive-UTC digits (DC-A fix): last_activity_at is a
         # tz-naive column on PostgreSQL.
-        parent.last_activity_at = now_utc().replace(tzinfo=None)
+        parent.last_activity_at = now_utc_naive()
         parent.version = (parent.version or 1) + 1
 
         # NOTE: parent.children cache column was dropped in Phase 4.
@@ -1281,7 +1281,7 @@ Provide a concise summary:"""
                 "report_message_id": report_message_id,
             }),
             # Naive-UTC digits (DC-A fix) — naive column bind.
-            created_at=now_utc().replace(tzinfo=None),
+            created_at=now_utc_naive(),
         )
         session.add(completion_event)
 
@@ -1295,7 +1295,7 @@ Provide a concise summary:"""
                 "pending_for_parent": pending_for_parent,
             }),
             # Naive-UTC digits (DC-A fix) — naive column bind.
-            created_at=now_utc().replace(tzinfo=None),
+            created_at=now_utc_naive(),
         )
         session.add(parent_event)
 
@@ -2981,7 +2981,7 @@ Provide a concise summary:"""
                 status=MessageStatus.READY.value,
                 priority=0,
                 # Naive-UTC digits (DC-A fix) — naive column bind.
-                enqueued_at=now_utc().replace(tzinfo=None),
+                enqueued_at=now_utc_naive(),
             )
             session.add(report_message)
             
@@ -3084,7 +3084,7 @@ Provide a concise summary:"""
                     message_id=report_message_id,
                     status=TaskStatus.PENDING.value,
                     # Naive-UTC digits (DC-A fix) — naive column bind.
-                    created_at=now_utc().replace(tzinfo=None),
+                    created_at=now_utc_naive(),
                 )
                 session.add(report_task)
 
@@ -3362,7 +3362,7 @@ Provide a concise summary:"""
                 )
             # Naive-UTC digits (DC-A fix): last_activity_at is a
             # tz-naive column on PostgreSQL.
-            parent.last_activity_at = now_utc().replace(tzinfo=None)
+            parent.last_activity_at = now_utc_naive()
             parent.version = (parent.version or 1) + 1
 
             # NOTE: parent.children cache column was dropped in Phase 4.
@@ -3568,7 +3568,7 @@ Provide a concise summary:"""
                     "report_message_id": report_message_id,
                 }),
                 # Naive-UTC digits (DC-A fix) — naive column bind.
-                created_at=now_utc().replace(tzinfo=None),
+                created_at=now_utc_naive(),
             )
             session.add(completion_event)
             
@@ -3582,7 +3582,7 @@ Provide a concise summary:"""
                     "pending_for_parent": pending_for_parent,
                 }),
                 # Naive-UTC digits (DC-A fix) — naive column bind.
-                created_at=now_utc().replace(tzinfo=None),
+                created_at=now_utc_naive(),
             )
             session.add(parent_event)
             
