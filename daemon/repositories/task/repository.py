@@ -22,6 +22,7 @@ from sqlmodel import Session as SQLModelSession, select, col
 
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.feature_flags import TURN_RECONCILER_DIRECT_WRITE_PARITY
+from daemon.services.timestamps import now_utc_iso, now_utc_naive
 from daemon.services.turn_transitions import (
     _TransitionContext,
     AbortTurn,
@@ -1039,6 +1040,15 @@ class TaskRepository:
                 # task-liveness predicates.
                 "instance_status_paused": InstanceStatus.PAUSED.value,
                 "instance_status_running": InstanceStatus.RUNNING.value,
+                # Timestamp binds (tz fix, feature/fix-job-queue-timestamps-tz):
+                # SQL CURRENT_TIMESTAMP renders in the PostgreSQL session
+                # TimeZone (+07 in production) — these bound params replace
+                # it so stored values follow the UTC standard (TEXT columns
+                # get aware ISO, the naive message_queue.completed_at column
+                # gets naive-UTC digits).
+                "now_failed_at_iso": now_utc_iso(),
+                "now_completed_at_naive": now_utc_naive(),
+                "now_delivered_at_iso": now_utc_iso(),
             }
             snapshot_guard = """
                 (:task_exists = false OR EXISTS (
@@ -1085,7 +1095,7 @@ class TaskRepository:
                                            :instance_status_running
                                        )
                                  )
-                            THEN COALESCE(failed_at, CAST(CURRENT_TIMESTAMP AS TEXT))
+                            THEN COALESCE(failed_at, :now_failed_at_iso)
                             ELSE failed_at
                         END
                     WHERE job_id = :work_id AND {snapshot_guard}
@@ -1138,7 +1148,7 @@ class TaskRepository:
                             ELSE 'completed'
                         END,
                         processing_task_id = NULL,
-                        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+                        completed_at = COALESCE(completed_at, :now_completed_at_naive)
                     WHERE message_id = :task_message_id
                       AND status IN ('pending', 'ready', 'processing', 'retrying')
                       AND status != 'completed'
@@ -1239,7 +1249,7 @@ class TaskRepository:
                     UPDATE report_injections
                     SET state = 'TASK_DELIVERED',
                         delivered_at = COALESCE(
-                            delivered_at, CAST(CURRENT_TIMESTAMP AS TEXT)
+                            delivered_at, :now_delivered_at_iso
                         )
                     WHERE report_message_id = :task_message_id
                       AND state = 'PENDING'
