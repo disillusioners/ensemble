@@ -362,6 +362,16 @@ Grandchild-setsid killpg ESCAPE limitation (F15):
   CANNOT signal it. Document this for the LLM; consider not invoking
   such wrappers, or stop the service via its public API instead
   (e.g. ``kill -TERM <pid>`` to the wrapper directly).
+
+Exit-code semantics on ``status: "exited"`` rows (F10 / A4):
+* ``exit_code: int | None``. ``None`` is the EXPECTED DEFAULT: the
+  process exited during the 5s grace period (or the PID was recycled
+  — see the ``pid_recycled`` family above) and the spawner does NOT
+  retain a ``wait()`` handle after ``Popen`` returns (per
+  ``decisions.md`` D3). An ``int`` (e.g. ``137`` for SIGKILL, ``143``
+  for SIGTERM) is the exception, not the rule — it appears only when
+  the kernel reports a terminal status via the reconciliation sweep
+  before the EXITED row is returned.
 """
 
     # ── service_status ───────────────────────────────────────────
@@ -420,6 +430,16 @@ is NOT counted as alive — its stat file still exists on Linux, so
 ``get_process_start_time`` alone is insufficient. ``is_process_alive``
 reads the ``state`` field from ``/proc/<pid>/stat`` (Linux) or the
 ``ps -o stat=`` column (macOS) and excludes ``Z``.
+
+Exit-code semantics on EXITED rows (F10 / A4):
+* ``exit_code: int | None``. ``None`` is the canonical value when
+  ``service_status`` reconciles a death NOT observed via
+  ``service_stop`` — the spawner does NOT retain a ``wait()`` handle
+  after ``Popen`` returns (per ``decisions.md`` D3), so any death not
+  observed via ``service_stop`` returns ``exit_code=None``. An ``int``
+  (the observed exit code) appears only when ``service_stop`` signaled
+  the process AND the process exited cleanly before the grace period
+  escalated to SIGKILL.
 """
 
     # ── service_list ─────────────────────────────────────────────
