@@ -274,12 +274,18 @@ Notes:
             force: ``True`` skips SIGTERM and SIGKILL immediately.
 
         Returns:
-            ``{"name", "pid", "status": "exited"}`` on success; the
-            4-result-tuple extended with F1 grace-window reasons
-            (``pid_recycled`` / ``pid_recycled_during_grace`` /
-            ``pid_recycled_pre_kill``). Idempotent: already-exited
-            returns the stored EXITED shape. ``not_found`` when the
-            name was never registered.
+            The canonical 4-result shape plus F1 grace-window and
+            short-circuit reasons:
+
+            * ``{"name": ..., "status": "running"}`` — signaled, awaiting graceful exit (no row transition yet).
+            * ``{"name": ..., "pid": ..., "status": "exited"}`` — clean exit. May carry ``exit_code``.
+            * ``{"name": ..., "status": "starting", "reason": "pid_not_yet_assigned"}`` — row exists in STARTING but no PID was assigned yet (F8 synchronous-spawn-failure path).
+            * ``{"name": ..., "pid": ..., "status": "exited", "reason": "pid_dead"}`` — stored PID already dead (no signal needed).
+            * ``{"name": ..., "status": "not_found"}`` — name was never registered.
+
+            Plus the F1 recycle reasons: ``pid_recycled`` /
+            ``pid_recycled_during_grace`` / ``pid_recycled_pre_kill``.
+            Idempotent: already-exited returns the stored EXITED shape.
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
