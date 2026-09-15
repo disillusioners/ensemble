@@ -223,6 +223,7 @@ def _make_fake_llm_class(responses: list[Any] | None = None):
     # the canonical ``_StubClient`` in
     # ``tests/unit/test_symptom_repair_engine.py``.
     _factory.default_streaming = False
+    _factory.default_request_timeout = 610
     _factory.default_request_gzip = False
 
     return _factory, mock_instance

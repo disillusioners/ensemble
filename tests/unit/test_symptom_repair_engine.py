@@ -392,6 +392,7 @@ class _StubWrapper:
 class _StubClient:
     # Class attrs touched by ``clean_llm_config`` (gzip / streaming knobs).
     default_streaming = False
+    default_request_timeout = 610
     default_request_gzip = False
 
     def __init__(self, **kwargs):
