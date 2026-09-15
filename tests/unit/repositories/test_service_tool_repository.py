@@ -564,39 +564,27 @@ class TestThreeSiteIndexNamePin:
             f"3-site name-pin."
         )
 
-    @pytest.mark.skip(
-        reason=(
-            "manager.py _ensure_postgres_columns block lands in Phase 1.C "
-            "task 1.C.13b (F3 single-writer reassignment — NOT in "
-            "Phase 1.A). When 1.C.13b adds the byte-identical "
-            "CREATE TABLE / CREATE INDEX statements to "
-            "EnsembleManager._ensure_postgres_columns, 1.C replaces "
-            "this skip with a strict read_file grep assertion in one "
-            "line (replace this skip decorator with @pytest.mark.parametrize "
-            "+ assertion mirroring test_index_name_in_models_py)."
-        )
-    )
     @pytest.mark.parametrize("index_name", INDEX_NAMES)
     def test_index_name_in_manager_py(
         self, repo_root: Path, index_name: str
     ) -> None:
         """The 3rd site — daemon/manager.py ``_ensure_postgres_columns``.
 
-        GATED with an explicit skip per the F3 reassignment in
-        ``phase1-plan.md`` after task 1.A.7 (the manager.py
-        ``_ensure_postgres_columns`` block is part of Phase 1.C,
-        NOT Phase 1.A — manager.py is a single-writer file). The
-        skip message names 1.C.13b as the un-skip site so the
-        transition is obvious in review. The hand-off is also
-        documented in the final 1.A coder report.
+        STRICT since Phase 1.C task 1.C.13b (the F3 reassignment —
+        manager.py is single-writer): the byte-identical CREATE TABLE /
+        CREATE UNIQUE INDEX / CREATE INDEX statements now live in
+        ``EnsembleManager._ensure_postgres_columns``, so this arm
+        mirrors ``test_index_name_in_models_py`` exactly. If any of
+        the three sites (.sql / models.py / manager.py) drifts, this
+        test fails immediately and surfaces the drift before merge.
         """
         manager_text = self._read(repo_root, self.MANAGER_FILE_REL)
         assert index_name in manager_text, (
             f"index {index_name!r} must appear in "
             f"{self.MANAGER_FILE_REL} (EnsembleManager."
             f"_ensure_postgres_columns, the PG mirror). "
-            f"3-site name-pin — Phase 1.C task 1.C.13b must add "
-            f"the byte-identical CREATE INDEX statement."
+            f"3-site name-pin — Phase 1.C task 1.C.13b added "
+            f"the byte-identical CREATE INDEX statements."
         )
 
     def test_models_table_args_has_unique_partial_name_active(

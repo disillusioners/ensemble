@@ -113,6 +113,21 @@ from .blueprint.pending_models import BlueprintPendingUpdate
 from .blueprint.repository import BlueprintRepository
 from .blueprint.pending_repository import BlueprintPendingRepository
 
+# Service-tool repository (service-tool Phase 1.A store track).
+# Imported here so ``SQLModel.metadata.create_all()`` (called from
+# ``daemon/manager.py``) registers the ``service_tracking`` table on
+# fresh databases (both dialects — the model's dual-dialect partial
+# UNIQUE index ``idx_service_tracking_name_active`` carries
+# ``sqlite_where``/``postgresql_where``). Existing SQLite databases
+# pick the table up from the MigrationRunner via
+# ``daemon/migrations/versions/20260915_212810_create_service_tracking.sql``;
+# existing PostgreSQL databases rely on the
+# ``EnsembleManager._ensure_postgres_columns`` mirror (the .sql
+# runner is a NO-OP on PG). The repo is intentionally SYNC (frozen
+# F3 interface) — async callers wrap calls in ``asyncio.to_thread``.
+from .service_tool.repository import ServiceRepo
+from .service_tool.models import ServiceTracking, ServiceStatus
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -229,6 +244,10 @@ __all__ = [
     "BlueprintRepository",
     "BlueprintPendingUpdate",
     "BlueprintPendingRepository",
+    # Service tool (service-tool Phase 1.A store track)
+    "ServiceRepo",
+    "ServiceTracking",
+    "ServiceStatus",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
