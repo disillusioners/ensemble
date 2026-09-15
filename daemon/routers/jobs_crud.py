@@ -1,7 +1,6 @@
 """Job Queue CRUD API endpoints."""
 
 import logging
-from datetime import timezone as _tz
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,7 +10,6 @@ from pydantic import ValidationError
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.services.timestamps import to_utc_iso
 from daemon.services.work_status import _derive_legacy_status
 from daemon.services.mission_resolver import mission_ref_to_dict
 from daemon.repositories.job_queue.models import (
@@ -135,12 +133,16 @@ def _job_to_response(
         # response stays in sync with the resolver's view.
         started_at = work_record.started_at
         completed_at = work_record.completed_at
-        # ``created_at`` is a datetime on WorkRecord; the JobResponse
-        # schema expects an ISO-8601 string. Route through the shared
-        # serialization boundary (tz fix) so the wire output always
-        # carries the explicit offset and every read surface emits
-        # the same shape.
-        created_at = to_utc_iso(work_record.created_at)
+        # D3 (tz fix, Phase 3): ``created_at`` is sourced from the
+        # JobItem TEXT column VERBATIM — byte-stable across
+        # create → dispatch → get on list AND detail views. The
+        # previous WorkRecord-derived serialization re-rendered a
+        # parsed datetime (normalising e.g. 'Z' → '+00:00'), so the
+        # create response and a later get could disagree byte-wise.
+        # ``job`` is always present in this composition (both
+        # branches project a JobItem row), so reading it here is
+        # safe for the work_record path too.
+        created_at = job.created_at
     else:
         # Legacy fallback path. Execution state comes straight off
         # the JobItem mirror columns — used by older tests / partial
@@ -176,6 +178,7 @@ def _job_to_response(
         # Legacy timing: read directly from the JobItem mirror columns.
         started_at = None
         completed_at = None
+        # D3: JobItem TEXT verbatim (byte-stable).
         created_at = job.created_at
 
     return JobResponse(
