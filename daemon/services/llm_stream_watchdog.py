@@ -519,7 +519,7 @@ def _force_unblock(
                 # reader teardown racing the tick).
                 logger.warning(
                     "[StreamWatchdog] shutdown() failed (%s); "
-                    "response.close() fallback applied",
+                    "response.close() applying fallback",
                     exc,
                 )
         else:
@@ -527,7 +527,7 @@ def _force_unblock(
             # unknown transport shape or the connection is already gone.
             logger.warning(
                 "[StreamWatchdog] socket unresolvable; "
-                "response.close() fallback applied"
+                "response.close() applying fallback"
             )
         entry.response.close()
         return True

@@ -1068,7 +1068,7 @@ class TestW3FallbackMessagesPinned:
         assert "socket unresolvable" not in joined, (
             "the two W3 fallbacks must never bleed into each other"
         )
-        assert "response.close() fallback applied" in joined
+        assert "response.close() applying fallback" in joined
         entry.response.close.assert_called_once()
 
     def test_unresolvable_socket_message(self, caplog, monkeypatch):
@@ -1087,7 +1087,7 @@ class TestW3FallbackMessagesPinned:
         assert "shutdown() failed" not in joined, (
             "the two W3 fallbacks must never bleed into each other"
         )
-        assert "response.close() fallback applied" in joined
+        assert "response.close() applying fallback" in joined
         entry.response.close.assert_called_once()
 
     def test_stall_abort_lines_carry_telemetry_token(self, caplog, monkeypatch):
