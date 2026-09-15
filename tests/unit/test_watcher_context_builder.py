@@ -69,6 +69,7 @@ def _make_fake_llm_class(
     # the canonical ``_StubClient`` in
     # ``tests/unit/test_symptom_repair_engine.py``.
     _factory.default_streaming = False
+    _factory.default_request_timeout = 610
     _factory.default_request_gzip = False
 
     return _factory, mock_instance
@@ -153,6 +154,7 @@ class TestWatcherContextBuilderHappyPath:
         # ``default_request_gzip`` (graph.py:3768) before constructing
         # the LLM — see the matching note in ``_make_fake_llm_class``.
         _capture_factory.default_streaming = False
+        _capture_factory.default_request_timeout = 610
         _capture_factory.default_request_gzip = False
 
         factory = _capture_factory
@@ -502,6 +504,7 @@ class TestWatcherContextBuilderLazyLlm:
         # ``default_request_gzip`` (graph.py:3768) before constructing
         # the LLM — see the matching note in ``_make_fake_llm_class``.
         _tracking_factory.default_streaming = False
+        _tracking_factory.default_request_timeout = 610
         _tracking_factory.default_request_gzip = False
 
         manager = _make_manager_with_llm(_tracking_factory)

@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import uuid
+import httpx
 import openai
 from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
@@ -3352,6 +3353,20 @@ class ThinkingChatOpenAI(ChatOpenAI):
     # on the response side.
     default_request_gzip: ClassVar[bool] = False
 
+    # Default HTTP request timeout (seconds) for ``clean_llm_config``
+    # inject-if-absent (llm-stream-stall-hardening L0). The daemon sets
+    # this from ``LLMConfig.request_timeout`` at startup (see
+    # ``daemon/__main__.py`` and ``daemon/api.py``), BEFORE any instance
+    # is created — same ClassVar propagation pattern as
+    # ``default_streaming`` / ``default_request_gzip``. Sites that OMIT
+    # ``request_timeout`` in their config dict (title generation,
+    # keyword extraction, child-reports ×2) get this value injected so
+    # a hung first attempt can never pin a ``to_thread`` worker past
+    # the configured deadline (the same latent bug class the LCA judge
+    # fixed per-site in d6e30d9d). Strictly inject-if-ABSENT: a caller
+    # that passes the key (even ``None``) keeps its value verbatim.
+    default_request_timeout: ClassVar[int] = 610
+
     def _should_echo_reasoning(self) -> bool:
         """Return True if reasoning_content echo is enabled for the current model.
 
@@ -3738,47 +3753,77 @@ def clean_llm_config(cfg: dict) -> dict:
     # Respect explicit caller opt-outs (stream_usage=False).
     if "stream_usage" not in cleaned:
         cleaned["stream_usage"] = True
-    # Outbound LLM request-body gzip compression (opt-in). When
-    # ``default_request_gzip`` is True and the caller has NOT already
+    # L0 inject-if-absent (llm-stream-stall-hardening): give every
+    # LangChain site an explicit HTTP deadline. When a site omits
+    # ``request_timeout``, langchain-openai passes ``timeout=None`` down
+    # EXPLICITLY (langchain always passes a timeout value) — the openai
+    # SDK treats an explicit ``None`` as given, so the HTTP-layer read
+    # deadline is NO deadline at all (∞). The SDK's own
+    # ``DEFAULT_TIMEOUT`` 600s fallback is unreachable from langchain
+    # precisely because a value is always passed. A hung first attempt
+    # therefore pinned a ``to_thread`` worker forever; secondary sites
+    # (title generation, keyword extraction, child-reports ×2) hit
+    # exactly this hole. This inject is a pure TIGHTENING ∞→610s — a
+    # deliberate behavior change for the omitted sites, NOT
+    # wire-identical. Operators can tighten further via
+    # OPENAI_REQUEST_TIMEOUT (LLMConfig.request_timeout, startup-wired
+    # into the ``default_request_timeout`` ClassVar read here).
+    # STRICTLY inject-if-absent: callers that pass the key — including
+    # an explicit ``None`` — keep their value verbatim.
+    if "request_timeout" not in cleaned:
+        cleaned["request_timeout"] = ThinkingChatOpenAI.default_request_timeout
+    # Outbound LLM HTTP clients — stream-liveness watchdog, ALWAYS ON
+    # (llm-stream-stall-hardening L2). When the caller has NOT already
     # supplied an ``http_client`` / ``http_async_client`` kwarg, attach
-    # the gzip-enabled httpx clients (from ``daemon.services.llm_gzip``)
-    # so every outbound LLM HTTP request body is gzip-compressed on
-    # the wire and ``Content-Encoding: gzip`` is stamped (Content-Length
-    # auto-corrected). When the flag is OFF (default), this branch is
-    # a no-op — the langchain-openai client uses its built-in default
-    # httpx clients and the wire is byte-identical to the pre-feature
-    # state. Sites that want to bypass the gzip wrapping for a
-    # specific LLM pass plain ``http_client`` / ``http_async_client``
-    # kwargs explicitly — those values are preserved verbatim (the
-    # ``not in cleaned`` guards).
+    # the watchdog-wrapped module singletons so every SSE response
+    # stream is monitored for byte-silence: a stalled stream (heartbeat
+    # stop = transport death) is force-aborted within
+    # ``LLMConfig.stream_stall_threshold_seconds`` (default 45s) instead
+    # of waiting out the 610s read deadline, and the forced abort rides
+    # the existing tenacity timeout budget (StreamStalledError
+    # subclasses httpx.ReadTimeout). See
+    # ``daemon/services/llm_stream_watchdog.py`` for the delivery
+    # vehicle (transport shutdown — response.close() does NOT wake a
+    # blocked recv; spike-proven).
     #
-    # Partial-override contract: passing EITHER ``http_client`` OR
-    # ``http_async_client`` (the caller-supplied value, even ``None``,
-    # counts as "present" — the ``not in cleaned`` checks test for key
-    # membership) opts the LLM out of gzip wrapping entirely on BOTH
-    # sync and async paths. There is no partial gzip — you cannot pass
-    # a gzip ``http_client`` and a plain ``http_async_client`` (or vice
-    # versa) and have one path gzipped while the other is not. To
-    # enable gzip, pass NEITHER — the function injects the gzip-enabled
-    # module singletons for both. If a caller actually needs one path
-    # gzipped and the other not (uncommon; test-only), they must build
-    # both clients by hand and pass both kwargs explicitly, bypassing
-    # this function.
+    # Gzip composition: when ``default_request_gzip`` is True the
+    # injected client is
+    # ``WatchdogHTTPTransport(GzipRequestTransport(httpx.HTTPTransport()))``
+    # — watchdog outermost (owns the response stream), gzip inner
+    # (mutates request bytes only). When False, the watchdog wraps a
+    # plain ``httpx.HTTPTransport()``. The client's connection-pool /
+    # redirect settings mirror the OpenAI SDK defaults exactly (see
+    # ``llm_stream_watchdog._WATCHDOG_*``). Note this seam is NOT a
+    # no-op vs the SDK-default path: beyond the watchdog wrapping, the
+    # client carries its own 600s httpx ``Timeout`` fallback — and the
+    # L0 ``request_timeout`` inject above changes the effective read
+    # deadline for sites that omitted it from ∞ (no deadline) to 610s.
+    #
+    # Partial-override contract (unchanged): passing EITHER
+    # ``http_client`` OR ``http_async_client`` (the caller-supplied
+    # value, even ``None``, counts as "present" — the ``not in cleaned``
+    # checks test for key membership) opts the LLM out of the watchdog
+    # wrapping entirely on BOTH sync and async paths. There is no
+    # partial injection — you cannot pass a custom ``http_client`` and
+    # get the watchdog-wrapped ``http_async_client``. If a caller
+    # actually needs one path wrapped and the other not (uncommon;
+    # test-only), they must build both clients by hand and pass both
+    # kwargs explicitly, bypassing this function.
     if (
-        ThinkingChatOpenAI.default_request_gzip
-        and "http_client" not in cleaned
+        "http_client" not in cleaned
         and "http_async_client" not in cleaned
     ):
-        # Lazy import: ``daemon.services.llm_gzip`` pulls in httpx,
-        # but the project already depends on httpx. Keeping the import
-        # local avoids an extra import-ordering surprise in the rare
-        # test paths that touch ``daemon.graph`` without the LLM
-        # services loaded.
-        from .services.llm_gzip import get_or_build_gzip_clients
+        # Lazy import: keeps ``daemon.graph`` import-time cost flat and
+        # avoids an import-ordering surprise in the rare test paths that
+        # touch ``daemon.graph`` without the LLM services loaded (same
+        # rationale as the gzip lazy import this replaces).
+        from .services.llm_stream_watchdog import get_or_build_watchdog_clients
 
-        gzip_sync, gzip_async = get_or_build_gzip_clients()
-        cleaned["http_client"] = gzip_sync
-        cleaned["http_async_client"] = gzip_async
+        wd_sync, wd_async = get_or_build_watchdog_clients(
+            use_gzip=ThinkingChatOpenAI.default_request_gzip
+        )
+        cleaned["http_client"] = wd_sync
+        cleaned["http_async_client"] = wd_async
     return cleaned
 
 
@@ -5120,6 +5165,23 @@ def create_attestation_gate_node(
                 Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             )
             and (decision.marker_hit or decision.length_trigger)
+            # 2026-09-12 LCA busy trigger suppression — when
+            # ``trigger_suppressed_by`` is set on the decision (the
+            # gate found at least one busy descendant in the
+            # unconditional-busy subset ``{RUNNING, WAITING,
+            # WAITING_CHILDREN}``), the WHOLE marker/length trigger
+            # is suppressed ENTIRELY: NO judge call, NO route-(b)
+            # hint, plain allow. The marker/length signal STAYS
+            # RECORDED on the canonical ``event=leader_completion_
+            # gate`` log row inside ``evaluate()`` for forensics —
+            # ``trigger_source`` is force-cleared to ``""`` and
+            # ``trigger_suppressed_by`` carries the suppressor name.
+            # PAUSED is NOT busy (suspect, not healthy) — the
+            # trigger stays armed on PAUSED so a stuck child is
+            # caught. Dormant IDLE/QUEUED is NOT busy (no
+            # execution) — also keeps the trigger armed so
+            # en-route-only work is caught.
+            and not decision.trigger_suppressed_by
         ):
             try:
                 from .services.attestation_judge_resolver import (
@@ -7424,7 +7486,19 @@ def create_agent_node(
                 lambda: current_llm.invoke(compact_messages)
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError,
-                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError) as e:
+                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError, MalformedLLMResponseError, IndexError,
+                httpx.TimeoutException) as e:
+            # ``httpx.TimeoutException`` joins the tuple (L1 log-truth
+            # fix, llm-stream-stall-hardening): mid-stream timeouts
+            # surface as bare httpx exceptions (the SDK wraps only
+            # request-level ones as APITimeoutError). Without this
+            # member, an EXHAUSTED timeout budget re-raised from
+            # tenacity landed in the generic ``except Exception``
+            # below and logged "Unexpected error after retries" —
+            # misleading, same lie family as the classifier catch-all.
+            # With it, exhausted mid-stream timeouts route through this
+            # handler (loud ERROR + severity stamping) like their
+            # request-level siblings.
             # ── Hallucination-recovery ladder PHASE 2 (C-2 / D-2):
             # PRE-TERMINAL intercept for truncated and empty_post_ladder
             # (ADR-0003 / OQ1=pre-terminal-now). When the master ladder

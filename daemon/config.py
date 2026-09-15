@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, Dict
 
 import yaml
-from pydantic import AliasChoices, Field, ConfigDict, model_validator, field_validator
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Single source of truth for the non-status transient-channel pattern
@@ -157,6 +157,33 @@ class LLMConfig(BaseSettings):
     model_vision: str | None = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=610, description="Request timeout in seconds (default: 11 minutes)")
+
+    # LLM stream-liveness watchdog threshold (llm-stream-stall-hardening
+    # L2). When a streaming (SSE) LLM response delivers no bytes —
+    # content OR heartbeat keep-alive — for longer than this many
+    # wall-clock seconds, the watchdog force-aborts the blocked read
+    # (transport shutdown) and the forced abort rides the existing
+    # timeout retry budget via StreamStalledError (an
+    # httpx.ReadTimeout subclass). Healthy streams always carry bytes
+    # within ~one heartbeat interval (~5.0s on both prod proxies,
+    # 2026-09-15 probe; max legit inter-batch gap ~3.9s), so
+    # 45s (~9x cadence) discriminates a dead transport without
+    # false-aborting long thinking pauses. ALWAYS-ON — this is a
+    # tuning-only knob (repo fix/flag policy: no disable value; the
+    # ge=10 floor keeps the value honest). Override via
+    # OPENAI_STREAM_STALL_THRESHOLD_SECONDS.
+    stream_stall_threshold_seconds: int = Field(
+        default=45,
+        ge=10,
+        description=(
+            "Seconds of SSE byte-silence (wall clock) before the stream "
+            "watchdog force-aborts the stalled response. Floor 10s; "
+            "default 45s. Probe-evidenced 2026-09-15 (round 2): both "
+            "proxies heartbeat at ~5.0s cadence (max observed 5.8s), "
+            "max legitimate inter-content gap 3.9s — 45s ≈ 9x the "
+            "measured cadence, kept as default."
+        ),
+    )
 
     # Models for which reasoning_content echo is DISABLED: reasoning_content
     # from a previous turn is echoed back in subsequent assistant messages
@@ -1463,6 +1490,41 @@ class ServicesConfig(BaseSettings):
             "incidents does NOT change what survives the restart."
         ),
     )
+    # F3 (joblock-leak fix): periodic sweep cadence for
+    # ``JobLockSweepService``. The startup-time
+    # ``recover_stale_job_locks`` (in ``daemon/api.py``) clears
+    # orphans from a previous process that died mid-execution; this
+    # knob governs the steady-state companion that reclaims locks
+    # left behind by the live daemon (F1 inline writers that won
+    # the SQL guard race before ``_finalize_job_db_sync`` could
+    # release the lock; F2 R6/R7 cancellations that aborted
+    # mid-release; F5 ``force_finalize_orphan`` reaps). The sweep
+    # is ALWAYS-ON infrastructure (no kill-switch env var — per
+    # the project owner's HARD POLICY on Batch A); the interval
+    # knob tunes reclaim responsiveness vs DB load. Default 90s
+    # shares the A3 cadence. Lower = faster reclaim but more DB
+    # scans; floor 1s prevents spin. Out-of-range values FAIL FAST
+    # AT BOOT via pydantic ValidationError. Override via
+    # SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS.
+    job_lock_sweep_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "F3 — joblock-leak fix (2026-09-14): how often the "
+            "``JobLockSweepService`` reclaim tick runs (seconds). "
+            "Default 90s shares the A3 cadence. The sweep calls "
+            "``JobLockManager.cleanup_terminal_job_locks`` which "
+            "delegates to ``LockRepository.clear_terminal_job_locks`` "
+            "(DELETEs rows whose job is no longer in {queued, active}). "
+            "Reclaims locks orphaned by F1 inline writer races, F2 "
+            "cancellation mid-release, and F5 orphan reaps. "
+            "ALWAYS-ON infrastructure (no kill-switch env var — per "
+            "the project owner's HARD POLICY on Batch A); the "
+            "interval knob tunes responsiveness vs DB load. "
+            "Floor 1s; out-of-range values FAIL FAST AT BOOT. "
+            "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
     lease_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description=(
@@ -2026,6 +2088,95 @@ class ContextMessagesConfig(BaseSettings):
         return value
 
 
+class CriticalNotesConfig(BaseModel):
+    """Critical-notes tiered loading + maintenance knobs (Phase 1).
+
+    Deliberately a PLAIN ``BaseModel`` — NOT ``BaseSettings`` — so the
+    knob set has NO environment-variable binding of any kind. D4 (user
+    ruling, 2026-09-15): the feature is always-on and tuned at the
+    config layer ONLY; the ``ENSEMBLE_*`` env family is NOT extended
+    (there is no kill-switch; rollback = redeploy the previous build).
+    A ``BaseSettings`` subclass would mechanically mint
+    ``CRITICAL_NOTES_*`` env names via ``env_prefix`` — an env layer in
+    everything but spelling — so the stronger no-env-by-construction
+    shape is used instead.
+
+    Knobs (§4.7 as amended by leader ruling N3 — the v1 ``tiered`` knob
+    is DROPPED entirely; always-on has no shape switch):
+
+    Phase-1 consumers:
+    * ``core_cap`` (8) — max pinned notes in the always-injected core
+      tier; the 9th pin REJECTS with demotion candidates named.
+    * ``reference_max`` (500) — tool-reject bound (authoritative) +
+      injection-side truncation bound (defensive backstop only).
+    * ``stale_days`` (90) — STALE marking + archive-candidate horizon
+      in the list/housekeeping surface.
+
+    Reserved Phase-2/3 fields — defaults ONLY, no consumer machinery
+    ships in Phase 1: ``tail_cap``, ``section_char_cap``,
+    ``fusion_bm25_weight``, ``fusion_vector_weight``,
+    ``fusion_threshold``, ``floor_count``, ``query_max_chars``,
+    ``mint_cap_per_read``.
+
+    N7 (D4 compliance): the reserved Phase-3 knob ``llm_select`` gets
+    NO ``ENSEMBLE_*`` env var — like every knob in this section it is
+    config.yaml-only, and this class's plain-BaseModel shape makes an
+    env binding structurally impossible.
+    """
+
+    core_cap: int = Field(
+        default=8, ge=1,
+        description="Max pinned notes in the always-injected core tier (reject-don't-evict beyond this).",
+    )
+    tail_cap: int = Field(
+        default=6, ge=0,
+        description="RESERVED Phase 2: max selected tail notes per first turn. No Phase-1 consumer.",
+    )
+    section_char_cap: int = Field(
+        default=12000, ge=0,
+        description="RESERVED Phase 2: hard char cap on the notes section of the injected block. No Phase-1 consumer.",
+    )
+    fusion_bm25_weight: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: BM25 fusion weight (BlueprintMatcher parity). No Phase-1 consumer.",
+    )
+    fusion_vector_weight: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: vector fusion weight. No Phase-1 consumer.",
+    )
+    fusion_threshold: float = Field(
+        default=0.30, ge=0.0, le=1.0,
+        description="RESERVED Phase 2: minimum fusion score for tail selection. No Phase-1 consumer.",
+    )
+    floor_count: int = Field(
+        default=2, ge=0,
+        description="RESERVED Phase 2: priority floor size when fusion under-selects. No Phase-1 consumer.",
+    )
+    reference_max: int = Field(
+        default=500, ge=1,
+        description="Tool-reject bound for reference (authoritative) + injection truncation bound (defensive).",
+    )
+    query_max_chars: int = Field(
+        default=2000, ge=1,
+        description="RESERVED Phase 2: query truncation for embed/BM25 input. No Phase-1 consumer.",
+    )
+    stale_days: int = Field(
+        default=90, ge=1,
+        description="Staleness horizon for STALE marks + archive-candidate proposals in list surfaces.",
+    )
+    mint_cap_per_read: int = Field(
+        default=10, ge=0,
+        description="RESERVED Phase 2: lazy embedding mint cap per first-turn read. No Phase-1 consumer.",
+    )
+    llm_select: bool = Field(
+        default=False,
+        description=(
+            "RESERVED Phase 3 (C2 quick-LLM stage). Ships false and "
+            "unimplemented. NO env var exists for this knob (D4)."
+        ),
+    )
+
+
 class LongToolCallNudgeConfig(BaseSettings):
     """Configuration for the long-tool-call nudge scanner.
 
@@ -2256,6 +2407,9 @@ class Config(BaseSettings):
     blueprint: BlueprintConfig = Field(default_factory=BlueprintConfig)
     context_messages: ContextMessagesConfig = Field(
         default_factory=ContextMessagesConfig
+    )
+    critical_notes: CriticalNotesConfig = Field(
+        default_factory=CriticalNotesConfig
     )
 
 
@@ -2996,6 +3150,45 @@ def _resolve_vscode_webview_csp_fix_from_sources(
     return bool(yaml_value)
 
 
+def _resolve_critical_notes_llm_select(yaml_value: Any) -> bool:
+    """Explicit resolver for the reserved ``critical_notes.llm_select`` knob.
+
+    Mirror of the ``_resolve_compaction_model`` pattern, adapted to a
+    knob that has NO env source: pydantic-settings gives a passed-in
+    init kwarg priority over env vars (the inversion trap), so the
+    value is resolved EXPLICITLY in ``load_config`` and handed to the
+    model as a normalized bool instead of a raw ``None`` (an explicit
+    yaml ``llm_select: null`` would otherwise raise ``bool_type`` and
+    crash boot).
+
+    N7 / D4 compliance: this knob — like every ``critical_notes.``
+    knob — gets NO ``ENSEMBLE_*`` env var. ``CriticalNotesConfig`` is a
+    plain ``BaseModel`` (not ``BaseSettings``), so no env binding exists
+    at all; the only sources are config.yaml and the documented default
+    (``False`` until Phase 3).
+
+    Accepted inputs: ``bool`` passthrough; ``None`` / blank string →
+    default ``False``; the shared permissive bool vocabulary
+    (:data:`_PROACTIVE_TRUE_BOOLS` / :data:`_PROACTIVE_FALSE_BOOLS`)
+    for string spellings; anything else raises so a yaml typo is caught
+    at startup.
+    """
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return False  # documented default — reserved knob, Phase 3
+    if isinstance(yaml_value, str):
+        s = yaml_value.strip().lower()
+        if not s or s in _PROACTIVE_FALSE_BOOLS:
+            return False
+        if s in _PROACTIVE_TRUE_BOOLS:
+            return True
+    raise ValueError(
+        f"Invalid critical_notes.llm_select value {yaml_value!r} — "
+        f"expected a boolean (0/false/no/off or 1/true/yes/on)"
+    )
+
+
 def _resolve_vscode_binary_path(
     yaml_value: str | None,
     *,
@@ -3369,6 +3562,46 @@ def load_config(config_path: str | None = None) -> Config:
         )
     )
     config_dict["context_messages"] = context_messages_config
+
+    # critical-notes-retrieval Phase 1 (D4): the section is ALWAYS
+    # present in ``config_dict`` so an env-free deployment (no
+    # ``critical_notes:`` key in yaml) gets the documented defaults.
+    # ``llm_select`` is resolved EXPLICITLY (mirroring the resolvers
+    # above) so a yaml ``null`` normalizes to the reserved default
+    # instead of crashing pydantic bool validation. There is NO env
+    # read here BY DESIGN — D4: no ``ENSEMBLE_*`` env var exists for
+    # any knob in this section (see CriticalNotesConfig docstring).
+    critical_notes_config: Dict[str, Any] = {}
+    raw_critical_notes = processed_config.get("critical_notes")
+    if raw_critical_notes is None:
+        # Section absent — fall through to documented defaults below
+        # (test_section_absent_yields_documented_defaults pins this).
+        pass
+    elif isinstance(raw_critical_notes, dict):
+        # Drop null values so partial yaml sections (``key:`` with no
+        # value) fall through to documented defaults rather than
+        # crashing nested-model validation (skill_evolution/blueprint
+        # None-strip precedent). A section that is present but entirely
+        # null (``critical_notes:`` with no keys) is treated as absent.
+        critical_notes_config = {
+            k: v for k, v in raw_critical_notes.items() if v is not None
+        }
+    else:
+        # Loud guard (2026-09-15): a non-dict ``critical_notes:`` section
+        # (e.g. ``critical_notes: 5`` or a bare string) used to silently
+        # fall through to defaults — masking an operator typo. Match the
+        # crash-loud idiom of sibling config sections: name the offending
+        # value so the operator sees the actual misconfiguration. Absent
+        # / None still yields documented defaults above.
+        raise ValueError(
+            f"config.critical_notes must be a mapping (got "
+            f"{type(raw_critical_notes).__name__}: {raw_critical_notes!r}). "
+            f"Fix the yaml — e.g. ``critical_notes:\\n  core_cap: 8``."
+        )
+    critical_notes_config["llm_select"] = _resolve_critical_notes_llm_select(
+        critical_notes_config.get("llm_select")
+    )
+    config_dict["critical_notes"] = critical_notes_config
     # Boot-time validation for the injected-notes absorb kill-switch
     # (``ENSEMBLE_INJECTED_NOTES_ABSORB``). The resolver is read-at-call by
     # ``daemon/compaction.py::_injected_note_absorbed_ids``; invoking it
@@ -3535,6 +3768,78 @@ def load_config(config_path: str | None = None) -> Config:
         ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     )
 
+    # critical-notes-retrieval Phase 1 — install the Phase-1 consumer
+    # knobs into the tool + render module caches and emit the boot INFO
+    # state line HERE, at config-resolution time (same S13
+    # reviewer-gate rationale as the KV-ambient / vscode-CSP installs:
+    # the line MUST stay on the boot path so a quiet-daemon boot-log
+    # grep never false-fails). Lazy imports — config.py must not import
+    # tool/graph-adjacent modules at module load. D4: this line is
+    # state VISIBILITY, not a switch — the feature is always-on and the
+    # ENSEMBLE_* env family is NOT extended (rollback = redeploy the
+    # previous build).
+    from .tools.critical_notes import install_critical_notes_config
+    from .services.context_messages import install_critical_notes_render_config
+    from .services.critical_notes_selection_orchestrator import (
+        install_critical_notes_selection_config,
+    )
+
+    install_critical_notes_config(
+        core_cap=config.critical_notes.core_cap,
+        reference_max=config.critical_notes.reference_max,
+        stale_days=config.critical_notes.stale_days,
+    )
+    install_critical_notes_render_config(
+        reference_max=config.critical_notes.reference_max,
+    )
+    install_critical_notes_selection_config(
+        tail_cap=config.critical_notes.tail_cap,
+        section_char_cap=config.critical_notes.section_char_cap,
+        fusion_bm25_weight=config.critical_notes.fusion_bm25_weight,
+        fusion_vector_weight=config.critical_notes.fusion_vector_weight,
+        fusion_threshold=config.critical_notes.fusion_threshold,
+        floor_count=config.critical_notes.floor_count,
+        query_max_chars=config.critical_notes.query_max_chars,
+        mint_cap_per_read=config.critical_notes.mint_cap_per_read,
+    )
+    _cn = config.critical_notes
+    # Phase-1 ACTIVE knobs on the primary line (ops-grep target, pinned
+    # by tests/test_critical_notes_migrations.py and the runtime
+    # anchor grep). Phase-2 ADDS new knobs via the dedicated
+    # follow-up line so the primary line stays short and meaningful
+    # for the always-on path.
+    logger.info(
+        "[CriticalNotes] core_cap=%s reference_max=%s stale_days=%s "
+        "(always-on per D4 — no ENSEMBLE_* env flag)",
+        _cn.core_cap,
+        _cn.reference_max,
+        _cn.stale_days,
+    )
+    logger.info(
+        "[CriticalNotes:reserved] tail_cap=%s section_char_cap=%s "
+        "floor_count=%s query_max_chars=%s mint_cap_per_read=%s "
+        "fusion_bm25_weight=%s fusion_vector_weight=%s fusion_threshold=%s "
+        "llm_select=%s (all CONSUMED Phase-2; defaults only — "
+        "no ENSEMBLE_* env flag, D4)",
+        _cn.tail_cap,
+        _cn.section_char_cap,
+        _cn.floor_count,
+        _cn.query_max_chars,
+        _cn.mint_cap_per_read,
+        _cn.fusion_bm25_weight,
+        _cn.fusion_vector_weight,
+        _cn.fusion_threshold,
+        _cn.llm_select,
+    )
+    # Phase-2 boot-state probe (architect §4.2 [#8]): moved OUT of
+    # ``load_config`` (B2 fix — the original inline probe imported a
+    # nonexistent ``get_db_engine`` from the repositories factory, so
+    # it raised ImportError on EVERY boot and permanently logged the
+    # deferred branch). The probe needs the LIVE engine, which does
+    # not exist at config-load time; it is now injected from the api
+    # lifespan via :func:`probe_critical_notes_boot_state` once
+    # ``manager.initialize()`` has built ``manager.engine``.
+
     # Empty-response-guard Phase 1 (item 5) — install the RESOLVED
     # guard knobs into the response_validation module cache and emit
     # the boot INFO lines HERE, at config-resolution time (same S13
@@ -3621,6 +3926,71 @@ def load_config(config_path: str | None = None) -> Config:
     )
 
     return config
+
+
+def probe_critical_notes_boot_state(*, engine: Any) -> None:
+    """Emit the Phase-2 ``[CriticalNotes:state]`` boot-state probe line.
+
+    Reports the ``projects_with_pins=N/M total_pinned=K`` segment the
+    architecture recommendation §4.2 [#8] defines: operators grep this
+    line to confirm the tiered-activation gate status at startup
+    (gating active when ``projects_with_pins >= 1``; projects without
+    pins fall back to the render-all shape).
+
+    B2 wiring choice — INJECTION, not construction: the probe lives at
+    the api lifespan (``daemon/api.py``), called right after
+    ``manager.initialize()`` with the manager's LIVE shared engine.
+    The original in-``load_config`` site could not receive an engine
+    (config load runs before any engine exists) and its fallback
+    imported a nonexistent ``get_db_engine``, so the probe deferred on
+    every boot. Injecting the live reference avoids constructing a
+    second long-lived engine purely for a probe.
+
+    Best-effort / never raises: any failure logs the deferred ``?/?``
+    variant under the same canonical prefix. State VISIBILITY, not a
+    gate — the feature is always-on regardless of probe outcome.
+
+    Args:
+        engine: The live shared SQLAlchemy engine (``manager.engine``).
+    """
+    try:
+        from .repositories.project.repository import (
+            SQLModelProjectRepository,
+        )
+
+        proj_repo = SQLModelProjectRepository(engine)
+        all_projects = proj_repo.list_projects()
+        projects_with_pins = 0
+        total_pinned = 0
+        for proj in all_projects:
+            pid = getattr(proj, "project_id", None)
+            if not pid:
+                continue
+            count = int(
+                proj_repo.count_pinned_critical_notes(pid)
+            )
+            total_pinned += count
+            if count > 0:
+                projects_with_pins += 1
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=%d/%d "
+            "total_pinned=%d (gating active when projects_with_pins>=1 per §4.2 #8; "
+            "projects without pins fall back to render-all)",
+            projects_with_pins,
+            len(all_projects),
+            total_pinned,
+        )
+    except Exception as e:
+        # Best-effort probe. Boot-state visibility is a nice-to-have,
+        # not a gate; the feature is always-on regardless of probe
+        # outcome. A ``projects_with_pins=N/M total_pinned=K`` follow-up
+        # line will appear in the FIRST first-turn log instead.
+        logger.info(
+            "[CriticalNotes:state] tiered=true projects_with_pins=?/? "
+            "total_pinned=? (probe deferred — %s: %s)",
+            type(e).__name__,
+            e,
+        )
 
 
 # Convenience function for getting the config

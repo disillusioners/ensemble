@@ -152,15 +152,58 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
     else:
+        # Dialect-agnostic branch. In the daemon runtime this path
+        # only ever sees SQLite (``DatabaseConfig.postgres`` has zero
+        # callers — the canonical PG engine is ``create_postgres_engine``
+        # below). Guard the latent trap anyway: when the URL IS
+        # PostgreSQL, apply the same libpq session options as the
+        # canonical engine so SQL-side ``now()`` readers stay aligned
+        # with the naive-UTC digit writers (B2/B3). Non-PG dialects
+        # never receive libpq-specific options — an empty
+        # ``connect_args`` is a SQLAlchemy no-op.
+        pg_connect_args = (
+            dict(PG_SESSION_CONNECT_ARGS)
+            if "postgres" in config.connection_string.lower()
+            else {}
+        )
         engine = create_engine(
             config.connection_string,
             echo=config.echo,
             pool_size=config.pool_size,
             max_overflow=config.max_overflow,
             pool_pre_ping=True,
+            connect_args=pg_connect_args,
         )
 
     return engine
+
+
+# libpq session options applied to EVERY connection created by the
+# PostgreSQL engine factory (B2/B3 class-closing fix,
+# feature/fix-job-queue-timestamps-tz).
+#
+# Why: the naive-column writers (task.completed_at,
+# task.last_heartbeat_at, instances.last_activity_at, ...) stamp
+# naive-UTC DIGITS (``now_utc_naive()``), but SQL-side age readers —
+# the readiness heartbeat max-age (``daemon/services/readiness.py``)
+# and the hung-children watchdog
+# (``daemon/repositories/instance/repository.py::
+# _build_hung_children_sql``) — evaluate ``now()`` in the PostgreSQL
+# SESSION TimeZone. On a non-UTC session (+07 in production) the ages
+# inflate by the session offset (~7h vs the 120s/3600s thresholds):
+# /readyz would be permanently degraded from the first post-activation
+# heartbeat and every non-terminal child would be falsely flagged
+# hung (auto-revive storm risk). Forcing the session clock to UTC
+# aligns every SQL-side reader with the naive-UTC digit writers at
+# once — not just the two flagged sites.
+#
+# libpq semantics: ``options`` is the standard libpq connection
+# parameter carrying server command-line options; ``-c timezone=UTC``
+# is the connect-time equivalent of ``SET timezone='UTC'`` and takes
+# precedence over server/database/role timezone defaults. psycopg3
+# merges SQLAlchemy ``connect_args`` kwargs into the conninfo, so the
+# option reaches libpq verbatim.
+PG_SESSION_CONNECT_ARGS: dict[str, str] = {"options": "-c timezone=UTC"}
 
 
 def create_postgres_engine(config: "EnsembleConfig") -> Engine:
@@ -205,6 +248,15 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
         pool_size=5,
         max_overflow=10,
         pool_pre_ping=True,
+        # B2/B3: render every PG session clock in UTC (see
+        # ``PG_SESSION_CONNECT_ARGS`` above). ``connect_args`` bind at
+        # connection CREATION — initial pool fill, overflow growth,
+        # and any replacement after a pool_pre_ping invalidation all
+        # pass through the same creator, so no pooled connection can
+        # escape the UTC frame. pool_pre_ping's checkout probe does
+        # not (and cannot) reset the option; it only recycles dead
+        # connections through this same path.
+        connect_args=dict(PG_SESSION_CONNECT_ARGS),
     )
     return engine
 

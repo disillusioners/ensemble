@@ -10,6 +10,8 @@ import time
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from daemon.services.timestamps import now_utc_naive
 from pathlib import Path
 from typing import Any
 from langgraph.graph.state import CompiledStateGraph
@@ -3691,6 +3693,50 @@ class InstanceManager:
             )
             return None
 
+    def has_live_graph_task(self, instance_id: str) -> bool:
+        """Return ``True`` when a live (not-done) LangGraph task exists.
+
+        Dispatch-lane stranding fix (feature/fix-question-resume-stuck,
+        2026-09-14 — DEFECT A defensive seam). ``status == "running"`` is
+        only a valid signal for the RAM-FIFO injection lane when a live
+        graph consumer exists to drain ``_pending_injections``. A
+        spawn-created child that was cascade-paused and cascade-resumed
+        WITHOUT ever being dispatched reads ``status="running"`` while
+        having NO graph (zero task/message/checkpoint rows) — the
+        pre-fix injection lane silently stranded such dispatches in
+        memory forever (incident 2026-09-14: leader send_message →
+        "[Injection] Appended pending message ... queue_depth=1" with no
+        graph to ever drain it → tree wedged at WAITING_CHILDREN).
+
+        The three injection-lane consumers (``routers/messages.py``,
+        ``tools/instance.py``, ``tools/job_queue.py`` — the
+        ``INJECTION_ELIGIBLE_STATUSES`` consumer set) MUST call this
+        BEFORE choosing the in-memory lane; a ``False`` result routes
+        the send through the durable enqueue pipeline instead.
+
+        Read-only — no state mutation, no facade-forwarding implications.
+
+        Contract: this method MUST NOT raise. It is a read-only
+        in-memory state introspection (``dict.get`` + ``task.done()``)
+        with no DB calls and no locks. All three call sites
+        (``tools/instance.py:3052``, ``routers/messages.py``,
+        ``tools/job_queue.py:2316``) invoke it unguarded — they
+        branch on the returned ``bool`` to choose between the RAM-FIFO
+        injection lane and the durable enqueue lane. Raising here
+        would surface as an uncaught ``KeyError``/``AttributeError``
+        in the caller and strand the dispatch.
+
+        Args:
+            instance_id: Target instance identifier.
+
+        Returns:
+            ``True`` iff ``_graph_tasks[instance_id]`` exists AND is not
+            done. A missing entry (never dispatched, or daemon restart
+            cleared the in-memory registry) returns ``False``.
+        """
+        task = self._graph_tasks.get(instance_id)
+        return task is not None and not task.done()
+
     async def wait_for_instance_quiescent(
         self, instance_id: str, timeout: float = 30.0
     ) -> bool:
@@ -5825,6 +5871,51 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS ix_message_metadata_thread "
                 "ON message_metadata (thread_id)"
             ),
+            # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
+            # Additive columns on ``critical_notes`` per
+            # architecture-recommendation §5.1. The SQLite companion is
+            # ``daemon/migrations/versions/20260915_120000_critical_notes
+            # _lifecycle.sql``; this block is the PostgreSQL counterpart
+            # (the .sql runner is a NO-OP on PG). Fresh PG databases get
+            # the columns via ``SQLModel.metadata.create_all()`` from
+            # ``daemon/repositories/project/models.py::CriticalNoteModel``.
+            # ``superseded_by_id`` is deliberately a SOFT self-reference
+            # (no DB FK) — see the model comment for the dialect-divergence
+            # rationale. ``last_reviewed_at`` is backfilled with the same
+            # NULL-guarded UPDATE as the SQLite migration (idempotent).
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned_at TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned_by TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS superseded_by_id TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS last_reviewed_at TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS detail_ref TEXT",
+            (
+                "UPDATE critical_notes SET last_reviewed_at = created_at "
+                "WHERE last_reviewed_at IS NULL"
+            ),
+            # PARTIAL indexes — NOT expressible via SQLModel/create_all
+            # (reviewer #5), so BOTH PG lineages (migration-shaped and
+            # create_all-shaped) converge on them HERE, and only here.
+            # Names + predicates MUST stay byte-identical with the SQLite
+            # companion migration.
+            (
+                "CREATE INDEX IF NOT EXISTS ix_critical_notes_pinned "
+                "ON critical_notes(project_id, pinned) WHERE pinned = TRUE"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_critical_notes_superseded_by_id "
+                "ON critical_notes(superseded_by_id) WHERE superseded_by_id IS NOT NULL"
+            ),
+            # ── Drop the dead projects.critical_notes JSON column ──
+            # PostgreSQL counterpart of migration
+            # ``20260915_120001_drop_projects_critical_notes_json.sql``
+            # (whose SQLite path is precondition-gated on ≥3.35.0 via the
+            # runner's PRECONDITION mechanism; PG has supported
+            # DROP COLUMN forever, so this executes unconditionally —
+            # IF EXISTS keeps it idempotent). Fresh PG databases no-op
+            # (create_all() never emitted the column — the Project model
+            # has no such field).
+            "ALTER TABLE projects DROP COLUMN IF EXISTS critical_notes",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -7175,7 +7266,9 @@ class InstanceManager:
                     ):
                         return True
                     inst_row.status = InstanceStatus.RUNNING.value
-                    inst_row.last_activity_at = datetime.now(timezone.utc)
+                    # Naive-UTC digits (DC-A fix): last_activity_at
+                    # is a tz-naive column on PostgreSQL.
+                    inst_row.last_activity_at = now_utc_naive()
                     inst_row.version = (inst_row.version or 1) + 1
                     inst_row.updated_at = datetime.now(timezone.utc).isoformat()
                     session.add(inst_row)
@@ -7690,7 +7783,7 @@ class InstanceManager:
                                 type=MessageType.COMPLETION_REPORT.value,
                                 status=MessageStatus.FAILED.value,
                                 priority=0,
-                                enqueued_at=datetime.now(timezone.utc),
+                                enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                             )
                         )
                         logger.info(
@@ -7718,7 +7811,7 @@ class InstanceManager:
                             type=MessageType.COMPLETION_REPORT.value,
                             status=MessageStatus.READY.value,
                             priority=0,
-                            enqueued_at=datetime.now(timezone.utc),
+                            enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                         )
                     )
                     if existing_task is None:
@@ -8104,7 +8197,7 @@ class InstanceManager:
                     type=MessageType.COMPLETION_REPORT.value,
                     status=MessageStatus.FAILED.value,
                     priority=0,
-                    enqueued_at=datetime.now(timezone.utc),
+                    enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                 )
             )
         else:
@@ -8120,7 +8213,7 @@ class InstanceManager:
                     type=MessageType.COMPLETION_REPORT.value,
                     status=MessageStatus.READY.value,
                     priority=0,
-                    enqueued_at=datetime.now(timezone.utc),
+                    enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                 )
             )
 
@@ -8344,7 +8437,7 @@ class InstanceManager:
                                 type=MessageType.COMPLETION_REPORT.value,
                                 status=MessageStatus.FAILED.value,
                                 priority=0,
-                                enqueued_at=datetime.now(timezone.utc),
+                                enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                             )
                         )
                         logger.info(
@@ -8372,7 +8465,7 @@ class InstanceManager:
                             type=MessageType.COMPLETION_REPORT.value,
                             status=MessageStatus.READY.value,
                             priority=0,
-                            enqueued_at=datetime.now(timezone.utc),
+                            enqueued_at=now_utc_naive(),  # naive-UTC digits (DC-A fix)
                         )
                     )
                     if existing_task is None:
@@ -8745,6 +8838,144 @@ class InstanceManager:
     # mirroring ``_MAX_TRAVERSAL_DEPTH = 256`` precedent).
     LIVE_DESCENDANTS_BFS_CAP = 500
 
+    def _count_descendants_busy_and_live(
+        self, instance_id: str
+    ) -> tuple[int, int]:
+        """ONE BFS pass returning ``(busy_count, live_count)``.
+
+        Shared walker for :meth:`count_live_descendants` and the
+        2026-09-12 sibling :meth:`count_busy_descendants` (busy
+        trigger suppression — the LCA mid-work trigger suppression
+        feature). Both public methods invoke this helper so the BFS
+        machinery (the ``get_tree_ids_permanent`` call + per-id
+        ``repo.get`` reads + dormant work-en-route batched lookups)
+        is identical — single source of truth for the descendant
+        scan. The busy count is a strict subset of the live count
+        (PAUSED is live-for-deny-protection but NOT busy for hint
+        suppression; conditional-live dormant ids with work en route
+        are live but NOT busy).
+
+        Cost: ONE BFS pass per invocation. The two public methods
+        together = two passes total (each independent). Gate sits on
+        the routing hot path with a 20ms P95 budget; this helper's
+        predecessor single-pass had P95 ~0.016ms (see
+        :meth:`count_live_descendants` docstring) — two passes stay
+        well under budget.
+
+        Fail-open contract mirrors :meth:`count_live_descendants` —
+        DB errors propagate out of this helper (the gate's
+        ``except Exception`` DB seam converts them to fail-open
+        ALLOWED with the relevant count surfaced as ``-1``).
+
+        Args:
+            instance_id: The leader instance whose subtree to scan
+                (root is excluded from both counts).
+
+        Returns:
+            Tuple ``(busy_count, live_count)``. busy = status in
+            ``{RUNNING, WAITING, WAITING_CHILDREN}`` (the
+            unconditional-busy subset). live = the existing two-set
+            live definition (inc. PAUSED + conditional-live dormant
+            with work en route). Both 0 when the root is not found,
+            has no descendants, or every descendant is terminal.
+            Both bounded by :data:`LIVE_DESCENDANTS_BFS_CAP`.
+        """
+        repo = getattr(self, "_instance_repository", None)
+        if repo is None:
+            # No repo wired ⇒ no descendants known. Mirrors the
+            # ``count_pending_children`` fail-closed-allow semantics:
+            # unreadable ⇒ 0 (genuinely zero, not fail-open dodge).
+            return (0, 0)
+        # Permanent lineage — same source as ``get_tree_ids_permanent``;
+        # the repository already caps the BFS at _MAX_TRAVERSAL_DEPTH=256
+        # and WARN-logs if the cap is hit. We apply our own additional
+        # cap of LIVE_DESCENDANTS_BFS_CAP on the descendant slice to
+        # bound the hot-path cost.
+        tree_ids = repo.get_tree_ids_permanent(instance_id)
+        # Exclude the root itself.
+        descendant_ids = [iid for iid in tree_ids if iid != instance_id]
+        if not descendant_ids:
+            return (0, 0)
+        # Apply our hot-path cap.
+        cap = self.LIVE_DESCENDANTS_BFS_CAP
+        scanned = descendant_ids[:cap]
+        terminal_statuses = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        }
+        # Busy subset = unconditional-live MINUS PAUSED. PAUSED is
+        # live-for-deny-protection (the b08f40fe amendment kept
+        # PAUSED in the unconditional-live set so a stuck-paused
+        # subtree still blocks the deny path) but is NOT busy
+        # for the LCA trigger-suppression class — a PAUSED child
+        # is suspect, not healthy, and the existing marker
+        # suppression logic at ``attestation_gate.evaluate`` keeps
+        # the marker/length trigger armed on PAUSED so a stuck
+        # child is caught.
+        busy_statuses = {
+            InstanceStatus.RUNNING.value,
+            InstanceStatus.WAITING.value,
+            InstanceStatus.WAITING_CHILDREN.value,
+        }
+        unconditional_live_statuses = busy_statuses | {
+            InstanceStatus.PAUSED.value,
+        }
+        conditional_live_statuses = {
+            InstanceStatus.IDLE.value,
+            InstanceStatus.QUEUED.value,
+        }
+        busy_count = 0
+        live_count = 0
+        dormant_ids: list[str] = []
+        for iid in scanned:
+            row = repo.get(iid)
+            if row is None:
+                # Row missing (likely purged) — skip; not live.
+                continue
+            status = row.status
+            if status in terminal_statuses:
+                continue
+            if status in busy_statuses:
+                busy_count += 1
+                live_count += 1
+            elif status in unconditional_live_statuses:
+                # PAUSED: live-for-deny but NOT busy-for-suppression.
+                live_count += 1
+            elif status in conditional_live_statuses:
+                # Dormant — live only if work is en route (checked in
+                # one batch after the walk; incident b08f40fe).
+                # Dormant is never busy (no execution happening).
+                dormant_ids.append(iid)
+            else:
+                # Unknown status — preserve the historical default
+                # (not terminal ⇒ live) so a future enum member can
+                # never silently read as not-live. Unknown is
+                # treated as live (PAUSED-like — suspect) and
+                # therefore NOT busy (strict-subset rule).
+                live_count += 1
+        if dormant_ids:
+            # Resolve the two work-en-route lanes (production wiring:
+            # manager-level message-queue repo; job repo behind the
+            # late-bound JobQueueService — see the helper's wiring
+            # notes) and count only the dormant ids that carry work.
+            # Dormant-with-work is live (existing two-set) but NOT
+            # busy (still no execution — work is merely en route).
+            msg_repo = getattr(self, "_queue_repository", None)
+            job_service = getattr(self, "_job_queue_service", None)
+            job_repo = (
+                getattr(job_service, "_repository", None)
+                if job_service is not None
+                else None
+            )
+            live_count += len(
+                _dormant_descendants_with_work_en_route(
+                    msg_repo, job_repo, dormant_ids
+                )
+            )
+        return (busy_count, live_count)
+
     def count_live_descendants(self, instance_id: str) -> int:
         """Count work-bearing descendants of this instance (R2 third input).
 
@@ -8799,6 +9030,21 @@ class InstanceManager:
         leader be denied on a possibly-wrong zero, and the -1 row makes
         the degenerate read visible).
 
+        Implementation note (2026-09-12, busy trigger suppression):
+        this method now delegates to the shared private helper
+        :meth:`_count_descendants_busy_and_live` — ONE BFS pass
+        returning both ``(busy_count, live_count)``. The busy subset
+        (``RUNNING``/``WAITING``/``WAITING_CHILDREN`` only) is the
+        trigger-suppression input at the LCA gate; the live count is
+        the existing deny-predicate input. The helper is the single
+        source of truth for both — the per-id ``repo.get`` reads and
+        the dormant work-en-route batched lookup are shared, never
+        duplicated. The 2026-09-06 incident docstring
+        (809e2a59 deferral-watcher-fire gap) and the b08f40fe
+        two-set amendment are preserved verbatim on the helper —
+        the public facade is a thin pass-through for its respective
+        count.
+
         The watcher lifecycle emits PENDING dependency rows for direct
         children but DELIBERATELY fires the watcher on
         ``child_still_running_defer`` so the parent's
@@ -8833,80 +9079,65 @@ class InstanceManager:
             Bounded by :data:`LIVE_DESCENDANTS_BFS_CAP` (the tree walk
             stops at the cap — admin-tool territory past that).
         """
-        repo = getattr(self, "_instance_repository", None)
-        if repo is None:
-            # No repo wired ⇒ no descendants known. Mirrors the
-            # ``count_pending_children`` fail-closed-allow semantics:
-            # unreadable ⇒ 0 (genuinely zero, not fail-open dodge).
-            return 0
-        # Permanent lineage — same source as ``get_tree_ids_permanent``;
-        # the repository already caps the BFS at _MAX_TRAVERSAL_DEPTH=256
-        # and WARN-logs if the cap is hit. We apply our own additional
-        # cap of LIVE_DESCENDANTS_BFS_CAP on the descendant slice to
-        # bound the hot-path cost.
-        tree_ids = repo.get_tree_ids_permanent(instance_id)
-        # Exclude the root itself.
-        descendant_ids = [iid for iid in tree_ids if iid != instance_id]
-        if not descendant_ids:
-            return 0
-        # Apply our hot-path cap.
-        cap = self.LIVE_DESCENDANTS_BFS_CAP
-        scanned = descendant_ids[:cap]
-        terminal_statuses = {
-            InstanceStatus.COMPLETED.value,
-            InstanceStatus.TERMINATED.value,
-            InstanceStatus.ERROR.value,
-            InstanceStatus.FAILED.value,
-        }
-        unconditional_live_statuses = {
-            InstanceStatus.RUNNING.value,
-            InstanceStatus.WAITING.value,
-            InstanceStatus.WAITING_CHILDREN.value,
-            InstanceStatus.PAUSED.value,
-        }
-        conditional_live_statuses = {
-            InstanceStatus.IDLE.value,
-            InstanceStatus.QUEUED.value,
-        }
-        live_count = 0
-        dormant_ids: list[str] = []
-        for iid in scanned:
-            row = repo.get(iid)
-            if row is None:
-                # Row missing (likely purged) — skip; not live.
-                continue
-            status = row.status
-            if status in terminal_statuses:
-                continue
-            if status in unconditional_live_statuses:
-                live_count += 1
-            elif status in conditional_live_statuses:
-                # Dormant — live only if work is en route (checked in
-                # one batch after the walk; incident b08f40fe).
-                dormant_ids.append(iid)
-            else:
-                # Unknown status — preserve the historical default
-                # (not terminal ⇒ live) so a future enum member can
-                # never silently read as not-live.
-                live_count += 1
-        if dormant_ids:
-            # Resolve the two work-en-route lanes (production wiring:
-            # manager-level message-queue repo; job repo behind the
-            # late-bound JobQueueService — see the helper's wiring
-            # notes) and count only the dormant ids that carry work.
-            msg_repo = getattr(self, "_queue_repository", None)
-            job_service = getattr(self, "_job_queue_service", None)
-            job_repo = (
-                getattr(job_service, "_repository", None)
-                if job_service is not None
-                else None
-            )
-            live_count += len(
-                _dormant_descendants_with_work_en_route(
-                    msg_repo, job_repo, dormant_ids
-                )
-            )
+        _, live_count = self._count_descendants_busy_and_live(instance_id)
         return live_count
+
+    def count_busy_descendants(self, instance_id: str) -> int:
+        """Count busy descendants of this instance (LCA trigger suppression).
+
+        Attestation-gate trigger-suppression input (``busy_descendants``,
+        2026-09-12 — LCA busy trigger suppression). Counts descendants
+        in the UNCONDITIONAL-BUSY subset ONLY: status in
+        ``{RUNNING, WAITING, WAITING_CHILDREN}``. PAUSED is excluded
+        (suspect, not healthy — the gate keeps the marker/length trigger
+        armed on PAUSED so a stuck child is caught). Conditional-live
+        dormant ``IDLE``/``QUEUED`` ids are excluded too (no execution
+        happening — only work en route). Terminal ``COMPLETED``/
+        ``TERMINATED``/``ERROR``/``FAILED`` are excluded.
+
+        Why busy ≠ live:
+          * Live = deny-predicate input (existing third R2 input, the
+            809e2a59 + b08f40fe two-set). Live blocks the deny path
+            because a wakeup is en route.
+          * Busy = trigger-suppression input (new). A leader awaiting
+            a RUNNING/WAITING/WAITING_CHILDREN child is doing the
+            HEALTHY thing — the route-(b) Completion Check hint
+            (markers + length trigger firing + judge-no + real pending)
+            is NOISE on essentially every awaiting turn-end. When
+            ``busy_descendants > 0`` the marker/length trigger is
+            suppressed ENTIRELY: NO judge call, NO route-(b) hint,
+            plain allow. PAUSED is kept in the trigger-armed set
+            because a stuck child is suspect.
+
+        Same BFS as :meth:`count_live_descendants` (shared private
+        helper :meth:`_count_descendants_busy_and_live` returns both
+        counts in ONE pass). ONE BFS pass per invocation. Gate hot
+        path budget: this call + ``count_live_descendants`` together
+        stay well under the 20ms P95 (current P95 ~0.016ms per pass
+        on the existing single-pass shape).
+
+        Fail-open contract: identical to :meth:`count_live_descendants`
+        — DB errors propagate out of the helper; the gate's
+        ``except Exception`` DB seam converts them to fail-open
+        ALLOWED with ``busy_descendants=-1`` in the log row (the -1
+        sentinel is the same surface every other R2 read gets —
+        a flaky DB must not let a leader be denied on a
+        possibly-wrong zero).
+
+        Args:
+            instance_id: The leader instance whose subtree to scan
+                (root is excluded from the count).
+
+        Returns:
+            Non-negative int count of busy descendants
+            (``{RUNNING, WAITING, WAITING_CHILDREN}`` only). 0 when
+            the root is not found OR no descendants exist OR every
+            descendant is terminal-or-PAUSED-or-dormant. Bounded by
+            :data:`LIVE_DESCENDANTS_BFS_CAP` (the tree walk stops at
+            the cap — admin-tool territory past that).
+        """
+        busy_count, _ = self._count_descendants_busy_and_live(instance_id)
+        return busy_count
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.

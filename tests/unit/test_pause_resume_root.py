@@ -298,7 +298,8 @@ class TestPauseResumeRoot:
              named pause/cancel transitions per §8.2).
           6. ``_finalize_job_db_sync(job_id=None, terminal_status=
              "completed", ...)`` — Step 1 (JobItem UPDATE) is skipped,
-             Steps 2+3 (instance → COMPLETED, lock release) run.
+             Step 2 (instance → COMPLETED) runs; Step 3 (lock
+             release) is a W1 job-scoped no-op on this path.
 
         The instance reaches ``COMPLETED`` (not stuck in PAUSED or
         RUNNING) — the original B1 bug the D13 rewrite fixed.
@@ -445,9 +446,16 @@ class TestPauseResumeRoot:
         assert finalize_result.skip is False
         assert finalize_result.terminal_status == InstanceStatus.COMPLETED.value
         assert finalize_result.instance_id == iid
-        assert finalize_result.locks_released == 1, (
-            "Step 3 (lock release) must run even with job_id=None; "
-            "the seeded JobLock must be deleted"
+        # W1 re-contract (job-scoped lock release): with ``job_id=None``
+        # the finalized virtual job cannot hold a lock of its own
+        # (``job_locks.job_id`` is non-nullable; virtual jobs never
+        # acquire per-queue locks), so Step 3 releases NOTHING — the
+        # old assertion (``locks_released == 1`` + "the seeded JobLock
+        # must be deleted") pinned the condemned instance-wide
+        # release, which could only ever delete OTHER jobs' locks.
+        assert finalize_result.locks_released == 0, (
+            "W1: Step 3 is job-scoped — on the job_id=None path "
+            "nothing of this finalize's own is released"
         )
         assert finalize_result.instance_was_terminal is False
 
@@ -458,11 +466,16 @@ class TestPauseResumeRoot:
             f"got {inst_final.status!r}"
         )
 
-        # 6b. Lock released.
-        assert _count_locks(engine, iid) == 0, (
-            "Step 3 (lock release) must delete the seeded JobLock; "
-            "leaked locks would block the per-instance serialization "
-            "guard for the next message on this instance"
+        # 6b. Lock contract (W1 job-scoped): the seeded JobLock (keyed
+        # to an independent job_id) SURVIVES the None-path finalize.
+        # A genuinely-orphaned other-job lock is reclaimed by
+        # ``JobLockSweepService`` (terminal-job locks, ≤90s) or F5
+        # ``force_finalize_orphan`` (stuck-active) — not by this
+        # finalize.
+        assert _count_locks(engine, iid) == 1, (
+            "W1: the seeded (other-job) lock must SURVIVE the "
+            "job_id=None finalize — instance-wide release is the "
+            "condemned defect class"
         )
 
         # 6c. No JobItem exists (we never seeded one) — Step 1 was a

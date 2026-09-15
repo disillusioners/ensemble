@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+
+from daemon.services.timestamps import now_utc, now_utc_iso
 import logging
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -218,11 +220,13 @@ class _ProcessingJobContext(NamedTuple):
         (``notify_watchers``, ``_trigger_next_job``) fire with this
         ``job_id``.
       * ``job_id is None`` — MESSAGE-driven instances in the post-D13
-        world. Step 1 is skipped (no JobItem to UPDATE); Steps 2+3
-        (instance status + lock release) ALWAYS run; downstream
-        ``notify_watchers`` and ``_trigger_next_job`` are skipped
-        (no JobItem to notify watchers of, and the next job, if any,
-        is claimed by the WorkerPool path).
+        world. Step 1 is skipped (no JobItem to UPDATE); Step 2
+        (instance status) runs unconditionally; Step 3 (lock release) is a
+        W1 job-scoped no-op on this path (the virtual job holds no
+        lock of its own; locks keyed to other jobs' ``job_id`` MUST
+        SURVIVE); downstream ``notify_watchers`` and ``_trigger_next_job``
+        are skipped (no JobItem to notify watchers of, and the next
+        job, if any, is claimed by the WorkerPool path).
 
     ``instance_id`` is always set (even when ``job_id`` is ``None``) —
     it is the canonical identifier the finalize chain operates on.
@@ -740,8 +744,11 @@ class JobFeedbackObserver:
           3. Otherwise (no PROCESSING row) → return
              ``_ProcessingJobContext(instance_id, job_id=None)`` — the
              post-D13 MESSAGE path. ``_finalize_job_db_sync`` will
-             skip Step 1 (no JobItem to UPDATE) but still run Steps 2+3
-             (instance status + lock release are critical).
+             skip Step 1 (no JobItem to UPDATE); Step 2 (instance
+             status) still runs; Step 3 (lock release) is a W1
+             job-scoped no-op on this path (the virtual job holds no
+             lock of its own; locks keyed to other jobs' ``job_id``
+             MUST SURVIVE).
           4. If no JobItem row exists at all (only Task rows; pure
              post-D13 path) → same as case 3, return the context with
              ``job_id=None``. The observer's terminal chain
@@ -884,11 +891,14 @@ class JobFeedbackObserver:
                     )
 
         # Post-D13 MESSAGE path (Task 2.5.3): no JobItem exists for the
-        # instance. The terminal chain must STILL run — Steps 2+3
-        # (instance status + lock release) are critical and depend on
-        # this finalize call reaching them. ``job_id=None`` tells
-        # ``_finalize_job_db_sync`` to skip Step 1 (no JobItem to
-        # UPDATE) and run Steps 2+3 unconditionally.
+        # instance. The terminal chain must STILL run — Step 2 (instance
+        # status) is critical and runs unconditionally; Step 3 (lock
+        # release) is a W1 job-scoped no-op on this ``job_id=None`` path
+        # (the virtual job holds no lock of its own; locks keyed to
+        # other jobs' ``job_id`` on the same instance MUST SURVIVE).
+        # ``job_id=None`` tells ``_finalize_job_db_sync`` to skip Step 1
+        # (no JobItem to UPDATE), run Step 2 unconditionally, and no-op
+        # Step 3.
         return _ProcessingJobContext(instance_id=instance_id, job_id=None)
 
     async def _get_task_row_by_work_id(self, work_id: str) -> Any | None:
@@ -1181,9 +1191,11 @@ class JobFeedbackObserver:
         # Phase 2.5 (Task 2.5.6): pass the _ProcessingJobContext to
         # ``_finalize_job``. ``ctx.job_id`` may be ``None`` (post-D13
         # MESSAGE path) — ``_finalize_job_db_sync`` handles that by
-        # skipping Step 1 (no JobItem UPDATE) and running Steps 2+3
-        # (instance status + lock release) unconditionally. The
-        # terminal transition fires regardless.
+        # skipping Step 1 (no JobItem UPDATE); Step 2 (instance status)
+        # runs unconditionally; Step 3 (lock release) is a W1
+        # job-scoped no-op on this path (the virtual job holds no lock
+        # of its own; locks keyed to other jobs' ``job_id`` MUST
+        # SURVIVE). The terminal transition fires regardless.
         await self._finalize_job(
             ctx, instance_id, status_to_finalize, error=error_for_finalize
         )
@@ -1442,9 +1454,11 @@ class JobFeedbackObserver:
         (instance_id + job_id) rather than a ``JobItem``. When
         ``ctx.job_id is None`` (post-D13 MESSAGE path — no
         ``JobItem`` exists for the message-driven instance),
-        ``_finalize_job_db_sync`` skips Step 1 (JobItem UPDATE)
-        and runs Steps 2+3 (instance status + lock release)
-        unconditionally. The downstream side effects
+        ``_finalize_job_db_sync`` skips Step 1 (JobItem UPDATE);
+        Step 2 (instance status) runs unconditionally; Step 3 (lock
+        release) is a W1 job-scoped no-op on this path (the virtual
+        job holds no lock of its own; locks keyed to other jobs'
+        ``job_id`` MUST SURVIVE). The downstream side effects
         (``notify_watchers``, ``_trigger_next_job``) are also
         skipped — there is no JobItem to notify watchers of, and
         any follow-up work is claimed via the WorkerPool path,
@@ -1627,8 +1641,10 @@ class JobFeedbackObserver:
             # The JobItem-only re-arm below is skipped when no
             # ``JobItem`` exists. The instance-level side effects
             # (Steps 2+3 in ``_finalize_job_db_sync``) have already
-            # committed inside the WriteGuardSession; the per-instance
-            # lock release is already done — there is nothing further
+            # committed inside the WriteGuardSession; Step 3's
+            # job-scoped release is a W1 no-op when no JobItem exists
+            # (no lock of its own to release — locks keyed to other
+            # jobs' ``job_id`` survive) — there is nothing further
             # to re-arm at the JobItem layer. The bus's own
             # watcher/generation state IS the re-arm signal.
             if (
@@ -2185,7 +2201,9 @@ class JobFeedbackObserver:
                         job_id=ctx.job_id,
                         from_status="processing",
                         to_status="failed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        # TEXT-column stamp (tz fix): shared aware-ISO
+                        # producer keeps the legacy format byte-stable.
+                        completed_at=now_utc_iso(),
                         error_message=f"Job finalization failed: {e}",
                         # failed_at stamp (paused-race amendment,
                         # 2026-08-25): the W3 fail-safe IS the failed
@@ -2196,7 +2214,7 @@ class JobFeedbackObserver:
                         # unchanged (not in ``_REMOVED_JOB_COLUMNS``),
                         # keeping the row retryable via
                         # ``atomic_retry``.
-                        failed_at=datetime.now(timezone.utc).isoformat(),
+                        failed_at=now_utc_iso(),
                     )
                     logger.info(
                         f"Observer: fail-safe transitioned job "
@@ -2304,9 +2322,11 @@ class JobFeedbackObserver:
         # than a ``JobItem | None``. The ``ctx`` is ``None`` ONLY when
         # the lookup itself raises — callers treat ``None`` as "skip
         # silently". When ``ctx.job_id is None`` (post-D13 MESSAGE
-        # path), we still proceed with finalize — the instance status
-        # transition + lock release are critical and depend on this
-        # finalize call reaching them. The pre-D13 short-circuit
+        # path), we still proceed with finalize — Step 2 (instance
+        # status) is critical and runs unconditionally; Step 3 (lock
+        # release) is a W1 job-scoped no-op on this path (the virtual
+        # job holds no lock of its own; locks keyed to other jobs'
+        # ``job_id`` MUST SURVIVE). The pre-D13 short-circuit
         # (``if job is None: return``) is gone because in the
         # post-D13 world, ``ctx`` is non-None whenever the instance
         # row exists (the helper returns a context with
@@ -3108,9 +3128,16 @@ class JobFeedbackObserver:
             parent_id = instance.parent_id
             agent_id = instance.agent_id
 
+            # D9 dead-site resolution (tz fix) — convert (smaller than
+            # delete; preserves the symmetry-coverage guarantee the
+            # W2 dead-site comment relies on). Same µs-twin mint as
+            # the live observer twin: ONE aware instant, derive
+            # TEXT iso + naive digits from the SAME datetime so the
+            # µs-match survives.
+            now_d9 = now_utc()
             instance.status = new_status
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.updated_at = now_d9.isoformat()
+            instance.last_activity_at = now_d9.replace(tzinfo=None)
             instance.version = (instance.version or 1) + 1
             session.commit()
 
@@ -3164,11 +3191,18 @@ class JobFeedbackObserver:
           2. Instance status update to COMPLETED/ERROR (status, updated_at,
              last_activity_at, version bump). Skipped if already terminal
              OR if the row is missing.
-          3. Lock release — DELETE every ``job_locks`` row where
-             ``instance_id`` matches. Inlined here (instead of calling
-             ``LockRepository.release_by_instance`` which opens its own
-             session — a separate transaction that would defeat the
-             atomicity we need).
+          3. Lock release — DELETE the ``job_locks`` rows keyed by THIS
+             job's own ``job_id`` (W1 job-scoped release — NOT
+             instance-wide: a sibling concurrent job's lock or a
+             post-revive successor's lock on the same instance MUST
+             survive; canonical job-keyed shape is
+             ``LockRepository.release_by_job``; ``job_id`` alone
+             because ``JobItem`` partition keys are nullable).
+             Inlined here (instead of calling
+             ``LockRepository.release_by_job`` (post-W1 canonical
+             job-keyed helper) or ``release_by_instance`` — both open
+             their own session, a separate transaction that would defeat
+             the atomicity we need).
 
         If any step raises, none of them commit (the
         ``WriteGuardSession.__exit__`` rolls back via the underlying
@@ -3177,10 +3211,17 @@ class JobFeedbackObserver:
         Phase 2.5 (Task 2.5.4, D13 consumption-site rewrite): the
         ``job_id`` parameter is now ``str | None``. When ``job_id is
         None`` (post-D13 MESSAGE path — no ``JobItem`` exists for the
-        instance), Step 1 is skipped entirely and Steps 2+3 still run.
+        instance), Step 1 is skipped entirely and Step 2 still runs.
         This is the **least disruptive** option per the plan: the
-        instance transition (Step 2) and lock release (Step 3) are
-        critical — they MUST fire even without a JobItem. The JobItem
+        instance transition (Step 2) is critical — it MUST fire even
+        without a JobItem. The lock release (Step 3) is W1
+        job-scoped: on the ``job_id=None`` path the finalized virtual
+        job cannot hold a lock of its own (``job_locks.job_id`` is
+        non-nullable; virtual jobs never acquire per-queue locks), so
+        the release correctly no-ops — releasing instance-wide there
+        could only ever delete OTHER jobs' locks (the W1 defect
+        class). Stale/unrelated locks are reclaimed by
+        ``JobLockSweepService``. The JobItem
         UPDATE (Step 1) is redundant in the no-JobItem case (there is
         nothing to UPDATE). The bus gate (premature-finalization
         defense) and the in-session gate are preserved regardless
@@ -3231,7 +3272,8 @@ class JobFeedbackObserver:
         Args:
             job_id: The job to transition. ``None`` skips Step 1 (no
                 ``JobItem`` exists for the instance — post-D13 MESSAGE
-                path). Steps 2+3 still run.
+                path); Step 2 (instance status) still runs; Step 3
+                (lock release) is a W1 job-scoped no-op on this path.
             instance_id: The parent instance ID (instance update + lock release).
             terminal_status: ``"completed"`` or ``"error"``.
             result_summary: Pre-fetched result summary for the COMPLETED path.
@@ -3706,8 +3748,15 @@ class JobFeedbackObserver:
             # stale state from a prior incident.
             _gate_defer_counts.pop(instance_id, None)
 
-            now = datetime.now(timezone.utc).isoformat()
-            now_dt = datetime.now(timezone.utc)
+            # µs-twin mint (tz fix): ONE aware instant; the TEXT
+            # twin (updated_at) keeps the aware-ISO format, the
+            # naive-column twin (last_activity_at) carries naive-UTC
+            # digits of the SAME instant (the µs-match between the
+            # twins is a D7 backfill detection heuristic and must
+            # survive).
+            now_dt_aware = now_utc()
+            now = now_dt_aware.isoformat()
+            now_dt = now_dt_aware.replace(tzinfo=None)
 
             # ─── Step 1: Job atomic transition (in-session UPDATE) ───
             # Mirrors ``JobRepository.atomic_transition`` but inside our
@@ -3717,8 +3766,10 @@ class JobFeedbackObserver:
             #
             # Phase 2.5 (Task 2.5.4): Step 1 is **skipped** when
             # ``job_id is None`` — the post-D13 MESSAGE path where no
-            # ``JobItem`` exists for the instance. Steps 2+3 (instance
-            # status + lock release) still run unconditionally. The
+            # ``JobItem`` exists for the instance. Step 2 (instance
+            # status) still runs unconditionally; Step 3 (lock release)
+            # is a W1 job-scoped no-op on this path (the virtual job
+            # holds no lock of its own). The
             # ``InvalidTransitionError`` short-circuit (status-mismatch
             # on concurrent transition) does not apply in this branch
             # — there is no JobItem to mismatch on. The conditional
@@ -3905,7 +3956,8 @@ class JobFeedbackObserver:
                         )
             else:
                 # Phase 2.5 (Task 2.5.4): no JobItem to update.
-                # Fall through to Steps 2+3 unconditionally.
+                # Fall through to Step 2 unconditionally; Step 3 is a
+                # W1 job-scoped no-op on this path.
                 logger.debug(
                     f"Observer: Step 1 (JobItem UPDATE) skipped — "
                     f"no JobItem for instance {instance_id[:8]}... "
@@ -3969,16 +4021,32 @@ class JobFeedbackObserver:
                 instance_was_terminal = False
                 _b_violation_report = b_report
 
-            # ─── Step 3: Lock release ───
+            # ─── Step 3: Lock release (W1 job-scoped) ───
             # Inline the SQL instead of calling
-            # ``LockRepository.release_by_instance`` (which opens its own
-            # session — a separate transaction that would defeat the
-            # atomicity we need). Same SELECT + DELETE pattern.
-            lock_stmt = select(JobLock).where(JobLock.instance_id == instance_id)
-            locks = session.exec(lock_stmt).all()
-            released = len(locks)
-            for lock in locks:
-                session.delete(lock)
+            # ``LockRepository.release_by_job`` (post-W1 canonical
+            # job-keyed helper) or ``release_by_instance`` — both open
+            # their own session, a separate transaction that would defeat
+            # the atomicity we need). Same SELECT + DELETE pattern, scoped
+            # to THIS job's own ``job_id`` (W1 job-scoped release — NOT
+            # instance-wide: a sibling concurrent job's lock or a
+            # post-revive successor's lock on the same instance MUST
+            # survive this finalize; canonical job-keyed shape is
+            # ``LockRepository.release_by_job``; ``job_id`` alone
+            # because ``JobItem`` partition keys are nullable).
+            # When ``job_id is None`` (post-D13 MESSAGE path) the
+            # finalized virtual job cannot hold a lock of its own
+            # (``job_locks.job_id`` is non-nullable; virtual jobs never
+            # acquire per-queue locks) — the old instance-wide DELETE
+            # could only ever delete OTHER jobs' locks there, so the
+            # release correctly no-ops. Stale/unrelated locks are
+            # reclaimed by ``JobLockSweepService`` (bounded sweep).
+            released = 0
+            if job_id is not None:
+                lock_stmt = select(JobLock).where(JobLock.job_id == job_id)
+                locks = session.exec(lock_stmt).all()
+                released = len(locks)
+                for lock in locks:
+                    session.delete(lock)
 
             # ─── Single commit for ALL three DB writes ───
             session.commit()

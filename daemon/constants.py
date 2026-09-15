@@ -51,7 +51,7 @@ BACKOFF_MULTIPLIER: float = 2.0  # Exponential backoff multiplier
 CIRCUIT_BREAKER_THRESHOLD: int = 5  # Failure threshold before circuit opens
 
 # ── Worker Pool ──────────────────────────────────────────────────────────────────
-WORKER_POOL_SIZE: int = 4  # Default number of worker threads
+WORKER_POOL_SIZE: int = 5  # Default number of worker threads
 WORKER_WAIT_TIMEOUT: float = 3.0  # Worker wait timeout (seconds)
 WORKER_STALE_CHECK_INTERVAL: int = 60  # Stale task recovery check interval (seconds)
 STALE_TASK_CANCEL_GRACE_S: int = 10  # Grace period before cancelling stale tasks
@@ -245,6 +245,18 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
 })
+
+# DEFECT A (dispatch-lane stranding fix, feature/fix-question-resume-stuck,
+# 2026-09-14): membership in this set is NECESSARY but NOT SUFFICIENT for
+# the RAM-FIFO injection lane. Every consumer MUST additionally verify a
+# live graph consumer exists (``InstanceManager.has_live_graph_task``)
+# before calling ``set_injection`` — a spawn-created child that was
+# cascade-paused and cascade-resumed WITHOUT ever being dispatched reads
+# ``running`` while having no graph (zero task/message/checkpoint rows),
+# and an injection into it is stranded in memory forever (the graph that
+# would drain ``_pending_injections`` never runs). Graphless ``running``
+# targets route through the durable enqueue pipeline instead. The
+# constant itself stays a pure status set (single-home, config-free).
 
 # Terminal instance statuses — companion to ``INJECTION_ELIGIBLE_STATUSES``
 # above. The four instance statuses that ``send_message``'s routing helper

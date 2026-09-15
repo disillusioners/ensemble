@@ -387,6 +387,30 @@ class GateDecision:
     #: cheap allow path with no trigger). Logged alongside the
     #: marker fields; additive to the canonical 17-field tuple.
     trigger_source: str = ""
+    #: 2026-09-12 LCA busy trigger suppression — the count of
+    #: descendants in the unconditional-busy subset
+    #: ``{RUNNING, WAITING, WAITING_CHILDREN}`` ONLY (PAUSED is NOT
+    #: busy — see ``InstanceManager.count_busy_descendants``). Always
+    #: surfaces the count in the schema; 0 means either no
+    #: descendants or every descendant terminal/PAUSED/dormant.
+    #: The gate reads ``busy_descendants > 0`` as the trigger
+    #: suppression signal (suspect-pending shapes PAUSED,
+    #: en-route-only work etc. keep the trigger armed — see
+    #: :func:`evaluate`). Default 0 so a never-evaluated path never
+    #: accidentally suppresses. Additive to the canonical 17-field
+    #: tuple.
+    busy_descendants: int = 0
+    #: 2026-09-12 LCA busy trigger suppression — name of the
+    #: suppressor that disarmed the marker/length trigger on this
+    #: evaluation, or ``""`` when the trigger was not suppressed.
+    #: Currently only ``"busy_descendants"`` is defined (the
+    #: descendants-BFS found at least one busy child ⇒ a healthy
+    #: wait, not a stuck leader; suppress the route-(b) hint that
+    #: would otherwise inject on essentially every awaiting
+    #: turn-end). Empty string on every other path. Logged
+    #: alongside the marker fields; additive to the canonical
+    #: 17-field tuple.
+    trigger_suppressed_by: str = ""
 
 
 #: Marker-path enum constants — the canonical strings the gate emits on
@@ -831,12 +855,18 @@ def evaluate(
         # (ii) R2 inputs — the THREE NEW manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
         # DB seam: `except Exception` (KeyboardInterrupt stays fail-closed).
+        # ``busy_descendants`` (2026-09-12) is the FOURTH input — the
+        # trigger-suppression signal sourced from the SAME BFS as
+        # ``live_descendants`` (shared helper
+        # ``InstanceManager._count_descendants_busy_and_live`` — one
+        # BFS pass per method invocation).
         try:
             pending_children = manager.count_pending_children(instance_id)
             queued_or_expected_wakeups = manager.get_queued_or_expected_wakeups(
                 instance_id
             )
             live_descendants = manager.count_live_descendants(instance_id)
+            busy_descendants = manager.count_busy_descendants(instance_id)
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam
             error_class = type(db_exc).__name__
             logger.error(
@@ -851,6 +881,7 @@ def evaluate(
                 "pending_children=-1 "
                 "queued_or_expected_wakeups=-1 "
                 "live_descendants=-1 "
+                "busy_descendants=-1 "
                 "attest_seen_outside_window=%s "
                 "messages_scanned=%s "
                 "scanned_window_size=%s "
@@ -886,6 +917,7 @@ def evaluate(
                 pending_children=-1,
                 queued_or_expected_wakeups=-1,
                 live_descendants=-1,
+                busy_descendants=-1,
                 denied_count=denied_count,
                 gate_exception_seen=True,
             )
@@ -905,6 +937,13 @@ def evaluate(
         )
 
         # Attach diagnostics + R2 inputs → log-ready object.
+        # ``busy_descendants`` (2026-09-12) is stamped on EVERY
+        # evaluation — the trigger-suppression input is meaningful
+        # even when the marker/length trigger doesn't fire (the
+        # log row carries the count for forensics). The
+        # ``trigger_suppressed_by`` field defaults to ``""`` (set
+        # in the trigger block below only when the trigger fires
+        # AND busy > 0).
         result = replace(
             result,
             scanner_window_truncated=scan.window_truncated,
@@ -916,6 +955,7 @@ def evaluate(
             pending_children=pending_children,
             queued_or_expected_wakeups=queued_or_expected_wakeups,
             live_descendants=live_descendants,
+            busy_descendants=busy_descendants,
             denied_count=denied_count,
             delegation_since_last_user=delegation_scan.delegation_since_last_user,
             last_real_user_found=delegation_scan.last_real_user_found,
@@ -999,17 +1039,51 @@ def evaluate(
             # string ``""`` means neither fired (cheap allow path).
             # Both halves firing ⇒ "markers+length"; one firing ⇒
             # its single name; neither ⇒ "".
-            if marker_result.marker_hit and length_result.length_trigger:
-                trigger_source = "markers+length"
-            elif marker_result.marker_hit:
-                trigger_source = "markers"
-            elif length_result.length_trigger:
-                trigger_source = "length"
-            else:
-                trigger_source = ""
+            #
+            # 2026-09-12 LCA busy trigger suppression — when
+            # ``busy_descendants > 0`` AND at least one trigger
+            # half fires, the WHOLE trigger is suppressed
+            # ENTIRELY: NO judge call, NO route-(b) hint, plain
+            # allow. The marker/length signal STAYS RECORDED on
+            # the log row for observability
+            # (``marker_hit``/``length_trigger`` keep their
+            # computed values; ``trigger_source`` is force-cleared
+            # to ``""`` and ``trigger_suppressed_by`` is set to the
+            # suppressor name ``"busy_descendants"``). The
+            # graph-node judge-firing check reads
+            # ``decision.trigger_suppressed_by == ""`` and skips
+            # the judge block on a non-empty value. PAUSED is NOT
+            # busy (suspect, not healthy) — the trigger stays
+            # armed on PAUSED so a stuck child is caught. Dormant
+            # IDLE/QUEUED is NOT busy (no execution) — also keeps
+            # the trigger armed so en-route-only work is caught.
+            marker_hit_computed = marker_result.marker_hit
+            length_trigger_computed = length_result.length_trigger
             trigger_fires = bool(
-                marker_result.marker_hit or length_result.length_trigger
+                marker_hit_computed or length_trigger_computed
             )
+            trigger_suppressed_by = ""
+            trigger_source = ""
+            if marker_hit_computed and length_trigger_computed:
+                trigger_source = "markers+length"
+            elif marker_hit_computed:
+                trigger_source = "markers"
+            elif length_trigger_computed:
+                trigger_source = "length"
+            if trigger_fires and busy_descendants > 0:
+                # Busy descendant ⇒ healthy wait. Suppress the
+                # trigger ENTIRELY: clear ``trigger_source`` (the
+                # cheap-allow signal), stamp
+                # ``trigger_suppressed_by`` for log forensics. The
+                # marker/length fields keep their computed values
+                # so operators can see in the log row that the
+                # trigger WOULD have fired but for the busy
+                # suppression. ``marker_path`` is force-cleared to
+                # ``""`` since no judge fires — the
+                # route-(a)/(b)/(c)/(d) enum is moot on this
+                # branch.
+                trigger_source = ""
+                trigger_suppressed_by = "busy_descendants"
             if trigger_fires:
                 # The trigger scan is a TRIGGER only. The judge is the
                 # VERDICT. The actual (a)/(b)/(c)/(d) routing happens
@@ -1023,17 +1097,43 @@ def evaluate(
                 # node early-outs before any judge/hint/deny/counter
                 # side effect — the sentinel stays as the final
                 # marker_path on the dry-log row (log-only).
+                #
+                # 2026-09-12 busy-suppression branch — when the
+                # trigger is suppressed (trigger_source cleared +
+                # trigger_suppressed_by set), ``marker_path`` stays
+                # at ``""`` (no judge fires — no path to record).
+                # ``marker_judge_verdict`` is stamped to ``"<pending>"``
+                # sentinel (same as the non-suppressed branch — the
+                # gate always emits the pending sentinel on the
+                # canonical log row; the graph node re-stamps the
+                # final a/b/c/d value on the judge path and the
+                # ``<pending>`` value is what stays on the dry-log
+                # row when no judge runs. The log-row formatter maps
+                # empty ``marker_path`` to ``<none>`` and non-empty
+                # ``marker_judge_verdict`` to its literal — so the
+                # suppressed branch logs as ``marker_path=<none>
+                # marker_judge_verdict=<pending>``, while the dry-log
+                # branch logs as ``marker_path=<pending>
+                # marker_judge_verdict=<pending>``, and the
+                # marker-suppression-vs-trigger signal is observable
+                # in the canonical log row via ``marker_hit`` /
+                # ``length_trigger`` keeping their computed values.
+                marker_path_stamp = (
+                    "<pending>" if not trigger_suppressed_by else ""
+                )
                 result = replace(
                     result,
                     marker_hit=marker_result.marker_hit,
                     marker_terms=marker_result.marker_terms,
-                    marker_path="<pending>",
+                    marker_path=marker_path_stamp,
                     marker_judge_verdict="<pending>",
                     marker_judge_latency_ms=0,
                     marker_judge_error_class=None,
                     length_trigger=length_result.length_trigger,
                     final_word_count=length_result.final_word_count,
                     trigger_source=trigger_source,
+                    busy_descendants=busy_descendants,
+                    trigger_suppressed_by=trigger_suppressed_by,
                 )
 
         # (iv) canonical structured log entry (Phase 4 task 4.5 schema —
@@ -1050,7 +1150,9 @@ def evaluate(
             "gate_location=%s leader_prompt_version=%s mode=%s "
             "attestation_present=%s denied_count=%s next_denied_count=%s "
             "pending_children=%s queued_or_expected_wakeups=%s "
-            "live_descendants=%s attestation_required=%s "
+            "live_descendants=%s busy_descendants=%s "
+            "trigger_suppressed_by=%s "
+            "attestation_required=%s "
             "last_real_user_found=%s last_real_user_index=%s "
             "first_delegation_after_last_user_index=%s "
             "delegation_tool_call_total=%s "
@@ -1072,6 +1174,8 @@ def evaluate(
             result.pending_children,
             result.queued_or_expected_wakeups,
             result.live_descendants,
+            result.busy_descendants,
+            result.trigger_suppressed_by or "<none>",
             result.attestation_required,
             result.last_real_user_found,
             result.last_real_user_index,
@@ -1162,5 +1266,6 @@ def evaluate(
             pending_children=-1,
             queued_or_expected_wakeups=-1,
             live_descendants=-1,
+            busy_descendants=-1,
             gate_exception_seen=True,
         )

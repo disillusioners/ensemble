@@ -152,9 +152,13 @@ class TestUpdateHeartbeat:
             results = [f.result() for f in as_completed([ex.submit(beat) for _ in range(N)])]
         # All beats succeed (task is RUNNING throughout)
         assert all(results), "Some heartbeats lost on a RUNNING task"
-        # Final heartbeat is fresh (within last second)
+        # Final heartbeat is fresh (within last second). tz fix:
+        # last_heartbeat_at stores naive-UTC digits — coerce before
+        # subtracting against the aware clock.
         after = repository.get(t.id).last_heartbeat_at
-        assert (datetime.now(timezone.utc) - after).total_seconds() < 5
+        assert (
+            datetime.now(timezone.utc) - after.replace(tzinfo=timezone.utc)
+        ).total_seconds() < 5
 
 
 class TestBackfillHeartbeats:
@@ -332,9 +336,13 @@ class TestTaskHeartbeat:
         try:
             hb.set_task(t.id)
             time.sleep(0.35)  # ~3 beats at 100ms interval
-            # Heartbeat should be at most ~100ms old
+            # Heartbeat should be at most ~100ms old. tz fix: the
+            # stored value is naive-UTC digits — coerce before
+            # subtracting against the aware clock.
             last = repository.get(t.id).last_heartbeat_at
-            age = (datetime.now(timezone.utc) - last).total_seconds()
+            age = (
+                datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+            ).total_seconds()
             assert age < 1.0, f"heartbeat too stale: {age}s"
         finally:
             hb.stop()
@@ -380,9 +388,13 @@ class TestTaskHeartbeat:
         hb.start()
         try:
             hb.set_task(t.id)
-            # Immediate: heartbeat should be refreshed now, not in 10s
+            # Immediate: heartbeat should be refreshed now, not in 10s.
+            # tz fix: the stored value is naive-UTC digits — coerce
+            # before subtracting against the aware clock.
             last = repository.get(t.id).last_heartbeat_at
-            age = (datetime.now(timezone.utc) - last).total_seconds()
+            age = (
+                datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+            ).total_seconds()
             assert age < 0.5, f"set_task() did not eager-beat: age={age}s"
         finally:
             hb.stop()

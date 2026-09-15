@@ -18,6 +18,18 @@ from pydantic import BaseModel, field_validator
 from daemon.repositories.infra.types import JSONBType
 
 
+def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Single source of truth for ``created_at`` / ``updated_at`` /
+    ``minted_at`` defaults across the project-tree models so the
+    format stays consistent (tz-aware, microsecond-resolution,
+    ``+00:00`` UTC offset). Mirrors the helper in
+    :mod:`daemon.repositories.skill.models`.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 CRITICAL_NOTES_MAX_ENTRIES = 30
 
 
@@ -43,6 +55,23 @@ class CriticalNotes(BaseModel):
     priority: str
     summary: str
     reference: str | None = None
+    # ── Lifecycle columns (critical-notes-retrieval Phase 1, 2026-09-15) ──
+    # This BaseModel TRACKS the storage shape on CriticalNoteModel below
+    # (the round-trip ``CriticalNotes(**note.to_dict())`` idiom in the
+    # tool layer), but is NOT a byte-for-byte mirror: ``last_reviewed_at``
+    # is None-defaulted here to admit legacy NULLs (storage declares it
+    # non-optional on fresh lineages; the legacy column is nullable on
+    # pre-migration DBs). See the model-side comment for the broader
+    # storage-vs-wire drift and the NULL→created_at read fallback.
+    # ``superseded_by_id`` is a SOFT self-reference (plain str, no DB FK —
+    # integrity is enforced leader-only at the tool layer; a hard FK would
+    # give dialect-divergent cascade behavior between PG and SQLite).
+    pinned: bool = False
+    pinned_at: str | None = None
+    pinned_by: str | None = None
+    superseded_by_id: str | None = None
+    last_reviewed_at: str | None = None
+    detail_ref: str | None = None
 
     @field_validator('category')
     @classmethod
@@ -157,6 +186,40 @@ class CriticalNoteModel(SQLModel, table=True):
     priority: str = Field(default="")
     summary: str = Field(default="")
     reference: str | None = Field(default=None)
+    # ── Lifecycle columns (critical-notes-retrieval Phase 1, 2026-09-15) ──
+    # Additive columns from architecture-recommendation §5.1. DDL lineage:
+    #   * fresh DBs (both drivers) get them from create_all() right here;
+    #   * existing SQLite DBs get them from the ordered migration
+    #     ``daemon/migrations/versions/20260915_120000_critical_notes_lifecycle.sql``
+    #     (runner is SQLite-only);
+    #   * existing PG DBs get them from the idempotent
+    #     ``_ensure_postgres_columns`` mirror in ``daemon/manager.py``
+    #     (partial indexes are NOT expressible via create_all — they are
+    #     mirrored there with ``CREATE INDEX IF NOT EXISTS ... WHERE ...``).
+    #
+    # ``superseded_by_id`` is a SOFT self-reference (plain TEXT, no DB-level
+    # FK): a hard FK would give dialect-divergent ON DELETE behavior (PG
+    # enforces, SQLite defaults OFF) and would make the cascade question a
+    # database-internal side effect. Integrity is enforced leader-only in
+    # the tool layer (``daemon/tools/critical_notes.py``) — the only write
+    # surface. Removal semantics (incl. what happens to rows pointing at a
+    # removed id) are documented EXACTLY at the ``project_cn_remove`` site.
+    #
+    # ``last_reviewed_at`` is backfilled ``= created_at`` by both the
+    # migration and the PG mirror (NULL-guarded UPDATE). It is declared
+    # non-optional here so fresh lineages are NOT NULL; the migration-added
+    # column is nullable on legacy lineages (SQLite cannot ADD COLUMN NOT
+    # NULL without a constant default) — every write path populates it, and
+    # read surfaces treat NULL as "fall back to created_at", so the drift
+    # is behaviorally inert.
+    pinned: bool = Field(default=False)
+    pinned_at: str | None = Field(default=None)
+    pinned_by: str | None = Field(default=None)
+    superseded_by_id: str | None = Field(default=None)
+    last_reviewed_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    detail_ref: str | None = Field(default=None)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -170,7 +233,79 @@ class CriticalNoteModel(SQLModel, table=True):
             "priority": self.priority,
             "summary": self.summary,
             "reference": self.reference,
+            "pinned": self.pinned,
+            "pinned_at": self.pinned_at,
+            "pinned_by": self.pinned_by,
+            "superseded_by_id": self.superseded_by_id,
+            "last_reviewed_at": self.last_reviewed_at,
+            "detail_ref": self.detail_ref,
         }
+
+
+class CriticalNoteEmbeddingModel(SQLModel, table=True):
+    """Cached per-critical-note embedding (critical-notes-retrieval Phase 2).
+
+    Holds ONE embedding row per note (the ``note_id`` FK is the primary
+    key). Mirrors the side-table pattern used by
+    :class:`daemon.repositories.skill.models.SkillEmbedding` — pure
+    JSON float arrays, no numpy / bytes / pickle (the project
+    standard for JSON-shaped columns).
+
+    Phase-2 write-time embed (§4.2):
+      * ``add_critical_note`` triggers a best-effort embed of
+        ``summary + reference[:800]`` (NOT the unbounded ``detail_ref`` —
+        list/router reads carry full detail).
+      * Embedding failure NEVER blocks the write — the note lives in
+        BM25-only state until a lazy-mint or explicit backfill covers
+        it.
+      * Once a row exists, repeated lazy mints are a no-op
+        (``WHERE embedding IS NULL`` filter on the backfill).
+
+    Storage wording is dialect-neutral (§4.2 [#6]): the JSON float array
+    goes through the same cross-driver :class:`JSONBType` adapter that
+    ``skill_embeddings`` uses, so PG / SQLite schemas stay byte-
+    equivalent for the runtime path. New-table-only via
+    ``SQLModel.metadata.create_all()`` — NO ordered ``.sql`` migration
+    needed for additive Phase 2 surface area.
+
+    Attributes:
+        note_id: PK + FK-self to ``critical_notes.id``
+            (``ON DELETE CASCADE`` so removing a note clears its
+            cached embedding in the same transaction). Mirrors the
+            ``skill_embeddings`` ``ON DELETE CASCADE`` shape.
+        embedding: Vector as a list of floats (length depends on
+            embedding model). Cross-driver JSON via
+            :class:`~daemon.repositories.infra.types.JSONBType`.
+        model: Embedding model name used to produce this vector
+            (rationale: changing models invalidates every cached
+            embedding; the audit column makes that re-mint
+            observable).
+        dims: Captured vector length — redundant with ``len(embedding)``
+            but a separate column keeps the model provider's
+            reported dims queryable without deserializing the
+            array.
+        minted_at: ISO-8601 timestamp. Set both at write-time embed
+            and at lazy mint / explicit backfill so a stale row is
+            easy to spot (``OLD minted_at + active migration`` =
+            candidate for re-mint).
+    """
+
+    __tablename__ = "critical_note_embeddings"
+
+    note_id: str = Field(
+        sa_column=Column(
+            String(64),
+            ForeignKey("critical_notes.id", ondelete="CASCADE"),
+            primary_key=True,
+        )
+    )
+    embedding: list[float] = Field(
+        default_factory=list,
+        sa_column=Column("embedding", JSONBType, nullable=False),
+    )
+    model: str = Field(sa_column=Column(String, nullable=False), max_length=128)
+    dims: int = Field(sa_column=Column(Integer, nullable=False))
+    minted_at: str = Field(default_factory=_now_iso)
 
 
 class ProjectMetadataRecord(SQLModel, table=True):

@@ -591,6 +591,16 @@ class TestFacadeBfsCap:
         manager.count_live_descendants = MethodType(
             InstanceManager.count_live_descendants, manager
         )
+        manager.count_busy_descendants = MethodType(
+            InstanceManager.count_busy_descendants, manager
+        )
+        # The shared BFS helper is private but called by both public
+        # methods (2026-09-12 refactor — single source of truth for
+        # the descendant scan). Bind it onto the stub so the public
+        # wrappers resolve to it without AttributeError.
+        manager._count_descendants_busy_and_live = MethodType(
+            InstanceManager._count_descendants_busy_and_live, manager
+        )
         return manager
 
     # Use the module-level ``_seed_instance`` helper — direct SQL
@@ -909,6 +919,12 @@ class TestFacadeBfsCap:
         manager.count_live_descendants = MethodType(
             InstanceManager.count_live_descendants, manager
         )
+        manager.count_busy_descendants = MethodType(
+            InstanceManager.count_busy_descendants, manager
+        )
+        manager._count_descendants_busy_and_live = MethodType(
+            InstanceManager._count_descendants_busy_and_live, manager
+        )
         # Plant 5 live descendants (more than the patched cap of 3).
         for i in range(5):
             _seed_instance(
@@ -920,6 +936,323 @@ class TestFacadeBfsCap:
         # The cap clips the descendant slice to ``tiny_cap`` — we read
         # only the first 3 live descendants, not all 5.
         assert manager.count_live_descendants("root-cap") == tiny_cap
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (h2) Busy-classification matrix (2026-09-12, LCA busy trigger
+# suppression). Real BFS (no stubs for the count) — the helper
+# ``_count_descendants_busy_and_live`` is invoked via
+# ``count_busy_descendants`` + ``count_live_descendants`` and the
+# production two-set live semantics is exercised with seeded rows.
+# The wiring tests above stub busy_descendants=0; THIS matrix pins the
+# actual classification of the new public method against the seeded
+# state (real helper, no stub) — closing spec point 5d/5e.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBusyClassification:
+    """Busy-descendants classification — real BFS, seeded rows.
+
+    The companion ``TestFacadeBfsCap`` class above exercises the
+    ``count_live_descendants`` two-set live semantics. This class
+    exercises ``count_busy_descendants`` against the SAME seeded
+    state — proving the busy subset is a STRICT SUBSET of the
+    unconditional-live subset MINUS PAUSED, and that conditional-live
+    dormant ``IDLE``/``QUEUED`` (with work en route) is live but NOT
+    busy. The two counts are derived from the SAME private BFS
+    helper (``InstanceManager._count_descendants_busy_and_live``)
+    — every test exercises both methods together to pin the joint
+    contract.
+
+    Pin matrix (3 cases — closes spec point 5d/5e coverage gap that
+    the wiring tests' ``busy_descendants=0`` default left open):
+
+    * (d) **PAUSED** descendant — busy==0, live>=1. PAUSED is
+      suspect, not healthy; the LCA trigger suppression MUST NOT
+      disarm the trigger on a stuck-paused subtree. The gate keeps
+      the marker/length trigger armed (route-(b) hint STILL fires
+      when markers/length trigger on a healthy PAUSED subtree).
+    * (e) **IDLE/QUEUED with work en route** — busy==0, live>=1.
+      Dormant IDs are live via the two-set conditional-live arm
+      (unprocessed message OR unsettled job) but NOT busy (no
+      execution happening). The trigger stays armed so en-route-only
+      work is caught.
+    * (f) **Terminal** (``COMPLETED``/``TERMINATED``/``ERROR``/
+      ``FAILED``) — busy==0, live==0. Already excluded from both sets
+      (regression guard for the existing terminal-set exclusion).
+
+    RUNNING/WAITING/WAITING_CHILDREN busy classification is covered
+    separately by ``TestFacadeBfsCap::test_unconditional_live_set_
+    counts_without_work_checks`` (the unconditional-live set
+    includes all four — and the new busy subset is exactly the
+    first three MINUS PAUSED; the existing fixture's RUNNING/PAUSED
+    combo proves both counts simultaneously via
+    ``manager.count_busy_descendants``).
+    """
+
+    def _build_manager_with_lanes(
+        self,
+        file_sqlite_engine,
+        repo,
+        *,
+        with_message_lane: bool = False,
+        with_job_lane: bool = False,
+    ):
+        """Build a stub manager with BOTH count methods + the private
+        BFS helper bound via MethodType.
+
+        Mirrors ``TestFacadeBfsCap._build_manager`` (the cap-test
+        stub) but ALSO binds the LCA busy trigger suppression inputs
+        (2026-09-12). The wiring tests' stub here is used by the
+        full two-set live + busy contract — the manager facade is
+        the production facade bound to the stub manager.
+        """
+        from types import MethodType, SimpleNamespace
+
+        from daemon.repositories.job_queue.repository import JobRepository
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+
+        manager = object.__new__(_StubManager)
+        manager._instance_repository = repo
+        if with_message_lane:
+            manager._queue_repository = SQLModelMessageQueueRepository(
+                file_sqlite_engine
+            )
+        if with_job_lane:
+            # Production shape: the manager reaches the job repository
+            # through the late-bound JobQueueService (``_repository``
+            # attribute holds a ``JobRepository``). The shared
+            # ``file_sqlite_engine`` fixture does not create the
+            # ``job_queue_items`` table — add it here (idempotent for
+            # already-present tables) so an empty wired lane reads as
+            # zero jobs instead of a missing-table error.
+            from daemon.repositories.job_queue.models import JobItem
+
+            SQLModel.metadata.create_all(
+                file_sqlite_engine, tables=[JobItem.__table__]
+            )
+            manager._job_queue_service = SimpleNamespace(
+                _repository=JobRepository(file_sqlite_engine)
+            )
+        manager.LIVE_DESCENDANTS_BFS_CAP = InstanceManager.LIVE_DESCENDANTS_BFS_CAP
+        manager.count_live_descendants = MethodType(
+            InstanceManager.count_live_descendants, manager
+        )
+        manager.count_busy_descendants = MethodType(
+            InstanceManager.count_busy_descendants, manager
+        )
+        manager._count_descendants_busy_and_live = MethodType(
+            InstanceManager._count_descendants_busy_and_live, manager
+        )
+        return manager
+
+    # Shared work-en-route seed helpers — the companion
+    # ``TestFacadeBfsCap`` class has the same helpers as bound
+    # methods; we redeclare them here so this class is hermetic and
+    # not coupled to the test-class method-resolution order. The
+    # bodies are unchanged — direct SQL inserts that bypass
+    # ``repo.create`` (matching the engine fixture's deliberate
+    # "no instance_hierarchy working table" shape).
+    def _seed_message(self, engine, instance_id, status):
+        with Session(engine) as session:
+            session.add(
+                MessageQueue(
+                    instance_id=instance_id,
+                    content="work en route (test)",
+                    source="test",
+                    status=status,
+                )
+            )
+            session.commit()
+
+    # ── (d) PAUSED — busy==0, live>=1 (live-not-busy) ────────────────
+
+    def test_paused_descendant_live_not_busy(self, file_sqlite_engine):
+        """Spec point 5d — PAUSED descendant.
+
+        PAUSED is suspect, not healthy. The LCA trigger suppression
+        MUST NOT disarm the trigger on a stuck-paused subtree —
+        busy=0 (PAUSED excluded from busy subset), live=1 (PAUSED is
+        in the unconditional-live set for deny-path protection).
+        Real BFS, seeded rows.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-paused", None, InstanceStatus.IDLE.value)
+        _seed_instance(
+            file_sqlite_engine,
+            "paused-child",
+            "root-paused",
+            InstanceStatus.PAUSED.value,
+        )
+        manager = self._build_manager_with_lanes(file_sqlite_engine, repo)
+        # Live (PAUSED is in unconditional-live) — live>=1.
+        assert manager.count_live_descendants("root-paused") == 1, (
+            "PAUSED MUST count as live (live-for-deny-protection) — "
+            "real BFS sees status=PAUSED in the unconditional-live set"
+        )
+        # Busy (PAUSED is NOT in busy subset) — busy==0.
+        assert manager.count_busy_descendants("root-paused") == 0, (
+            "PAUSED MUST NOT count as busy (suspect, not healthy) — "
+            "LCA trigger suppression keeps the trigger armed on PAUSED"
+        )
+
+    def test_paused_descendants_mixed_with_running(
+        self, file_sqlite_engine
+    ):
+        """PAUSED + RUNNING mixed tree — live=2, busy=1 (only RUNNING).
+
+        A subtree with 1 RUNNING + 1 PAUSED child under the leader:
+        busy=1 (RUNNING is busy; PAUSED is not), live=2 (both are
+        in unconditional-live). The LCA trigger suppression disarms
+        because busy>0, but PAUSED's contribution is correctly
+        excluded from busy — the suppression branch is the
+        RUNNING's "healthy wait", not the PAUSED's "stuck" wait
+        (both are present but only RUNNING triggers suppression).
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-mixed", None, InstanceStatus.IDLE.value)
+        _seed_instance(
+            file_sqlite_engine,
+            "mixed-running",
+            "root-mixed",
+            InstanceStatus.RUNNING.value,
+        )
+        _seed_instance(
+            file_sqlite_engine,
+            "mixed-paused",
+            "root-mixed",
+            InstanceStatus.PAUSED.value,
+        )
+        manager = self._build_manager_with_lanes(file_sqlite_engine, repo)
+        assert manager.count_live_descendants("root-mixed") == 2
+        assert manager.count_busy_descendants("root-mixed") == 1
+
+    # ── (e) IDLE / QUEUED with work en route — busy==0, live>=1 ──────
+
+    def test_idle_with_unprocessed_message_live_not_busy(
+        self, file_sqlite_engine
+    ):
+        """Spec point 5e — IDLE descendant with work en route.
+
+        An IDLE descendant with an unprocessed message row is live
+        (conditional-live arm of the two-set live definition) but
+        NOT busy (dormant IDs are never busy — no execution
+        happening, work is merely en route). The LCA trigger
+        suppression MUST NOT disarm the trigger on en-route-only
+        work — busy=0, live=1. The marker/length trigger stays
+        armed so lost en-route work is caught.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-idle", None, InstanceStatus.IDLE.value)
+        _seed_instance(
+            file_sqlite_engine,
+            "idle-msg-child",
+            "root-idle",
+            InstanceStatus.IDLE.value,
+        )
+        self._seed_message(
+            file_sqlite_engine, "idle-msg-child", MessageStatus.READY.value
+        )
+        manager = self._build_manager_with_lanes(
+            file_sqlite_engine, repo,
+            with_message_lane=True, with_job_lane=True,
+        )
+        # Live (IDLE + work en route ⇒ conditional-live arm fires) — live>=1.
+        assert manager.count_live_descendants("root-idle") == 1, (
+            "IDLE + unprocessed message MUST count as live (b08f40fe "
+            "two-set conditional-live arm)"
+        )
+        # Busy (IDLE is NOT in busy subset — no execution happening).
+        assert manager.count_busy_descendants("root-idle") == 0, (
+            "IDLE + unprocessed message MUST NOT count as busy — "
+            "dormant IDs are never busy; LCA trigger suppression "
+            "keeps the trigger armed on en-route-only work"
+        )
+
+    def test_queued_with_unprocessed_message_live_not_busy(
+        self, file_sqlite_engine
+    ):
+        """Spec point 5e — QUEUED descendant with work en route.
+
+        Same shape as IDLE-with-message but the dormant status is
+        QUEUED. Both IDLE and QUEUED are dormant (conditional-live
+        with work en route) but never busy.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-q", None, InstanceStatus.IDLE.value)
+        _seed_instance(
+            file_sqlite_engine,
+            "queued-msg-child",
+            "root-q",
+            InstanceStatus.QUEUED.value,
+        )
+        self._seed_message(
+            file_sqlite_engine, "queued-msg-child", MessageStatus.READY.value
+        )
+        manager = self._build_manager_with_lanes(
+            file_sqlite_engine, repo,
+            with_message_lane=True, with_job_lane=True,
+        )
+        assert manager.count_live_descendants("root-q") == 1
+        assert manager.count_busy_descendants("root-q") == 0
+
+    def test_idle_without_work_not_live_not_busy(self, file_sqlite_engine):
+        """IDLE orphan (no message, no unsettled job) — live=0,
+        busy=0.
+
+        Regression guard for the b08f40fe amendment — an IDLE
+        orphan is NOT live (no work en route ⇒ conditional-live arm
+        does NOT fire) and NOT busy (dormant is never busy). The
+        LCA busy trigger suppression does NOT change this — the
+        idle-orphan two-set live semantics are untouched.
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-orphan", None, InstanceStatus.IDLE.value)
+        _seed_instance(
+            file_sqlite_engine,
+            "idle-orphan-child",
+            "root-orphan",
+            InstanceStatus.IDLE.value,
+        )
+        manager = self._build_manager_with_lanes(
+            file_sqlite_engine, repo,
+            with_message_lane=True, with_job_lane=True,
+        )
+        assert manager.count_live_descendants("root-orphan") == 0
+        assert manager.count_busy_descendants("root-orphan") == 0
+
+    # ── (f) Terminal — busy==0, live==0 (regression guard) ────────────
+
+    def test_terminal_descendant_not_live_not_busy(
+        self, file_sqlite_engine
+    ):
+        """Terminal set (``COMPLETED``/``TERMINATED``/``ERROR``/
+        ``FAILED``) — busy==0, live==0.
+
+        Regression guard — terminal IDs are excluded from BOTH
+        counts. The LCA busy trigger suppression does NOT regress
+        this — terminal IDs are busy=0 by construction (terminal
+        statuses are excluded before the busy subset check).
+        """
+        repo = SQLModelInstanceRepository(file_sqlite_engine)
+        _seed_instance(file_sqlite_engine, "root-term-busy", None, InstanceStatus.IDLE.value)
+        for status in [
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ]:
+            _seed_instance(
+                file_sqlite_engine, f"term-busy-{status}", "root-term-busy", status
+            )
+        manager = self._build_manager_with_lanes(file_sqlite_engine, repo)
+        # Already covered by TestFacadeBfsCap.test_terminal_set_excludes
+        # but re-asserted here with the busy count to close the
+        # LCA busy-trigger-suppression coverage gap.
+        assert manager.count_live_descendants("root-term-busy") == 0
+        assert manager.count_busy_descendants("root-term-busy") == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -951,6 +1284,7 @@ class TestCanonicalLogSchema:
         manager.count_pending_children.return_value = 0
         manager.get_queued_or_expected_wakeups.return_value = 0
         manager.count_live_descendants.return_value = 2  # depth-2 tree
+        manager.count_busy_descendants.return_value = 0  # LCA trigger-suppression input
 
         with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
             evaluate(
@@ -981,6 +1315,7 @@ class TestCanonicalLogSchema:
         manager.count_pending_children.side_effect = RuntimeError("db down")
         manager.get_queued_or_expected_wakeups.return_value = 0
         manager.count_live_descendants.return_value = 0
+        manager.count_busy_descendants.return_value = 0  # 2026-09-12 LCA input
 
         with caplog.at_level(logging.ERROR, logger="daemon.services.attestation_gate"):
             evaluate(
@@ -1010,6 +1345,7 @@ class TestCanonicalLogSchema:
         manager.count_pending_children.return_value = 0
         manager.get_queued_or_expected_wakeups.return_value = 0
         manager.count_live_descendants.return_value = 0
+        manager.count_busy_descendants.return_value = 0  # 2026-09-12 LCA input
 
         def _boom(*args, **kwargs):
             raise ValueError("scanner exploded")

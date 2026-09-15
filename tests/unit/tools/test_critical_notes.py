@@ -69,7 +69,7 @@ def make_mock_repo(initial_entries: list = None):
     def list_critical_notes(pid):
         return list(notes_storage)
 
-    def add_critical_note(pid, source_agent, category, priority, summary, reference=None):
+    def add_critical_note(pid, source_agent, category, priority, summary, reference=None, detail_ref=None):
         note = CriticalNoteModel(
             project_id=pid,
             source_agent=source_agent,
@@ -77,6 +77,7 @@ def make_mock_repo(initial_entries: list = None):
             priority=priority,
             summary=summary,
             reference=reference,
+            detail_ref=detail_ref,
         )
         notes_storage.append(note)
         return note

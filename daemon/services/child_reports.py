@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from daemon.services.timestamps import now_utc, now_utc_naive
+
 from sqlalchemy import exists, func, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
@@ -1036,7 +1038,9 @@ Provide a concise summary:"""
                 f"(no message_id — child completed without a tracked send)"
             )
 
-        parent.last_activity_at = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix): last_activity_at is a
+        # tz-naive column on PostgreSQL.
+        parent.last_activity_at = now_utc_naive()
         parent.version = (parent.version or 1) + 1
 
         # NOTE: parent.children cache column was dropped in Phase 4.
@@ -1276,7 +1280,8 @@ Provide a concise summary:"""
                 "parent_id": parent_id,
                 "report_message_id": report_message_id,
             }),
-            created_at=datetime.now(timezone.utc),
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            created_at=now_utc_naive(),
         )
         session.add(completion_event)
 
@@ -1289,7 +1294,8 @@ Provide a concise summary:"""
                 "child_instance_id": instance_id,
                 "pending_for_parent": pending_for_parent,
             }),
-            created_at=datetime.now(timezone.utc),
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            created_at=now_utc_naive(),
         )
         session.add(parent_event)
 
@@ -2556,8 +2562,14 @@ Provide a concise summary:"""
                 # another writer (e.g. question() pause cascade) already
                 # finalized the row and we must skip the rest of the
                 # completion logic for this path.
-                now_iso = datetime.now(timezone.utc).isoformat()
-                now_dt = datetime.now(timezone.utc)
+                # µs-twin mint (tz fix): ONE aware instant; the TEXT
+                # twin keeps the aware-ISO format, the naive-column
+                # twin carries naive-UTC digits of the SAME instant
+                # (the µs-match between the twins is a D7 backfill
+                # detection heuristic and must survive).
+                _now = now_utc()
+                now_iso = _now.isoformat()
+                now_dt = _now.replace(tzinfo=None)
                 update_result = session.execute(
                     sa_update(Instance)
                     .where(Instance.instance_id == instance_id)
@@ -2746,8 +2758,14 @@ Provide a concise summary:"""
                 # rowcount == 0 means another writer already finalized
                 # the row and we must skip the rest of the completion
                 # logic for this path.
-                now_iso = datetime.now(timezone.utc).isoformat()
-                now_dt = datetime.now(timezone.utc)
+                # µs-twin mint (tz fix): ONE aware instant; the TEXT
+                # twin keeps the aware-ISO format, the naive-column
+                # twin carries naive-UTC digits of the SAME instant
+                # (the µs-match between the twins is a D7 backfill
+                # detection heuristic and must survive).
+                _now = now_utc()
+                now_iso = _now.isoformat()
+                now_dt = _now.replace(tzinfo=None)
                 update_result = session.execute(
                     sa_update(Instance)
                     .where(Instance.instance_id == instance_id)
@@ -2906,8 +2924,14 @@ Provide a concise summary:"""
             # row and we must skip the entire completion_report
             # emission (message + task + report_injection + parent
             # cascade) for this path.
-            now_iso = datetime.now(timezone.utc).isoformat()
-            now_dt = datetime.now(timezone.utc)
+            # µs-twin mint (tz fix): ONE aware instant; the TEXT
+            # twin keeps the aware-ISO format, the naive-column
+            # twin carries naive-UTC digits of the SAME instant
+            # (the µs-match between the twins is a D7 backfill
+            # detection heuristic and must survive).
+            _now = now_utc()
+            now_iso = _now.isoformat()
+            now_dt = _now.replace(tzinfo=None)
             update_result = session.execute(
                 sa_update(Instance)
                 .where(Instance.instance_id == instance_id)
@@ -2956,7 +2980,8 @@ Provide a concise summary:"""
                 type=MessageType.COMPLETION_REPORT.value,
                 status=MessageStatus.READY.value,
                 priority=0,
-                enqueued_at=datetime.now(timezone.utc),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                enqueued_at=now_utc_naive(),
             )
             session.add(report_message)
             
@@ -3058,7 +3083,8 @@ Provide a concise summary:"""
                     instance_id=instance.parent_id,
                     message_id=report_message_id,
                     status=TaskStatus.PENDING.value,
-                    created_at=datetime.now(timezone.utc),
+                    # Naive-UTC digits (DC-A fix) — naive column bind.
+                    created_at=now_utc_naive(),
                 )
                 session.add(report_task)
 
@@ -3334,7 +3360,9 @@ Provide a concise summary:"""
                 raise RuntimeError(
                     f"Parent {instance.parent_id} disappeared during child completion"
                 )
-            parent.last_activity_at = datetime.now(timezone.utc)
+            # Naive-UTC digits (DC-A fix): last_activity_at is a
+            # tz-naive column on PostgreSQL.
+            parent.last_activity_at = now_utc_naive()
             parent.version = (parent.version or 1) + 1
 
             # NOTE: parent.children cache column was dropped in Phase 4.
@@ -3539,7 +3567,8 @@ Provide a concise summary:"""
                     "parent_id": instance.parent_id,
                     "report_message_id": report_message_id,
                 }),
-                created_at=datetime.now(timezone.utc),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                created_at=now_utc_naive(),
             )
             session.add(completion_event)
             
@@ -3552,7 +3581,8 @@ Provide a concise summary:"""
                     "child_instance_id": instance_id,
                     "pending_for_parent": pending_for_parent,
                 }),
-                created_at=datetime.now(timezone.utc),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                created_at=now_utc_naive(),
             )
             session.add(parent_event)
             

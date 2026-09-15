@@ -7,13 +7,27 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Column
 from sqlmodel import SQLModel, Field
 
 from daemon.repositories.infra.types import JSONBType
+
+
+def _default_enqueued_at_naive_utc() -> datetime:
+    """Naive-UTC ``enqueued_at`` default for queue rows (DC-A fix).
+
+    Deferred import: ``daemon.services.__init__`` eagerly imports
+    service classes that transitively import this module, so a
+    module-level ``from daemon.services.timestamps import
+    now_utc_naive`` would create a circular import. The deferred
+    path resolves at first instantiation, well after module load.
+    """
+    from daemon.services.timestamps import now_utc_naive
+
+    return now_utc_naive()
 
 
 class MessageType(str, enum.Enum):
@@ -62,7 +76,13 @@ class MessageQueue(SQLModel, table=True):
         sa_column=Column("metadata", JSONBType)
     )
     
-    enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Naive-UTC digits (DC-A fix): the timestamp columns on this
+    # table are tz-naive on PostgreSQL — an aware default would
+    # render in the session TimeZone (+07 in production) and store
+    # local digits.
+    enqueued_at: datetime = Field(
+        default_factory=_default_enqueued_at_naive_utc
+    )
     processing_started_at: datetime | None = Field(default=None)
     last_activity_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)

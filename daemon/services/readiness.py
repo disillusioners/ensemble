@@ -85,18 +85,21 @@ _FORCED_DEGRADED_VALUES = frozenset(
 #
 # Why SQL-side (plan deviation, recorded in the Phase-1 report): the
 # plan text says to read MAX(last_heartbeat_at) and compute
-# max_age = now - max(ts) in Python. Reality: ``last_heartbeat_at``
-# is a timezone-naive TIMESTAMP, and psycopg renders timezone-AWARE
-# binds (the writers stamp datetime.now(timezone.utc)) into
-# SESSION-LOCAL wall time before storing. Reading the naive value
-# back and attaching UTC — as Python-side subtraction must — is
-# therefore wrong by the session offset whenever the PG session TZ
-# is not UTC (verified experimentally: 7h skew on a +07 session).
-# Computing the age inside SQL with the database's own ``now()``
-# keeps both operands in the same session frame — exactly how the
-# existing StaleTaskRecovery predicates stay correct — and also
-# removes app-host vs DB-host clock skew. SQLite's ``julianday``
-# handles the offset stored in the timestamp string the same way.
+# max_age = now - max(ts) in Python. Pre-tz-fix reality: the writers
+# stamped AWARE ``datetime.now(timezone.utc)`` binds, which psycopg
+# rendered into SESSION-LOCAL wall time before storing into the
+# timezone-naive TIMESTAMP column — so Python-side subtraction
+# (naive digits read back + assumed UTC) was wrong by the session
+# offset whenever the PG session TZ was not UTC (verified
+# experimentally: 7h skew on a +07 session). The tz fix (Phase 3)
+# closed the class at the source — writers now stamp naive-UTC
+# digits (``now_utc_naive``) and the PG engine pins its session
+# frame to UTC — and this predicate STAYS SQL-side as defense in
+# depth: computing the age inside SQL with the database's own
+# ``now()`` keeps both operands in one frame regardless of session
+# settings or driver bind rendering, and also removes app-host vs
+# DB-host clock skew. SQLite's ``julianday`` handles the offset
+# stored in the timestamp string the same way.
 _QUEUE_MAX_AGE_SQL_POSTGRES = sa_text(
     "SELECT EXTRACT(EPOCH FROM (now() - MAX(last_heartbeat_at))) "
     "FROM task WHERE status = :status_running"

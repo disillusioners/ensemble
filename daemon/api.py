@@ -9,11 +9,12 @@ factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-
 nudge scanner, the dead-letter service, the job-queue reconcile,
-and the per-instance lazy-import graph cache (each a single, large
-``try / except`` block keyed on construction-time failure), and
-(c) global error handlers (``HTTPException`` shim, request-validation
-handler, the startup-shutdown banner). Co-locating app factory +
-lifespan wiring + middleware + error handlers is the project-house
+the job-lock reclaim sweep, and the per-instance lazy-import graph
+cache (each a single, large ``try / except`` block keyed on
+construction-time failure), and (c) global error handlers
+(``HTTPException`` shim, request-validation handler, the
+startup-shutdown banner). Co-locating app factory + lifespan
+wiring + middleware + error handlers is the project-house
 pattern (mirror ``daemon/services/long_tool_nudge.py`` module-
 band rationale) — the alternative (splitting lifespan across
 ``daemon/api_lifespan.py``) would force every router to import two
@@ -35,6 +36,7 @@ warnings.filterwarnings(
 import time
 import sys
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 import asyncio
 import json
@@ -279,6 +281,22 @@ async def lifespan(app: FastAPI):
         f"(clean_llm_config attaches gzip httpx clients when True; "
         f"OPENAI_REQUEST_GZIP env var controls it)"
     )
+    # Wire the L0 request-timeout inject-if-absent default
+    # (llm-stream-stall-hardening). ``clean_llm_config`` reads this
+    # ClassVar when a construction site omits ``request_timeout`` —
+    # those sites previously had NO read deadline at all (∞: langchain
+    # always passes timeout explicitly, so the SDK's 600s default
+    # fallback is unreachable), so the inject is a pure tightening
+    # ∞→610s. See daemon/graph.py.
+    ThinkingChatOpenAI.default_request_timeout = int(
+        config.llm.request_timeout
+    )
+    daemon_logger.info(
+        f"[Config] default_request_timeout={ThinkingChatOpenAI.default_request_timeout}s "
+        f"(clean_llm_config injects it when a site omits request_timeout "
+        f"— tightening ∞→{ThinkingChatOpenAI.default_request_timeout}s; "
+        f"OPENAI_REQUEST_TIMEOUT controls it)"
+    )
 
     # Wire the S5 degenerate re-invoke cap (empty-response-guard Phase 1).
     # Mirrors __main__.py — the router reads the graph module global on
@@ -322,6 +340,16 @@ async def lifespan(app: FastAPI):
         config, ensemble_config, credential_manager=credential_manager
     )
     await manager.initialize()
+
+    # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
+    # the LIVE engine, which only exists after manager.initialize().
+    # Injected here rather than inside load_config — config load runs
+    # before any engine exists, and the previous in-load_config probe
+    # imported a nonexistent ``get_db_engine`` (deferred on every
+    # boot). Best-effort / never raises.
+    from daemon.config import probe_critical_notes_boot_state
+
+    probe_critical_notes_boot_state(engine=manager.engine)
 
     # Execution Gate: clear any leases left behind by a previous
     # process that died mid-execution. Done HERE (and awaited) so
@@ -705,6 +733,48 @@ async def lifespan(app: FastAPI):
         )
 
     # ─────────────────────────────────────────────────────────────
+    # F3 — joblock-leak fix (2026-09-14). Periodic reclaim sweep
+    # for ``job_locks`` rows orphaned by the live daemon. The
+    # companion startup sweep (above) clears orphans left by a
+    # PREVIOUS process that died mid-execution; this steady-state
+    # sweep reclaims locks left behind by the LIVE daemon (F1
+    # inline writer races, F2 cancellation mid-release, F5
+    # ``force_finalize_orphan`` reaps). The method
+    # ``JobLockManager.cleanup_terminal_job_locks`` has existed
+    # since C12 but was DEAD CODE — no periodic caller. F3 wires
+    # it into ``JobLockSweepService`` and the daemon lifespan.
+    # ALWAYS-ON infrastructure (no kill-switch env var — per the
+    # project owner's HARD POLICY on Batch A); the interval knob
+    # tunes reclaim responsiveness vs DB load. Out-of-range
+    # values FAIL FAST AT BOOT via pydantic ValidationError
+    # (deliberate, council-approved behavior).
+    from daemon.services.job_lock_sweep import (
+        DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS,
+        JobLockSweepService,
+    )
+    job_lock_sweep_interval = (
+        config.services.job_lock_sweep_interval_seconds
+    )
+    # ``job_lock_sweep_interval`` is bounded by pydantic ``ge=1`` on
+    # ``ServicesConfig.job_lock_sweep_interval_seconds`` — out-of-range
+    # values fail fast at boot with ValidationError. No runtime
+    # DISABLED branch here; the floor is enforced upstream.
+    # ``JobLockSweepService.__init__`` additionally clamps via
+    # ``max(1, int(interval_seconds))``, so the lifespan-side floor
+    # needs no DISABLED branch (unlike ``OrphanWatcherSweepService``).
+    job_lock_sweep = JobLockSweepService(
+        job_lock_manager=job_lock_manager,
+        interval_seconds=job_lock_sweep_interval,
+    )
+    job_lock_sweep.start()
+    app.state.job_lock_sweep = job_lock_sweep
+    logger.info(
+        f"JobLockSweepService started: interval="
+        f"{job_lock_sweep_interval}s (default "
+        f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
@@ -848,6 +918,49 @@ async def lifespan(app: FastAPI):
         else:
             app.state.long_tool_nudge_task = None
             logger.info("Long-tool-nudge scanner disabled by config")
+
+    # ── LLM stream-liveness watchdog (llm-stream-stall-hardening L2) ──
+    # Daemon-wide tick thread sweeping watched SSE streams. The
+    # transports inside the injected LLM http clients and this loop
+    # MUST share the module-level ``STREAM_WATCHDOG_REGISTRY``
+    # singleton — importing it explicitly here (a per-call or
+    # per-thread registry silently no-ops the whole feature; same
+    # identity discipline as the LONG_TOOL_REGISTRY pin above).
+    # Always-on per fix/flag policy — ``stream_stall_threshold_seconds``
+    # is a tuning-only knob (no disable value); a tick/sweep failure is
+    # logged and retried next tick, so watchdog breakage degrades to
+    # the pre-feature 610s read-deadline behavior, never to a crash.
+    from daemon.services.llm_stream_watchdog import (
+        STREAM_WATCHDOG_REGISTRY,
+        run_stream_watchdog_loop,
+    )
+    try:
+        _stream_watchdog_stop = threading.Event()
+        _stream_watchdog_thread = threading.Thread(
+            target=run_stream_watchdog_loop,
+            args=(
+                STREAM_WATCHDOG_REGISTRY,
+                float(config.llm.stream_stall_threshold_seconds),
+                _stream_watchdog_stop,
+            ),
+            name="llm-stream-watchdog",
+            daemon=True,
+        )
+        _stream_watchdog_thread.start()
+        app.state.llm_stream_watchdog_thread = _stream_watchdog_thread
+        app.state.llm_stream_watchdog_stop = _stream_watchdog_stop
+        logger.info(
+            f"[StreamWatchdog] started: "
+            f"threshold={config.llm.stream_stall_threshold_seconds}s"
+        )
+    except Exception as stream_watchdog_boot_exc:
+        app.state.llm_stream_watchdog_thread = None
+        app.state.llm_stream_watchdog_stop = None
+        logger.error(
+            f"[StreamWatchdog] DISABLED — thread start failed: "
+            f"{stream_watchdog_boot_exc}",
+            exc_info=True,
+        )
 
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
@@ -1364,6 +1477,35 @@ async def lifespan(app: FastAPI):
             )
     app.state.long_tool_nudge_task = None
 
+    # LLM stream-liveness watchdog shutdown (llm-stream-stall-hardening).
+    # Set the stop event (the loop's ``wait(interval)`` returns within
+    # one tick) then join with a small timeout; a daemon thread that
+    # fails to stop in time still dies with the process.
+    _stream_watchdog_stop = getattr(
+        app.state, "llm_stream_watchdog_stop", None
+    )
+    _stream_watchdog_thread = getattr(
+        app.state, "llm_stream_watchdog_thread", None
+    )
+    if _stream_watchdog_stop is not None:
+        try:
+            _stream_watchdog_stop.set()
+        except Exception as e:  # noqa: BLE001 — shutdown keeps going
+            logger.warning(f"[StreamWatchdog] stop-event set failed: {e}")
+    if _stream_watchdog_thread is not None:
+        try:
+            if _stream_watchdog_thread.is_alive():
+                _stream_watchdog_thread.join(timeout=5.0)
+            if _stream_watchdog_thread.is_alive():
+                logger.warning(
+                    "[StreamWatchdog] thread did not stop within 5s "
+                    "(daemon thread — will die with the process)"
+                )
+        except Exception as e:  # noqa: BLE001 — shutdown keeps going
+            logger.warning(f"[StreamWatchdog] shutdown error: {e}")
+    app.state.llm_stream_watchdog_thread = None
+    app.state.llm_stream_watchdog_stop = None
+
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the
     # asyncio task; the watchdog-style cancel/await is folded
@@ -1395,6 +1537,21 @@ async def lifespan(app: FastAPI):
                 f"OrphanWatcherSweepService shutdown error: {e}"
             )
         app.state.orphan_watcher_sweep = None
+
+    # --- JobLockSweepService shutdown (F3) ---
+    # Stop the periodic reclaim sweep BEFORE the manager shuts down
+    # so any in-flight reclaim tick completes before the DB
+    # connection closes. Mirrors the OrphanWatcherSweepService
+    # shutdown shape (graceful stop with WARNING on failure).
+    job_lock_sweep = getattr(app.state, "job_lock_sweep", None)
+    if job_lock_sweep is not None:
+        try:
+            await job_lock_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"JobLockSweepService shutdown error: {e}"
+            )
+        app.state.job_lock_sweep = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down
@@ -2334,6 +2491,9 @@ def create_app() -> FastAPI:
 
     return app
 
+
+# Create app instance for convenience
+app = create_app()
 
 # Create app instance for convenience
 app = create_app()

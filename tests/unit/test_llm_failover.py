@@ -1342,11 +1342,18 @@ class TestF1BackupKwargNeverReachesConstructor:
             # ON (clean_llm_config injects True) and that path is
             # exercised in test_llm_streaming_activation.py.
             "streaming": False,
+            # Opt out of the watchdog injection via the documented
+            # partial-override contract (cfg key BEFORE clean_llm_config
+            # runs) — the mock client must reach the constructor, and
+            # the always-on L2 injection would otherwise collide with
+            # the explicit constructor kwarg below.
+            "http_client": httpx.Client(
+                transport=httpx.MockTransport(handler)
+            ),
         }
         llm_config = clean_llm_config(llm_config)
         llm = ThinkingChatOpenAI(
             max_retries=0,
-            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
             **llm_config,
         )
         result = llm.invoke([HumanMessage(content="hi")])

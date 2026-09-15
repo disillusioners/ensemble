@@ -954,3 +954,47 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 **DO NOT TOUCH (this requirement):** the judge services (`attestation_report_judge.py`, judge resolver), the gate evaluator, the marker catalog, the R2 inputs, counter/reset/bound semantics, the dry-mode and kill-switch contracts, and every other byte of the two constants beyond the two clauses above.
 
 **Files (this requirement):** `daemon/graph.py` (two import fixes; two clause additions); `tests/unit/test_attestation_nudge_inject.py` (byte pin re-pinned); `tests/integration/test_attestation_marker_routing_lca.py` (three regression tests + `_ConfigLessManagerStub`); `decisions.md` + `requirements.md` (this entry).
+
+## Requirement (2026-09-12, user request) — LCA busy-descendant trigger suppression (false-positive hint fix)
+
+**Context:** User observation 2026-09-12 — Route-(b) Completion Check Note hint fires on healthy waits. The user's repro: a leader awaiting a RUNNING child writes a short mid-work ACK ("Awaiting the tester reply. Ending turn, will continue.") — markers (`ending turn`, `awaiting`) AND length (short, < 150 words) BOTH fire on the ALLOW path → judge fires → judge-no (mid-work phrasing) → route (b) → ALLOW + checkpoint-durable Completion Check Note injected. Council-predicted W2 false-positive class: the hint appears on essentially every awaiting turn-end where the leader is doing the HEALTHY thing. Pre-fix a leader with 3 RUNNING children would inject a Completion Check Note on EVERY turn-end during a long-running mission. This requirement adds busy-descendant trigger suppression: the marker/length trigger is disarmed ENTIRELY when at least one descendant is in the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}`. No judge call, no route-(b) hint, plain allow. The marker/length signal STAYS RECORDED for observability.
+
+**Requirement:** the gate MUST detect busy descendants (the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}`) and SUPPRESS the WHOLE marker/length trigger when at least one busy descendant exists. Suspect-pending shapes (PAUSED descendants, en-route-only work via IDLE/QUEUED + pending message OR unsettled job) MUST KEEP triggering — the suppression is for healthy waits, not stuck work. No new `ENSEMBLE_*` env flags (fix/flag policy 7d5285aa — behavior fixes ship always-on). Dry-mode `allow unconditionally` posture is preserved end-to-end. The kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` continues to apply on non-suppressed paths exactly as before.
+
+**Acceptance criteria:**
+
+* **AC-BUSY-1**: `InstanceManager.count_busy_descendants(instance_id) -> int` is a new public method on `daemon/manager.py`. Counts descendants in the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}` ONLY. PAUSED is excluded (suspect, not healthy). Conditional-live dormant `IDLE`/`QUEUED` are excluded (no execution). Terminal `COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` are excluded. Returns 0 when the root is not found OR no descendants exist OR every descendant is terminal/PAUSED/dormant. Bounded by `LIVE_DESCENDANTS_BFS_CAP`.
+* **AC-BUSY-2**: shared private helper `InstanceManager._count_descendants_busy_and_live(instance_id) -> tuple[int, int]` does ONE BFS pass returning `(busy_count, live_count)`. Both `count_live_descendants` and `count_busy_descendants` are thin wrappers around this helper. From the gate, two BFS passes total (each bounded, each ~0.016ms P95, total ~0.032ms stays well under the 20ms budget).
+* **AC-BUSY-3**: `GateDecision` extended with `busy_descendants` (int, default 0) and `trigger_suppressed_by` (str, default `""`). Both stamped on EVERY evaluation (the busy count is meaningful even when the trigger doesn't fire — log forensics).
+* **AC-BUSY-4**: at the trigger site (`daemon/services/attestation_gate.py:993-1037`), if `busy_descendants > 0 AND trigger_fires` ⇒ the WHOLE trigger is SUPPRESSED ENTIRELY:
+  - `trigger_source=""` (cleared — the cheap-allow signal)
+  - `trigger_suppressed_by="busy_descendants"` stamped
+  - `marker_hit`, `marker_terms`, `length_trigger`, `final_word_count` STAY RECORDED for observability
+  - `marker_path=""` (no judge fires — no path to record)
+* **AC-BUSY-5**: graph-node marker-path judge wiring (`daemon/graph.py:5161-5168`) adds `and not decision.trigger_suppressed_by` to the existing `decision.marker_hit or decision.length_trigger` check. When the gate has stamped a non-empty `trigger_suppressed_by` on the decision, the entire judge block short-circuits: NO `judge_completion_report_async` call, NO route-(b) hint injection, NO counter write, plain allow.
+* **AC-BUSY-6**: PAUSED descendants + trigger ⇒ judge + route-(b) hint STILL fire (PAUSED is suspect, not healthy). Pinned by `test_paused_child_keeps_trigger_armed_no_suppression`.
+* **AC-BUSY-7**: en-route-only work (IDLE + pending message OR IDLE + unsettled job) + trigger ⇒ STILL fires (dormant IDs are not busy). Pinned by `TestFacadeBfsCap::test_idle_with_unprocessed_message_counts_live` (existing — re-asserted post-change) and the new `_count_descendants_busy_and_live` helper's strict busy subset.
+* **AC-BUSY-8**: boundary — busy=0 + markers + nothing pending ⇒ route (a) deny+nudge UNCHANGED. Busy suppression MUST NOT regress the existing deny path. Pinned by `test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge`.
+* **AC-BUSY-9**: existing deny-path suite unchanged (route a/b/c/d). Pinned by `test_deny_path_suite_unchanged_existing_marker_a_still_works` and the existing marker-path routing tests still passing.
+* **AC-BUSY-10**: log schema pin — the canonical `event=leader_completion_gate` log row carries `busy_descendants` AND `trigger_suppressed_by` on EVERY evaluation. Format-string placeholder count grows 31 → 33 (drift pin in `test_length_log_placeholder_count_is_33`). Operators can grep `event=leader_completion_gate trigger_suppressed_by=busy_descendants` to count suppressions; `marker_hit=True trigger_suppressed_by=busy_descendants` confirms the trigger would have fired but for busy suppression.
+* **AC-BUSY-11**: dry-mode + busy suppression — log-only, NO judge call, NO hint, plain allow (dry-mode `allow unconditionally` posture preserved end-to-end). Pinned by `test_busy_suppression_dry_mode_log_only_no_judge_no_hint`.
+* **AC-BUSY-12**: kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` + busy suppression — suppression disarms the trigger BEFORE the kill-switch check; dry-mode log-only posture preserved.
+* **AC-BUSY-13**: fail-open contract — DB errors on `count_busy_descendants` propagate out of the helper; the gate's `except Exception` DB seam converts them to fail-open ALLOWED with `busy_descendants=-1` in the log row (the `-1` sentinel pattern, never a 0 default — 0 is a meaningful R2 value).
+* **AC-BUSY-14**: no new `ENSEMBLE_*` env flags. The busy suppression is a behavior fix shipped always-on per the fix/flag policy (7d5285aa). The only kill-switch surface is the existing judge kill-switch (AC-BUSY-12).
+* **AC-BUSY-15**: full attestation test matrix green post-change. Enumerated by `find tests -name "*attestation*.py" -not -path "*/postgres/*"` (47 files; 662 tests). Pre-existing failures are itemized separately; no new reds.
+
+**DO NOT TOUCH (this requirement):**
+
+* The 5-value canonical decision enum — unchanged.
+* The marker catalog (16 patterns; 12-18 balance) — unchanged.
+* The marker-path judge — unchanged, REUSED on non-suppressed paths only.
+* The would-be-deny judge — unchanged, REUSED.
+* The R2 inputs — unchanged.
+* The deny path + the two-set live semantics — unchanged.
+* The counter-reset semantics — unchanged.
+* The nudge/hint texts — unchanged.
+* The bound/escalation semantics — unchanged.
+* The b08f40fe idle-orphan class — unchanged (idle orphans still NOT counted live, still NOT counted busy).
+* No new `ENSEMBLE_*` env flags (fix/flag policy 7d5285aa).
+
+**Files (this requirement):** `daemon/manager.py` (new `count_busy_descendants` sibling + shared `_count_descendants_busy_and_live` helper); `daemon/services/attestation_gate.py` (`GateDecision` extended with two additive fields; trigger-site suppression; log format string 31 → 33); `daemon/graph.py` (gate-node judge wiring `and not decision.trigger_suppressed_by`); `tests/unit/test_attestation_marker_wiring.py` (11 new tests + `_make_node` extended with `busy_descendants` kwarg + drift pin 31 → 33); `tests/integration/test_attestation_marker_routing_lca.py` (`_ConfigLessManagerStub` extended); `tests/integration/test_attestation_live_descendants.py` (`_StubManager` extended + `TestFacadeBfsCap` + `TestCanonicalLogSchema` + DB-seam tests patched); `tests/integration/test_attestation_mid_work_report_testcase.py` (`test_scenario_a_children_out_allow_with_hint` + `test_scenario_a_live_judge` rewritten for the suppressed contract); `tests/integration/test_attestation_c2_both_branches.py` + `tests/integration/test_attestation_dry_mode.py` + `tests/integration/test_attestation_observability.py` + `tests/unit/test_attestation_dry_logging.py` + `tests/unit/test_attestation_gate.py` (`make_manager` / `_manager` helpers extended with `count_busy_descendants=0`); `tests/support/conftest.py` (`GraphTestManager` extended with `count_busy_descendants` + `_count_descendants_busy_and_live` delegation); `decisions.md` + `requirements.md` (this entry); `docs/setup.md` (runbook note).

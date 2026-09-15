@@ -11,6 +11,8 @@ from sqlalchemy import delete as sql_delete, func, and_, or_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select, col
 
+from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_naive
+
 from .models import MessageQueue, MessageStatus
 
 # Configuration constants
@@ -23,9 +25,9 @@ def _coerce_datetime(value: Any) -> datetime | None:
     - ``None`` passes through.
     - ``datetime`` instances pass through (PostgreSQL native).
     - ISO-8601 strings (SQLite storage format) are parsed; values
-      without a timezone offset are assumed UTC because the
-      ``MessageQueue`` model writes ``datetime.now(timezone.utc)``
-      everywhere.
+      without a timezone offset are assumed UTC (the documented
+      policy in ``daemon.services.timestamps`` — the model writes
+      naive-UTC digits into the naive timestamp columns).
     """
     if value is None or isinstance(value, datetime):
         return value
@@ -35,9 +37,8 @@ def _coerce_datetime(value: Any) -> datetime | None:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    # Shared assume-UTC companion (tz fix).
+    return coerce_to_aware_utc(dt)
 
 
 def _coerce_json(value: Any, *, as_dict: bool = False, as_list: bool = False) -> Any:
@@ -101,7 +102,9 @@ class SQLModelMessageQueueRepository:
             max_retries=max_retries,
             message_metadata=message_metadata or {},
             images=images,
-            enqueued_at=datetime.now(timezone.utc),
+            # Naive-UTC digits for the naive enqueued_at column
+            # (DC-A fix).
+            enqueued_at=now_utc_naive(),
         )
 
         with Session(self.engine) as session:
@@ -159,7 +162,11 @@ class SQLModelMessageQueueRepository:
             The claimed message in ``processing`` status, or ``None``
             if no eligible message is currently available.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix): bound into the naive
+        # processing_started_at / last_activity_at columns and
+        # compared against next_retry_at digits — all in the same
+        # naive-UTC frame.
+        now = now_utc_naive()
 
         # Subquery selects the next eligible message. Built with
         # string concatenation rather than SQLAlchemy ORM so the
@@ -224,7 +231,9 @@ class SQLModelMessageQueueRepository:
         ``pending_count`` permanently non-zero and breaking the
         ``send_message`` in-progress guard in ``daemon/tools/instance.py``.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix) — same frame as the stored
+        # naive-column digits and the next_retry_at comparison.
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
@@ -281,7 +290,12 @@ class SQLModelMessageQueueRepository:
         Returns:
             List of stuck messages.
         """
-        timeout_threshold = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
+        # Naive-UTC frame (DC-A fix): the stored last_activity_at
+        # digits are naive-UTC; comparing them against an AWARE
+        # threshold makes PostgreSQL cast the column through the
+        # session TimeZone (+07) and inflate ages by 7h. Keep the
+        # comparison naive-digits vs naive-digits.
+        timeout_threshold = now_utc_naive() - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
 
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
@@ -299,7 +313,9 @@ class SQLModelMessageQueueRepository:
         Returns:
             List of messages with next_retry_at <= now.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # next_retry_at digits.
+        now = now_utc_naive()
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
                 MessageQueue.status == MessageStatus.RETRYING.value
@@ -343,7 +359,8 @@ class SQLModelMessageQueueRepository:
             
             message.status = MessageStatus.FAILED.value
             message.error_message = error_message
-            message.completed_at = datetime.now(timezone.utc)
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            message.completed_at = now_utc_naive()
             
             session.commit()
             session.refresh(message)
@@ -371,7 +388,8 @@ class SQLModelMessageQueueRepository:
             
             # Exponential backoff: 1min, 2min, 4min, 8min, etc.
             delay = min(60 * (2 ** (retry_count - 1)), 3600)  # Max 1 hour
-            message.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            message.next_retry_at = now_utc_naive() + timedelta(seconds=delay)
             message.status = MessageStatus.RETRYING.value
             message.processing_started_at = None
             message.error_message = error_message
@@ -452,7 +470,8 @@ class SQLModelMessageQueueRepository:
         have its terminal status clobbered. Returns ``None`` if the row
         does not exist OR its current status is not ``processing``.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix) — naive column bind.
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
@@ -484,7 +503,8 @@ class SQLModelMessageQueueRepository:
         have its terminal status clobbered. Returns ``None`` if the row
         does not exist OR its current status is not ``processing``.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix) — naive column bind.
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
@@ -534,7 +554,10 @@ class SQLModelMessageQueueRepository:
             The updated message, or ``None`` if the message does not
             exist or is not in ``failed`` status.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits (DC-A fix): bound into the naive
+        # completed_at column and used for the next_retry_at
+        # backoff arithmetic — all in the same naive-UTC frame.
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             # Branch 1: max retries already exceeded — mark as FAILED.
             # We compute the error message in SQL so the
@@ -625,7 +648,9 @@ class SQLModelMessageQueueRepository:
         have its activity timestamp refreshed. Returns ``None`` if the
         row does not exist OR its current status is not ``processing``.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC digits for the naive last_activity_at column
+        # (DC-A fix).
+        now = now_utc_naive()
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
@@ -667,7 +692,9 @@ class SQLModelMessageQueueRepository:
         
         Returns True if there are no ready, processing, or retry-ready messages.
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # next_retry_at digits.
+        now = now_utc_naive()
         with Session(self.engine) as session:
             stmt = select(func.count()).select_from(MessageQueue).where(
                 MessageQueue.instance_id == instance_id
@@ -713,7 +740,9 @@ class SQLModelMessageQueueRepository:
 
     def list_ready(self, limit: int = 100) -> list[MessageQueue]:
         """List all ready messages."""
-        now = datetime.now(timezone.utc)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # next_retry_at digits.
+        now = now_utc_naive()
         with Session(self.engine) as session:
             stmt = (
                 select(MessageQueue)
@@ -836,7 +865,9 @@ class SQLModelMessageQueueRepository:
         Returns:
             Number of messages deleted.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # completed_at digits.
+        cutoff = now_utc_naive() - timedelta(hours=max_age_hours)
         
         with Session(self.engine) as session:
             stmt = sql_delete(MessageQueue).where(
@@ -951,7 +982,9 @@ class SQLModelMessageQueueRepository:
         - processing_count: Number of processing messages
         - oldest_message_age_seconds: Age of oldest message in seconds (or None)
         """
-        now = datetime.now(timezone.utc)
+        # Naive-UTC frame (DC-A fix) — same frame as the stored
+        # next_retry_at digits.
+        now = now_utc_naive()
         
         with Session(self.engine) as session:
             # Pending count (ready + retrying with next_retry_at <= now)
@@ -989,10 +1022,18 @@ class SQLModelMessageQueueRepository:
             oldest = session.exec(oldest_stmt).one()
             oldest_message_age_seconds = None
             if oldest:
-                # Make oldest timezone-aware if it's naive (stored without tz in DB)
-                if oldest.tzinfo is None:
-                    oldest = oldest.replace(tzinfo=timezone.utc)
-                oldest_message_age_seconds = (now - oldest).total_seconds()
+                # tz fix: coerce the stored value to the aware-UTC
+                # frame via the shared companion (naive digits are
+                # assumed-UTC per policy; legacy aware shapes pass
+                # through) and subtract in that ONE frame — mixing
+                # the naive ``now`` bind with an aware read raises
+                # TypeError.
+                oldest_aware = coerce_to_aware_utc(oldest)
+                now_aware = coerce_to_aware_utc(now)
+                if oldest_aware is not None and now_aware is not None:
+                    oldest_message_age_seconds = (
+                        now_aware - oldest_aware
+                    ).total_seconds()
             
             return {
                 "pending_count": pending_count,

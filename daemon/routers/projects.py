@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.project import HistoryEntryType
+from daemon.services.critical_note_gate import is_active_critical_note
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
 from daemon.services.workspace_guard import WorkspaceGuard
 from .schemas import (
@@ -91,17 +92,32 @@ def set_job_queue_mgmt_service(service: JobQueueMgmtService) -> None:
 
 def _get_critical_notes_safe(repo: SQLModelProjectRepository, project_id: str) -> list[dict]:
     """Fetch critical notes for a project with graceful error handling.
-    
+
+    R21 entry-gate (LOCKED-L 2026-09-15): superseded rows are dropped
+    at this external pass-through surface so they never appear in
+    ``ProjectResponse`` payloads. ``is not None`` defends against the
+    stray empty-string class too (a non-NULL empty pointer must not
+    bypass the filter).
+
     Args:
         repo: The project repository instance.
         project_id: The project ID to fetch notes for.
-    
+
     Returns:
-        List of critical note dicts, or empty list on error.
+        List of critical note dicts (active only), or empty list on
+        error.
     """
     try:
         notes = repo.list_critical_notes(project_id)
-        return [note.to_dict() for note in notes]
+        # R21 entry gate — routed through the shared predicate
+        # (``daemon.services.critical_note_gate``); strict is-not-None
+        # comparison so a stray empty-string pointer is also dropped
+        # (e.g. a legacy row whose superseded_by_id was cleared to ""
+        # instead of NULL).
+        return [
+            note.to_dict() for note in notes
+            if is_active_critical_note(note)
+        ]
     except Exception as e:
         logger.warning(f"Failed to fetch critical notes for project {project_id}: {e}")
         return []

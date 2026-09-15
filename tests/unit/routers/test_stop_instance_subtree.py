@@ -144,11 +144,38 @@ def _build_three_node_tree(repo: SQLModelInstanceRepository) -> dict[str, str]:
 
     Returns a dict mapping role → instance_id (role is the B5 fixture
     name; instance_id is what the router path sees).
+
+    DEFECT B contract update (2026-09-14): the pause cascade now SKIPS
+    never-dispatched ghost children (idle + version==1 + zero
+    message/task rows). These tree-resolution tests exercise the
+    pause path itself, so each node is seeded with one message row
+    ("dispatched idle") — a node with queued work is pausable under
+    both the old and the refined contract.
     """
     root = _create_instance(repo, "root-b5")
     mid = _create_instance(repo, "mid-b5", parent_id="root-b5")
     leaf = _create_instance(repo, "leaf-of-mid-b5", parent_id="mid-b5")
+    for iid in (root.instance_id, mid.instance_id, leaf.instance_id):
+        _seed_dispatched_work(repo, iid)
     return {"root": root.instance_id, "mid": mid.instance_id, "leaf_of_mid": leaf.instance_id}
+
+
+def _seed_dispatched_work(repo: SQLModelInstanceRepository, instance_id: str) -> None:
+    """Mark ``instance_id`` as dispatched (one message row) so the
+    DEFECT B ghost-skip does not exclude it from the pause cascade."""
+    from daemon.repositories.message_queue.models import MessageQueue
+
+    with Session(repo.engine) as session:
+        session.add(
+            MessageQueue(
+                message_id=f"mq-{instance_id}",
+                instance_id=instance_id,
+                content="tree-resolution fixture work",
+                role="user",
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        session.commit()
 
 
 # ---------------------------------------------------------------------------

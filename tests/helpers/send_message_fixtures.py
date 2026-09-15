@@ -127,6 +127,12 @@ def make_send_message_manager(*, status: str) -> MagicMock:
     manager.set_injection = MagicMock(
         return_value={"content": "stub", "timestamp": "2026-08-26T00:00:00Z"}
     )
+    # DEFECT A (dispatch-lane stranding fix, 2026-09-14): the injection
+    # lane is guarded by a live-graph check at the send_message call
+    # site. Default ``True`` keeps every pre-existing routing test
+    # pinning the injection behavior for a genuinely-running (live
+    # graph) target; the graphless tests override this to ``False``.
+    manager.has_live_graph_task = MagicMock(return_value=True)
     manager._instance_repository = MagicMock()
     manager._instance_repository.get = MagicMock(return_value=None)
     manager.engine = MagicMock()

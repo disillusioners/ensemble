@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, case, delete as sql_delete, func, literal, not_, or_, String, text
+from sqlalchemy import bindparam, case, delete as sql_delete, exists, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql.elements import TextClause
@@ -654,6 +654,66 @@ class SQLModelInstanceRepository:
         if mode == "hierarchy":
             return self.get_tree_ids(root_id)
         return self.get_tree_ids_permanent(root_id)
+
+    def filter_never_dispatched_ids(self, instance_ids: list[str]) -> set[str]:
+        """Return the subset of ``instance_ids`` that are never-dispatched
+        ghost children.
+
+        Dispatch-lane stranding fix (feature/fix-question-resume-stuck,
+        2026-09-14 — DEFECT B). A "never-dispatched ghost" is a
+        spawn-created child that has NEVER received any work: zero
+        ``message_queue`` rows, zero ``task`` rows, still ``idle`` at
+        ``version == 1``. The predicate MUST stay in lockstep with the
+        canonical SQL expression
+        ``ChildReportsService._ghost_child_filter``
+        (``daemon/services/child_reports.py`` — the parent-completion
+        gate's live-children exclusion); a semantic-equivalence drift
+        test pins both sides against the same fixture DB
+        (``tests/unit/test_pause_never_dispatched_ghosts.py``).
+
+        Consumer: ``pause_instance_cascade`` skips such nodes — there is
+        no in-flight work to quiesce, and pausing them sets up the
+        wedged-tree class (resume flips them to ``running`` with no
+        graph, ``resume_processing_job`` routes them to
+        ``internal_child_noop``, and every later dispatch-to-``running``
+        used to strand in the in-memory injection queue).
+
+        Single batched query (one round trip for the whole tree) — the
+        pause-cascade loop already does one ``repo.get`` per node, this
+        keeps the probe O(1) round trips.
+
+        Args:
+            instance_ids: Candidate instance IDs (typically a cascade
+                tree enumeration).
+
+        Returns:
+            The subset of IDs satisfying the never-dispatched predicate.
+            Unknown IDs are simply not returned. Empty input returns an
+            empty set without touching the DB.
+        """
+        if not instance_ids:
+            return set()
+        no_messages = ~exists(
+            select(MessageQueue.message_id).where(
+                MessageQueue.instance_id == Instance.instance_id
+            )
+        )
+        no_tasks = ~exists(
+            select(Task.id).where(Task.instance_id == Instance.instance_id)
+        )
+        stmt = (
+            select(Instance.instance_id)
+            .where(Instance.instance_id.in_(instance_ids))
+            .where(
+                Instance.status == InstanceStatus.IDLE.value,
+                Instance.version == 1,
+                no_messages,
+                no_tasks,
+            )
+        )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        return set(rows)
 
     def get_ancestor_ids(self, instance_id: str) -> list[str]:
         """Get all ancestor instance IDs (parent, grandparent, ..., up to root).

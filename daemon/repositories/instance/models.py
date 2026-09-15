@@ -138,7 +138,9 @@ class Instance(SQLModel, table=True):
             "initiative_message": self.initiative_message,
             "metadata": dict(self.instance_metadata) if self.instance_metadata else {},
             "version": self.version,
-            "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
+            # Shared serialization boundary (tz fix): naive-UTC
+            # digits render assume-UTC; TEXT columns pass verbatim.
+            "last_activity_at": _to_utc_iso(self.last_activity_at),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "paused_at": self.paused_at,
@@ -148,6 +150,18 @@ class Instance(SQLModel, table=True):
             "attestation_denied_count": self.attestation_denied_count,
             "completion_gate_escalated": self.completion_gate_escalated,
         }
+
+
+def _to_utc_iso(value):
+    """``to_utc_iso`` wrapper (tz fix serialization boundary).
+
+    Deferred import: importing ``daemon.services.timestamps`` at
+    module level would cycle (``daemon.services.__init__`` imports
+    service classes which import this module).
+    """
+    from daemon.services.timestamps import to_utc_iso
+
+    return to_utc_iso(value)
 
 
 # ─── updated_at consistency ─────────────────────────────────────────────────

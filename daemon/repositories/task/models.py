@@ -16,6 +16,27 @@ from sqlalchemy import Boolean, Column, Index, Integer, text
 from sqlmodel import SQLModel, Field
 
 
+def _to_utc_iso(value):
+    """``to_utc_iso`` wrapper with the deferred-import cycle guard."""
+    from daemon.services.timestamps import to_utc_iso
+
+    return to_utc_iso(value)
+
+
+def _default_created_at_naive_utc() -> datetime:
+    """Naive-UTC ``created_at`` default for Task rows (DC-A fix).
+
+    Deferred import: ``daemon.services.__init__`` eagerly imports the
+    service classes (which import this module), so a module-level
+    ``from daemon.services.timestamps import now_utc_naive`` would
+    create a circular import. The deferred path resolves at first
+    instantiation, well after module load.
+    """
+    from daemon.services.timestamps import now_utc_naive
+
+    return now_utc_naive()
+
+
 class TaskType(str, enum.Enum):
     """Task type enum.
 
@@ -216,8 +237,12 @@ class Task(SQLModel, table=True):
     # Error storage
     error: str | None = Field(default=None)
 
-    # Timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Timestamps. Naive-UTC digits (DC-A fix): the columns are
+    # ``timestamp without time zone`` on PostgreSQL — an aware
+    # default would render in the session TimeZone (+07 in
+    # production) and store local digits. Readers that need an aware
+    # value coerce via ``coerce_to_aware_utc`` (assume-UTC policy).
+    created_at: datetime = Field(default_factory=_default_created_at_naive_utc)
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
 
@@ -277,8 +302,11 @@ class Task(SQLModel, table=True):
             "is_background": self.is_background,
             "result": result_data,
             "error": self.error,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at else None,
+            # Shared serialization boundary (tz fix): naive-UTC
+            # digits render assume-UTC with the explicit offset on
+            # the wire. Deferred import — see _default_created_at.
+            "created_at": _to_utc_iso(self.created_at),
+            "started_at": _to_utc_iso(self.started_at),
+            "completed_at": _to_utc_iso(self.completed_at),
+            "last_heartbeat_at": _to_utc_iso(self.last_heartbeat_at),
         }

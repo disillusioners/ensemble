@@ -240,6 +240,7 @@ def _make_fake_llm_class(
     # ``_FakeChatClient`` in ``tests/unit/test_symptom_repair_engine.py``
     # + ``tests/unit/test_symptom_repair_engine_failover_e2e.py``.
     _factory.default_streaming = False
+    _factory.default_request_timeout = 610
     _factory.default_request_gzip = False
 
     return _factory, mock_instance

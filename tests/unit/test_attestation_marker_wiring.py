@@ -91,6 +91,10 @@ def _make_node(
     instance_id: str = "marker-it",
     llm_judge_enabled: bool = True,
     denied_count_getter=None,
+    busy_descendants: int = 0,
+    live_descendants: int = 0,
+    pending_children: int = 0,
+    queued_or_expected_wakeups: int = 0,
 ) -> tuple:
     """Build the gate node with manager + ledger stubs (no real DB).
 
@@ -102,11 +106,22 @@ def _make_node(
     The BFS shape is covered separately by the manager-side conftest
     fixtures (per the tester-manager conftest pattern); this file
     exercises the gate-node wiring only.
+
+    2026-09-12 LCA busy trigger suppression — ``busy_descendants`` is
+    stubbed too (default 0; tests pass an explicit value to exercise
+    the suppression branches). The two methods share the SAME private
+    BFS helper in the production facade
+    (``InstanceManager._count_descendants_busy_and_live``), but this
+    stub returns independent ints per method (gate-node wiring only —
+    the production helper is covered by the manager-side suite).
     """
     manager = MagicMock()
-    manager.count_pending_children.return_value = 0
-    manager.get_queued_or_expected_wakeups.return_value = 0
-    manager.count_live_descendants.return_value = 0
+    manager.count_pending_children.return_value = pending_children
+    manager.get_queued_or_expected_wakeups.return_value = (
+        queued_or_expected_wakeups
+    )
+    manager.count_live_descendants.return_value = live_descendants
+    manager.count_busy_descendants.return_value = busy_descendants
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -303,6 +318,7 @@ def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
     manager.count_pending_children.return_value = 1  # REAL pending
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -461,6 +477,7 @@ def test_marker_d_timeout_with_real_pending_hint(monkeypatch, caplog):
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 1  # wakeup
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -636,6 +653,7 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
     manager.count_pending_children.return_value = 1  # REAL pending
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -1170,6 +1188,7 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -1736,6 +1755,7 @@ def test_length_short_real_pending_hint(monkeypatch, caplog):
     manager.count_pending_children.return_value = 1  # REAL pending
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -1880,6 +1900,7 @@ def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
     manager.count_pending_children.return_value = 0
     manager.get_queued_or_expected_wakeups.return_value = 0
     manager.count_live_descendants.return_value = 0
+    manager.count_busy_descendants.return_value = 0
     manager.enqueue_message = MagicMock()
     manager.revive = MagicMock()
     manager.send_message = MagicMock()
@@ -1987,14 +2008,30 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     )
 
 
-def test_length_log_placeholder_count_is_31():
+def test_length_log_placeholder_count_is_33():
     """The canonical ``event=leader_completion_gate`` log format
-    string has exactly 31 placeholders (28 → 31 with the three new
-    length-trigger fields). Pinned by source grep — drift pin so
-    log-row format-string changes surface in code review (a
-    regression to 28 placeholders breaks grep-based soak tooling
-    silently)."""
+    string has exactly 33 placeholders (31 → 33 with the two new
+    busy trigger-suppression fields ``busy_descendants`` +
+    ``trigger_suppressed_by``). Pinned by source grep — drift pin
+    so log-row format-string changes surface in code review (a
+    regression to 31 placeholders breaks grep-based soak tooling
+    silently).
+
+    TWO-LAYER PIN: substring-count alone cannot catch an arg-shift
+    (Python's ``logging`` swallows format errors via
+    ``Handler.handleError`` — see CPython
+    ``Lib/logging/__init__.py`` — so a 33-placeholder format string
+    fed 34 args would log a tuple-mismatch error to stderr and the
+    row would appear truncated, but no test failure). The second
+    layer parses the source via ``ast`` to extract the literal
+    arg-tuple after the format string and asserts the arg count
+    equals the placeholder count (33 == 33). The two layers catch
+    drift in opposite directions: the substring count catches a
+    format-string change that drops a field; the arg-count parse
+    catches a body change that adds/removes an arg without
+    updating the format string."""
     from daemon.services import attestation_gate as gate_mod
+    import ast
     import inspect
 
     source = inspect.getsource(gate_mod)
@@ -2024,9 +2061,621 @@ def test_length_log_placeholder_count_is_31():
                 break
     format_text = "\n".join(format_string_lines)
     placeholder_count = format_text.count("%s")
-    assert placeholder_count == 31, (
+    assert placeholder_count == 33, (
         f"canonical gate log format string placeholder count drifted: "
-        f"expected 31 (28 + length_trigger + final_word_count + "
-        f"trigger_source), got {placeholder_count}. Update the drift "
-        f"pin if the placeholder count is correct for the new schema."
+        f"expected 33 (31 + busy_descendants + trigger_suppressed_by), "
+        f"got {placeholder_count}. Update the drift pin if the "
+        f"placeholder count is correct for the new schema."
+    )
+
+    # ── Arg-count parity layer (logging-swallow hardener) ──
+    # Parse the source with ``ast`` to extract the ``logger.info``
+    # call carrying our canonical format string and assert the
+    # positional-arg count of the format-string argument equals
+    # the placeholder count. ``logging.Handler.handleError``
+    # swallows format errors silently (CPython logging/__init__.py),
+    # so a 33-placeholder format string fed 34 args would log a
+    # ``KeyError`` / ``TypeError`` to stderr and the row would
+    # appear truncated — but no test failure, no log-line drift
+    # visible to grep. The args-count parity assertion closes that
+    # silent-failure surface.
+    parsed = ast.parse(source)
+    found_args_count: int | None = None
+    for node in ast.walk(parsed):
+        # Match ``logger.info("..." + "..." + ..., arg1, arg2, ...)``
+        # or ``logger.info("...", arg1, arg2, ...)``. The canonical
+        # log call in this module uses string-concatenation
+        # adjacent literals for the format string (PEP 3126 style);
+        # ``ast.Call`` is the unified node for either form.
+        if (
+            not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Attribute)
+            or node.func.attr != "info"
+        ):
+            continue
+        # The first positional arg MUST be the format string — either
+        # a single ``ast.Constant`` or a ``ast.BinOp`` chain (string
+        # concatenation of adjacent literals). We accept both.
+        if not node.args:
+            continue
+        first_arg = node.args[0]
+        is_format = isinstance(first_arg, ast.Constant) and isinstance(
+            first_arg.value, str
+        )
+        if not is_format and not (
+            isinstance(first_arg, ast.BinOp)
+            and isinstance(first_arg.op, ast.Add)
+        ):
+            continue
+        # Reconstruct the format-string text from the AST and
+        # verify it carries the canonical event= prefix.
+        def _flatten(node_: ast.AST) -> str | None:
+            if isinstance(node_, ast.Constant) and isinstance(
+                node_.value, str
+            ):
+                return node_.value
+            if isinstance(node_, ast.BinOp) and isinstance(
+                node_.op, ast.Add
+            ):
+                left = _flatten(node_.left)
+                right = _flatten(node_.right)
+                if left is None or right is None:
+                    return None
+                return left + right
+            return None
+
+        flat = _flatten(first_arg)
+        if flat is None or marker_prefix not in flat:
+            continue
+        # Pin: positional args AFTER the format string MUST equal
+        # the placeholder count. ``extra=meta`` is a kwarg (NOT a
+        # positional arg), so the positional count IS the format-
+        # arg count.
+        found_args_count = len(node.args) - 1
+        break
+
+    assert found_args_count is not None, (
+        "canonical gate log call not found in attestation_gate.py "
+        "AST — drift in the module structure"
+    )
+    assert found_args_count == placeholder_count, (
+        f"gate log args-count parity drifted: format string has "
+        f"{placeholder_count} placeholders but the call passes "
+        f"{found_args_count} positional args. Python's logging "
+        f"swallows format errors silently via Handler.handleError, "
+        f"so a mismatch would log a tuple-mismatch error to stderr "
+        f"and the row would appear truncated — no exception, no "
+        f"grep-visible drift. Update BOTH the format string AND "
+        f"the positional args when adding/removing a field."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LCA busy trigger suppression (2026-09-12) — healthy-wait hints are
+# noise; suppress marker/length trigger on busy descendants.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _delegated_short_marker_mission(final_text: str) -> dict:
+    """Delegated mission ending with a short AIMessage (no marker
+    phrase) — exercises the length-only trigger class."""
+
+    delegation_ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "send_message", "args": {"target": "child-id"}, "id": "c1"}
+        ],
+    )
+    return {
+        "messages": [
+            HumanMessage(content="please do it"),
+            delegation_ai,
+            AIMessage(content=final_text),
+        ]
+    }
+
+
+def test_busy_running_child_suppresses_marker_trigger_no_judge_no_hint(
+    monkeypatch, caplog
+):
+    """(AC-B1, spec point 5a) RUNNING child + marker-triggering
+    short "awaiting" ack → NO judge call, NO route-(b) hint, plain
+    allow, ``trigger_suppressed_by="busy_descendants"``.
+
+    The false-positive class: leader awaiting a RUNNING child writes
+    a short mid-work ACK. The marker substring scan fires; the
+    length trigger also fires (the AIMessage is short). Without busy
+    suppression, the gate would route through the judge and — on
+    judge-no — inject a checkpoint-durable Completion Check Note on
+    essentially every awaiting turn-end. Busy suppression disarms
+    the WHOLE trigger so the leader is allowed silently and the
+    healthy-wait noise is gone.
+    """
+    call_count = {"n": 0}
+
+    def _track(*args, **kwargs):
+        call_count["n"] += 1
+        return ('{"is_complete_report": false, "reason": "x"}', "fake-quick")
+
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _track,
+    )
+
+    node, manager, ledger = _make_node(
+        instance_id="busy-running-it",
+        busy_descendants=1,  # RUNNING child
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting tester reply. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "busy-running-it"}},
+            )
+        )
+
+    # Plain allow — NO nudge, NO counter, NO hint, NO judge call.
+    assert result["attestation_route"] is None
+    assert "messages" not in result  # no hint injected
+    ledger.increment.assert_not_called()
+    ledger.reset.assert_not_called()
+    ledger.set_escalated_and_reset.assert_not_called()
+    # Judge must NOT have been called.
+    assert call_count["n"] == 0, (
+        "marker-path judge fired despite busy trigger suppression; "
+        "the trigger block in graph.py must check trigger_suppressed_by"
+    )
+
+    # Log row carries busy_descendants + trigger_suppressed_by.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "event=leader_completion_gate" in log_text
+    assert "busy_descendants=1" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # marker_hit STILL recorded for observability.
+    assert "marker_hit=True" in log_text
+    # trigger_source is cleared (cheap allow signal).
+    assert "trigger_source=<none>" in log_text
+    # The marker_path is force-cleared to "" (no judge fires).
+    # The log row stamps "<none>" for an empty marker_path.
+    assert "marker_path=<none>" in log_text
+    # No judge log row.
+    assert (
+        "event=leader_completion_gate_marker_judge " not in log_text
+        and "event=leader_completion_gate_marker_judge\n" not in log_text
+    )
+
+
+def test_busy_waiting_child_suppresses_marker_trigger(monkeypatch, caplog):
+    """(AC-B2, spec point 5b) WAITING child + marker-trigger → NO judge,
+    NO hint, plain allow, suppression armed."""
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    # WAITING is busy (counted), live (counted).
+    node, manager, ledger = _make_node(
+        instance_id="busy-waiting-it",
+        busy_descendants=1,
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker("Awaiting. Ending turn."),
+                config={"configurable": {"thread_id": "busy-waiting-it"}},
+            )
+        )
+    assert result["attestation_route"] is None
+    assert "messages" not in result
+    ledger.increment.assert_not_called()
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=1" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    assert "marker_hit=True" in log_text
+    assert "trigger_source=<none>" in log_text
+    # No judge log row.
+    assert (
+        "event=leader_completion_gate_marker_judge " not in log_text
+        and "event=leader_completion_gate_marker_judge\n" not in log_text
+    )
+
+
+def test_busy_waiting_children_child_suppresses_marker_trigger(
+    monkeypatch, caplog
+):
+    """(AC-B3, spec point 5c) WAITING_CHILDREN child + marker-trigger
+    → NO judge, NO hint, plain allow, suppression armed."""
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    node, manager, ledger = _make_node(
+        instance_id="busy-waiting-children-it",
+        busy_descendants=1,  # WAITING_CHILDREN counts as busy
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker("Awaiting. Ending turn."),
+                config={"configurable": {"thread_id": "busy-waiting-children-it"}},
+            )
+        )
+    assert result["attestation_route"] is None
+    assert "messages" not in result
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=1" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    assert "marker_hit=True" in log_text
+
+
+def test_paused_child_keeps_trigger_armed_no_suppression(
+    monkeypatch, caplog
+):
+    """(AC-B4, spec point 5d) PAUSED child + trigger → judge + route-
+    (b) hint STILL fire (PAUSED is suspect, not healthy — busy
+    suppression MUST NOT disarm the trigger).
+
+    Pin: ``busy_descendants=0`` when only PAUSED descendants exist
+    (the live count is 1 — PAUSED is live-for-deny-protection, but
+    NOT busy for trigger suppression). The trigger stays armed and
+    the judge fires.
+    """
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    # PAUSED is live (counted), NOT busy (excluded from busy subset).
+    node, manager, ledger = _make_node(
+        instance_id="paused-not-busy-it",
+        busy_descendants=0,
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting child reply. Ending turn, will continue."
+                ),
+                config={"configurable": {"thread_id": "paused-not-busy-it"}},
+            )
+        )
+
+    # Path (b): ALLOW + hint (NOT suppress) — judge fires, judge-no,
+    # real pending → Completion Check Note injected.
+    assert "messages" in result
+    assert result["messages"][0].content == COMPLETION_CHECK_NOTE_TEXT
+    ledger.increment.assert_not_called()  # (b) does not increment
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=0" in log_text
+    assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
+    assert "trigger_source=markers+length" in log_text  # both halves fired
+    # Judge ran.
+    assert "event=leader_completion_gate_marker_judge" in log_text
+    assert "verdict=no" in log_text
+    assert "[AttestationGate] marker-path b instance=" in log_text
+
+
+def test_busy_suppression_short_only_length_trigger_no_judge(
+    monkeypatch, caplog
+):
+    """(AC-B5, spec point 5a variant) RUNNING child + length-only
+    trigger (short ack with NO marker phrase) → suppression disarms
+    the trigger; no judge, no hint.
+
+    The brevity-only class: a leader awaiting a RUNNING child
+    writes "OK, waiting on the tester." (short, no marker phrase).
+    Length trigger fires alone (``trigger_source="length"``).
+    Without busy suppression, the gate would route through the judge
+    and inject a Completion Check Note on every short healthy wait.
+    """
+    call_count = {"n": 0}
+
+    def _track(*args, **kwargs):
+        call_count["n"] += 1
+        return ('{"is_complete_report": false, "reason": "x"}', "fake-quick")
+
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _track,
+    )
+
+    node, manager, ledger = _make_node(
+        instance_id="busy-length-only-it",
+        busy_descendants=1,
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_short_marker_mission("OK, waiting on the tester."),
+                config={"configurable": {"thread_id": "busy-length-only-it"}},
+            )
+        )
+
+    assert result["attestation_route"] is None
+    assert "messages" not in result
+    ledger.increment.assert_not_called()
+    assert call_count["n"] == 0, "judge fired despite busy suppression"
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=1" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # length_trigger STILL recorded for observability.
+    assert "length_trigger=True" in log_text
+    # trigger_source cleared.
+    assert "trigger_source=<none>" in log_text
+
+
+def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
+    monkeypatch, caplog
+):
+    """(AC-B6, spec point 5f) Boundary — busy=0 + markers + nothing
+    pending → route (a) deny+nudge UNCHANGED. Busy suppression MUST
+    NOT regress the existing deny path.
+
+    Pin the historical contract: when trigger fires, busy=0, and
+    nothing is pending, the gate converts to DENY + nudge + counter
+    increment. This test mirrors the original
+    ``test_marker_a_deny_nudge_counter_increments`` shape (the
+    non-delegated mission where ``attestation_required=False`` — the
+    natural ALLOW path is the only way to reach the (a) route). The
+    test exercises the new busy-input plumbing explicitly
+    (``busy_descendants=0``) so any future refactor that accidentally
+    drops the busy read is caught.
+    """
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    node, manager, ledger = _make_node(
+        instance_id="busy-zero-deny-it",
+        busy_descendants=0,  # explicit — boundary pin
+        live_descendants=0,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Awaiting your reply. Ending turn, will continue after."
+                ),
+                config={"configurable": {"thread_id": "busy-zero-deny-it"}},
+            )
+        )
+
+    # Path (a) — DENY + nudge + counter+1, UNCHANGED.
+    assert result["attestation_route"] == "agent"
+    # Deny path injects a nudge message into state.
+    assert "messages" in result
+    ledger.increment.assert_called_once()
+    assert ledger.increment.call_args.args[0] == "busy-zero-deny-it"
+    ledger.reset.assert_not_called()
+    ledger.set_escalated_and_reset.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=0" in log_text
+    assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
+    assert "marker_hit=True" in log_text
+    # Judge ran.
+    assert "event=leader_completion_gate_marker_judge" in log_text
+    assert "verdict=no" in log_text
+    assert "[AttestationGate] marker-path a instance=" in log_text
+
+
+def test_deny_path_suite_unchanged_existing_marker_a_still_works(
+    monkeypatch, caplog
+):
+    """(AC-B7, spec point 5g) Existing deny-path suite unchanged —
+    the historical (a)/(b)/(c)/(d) marker routing tests must still
+    pass with the busy plumbing added (busy=0 by default).
+
+    This is a regression guard — the marker_a_deny_nudge_counter_
+    increments test shape, re-run with the busy plumbing in place.
+    """
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    # busy=0, live=0 — clean (a)-path. Same shape as
+    # test_marker_a_deny_nudge_counter_increments but exercises the
+    # new _make_node defaults (busy_descendants=0).
+    node, manager, ledger = _make_node(instance_id="marker-a-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "Awaiting your reply. Ending turn, will continue after."
+                ),
+                config={"configurable": {"thread_id": "marker-a-it"}},
+            )
+        )
+
+    assert result["attestation_route"] == "agent"
+    ledger.increment.assert_called_once()
+    assert ledger.increment.call_args.args[0] == "marker-a-it"
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "busy_descendants=0" in log_text
+    assert "trigger_suppressed_by=<none>" in log_text
+
+
+def test_busy_suppression_short_only_length_trigger_log_has_both_fields(
+    monkeypatch, caplog
+):
+    """(AC-B8) Log schema pin — the canonical
+    ``event=leader_completion_gate`` log row ALWAYS carries
+    ``busy_descendants`` and ``trigger_suppressed_by``, even when
+    busy=0 and the trigger is not suppressed. Operators grep for
+    these two new fields; they are additive to the canonical 17-
+    field tuple (same shape as ``length_trigger`` /
+    ``final_word_count`` / ``trigger_source``).
+
+    Drift pin: ``busy_descendants=<int> trigger_suppressed_by=<none-or-name>``
+    on every log row. A future regression that drops these fields
+    breaks grep-based busy-suppression forensics silently.
+    """
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    node, manager, ledger = _make_node(instance_id="log-pin-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting child reply. Ending turn, will continue."
+                ),
+                config={"configurable": {"thread_id": "log-pin-it"}},
+            )
+        )
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # The canonical log row MUST carry both new fields, ALWAYS.
+    assert "busy_descendants=" in log_text
+    assert "trigger_suppressed_by=" in log_text
+
+
+def test_busy_suppression_both_triggers_combined_no_judge(
+    monkeypatch, caplog
+):
+    """(AC-B9) RUNNING child + BOTH marker AND length triggers fire
+    (``trigger_source="markers+length"`` would-be) → suppression
+    disarms the WHOLE trigger; ``trigger_source=""`` (cleared);
+    ``trigger_suppressed_by="busy_descendants"``; NO judge.
+
+    Boundary pin for the combined-trigger case — the suppression
+    branch must clear the combined ``trigger_source`` (not leave it
+    as "markers+length") and stamp ``trigger_suppressed_by``.
+    """
+    call_count = {"n": 0}
+
+    def _track(*args, **kwargs):
+        call_count["n"] += 1
+        return ('{"is_complete_report": false, "reason": "x"}', "fake-quick")
+
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _track,
+    )
+
+    node, manager, ledger = _make_node(
+        instance_id="busy-combined-it",
+        busy_descendants=1,
+        live_descendants=1,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting tester reply. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "busy-combined-it"}},
+            )
+        )
+
+    assert call_count["n"] == 0, "judge fired despite busy suppression"
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # Both halves fire (marker + length) but the WHOLE trigger is
+    # suppressed — ``trigger_source`` is force-cleared.
+    assert "marker_hit=True" in log_text
+    assert "length_trigger=True" in log_text
+    assert "trigger_source=<none>" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # The combined string MUST NOT appear in the log when suppressed.
+    assert "trigger_source=markers+length" not in log_text
+
+
+def test_busy_suppression_dry_mode_log_only_no_judge_no_hint(
+    monkeypatch, caplog
+):
+    """(AC-B10) DRY mode + busy suppression — dry-mode log-only
+    contract preserved end-to-end. Busy suppression is layered on
+    top of dry-mode: the trigger is suppressed, NO judge call,
+    NO hint, plain allow, additive log fields stamped.
+
+    The dry-mode ``allow unconditionally`` posture is preserved —
+    busy suppression is silent on dry-mode too (no judge, no hint).
+    Operators see the suppression in the log row
+    (``trigger_suppressed_by=busy_descendants``).
+    """
+    monkeypatch.setattr(
+        "daemon.services.attestation_report_judge._invoke_judge_llm",
+        _invoke_no,
+    )
+    manager = MagicMock()
+    manager.count_pending_children.return_value = 0
+    manager.get_queued_or_expected_wakeups.return_value = 0
+    manager.count_live_descendants.return_value = 1
+    manager.count_busy_descendants.return_value = 1
+    manager.enqueue_message = MagicMock()
+    manager.revive = MagicMock()
+    manager.send_message = MagicMock()
+
+    ledger = MagicMock()
+    ledger.increment.return_value = 1
+    ledger.reset.return_value = True
+    ledger.set_escalated_and_reset.return_value = True
+    ledger.get.return_value = 0
+
+    # dry mode
+    config = build_gate_config(
+        "busy-dry-it", GateSettings("dry", 3, 3), llm_judge_enabled=True,
+    )
+    node = create_attestation_gate_node(
+        config,
+        GateSettings("dry", 3, 3),
+        manager,
+        "busy-dry-it",
+        denied_count_getter=lambda: 0,
+        ledger=ledger,
+    )
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _delegated_mission_with_marker(
+                    "Awaiting tester reply. Ending turn."
+                ),
+                config={"configurable": {"thread_id": "busy-dry-it"}},
+            )
+        )
+
+    # DRY mode → no route, no hint, no counter change, no judge.
+    assert result["attestation_route"] is None
+    assert "messages" not in result
+    ledger.increment.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "decision=dry_log" in log_text
+    assert "busy_descendants=1" in log_text
+    assert "trigger_suppressed_by=busy_descendants" in log_text
+    assert "marker_hit=True" in log_text
+    assert "trigger_source=<none>" in log_text
+    # No judge row.
+    assert (
+        "event=leader_completion_gate_marker_judge " not in log_text
+        and "event=leader_completion_gate_marker_judge\n" not in log_text
     )

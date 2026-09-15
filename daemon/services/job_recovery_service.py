@@ -29,6 +29,7 @@ from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.services.timestamps import coerce_to_aware_utc, now_utc_naive
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -1960,7 +1961,10 @@ class JobRecoveryService:
         from daemon.repositories.instance.models import InstanceStatus
         from daemon.services.turn_transitions import DeadLetterTurn
 
-        threshold = datetime.now(timezone.utc) - timedelta(
+        # Naive-UTC digit bind for the naive ``t.created_at`` column
+        # (DC-A fix — aware binds render in the PG session TimeZone
+        # (+07), inflating ages 7h on the sweep predicate).
+        threshold = now_utc_naive() - timedelta(
             seconds=min_pending_age_seconds
         )
 
@@ -2030,7 +2034,11 @@ class JobRecoveryService:
                     """),
                     {
                         "status_failed": TaskStatus.FAILED.value,
-                        "now": datetime.now(timezone.utc),
+                        # Naive-UTC digits for the naive
+                        # ``task.completed_at`` column (DC-A fix —
+                        # aware binds render in the PG session
+                        # TimeZone (+07)).
+                        "now": now_utc_naive(),
                         "reason": "drift_sweep_dead_parent",
                         "task_id": task_id,
                         "status_pending": TaskStatus.PENDING.value,
@@ -3649,8 +3657,8 @@ class JobRecoveryService:
         comparison.
 
         JobItem stores ``created_at`` as an ISO-8601
-        string (per the model default factory at
-        ``daemon/repositories/job_queue/models.py:349``).
+        string (per the model default factory in
+        ``daemon/repositories/job_queue/models.py``).
         A malformed or missing value is a defensive
         concern — the ``recover_on_startup`` and Pattern
         (a) paths assume well-formed timestamps; we
@@ -3669,12 +3677,9 @@ class JobRecoveryService:
             parsed = datetime.fromisoformat(str(value))
         except (TypeError, ValueError):
             return None
-        if parsed.tzinfo is None:
-            # JobItem stores naive ISO strings in some
-            # code paths; assume UTC for the grace
-            # comparison.
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
+        # Shared assume-UTC companion (tz fix) — naive ISO strings
+        # are assumed UTC for the grace comparison.
+        return coerce_to_aware_utc(parsed)
 
     async def _pattern_f_finalize_dead(
         self,

@@ -170,6 +170,7 @@ class _FakeChatClient:
     """
 
     default_streaming = False
+    default_request_timeout = 610
     default_request_gzip = False
 
     def __init__(
@@ -235,6 +236,7 @@ def _patch_facade(monkeypatch, fake_client: _FakeChatClient):
         # ``ThinkingChatOpenAI`` exposes — ``clean_llm_config``
         # reads ``default_streaming`` here (graph.py:2843).
         default_streaming = False
+        default_request_timeout = 610
         default_request_gzip = False
 
         def __new__(cls, **_kwargs):

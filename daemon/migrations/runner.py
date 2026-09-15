@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel
 from .models import SchemaMigration
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,14 @@ class MigrationFile:
         name: Human-readable name extracted from filename.
         up_sql: SQL statements for applying the migration.
         down_sql: SQL statements for rolling back the migration.
+        manual_only: When True, the auto-apply path skips this migration.
+        precondition: Declared driver precondition token parsed from the
+            file header (e.g. ``sqlite>=3.35.0``), or None when the
+            migration is unconditional. Evaluated by the runner BEFORE
+            execution; a failed precondition records a skip-ledger row
+            (``SchemaMigration.skip_reason``) so the migration never
+            re-fires and boot never fails. See ``README.md`` →
+            Migration File Format → Preconditions.
     """
     
     def __init__(
@@ -45,6 +53,7 @@ class MigrationFile:
         up_sql: str,
         down_sql: str,
         manual_only: bool = False,
+        precondition: str | None = None,
     ) -> None:
         self.path = path
         self.version = version
@@ -52,6 +61,7 @@ class MigrationFile:
         self.up_sql = up_sql.strip()
         self.down_sql = down_sql.strip()
         self.manual_only = manual_only
+        self.precondition = precondition
     
     @property
     def checksum(self) -> str:
@@ -102,6 +112,46 @@ class MigrationFile:
         # the file. See D10 ``drop_legacy_completion_columns.sql``.
         manual_only = bool(re.search(r"--\s*MANUAL:\s*TRUE", content, re.IGNORECASE))
 
+        # Detect a declared driver precondition via a ``PRECONDITION:``
+        # marker in the file header (N4 mechanism, 2026-09-15 —
+        # discoverable ledger columns, not inline checks). Grammar:
+        # ``sqlite>=X.Y.Z`` (semver floor on the SQLite engine version).
+        # The token is stored verbatim on the ledger row for
+        # discoverability; evaluation happens in
+        # ``MigrationRunner._evaluate_precondition``. A failed
+        # precondition records a skip-ledger row (never fails boot,
+        # never re-fires). See ``README.md`` → Preconditions.
+        precondition_match = re.search(
+            r"--\s*PRECONDITION:\s*([A-Za-z]+>=[\d.]+)", content, re.IGNORECASE
+        )
+        precondition = precondition_match.group(1) if precondition_match else None
+
+        # Loud-but-non-fatal guard for a MALFORMED marker: if the file
+        # LOOKS like it tried to declare a precondition (e.g. a typo'd
+        # ``-- PRECONDITON:`` line — note the missing 'I') but the strict
+        # regex above did not match, WARN so an operator sees the miss
+        # instead of the migration silently degrading to ungated
+        # execution. Without this guard, a typo'd marker would be
+        # indistinguishable from "no marker declared" — the migration
+        # would run, never gated, and the author would not know. The
+        # loose regex tolerates any keyword starting with ``PRECONDIT``
+        # (catches PRECONDITON / PRECONDITION / PRECONDITIONX) followed
+        # by a colon, which is enough to distinguish "tried to declare"
+        # from "no marker here".
+        if precondition is None:
+            malformed_match = re.search(
+                r"--\s*\S*PRECONDIT[\w-]*\s*:", content, re.IGNORECASE
+            )
+            if malformed_match:
+                logger.warning(
+                    "Migration %s '%s' has a malformed -- PRECONDITION: marker "
+                    "(expected 'PRECONDITION: <driver>>=<version>' per N4). "
+                    "Treating as no precondition declared — the migration will "
+                    "run ungated. Fix the marker to gate execution.",
+                    path.name,
+                    name,
+                )
+
         return cls(
             path=path,
             version=version,
@@ -109,6 +159,7 @@ class MigrationFile:
             up_sql=up_sql,
             down_sql=down_sql,
             manual_only=manual_only,
+            precondition=precondition,
         )
 
 
@@ -141,21 +192,31 @@ class MigrationRunner:
     
     def ensure_migrations_table(self) -> None:
         """Create or update the schema_migrations table.
-        
+
         Uses CREATE TABLE IF NOT EXISTS to avoid race conditions when
         multiple processes try to create the table simultaneously.
-        
+
         Also adds missing columns to handle schema evolution - if the
         SchemaMigration model adds new columns, this ensures they exist.
         """
         with self.engine.connect() as conn:
+            # N4 precondition columns: ``precondition`` + ``skip_reason``
+            # are declared here (CREATE TABLE path) for the same reason
+            # they appear in the model-side ``model_columns`` block
+            # below: the column exists on the ledger row from the very
+            # first migration ever recorded, so an operator reading the
+            # schema later sees the contract in one place. The migration
+            # runner reads/writes these on every apply (see
+            # ``MigrationRunner.apply_migration`` and ``_record_skip``).
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     applied_at TEXT NOT NULL,
                     execution_time_ms INTEGER,
-                    checksum TEXT
+                    checksum TEXT,
+                    precondition TEXT,
+                    skip_reason TEXT
                 )
             """))
             conn.commit()
@@ -176,6 +237,10 @@ class MigrationRunner:
             "applied_at": "TEXT",
             "execution_time_ms": "INTEGER",
             "checksum": "TEXT",
+            # N4 precondition mechanism (2026-09-15): declared
+            # precondition + skip reason, discoverable on the ledger row.
+            "precondition": "TEXT",
+            "skip_reason": "TEXT",
         }
         
         with self.engine.connect() as conn:
@@ -284,6 +349,156 @@ class MigrationRunner:
                 return True
         
         return False
+
+    # Precondition grammar: ``<engine>>=<semver>``. Only the sqlite
+    # engine is defined today; the regex in MigrationFile.parse already
+    # constrains the token shape, and unknown engines fail CLOSED here
+    # (evaluate as not-satisfied) so a future token never silently
+    # executes on the wrong driver.
+    _PRECONDITION_RE = re.compile(r"^([A-Za-z]+)>=([\d.]+)$")
+
+    def _evaluate_precondition(self, conn, precondition: str | None) -> tuple[bool, str]:
+        """Evaluate a declared migration precondition.
+
+        Args:
+            conn: An open SQLAlchemy connection (used for engine-version
+                probes; must be a SQLite connection when the token names
+                sqlite).
+            precondition: The declared token (e.g. ``sqlite>=3.35.0``),
+                or None for an unconditional migration.
+
+        Returns:
+            Tuple ``(satisfied, reason)``. ``reason`` is empty when
+            satisfied; otherwise a human-readable explanation suitable
+            for the ``skip_reason`` ledger column.
+        """
+        if not precondition:
+            return (True, "")
+        match = self._PRECONDITION_RE.match(precondition.strip())
+        if not match:
+            return (False, f"unparseable precondition {precondition!r}")
+        engine, floor = match.group(1).lower(), match.group(2)
+        if engine != "sqlite":
+            return (
+                False,
+                f"unknown precondition engine {engine!r} (supported: sqlite)",
+            )
+        version_row = conn.execute(text("SELECT sqlite_version()")).fetchone()
+        actual = str(version_row[0]) if version_row else "0"
+        if self._semver_tuple(actual) >= self._semver_tuple(floor):
+            return (True, "")
+        return (
+            False,
+            f"sqlite {actual} < required {floor} ({precondition})",
+        )
+
+    @staticmethod
+    def _semver_tuple(version: str) -> tuple[int, ...]:
+        """Parse a dotted version string to a comparable int tuple.
+
+        Non-numeric segments are dropped defensively so odd vendor
+        suffixes (``3.35.0-custom``) still compare on their numeric
+        prefix; an unparseable string yields ``(0,)`` (never satisfies).
+        """
+        parts: list[int] = []
+        for seg in str(version).split("."):
+            digits = ""
+            for ch in seg:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            if digits:
+                parts.append(int(digits))
+            else:
+                break
+        return tuple(parts) if parts else (0,)
+
+    def _persist_ledger_row(
+        self,
+        migration: MigrationFile,
+        *,
+        execution_time_ms: int,
+        skip_reason: str | None = None,
+        bind: Connection | None = None,
+    ) -> None:
+        """Insert one ``SchemaMigration`` row inside its own session.
+
+        Replaces the duplicated ``SchemaMigration(...) + session.add +
+        session.commit`` block across the apply path, the rename no-op
+        path, and the precondition-skip path. ``bind`` defaults to
+        ``self.engine``; the apply path passes a ``Connection`` from its
+        outer ``engine.begin()`` so the ledger row participates in the
+        migration's transaction (rolls back together with the SQL if the
+        transaction aborts).
+
+        Args:
+            migration: The migration the row describes.
+            execution_time_ms: Wall-clock duration recorded on the row.
+            skip_reason: Set only by ``_record_skip`` to mark a
+                precondition-failed migration; ``None`` for executed rows.
+            bind: Optional existing ``Connection`` to bind the session to
+                (the apply path). ``None`` opens a fresh session bound to
+                ``self.engine``.
+        """
+        if bind is None:
+            with Session(self.engine) as session:
+                self._add_ledger_row(session, migration, execution_time_ms, skip_reason)
+                session.commit()
+        else:
+            with Session(bind=bind) as session:
+                self._add_ledger_row(session, migration, execution_time_ms, skip_reason)
+                session.commit()
+
+    @staticmethod
+    def _add_ledger_row(
+        session: Session,
+        migration: MigrationFile,
+        execution_time_ms: int,
+        skip_reason: str | None,
+    ) -> None:
+        """Construct the ``SchemaMigration`` and add it to ``session``
+        (caller commits). Split out so the helper can use either an
+        engine-bound session or a connection-bound session without the
+        ``bind`` kwarg ambiguity.
+        """
+        record = SchemaMigration(
+            version=migration.version,
+            name=migration.name,
+            applied_at=datetime.now(timezone.utc).isoformat(),
+            execution_time_ms=execution_time_ms,
+            checksum=migration.checksum,
+            precondition=migration.precondition,
+            skip_reason=skip_reason,
+        )
+        session.add(record)
+
+    def _record_skip(self, migration: MigrationFile, reason: str, execution_time_ms: int = 0) -> float:
+        """Record a skip-ledger row for a precondition-failed migration.
+
+        The row lands in ``schema_migrations`` with ``skip_reason`` (and
+        the declared ``precondition``) populated. Contract (N4 / §5.3):
+        skip-WITH-ledger-marker — the migration never re-fires
+        (``get_applied_versions`` counts the row) and boot never fails.
+
+        Returns the elapsed time in milliseconds (float, matching the
+        ``apply_migration`` contract so downstream renders ``Applied …
+        in <ms>ms`` instead of ``in Nonems``).
+        """
+        logger.warning(
+            "Migration %s (%s) SKIPPED by precondition: %s. Recorded in the "
+            "ledger with skip_reason — it will not re-fire. The affected "
+            "schema element (if any) is retained; no boot failure.",
+            migration.version,
+            migration.name,
+            reason,
+        )
+        self._persist_ledger_row(
+            migration,
+            execution_time_ms=execution_time_ms,
+            skip_reason=reason,
+        )
+        return 0.0
     
     def apply_migration(self, migration: MigrationFile) -> float:
         """Apply a single migration within a transaction.
@@ -301,6 +516,18 @@ class MigrationRunner:
         logger.info(f"Starting migration: {migration.version} - {migration.name}")
         start_time = time.perf_counter()
         
+        # Precondition gate (N4): evaluate the declared driver
+        # precondition BEFORE touching the schema. On failure: WARN +
+        # skip-with-ledger-marker (never fail boot, never re-fire) and
+        # return without executing any SQL.
+        if migration.precondition:
+            with self.engine.connect() as precheck_conn:
+                satisfied, reason = self._evaluate_precondition(
+                    precheck_conn, migration.precondition
+                )
+            if not satisfied:
+                return self._record_skip(migration, reason)
+        
         # Pre-check for rename migration: if old session tables/columns don't exist,
         # the rename migration is a no-op (tables already created with new names)
         if "rename session to instance" in migration.name.lower():
@@ -310,16 +537,7 @@ class MigrationRunner:
                         f"Migration {migration.version}: no old 'session' schema detected, "
                         f"recording as applied (no-op)"
                     )
-                    with Session(self.engine) as session:
-                        record = SchemaMigration(
-                            version=migration.version,
-                            name=migration.name,
-                            applied_at=datetime.now(timezone.utc).isoformat(),
-                            execution_time_ms=0,
-                            checksum=migration.checksum,
-                        )
-                        session.add(record)
-                        session.commit()
+                    self._persist_ledger_row(migration, execution_time_ms=0)
                     return 0.0
         
         with self.engine.begin() as conn:
@@ -394,16 +612,11 @@ class MigrationRunner:
             # Record the migration as applied (even if some statements were idempotently skipped)
             # This prevents re-running migrations that are no-ops on the current schema
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
-            with Session(bind=conn) as session:
-                record = SchemaMigration(
-                    version=migration.version,
-                    name=migration.name,
-                    applied_at=datetime.now(timezone.utc).isoformat(),
-                    execution_time_ms=execution_time_ms,
-                    checksum=migration.checksum,
-                )
-                session.add(record)
-                session.commit()
+            self._persist_ledger_row(
+                migration,
+                execution_time_ms=execution_time_ms,
+                bind=conn,
+            )
         
         logger.info(
             f"Completed migration {migration.version} in {execution_time_ms}ms"
@@ -434,16 +647,38 @@ class MigrationRunner:
         
         logger.info(f"Rolling back migration: {version} - {migration.name}")
         start_time = time.perf_counter()
-        
+
+        # DOWN-side precondition gate (§5.3: "SQLite re-add gated on the
+        # same precondition"). If the precondition fails on the way down
+        # (e.g. old SQLite where the UP was skipped and the column was
+        # never dropped), executing the DOWN would error on a duplicate
+        # column — so skip the SQL but still clear the ledger row so a
+        # re-apply can proceed.
+        down_gate_blocks = False
+        if migration.precondition:
+            with self.engine.connect() as precheck_conn:
+                satisfied, reason = self._evaluate_precondition(
+                    precheck_conn, migration.precondition
+                )
+            if not satisfied:
+                down_gate_blocks = True
+                logger.warning(
+                    "Rollback of migration %s: precondition not satisfied "
+                    "(%s) — DOWN SQL skipped, ledger row cleared.",
+                    version,
+                    reason,
+                )
+
         with self.engine.begin() as conn:
             # Execute the DOWN SQL
-            _raw_lines = migration.down_sql.splitlines()
-            _code_lines = [ln for ln in _raw_lines if not ln.lstrip().startswith("--")]
-            _clean_sql = "\n".join(_code_lines)
-            statements = [s.strip() for s in _clean_sql.split(";") if s.strip()]
-            for stmt in statements:
-                if stmt:
-                    conn.execute(text(stmt))
+            if not down_gate_blocks:
+                _raw_lines = migration.down_sql.splitlines()
+                _code_lines = [ln for ln in _raw_lines if not ln.lstrip().startswith("--")]
+                _clean_sql = "\n".join(_code_lines)
+                statements = [s.strip() for s in _clean_sql.split(";") if s.strip()]
+                for stmt in statements:
+                    if stmt:
+                        conn.execute(text(stmt))
             
             # Remove the migration record
             conn.execute(

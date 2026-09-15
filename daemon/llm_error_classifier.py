@@ -1027,6 +1027,20 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # condition-neutral — the classifier only classifies.
             logger.warning(f"[LLM] Remote protocol error (peer closed connection mid-body): {_truncate_error(e)}")
             raise
+        except httpx.TimeoutException as e:
+            # L1 log-truth fix (llm-stream-stall-hardening): mid-stream
+            # HTTP timeouts arrive as bare httpx exceptions (ReadTimeout
+            # et al.) — the openai SDK wraps only REQUEST-level timeouts
+            # as APITimeoutError (caught above), so these used to fall
+            # into the catch-all below which logged "will not retry" —
+            # a lie: TIMEOUT_EXCEPTIONS membership in RetryByCategory
+            # routes them into the timeout budget (``llm_retry_timeout_``
+            # attempts) and the classifier re-raises them into tenacity.
+            # This branch only fixes the LOG WORDING — classification
+            # and retryability are decided by the retry predicate
+            # (unchanged), so the wording is condition-neutral.
+            logger.warning(f"[LLM] HTTP timeout (mid-stream, retryable via timeout budget): {_truncate_error(e)}")
+            raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {_truncate_error(e)}")
             raise  # Everything else passes through (including socket errors)
