@@ -195,7 +195,40 @@ async def test_c1_kill_sweep_reaps_dead_pid(
         # EXITED via the manager.stop fallback is acceptable; the
         # sweep must record at least one reaped row.
         assert row.status == ServiceStatus.EXITED.value
-    assert counters["reaped"] + counters["alive"] >= 0
+    # Plan §2.C.1 acceptance: this test row set has exactly one
+    # process that died and the sweep must reap exactly it. ``alive``
+    # MUST be 0 (no other rows were live). The previous
+    # ``counters["reaped"] + counters["alive"] >= 0`` shape was
+    # vacuous; pin both fields to the row's actual outcome.
+    assert counters["reaped"] == 1, (
+        f"sweep did not reap the externally-killed row; "
+        f"counters={counters!r}"
+    )
+    assert counters["alive"] == 0, (
+        f"sweep counted unexpected live rows; counters={counters!r}"
+    )
+    # The sweep's INFO log line MUST contain the exact tokens
+    # ``name=c1_service`` and ``reason=dead`` — this is the
+    # Phase-2 plan acceptance pin. The emit site is
+    # ``daemon/services/service_reconciliation.py`` (dead-PID branch
+    # of ``sweep_once``); ``caplog`` was already in the signature
+    # but the pin was missing.
+    matched = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == "daemon.services.service_reconciliation"
+        and rec.levelno == _logging.INFO
+    ]
+    assert any(
+        "[ServiceTool] reconcile_reaped" in msg
+        and "name=c1_service" in msg
+        and "reason=dead" in msg
+        for msg in matched
+    ), (
+        f"sweep did not emit the expected [ServiceTool] "
+        f"reconcile_reaped name=c1_service ... reason=dead INFO line; "
+        f"observed service_reconciliation INFO messages: {matched!r}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -651,48 +651,54 @@ async def test_k13_git_diff_timeout_does_not_kill_service(
 async def test_f9_full_cascade_does_not_kill_service(
     tmp_path: Path, file_backed_engine: Engine, svc_repo: ServiceRepo
 ) -> None:
-    """F9 — a single full-cascade case where ``terminate_instance``
-    fires K3, K4, K6, K8 in one shot. The detached service survives
-    by the registry-scope invariant.
+    """F9 — full-cascade on a fake instance with REAL registered
+    bash + proc victims.
 
-    F21 fixture strategy: dedicated test-instance manager with the
-    bare-minimum wiring needed to exercise ``terminate_instance``
-    (manager.engine + service_tool_manager) — we do NOT call
-    ``manager.initialize()`` (the full stack would require
-    checkpoint threads, MCP discovery, source adapter init, etc.,
-    none of which are needed to exercise the cascade's kill path).
+    The cascade's K4 (bash ``cleanup_instance``) and K8 (proc
+    ``cleanup_instance``) sites genuinely fire and kill the
+    registered victims (empirical proof that the kill path runs);
+    the detached service survives by registry-scope — it is NOT in
+    any bash/proc bucket so the cascade's killpg cannot reach it.
+
+    F21 fixture strategy: dedicated test-instance ``InstanceManager``
+    built via ``__new__`` with the bare-minimum wiring needed to
+    exercise ``manager.terminate_instance`` end-to-end:
+    * ``_lifecycle_service`` — the real ``InstanceLifecycleService``
+      (otherwise the facade wrapper at ``manager.py:9397`` raises
+      ``AttributeError`` BEFORE the cascade runs);
+    * ``instances[fake_id] =<stub>`` — so the early-return at
+      ``instance_lifecycle.py:2369-2370`` (``meta is None``) does
+      NOT fire BEFORE the K4/K8 cleanup sites;
+    * the manager attrs the per-node work section dereferences
+      (``_request_registry``, ``clear_injection``, ``_graph_tasks``,
+      ``release_context_usage_cache``, ``_gii_throttle``,
+      ``_loop_breaker_state``, ``engine``, ``write_guard``) — all
+      stubbed to safe no-ops so the cascade traverses the kill
+      sites.
+
+    The cascade's terminal state is graceful — the DB write returns
+    ``skip=True`` (no Instance row exists for ``fake_id``) and the
+    post-commit outbox is suppressed (F3 flag), but the in-memory
+    kill sites at lines 2330-2354 fire BEFORE either gate.
+
+    The cascade may raise a downstream exception (DB write
+    side-effects, descendants snapshot, etc.) — the assertion is on
+    what was killed during the path that DID execute, NOT on the
+    cascade returning cleanly. The test empirically proves the
+    K4/K8 kill sites fire by registering REAL bash + proc victims
+    and asserting they are dead after the cascade.
+
+    Note: K3 (bash ``CancelledError``) and K6 (user-initiated
+    ``proc_stop``) are NOT exercised by this test — neither path
+    is part of the ``terminate_instance`` cascade's kill sites.
+    They have their own per-K tests elsewhere in this file.
     """
-    from daemon.config import (
-        AgentsConfig,
-        Config,
-        DaemonConfig,
-        LLMConfig,
-        LimitsConfig,
-        PersistenceConfig,
-    )
+    import subprocess as _sp
     from daemon.manager import InstanceManager
-
-    config = Config(
-        llm=LLMConfig(
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-            model="gpt-4",
-            temperature=0.7,
-        ),
-        limits=LimitsConfig(
-            max_children_per_instance=3,
-            instance_timeout_minutes=60,
-        ),
-        persistence=PersistenceConfig(
-            db_path=str(tmp_path / "config-unused.db"),
-            checkpoint_interval=1,
-            checkpoint_ttl_hours=168,
-            checkpoint_cleanup_interval=24,
-            max_instance_history=300,
-        ),
-        daemon=DaemonConfig(host="127.0.0.1", port=8079),
-        agents=AgentsConfig(directory="./agents"),
+    from daemon.services.instance_lifecycle import (
+        InstanceLifecycleService,
     )
+    from daemon.write_pause_guard import WritePauseGuard
 
     # Build a minimal manager via ``__new__`` (skips initialize()).
     manager = InstanceManager.__new__(InstanceManager)
@@ -702,6 +708,38 @@ async def test_f9_full_cascade_does_not_kill_service(
         repo=svc_repo, cap=10, enabled=True
     )
     manager._loop = asyncio.get_running_loop()
+
+    # Wire the real lifecycle service. ``cancellation_service=None``
+    # is safe — the cascade's per-node work doesn't reach the
+    # cancellation service (only the stored attribute is referenced).
+    manager._lifecycle_service = InstanceLifecycleService(
+        manager, None
+    )
+
+    # Per-node work stubs — the cascade at lines 2252-2289
+    # dereferences these on the manager BEFORE the kill sites.
+    # Each must NOT raise so the cascade reaches lines 2330-2354.
+    class _NoopRegistry:
+        def cancel_by_instance(self, _instance_id: str) -> None:
+            return None
+
+    manager._request_registry = _NoopRegistry()
+    manager.clear_injection = lambda _instance_id: None
+    manager._graph_tasks = {}
+    manager.release_context_usage_cache = lambda _instance_id: None
+    manager._gii_throttle = {}
+    manager._loop_breaker_state = {}
+    # ``engine`` is a property that reads ``_engine`` (already set
+    # above). ``write_guard`` is a property that reads
+    # ``_write_guard`` — set the private attr directly so the
+    # ``asyncio.to_thread(self._terminate_instance_db_sync, ...)``
+    # call at line 2401-2407 can construct ``WriteGuardSession``.
+    manager._write_guard = WritePauseGuard()
+    # ``instances`` is normally set by ``__init__`` at line 465; we
+    # bypassed that via ``__new__`` so the dict doesn't exist.
+    # Provide it here so the cascade's ``del self._manager.instances
+    # [instance_id]`` at line 2366 has something to remove.
+    manager.instances = {}
 
     # Spawn the service via the manager's own start path so the
     # row is visible to terminate_instance's downstream code.
@@ -717,24 +755,128 @@ async def test_f9_full_cascade_does_not_kill_service(
     assert pid is not None and _pid_alive(pid)
     row = svc_repo.get_by_name("f9_service")
 
+    # Use a unique fake instance_id to terminate — we want the
+    # cascade to walk the kill sites for THIS instance (not the
+    # service's).
+    fake_instance_id = str(uuid.uuid4())
+
+    # Register a REAL bash victim (spawned with start_new_session so
+    # pid == pgid — killpg will reach it). The cascade's
+    # ``get_bash_process_registry().cleanup_instance(fake_id)``
+    # walks the registry for fake_instance_id and SIGKILLs the pgid.
+    bash_victim = _sp.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
+    )
+    bash_pid = bash_victim.pid
+    bash_pgid = os.getpgid(bash_pid)
+    assert _pid_alive(bash_pid), "bash victim failed to spawn"
+
+    from daemon.tools.bash import get_bash_process_registry
+    bash_registry = get_bash_process_registry()
+    await bash_registry.register(
+        fake_instance_id, bash_pid, bash_pgid
+    )
+    # Sanity: confirm the entry is visible to the cascade's
+    # cleanup_instance call.
+    assert fake_instance_id in bash_registry._entries, (
+        f"bash registry missing entry for fake_instance_id; "
+        f"entries={list(bash_registry._entries.keys())!r}"
+    )
+
+    # Register a REAL proc_run victim via the public API.
+    # ``bpm.start_process`` returns ``(handle, error)``; we keep the
+    # underlying asyncio subprocess PID for the death assertion.
+    from daemon.tools.proc_tools import get_background_process_manager
+    bpm = get_background_process_manager()
+    proc_handle, proc_err = await bpm.start_process(
+        instance_id=fake_instance_id,
+        command="sleep 60",
+        workdir=None,
+        timeout_seconds=0,
+    )
+    assert proc_handle is not None, (
+        f"proc_run spawn failed: {proc_err!r}"
+    )
+    proc_info = bpm._processes.get(fake_instance_id, {}).get(
+        proc_handle
+    )
+    assert proc_info is not None, (
+        "proc victim missing from bpm bucket post-spawn"
+    )
+    proc_pid = proc_info.proc.pid
+    assert proc_pid is not None and _pid_alive(proc_pid), (
+        f"proc victim PID {proc_pid} not alive pre-cascade"
+    )
+
+    # Add the fake instance to the manager's in-memory dict so the
+    # cascade's early-return (``meta is None``) at line 2369 does
+    # NOT fire BEFORE the K4/K6/K8 sites. ``meta is None`` because
+    # no ``_instance_repository`` is attached (the DB has no
+    # Instance row for fake_instance_id either).
+    manager.instances[fake_instance_id] = object()
+
     try:
-        # F9 — full-cascade via the REAL ``terminate_instance`` API
-        # on the manager facade. Pin: the cascade routes through
-        # ``_lifecycle_service.terminate_instance`` which walks the
-        # bash / proc cleanup paths. We do NOT need the cascade to
-        # fully succeed — we need it to attempt every kill site AND
-        # for the service to survive.
-        fake_instance_id = str(uuid.uuid4())
+        # Run the REAL ``terminate_instance`` facade. The DB write
+        # returns ``skip=True`` (no Instance row exists for
+        # fake_instance_id) and the post-commit outbox is
+        # suppressed; the in-memory kill sites at lines 2330-2354
+        # fire BEFORE that gate. The cascade may raise downstream
+        # (e.g. descendants snapshot, lifecycle event publish), but
+        # the kill sites will have executed.
         try:
             await manager.terminate_instance(
                 fake_instance_id, terminal_reason="aborted"
             )
         except Exception:
-            # The cascade may fail because the fake instance row
-            # never existed — that's fine; the kill sites along the
-            # path are STILL exercised by the cascade's traversal.
+            # Empirical proof: the kill sites fired regardless of
+            # the post-DB outbox exceptions. The assertions below
+            # check the observable side effect.
             pass
 
+        # Allow a settle window for the OS to reap the killed pgid
+        # members. The cascade's proc cleanup_instance waits up to
+        # 2s on task cancellation BEFORE the SIGKILL, so the bash
+        # cleanup (which runs AFTER) may not have started until
+        # ~2s in. ``os.kill(pid, 0)`` returns 0 for zombies (not
+        # ESRCH until the parent reaps); we use ``poll()`` /
+        # ``returncode`` for the per-victim liveness check below
+        # which handles zombies correctly.
+        bash_dead = False
+        proc_dead = False
+        for _ in range(80):
+            # ``bash_victim.poll()`` reaps the child via
+            # ``os.waitpid(WNOHANG)`` — returns the exit code
+            # once killed (zombies included), ``None`` while
+            # still running. The cascade's killpg reaches the
+            # bash victim via the bash registry.
+            bash_dead = bash_victim.poll() is not None
+            # The proc victim is an asyncio subprocess; asyncio
+            # auto-reaps via its SIGCHLD transport so ``returncode``
+            # gets set after the cascade's SIGKILL.
+            proc_dead = proc_info.proc.returncode is not None
+            if bash_dead and proc_dead:
+                break
+            await asyncio.sleep(0.05)
+
+        # Empirical proof that the cascade's K4/K8 sites FIRED
+        # (the cascade killed both registered victims via the real
+        # bash / proc registries).
+        assert bash_dead, (
+            f"F9 cascade did not kill bash victim PID {bash_pid} "
+            f"(bash pgid {bash_pgid}) — K4 bash cleanup_instance "
+            f"was not exercised by the cascade"
+        )
+        assert proc_dead, (
+            f"F9 cascade did not kill proc victim handle "
+            f"{proc_handle} on PID {proc_pid} — K8 proc "
+            f"cleanup_instance was not exercised by the cascade"
+        )
+
+        # Registry-scope proof: the detached service survives because
+        # its PID was never registered in bash / proc buckets.
         assert _pid_alive(pid), (
             f"F9 full cascade killed the service PID {pid}"
         )
@@ -744,6 +886,20 @@ async def test_f9_full_cascade_does_not_kill_service(
             assert current.pid == pid
             assert current.start_time == row.start_time
     finally:
+        # Belt-and-braces cleanup of test-created state.
+        try:
+            await bash_registry.cleanup_instance(fake_instance_id)
+        except Exception:
+            pass
+        try:
+            await bpm.cleanup_instance(fake_instance_id)
+        except Exception:
+            pass
+        try:
+            if _pid_alive(bash_pid):
+                os.killpg(bash_pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
         try:
             await manager._service_tool_manager.stop(
                 "f9_service", force=True

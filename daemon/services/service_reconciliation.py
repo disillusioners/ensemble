@@ -69,8 +69,6 @@ Wiring contract (1.C.14, A5/A6 amended):
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from datetime import datetime, timezone
