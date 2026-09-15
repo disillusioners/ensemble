@@ -5871,6 +5871,51 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS ix_message_metadata_thread "
                 "ON message_metadata (thread_id)"
             ),
+            # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
+            # Additive columns on ``critical_notes`` per
+            # architecture-recommendation §5.1. The SQLite companion is
+            # ``daemon/migrations/versions/20260915_120000_critical_notes
+            # _lifecycle.sql``; this block is the PostgreSQL counterpart
+            # (the .sql runner is a NO-OP on PG). Fresh PG databases get
+            # the columns via ``SQLModel.metadata.create_all()`` from
+            # ``daemon/repositories/project/models.py::CriticalNoteModel``.
+            # ``superseded_by_id`` is deliberately a SOFT self-reference
+            # (no DB FK) — see the model comment for the dialect-divergence
+            # rationale. ``last_reviewed_at`` is backfilled with the same
+            # NULL-guarded UPDATE as the SQLite migration (idempotent).
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned_at TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS pinned_by TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS superseded_by_id TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS last_reviewed_at TEXT",
+            "ALTER TABLE critical_notes ADD COLUMN IF NOT EXISTS detail_ref TEXT",
+            (
+                "UPDATE critical_notes SET last_reviewed_at = created_at "
+                "WHERE last_reviewed_at IS NULL"
+            ),
+            # PARTIAL indexes — NOT expressible via SQLModel/create_all
+            # (reviewer #5), so BOTH PG lineages (migration-shaped and
+            # create_all-shaped) converge on them HERE, and only here.
+            # Names + predicates MUST stay byte-identical with the SQLite
+            # companion migration.
+            (
+                "CREATE INDEX IF NOT EXISTS ix_critical_notes_pinned "
+                "ON critical_notes(project_id, pinned) WHERE pinned = TRUE"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_critical_notes_superseded_by_id "
+                "ON critical_notes(superseded_by_id) WHERE superseded_by_id IS NOT NULL"
+            ),
+            # ── Drop the dead projects.critical_notes JSON column ──
+            # PostgreSQL counterpart of migration
+            # ``20260915_120001_drop_projects_critical_notes_json.sql``
+            # (whose SQLite path is precondition-gated on ≥3.35.0 via the
+            # runner's PRECONDITION mechanism; PG has supported
+            # DROP COLUMN forever, so this executes unconditionally —
+            # IF EXISTS keeps it idempotent). Fresh PG databases no-op
+            # (create_all() never emitted the column — the Project model
+            # has no such field).
+            "ALTER TABLE projects DROP COLUMN IF EXISTS critical_notes",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

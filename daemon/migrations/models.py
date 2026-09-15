@@ -12,6 +12,13 @@ class SchemaMigration(SQLModel, table=True):
         applied_at: ISO 8601 timestamp when the migration was applied.
         execution_time_ms: Duration of migration execution in milliseconds.
         checksum: SHA-256 hash of the migration file content.
+        precondition: Declared precondition token parsed from the file
+            header (e.g. ``sqlite>=3.35.0``), stored for discoverability.
+            NULL = unconditional migration.
+        skip_reason: When a declared precondition FAILED, the row is
+            still recorded (so the migration never re-fires) with this
+            column carrying the evaluation failure reason. NULL = the
+            migration executed.
     """
     
     __tablename__ = "schema_migrations"
@@ -33,4 +40,12 @@ class SchemaMigration(SQLModel, table=True):
     checksum: str | None = Field(
         default=None,
         description="SHA-256 hash of migration content"
+    )
+    precondition: str | None = Field(
+        default=None,
+        description="Declared precondition token (e.g. sqlite>=3.35.0); NULL = unconditional"
+    )
+    skip_reason: str | None = Field(
+        default=None,
+        description="Why execution was skipped (precondition failure); NULL = executed"
     )

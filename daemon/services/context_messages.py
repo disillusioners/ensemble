@@ -55,6 +55,14 @@ from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJE
 from daemon.config import _resolve_kv_ambient_system_default_enabled
 from .skill_metrics_service import REPLACED_SKILLS_METADATA_KEY
 
+# Phase-2 selector lazy import keeps the module-level surface
+# small; the orchestrator itself owns imports of the heavier
+# service dependencies it needs.
+from .critical_notes_selection_orchestrator import (
+    _maybe_tiered_critical_notes,
+    install_critical_notes_selection_config,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -396,15 +404,128 @@ def _format_relative_time_standalone(created_at: Any) -> str:
     return f"{years} year{'s' if years != 1 else ''} ago"
 
 
-def _format_critical_notes_section(critical_notes: list[dict]) -> str:
+# ── Phase-1 critical-notes render knobs (config-installed; D4) ────────────────
+#
+# Render-side reference bound (§4.4 #11, defensive backstop only — the
+# tool-layer write REJECT is authoritative). Tuned by
+# ``config.yaml → critical_notes.reference_max`` via
+# :func:`install_critical_notes_render_config` from ``load_config``. NO
+# ``ENSEMBLE_*`` env var exists for this (D4: config-layer tuning only).
+#
+# N5 — Phase-1 budget derivation: with summaries tool-capped at 200
+# chars and references render-bounded at 500, the injected notes block
+# worst case ≈ store cap 50 × (summary 200 + reference 500 + per-row
+# markdown overhead ≈ 30) ≈ **35k chars** (~9k tokens) — down from the
+# unbounded ≈100k+ legacy worst case. Phase 2 adds the 12k
+# ``section_char_cap`` on top; this phase's bound alone already cuts
+# the ceiling roughly 3×.
+_CRITICAL_NOTES_DEFAULT_REFERENCE_MAX = 500
+_critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+
+# R19 injected-block ordering: pinned tier first (priority
+# critical→high→medium, recency within tier), then the remainder
+# (priority→recency). Phase 2 replaces the remainder ordering with
+# fusion-score order; the pinned tier ordering stays.
+_CRITICAL_NOTES_PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2}
+
+
+def install_critical_notes_render_config(*, reference_max: int | None = None) -> None:
+    """Install boot-resolved render knobs (called once from ``load_config``).
+
+    ``None`` leaves the current value untouched (partial yaml block →
+    documented default). Mirrors the ``_install_vscode_webview_csp_fix``
+    module-cache pattern.
+    """
+    global _critical_notes_reference_max
+    if reference_max is not None:
+        _critical_notes_reference_max = int(reference_max)
+
+
+def reset_critical_notes_render_config() -> None:
+    """Restore documented defaults (test isolation helper)."""
+    global _critical_notes_reference_max
+    _critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+
+
+def _resolve_critical_notes_reference_max() -> int:
+    """Return the effective render-side reference bound."""
+    return _critical_notes_reference_max
+
+
+def _order_critical_notes_for_injection(notes: list[dict]) -> list[dict]:
+    """Order the injected notes block (R19 — injected block ONLY).
+
+    Pinned rows first, then the remainder; within each group priority
+    ascending (critical→high→medium) and recency descending (newest
+    first) within a priority tier. Two-pass stable sort: recency desc
+    first, then a stable priority sort preserves recency inside tiers.
+    Unparseable/missing ``created_at`` sorts last within its pass
+    (empty string vs ISO strings under ``reverse=True``).
+    """
+    pinned = [n for n in notes if n.get("pinned")]
+    rest = [n for n in notes if not n.get("pinned")]
+
+    def _recency_desc(seq: list[dict]) -> list[dict]:
+        return sorted(seq, key=lambda n: (n.get("created_at") or ""), reverse=True)
+
+    def _priority_then_recency(seq: list[dict]) -> list[dict]:
+        return sorted(
+            _recency_desc(seq),
+            key=lambda n: _CRITICAL_NOTES_PRIORITY_RANK.get(n.get("priority", ""), 3),
+        )
+
+    return _priority_then_recency(pinned) + _priority_then_recency(rest)
+
+
+def _format_critical_notes_section(
+    critical_notes: list[dict], *, pre_ordered: bool = False
+) -> str:
     """Render the critical-notes subsection used by the project builder.
 
-    Layout: priority icon + bracketed category + optional reference.
+    Phase-1+2 render contract (critical-notes-retrieval, R19 + Phase 2
+    tiered selection):
+
+    - SUPERSEDED rows are never injected (``superseded_by_id``
+      set OR non-``None`` per the 0b defensive review — empty
+      string is also dropped).
+    - Ordering is scoped to the INJECTED BLOCK ONLY, and has TWO
+      modes (item 10 / spec §4.2 R19 render-order contract):
+      ``pre_ordered=True`` (tiered path) renders the input order
+      VERBATIM — the orchestrator already emitted pinned first
+      (priority sort) then the tail in FUSION-score order, and
+      re-sorting here would destroy that fusion order;
+      ``pre_ordered=False`` (default, legacy / render-all path)
+      applies the R19 re-sort: pinned rows first (priority
+      critical→high→medium, recency within tier), then the rest.
+    - ``project_cn_list`` output order stays ``created_at`` DESC
+      — the tool surface is unchanged.
+    - ``reference`` is bounded at the render bound below with a
+      truncation suffix. This is the DEFENSIVE backstop only — the
+      write-side tool REJECT is authoritative (reject-first
+      precedence); truncation exists solely for rows that predate
+      or bypass the bound. ``detail_ref`` is NEVER injected
+      (list/router reads only).
+    - No strike-through / staleness marks here — those render in
+      the list/housekeeping surfaces (R19); the injected block
+      stays clean.
+    - **Phase-2 hint line**: when the selection orchestrator
+      appended the ``__hint_drop_count`` sentinel to the last
+      surviving row (architecture-recommendation §4.2 — "ALWAYS
+      when notes are dropped"), the canonical hint line
+      ``(N additional notes not shown — use project_cn_list for
+      the full view)`` is emitted at the END of the block. The
+      sentinel is consumed by this renderer and stripped from the
+      row dict before serialization.
 
     Args:
         critical_notes: List of dicts with ``priority``, ``category``,
-            ``summary``, optional ``reference``. Non-dict entries are
-            silently skipped (matches the legacy defensive contract).
+            ``summary``, optional ``reference`` / ``pinned`` /
+            ``superseded_by_id`` / ``created_at`` /
+            ``__hint_drop_count``. Non-dict entries are silently
+            skipped (matches the legacy defensive contract).
+        pre_ordered: ``True`` renders the input order verbatim
+            (tiered fusion order preserved); ``False`` (default)
+            applies the legacy R19 re-sort.
 
     Returns:
         Markdown subsection text including the leading ``\\n### ⚡
@@ -420,16 +541,60 @@ def _format_critical_notes_section(critical_notes: list[dict]) -> str:
         "medium": "🟢",
     }
 
+    # Phase-1+2 injected rows: ALL active notes. Tiered tail selection
+    # + the 12k section cap are Phase 2 — this phase only bounds
+    # references and orders the block.
+    #
+    # 0b (Phase-2 review conditioning, 2026-09-15): ``is not None``
+    # comparison. The previous ``not e.get("superseded_by_id")``
+    # truthy-check FALSELY KEPT a row whose ``superseded_by_id`` was
+    # an empty string ``""`` (a stray empty pointer bypassed the
+    # filter). The strict comparison drops both ``NULL`` and ``""``.
+    injected = [
+        e for e in critical_notes
+        if isinstance(e, dict) and e.get("superseded_by_id") is None
+    ]
+    if not injected:
+        return ""
+
     rendered: list[str] = ["\n### ⚡ Critical Notes"]
-    for entry in critical_notes:
-        if not isinstance(entry, dict):
-            continue
+    hint_drop_count: int | None = None
+    ordered = (
+        injected if pre_ordered
+        else _order_critical_notes_for_injection(injected)
+    )
+    for entry in ordered:
+        # Phase-2 sentinel: the orchestrator attaches
+        # ``__hint_drop_count`` to the last surviving row when the
+        # selection dropped ≥1 row. Consume it here AND strip
+        # from the row so the sentinel never renders literally.
+        if isinstance(entry, dict):
+            sentinel = entry.pop("__hint_drop_count", None)
+            if sentinel is not None:
+                hint_drop_count = int(sentinel)
         icon = priority_icon.get(entry.get("priority", ""), "⚪")
         category = entry.get("category", "")
         summary = entry.get("summary", "")
         reference = entry.get("reference")
+        if isinstance(reference, str) and len(reference) > _resolve_critical_notes_reference_max():
+            # Defensive backstop ONLY (§4.4 #11): legacy pre-bound rows
+            # or non-tool write paths. The tool layer REJECTS >bound on
+            # write — reject-first, truncation is never the alternative.
+            reference = (
+                reference[:_resolve_critical_notes_reference_max()]
+                + "… (truncated — project_cn_list for full text)"
+            )
         ref_str = f" *(ref: {reference})*" if reference else ""
         rendered.append(f"- {icon} **[{category}]** {summary}{ref_str}")
+
+    if hint_drop_count and hint_drop_count > 0:
+        # Phase-2 hint line (architect §4.2 — "ALWAYS when notes
+        # are dropped"). Canonical copy; operators grep for it on
+        # clean-window reviews.
+        rendered.append(
+            f"- …({hint_drop_count} additional notes not shown — use "
+            "project_cn_list for the full view)"
+        )
 
     return "\n".join(rendered) + "\n"
 
@@ -533,6 +698,9 @@ def build_project_context_message(
     project: Any,
     critical_notes: list[dict] | None,
     history_entries: list[dict] | None,
+    *,
+    instance_id: str | None = None,
+    notes_pre_ordered: bool = False,
 ) -> HumanMessage | None:
     """Build the merged ``[SYSTEM CONTEXT: Related Project]`` message.
 
@@ -550,6 +718,18 @@ def build_project_context_message(
     decisions.md D4 / D7 — this function intentionally no longer
     takes a ``kv_metadata`` parameter.
 
+    R25 (2026-09-15, ADOPTED architect pick): when ``instance_id`` is
+    provided, the HumanMessage is minted with the stable
+    construction-time id ``project:{instance_id}``. This honors the
+    foundational Message-id invariant — id-less persisted HumanMessages
+    break FE merge ordering via the moving-checkpoint-ts fallback
+    (``persistence.py:527-528``) and drop ``MessageTapSlot``
+    metadata. Per-instance determinism is revive-safe (same instance
+    → same id → stable merge) and collision-free under first-turn-
+    frozen semantics. Callers WITHOUT ``instance_id`` still get a
+    uuid4 (legacy callers, internal tests) — the id is not optional
+    in production paths.
+
     Args:
         project: Project model / dict exposing ``to_dict()``. ``None``
             → return ``None`` (nothing to render).
@@ -558,6 +738,17 @@ def build_project_context_message(
             optional). ``None`` is treated as an empty list.
         history_entries: List of recent-history dicts, or ``None`` /
             empty list.
+        instance_id: Owning instance id (only consumed for the R25
+            stable-id path). Optional because legacy tests / callers
+            pass dicts directly without an instance id; production
+            callers (``assemble_context_messages``) always provide it.
+        notes_pre_ordered: ``True`` when ``critical_notes`` arrives
+            pre-ordered from the Phase-2 tiered orchestrator (pinned
+            first, then tail in fusion-score order) — the renderer
+            then preserves that order verbatim (spec §4.2/R19
+            render-order contract). Default ``False`` keeps the
+            legacy behavior: the renderer applies its own R19
+            priority/recency re-sort (render-all fallback shape).
 
     Returns:
         Tagged :class:`HumanMessage`` carrying the merged body, or
@@ -576,7 +767,9 @@ def build_project_context_message(
     project_section = _format_project_json_section(
         project, critical_notes or []
     )
-    notes_section = _format_critical_notes_section(critical_notes or [])
+    notes_section = _format_critical_notes_section(
+        critical_notes or [], pre_ordered=notes_pre_ordered,
+    )
     history_section = _format_history_section(history_entries or [])
 
     body = project_section + notes_section + history_section
@@ -586,10 +779,23 @@ def build_project_context_message(
         # ``None`` return on the fast-path above.
         return None
 
+    # R25 stable id (option (a), ADOPTED): mint ``project:{instance_id}``
+    # at construction time so the persisted HumanMessage survives
+    # revive-restore without a duplicate append (LangGraph
+    # ``add_messages`` reducer SUPERSEDES on matching id). When the
+    # caller did not pass ``instance_id`` (legacy internal callers /
+    # tests), fall back to the uuid4 default — the construction-time
+    # id stays "some stable" but is not per-instance.
+    if instance_id:
+        message_id = _stable_id_for("project", instance_id=instance_id)
+    else:
+        message_id = None
+
     return _make_context_message(
         kind=CONTEXT_KIND_PROJECT,
         title="Related Project",
         content=body,
+        id_=message_id,
     )
 
 
@@ -1596,7 +1802,35 @@ async def assemble_context_messages(
             if kv_msg is not None:
                 persistent_msgs.append(kv_msg)
     else:
-        project_msg = build_project_context_message(project, critical_notes, history_entries)
+        # Phase-2 tiered selection (critical-notes-retrieval §4.2):
+        # the orchestrator pre-computes the selection here, on the
+        # FIRST TURN only — the messaging path's ``project_already_injected``
+        # gate (instance_messaging.py:2829-2929) ensures this block
+        # never re-runs. The builder receives a pre-shaped
+        # ``critical_notes`` list (pinned first, then tail, then a
+        # sentinel hint drop count) so the existing
+        # ``_format_critical_notes_section`` renderer emits the
+        # ``(N additional notes not shown — use project_cn_list
+        # for the full view)`` line when notes were dropped.
+        # ``notes_pre_ordered`` (item 10 / R19 render-order contract):
+        # the tiered path returns the tail in FUSION-score order —
+        # the renderer must preserve it, not re-sort. The render-all
+        # fallback (``pre_ordered=False``) keeps the legacy R19
+        # priority/recency re-sort byte-identically.
+        selected_critical_notes, notes_pre_ordered = (
+            await _maybe_tiered_critical_notes(
+                project_id=project_id,
+                active_notes=critical_notes,
+                user_query=user_query,
+                instance_id=instance_id,
+                manager=manager,
+            )
+        )
+        project_msg = build_project_context_message(
+            project, selected_critical_notes, history_entries,
+            instance_id=instance_id,
+            notes_pre_ordered=notes_pre_ordered,
+        )
         if project_msg is not None:
             persistent_msgs.append(project_msg)
         if kv_metadata:

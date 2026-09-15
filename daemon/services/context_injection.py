@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .context_tools import resolve_context_dir
+from .critical_note_gate import is_active_critical_note
 
 logger = logging.getLogger(__name__)
 
@@ -534,9 +535,22 @@ def _mcp_rag_hint(
             "(pass these to MCP RAG tools to scope results to this project)."
         )
         if critical_notes:
+            # R21 entry gate (LOCKED-L 2026-09-15): drop superseded rows
+            # at THIS external pass-through surface (the renderer
+            # received the raw list from an upstream caller — typically
+            # the ``external_opencode.py`` preload path, but defensively
+            # filter again here so any future caller shape can't leak
+            # a superseded row into the hint). The superseded check is
+            # routed through the shared predicate
+            # (``daemon.services.critical_note_gate``); the isinstance
+            # guard stays so non-dict shapes keep dropping (the
+            # predicate alone would pass them as ACTIVE).
+            active_notes = [
+                note for note in critical_notes
+                if isinstance(note, dict) and is_active_critical_note(note)
+            ]
             rendered = [
-                line for note in critical_notes
-                if isinstance(note, dict)
+                line for note in active_notes
                 for line in [_format_critical_note(note)]
                 if line is not None
             ]

@@ -21,6 +21,7 @@ from daemon.opencode.server import (
     external_opencode_send_message as _server_send_message,  # Blocker 1 (Rev 4): alias to avoid name collision with LangChain tool of same name
 )
 from daemon.services.context_injection import get_shared_context
+from daemon.services.critical_note_gate import is_active_critical_note
 from daemon.services.keyword_extraction import (
     _heuristic_keywords,
     _normalize_keywords,
@@ -490,7 +491,18 @@ def create_opencode_tools(
                 pass
             try:
                 notes = manager._project_repository.list_critical_notes(project_id)
-                critical_notes = [n.to_dict() for n in notes]
+                # R21 entry-gate (LOCKED-L 2026-09-15): drop superseded
+                # rows at the EXTERNAL pass-through surface so they
+                # never leak into the hint / shared-context render.
+                # Routed through the shared predicate
+                # (``daemon.services.critical_note_gate``) — strict
+                # is-not-None comparison, so the stray empty-string
+                # class is dropped too.
+                active_notes = [
+                    n for n in notes
+                    if is_active_critical_note(n)
+                ]
+                critical_notes = [n.to_dict() for n in active_notes]
             except Exception:
                 pass
 
