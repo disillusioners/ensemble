@@ -3128,9 +3128,16 @@ class JobFeedbackObserver:
             parent_id = instance.parent_id
             agent_id = instance.agent_id
 
+            # D9 dead-site resolution (tz fix) — convert (smaller than
+            # delete; preserves the symmetry-coverage guarantee the
+            # W2 dead-site comment relies on). Same µs-twin mint as
+            # the live observer twin: ONE aware instant, derive
+            # TEXT iso + naive digits from the SAME datetime so the
+            # µs-match survives.
+            now_d9 = now_utc()
             instance.status = new_status
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.updated_at = now_d9.isoformat()
+            instance.last_activity_at = now_d9.replace(tzinfo=None)
             instance.version = (instance.version or 1) + 1
             session.commit()
 
