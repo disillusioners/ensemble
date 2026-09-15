@@ -116,6 +116,15 @@ Use this for version-gated DDL such as `DROP COLUMN` (SQLite ≥ 3.35.0).
 Canonical example:
 `versions/20260915_120001_drop_projects_critical_notes_json.sql`.
 
+**DOWN-with-failing-precondition semantics (subtle but correct):** when
+the precondition fails on rollback, the DOWN SQL is **skipped**, the
+**ledger row is unconditionally cleared**, the schema element is
+**untouched**, and a WARNING logs the reason. The cleared ledger is
+load-bearing: it permits a fresh `apply` to record a new
+`applied_at` (since the row no longer exists). The schema is left in
+its current state — which on a legacy SQLite is the post-skip state
+(UP never ran, column never dropped, nothing for DOWN to remove).
+
 ### Parsing Rules
 
 1. Content before `-- UP` is treated as header/comments

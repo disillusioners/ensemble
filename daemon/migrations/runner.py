@@ -380,13 +380,17 @@ class MigrationRunner:
                 break
         return tuple(parts) if parts else (0,)
 
-    def _record_skip(self, migration: MigrationFile, reason: str, execution_time_ms: int = 0) -> None:
+    def _record_skip(self, migration: MigrationFile, reason: str, execution_time_ms: int = 0) -> float:
         """Record a skip-ledger row for a precondition-failed migration.
 
         The row lands in ``schema_migrations`` with ``skip_reason`` (and
         the declared ``precondition``) populated. Contract (N4 / §5.3):
         skip-WITH-ledger-marker — the migration never re-fires
         (``get_applied_versions`` counts the row) and boot never fails.
+
+        Returns the elapsed time in milliseconds (float, matching the
+        ``apply_migration`` contract so downstream renders ``Applied …
+        in <ms>ms`` instead of ``in Nonems``).
         """
         logger.warning(
             "Migration %s (%s) SKIPPED by precondition: %s. Recorded in the "
@@ -408,6 +412,7 @@ class MigrationRunner:
             )
             session.add(record)
             session.commit()
+        return 0.0
     
     def apply_migration(self, migration: MigrationFile) -> float:
         """Apply a single migration within a transaction.

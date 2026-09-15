@@ -180,13 +180,24 @@ def _eviction_candidates(entries: list[CriticalNotes]) -> list[CriticalNotes]:
 
 
 def _parse_iso_ts(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp defensively; None on missing/invalid."""
+    """Parse an ISO-8601 timestamp defensively; None on missing/invalid.
+
+    Naive timestamps (no tz offset) are coerced to UTC — callers pass a
+    tz-aware ``now`` (``datetime.now(timezone.utc)``) so the downstream
+    ``now - ts`` subtraction cannot raise ``TypeError`` on a naive
+    ``ts``. This matches the storage convention: timestamps written by
+    ``datetime.now(timezone.utc).isoformat()`` are tz-aware, but legacy
+    rows / 3rd-party adapters may write naive ISO strings.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        ts = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
 
 
 def _days_since(value: str | None, now: datetime) -> int | None:
@@ -194,6 +205,11 @@ def _days_since(value: str | None, now: datetime) -> int | None:
     ts = _parse_iso_ts(value)
     if ts is None:
         return None
+    # Both sides tz-aware now: _parse_iso_ts coerces naive→UTC, callers
+    # pass ``datetime.now(timezone.utc)``; mixing tz-aware and naive
+    # would raise TypeError (the bug this guards against).
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     delta = now - ts
     return max(0, int(delta.total_seconds() // 86400))
 
@@ -735,6 +751,21 @@ Returns:
                     f"Entry '{old_id}' is already SUPERSEDED by "
                     f"{old.superseded_by_id} — a superseded row cannot "
                     f"supersede another note."
+                )
+            }
+
+        # Guard 4 (cycle closure, R21): the NEW row must also be ACTIVE.
+        # Without this, ``supersede(A, B)`` then ``supersede(B, A)``
+        # would succeed (Guard 3 only checks ``old``), leaving both
+        # rows mutually hidden. Symmetric check on ``new`` closes the
+        # 2-cycle so the lineage graph stays a partial order.
+        if new.superseded_by_id is not None:
+            return {
+                "error": (
+                    f"Entry '{new_id}' is already SUPERSEDED by "
+                    f"{new.superseded_by_id} — a superseded row cannot "
+                    f"be re-targeted as the superseder (would create "
+                    f"a 2-cycle)."
                 )
             }
 

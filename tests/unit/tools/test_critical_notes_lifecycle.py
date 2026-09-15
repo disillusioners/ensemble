@@ -260,6 +260,39 @@ class TestProjectCnSupersede:
         assert "error" in result
         assert "cannot supersede another" in result["error"]
 
+    def test_2_cycle_supersede_refused_new_is_already_superseded(
+        self, tools, repo, project_id
+    ):
+        # ``supersede(A, B)`` then ``supersede(B, A)`` would succeed
+        # without Guard 4 (R21): both rows point at each other and the
+        # lineage graph loses partial-order. Guard 4 closes the cycle
+        # by rejecting when ``new.superseded_by_id is not None``.
+        a = repo.add_critical_note(
+            project_id, source_agent="l", category="risk", priority="high",
+            summary="Cycle probe note A",
+        )
+        b = repo.add_critical_note(
+            project_id, source_agent="l", category="risk", priority="high",
+            summary="Cycle probe note B",
+        )
+        # Step 1: A → B (legal: both ACTIVE).
+        first = tools["project_cn_supersede"].invoke(
+            {"project_id": project_id, "old_id": a.id, "new_id": b.id}
+        )
+        assert "error" not in first
+        # Step 2: B → A MUST be refused (B is now superseded → cannot be
+        # the superseder for the cycle-closing reverse direction).
+        reverse = tools["project_cn_supersede"].invoke(
+            {"project_id": project_id, "old_id": b.id, "new_id": a.id}
+        )
+        assert "error" in reverse
+        assert "2-cycle" in reverse["error"]
+        # Neither row gained the cycle pointer — A still points at B
+        # (from step 1), B's pointer stays None (it was the superseder,
+        # never the supersedee).
+        assert repo.get_critical_note(project_id, a.id).superseded_by_id == b.id
+        assert repo.get_critical_note(project_id, b.id).superseded_by_id is None
+
     def test_rejects_cross_project_ids(self, tools, repo, project_id):
         other = repo.create(name="cn-other-project")
         a = repo.add_critical_note(
@@ -514,3 +547,102 @@ class TestPinSuggestion:
         })
         assert "error" not in result
         assert "pin_suggestion" not in result
+
+
+# ─── Review-conditions: tz-naive guard, update-path suggestion, None-preserve ──
+
+
+class TestReviewConditions:
+    def test_days_since_accepts_naive_iso_string(self, tools, repo, project_id):
+        """Regression: a parseable ISO string WITHOUT tz offset must NOT
+        crash ``_days_since`` (the bug class crashes ``project_cn_list``
+        entirely). The fix coerces naive→UTC inside ``_parse_iso_ts``;
+        this test pins that path with a real row + a tz-less override
+        of ``last_reviewed_at`` via a raw SQL UPDATE.
+        """
+        from sqlmodel import Session
+
+        added = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "category": "risk",
+            "priority": "medium",
+            "summary": "Naive-ts list-render probe",
+        })
+        assert "error" not in added
+
+        # Overwrite last_reviewed_at with a tz-less ISO string. The
+        # earlier defect was that ``datetime.fromisoformat("...")``
+        # returns a naive datetime, and ``datetime.now(timezone.utc) -
+        # naive_dt`` raises ``TypeError``. The guard coerces naive→UTC.
+        from daemon.repositories.project.models import CriticalNoteModel
+        naive_ts = (datetime.now(timezone.utc) - timedelta(days=30)).replace(
+            tzinfo=None
+        ).isoformat()
+        with Session(repo.engine) as session:
+            row = session.get(CriticalNoteModel, added["id"])
+            row.last_reviewed_at = naive_ts
+            session.commit()
+
+        # Must NOT raise; the row renders cleanly without STALE (30d < 90d).
+        listed = tools["project_cn_list"].invoke({"project_id": project_id})
+        match = [e for e in listed["entries"] if e["id"] == added["id"]]
+        assert match, "the added row should appear in the list"
+        entry = match[0]
+        assert entry["stale"] is False  # 30d < stale_days=90
+        assert entry["days_since_review"] is not None
+        assert 25 <= entry["days_since_review"] <= 35
+
+    def test_detail_ref_none_on_update_preserves_existing(self, tools, repo, project_id):
+        """One-line asymmetry pin: passing ``detail_ref=None`` on the
+        update path means "not touched", not "cleared". The repo's
+        ``_ALLOWED_UPDATES`` skip-when-None guard (``value is not None``
+        at ``repository.py:1586``) implements this — pin behavior here.
+        """
+        original_detail = "long context block, never clear me"
+        added = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "category": "risk",
+            "priority": "medium",
+            "summary": "Detail-preserve probe",
+            "detail_ref": original_detail,
+        })
+        assert "error" not in added
+        assert added["detail_ref"] == original_detail
+
+        # Update WITHOUT passing detail_ref (defaults to None → repo skip).
+        result = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "entry_id": added["id"],
+            "category": "risk",
+            "priority": "medium",
+            "summary": "Detail-preserve probe (updated)",
+        })
+        assert "error" not in result
+        assert result["detail_ref"] == original_detail  # NOT cleared
+
+    def test_pin_suggestion_fires_on_update_to_critical(self, tools, repo, project_id):
+        """One-line pin-suggestion pin: a priority escalation to
+        ``critical`` on the UPDATE path (not just the add path) must
+        surface the suggestion field — curation is still the leader's
+        explicit call; the suggestion is in-band nudging, never auto-pin.
+        """
+        added = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "category": "risk",
+            "priority": "medium",
+            "summary": "Escalate-to-critical probe",
+        })
+        assert "error" not in added
+        assert "pin_suggestion" not in added  # medium → no suggestion on add
+
+        result = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "entry_id": added["id"],
+            "category": "risk",
+            "priority": "critical",  # escalate
+            "summary": "Escalate-to-critical probe",
+        })
+        assert "error" not in result
+        assert result["priority"] == "critical"
+        assert "pin_suggestion" in result
+        assert result["id"] in result["pin_suggestion"]

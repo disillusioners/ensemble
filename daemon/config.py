@@ -3774,18 +3774,30 @@ def load_config(config_path: str | None = None) -> Config:
         reference_max=config.critical_notes.reference_max,
     )
     _cn = config.critical_notes
+    # Phase-1 ACTIVE knobs on the primary line (ops-grep target);
+    # RESERVED Phase-2/3 knobs on a dedicated follow-up line so the
+    # primary line stays short and meaningful for the always-on path.
     logger.info(
-        "[CriticalNotes] core_cap=%s tail_cap=%s section_char_cap=%s "
-        "floor_count=%s reference_max=%s stale_days=%s "
-        "mint_cap_per_read=%s llm_select=%s (llm_select reserved "
-        "Phase-3; always-on per D4 — no ENSEMBLE_* env flag)",
+        "[CriticalNotes] core_cap=%s reference_max=%s stale_days=%s "
+        "(always-on per D4 — no ENSEMBLE_* env flag)",
         _cn.core_cap,
+        _cn.reference_max,
+        _cn.stale_days,
+    )
+    logger.info(
+        "[CriticalNotes:reserved] tail_cap=%s section_char_cap=%s "
+        "floor_count=%s query_max_chars=%s mint_cap_per_read=%s "
+        "fusion_bm25_weight=%s fusion_vector_weight=%s fusion_threshold=%s "
+        "llm_select=%s (all RESERVED Phase-2/3; defaults only — "
+        "no consumer machinery ships in Phase 1; no ENSEMBLE_* env flag, D4)",
         _cn.tail_cap,
         _cn.section_char_cap,
         _cn.floor_count,
-        _cn.reference_max,
-        _cn.stale_days,
+        _cn.query_max_chars,
         _cn.mint_cap_per_read,
+        _cn.fusion_bm25_weight,
+        _cn.fusion_vector_weight,
+        _cn.fusion_threshold,
         _cn.llm_select,
     )
 
