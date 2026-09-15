@@ -29,18 +29,11 @@ from langchain_core.messages import HumanMessage
 from daemon.services.context_messages import (
     build_project_context_message,
     install_critical_notes_render_config,
-    reset_critical_notes_render_config,
     _format_critical_notes_section,
     _order_critical_notes_for_injection,
     _resolve_critical_notes_reference_max,
 )
-
-
-@pytest.fixture(autouse=True)
-def _restore_render_defaults():
-    reset_critical_notes_render_config()
-    yield
-    reset_critical_notes_render_config()
+from tests.helpers.critical_notes_fixtures import reset_module_state
 
 
 def _note(**overrides):

@@ -32,6 +32,7 @@ this feature's scope):
 from __future__ import annotations
 
 import shutil
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -379,6 +380,31 @@ class TestPreconditionMechanism:
         runner2.apply_migration(migration)
         runner2.rollback_migration("20260915_120001")
         assert "critical_notes" in _table_columns(legacy_engine, "projects")
+
+    def test_malformed_precondition_marker_logs_warning(
+        self, tmp_path: Path, caplog
+    ):
+        """A typo'd ``-- PRECONDITON:`` marker (note the missing 'I') must
+        WARN rather than silently degrade to ungated execution. The strict
+        regex does not match, but the malformed-marker sniff does — the
+        author gets a loud message and the migration still runs.
+        """
+        mig_path = tmp_path / "20260916_999999_typo_marker.sql"
+        mig_path.write_text(
+            "-- version: 20260916_999999\n"
+            "-- name: typo marker probe\n"
+            "-- PRECONDITON: sqlite>=3.35.0\n"  # missing 'I' — strict parse fails
+            "\n"
+            "-- UP\n"
+            "SELECT 1;\n"
+        )
+        with caplog.at_level(logging.WARNING, logger="daemon.migrations.runner"):
+            migration = MigrationFile.parse(mig_path)
+        assert migration.precondition is None  # ungated
+        assert any(
+            "malformed" in rec.message.lower() and "PRECONDITION" in rec.message
+            for rec in caplog.records
+        )
 
 
 # ─── 5. PG-mirror parity (static contract — the runner never runs on PG) ────

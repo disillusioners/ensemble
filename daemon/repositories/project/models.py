@@ -44,9 +44,13 @@ class CriticalNotes(BaseModel):
     summary: str
     reference: str | None = None
     # ── Lifecycle columns (critical-notes-retrieval Phase 1, 2026-09-15) ──
-    # Wire shape MUST equal storage shape (dual-surface same-commit rule):
-    # these mirror CriticalNoteModel below so
-    # ``CriticalNotes(**note.to_dict())`` round-trips in the tool layer.
+    # This BaseModel TRACKS the storage shape on CriticalNoteModel below
+    # (the round-trip ``CriticalNotes(**note.to_dict())`` idiom in the
+    # tool layer), but is NOT a byte-for-byte mirror: ``last_reviewed_at``
+    # is None-defaulted here to admit legacy NULLs (storage declares it
+    # non-optional on fresh lineages; the legacy column is nullable on
+    # pre-migration DBs). See the model-side comment for the broader
+    # storage-vs-wire drift and the NULL→created_at read fallback.
     # ``superseded_by_id`` is a SOFT self-reference (plain str, no DB FK —
     # integrity is enforced leader-only at the tool layer; a hard FK would
     # give dialect-divergent cascade behavior between PG and SQLite).

@@ -133,6 +133,29 @@ def _normalize_summary(summary: str) -> str:
     return " ".join(summary.lower().split())
 
 
+def _load_entries(
+    repo, project_id: str, *, predicate=None
+) -> list[CriticalNotes]:
+    """Load and coerce all critical-note rows for a project.
+
+    Replaces the repeated ``repo.list_critical_notes(...) + isinstance-
+    coerce comprehension`` pattern: the repo returns SQLModel rows, but
+    the tool layer operates on the BaseModel ``CriticalNotes`` form so
+    predicates and helpers see the canonical in-memory shape. When
+    ``predicate`` is provided, only entries for which it returns True
+    are kept; the predicate runs AFTER the coerce (BaseModel form), so
+    it can rely on attribute access without re-checking the type.
+    """
+    notes_list = repo.list_critical_notes(project_id)
+    coerced = [
+        CriticalNotes(**note.to_dict()) if isinstance(note, CriticalNoteModel) else note
+        for note in notes_list
+    ]
+    if predicate is None:
+        return coerced
+    return [e for e in coerced if predicate(e)]
+
+
 def _find_near_duplicate_entry(
     entries: list[CriticalNotes], summary: str
 ) -> CriticalNotes | None:
@@ -325,12 +348,8 @@ def create_critical_notes_tools(
         if not project:
             return {"error": f"Project '{project_id}' not found"}
 
-        # Step 3: Load current entries
-        notes_list = repo.list_critical_notes(project_id)
-        entries = [
-            CriticalNotes(**note.to_dict()) if isinstance(note, CriticalNoteModel) else note
-            for note in notes_list
-        ]
+        # Step 3: Load current entries (coerced to BaseModel form).
+        entries = _load_entries(repo, project_id)
 
         # Step 4: EXPLICIT UPDATE PATH (entry_id provided)
         if entry_id is not None:
@@ -451,11 +470,7 @@ Returns:
         if not project:
             return {"error": f"Project '{project_id}' not found"}
 
-        notes_list = repo.list_critical_notes(project_id)
-        entries = [
-            CriticalNotes(**note.to_dict()) if isinstance(note, CriticalNoteModel) else note
-            for note in notes_list
-        ]
+        entries = _load_entries(repo, project_id)
         now = datetime.now(timezone.utc)
 
         # R19: list surfaces OWN the maintenance marks — strike-through
@@ -573,13 +588,11 @@ Returns:
         #   * Leaving dangling pointers was REJECTED: the pointing rows
         #     would stay hidden from injection forever (silent data
         #     loss), pointing at a ghost id.
-        pointing = [
-            e for e in (
-                CriticalNotes(**n.to_dict()) if isinstance(n, CriticalNoteModel) else n
-                for n in repo.list_critical_notes(project_id)
-            )
-            if e.superseded_by_id == entry_id
-        ]
+        pointing = _load_entries(
+            repo,
+            project_id,
+            predicate=lambda e: e.superseded_by_id == entry_id,
+        )
         if pointing and not cascade:
             pointer_lines = "\n".join(
                 f"  - id={p.id} summary={p.summary!r}" for p in pointing[:_MAX_EVICTION_CANDIDATES_NAMED]
@@ -663,12 +676,15 @@ Returns:
         if pinned and not target.pinned:
             pinned_active = repo.count_pinned_critical_notes(project_id)
             if pinned_active >= _CORE_CAP:
-                candidates = repo.list_critical_notes(project_id)
-                candidate_entries = [
-                    CriticalNotes(**c.to_dict()) if isinstance(c, CriticalNoteModel) else c
-                    for c in candidates
-                    if c.pinned and c.superseded_by_id is None and c.id != entry_id
-                ]
+                candidate_entries = _load_entries(
+                    repo,
+                    project_id,
+                    predicate=lambda c: (
+                        c.pinned
+                        and c.superseded_by_id is None
+                        and c.id != entry_id
+                    ),
+                )
                 demotion = sorted(
                     candidate_entries,
                     key=lambda e: (-_PRIORITY_ORDER.get(e.priority, 2), e.created_at),
@@ -736,9 +752,12 @@ Returns:
             return {"error": f"Entry '{new_id}' not found in project '{project_id}'"}
 
         # Guard 2: same-project (both ids must live in the target
-        # project; get_critical_note already enforces membership, but
-        # the explicit check below documents the cross-project refusal
-        # contract for callers who pass ids from two projects).
+        # project). ``get_critical_note`` already enforces membership, so
+        # this explicit check is defense-in-depth — unreachable via the
+        # current call paths. It documents the cross-project refusal
+        # contract for callers who pass ids from two projects, and
+        # protects against future call sites that skip the membership
+        # check.
         if old.project_id != project_id or new.project_id != project_id:
             return {"error": "old_id and new_id must belong to the same project"}
 
@@ -779,7 +798,9 @@ Returns:
 The old note stays in the store (history), disappears from the injected
 context, and renders struck-through ("~~summary~~ ✅ superseded by {id}")
 in list surfaces. Guards: old_id == new_id is rejected; a SUPERSEDED row
-cannot act as superseder; both ids must belong to the same project.
+cannot act as superseder; the NEW row must also be ACTIVE (no 2-cycle
+— supersede(A,B) then supersede(B,A) is refused, so the lineage graph
+stays a partial order); both ids must belong to the same project.
 Supersede bumps the old row's last_reviewed_at (a leader write). This is
 the PREFERRED maintenance verb — supersede-don't-re-add; a verbatim
 re-add after a supersede inserts a fresh row (visible in the list).
@@ -792,5 +813,7 @@ Args:
 Returns:
     The updated old entry dict (superseded_by_id set), or an error dict
     on any guard violation."""
+
+    return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede]
 
     return [project_cn_add, project_cn_list, project_cn_remove, project_cn_pin, project_cn_supersede]

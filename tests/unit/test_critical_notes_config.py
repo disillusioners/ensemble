@@ -31,20 +31,8 @@ from daemon.config import (
 )
 from daemon.services.context_messages import (
     _resolve_critical_notes_reference_max,
-    reset_critical_notes_render_config,
 )
-from daemon.tools.critical_notes import (
-    reset_critical_notes_config,
-)
-
-
-@pytest.fixture(autouse=True)
-def _restore_module_state():
-    reset_critical_notes_config()
-    reset_critical_notes_render_config()
-    yield
-    reset_critical_notes_config()
-    reset_critical_notes_render_config()
+from tests.helpers.critical_notes_fixtures import reset_module_state
 
 
 @pytest.fixture
@@ -100,6 +88,19 @@ class TestCriticalNotesConfigDefaults:
         config = load_config(path)
         assert config.critical_notes.core_cap == 6
         assert config.critical_notes.reference_max == 500
+
+    def test_non_dict_section_raises_loud_value_error(self, tmp_path):
+        """A non-dict ``critical_notes:`` section (int / str / bool / list)
+        used to silently fall through to defaults — masking operator typos.
+        Now it must raise a named ``ValueError`` matching the crash-loud
+        idiom of sibling config sections. Absent section still yields
+        documented defaults (test_section_absent_yields_documented_defaults).
+        """
+        for bad in ("5", "true", "foo"):
+            path = tmp_path / "config.yaml"
+            path.write_text(f"critical_notes: {bad}\n")
+            with pytest.raises(ValueError, match="must be a mapping"):
+                load_config(path)
 
 
 class TestNoEnvLayerD4:

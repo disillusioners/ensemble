@@ -510,7 +510,7 @@ project_cn_add(
 
 **Duplicate Handling**: Only exact normalized-summary matches count as near-duplicates — there is no automatic merging. A colliding add is REJECTED with an error naming the collided entry (id + summary). Near-duplicate detection is **cross-category** by design: the matcher compares normalized summary text only, so a re-tag of the same wording in a different category still collides. To recategorize, pass `entry_id` of the colliding entry on a follow-up `project_cn_add` call — `category` is now forwarded on the explicit update path, so the change is visible on the returned dict.
 
-**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `source_agent`. `category` is included so a recategorize is visible, never silent.
+**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `detail_ref`, `source_agent`. `category` is included so a recategorize is visible, never silent.
 
 **Cap**: At 50 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
@@ -526,6 +526,26 @@ project_cn_list(project_id="550e8400-e29b-41d4-a716-446655440000")
 project_cn_remove(
   project_id="550e8400-e29b-41d4-a716-446655440000",
   entry_id="entry-uuid"
+)
+```
+
+#### project_cn_pin
+
+```javascript
+project_cn_pin(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  entry_id="entry-uuid",
+  pinned=true
+)
+```
+
+#### project_cn_supersede
+
+```javascript
+project_cn_supersede(
+  project_id="550e8400-e29b-41d4-a716-446655440000",
+  old_id="entry-uuid-old",
+  new_id="entry-uuid-new"
 )
 ```
 

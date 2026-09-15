@@ -3573,7 +3573,11 @@ def load_config(config_path: str | None = None) -> Config:
     # any knob in this section (see CriticalNotesConfig docstring).
     critical_notes_config: Dict[str, Any] = {}
     raw_critical_notes = processed_config.get("critical_notes")
-    if isinstance(raw_critical_notes, dict):
+    if raw_critical_notes is None:
+        # Section absent — fall through to documented defaults below
+        # (test_section_absent_yields_documented_defaults pins this).
+        pass
+    elif isinstance(raw_critical_notes, dict):
         # Drop null values so partial yaml sections (``key:`` with no
         # value) fall through to documented defaults rather than
         # crashing nested-model validation (skill_evolution/blueprint
@@ -3582,6 +3586,18 @@ def load_config(config_path: str | None = None) -> Config:
         critical_notes_config = {
             k: v for k, v in raw_critical_notes.items() if v is not None
         }
+    else:
+        # Loud guard (2026-09-15): a non-dict ``critical_notes:`` section
+        # (e.g. ``critical_notes: 5`` or a bare string) used to silently
+        # fall through to defaults — masking an operator typo. Match the
+        # crash-loud idiom of sibling config sections: name the offending
+        # value so the operator sees the actual misconfiguration. Absent
+        # / None still yields documented defaults above.
+        raise ValueError(
+            f"config.critical_notes must be a mapping (got "
+            f"{type(raw_critical_notes).__name__}: {raw_critical_notes!r}). "
+            f"Fix the yaml — e.g. ``critical_notes:\\n  core_cap: 8``."
+        )
     critical_notes_config["llm_select"] = _resolve_critical_notes_llm_select(
         critical_notes_config.get("llm_select")
     )

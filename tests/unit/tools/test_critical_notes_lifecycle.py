@@ -40,8 +40,11 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.tools.critical_notes import (
     create_critical_notes_tools,
     install_critical_notes_config,
-    reset_critical_notes_config,
     _find_near_duplicate_entry,
+)
+from tests.helpers.critical_notes_fixtures import (
+    make_note,
+    reset_module_state,
 )
 
 
@@ -90,12 +93,11 @@ def tools(repo):
     }
 
 
-@pytest.fixture(autouse=True)
-def _restore_config_defaults():
-    """Keep module-level config state isolated across tests."""
-    reset_critical_notes_config()
-    yield
-    reset_critical_notes_config()
+# Note: the module-state reset autouse fixture (``reset_module_state``)
+# is inherited from tests.helpers.critical_notes_fixtures — it
+# replaces the local copy that previously lived here. The render-side
+# knobs that file did not touch are still safe because resetting both
+# sides is a no-op when the other side is already at defaults.
 
 
 @pytest.fixture
@@ -400,25 +402,27 @@ class TestCollisionScopeExcludesSuperseded:
 
 class TestReferenceBound:
     def test_write_reject_over_500_is_authoritative(self, tools, project_id):
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "convention",
-            "priority": "high",
-            "summary": "Reference bound probe",
-            "reference": "x" * 501,
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="convention",
+            priority="high",
+            summary="Reference bound probe",
+            reference="x" * 501,
+        )
         assert "error" in result
         assert "500" in result["error"]
         assert "detail_ref" in result["error"]  # points at the right fix
 
     def test_write_at_500_accepted(self, tools, repo, project_id):
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "convention",
-            "priority": "high",
-            "summary": "Reference bound edge probe",
-            "reference": "x" * 500,
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="convention",
+            priority="high",
+            summary="Reference bound edge probe",
+            reference="x" * 500,
+        )
         assert "error" not in result
         assert len(result["reference"]) == 500
 
@@ -426,13 +430,14 @@ class TestReferenceBound:
         self, tools, repo, project_id
     ):
         big_detail = "d" * 5000
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "convention",
-            "priority": "high",
-            "summary": "Detail overflow probe",
-            "detail_ref": big_detail,
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="convention",
+            priority="high",
+            summary="Detail overflow probe",
+            detail_ref=big_detail,
+        )
         assert "error" not in result
         assert result["detail_ref"] == big_detail
         listed = tools["project_cn_list"].invoke({"project_id": project_id})
@@ -441,13 +446,14 @@ class TestReferenceBound:
 
     def test_reference_max_knob_is_installable(self, tools, project_id):
         install_critical_notes_config(reference_max=10)
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "convention",
-            "priority": "high",
-            "summary": "Tunable bound probe",
-            "reference": "x" * 11,
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="convention",
+            priority="high",
+            summary="Tunable bound probe",
+            reference="x" * 11,
+        )
         assert "error" in result
         assert "10" in result["error"]
 
@@ -527,24 +533,26 @@ class TestProjectCnListMarks:
 
 class TestPinSuggestion:
     def test_critical_write_suggests_never_auto_pins(self, tools, repo, project_id):
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "risk",
-            "priority": "critical",
-            "summary": "Suggestion probe for critical writes",
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="risk",
+            priority="critical",
+            summary="Suggestion probe for critical writes",
+        )
         assert "error" not in result
         assert result["pinned"] is False  # never auto-pinned
         assert "pin_suggestion" in result
         assert result["id"] in result["pin_suggestion"]
 
     def test_non_critical_write_carries_no_suggestion(self, tools, repo, project_id):
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "risk",
-            "priority": "high",
-            "summary": "Suggestion probe for high writes",
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            category="risk",
+            priority="high",
+            summary="Suggestion probe for high writes",
+        )
         assert "error" not in result
         assert "pin_suggestion" not in result
 
@@ -562,12 +570,13 @@ class TestReviewConditions:
         """
         from sqlmodel import Session
 
-        added = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "risk",
-            "priority": "medium",
-            "summary": "Naive-ts list-render probe",
-        })
+        added = make_note(
+            tools,
+            project_id=project_id,
+            category="risk",
+            priority="medium",
+            summary="Naive-ts list-render probe",
+        )
         assert "error" not in added
 
         # Overwrite last_reviewed_at with a tz-less ISO string. The
@@ -596,27 +605,30 @@ class TestReviewConditions:
         """One-line asymmetry pin: passing ``detail_ref=None`` on the
         update path means "not touched", not "cleared". The repo's
         ``_ALLOWED_UPDATES`` skip-when-None guard (``value is not None``
-        at ``repository.py:1586``) implements this — pin behavior here.
+        filter on the updatable-field allowlist) implements this — pin
+        behavior here.
         """
         original_detail = "long context block, never clear me"
-        added = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "risk",
-            "priority": "medium",
-            "summary": "Detail-preserve probe",
-            "detail_ref": original_detail,
-        })
+        added = make_note(
+            tools,
+            project_id=project_id,
+            category="risk",
+            priority="medium",
+            summary="Detail-preserve probe",
+            detail_ref=original_detail,
+        )
         assert "error" not in added
         assert added["detail_ref"] == original_detail
 
         # Update WITHOUT passing detail_ref (defaults to None → repo skip).
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "entry_id": added["id"],
-            "category": "risk",
-            "priority": "medium",
-            "summary": "Detail-preserve probe (updated)",
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            entry_id=added["id"],
+            category="risk",
+            priority="medium",
+            summary="Detail-preserve probe (updated)",
+        )
         assert "error" not in result
         assert result["detail_ref"] == original_detail  # NOT cleared
 
@@ -626,22 +638,24 @@ class TestReviewConditions:
         surface the suggestion field — curation is still the leader's
         explicit call; the suggestion is in-band nudging, never auto-pin.
         """
-        added = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "category": "risk",
-            "priority": "medium",
-            "summary": "Escalate-to-critical probe",
-        })
+        added = make_note(
+            tools,
+            project_id=project_id,
+            category="risk",
+            priority="medium",
+            summary="Escalate-to-critical probe",
+        )
         assert "error" not in added
         assert "pin_suggestion" not in added  # medium → no suggestion on add
 
-        result = tools["project_cn_add"].invoke({
-            "project_id": project_id,
-            "entry_id": added["id"],
-            "category": "risk",
-            "priority": "critical",  # escalate
-            "summary": "Escalate-to-critical probe",
-        })
+        result = make_note(
+            tools,
+            project_id=project_id,
+            entry_id=added["id"],
+            category="risk",
+            priority="critical",  # escalate
+            summary="Escalate-to-critical probe",
+        )
         assert "error" not in result
         assert result["priority"] == "critical"
         assert "pin_suggestion" in result

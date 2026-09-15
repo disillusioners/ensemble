@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel
 from .models import SchemaMigration
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,32 @@ class MigrationFile:
         )
         precondition = precondition_match.group(1) if precondition_match else None
 
+        # Loud-but-non-fatal guard for a MALFORMED marker: if the file
+        # LOOKS like it tried to declare a precondition (e.g. a typo'd
+        # ``-- PRECONDITON:`` line — note the missing 'I') but the strict
+        # regex above did not match, WARN so an operator sees the miss
+        # instead of the migration silently degrading to ungated
+        # execution. Without this guard, a typo'd marker would be
+        # indistinguishable from "no marker declared" — the migration
+        # would run, never gated, and the author would not know. The
+        # loose regex tolerates any keyword starting with ``PRECONDIT``
+        # (catches PRECONDITON / PRECONDITION / PRECONDITIONX) followed
+        # by a colon, which is enough to distinguish "tried to declare"
+        # from "no marker here".
+        if precondition is None:
+            malformed_match = re.search(
+                r"--\s*\S*PRECONDIT[\w-]*\s*:", content, re.IGNORECASE
+            )
+            if malformed_match:
+                logger.warning(
+                    "Migration %s '%s' has a malformed -- PRECONDITION: marker "
+                    "(expected 'PRECONDITION: <driver>>=<version>' per N4). "
+                    "Treating as no precondition declared — the migration will "
+                    "run ungated. Fix the marker to gate execution.",
+                    path.name,
+                    name,
+                )
+
         return cls(
             path=path,
             version=version,
@@ -166,14 +192,22 @@ class MigrationRunner:
     
     def ensure_migrations_table(self) -> None:
         """Create or update the schema_migrations table.
-        
+
         Uses CREATE TABLE IF NOT EXISTS to avoid race conditions when
         multiple processes try to create the table simultaneously.
-        
+
         Also adds missing columns to handle schema evolution - if the
         SchemaMigration model adds new columns, this ensures they exist.
         """
         with self.engine.connect() as conn:
+            # N4 precondition columns: ``precondition`` + ``skip_reason``
+            # are declared here (CREATE TABLE path) for the same reason
+            # they appear in the model-side ``model_columns`` block
+            # below: the column exists on the ledger row from the very
+            # first migration ever recorded, so an operator reading the
+            # schema later sees the contract in one place. The migration
+            # runner reads/writes these on every apply (see
+            # ``MigrationRunner.apply_migration`` and ``_record_skip``).
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
@@ -380,6 +414,65 @@ class MigrationRunner:
                 break
         return tuple(parts) if parts else (0,)
 
+    def _persist_ledger_row(
+        self,
+        migration: MigrationFile,
+        *,
+        execution_time_ms: int,
+        skip_reason: str | None = None,
+        bind: Connection | None = None,
+    ) -> None:
+        """Insert one ``SchemaMigration`` row inside its own session.
+
+        Replaces the duplicated ``SchemaMigration(...) + session.add +
+        session.commit`` block across the apply path, the rename no-op
+        path, and the precondition-skip path. ``bind`` defaults to
+        ``self.engine``; the apply path passes a ``Connection`` from its
+        outer ``engine.begin()`` so the ledger row participates in the
+        migration's transaction (rolls back together with the SQL if the
+        transaction aborts).
+
+        Args:
+            migration: The migration the row describes.
+            execution_time_ms: Wall-clock duration recorded on the row.
+            skip_reason: Set only by ``_record_skip`` to mark a
+                precondition-failed migration; ``None`` for executed rows.
+            bind: Optional existing ``Connection`` to bind the session to
+                (the apply path). ``None`` opens a fresh session bound to
+                ``self.engine``.
+        """
+        if bind is None:
+            with Session(self.engine) as session:
+                self._add_ledger_row(session, migration, execution_time_ms, skip_reason)
+                session.commit()
+        else:
+            with Session(bind=bind) as session:
+                self._add_ledger_row(session, migration, execution_time_ms, skip_reason)
+                session.commit()
+
+    @staticmethod
+    def _add_ledger_row(
+        session: Session,
+        migration: MigrationFile,
+        execution_time_ms: int,
+        skip_reason: str | None,
+    ) -> None:
+        """Construct the ``SchemaMigration`` and add it to ``session``
+        (caller commits). Split out so the helper can use either an
+        engine-bound session or a connection-bound session without the
+        ``bind`` kwarg ambiguity.
+        """
+        record = SchemaMigration(
+            version=migration.version,
+            name=migration.name,
+            applied_at=datetime.now(timezone.utc).isoformat(),
+            execution_time_ms=execution_time_ms,
+            checksum=migration.checksum,
+            precondition=migration.precondition,
+            skip_reason=skip_reason,
+        )
+        session.add(record)
+
     def _record_skip(self, migration: MigrationFile, reason: str, execution_time_ms: int = 0) -> float:
         """Record a skip-ledger row for a precondition-failed migration.
 
@@ -400,18 +493,11 @@ class MigrationRunner:
             migration.name,
             reason,
         )
-        with Session(self.engine) as session:
-            record = SchemaMigration(
-                version=migration.version,
-                name=migration.name,
-                applied_at=datetime.now(timezone.utc).isoformat(),
-                execution_time_ms=execution_time_ms,
-                checksum=migration.checksum,
-                precondition=migration.precondition,
-                skip_reason=reason,
-            )
-            session.add(record)
-            session.commit()
+        self._persist_ledger_row(
+            migration,
+            execution_time_ms=execution_time_ms,
+            skip_reason=reason,
+        )
         return 0.0
     
     def apply_migration(self, migration: MigrationFile) -> float:
@@ -451,16 +537,7 @@ class MigrationRunner:
                         f"Migration {migration.version}: no old 'session' schema detected, "
                         f"recording as applied (no-op)"
                     )
-                    with Session(self.engine) as session:
-                        record = SchemaMigration(
-                            version=migration.version,
-                            name=migration.name,
-                            applied_at=datetime.now(timezone.utc).isoformat(),
-                            execution_time_ms=0,
-                            checksum=migration.checksum,
-                        )
-                        session.add(record)
-                        session.commit()
+                    self._persist_ledger_row(migration, execution_time_ms=0)
                     return 0.0
         
         with self.engine.begin() as conn:
@@ -535,19 +612,11 @@ class MigrationRunner:
             # Record the migration as applied (even if some statements were idempotently skipped)
             # This prevents re-running migrations that are no-ops on the current schema
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
-            with Session(bind=conn) as session:
-                record = SchemaMigration(
-                    version=migration.version,
-                    name=migration.name,
-                    applied_at=datetime.now(timezone.utc).isoformat(),
-                    execution_time_ms=execution_time_ms,
-                    checksum=migration.checksum,
-                    # Declared precondition stored for discoverability
-                    # (N4); NULL for unconditional migrations.
-                    precondition=migration.precondition,
-                )
-                session.add(record)
-                session.commit()
+            self._persist_ledger_row(
+                migration,
+                execution_time_ms=execution_time_ms,
+                bind=conn,
+            )
         
         logger.info(
             f"Completed migration {migration.version} in {execution_time_ms}ms"
