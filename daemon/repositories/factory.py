@@ -152,12 +152,27 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
     else:
+        # Dialect-agnostic branch. In the daemon runtime this path
+        # only ever sees SQLite (``DatabaseConfig.postgres`` has zero
+        # callers — the canonical PG engine is ``create_postgres_engine``
+        # below). Guard the latent trap anyway: when the URL IS
+        # PostgreSQL, apply the same libpq session options as the
+        # canonical engine so SQL-side ``now()`` readers stay aligned
+        # with the naive-UTC digit writers (B2/B3). Non-PG dialects
+        # never receive libpq-specific options — an empty
+        # ``connect_args`` is a SQLAlchemy no-op.
+        pg_connect_args = (
+            dict(PG_SESSION_CONNECT_ARGS)
+            if "postgres" in config.connection_string.lower()
+            else {}
+        )
         engine = create_engine(
             config.connection_string,
             echo=config.echo,
             pool_size=config.pool_size,
             max_overflow=config.max_overflow,
             pool_pre_ping=True,
+            connect_args=pg_connect_args,
         )
 
     return engine
