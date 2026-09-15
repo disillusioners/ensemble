@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from daemon.services.timestamps import now_utc_naive
+from daemon.services.timestamps import now_utc_iso, now_utc_naive
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler

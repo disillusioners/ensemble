@@ -96,6 +96,13 @@ class _NoTaskRepo:
     def get_by_work_id(self, work_id: str):  # noqa: ARG002
         return None
 
+    def get_timing_by_work_ids(self, work_ids):  # noqa: ARG002
+        """D1 batched timing lookup (tz fix, Phase 3) — no Task rows
+        exist in these JobItem-only fixtures, so the timing map is
+        empty (every job surfaces ``None`` timing, the PENDING shape).
+        """
+        return {}
+
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -350,12 +357,12 @@ class TestTimingColumnsFromInstance:
     def test_started_at_sourced_from_instance_last_activity_at(
         self, engine, resolver
     ):
-        """``started_at`` in the WorkRecord comes from
-        ``Instance.last_activity_at`` (ISO-formatted), not from
-        ``JobItem.started_at``.
-
-        The fixture plants distinct values for both so the test can
-        assert exactly which one the resolver picked.
+        """D1 (tz fix, Phase 3): ``started_at`` comes from the TASK
+        row, NOT ``Instance.last_activity_at``. A JobItem with no
+        linked Task surfaces NO started_at even when the Instance
+        carries fresh activity data — the old Instance sourcing was
+        the D1 defect (``last_activity_at`` is bumped by unrelated
+        instance activity and drifted from true work-start).
         """
         activity = datetime(2026, 6, 1, 10, 30, 0, tzinfo=timezone.utc)
         _seed_instance(
@@ -377,11 +384,9 @@ class TestTimingColumnsFromInstance:
         record = resolver.resolve_work(jid)
 
         assert record is not None
-        # The Instance's last_activity_at must win (2026-06-01T10:30
-        # round-tripped through ISO format).
-        assert record.started_at == activity.isoformat()
-        # And the bogus JobItem mirror value must NOT appear.
-        assert record.started_at != "1999-01-01T00:00:00+00:00"
+        # No linked Task row → NO started_at, no matter how fresh the
+        # Instance timing data is.
+        assert record.started_at is None
 
     def test_completed_at_sourced_from_instance_updated_at_for_terminal(
         self, engine, resolver

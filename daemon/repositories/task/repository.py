@@ -247,6 +247,42 @@ class TaskRepository:
             stmt = select(Task).where(Task.work_id == work_id)
             return db_session.exec(stmt).first()
 
+    def get_timing_by_work_ids(
+        self, work_ids: list[str] | set[str]
+    ) -> dict[str, tuple["datetime | None", "datetime | None"]]:
+        """Batch-fetch ``(started_at, completed_at)`` per ``work_id``.
+
+        D1 timing semantics (``feature/fix-job-queue-timestamps-tz``):
+        job-view execution timing is sourced from the Task row —
+        ``started_at`` is the dispatch/claim stamp (set by
+        ``claim_pending_task``), ``completed_at`` is the terminal
+        finalize stamp (set by ``complete_task`` / ``fail_task`` /
+        cancel paths). This batch helper serves the
+        ``WorkResolverService.list_work`` jobs page with ONE
+        ``SELECT … WHERE work_id IN (…)`` instead of a per-row
+        lookup (the S4 query-budget pattern).
+
+        Args:
+            work_ids: The work identifiers to fetch timing for.
+
+        Returns:
+            Dict keyed by ``work_id``; each value is
+            ``(started_at, completed_at)``. Work ids with no Task
+            row are absent from the dict (callers treat absence as
+            "no timing" — a PENDING job that was never claimed).
+        """
+        ids = list(work_ids)
+        if not ids:
+            return {}
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(
+                Task.work_id, Task.started_at, Task.completed_at
+            ).where(col(Task.work_id).in_(ids))
+            return {
+                row[0]: (row[1], row[2])
+                for row in db_session.exec(stmt).all()
+            }
+
     def find_running_by_instance(self, instance_id: str) -> Task | None:
         """Return the first RUNNING ``task`` row for ``instance_id``,
         or None.

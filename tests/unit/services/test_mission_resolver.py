@@ -1350,22 +1350,15 @@ class TestWorkResolverServiceMissionFields:
     def test_resolve_work_single_row_surfaces_instance_timing(
         self, engine, instance_repo, job_repo
     ):
-        """Always-on single-row contract (WS3): ``resolve_work`` on a
-        DONE JobItem whose backing ``Instance`` carries timing data
-        surfaces the instance-derived timestamps AND the populated
-        mission fields.
-
-        History: the M1 commit made ``_job_to_record`` look up the
-        Instance lazily on the single-row path; the F2 fix then
-        gated that lookup on the kill-switch so the OFF path stayed
-        byte-identical to pre-M1 (``started_at`` / ``completed_at``
-        stayed ``None``). WS3 removed the kill-switch — the lazy
-        lookup is now unconditional, so this test pins the ALWAYS-ON
-        shape: a DONE row with a terminal Instance surfaces the
-        instance's ``last_activity_at`` as ``started_at``, the
-        terminal ``Instance.updated_at`` as ``completed_at``, and
-        the mission triple (``mission_id`` == instance id, epoch 1,
-        terminal_reason ``completed``).
+        """D1 single-row timing contract (tz fix, Phase 3):
+        ``resolve_work`` on a DONE JobItem sources execution timing
+        from the TASK row — NOT the Instance. A DONE JobItem with
+        NO linked Task row surfaces NO started_at / completed_at
+        even when the Instance carries rich timing data (the old
+        Instance-derived sourcing was the D1 defect:
+        ``last_activity_at`` is bumped by unrelated instance
+        activity and drifted from true work-start). Mission fields
+        stay populated (always-on since WS3).
         """
         from daemon.repositories.instance.models import InstanceStatus
         from daemon.services.work_resolver import WorkResolverService
@@ -1404,17 +1397,16 @@ class TestWorkResolverServiceMissionFields:
         record = svc.resolve_work(jid)
         assert record is not None
 
-        # Always-on shape: the single-row path consults the Instance,
-        # so instance-derived timing surfaces.
-        assert record.started_at == now_dt.isoformat(), (
-            "Always-on regression: single-row resolve_work did not "
-            f"surface the Instance-derived started_at: {record.started_at!r}. "
-            "The lazy _lookup_instance block must run unconditionally "
-            "since the kill-switch removal."
+        # D1: no linked Task row → NO started_at / completed_at,
+        # regardless of how fresh the Instance timing data is.
+        assert record.started_at is None, (
+            "D1 regression: resolve_work surfaced an Instance-derived "
+            f"started_at ({record.started_at!r}) for a JobItem with no "
+            "linked Task row. Job-view timing is Task-row sourced."
         )
-        assert record.completed_at is not None, (
-            "Always-on regression: single-row resolve_work did not "
-            "surface an instance-derived completed_at."
+        assert record.completed_at is None, (
+            "D1 regression: resolve_work surfaced an Instance-derived "
+            "completed_at for a JobItem with no linked Task row."
         )
         # Mission additive fields are populated — always-on.
         assert record.mission_id == iid

@@ -185,6 +185,7 @@ class _SelectSpy:
         self.counts: dict[str, int] = {
             "instances": 0,
             "job_queue_items": 0,
+            "task": 0,
             "total": 0,
         }
 
@@ -199,6 +200,13 @@ class _SelectSpy:
                     self.counts["instances"] += 1
                 if "JOB_QUEUE_ITEMS" in s:
                     self.counts["job_queue_items"] += 1
+                # D1 task-timing batch (tz fix, Phase 3): count the
+                # task-table SELECTs. The spy matches "FROM TASK"
+                # (word-bounded via the space so JOB_QUEUE's JOINs
+                # on task never double-count) — the batched timing
+                # lookup is the only task SELECT on the jobs path.
+                if "FROM TASK" in s or "FROM TASK," in s:
+                    self.counts["task"] += 1
 
         self._hook = _before_cursor_execute
         event.listen(self._engine, "before_cursor_execute", self._hook)
@@ -267,9 +275,11 @@ class TestListWorkJobsQueryBudget:
         self, engine: Engine, resolver: WorkResolverService
     ):
         """Default ``root_only=True`` shape: 2 JobItem SELECTs
-        (``_query_jobs`` + batched mission-fields lookup) and 2
+        (``_query_jobs`` + batched mission-fields lookup), 2
         Instance SELECTs (``_batch_instances`` +
-        ``_batch_child_instance_ids``) — regardless of row count.
+        ``_batch_child_instance_ids``), and 1 task SELECT (the D1
+        batched task-timing lookup, tz fix Phase 3) — regardless of
+        row count.
         """
         _seed_page(engine, n=6)
         with _SelectSpy(engine) as spy:
@@ -287,14 +297,20 @@ class TestListWorkJobsQueryBudget:
             f"(_batch_instances + _batch_child_instance_ids); got "
             f"{spy.counts['instances']}."
         )
-        assert spy.counts["total"] == 4
+        assert spy.counts["task"] == 1, (
+            f"Task leg must be exactly 1 SELECT (the D1 batched "
+            f"task-timing IN-clause); got {spy.counts['task']}. More "
+            f"than 1 is a per-row timing regression."
+        )
+        assert spy.counts["total"] == 5
 
     def test_per_leg_budget_root_only_false(
         self, engine: Engine, resolver: WorkResolverService
     ):
         """``root_only=False`` skips the child filter: 1 JobItem SELECT
         for the page + 1 for the batched mission fields, 1 Instance
-        SELECT.
+        SELECT, 1 task SELECT (D1 batched task-timing lookup, tz fix
+        Phase 3).
         """
         _seed_page(engine, n=6)
         with _SelectSpy(engine) as spy:
@@ -306,7 +322,11 @@ class TestListWorkJobsQueryBudget:
             f"fields); got {spy.counts['job_queue_items']}."
         )
         assert spy.counts["instances"] == 1
-        assert spy.counts["total"] == 3
+        assert spy.counts["task"] == 1, (
+            f"Task leg must be exactly 1 SELECT (the D1 batched "
+            f"task-timing IN-clause); got {spy.counts['task']}."
+        )
+        assert spy.counts["total"] == 4
 
     def test_batched_mission_fields_match_per_row_resolution(
         self, engine: Engine, resolver: WorkResolverService
