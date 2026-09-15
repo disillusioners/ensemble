@@ -51,7 +51,7 @@ BACKOFF_MULTIPLIER: float = 2.0  # Exponential backoff multiplier
 CIRCUIT_BREAKER_THRESHOLD: int = 5  # Failure threshold before circuit opens
 
 # ── Worker Pool ──────────────────────────────────────────────────────────────────
-WORKER_POOL_SIZE: int = 4  # Default number of worker threads
+WORKER_POOL_SIZE: int = 5  # Default number of worker threads
 WORKER_WAIT_TIMEOUT: float = 3.0  # Worker wait timeout (seconds)
 WORKER_STALE_CHECK_INTERVAL: int = 60  # Stale task recovery check interval (seconds)
 STALE_TASK_CANCEL_GRACE_S: int = 10  # Grace period before cancelling stale tasks

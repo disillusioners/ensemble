@@ -123,8 +123,8 @@ class TestConstants:
     # ── Worker Pool ────────────────────────────────────────────────────────────
 
     def test_worker_pool_size(self):
-        """WORKER_POOL_SIZE should be 4."""
-        assert constants.WORKER_POOL_SIZE == 4
+        """WORKER_POOL_SIZE should be 5."""
+        assert constants.WORKER_POOL_SIZE == 5
 
     def test_worker_wait_timeout(self):
         """WORKER_WAIT_TIMEOUT should be 3.0."""
