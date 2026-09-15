@@ -22,7 +22,7 @@ Pure unit tests — file-backed SQLite only; NO PostgreSQL, NO daemon boot.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -66,7 +66,9 @@ def resolver(engine: Engine) -> WorkResolverService:
     )
 
 
-def _seed_instance(engine: Engine, instance_id: str = "inst-tz") -> str:
+def _seed_instance(
+    engine: Engine, instance_id: str = "inst-tz", status: str = "running"
+) -> str:
     now = datetime.now(timezone.utc)
     with Session(engine) as s:
         s.add(
@@ -76,7 +78,7 @@ def _seed_instance(engine: Engine, instance_id: str = "inst-tz") -> str:
                 agent_dir="/tmp/agents/developer",
                 agent_name="developer",
                 project_id="tz-project",
-                status="running",
+                status=status,
                 created_at=now.isoformat(),
                 updated_at=now.isoformat(),
             )
@@ -361,7 +363,17 @@ class TestReconcileStampFrames:
         """job_queue_items.failed_at (TEXT) gets an aware ISO stamp with
         the +00:00 offset — string-comparable with legacy rows."""
         task_repo = TaskRepository(engine)
-        iid = _seed_instance(engine)
+        # Terminal-side instance status: the mirror's CASE guards
+        # suppress the terminal write while the instance is on the
+        # alive-side (waiting_children/paused/running), so this
+        # fail-path row seeds a terminal status.
+        iid = _seed_instance(engine, status="completed")
+        _seed_job(
+            engine,
+            job_id="wid-fail",
+            instance_id=iid,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
         with Session(engine) as s:
             task = Task(
                 work_id="wid-fail",
@@ -378,9 +390,17 @@ class TestReconcileStampFrames:
 
         with Session(engine) as s:
             row = s.get(JobItem, "wid-fail")
-            # No JobItem was seeded — the mirror UPDATE simply matched
-            # zero rows; the assertion target is the message lane below.
-            assert row is None
+            # The seeded JobItem MUST be matched by job_id — the
+            # pre-fix version of this test asserted against a
+            # non-existent row (vacuous pass).
+            assert row is not None
+            assert row.failed_at is not None, (
+                "fail_task reconcile must stamp failed_at on the "
+                "matched job row"
+            )
+            assert row.failed_at.endswith("+00:00"), row.failed_at
+            parsed = datetime.fromisoformat(row.failed_at)
+            assert parsed.utcoffset() == timedelta(0)
 
     def test_message_queue_completed_at_is_naive_digits(self, engine):
         task_repo = TaskRepository(engine)

@@ -71,6 +71,15 @@ class TestNowUtcNaive:
         # Simulate a non-UTC "session" by confirming the digits are
         # UTC wall-clock: compare against a +07-shifted reference —
         # the digits must NOT equal the local (+07) wall clock.
+        #
+        # LIMITATION (SQLite-only scope): this pins the PYTHON-side
+        # wall clock only — the process TZ. A PostgreSQL session
+        # TimeZone (how ``now()`` renders server-side) is a different
+        # concept this test cannot observe. The session frame is
+        # pinned separately: factory kwarg pin in
+        # tests/unit/repositories/test_pg_engine_utc_session.py and
+        # the disposable-PG behavioral pins in
+        # tests/postgres/test_pg_session_utc_frame_pg.py.
         aware = now_utc()
         naive = now_utc_naive()
         local_plus7 = (aware.astimezone(timezone(timedelta(hours=7)))
