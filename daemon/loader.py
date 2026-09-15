@@ -60,6 +60,7 @@ def _ensure_tool_metadata_populated() -> None:
     from .tools.knowledge_tools import create_knowledge_tools
     from .tools.upgrade_tools import create_upgrade_tools
     from .tools.db_tools import create_db_tools
+    from .tools.service_tools import create_service_tools
 
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
@@ -80,6 +81,14 @@ def _ensure_tool_metadata_populated() -> None:
     ens_db_tools = create_ens_db_tools(None, "")
     knowledge_tools = create_knowledge_tools(None, "")
     upgrade_tools = create_upgrade_tools(None, "")
+    # service (service-tool Phase 1, 1.C.6): the factory's F-guard
+    # returns [] for a FALSY current_instance_id (proc_tools
+    # precedent), so the warm-list stub passes a truthy placeholder
+    # id — construction only builds closures (manager is
+    # dereferenced at CALL time, never at construction), and the
+    # @register_tool_category("service") decorators must run HERE so
+    # the cold-boot metadata scan registers the category.
+    service_tools = create_service_tools(None, "metadata-scan")
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
     # None is sufficient — the credential manager is only invoked inside
@@ -106,7 +115,7 @@ def _ensure_tool_metadata_populated() -> None:
     # the list object itself would stringify it during the scan).
     for factory_tools in (
         system_log_tools, ens_db_tools, knowledge_tools,
-        upgrade_tools, db_tools,
+        upgrade_tools, db_tools, service_tools,
     ):
         if factory_tools:
             all_tools.extend(factory_tools)

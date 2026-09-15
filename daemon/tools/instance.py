@@ -237,6 +237,7 @@ from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
+from .service_tools import create_service_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from .tunables import create_set_instance_tunable_tool
@@ -4698,6 +4699,20 @@ Returns:
         manager, current_instance_id, agent_id
     )
     tools.extend(ens_db_tool_list)
+
+    # ── service tools (service-tool Phase 1, 1.C.5) — detached process management ──
+    # Privileged category (D4 Option A): in PRIVILEGED_TOOL_CATEGORIES —
+    # never default-granted; an agent reaches service_* ONLY via an
+    # explicit tools.allow entry naming "service". Manager dereferenced
+    # at CALL time (the factory tolerates a None-stub manager for the
+    # loader warm-list). Decorator-only registration is SILENTLY
+    # INVISIBLE — the extend below is the third step of the
+    # three-step registration seam (decorator + registry entry +
+    # construction — all three required).
+    service_tool_list = create_service_tools(
+        manager, current_instance_id, agent_id, version_tag=version_tag
+    )
+    tools.extend(service_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation

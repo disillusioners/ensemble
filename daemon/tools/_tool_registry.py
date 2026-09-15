@@ -91,6 +91,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_inspect",
     "ens_db_repair_execute",
     "ens_db_pool_status",
+    # service tools (service-tool Phase 1, 2026-09-15) — created by
+    # create_service_tools() factory (daemon/tools/service_tools.py).
+    # Privileged category (D4 Option A) — ``service_*`` tools spawn
+    # persistent detached OS processes that survive instance
+    # termination AND daemon restart; default-deny via
+    # ``PRIVILEGED_TOOL_CATEGORIES``, reachable only via an explicit
+    # ``tools.allow`` entry naming ``service``.
+    "service_start",
+    "service_stop",
+    "service_status",
+    "service_list",
+    "service_logs",
 })
 
 
@@ -543,6 +555,13 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (CLOSED-by-leader) — full boundary argument in
     # daemon/tools/attestation.py module docstring header.
     "attestation": "daemon.tools.attestation",
+    # service tool category (service-tool Phase 1, 2026-09-15) —
+    # long-lived detached processes tracked in the service_tracking
+    # table. PRIVILEGED (D4 Option A: in PRIVILEGED_TOOL_CATEGORIES —
+    # never default-granted; explicit tools.allow only). The five
+    # tools are factory-created (create_service_tools) and also
+    # listed in DYNAMIC_TOOL_NAMES below.
+    "service": "daemon.tools.service_tools",
 }
 
 
@@ -721,6 +740,11 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file",
     "release_info",
     "send_message",
+    "service_list",
+    "service_logs",
+    "service_start",
+    "service_status",
+    "service_stop",
     "set_instance_tunable",
     "shared_meta_kv",
     "skill_analyze",
@@ -761,7 +785,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "upgrade_status",
     "watch_job",
     "watch_jobs",
-    "write_file",})
+    "write_file",
+})
 
 
 def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list[str]]:

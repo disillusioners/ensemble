@@ -1063,10 +1063,39 @@ class TestMaintenancerToolsDocColdBoot:
         categories = get_tool_categories()
         for category_name in (
             "System Log", "Ensemble DB", "Knowledge", "System Upgrade", "Database",
+            # service-tool Phase 1 (1.C.8): the Service category is NOT
+            # in maintenancer's tools.allow (no per-agent defaults in
+            # v1) — but the cold warm-list scan must still REGISTER it
+            # (loader stub create_service_tools(None, "metadata-scan")).
+            # Registration is registry-level; doc visibility is
+            # allow-scoped (pinned by the negative assertion below).
+            "Service",
         ):
             assert category_name in categories, (
                 f"cold scan did not register category {category_name!r}; "
                 f"registered={sorted(categories)}"
+            )
+
+    def test_cold_boot_service_docs_default_denied(self, cold_registry):
+        """SC-6 rider (D4 Option A acceptance, doc-level): the Service
+        category is default-deny (PRIVILEGED_TOOL_CATEGORIES), so an
+        agent whose explicit allow list does NOT name it — maintenancer
+        — gets NO service_* tools in its docs, even though the category
+        itself is registered by the cold scan. The positive case
+        (tools.allow=["service"] resolves all five) is pinned in
+        tests/unit/tools/test_service_registration.py."""
+        docs = load_tools_doc_for_agent("maintenancer")
+        for service_tool in (
+            "service_start",
+            "service_stop",
+            "service_status",
+            "service_list",
+            "service_logs",
+        ):
+            assert service_tool not in docs, (
+                f"default-deny violation: {service_tool!r} leaked into "
+                f"docs for an agent whose allow list does not name "
+                f"'service' (SC-6 / D4 Option A)"
             )
 
 
