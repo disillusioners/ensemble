@@ -464,6 +464,64 @@ class TestReconcileStampFrames:
             assert msg.completed_at is not None
             assert isinstance(msg.completed_at, datetime)
 
+    def test_schedule_retry_stamp_frame_is_naive_utc(self, engine):
+        """B1 pin: the schedule_retry gate's ``"now": now_utc_naive()``
+        binding (task/repository.py gate UPDATE) stamps BOTH
+        completed_at and cancel_requested_at with naive-UTC digits —
+        not session-local digits, not aware values.
+
+        De-vacuous: a real RUNNING task row goes through the real
+        gate UPDATE (``retry_scheduled = false`` + status guard) and
+        the asserts read back the STORED parent row — same pattern
+        as test_failed_at_stamp_is_aware_iso above."""
+        task_repo = TaskRepository(engine)
+        with Session(engine) as s:
+            task = Task(
+                work_id="wid-retry",
+                task_type="process_message",
+                instance_id="inst-tz",
+                status=TaskStatus.RUNNING.value,
+            )
+            s.add(task)
+            s.commit()
+            task_id = task.id
+
+        before = datetime.now(timezone.utc)
+        child = task_repo.schedule_retry(task_id, max_retries=3)
+        after = datetime.now(timezone.utc)
+
+        # The gate must have MATCHED (retry_scheduled=false +
+        # RUNNING status + retry_count < max_retries) — otherwise
+        # the asserts below would pass vacuously on an untouched
+        # row.
+        assert child is not None, "gate must match a fresh RUNNING task"
+
+        with Session(engine) as s:
+            parent = s.get(Task, task_id)
+            assert parent is not None
+            assert parent.status == TaskStatus.CANCELLED.value
+
+            # completed_at (DATETIME column): naive round-trip, UTC
+            # wall-clock digits inside the before/after window, and
+            # isoformat() renders WITHOUT an offset suffix.
+            assert parent.completed_at is not None
+            assert parent.completed_at.tzinfo is None
+            assert "+" not in parent.completed_at.isoformat()
+            read_completed = parent.completed_at.replace(tzinfo=timezone.utc)
+            assert before <= read_completed <= after
+
+            # cancel_requested_at (TEXT column): the same ``now``
+            # binding stringifies on the round-trip — parse it and
+            # apply the same frame checks (naive, UTC digits, no
+            # offset in the stored string).
+            assert parent.cancel_requested_at is not None
+            parsed_cancel = datetime.fromisoformat(parent.cancel_requested_at)
+            assert parsed_cancel.tzinfo is None
+            assert before <= parsed_cancel.replace(tzinfo=timezone.utc) <= after
+            # One binding serves BOTH SET entries (the gate's
+            # single-key shape) — the stored digits must be equal.
+            assert parent.completed_at == parsed_cancel
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
