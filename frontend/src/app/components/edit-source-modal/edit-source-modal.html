@@ -115,6 +115,7 @@
                           [options]="toSelectOptions(field.options)"
                           [placeholder]="field.placeholder"
                           [ngModel]="getFieldValue(field.key)"
+                          [ngModelOptions]="{standalone: true}"
                           (ngModelChange)="onSelectFieldChange(field.key, $event)"
                         ></app-searchable-select>
                       } @else if (field.type === 'password') {
@@ -176,6 +177,7 @@
                           [options]="toSelectOptions(field.options)"
                           [placeholder]="field.placeholder"
                           [ngModel]="getFieldValue(field.key)"
+                          [ngModelOptions]="{standalone: true}"
                           (ngModelChange)="onSelectFieldChange(field.key, $event)"
                         ></app-searchable-select>
                       } @else {
