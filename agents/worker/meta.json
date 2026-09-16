@@ -28,7 +28,8 @@
       "shared_meta_kv",
       "dynamic-skill",
       "system-log",
-      "plane_sync"
+      "plane_sync",
+      "service"
     ]
   },
   "context_injection": {

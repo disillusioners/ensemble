@@ -8,7 +8,7 @@
   "no_force_explore": true,
   "innate_skills": [],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv"]
+    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "service"]
   },
   "team_members": []
 }

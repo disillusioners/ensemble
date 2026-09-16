@@ -24,7 +24,8 @@
       "job_progress",
       "job_inject",
       "system_upgrade",
-      "mission"
+      "mission",
+      "service"
     ],
     "deny": ["edit_file", "write_file"]
   }

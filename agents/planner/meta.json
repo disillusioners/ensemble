@@ -8,7 +8,7 @@
   "innate_skills": ["opencode", "chart", "todo"],
   "tools": {
     "allow": ["instance", "bash", "proc", "filesystem", "time", "subtree_messages",
-    "subtree_status", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint"]
+    "subtree_status", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint", "service"]
   },
   "team_members": ["explorer"]
 }
