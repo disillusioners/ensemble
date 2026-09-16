@@ -769,7 +769,9 @@ class TestExpandAllowForInnateSkills:
         ``allow`` via an innate skill.
 
         A future mapping whose value intersects the privileged set
-        (``system_upgrade`` / ``system-log`` / ``ens-db`` / ``service``)
+        (``system_upgrade`` / ``system-log`` / ``ens-db``; service
+        REMOVED per override 2026-09-16 — see
+        .agents/shared/planning/service-tool/decisions.md §D4)
         would otherwise default-grant a default-deny category to EVERY
         agent declaring the hosting innate skill. Fail-closed: the
         privileged category is silently dropped from the expansion

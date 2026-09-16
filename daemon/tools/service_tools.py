@@ -11,10 +11,11 @@ Five tools exposed to agents:
 Each tool is registered with the ``"service"`` category via
 :func:`daemon.tools._tool_registry.register_tool_category` and carries
 a ``_full_doc_`` attribute (the convention ``proc_tools.py:2154-2169``
-and ``daemon/tools/bash.py:415-433`` establish). The category lands in
-``PRIVILEGED_TOOL_CATEGORIES`` via Phase 1.C.3 — the tools are
-default-deny and reachable only through an explicit ``tools.allow``
-entry naming ``service``.
+and ``daemon/tools/bash.py:415-433`` establish). NOT in
+``PRIVILEGED_TOOL_CATEGORIES`` (D4 Option A reversed by override
+2026-09-16; see .agents/shared/planning/service-tool/decisions.md
+§D4 override note) — bash/proc-capable agents receive the tools via
+default-open/meta-grant.
 
 Factory: :func:`create_service_tools` mirrors the ``create_proc_tools``
 pattern at ``daemon/tools/proc_tools.py:1872-1900``:
@@ -403,9 +404,10 @@ Cross-instance stop semantics (name-keyed, daemon-global):
 * There is NO ``started_by`` gate: any agent that knows the name can
   stop the service. This is the OQ#4 resolution — name-keyed +
   daemon-global is the only sensible semantics for an LLM-driven
-  orchestration tool, and the privilege is gated at the
-  ``PRIVILEGED_TOOL_CATEGORIES`` layer (the category itself is
-  default-deny).
+  orchestration tool, and the privilege is gated via the
+  per-agent meta-grant IFF (bash OR proc in effective toolset →
+  service in tools.allow); the global kill-switch
+  ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` is the unconditional off.
 
 Grandchild-setsid killpg ESCAPE limitation (F15):
 * ``service_stop`` uses ``os.killpg(row.pid, sig)`` to reach fork-

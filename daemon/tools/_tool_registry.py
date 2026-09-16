@@ -554,10 +554,11 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "attestation": "daemon.tools.attestation",
     # service tool category (service-tool Phase 1, 2026-09-15) —
     # long-lived detached processes tracked in the service_tracking
-    # table. PRIVILEGED (D4 Option A: in PRIVILEGED_TOOL_CATEGORIES —
-    # never default-granted; explicit tools.allow only). The five
-    # tools are factory-created (create_service_tools) and also
-    # listed in DYNAMIC_TOOL_NAMES below.
+    # table. Default-grant per override 2026-09-16 (see
+    # .agents/shared/planning/service-tool/decisions.md §D4 override
+    # note — D4 Option A reversed); the five tools are
+    # factory-created (create_service_tools) and listed in
+    # DYNAMIC_TOOL_NAMES below.
     "service": "daemon.tools.service_tools",
 }
 

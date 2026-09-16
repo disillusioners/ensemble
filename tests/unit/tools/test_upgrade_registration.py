@@ -17,8 +17,10 @@ functionally:
 Plus the R-SR16 default-deny surface (review minor #3's functional gap):
 
 * ``PRIVILEGED_TOOL_CATEGORIES = {"system_upgrade", "system-log",
-  "ens-db", "service"}`` — never default-granted (behavioral
-  criterion; D4 Option A added ``service``).
+  "ens-db"}`` — never default-granted (behavioral criterion; trio
+  as of override 2026-09-16 — D4 Option A added ``service`` then the
+  override REMOVED it; see .agents/shared/planning/service-tool/
+  decisions.md §D4 override note).
 * An agent with ``tools.allow=["system_upgrade"]`` resolves ALL 4 tool
   objects through the REAL ``create_instance_tools()`` path; without it,
   NONE — including an EMPTY-allow agent (watcher-like) which would
