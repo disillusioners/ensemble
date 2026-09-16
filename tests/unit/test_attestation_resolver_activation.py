@@ -857,33 +857,38 @@ class TestFusedBundle:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestStage2SeamInert:
-    def test_stage2_seam_none_by_default(self):
-        assert ara.STAGE2_JUDGE_SEAM is None
+class TestFusedSeamContract:
+    """Stage-2 flip re-contract (2026-09-16): the Stage-1 module-global
+    seam (``STAGE2_JUDGE_SEAM`` / ``_maybe_invoke_stage2_judge``) is
+    RETIRED — the fused judge invocation lives in the graph node's
+    fused block (the ONE call site). The gate thread computes the
+    snapshot; it NEVER invokes an LLM."""
 
-    def test_maybe_invoke_stage2_noop_when_none(self):
-        # must not raise, must not call anything
-        ara._maybe_invoke_stage2_judge(None)
+    def test_module_global_seam_retired(self):
+        # The Stage-1 scaffolding is gone; the single invocation site is
+        # graph.py's fused block calling judge_fused_bundle_async.
+        assert not hasattr(ara, "STAGE2_JUDGE_SEAM")
+        assert not hasattr(ara, "_maybe_invoke_stage2_judge")
 
     def test_zero_llm_sentinel_full_gate_would_fire(self, monkeypatch, caplog):
         """Full gate evaluate() with would_fire=True ⇒ NO LLM/judge call.
 
         Delegated mission + un-attested + quiet tree ⇒ deny band ⇒ the
-        Stage-1 shadow assembles + logs the bundle but the judge is
-        NEVER invoked.
+        gate-thread compute assembles + hashes the bundle and attaches
+        the snapshot to the decision; the LLM invocation happens ONLY
+        in the graph node (not exercised here). ANY judge/LLM surface
+        exploding proves the gate-side zero-LLM contract.
         """
         # Sentinels: ANY judge/LLM surface explodes.
         from daemon.services import attestation_report_judge as judge_mod
 
         def _explode(*args, **kwargs):
-            raise AssertionError("LLM/judge invoked in Stage-1 shadow!")
+            raise AssertionError("LLM/judge invoked in gate evaluate()!")
 
         monkeypatch.setattr(judge_mod, "judge_completion_report_async", _explode)
         monkeypatch.setattr(judge_mod, "judge_completion_report_sync", _explode)
+        monkeypatch.setattr(judge_mod, "judge_fused_bundle_async", _explode)
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _explode)
-        # NOTE: STAGE2_JUDGE_SEAM is deliberately NOT patched here — the
-        # inert contract is that the seam stays ``None`` (default) and the
-        # shadow never wires it. Patching it live would CAUSE an invocation.
 
         manager = MagicMock()
         manager.count_pending_children.return_value = 0
@@ -902,14 +907,20 @@ class TestStage2SeamInert:
                 mode_resolver=GateSettings("enforce", 3, 3),
                 manager=manager,
             )
-        assert decision.decision is Decision.DENIED  # old path authoritative
-        shadow_rows = [
-            r for r in caplog.records if "leader_completion_resolver_eval" in r.getMessage()
+        assert decision.decision is Decision.DENIED  # decide() unchanged
+        # Stage-2 flip: the snapshot rides the decision (band + bundle).
+        snapshot = decision.resolver
+        assert snapshot is not None
+        assert snapshot.result.fired is True
+        assert snapshot.result.band == BAND_DENY
+        assert snapshot.result.bundle is not None
+        assert snapshot.result.bundle.sha256
+        # The gate thread emits NO eval row anymore (the node does).
+        eval_rows = [
+            r for r in caplog.records
+            if "event=leader_completion_resolver_eval" in r.getMessage()
         ]
-        assert shadow_rows, "shadow event must fire on a canonical gate evaluation"
-        assert "band=deny" in shadow_rows[0].getMessage()
-        assert "bundle_sha256=" in shadow_rows[0].getMessage()
-        assert "judge_invoked=False" in shadow_rows[0].getMessage()
+        assert eval_rows == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -933,10 +944,19 @@ REQUIRED_SHADOW_FIELDS = (
     "bundle_sha256=",
     "bundle_size_chars=",
     "judge_invoked=",
+    "judge_verdict=",
+    "resolver_outcome=",
 )
 
 
 class TestShadowEventRowShape:
+    """Stage-2 flip re-contract (2026-09-16): the gate thread COMPUTES
+    the snapshot (attached to the decision, no row); the graph node's
+    fused block emits the row via ``emit_resolver_eval_row`` after the
+    judge decision. These tests pin the snapshot + the ROW SHAPE by
+    driving the emitter directly (node-level emission is pinned in
+    ``tests/unit/test_attestation_resolver_stage2.py``)."""
+
     def _run_gate(self, caplog, *, messages, mode="enforce", pending=0, live=0, busy=0):
         manager = MagicMock()
         manager.count_pending_children.return_value = pending
@@ -953,19 +973,25 @@ class TestShadowEventRowShape:
                 mode_resolver=GateSettings(mode, 3, 3),
                 manager=manager,
             )
-        shadow_rows = [
-            r
-            for r in caplog.records
-            if "event=leader_completion_resolver_eval" in r.getMessage()
-        ]
+        shadow_rows = []
+        if decision.resolver is not None:
+            with caplog.at_level(logging.INFO):
+                ara.emit_resolver_eval_row(
+                    decision.resolver, judge_invoked=False
+                )
+            shadow_rows = [
+                r
+                for r in caplog.records
+                if "event=leader_completion_resolver_eval" in r.getMessage()
+            ]
         return decision, shadow_rows
 
     def test_row_carries_all_required_fields(self, caplog):
         _, rows = self._run_gate(caplog, messages=_delegated_mission_state())
-        assert rows, "expected exactly the shadow row on the canonical path"
+        assert rows, "expected exactly the eval row on the canonical path"
         row = rows[0].getMessage()
         for field in REQUIRED_SHADOW_FIELDS:
-            assert field in row, f"shadow row missing {field!r}"
+            assert field in row, f"eval row missing {field!r}"
 
     def test_agreement_true_case(self, caplog):
         # deny band vs old DENIED → agreement=true
@@ -988,10 +1014,11 @@ class TestShadowEventRowShape:
         assert "agreement=False" in row
 
     def test_one_row_per_evaluation_no_row_on_meta_bypass(self, caplog):
-        # meta-bypass (mode=off) — the shadow never runs (zero rows
-        # where the gate doesn't run).
-        _, rows = self._run_gate(caplog, messages=_delegated_mission_state(), mode="off")
+        # meta-bypass (mode=off) — the resolver never runs (no snapshot,
+        # no row where the gate doesn't run).
+        decision, rows = self._run_gate(caplog, messages=_delegated_mission_state(), mode="off")
         assert rows == []
+        assert decision.resolver is None
 
     def test_dry_mode_row_shape(self, caplog):
         _, rows = self._run_gate(caplog, messages=_delegated_mission_state(), mode="dry")

@@ -1147,3 +1147,19 @@ Origin: `resolver-unification.md` §4 (Stage 1) + user-locked decisions Δ1–Δ
 * **R-RES-14 (no new env flags)**: zero new `os.environ`/`os.getenv` reads in the Stage-1 module. Pinned by `TestSourcePins.test_no_new_env_flag_reads` (AST walk).
 
 * **R-RES-15 (old family unchanged)**: the existing attestation test family passes byte-identical (no behavior change; grep guards: old-path files touched only at the additive shadow seam; no new LLM/judge call sites; nudge/hint/note text constants untouched). Verified by the full-family run in the Stage-1 verification report.
+
+---
+
+## R-RES2 — Stage 2 flip acceptance criteria (2026-09-16, unified 3-source resolver)
+
+* **R-RES2-1 (ONE judge call site)**: the fused bundle reaches a REAL LLM invocation through exactly ONE site — `judge_fused_bundle_async`, called only from the graph node's fused block; `_invoke_judge_llm` is the shared transport seam (`system_prompt` additive kwarg, legacy default byte-identical). Pinned by `TestSharedTransportSeam` + `TestOldSitesDeadButPresent`.
+* **R-RES2-2 (retry-once carries)**: retry fires ONLY on responded-but-unparsable, never on timeout/error; `attempt=2` + `first_unparsable_excerpt` preserved (98b59dd7 contract). Pinned by `TestFusedJudgeRetryOnceOnUnparsable`.
+* **R-RES2-3 (judge_invoked derived)**: the eval row's `judge_invoked` derives from `FusedJudgeResult.invoked` (a real invocation record) — no literals on any path. Pinned by `TestJudgeInvokedDerivation`.
+* **R-RES2-4 (R7-1 — DP-5 rejected)**: judge error/timeout/unparsable×2 → deny+nudge bound-enforced on the deny band, NEVER allow; marker-band path-(d)-with-pending → hint. Pinned by `TestR7PinJudgeErrorNeverAllows`.
+* **R-RES2-5 (R7-2 — Q1 parity)**: kill-switch OFF → deny+nudge WITHOUT judge on the un-attested-quiet band (zero HTTP attempts spied); plain allow on marker AND A bands. Pinned by `TestR7PinKillSwitchPerBandMapping`.
+* **R-RES2-6 (R7-3 — bound/escalation parity)**: at-bound TERMINAL + `set_escalated_and_reset` + operator event from the fused path exactly as the old deny path; below-bound increments; EXACTLY-3-nudges loop. Pinned by `TestR7PinBoundEscalationFromFusedPath`.
+* **R-RES2-7 (budget sentinel)**: ≤1 LOGICAL invocation per evaluation on every band (deny/marker/A/rescue); the retry = 2 HTTP attempts WITHIN one invocation (documented reading, pinned as entries==1 ∧ attempts==2); 0-LLM rows (D10 meta-bypass, dry) never invoke. Pinned by `TestBudgetGuardSentinel`.
+* **R-RES2-8 (old sites dead-but-present)**: zero deletions; both legacy judge entries unreachable while `_LCA_STAGE2_RESOLVER_FLIP` is True (legacy event families silent; `judge_completion_report_async` zero calls across deny+marker evaluations). Pinned by `TestOldSitesDeadButPresent`.
+* **R-RES2-9 (Δ4 hint citation)**: the Completion Check Note gains `evidence_cited` + `advisory_note_text` from the verdict when present (canonical prefix byte-identical; stable supersede id unaffected); byte-identical note when the verdict cites nothing. Pinned by `TestD4HintEvidenceCitation`.
+* **R-RES2-10 (incident-class E2E)**: b08f40fe (Δ1 evidence visible in the judge payload + deny+nudge), 98b59dd7 (genuine report → allow, no nudge), 6a0d60c9 (answer-pending plain allow + bound-enforced sibling), ORIGINAL child-lie (3-eval arc: A-band Δ2 row → D4 hint → quiet deny+nudge → attested allow + reset). Pinned by the four `TestIncident*` classes in `tests/unit/test_attestation_resolver_stage2.py`.
+* **R-RES2-11 (byte-identical surfaces)**: attested allow / answer-gate allow / mode off+dry semantics / stamps / nudge text unchanged; zero new env flags under `daemon/` (AST pin green); bound/escalation/nudge/note texts untouched beyond the D4 citation.

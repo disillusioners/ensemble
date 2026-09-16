@@ -109,23 +109,35 @@ def _make_node(
     return node, manager, ledger
 
 
-async def _judge_incomplete(config, user_payload, *, timeout_s):
+async def _judge_incomplete(config, user_payload, *, timeout_s, system_prompt=None):
     return (
-        '{"is_complete_report": false, "reason": "mid-work"}',
+        '{"verdict": "not_complete", "evidence_cited": [], '
+        '"advisory_note_text": "", "rationale": "mid-work"}',
         "fake-quick",
     )
 
 
-async def _judge_timeout(config, user_payload, *, timeout_s):
+async def _judge_timeout(config, user_payload, *, timeout_s, system_prompt=None):
     raise asyncio.TimeoutError()
 
 
 def _marker_state(final_text: str) -> dict:
-    """The 6a0d60c9 turn-end shape: terse one-liner with mid-work
-    phrasing, conditional gate OFF (no delegation)."""
+    """The 6a0d60c9 turn-end shape (LCA Stage-2 flip re-contract,
+    2026-09-16): the original incident mission was NON-delegated —
+    under the unified resolver's D10 meta-bypass that shape is plain
+    allow (0 LLM; the loop class is closed STRUCTURALLY). The bound
+    regression therefore rides the DELEGATED variant — the delegated
+    twin of the same terse one-liner with mid-work phrasing."""
+    delegation_ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "send_message", "args": {"target": "child-id"}, "id": "c1"}
+        ],
+    )
     return {
         "messages": [
-            HumanMessage(content="what's the answer to X?"),
+            HumanMessage(content="please do it"),
+            delegation_ai,
             AIMessage(content=final_text),
         ]
     }
@@ -151,6 +163,9 @@ def test_path_a_at_bound_escalates_without_nudge(monkeypatch, caplog):
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -180,7 +195,14 @@ def test_path_a_at_bound_escalates_without_nudge(monkeypatch, caplog):
         "FIX-1 path (a): the terminal operator event MUST be emitted — "
         "the incident had ZERO such rows in the whole fleet log"
     )
-    assert "deny_bound exceeded" in caplog.text
+    # LCA Stage-2 flip (2026-09-16): the at-bound TERMINAL decision gets
+    # NO judge call (budget parity with the legacy would-be-deny path —
+    # the terminal machinery runs untouched); the resolver row records
+    # the terminal outcome.
+    assert any(
+        "resolver_outcome=terminal_after_bound" in r.getMessage()
+        for r in caplog.records
+    ), "FIX-1 path (a): the resolver row MUST record the terminal outcome"
     # No deny-side counter increment ran.
     ledger.increment.assert_not_called()
 
@@ -308,11 +330,11 @@ def test_path_d_wrapper_fault_at_bound_escalates_without_nudge(
     routes conservatively per the SAME R2 inputs — and that
     conservative route now consults the shared bound predicate too.
     """
-    async def _wrapper_fault(messages, *, config, window):
+    async def _wrapper_fault(bundle_text, *, config, timeout_s=None):
         raise RuntimeError("wrapper fault at public entry-point")
 
     monkeypatch.setattr(
-        judge_mod, "judge_completion_report_async", _wrapper_fault
+        judge_mod, "judge_fused_bundle_async", _wrapper_fault
     )
 
     node, _manager, ledger = _make_node(
@@ -338,11 +360,11 @@ def test_path_d_wrapper_fault_at_bound_escalates_without_nudge(
 
 def test_path_d_below_bound_wrapper_fault_still_denies(monkeypatch):
     """Sanity: below the bound the (d) wrapper-fault route still denies."""
-    async def _wrapper_fault(messages, *, config, window):
+    async def _wrapper_fault(bundle_text, *, config, timeout_s=None):
         raise RuntimeError("wrapper fault at public entry-point")
 
     monkeypatch.setattr(
-        judge_mod, "judge_completion_report_async", _wrapper_fault
+        judge_mod, "judge_fused_bundle_async", _wrapper_fault
     )
 
     node, _manager, ledger = _make_node(

@@ -1241,3 +1241,49 @@ Each row carries: `fired`, `band` (`deny|marker|a_suspicion|<none>`), `terms_fir
 **Error rows:** `event=leader_completion_resolver_eval_error` — a resolver-side exception, isolated from gate control flow (the gate decision is unaffected by construction). Any occurrence is a bug in the shadow; file it against the resolver module, never against the gate.
 
 **Related files:** `daemon/services/attestation_resolver_activation.py` (predicate + bundle + event), `daemon/services/attestation_gate.py` §(vi) (the additive shadow seam), `tests/unit/test_attestation_resolver_activation.py` (63 — R4 short-circuit invariant, predicate matrix incl. the Δ2 row, §10.2 busy⊆live source pin, bundle caps/redaction/Δ1/Δ3, zero-LLM sentinel, row-shape + agreement, exception isolation).
+
+
+## LCA unified resolver — Stage 2 flip (2026-09-16, authoritative)
+
+**The resolver's outcome mapping is now AUTHORITATIVE at the completion seam.** The gate thread computes the activation predicate + fused evidence bundle (`daemon/services/attestation_resolver_activation.py`, attached to the `GateDecision`); the graph node's **fused block** (`daemon/graph.py`, gated by the module constant `_LCA_STAGE2_RESOLVER_FLIP = True`) invokes **ONE fused judge** (`daemon/services/attestation_report_judge.judge_fused_bundle_async` — the single judge call site; retry-once-on-unparsable preserved) and maps the verdict onto the EXISTING outcome machinery (allow / allow+hint / deny+nudge / terminal_after_bound). The two legacy judge sites (marker-path + would-be-deny) and their route blocks are **dead-but-present** — removed from ROUTING only, zero deletions (Stage 3 deletes). There is **no runtime toggle** (repo convention n); revert = redeploy the pre-Stage-2 build (runbook below).
+
+**Post-flip behavior map** (spec §4.3, DP-5 REJECTED — no fail-safe allow anywhere):
+
+| Band | Judge fires? | verdict=complete | not_complete / error / timeout / unparsable×2 | kill-switch OFF |
+|---|---|---|---|---|
+| meta-bypass (no delegation / attested / answer-pending) | no — 0 LLM | — | — | — (plain allow) |
+| deny band (un-attested ∧ quiet) | yes — on a would-be-DENY decision only (an at-bound TERMINAL decision gets NO judge — budget parity) | allow (rescue) | **deny+nudge via the existing machinery, bound-enforced by `decide()` step (6)** | **deny+nudge WITHOUT judge (Q1 parity)** |
+| marker band (b_fires ∧ ¬quiet) | yes | plain allow | pending → allow+hint; else deny-flip (structurally unreachable) | plain allow |
+| A band (Δ2 — a_suspicion alone, ¬quiet) | yes — the new 0→1 row | plain allow | pending → **allow+hint citing A evidence (D4)**; else deny-flip (unreachable) | plain allow |
+| dry mode | no — 0 LLM (R3: computed + logged, node skipped) | — | — | — |
+
+### Post-flip soak watch (what to grep now)
+
+1. **Resolver decisions directly** — the eval row gained two additive tail fields; watch these, not the agreement flag:
+   ```
+   event=leader_completion_resolver_eval
+   resolver_outcome=allow|allow_hint|deny_nudge|terminal_after_bound
+   judge_invoked=True|False     # DERIVED from the real invocation flag
+   judge_verdict=complete|not_complete|error|timeout|unparsable|<none>
+   ```
+   `judge_invoked=True` iff the fused judge actually made an LLM attempt (the Stage-1 literal `False` is gone). `resolver_outcome` is the AUTHORITATIVE outcome the resolver routed this evaluation to.
+2. **Fused judge rows** — the legacy judge event family (`event=leader_completion_gate_marker_judge`, `event=leader_completion_gate_judge`) is **SILENT** post-flip (dead sites). The live surface is:
+   ```
+   event=leader_completion_gate_fused_judge            # invocation + verdict
+   event=leader_completion_gate_fused_judge_disabled   # kill-switch OFF, verdict=<skipped>
+   event=leader_completion_gate_fused_judge_error      # wrapper-layer fault, decision=fail_safe_conservative
+   ```
+   Grep hygiene: `leader_completion_gate_fused_judge` is a PREFIX of the `_disabled` / `_error` rows — anchor greps on the trailing token (e.g. `grep 'leader_completion_gate_fused_judge '` with the trailing space) exactly like the `leader_completion_resolver_eval` vs `leader_completion_resolver_eval_error` prefix pair.
+3. **Agreement-flag semantics changed** (deliberate): the flag still compares the resolver's NO-JUDGE would-be outcome against the gate `decide()` value — useful as the kill-switch-off / dry reference. The old JUDGE paths are dead and no longer evaluated, so rows where `judge_invoked=True` are divergence rows BY CONSTRUCTION when the verdict flipped the no-judge mapping (rescue rows: `would_deny_nudge` + `resolver_outcome=allow`). Do NOT alert on agreement=False alone post-flip; alert on `resolver_outcome` distributions instead.
+4. **D4 hint citations**: hint rows now may append a `Completion evidence cited by the completion judge:` block + `Advisory:` line (from the verdict JSON, capped 5×120 + 240 chars). Hints without verdict evidence remain byte-identical to the pre-flip note.
+5. **Zero-LLM rows preserved**: meta-bypass / dry / not-fired / fail-open rows log `judge_invoked=False` with `bundle_sha256=<none>` or a bundle hash but no invocation.
+
+### Revert runbook (Stage 2)
+
+Revert = **redeploy the pre-Stage-2 build** (frozen-PyInstaller, rebuild+restart discipline — the flip is a module constant, no env lever exists by design). Post-revert the Stage-1 shadow contract returns (old judge sites live again, `judge_invoked=False` literal rows). The kill-switch matrix to de-risk BEFORE reverting:
+
+| Knob | Effect while Stage-2 is active |
+|---|---|
+| `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` (+restart) | Fused judge never fires: deny band → deny+nudge WITHOUT judge (Q1); marker/A bands → plain allow. Cheapest incident brake — prefer this over reverting. |
+| `ENSEMBLE_LEADER_ATTESTATION_MODE=dry` (+restart) | Resolver computed + logged, node skipped, 0 LLM, allow-everything (passive observation). |
+| `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (+restart) | The whole gate is off (pre-feature baseline). |
