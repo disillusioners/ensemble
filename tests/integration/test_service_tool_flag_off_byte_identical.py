@@ -697,6 +697,82 @@ def _session_using(eng: Engine):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Case (h): service_logs is a no-op when OFF (council F4 — logs was
+# the last holdout breaking the uniform OFF contract)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_manager_logs_disabled_when_off(
+    file_backed_engine: Engine,
+) -> None:
+    """Case (h): ``ServiceToolManager.logs()`` returns the disabled
+    marker text when ``enabled=False`` — NO DB query, no row lookup.
+
+    Council F4 closed the last holdout in the uniform OFF contract:
+    ``start`` / ``stop`` / ``status`` (case f) and ``list_all``
+    (case g) gate on the kill switch; ``logs`` did not — it performed
+    a ``get_by_name_any_status`` read even under the flag-OFF state.
+    The fix adds the same ``if not self.enabled:`` early-return; the
+    str surface renders the canonical disabled dict as text
+    (``DISABLED_LOGS_MARKER``) rather than masquerading as an empty
+    log.
+
+    Mirrors ``test_manager_list_all_disabled_when_off``: seeds a
+    RUNNING row, proves (a) the OFF call returns the marker text and
+    (b) the row is untouched afterwards.
+    """
+    import asyncio
+
+    from daemon.services.service_tool_manager import DISABLED_LOGS_MARKER
+    from daemon.repositories.service_tool.models import ServiceTracking
+
+    repo = ServiceRepo(engine=file_backed_engine)
+    seed = ServiceTracking(
+        name="logged-row",
+        command="echo logged",
+        pid=os.getpid(),
+        start_time=1,
+        cwd="/tmp",
+        status="running",
+        started_by_instance_id="flag-off-test",
+        started_by_agent_id="flag-off-tester",
+        log_path="/tmp/logged-row.log",
+    )
+    with _session_using(file_backed_engine) as session:
+        session.add(seed)
+        session.commit()
+        session.refresh(seed)
+        seeded_id = seed.id
+        seeded_status = seed.status
+
+    manager = ServiceToolManager(
+        repo=repo,
+        cap=DEFAULT_MAX_CONCURRENT,
+        enabled=False,
+    )
+
+    async def _probe() -> str:
+        return await manager.logs("logged-row")
+
+    result = asyncio.run(_probe())
+
+    # (a) The disabled-marker text — NOT an empty string, NOT log
+    # contents.
+    assert result == DISABLED_LOGS_MARKER, (
+        f"OFF manager.logs MUST return the disabled-marker text; "
+        f"got {result!r}"
+    )
+
+    # (b) The row is untouched — no read side effect could transition
+    # anything, but pin the byte-identical invariant anyway.
+    post = repo.get_by_name_any_status("logged-row")
+    assert post is not None
+    assert post.id == seeded_id
+    assert post.status == seeded_status
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Sanity — PRIVILEGED_TOOL_CATEGORIES is the same set as
 # system_upgrade + system-log + ens-db + service (3-site pin
 # documented in daemon/tools/_tool_registry.py:148-161)

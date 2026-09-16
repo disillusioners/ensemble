@@ -1030,6 +1030,34 @@ def test_disabled_flag_returns_disabled_shape(
     assert status_result["status"] == "disabled"
 
 
+def test_logs_disabled_returns_marker(
+    repo: ServiceRepo, tmp_path, monkeypatch
+) -> None:
+    """Council F4(a): ``logs`` with ``enabled=False`` returns the
+    disabled-marker string — NO DB read, no empty-string masquerade.
+
+    The uniform OFF contract: start/stop/status/list_all all gate on
+    the kill switch; ``logs`` was the last holdout. The str surface
+    renders the canonical disabled dict as text
+    (:data:`daemon.services.service_tool_manager.DISABLED_LOGS_MARKER`)
+    so the marker is honest AND structured.
+    """
+    from daemon.services.service_tool_manager import DISABLED_LOGS_MARKER
+
+    monkeypatch.setenv("ENSEMBLE_SERVICE_LOG_DIR", str(tmp_path / "logs"))
+    mgr = ServiceToolManager(repo=repo, cap=3, enabled=False)
+
+    result = asyncio.run(mgr.logs(name="whatever", tail_lines=10))
+    assert result == DISABLED_LOGS_MARKER, (
+        f"OFF manager.logs MUST return the disabled-marker text; "
+        f"got {result!r}"
+    )
+    # The marker carries the same {status, reason} contract as the
+    # dict surfaces.
+    assert '"status": "disabled"' in result
+    assert '"reason": "service_tool_enabled=False"' in result
+
+
 # ── constructor validation ─────────────────────────────────────────
 
 

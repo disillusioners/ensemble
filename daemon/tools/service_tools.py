@@ -28,6 +28,17 @@ pattern at ``daemon/tools/proc_tools.py:1872-1900``:
   during early daemon boot; the actual call resolves it later when the
   tool is invoked).
 
+Manager-unavailable convention (council F4b): when
+``manager._service_tool_manager`` is missing at CALL time, ALL FIVE
+tools return the SAME disabled-marker contract with ONE stable reason
+token (``service_tool_manager_not_available``), rendered in the shape
+each return type dictates — the dict on ``service_start`` /
+``service_stop`` / ``service_status``, a single-element list carrying
+the marker dict on ``service_list`` (mirroring the manager's own
+``list_all`` OFF shape), and the marker dict rendered as JSON text on
+the str-returning ``service_logs``. No empty-container shapes: an
+empty list/string is indistinguishable from a healthy no-data answer.
+
 Decorator order is **PINNED**: ``@register_tool_category("service")``
 OUTER, ``@tool`` INNER. The langchain ``@tool`` wrapper preserves the
 inner-function attributes via ``functools.wraps`` — but ONLY if the
@@ -49,6 +60,36 @@ from ._tool_registry import register_tool_category
 from .service_spawner import DEFAULT_TAIL_LINES
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Manager-unavailable marker (council F4b convention)
+# ─────────────────────────────────────────────────────────────────────
+
+
+#: The ONE stable reason token for the manager-None gate.
+MANAGER_UNAVAILABLE_REASON: str = "service_tool_manager_not_available"
+
+
+def _manager_unavailable_marker() -> dict:
+    """The canonical disabled-marker dict all five tools converge on.
+
+    Council F4b: every ``manager._service_tool_manager``-missing call
+    site returns this shape (wrapped per return type — see the module
+    docstring), never an empty container.
+    """
+    return {
+        "status": "disabled",
+        "reason": MANAGER_UNAVAILABLE_REASON,
+    }
+
+
+#: The str-surface rendering of the marker (``service_logs``): the
+#: dict above as JSON text, so the str tool surfaces the same
+#: {status, reason} contract instead of a silent empty string.
+_MANAGER_UNAVAILABLE_TEXT: str = (
+    '{"status": "disabled", "reason": "service_tool_manager_not_available"}'
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -182,11 +223,7 @@ def create_service_tools(
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_manager_not_available",
-            }
+            return {"name": name, **_manager_unavailable_marker()}
         return await service_manager.start(
             name=name,
             argv=command,
@@ -289,11 +326,7 @@ Notes:
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_manager_not_available",
-            }
+            return {"name": name, **_manager_unavailable_marker()}
         return await service_manager.stop(name=name, force=force)
 
     service_stop._full_doc_ = """\
@@ -399,11 +432,7 @@ Exit-code semantics on ``status: "exited"`` rows (F10 / A4):
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_manager_not_available",
-            }
+            return {"name": name, **_manager_unavailable_marker()}
         return await service_manager.status(name=name)
 
     service_status._full_doc_ = """\
@@ -456,7 +485,9 @@ Exit-code semantics on EXITED rows (F10 / A4):
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
-            return []
+            # Council F4b: single-element list carrying the marker
+            # (mirrors the manager's own list_all OFF shape).
+            return [_manager_unavailable_marker()]
         return await service_manager.list_all()
 
     service_list._full_doc_ = """\
@@ -514,11 +545,16 @@ Returns:
             The last ``tail_lines`` lines as a single string. Empty
             string when the row is missing, the file is unreadable, or
             the row has no ``log_path`` (defensive — should not
-            happen in practice).
+            happen in practice). When the category is off (kill
+            switch or missing manager), returns the disabled-marker
+            text ``{"status": "disabled", "reason": ...}`` — never an
+            empty string masquerading as a healthy empty log.
         """
         service_manager = getattr(manager, "_service_tool_manager", None)
         if service_manager is None:
-            return ""
+            # Council F4b: the marker dict rendered as text (str
+            # surface) — never a silent empty string.
+            return _MANAGER_UNAVAILABLE_TEXT
         return await service_manager.logs(name=name, tail_lines=tail_lines)
 
     service_logs._full_doc_ = """\

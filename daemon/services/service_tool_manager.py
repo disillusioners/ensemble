@@ -127,6 +127,17 @@ _NAME_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
 #: Service-name max length — matches the D3 tool schema (1-64 chars).
 _NAME_MAX_LEN: int = 64
 
+#: Disabled marker for the str-returning ``logs`` surface (council
+#: F4): the canonical ``{"status": "disabled", "reason": ...}`` dict
+#: shape rendered as text — the str twin of the marker the dict
+#: surfaces return, so every surface expresses the SAME disabled
+#: contract. Logs is a diagnostic read; a structured marker string is
+#: the clearest honest "nothing to read: the category is off" answer
+#: without silently masquerading as an empty log.
+DISABLED_LOGS_MARKER: str = (
+    '{"status": "disabled", "reason": "service_tool_enabled=False"}'
+)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # ServiceToolManager
@@ -787,16 +798,28 @@ class ServiceToolManager:
         """Tail the log file for a service. Reads ``log_path`` from
         the row — NEVER re-derives the path from the name (F19).
 
+        OFF gate (council F4 — the last holdout, closing the uniform
+        OFF contract): when ``enabled=False``, returns the disabled
+        marker BEFORE any row lookup — NO DB queries, no reads. The
+        marker is :data:`DISABLED_LOGS_MARKER`: the canonical
+        ``{"status": "disabled", "reason": "service_tool_enabled=False"}``
+        dict shape rendered as text (the str twin of the marker the
+        dict surfaces return).
+
         Returns:
             The last ``tail_lines`` lines as a single string. If the
             row has no ``log_path`` (defensive), the file does not
             exist, or ``name`` is unknown, returns an empty string.
+            When the kill-switch is off, returns
+            :data:`DISABLED_LOGS_MARKER`.
 
         OOM protection: reads only the LAST ``MAX_LOG_TAIL_BYTES``
         bytes of the file (F19 / 1.B.7) — a 100 MB log with
         ``tail_lines=200`` returns the last 200 lines, not the whole
         file.
         """
+        if not self.enabled:
+            return DISABLED_LOGS_MARKER
         row = await asyncio.to_thread(self.repo.get_by_name_any_status, name)
         if row is None:
             return ""

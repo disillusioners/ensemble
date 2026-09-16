@@ -93,6 +93,13 @@ def manager_stub(service_manager: ServiceToolManager) -> SimpleNamespace:
     return SimpleNamespace(_service_tool_manager=service_manager)
 
 
+@pytest.fixture
+def manager_stub_none() -> SimpleNamespace:
+    """A stub ``InstanceManager`` whose ``_service_tool_manager`` is None
+    (the early-boot shape — exercises the manager-unavailable gate)."""
+    return SimpleNamespace(_service_tool_manager=None)
+
+
 # ── factory schema ──────────────────────────────────────────────────
 
 
@@ -169,6 +176,71 @@ def test_factory_dereferences_manager_at_call_time() -> None:
     )
     assert isinstance(result, dict)
     assert result.get("status") == "disabled"
+
+
+def test_manager_none_shapes_unified_across_all_five(
+    manager_stub_none: SimpleNamespace,
+) -> None:
+    """Council F4(b) lockstep pin: ALL FIVE tools return the SAME
+    disabled-marker convention when ``_service_tool_manager`` is
+    missing — ONE stable reason token, rendered per return type.
+
+    * dict surfaces (start / stop / status): ``{"name": ..., "status":
+      "disabled", "reason": "service_tool_manager_not_available"}``.
+    * list surface (list): a SINGLE-ELEMENT list carrying the marker
+      dict (mirrors the manager's own ``list_all`` OFF shape) — never
+      ``[]``, which would be indistinguishable from a healthy
+      no-services answer.
+    * str surface (logs): the marker dict rendered as JSON text —
+      never ``""``, which would masquerade as an empty log.
+    """
+    import asyncio
+
+    from daemon.tools.service_tools import (
+        MANAGER_UNAVAILABLE_REASON,
+        create_service_tools,
+    )
+
+    tools = {
+        t.name: t
+        for t in create_service_tools(
+            manager=manager_stub_none,
+            current_instance_id="inst-test",
+            agent_id="worker",
+        )
+    }
+    marker = {
+        "status": "disabled",
+        "reason": MANAGER_UNAVAILABLE_REASON,
+    }
+
+    start_result = asyncio.run(
+        tools["service_start"].ainvoke(
+            {"name": "n", "command": ["echo"], "cwd": None}
+        )
+    )
+    assert start_result == {"name": "n", **marker}
+
+    stop_result = asyncio.run(
+        tools["service_stop"].ainvoke({"name": "n", "force": False})
+    )
+    assert stop_result == {"name": "n", **marker}
+
+    status_result = asyncio.run(tools["service_status"].ainvoke({"name": "n"}))
+    assert status_result == {"name": "n", **marker}
+
+    list_result = asyncio.run(tools["service_list"].ainvoke({}))
+    assert list_result == [marker], (
+        f"council F4b: service_list manager=None must return the "
+        f"single-element marker list, got {list_result!r}"
+    )
+
+    logs_result = asyncio.run(
+        tools["service_logs"].ainvoke({"name": "n", "tail_lines": 5})
+    )
+    assert logs_result == (
+        '{"status": "disabled", "reason": "service_tool_manager_not_available"}'
+    ), f"council F4b: service_logs manager=None must return the marker text, got {logs_result!r}"
 
 
 # ── _full_doc_ ──────────────────────────────────────────────────────
