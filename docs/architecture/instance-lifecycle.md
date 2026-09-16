@@ -117,9 +117,9 @@ the script):
 | `daemon/tools/proc_tools.py` | proc tool surface (`_verify_pid_ownership`, `_attempt_kill_signal`, SIGTERM→5s→SIGKILL stop) |
 | `daemon/services/vscode_server_manager.py` | code-server lifecycle stop |
 | `daemon/tools/upgrade_journal.py` | benign sig-0 liveness probe (`_pid_alive` — `os.kill(p, 0)` sends no signal) |
-| `daemon/services/service_tool_manager.py` | inline stop loop (SIGTERM→grace→SIGKILL) — sole service-kill path; every signal site re-verifies (pid, start_time) ownership per the F1 fix (group signaling; `/proc/<pid>/stat` start-time read for PID-reuse defense is in `daemon/tools/service_spawner.py`) |
+| `daemon/tools/service_spawner.py` | `get_process_start_time` reads `/proc/<pid>/stat` (Linux) / `ps -o lstart` (macOS); the F2 cleanup-helper was DELETED — `ps` calls in `is_process_alive` are read-only ownership probes, NOT kill sites |
+| `daemon/services/service_tool_manager.py` | inline stop loop (SIGTERM→grace→SIGKILL) — sole service-kill path; 3 executable `os.killpg` sites at `start` (`:389` F2 lost-race cleanup), `stop` (`:554` SIGTERM escalation), `stop` (`:642` SIGKILL escalation); every signal site re-verifies `(pid, start_time)` ownership per the F1 fix |
 | `daemon/tools/service_tools.py` | docstring-only mentions of the sanctioned mechanism (no executable signal site) |
-| `daemon/services/service_tool_manager.py` | docstring-only mention of the liveness ping (no executable site) |
 | `daemon/repositories/service_tool/` | docstring-only mentions of the liveness ping (no executable signal site) |
 
 **The rule:** a PR that introduces a kill-primitive site in an un-inventoried
