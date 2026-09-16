@@ -404,3 +404,29 @@ Edit-Source modal agent selection fix (WeakMap memoization of toSelectOptions + 
 ### Last Run
 - **Date**: 2026-09-16 · **Worker**: 070f5c22 (e2e-test) · **Result**: PASS 5/5
 - **Report**: RESULTS/2026-09-16-source-edit-agent-verification.md + smoke-artifacts/
+
+
+## Mock Test: LCA Stage-2 Boot Smoke (fused path, stubbed judge)
+
+### Metadata
+- **Created**: 2026-09-16
+- **Script**: `test/packs/lca2_boot_smoke_mock_test.sh` (+ helper `test/packs/lca2_helpers/mock_llm.py`)
+- **Language**: Bash + Python
+- **Status**: ACTIVE (gate artifact; committed `473e1428` on `feature/lca-resolver-stage2`)
+
+### Configuration
+- **Timeout**: 300s outer / script-internal; EXIT-trap teardown always runs
+- **Daemon Port**: 15777 (uvicorn `daemon.api:app`, NO --reload, never dev.sh)
+- **Mock Ports**: 15778 (OpenAI-compatible mock LLM endpoint serving leader turns + judge verdicts)
+- **DB**: disposable PG14 on port 15434 (initdb -A trust; BOTH per-field POSTGRES_* and POSTGRES_URL set to the same DB — split-brain guard); fresh tmp DATA_DIR
+- **Cleanup**: SIGTERM uvicorn; pg_ctl stop + rm -rf; port-freedom asserted (15777/15778/15434); foreign ports 15432/8079/8088/9797 never touched
+
+### What It Tests
+- Boot from branch with ENSEMBLE_LEADER_ATTESTATION_MODE unset → default `enforce` boot line + zero Traceback/CRITICAL post-baseline
+- Scripted leader→spawn child→final report through the FUSED judge (stubbed): `not_complete → deny_nudge` then `complete → allow`, with `event=leader_completion_gate_fused_judge ... judge_invoked=True` and `event=leader_completion_resolver_eval ... resolver_outcome=...` rows (rows are logger.info events, NOT DB rows)
+- Clean shutdown, zero process leaks
+
+### Last Run
+- **Date**: 2026-09-16
+- **Result**: PASS (pack ~25s; health 200/200)
+- **Report**: `RESULTS/2026-09-16-lca-stage2-flip-verification.md` (Job 7)
