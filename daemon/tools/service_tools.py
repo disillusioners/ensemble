@@ -50,7 +50,6 @@ amendment) asserts this ordering by source-grep.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Annotated, Optional
 
 from langchain_core.tools import tool

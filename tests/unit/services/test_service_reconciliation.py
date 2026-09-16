@@ -29,11 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
-import sys
 import time
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterator
 from unittest.mock import MagicMock
 
 import pytest

@@ -51,10 +51,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Iterator
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
@@ -76,7 +75,6 @@ from daemon.repositories.service_tool.models import (
 )
 from daemon.repositories.service_tool.repository import ServiceRepo
 from daemon.services.service_reconciliation import (
-    DEFAULT_STARTING_GRACE_SECONDS,
     ServiceReconciliationService,
 )
 from daemon.services.service_tool_manager import ServiceToolManager

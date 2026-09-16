@@ -47,10 +47,8 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
-import sys
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterator
 
 import pytest
 from sqlalchemy import create_engine, event as sa_event, inspect as sa_inspect
@@ -500,9 +498,7 @@ def test_manager_status_inline_reconcile_disabled_when_off(
         started_by_agent_id="flag-off-tester",
         log_path="/tmp/would-be-touched.log",
     )
-    with SQLModel.__session__ if False else _session_using(  # type: ignore[unreachable]
-        file_backed_engine
-    ) as session:
+    with _session_using(file_backed_engine) as session:
         session.add(seed)
         session.commit()
         session.refresh(seed)

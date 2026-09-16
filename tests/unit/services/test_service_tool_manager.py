@@ -42,7 +42,6 @@ import os
 import signal
 import sys
 import time
-from pathlib import Path
 from typing import Iterator
 
 import pytest
@@ -55,18 +54,15 @@ from sqlmodel import SQLModel
 import daemon.repositories.service_tool.models  # noqa: F401
 from daemon.repositories.service_tool.models import (
     ServiceStatus,
-    ServiceTracking,
 )
 from daemon.repositories.service_tool.repository import ServiceRepo
 from daemon.services.service_tool_manager import (
-    DEFAULT_MAX_CONCURRENT,
     DEFAULT_STOP_GRACE_SECONDS,
     ServiceToolManager,
 )
 from daemon.tools.service_spawner import (
     get_process_start_time,
     is_process_alive,
-    kill_log_path,
 )
 
 

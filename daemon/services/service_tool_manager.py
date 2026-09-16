@@ -81,7 +81,6 @@ from sqlalchemy.exc import IntegrityError
 
 from daemon.repositories.service_tool.models import (
     ServiceStatus,
-    ServiceTracking,
 )
 from daemon.repositories.service_tool.repository import ServiceRepo
 from daemon.tools.service_spawner import (

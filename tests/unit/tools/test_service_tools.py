@@ -28,7 +28,6 @@ itself is exercised by ``tests/unit/services/test_service_tool_manager.py``).
 from __future__ import annotations
 
 import inspect
-import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,7 +39,6 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 import daemon.repositories.service_tool.models  # noqa: F401
-from daemon.repositories.service_tool.models import ServiceTracking
 from daemon.repositories.service_tool.repository import ServiceRepo
 from daemon.services.service_tool_manager import ServiceToolManager
 

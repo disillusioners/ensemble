@@ -44,12 +44,10 @@ import asyncio
 import os
 import signal
 import sys
-import uuid
 from pathlib import Path
 from typing import Iterator, List
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
@@ -65,7 +63,6 @@ import daemon.repositories.report_injection.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 import daemon.repositories.service_tool.models  # noqa: F401
 
-from daemon.repositories.service_tool.models import ServiceStatus
 from daemon.repositories.service_tool.repository import ServiceRepo
 from daemon.services.service_tool_manager import ServiceToolManager
 
