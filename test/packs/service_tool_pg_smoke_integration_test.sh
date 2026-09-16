@@ -513,7 +513,11 @@ def leg_d() -> None:
     # The row was transitioned to EXITED in the DB.
     with Session(ENGINE) as session:
         reread = session.get(ServiceTracking, row.id)
-    assert reread is not None
+    _check(
+        "D",
+        reread is not None,
+        f"row re-read succeeded; got {reread!r}",
+    )
     _check(
         "D",
         reread is not None and reread.status == ServiceStatus.EXITED.value,

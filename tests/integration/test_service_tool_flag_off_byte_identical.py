@@ -278,19 +278,21 @@ def test_lifespan_skips_reconciliation_when_off(
 
     The lifespan guard (``daemon/api.py`` ``lifespan`` context
     manager) reads the resolver-cached ``service_tool_enabled()``
-    flag and emits the DISABLED log line at info level. The
-    manager is constructed but the sweep is NEVER started.
+    flag and emits the DISABLED log line at info level. Per the
+    api.py DISABLED branch (~L1201-1208), the manager is NEVER
+    constructed at all when OFF — the gate short-circuits
+    BEFORE the manager reference is even obtained.
 
-    This test exercises the resolver + cache + a real
-    ``ServiceReconciliationService.start()`` invocation only
-    when OFF would have been the trigger — proves the lifespan
-    guard short-circuits BEFORE the sweep is wired.
-
-    The direct construction below mirrors the lifespan's gate
-    (the gate checks ``config.services.service_tool.enabled``; we
-    read the same field here via the manager-with-``enabled=False``
-    path and assert the sweep task stays None — no sweep task,
-    no DB queries).
+    This test exercises the defense-in-depth ``enabled_check``
+    gate directly: it builds the ``ServiceReconciliationService``
+    explicitly with ``enabled_check=lambda: service_tool_enabled()``
+    (= False) and proves ``sweep_once()`` short-circuits to the
+    disabled-shape counters with NO DB queries. The
+    defense-in-depth gate is what the lifespan relies on
+    transitively (the OFF lifespan branch never even reaches
+    construction; if a future caller bypassed the lifespan guard,
+    the ``enabled_check`` closure would still emit the disabled
+    counters).
     """
     # Install OFF in the module cache.
     _install_service_tool_enabled(False)
@@ -540,13 +542,146 @@ def test_manager_status_inline_reconcile_disabled_when_off(
         f"got status={reread.status} (expected {seeded_status})"
     )
 
-    # list_all() does NOT short-circuit on the OFF gate (the manager
-    # contract — list_all is a read-shape mirror; only start/stop/
-    # status gate on ``enabled``). However, ``list_all`` IS a
-    # read-only surface — it does not refuse to read while OFF.
-    # We do NOT assert its result here; the SC-10 negative pin
-    # is the ``service_status`` no-op above (the only public method
-    # that MUST short-circuit on OFF).
+
+# ─────────────────────────────────────────────────────────────────────
+# Case (g): service_list inline reconciliation is no-op when OFF
+# (review W2 — 3.A.7 list_all gate)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_manager_list_all_disabled_when_off(
+    file_backed_engine: Engine,
+) -> None:
+    """Case (g): ``ServiceToolManager.list_all()`` returns the
+    disabled marker shape when ``enabled=False`` — NO DB query,
+    NO ``mark_exited`` write, NO inline reconciliation, NO
+    liveness probes.
+
+    The ``list_all`` OFF gate (review W2) closes a source-level
+    gap: the inline liveness reconciliation at
+    ``service_tool_manager.py:list_all`` was writing
+    ``mark_exited`` rows even under ``service_tool_enabled=False``,
+    violating the byte-identical pre-Phase-1 ``service_list``
+    contract. The fix adds the same ``if not self.enabled:``
+    early-return used by ``start`` / ``stop`` / ``status`` —
+    returning a single-element list carrying the disabled marker
+    (``{"status": "disabled", "reason": "service_tool_enabled=False"}``).
+
+    Mirrors ``test_manager_status_inline_reconcile_disabled_when_off``:
+    seeds a MIX of RUNNING rows (one with a dead PID — the row
+    that the ungated path would transition to EXITED) plus an
+    EXITED row, calls ``list_all()`` with ``enabled=False``, and
+    proves (a) the disabled marker shape is returned, (b) the
+    dead-pid row is NOT transitioned by the call, (c) NO
+    ``mark_exited`` write occurred (row statuses identical
+    pre/post).
+    """
+    import asyncio
+
+    repo = ServiceRepo(engine=file_backed_engine)
+
+    # Seed a MIX of rows:
+    #   - "alive-row":  RUNNING with our own PID (live; would survive
+    #                  the ungated liveness probe).
+    #   - "dead-row":  RUNNING with PID 1 (guaranteed-dead on
+    #                  POSIX; the ungated path would transition it
+    #                  to EXITED via ``mark_exited``).
+    #   - "already-exited": EXITED with a stale PID (idempotency
+    #                  baseline — must NOT be touched by either
+    #                  path).
+    from daemon.repositories.service_tool.models import ServiceTracking
+
+    alive_seed = ServiceTracking(
+        name="alive-row",
+        command="echo alive",
+        pid=os.getpid(),
+        start_time=1,
+        cwd="/tmp",
+        status="running",
+        started_by_instance_id="flag-off-test",
+        started_by_agent_id="flag-off-tester",
+        log_path="/tmp/alive-row.log",
+    )
+    dead_seed = ServiceTracking(
+        name="dead-row",
+        command="echo dead",
+        pid=1,  # PID 1 is init — not owned by this test; guaranteed-dead.
+        start_time=1,
+        cwd="/tmp",
+        status="running",
+        started_by_instance_id="flag-off-test",
+        started_by_agent_id="flag-off-tester",
+        log_path="/tmp/dead-row.log",
+    )
+    exited_seed = ServiceTracking(
+        name="already-exited",
+        command="echo exited",
+        pid=99999,
+        start_time=1,
+        cwd="/tmp",
+        status="exited",
+        started_by_instance_id="flag-off-test",
+        started_by_agent_id="flag-off-tester",
+        log_path="/tmp/already-exited.log",
+    )
+
+    seeded_ids = {}
+    seeded_statuses = {}
+    with _session_using(file_backed_engine) as session:
+        for row in (alive_seed, dead_seed, exited_seed):
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            seeded_ids[row.name] = row.id
+            seeded_statuses[row.name] = row.status
+
+    # Sanity — the rows are visible BEFORE the OFF call.
+    for name in ("alive-row", "dead-row", "already-exited"):
+        pre = repo.get_by_name_any_status(name)
+        assert pre is not None
+        assert pre.status == seeded_statuses[name]
+
+    # Manager with ``enabled=False`` — ``list_all()`` returns the
+    # disabled marker shape with NO DB touches.
+    manager = ServiceToolManager(
+        repo=repo,
+        cap=DEFAULT_MAX_CONCURRENT,
+        enabled=False,
+    )
+
+    async def _probe() -> list[dict]:
+        return await manager.list_all()
+
+    result = asyncio.run(_probe())
+
+    # (a) Disabled marker shape returned — single-element list.
+    assert result == [
+        {"status": "disabled", "reason": "service_tool_enabled=False"}
+    ], (
+        f"OFF manager.list_all MUST return the disabled marker shape; "
+        f"got {result!r}"
+    )
+
+    # (b) The dead-pid row was NOT transitioned — pre/post statuses
+    # identical.
+    for name in ("alive-row", "dead-row", "already-exited"):
+        post = repo.get_by_name_any_status(name)
+        assert post is not None, f"{name!r} row disappeared after OFF list_all()"
+        assert post.id == seeded_ids[name]
+        assert post.status == seeded_statuses[name], (
+            f"{name!r} row MUST be unchanged after OFF list_all(); "
+            f"got status={post.status} (expected {seeded_statuses[name]})"
+        )
+
+    # (c) NO ``mark_exited`` write occurred — re-read proves the
+    # dead-row is STILL ``running`` (not ``exited``).
+    dead_post = repo.get_by_name_any_status("dead-row")
+    assert dead_post.status == "running", (
+        f"dead-row MUST remain running after OFF list_all(); "
+        f"got status={dead_post.status!r} — the OFF gate did NOT "
+        f"prevent the inline mark_exited write"
+    )
 
 
 def _session_using(eng: Engine):

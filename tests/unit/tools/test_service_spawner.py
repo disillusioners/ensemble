@@ -459,13 +459,24 @@ def test_stop_graceful_then_escalate_with_fork_children(
     Phase 3.A.4 closes the case the low-level spawner deferred twice
     (F1 acceptance note in ``phase1-plan.md`` 1.B.3): the service
     spawns a parent shell that ignores SIGTERM (``trap "" TERM``) and
-    TWO forked ``sleep`` children. The proof:
+    TWO forked children that ALSO ignore SIGTERM explicitly
+    (``python -c "import signal, time; signal.signal(signal.SIGTERM,
+    signal.SIG_IGN); time.sleep(60)"``). The proof:
 
     * ``SIGTERM`` (the FIRST step) does NOT kill the parent (trapped).
-    * The grace period expires (parent still alive — only option is
-      SIGKILL escalation).
+    * The grace period expires (parent AND children still alive —
+      SIGTERM is ignored by the children explicitly, not by relying
+      on platform-specific ``sleep`` behavior; on Linux ``sleep``
+      honors SIGTERM, on macOS it does not — the explicit signal
+      ignore is the portable contract).
     * ``SIGKILL`` via ``os.killpg(pid, SIGKILL)`` reaches the
       WHOLE process group — parent AND both forked children die.
+
+    Platform contract (review W1): the children's SIGTERM-survival
+    is enforced IN-CHILD via ``signal.SIG_IGN`` (Python-level signal
+    handler) rather than via reliance on the host ``sleep`` binary
+    behavior. This is portable across Linux + macOS — the test
+    proves identical elapsed-time and killpg semantics on both.
 
     Reliability bar: this test uses REAL processes (no global
     ``time`` / ``os`` patches — ``stop`` calls ``time.sleep`` and
@@ -486,15 +497,33 @@ def test_stop_graceful_then_escalate_with_fork_children(
         stop,
     )
 
+    # The fork-children ignore SIGTERM EXPLICITLY via the Python
+    # signal module — portable across Linux (where ``sleep`` honors
+    # SIGTERM) and macOS (where ``sleep`` ignores SIGTERM). Without
+    # this, on Linux the children would die on the first stop() tick
+    # and the parent's ``wait`` would return, collapsing the
+    # grace-window assertion. The explicit ignore closes the
+    # platform-dependent behavior gap (review W1).
+    _sigterm_ignoring_child = (
+        'python3 -c "import signal, time; '
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        'time.sleep(60)"'
+    )
     log_path = str(tmp_log_dir / "fork-children.log")
-    # Parent shell that IGNORES SIGTERM + two forked `sleep` children.
-    # `wait` is necessary so the shell does NOT exit before the
-    # children (would orphan them under the parent's PID = reaped by
-    # init, not by killpg). On macOS the children may still inherit
-    # the parent's pgid even after setsid — `killpg(pid, sig)` is the
+    # Parent shell that IGNORES SIGTERM + two forked children that
+    # also ignore SIGTERM (in-child Python signal handler). `wait`
+    # is necessary so the shell does NOT exit before the children
+    # (would orphan them under the parent's PID = reaped by init,
+    # not by killpg). On macOS the children may still inherit the
+    # parent's pgid even after setsid — `killpg(pid, sig)` is the
     # canonical fix.
     pid, _ = spawn(
-        ["sh", "-c", 'trap "" TERM; sleep 60 & sleep 60 & wait'],
+        [
+            "sh",
+            "-c",
+            f'trap "" TERM; {_sigterm_ignoring_child} & '
+            f"{_sigterm_ignoring_child} & wait",
+        ],
         log_path=log_path,
         cwd="/tmp",
     )

@@ -681,7 +681,22 @@ class ServiceToolManager:
         EXITED shape. The reconciliation is per-row and uses the
         same ``is_process_alive`` + ``get_process_start_time``
         contract as ``status``.
+
+        OFF gate (review W2): when ``enabled=False``, returns the
+        disabled marker shape with NO DB queries, NO ``mark_exited``
+        writes, and NO liveness probes — byte-identical to the
+        pre-Phase-1 ``service_list`` contract under the flag. The
+        disabled marker is a single-element list mirroring the
+        ``{"status": "disabled", "reason": ...}`` shape used by
+        ``start`` / ``stop`` / ``status``.
         """
+        if not self.enabled:
+            return [
+                {
+                    "status": "disabled",
+                    "reason": "service_tool_enabled=False",
+                }
+            ]
         rows = await asyncio.to_thread(self.repo.list_all)
         out: list[dict] = []
         for row in rows:
