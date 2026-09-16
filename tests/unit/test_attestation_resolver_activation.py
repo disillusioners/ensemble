@@ -1,0 +1,1146 @@
+"""LCA unified resolver — Stage 1 parallel-dry activation predicate tests.
+
+Spec: ``.agents/shared/planning/leader-completion-attestation/
+resolver-unification.md`` (§4.1/§4.2/§4.3, §10 invariant tests) — Stage 1
+additive shadow: pure activation predicate over sources A/B/C, fused-bundle
+assembly (no LLM), and ONE structured ``leader_completion_resolver_eval``
+log row per gate evaluation.
+
+Locked user decisions mirrored here:
+  * Δ2 — Source A is NOT busy-suppressed (a_suspicion fires ALONE even
+    when ``busy_descendants > 0``). Source B IS busy-muted:
+    ``b_fires := (marker_hit ∨ length_trigger) ∧ busy_descendants=0``.
+  * R4/D10 mirror — ``¬attestation_required ⇒`` suspicion sources A/B
+    are NEVER evaluated (short-circuit BEFORE the A/B provider calls).
+  * §10.2 structural pin — ``busy>0 ⇒ ¬c_quiet`` (busy ⊆ live status
+    sets in ``InstanceManager._count_descendants_busy_and_live``).
+  * Budget parity — ZERO LLM calls in Stage 1 (sentinel test).
+
+TDD ORDER NOTE: the R4 short-circuit test class
+(:class:`TestR4ShortCircuitInvariant`) was written FIRST and failed on
+import (module did not exist) before the implementation landed.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import uuid
+from dataclasses import replace
+from unittest.mock import MagicMock, call
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+
+from daemon.services.attestation_gate import (
+    Decision,
+    GateSettings,
+    evaluate as gate_evaluate,
+)
+from daemon.services.attestation_marker_scanner import (
+    CHILD_TERMINAL_PROMISE_MARKERS,
+)
+from daemon.services import attestation_resolver_activation as ara
+from daemon.services.attestation_resolver_activation import (
+    BAND_A_SUSPICION,
+    BAND_DENY,
+    BAND_MARKER,
+    BUNDLE_A_SECTION_MAX,
+    BUNDLE_B_SECTION_MAX,
+    BUNDLE_C_SECTION_MAX,
+    BUNDLE_C_TREE_ROWS_MAX,
+    BUNDLE_TOTAL_MAX,
+    SourceASignals,
+    SourceBSignals,
+    SourceCSignals,
+    WOULD_ALLOW,
+    WOULD_DENY_NUDGE,
+    WOULD_HINT,
+    WOULD_TERMINAL,
+    activation_predicate,
+    assemble_fused_bundle,
+    collect_source_a_signals,
+    compute_would_be_outcome,
+    map_old_decision_to_outcome,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixtures / builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _c(
+    pending: int = 0,
+    wakeups: int = 0,
+    live: int = 0,
+    busy: int = 0,
+    uap: bool = False,
+) -> SourceCSignals:
+    return SourceCSignals(
+        pending_children=pending,
+        queued_or_expected_wakeups=wakeups,
+        live_descendants=live,
+        busy_descendants=busy,
+        user_answer_pending=uap,
+    )
+
+
+def _b(
+    marker_hit: bool = False,
+    length_trigger: bool = False,
+    attested: bool = False,
+    terms: tuple[str, ...] = (),
+    words: int = 500,
+) -> SourceBSignals:
+    return SourceBSignals(
+        marker_hit=marker_hit,
+        marker_terms=terms if terms else (("ending turn",) if marker_hit else ()),
+        length_trigger=length_trigger,
+        final_word_count=(20 if length_trigger else words),
+        attested=attested,
+    )
+
+
+def _a(advisory: bool = False) -> SourceASignals:
+    return SourceASignals(
+        advisory_present=advisory,
+        phrase_match=advisory,
+        contradiction_flag=False,
+        word_count_below_threshold=False,
+        promise_terms_total=1 if advisory else 0,
+        evidence=(
+            (
+                ara.ChildReportCheckEvidence(
+                    child_instance_id=str(uuid.uuid4()),
+                    matched_terms=("ending turn", "will write"),
+                    note_excerpt=(
+                        "Child … completed while its final report promises "
+                        "future work … likely premature completion."
+                    ),
+                    stable_id="child_report_check:…",
+                    kwargs_surface_seen=True,
+                ),
+            )
+            if advisory
+            else ()
+        ),
+    )
+
+
+def _pred(
+    *,
+    enabled: bool = True,
+    scope: bool = True,
+    mode: str = "enforce",
+    required: bool = True,
+    attested: bool = False,
+    uap: bool = False,
+    a=None,
+    b=None,
+    c=None,
+    a_calls=None,
+    b_calls=None,
+):
+    """Run the predicate with SPY providers (records call order)."""
+    a_signals = _a() if a is None else a
+    b_signals = _b() if b is None else b
+    c_signals = _c() if c is None else c
+
+    def a_source():
+        if a_calls is not None:
+            a_calls.append(1)
+        return a_signals
+
+    def b_source():
+        if b_calls is not None:
+            b_calls.append(1)
+        return b_signals
+
+    def c_source():
+        return c_signals
+
+    return activation_predicate(
+        attestation_enabled=enabled,
+        scope_applicable=scope,
+        mode=mode,
+        attestation_required=required,
+        attested=attested,
+        user_answer_pending=uap,
+        a_source=a_source,
+        b_source=b_source,
+        c_source=c_source,
+    )
+
+
+def _child_report_check_note(
+    child_id: str = "11111111-2222-3333-4444-555555555555",
+    terms: tuple[str, ...] = ("ending turn", "will write"),
+) -> HumanMessage:
+    """Build a delivered Child Report Check note (canonical Stage-0 shape).
+
+    Mirrors ``daemon/services/child_reports.py`` — body via the
+    ``_make_context_message`` factory shape (``[SYSTEM CONTEXT: Child
+    Report Check]`` prefix) + the ``context_kind`` /
+    ``child_report_check`` / ``child_report_check_terms`` kwargs.
+    """
+    body = (
+        f'Child {child_id} completed while its final report promises '
+        f'future work ("{", ".join(terms)}") \u2014 likely premature '
+        f"completion. Its promised next report will never arrive. "
+        f"Verify the actual work state; if unfinished, revive it via "
+        f'send_message (e.g. "continue your work") or verify its subtree '
+        f"before relying on this report. (Advisory / heuristic \u2014 "
+        f"marker scan is a substring match, not an LLM verdict.)"
+    )
+    msg = HumanMessage(content=f"[SYSTEM CONTEXT: Child Report Check]\n\n{body}")
+    msg.additional_kwargs["context_kind"] = "child_report_check"
+    msg.additional_kwargs["injected_message"] = True
+    msg.additional_kwargs["child_report_check"] = True
+    msg.additional_kwargs["child_report_check_terms"] = list(terms)
+    msg.additional_kwargs["child_instance_id"] = child_id
+    return msg
+
+
+def _delegated_mission_state(final_text: str = "Done. All shipped.") -> list:
+    delegation_ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "send_message", "args": {"target": "child-id"}, "id": "c1"}
+        ],
+    )
+    return [
+        HumanMessage(content="please do it"),
+        delegation_ai,
+        AIMessage(content=final_text),
+    ]
+
+
+class _Row:
+    """Fake instance row for the tree-rows provider tests."""
+
+    def __init__(self, instance_id: str, status: str = "running", agent_id: str = "worker"):
+        self.instance_id = instance_id
+        self.status = status
+        self.agent_id = agent_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R4 INVARIANT — written FIRST (TDD). ¬attestation_required ⇒ A/B never run.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestR4ShortCircuitInvariant:
+    """§10.1 / R4 mirror: no delegation ⇒ suspicion sources NEVER evaluated."""
+
+    def test_no_delegation_never_evaluates_a_or_b(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(required=False, a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert result.band == ""
+        assert result.meta_bypass is True
+        assert a_calls == [], "Source A provider MUST NOT run when ¬attestation_required"
+        assert b_calls == [], "Source B provider MUST NOT run when ¬attestation_required"
+        # Even when A/B signals WOULD fire (suspicion present, quiet tree)
+        # the short-circuit wins.
+        a_calls.clear()
+        b_calls.clear()
+        result = _pred(
+            required=False,
+            a=_a(advisory=True),
+            b=_b(marker_hit=True),
+            c=_c(),  # quiet
+            a_calls=a_calls,
+            b_calls=b_calls,
+        )
+        assert result.fired is False
+        assert a_calls == [] and b_calls == []
+
+    def test_attested_never_evaluates_a_or_b(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(attested=True, a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert result.meta_bypass is True
+        assert a_calls == [] and b_calls == []
+
+    def test_user_answer_pending_never_evaluates_a_or_b(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(uap=True, a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert result.meta_bypass is True
+        assert a_calls == [] and b_calls == []
+
+    def test_delegated_mission_does_evaluate_a_and_b(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(required=True, a_calls=a_calls, b_calls=b_calls)
+        assert a_calls == [1], "Source A MUST be evaluated on a delegated mission"
+        assert b_calls == [1], "Source B MUST be evaluated on a delegated mission"
+        assert result.meta_bypass is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Term 0 — scope / mode outermost terms (R2 target shape)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTerm0ScopeMode:
+    def test_attestation_enabled_false_short_circuits_everything(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(enabled=False, a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert result.meta_bypass is True
+        assert a_calls == [] and b_calls == []
+
+    def test_scope_not_applicable_short_circuits_everything(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(scope=False, a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert a_calls == [] and b_calls == []
+
+    def test_mode_off_short_circuits_everything(self):
+        a_calls: list = []
+        b_calls: list = []
+        result = _pred(mode="off", a_calls=a_calls, b_calls=b_calls)
+        assert result.fired is False
+        assert a_calls == [] and b_calls == []
+
+    def test_mode_off_beats_c_quiet(self):
+        # off is outermost — even the deny band (quiet tree) cannot fire.
+        result = _pred(mode="off", c=_c(), b=_b(marker_hit=True), a=_a(advisory=True))
+        assert result.fired is False
+        assert result.band == ""
+
+    def test_dry_mode_computes_normally(self):
+        # Dry = activation computed + logged, node skipped (R3 target);
+        # the predicate itself is mode-blind except "off".
+        result = _pred(mode="dry", c=_c())
+        assert result.fired is True
+        assert result.band == BAND_DENY
+        assert result.mode == "dry"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core predicate matrix — §4.2 semantics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPredicateMatrix:
+    def test_c_quiet_unattested_fires_deny_band(self):
+        result = _pred(c=_c(), b=_b(), a=_a())
+        assert result.fired is True
+        assert result.band == BAND_DENY
+        assert result.terms_fired == ("c_quiet",)
+
+    def test_c_not_quiet_no_triggers_no_suspicion_does_not_fire(self):
+        result = _pred(c=_c(pending=1), b=_b(), a=_a())
+        assert result.fired is False
+        assert result.band == ""
+        assert result.terms_fired == ()
+
+    def test_marker_band_when_not_quiet_and_busy_zero(self):
+        result = _pred(
+            c=_c(pending=2),  # not quiet, busy=0
+            b=_b(marker_hit=True),
+            a=_a(),
+        )
+        assert result.fired is True
+        assert result.band == BAND_MARKER
+        assert result.terms_fired == ("b_fires",)
+
+    def test_length_trigger_alone_fires_marker_band(self):
+        result = _pred(
+            c=_c(wakeups=1),
+            b=_b(length_trigger=True),
+            a=_a(),
+        )
+        assert result.fired is True
+        assert result.band == BAND_MARKER
+
+    def test_busy_mutes_source_b(self):
+        # R5: b_fires := (marker_hit ∨ length_trigger) ∧ busy_descendants=0
+        result = _pred(
+            c=_c(live=3, busy=3),  # busy>0 ⇒ live>0 ⇒ ¬c_quiet
+            b=_b(marker_hit=True, length_trigger=True),
+            a=_a(),
+        )
+        assert result.fired is False, "busy must mute the marker band entirely"
+        assert result.band == ""
+        assert "b_fires" not in result.terms_fired
+
+    def test_delta2_a_band_fires_alone_while_busy(self):
+        # THE Δ2 ROW — Source A is NOT busy-suppressed. Markers busy-muted,
+        # tree not quiet (busy ⊆ live ⇒ live>0), A fires ALONE.
+        result = _pred(
+            c=_c(live=2, busy=2),
+            b=_b(marker_hit=True),  # would fire, but busy mutes it
+            a=_a(advisory=True),
+        )
+        assert result.fired is True
+        assert result.band == BAND_A_SUSPICION
+        assert result.terms_fired == ("a_suspicion",)
+
+    def test_a_band_requires_not_quiet_and_no_b(self):
+        result = _pred(
+            c=_c(live=1),  # not quiet, busy=0
+            b=_b(),
+            a=_a(advisory=True),
+        )
+        assert result.fired is True
+        assert result.band == BAND_A_SUSPICION
+
+    def test_deny_band_wins_over_marker_and_a(self):
+        # quiet tree + marker + suspicion → deny band (precedence).
+        result = _pred(c=_c(), b=_b(marker_hit=True), a=_a(advisory=True))
+        assert result.fired is True
+        assert result.band == BAND_DENY
+        assert set(result.terms_fired) == {"c_quiet", "b_fires", "a_suspicion"}
+
+    def test_marker_band_wins_over_a(self):
+        result = _pred(
+            c=_c(pending=1),
+            b=_b(marker_hit=True),
+            a=_a(advisory=True),
+        )
+        assert result.fired is True
+        assert result.band == BAND_MARKER
+        assert set(result.terms_fired) == {"b_fires", "a_suspicion"}
+
+    def test_structural_pin_busy_positive_implies_not_quiet(self):
+        # §10.2 — busy>0 ⇒ ¬c_quiet. The pure predicate CANNOT see the
+        # busy⊆live subset property (ints only); the pin lives at the
+        # facade status-set level (TestSourceSetPins below) AND here as
+        # the reachable-matrix consequence: every busy>0 row must have
+        # live>0 so the deny band stays unreachable.
+        result = _pred(
+            c=_c(live=1, busy=1),  # the REACHABLE busy>0 shape
+            b=_b(),
+            a=_a(),
+        )
+        assert result.fired is False  # nothing fires: ¬quiet, b muted, no A
+
+    def test_attested_snapshotted_on_result(self):
+        result = _pred(attested=True)
+        assert result.attested is True
+        assert result.fired is False
+
+
+class TestSourceSetPins:
+    """§10.2 structural pin — busy status set ⊆ live status set (source pin).
+
+    The subset property lives as inline set literals inside
+    ``InstanceManager._count_descendants_busy_and_live``; this test
+    extracts them from the source and asserts the subset — a future
+    edit that adds a busy status not in the live set (or removes a live
+    status that busy relies on) breaks this pin.
+    """
+
+    def test_busy_subset_of_live_in_manager_helper(self):
+        import inspect
+
+        from daemon import manager as manager_mod
+
+        src = inspect.getsource(
+            manager_mod.InstanceManager._count_descendants_busy_and_live
+        )
+        busy_match = re.search(
+            r"busy_statuses = \{(.*?)\}", src, re.DOTALL
+        )
+        live_match = re.search(
+            r"unconditional_live_statuses = busy_statuses \| \{(.*?)\}", src, re.DOTALL
+        )
+        assert busy_match, "busy_statuses literal not found in helper source"
+        assert live_match, "unconditional_live_statuses literal not found"
+
+        def parse_values(body: str) -> set[str]:
+            # Statuses are ``InstanceStatus.RUNNING.value`` literals.
+            return set(re.findall(r"InstanceStatus\.([A-Z_]+)\.value", body))
+
+        busy = parse_values(busy_match.group(1))
+        unconditional_live = parse_values(live_match.group(1)) | busy
+        assert busy, "busy status set must be non-empty"
+        assert busy <= unconditional_live, (
+            f"busy statuses {busy - unconditional_live} missing from the "
+            f"unconditional-live set — breaks busy>0 ⇒ live>0 ⇒ ¬c_quiet"
+        )
+        assert "PAUSED" in unconditional_live, (
+            "PAUSED must stay live-for-deny-protection (b08f40fe amendment)"
+        )
+        assert "PAUSED" not in busy, "PAUSED is NOT busy (suspect, not healthy)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# C-read failure — whole-eval fail-open plain-allow
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCReadFailureFailOpen:
+    def test_c_provider_raise_fails_open(self):
+        def exploding_c():
+            raise RuntimeError("db down")
+
+        result = activation_predicate(
+            attestation_enabled=True,
+            scope_applicable=True,
+            mode="enforce",
+            attestation_required=True,
+            attested=False,
+            user_answer_pending=False,
+            a_source=lambda: (_ for _ in ()).throw(AssertionError("A must not run")),
+            b_source=lambda: (_ for _ in ()).throw(AssertionError("B must not run")),
+            c_source=exploding_c,
+        )
+        assert result.fail_open is True
+        assert result.fired is False
+        assert result.band == ""
+        assert result.fail_open_error_class == "RuntimeError"
+
+    def test_fail_open_maps_to_would_allow(self):
+        def exploding_c():
+            raise RuntimeError("db down")
+
+        result = activation_predicate(
+            attestation_enabled=True,
+            scope_applicable=True,
+            mode="enforce",
+            attestation_required=True,
+            attested=False,
+            user_answer_pending=False,
+            a_source=_a,
+            b_source=_b,
+            c_source=exploding_c,
+        )
+        assert compute_would_be_outcome(result, denied_count=0, deny_bound=3) == WOULD_ALLOW
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Would-be-outcome mapping — §4.3 no-judge mapping (Stage 1, zero LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWouldBeOutcomeMapping:
+    def test_not_fired_maps_to_would_allow(self):
+        result = _pred(c=_c(pending=1))
+        assert compute_would_be_outcome(result, denied_count=0, deny_bound=3) == WOULD_ALLOW
+
+    def test_deny_band_maps_to_would_deny_nudge(self):
+        result = _pred(c=_c())
+        assert compute_would_be_outcome(result, denied_count=0, deny_bound=3) == WOULD_DENY_NUDGE
+
+    def test_deny_band_at_bound_maps_to_would_terminal(self):
+        result = _pred(c=_c())
+        assert compute_would_be_outcome(result, denied_count=3, deny_bound=3) == WOULD_TERMINAL
+
+    def test_deny_band_below_bound_stays_nudge(self):
+        result = _pred(c=_c())
+        assert compute_would_be_outcome(result, denied_count=2, deny_bound=3) == WOULD_DENY_NUDGE
+
+    def test_marker_band_with_pending_maps_to_would_hint(self):
+        # marker band ⇒ ¬c_quiet ⇒ route-(b) pending predicate true.
+        result = _pred(c=_c(pending=2), b=_b(marker_hit=True))
+        assert result.band == BAND_MARKER
+        assert compute_would_be_outcome(result, denied_count=0, deny_bound=3) == WOULD_HINT
+
+    def test_a_band_with_pending_maps_to_would_hint(self):
+        result = _pred(c=_c(live=1), a=_a(advisory=True))
+        assert result.band == BAND_A_SUSPICION
+        assert compute_would_be_outcome(result, denied_count=0, deny_bound=3) == WOULD_HINT
+
+    def test_marker_band_no_pending_arm_exists_but_is_pure(self):
+        # The pure function keeps the explicit pending arm — pin it via a
+        # synthetic marker-band result with a quiet C (structurally
+        # unreachable via the predicate — marker band REQUIRES ¬c_quiet —
+        # but the Stage-2 node may compose bands differently).
+        result = _pred(c=_c(pending=1), b=_b(marker_hit=True))
+        quiet = replace(result, c_signals=_c())
+        assert compute_would_be_outcome(quiet, denied_count=0, deny_bound=3) == WOULD_ALLOW
+
+    def test_old_decision_mapping(self):
+        assert map_old_decision_to_outcome(Decision.ALLOWED) == WOULD_ALLOW
+        assert (
+            map_old_decision_to_outcome(Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP)
+            == WOULD_ALLOW
+        )
+        assert map_old_decision_to_outcome(Decision.DRY_LOG) == WOULD_ALLOW
+        assert map_old_decision_to_outcome(Decision.DENIED) == WOULD_DENY_NUDGE
+        assert map_old_decision_to_outcome(Decision.TERMINAL_AFTER_BOUND) == WOULD_TERMINAL
+
+    def test_agreement_true_when_classes_match(self):
+        from daemon.services.attestation_resolver_activation import compute_agreement
+
+        assert compute_agreement(WOULD_ALLOW, WOULD_ALLOW) is True
+        assert compute_agreement(WOULD_DENY_NUDGE, WOULD_DENY_NUDGE) is True
+        assert compute_agreement(WOULD_TERMINAL, WOULD_TERMINAL) is True
+
+    def test_agreement_false_on_divergence(self):
+        from daemon.services.attestation_resolver_activation import compute_agreement
+
+        assert compute_agreement(WOULD_DENY_NUDGE, WOULD_ALLOW) is False
+        assert compute_agreement(WOULD_ALLOW, WOULD_DENY_NUDGE) is False
+        # would_hint can never agree at the evaluate() seam — the old
+        # path has no hint outcome there (hint rides graph.py route (b)).
+        assert compute_agreement(WOULD_HINT, WOULD_ALLOW) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source A collection — the LANDED Stage-0 producer contract
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSourceACollection:
+    def test_note_detected_via_kwargs_and_prefix(self):
+        messages = _delegated_mission_state() + [_child_report_check_note()]
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is True
+        assert signals.phrase_match is True
+        assert len(signals.evidence) == 1
+        ev = signals.evidence[0]
+        assert ev.child_instance_id == "11111111-2222-3333-4444-555555555555"
+        assert ev.matched_terms == ("ending turn", "will write")
+        assert ev.kwargs_surface_seen is True
+
+    def test_note_detected_by_content_prefix_without_kwargs(self):
+        # Delivery-path robustness: the drain may not preserve kwargs —
+        # the canonical ``[SYSTEM CONTEXT: Child Report Check]`` prefix
+        # is the always-present surface.
+        note = _child_report_check_note()
+        note.additional_kwargs = {}  # strip kwargs entirely
+        signals = collect_source_a_signals(_delegated_mission_state() + [note])
+        assert signals.advisory_present is True
+        assert signals.evidence[0].kwargs_surface_seen is False
+        # child id re-derived from the note body ("Child {uuid} completed")
+        assert (
+            signals.evidence[0].child_instance_id
+            == "11111111-2222-3333-4444-555555555555"
+        )
+        # terms re-derived by re-scanning the note body (it quotes them)
+        assert "ending turn" in signals.evidence[0].matched_terms
+
+    def test_no_note_no_suspicion(self):
+        signals = collect_source_a_signals(_delegated_mission_state())
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_other_context_kinds_ignored(self):
+        other = HumanMessage(content="[SYSTEM CONTEXT: Skills]\n\nskill text")
+        other.additional_kwargs["context_kind"] = "skills"
+        signals = collect_source_a_signals(_delegated_mission_state() + [other])
+        assert signals.advisory_present is False
+
+    def test_evidence_bounded(self):
+        notes = [
+            _child_report_check_note(child_id=str(uuid.uuid4()))
+            for _ in range(ara.A_EVIDENCE_NOTES_CAP + 3)
+        ]
+        signals = collect_source_a_signals(_delegated_mission_state() + notes)
+        assert len(signals.evidence) == ara.A_EVIDENCE_NOTES_CAP
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fused bundle assembly — spec §4.1 caps, Δ1 + Δ3
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _tree_rows(n: int) -> list[dict]:
+    return [
+        {
+            "instance_id": f"{uuid.uuid4()}",
+            "status": "running" if i % 2 else "waiting",
+            "agent_id": "worker",
+        }
+        for i in range(n)
+    ]
+
+
+class TestFusedBundle:
+    def _assemble(self, rows=None, notes=None, ai_tail=None):
+        a = SourceASignals(
+            advisory_present=True,
+            phrase_match=True,
+            contradiction_flag=False,
+            word_count_below_threshold=False,
+            promise_terms_total=1,
+            evidence=notes if notes is not None else (_a(advisory=True).evidence),
+        )
+        return assemble_fused_bundle(
+            a_signals=a,
+            b_signals=_b(marker_hit=True, terms=("awaiting",)),
+            c_signals=_c(pending=2, wakeups=1, live=5, busy=3),
+            c_tree_rows=rows if rows is not None else _tree_rows(3),
+            ai_tail_messages=ai_tail
+            if ai_tail is not None
+            else [AIMessage(content="Awaiting the final report. Ending turn.")],
+        )
+
+    def test_bundle_has_three_sections_and_header(self):
+        bundle = self._assemble()
+        text = bundle.text
+        assert text.startswith("[LCA FUSED EVIDENCE BUNDLE v1]")
+        assert "SOURCE A:" in text
+        assert "SOURCE B:" in text
+        assert "SOURCE C:" in text
+
+    def test_delta1_a_evidence_present(self):
+        bundle = self._assemble()
+        assert "ending turn" in bundle.text  # matched terms surface
+        assert bundle.a_chars > 0
+        assert bundle.a_chars <= BUNDLE_A_SECTION_MAX
+
+    def test_delta3_c_first_10_rows_plus_suffix_and_counts(self):
+        bundle = self._assemble(rows=_tree_rows(15))
+        text = bundle.text
+        assert "pending_children=2" in text
+        assert "queued_or_expected_wakeups=1" in text
+        assert "live_descendants=5" in text
+        assert "busy_descendants=3" in text
+        # first-10 rows rendered
+        assert text.count("status=") == BUNDLE_C_TREE_ROWS_MAX
+        assert "(+5 more" in text  # 15 - 10 suffix
+
+    def test_c_rows_id_redacted(self):
+        rows = _tree_rows(3)
+        bundle = self._assemble(rows=rows)
+        for row in rows:
+            assert row["instance_id"] not in bundle.text, (
+                "descendant instance ids MUST be redacted in the bundle"
+            )
+        assert "redacted" in bundle.text
+
+    def test_a_child_ids_redacted(self):
+        """A-section note excerpt MUST redact any embedded child instance id.
+
+        The Stage-0 producer (``daemon/services/child_reports.py``,
+        ``_process_child_completion_db_sync``) opens the note body with
+        ``Child {child_instance_id} completed …`` — the raw 36-char uuid
+        is ALWAYS in the body that becomes ``note_excerpt``. The fused
+        bundle is bound by the 98b59dd7 boundary ("the fused bundle
+        carries NO raw instance ids"), so the A-section renderer MUST
+        redact the excerpt the same way it already redacts ``child=`` and
+        ``stable_id=``. The PRE-redaction positive-control assertion
+        guarantees the test exercises the actual redaction (a vacuous
+        fixture using ``"Child … completed"`` would silently pass on a
+        regression that drops ``redact_ids`` from the excerpt line).
+        """
+        # Pick a deterministic uuid so the assertion is exact-match.
+        fixed_child_uuid = "11111111-2222-3333-4444-555555555555"
+        # Mirror the LANDED producer body template (child_reports.py:3140-3150)
+        # so the body opens ``Child {real-uuid} completed …`` with a real
+        # 36-char uuid embedded.
+        body_in_producer_shape = (
+            f'Child {fixed_child_uuid} completed while its final report '
+            f'promises future work ("ending turn", "will write") — likely '
+            f"premature completion. Its promised next report will never "
+            f"arrive. Verify the actual work state; if unfinished, revive "
+            f'it via send_message (e.g. "continue your work") or verify '
+            f"its subtree before relying on this report. (Advisory / "
+            f"heuristic — marker scan is a substring match, not an LLM "
+            f"verdict.)"
+        )
+        # Positive control: the raw uuid IS in the input fixture (without
+        # this assertion the test could silently go vacuous — the prior
+        # fixture used an ellipsis in the excerpt body and the literal
+        # uuid never appeared in any input).
+        assert fixed_child_uuid in body_in_producer_shape
+        # Build the bundle via the existing _assemble() helper with a
+        # single note whose excerpt is the producer-shape body.
+        evidence_note = ara.ChildReportCheckEvidence(
+            child_instance_id=fixed_child_uuid,
+            matched_terms=("ending turn", "will write"),
+            note_excerpt=body_in_producer_shape,
+            stable_id="child_report_check:…",
+            kwargs_surface_seen=True,
+        )
+        # Pre-redaction sanity: the fixture's evidence carries the raw uuid
+        # (this is the data ``_build_a_section`` sees BEFORE its redact
+        # call), so the assertions below are real coverage not tautology.
+        assert fixed_child_uuid in evidence_note.note_excerpt
+        bundle = self._assemble(notes=(evidence_note,))
+        # (a) the raw uuid MUST be absent from the bundle.
+        assert fixed_child_uuid not in bundle.text, (
+            "A-section note excerpt leaked the raw child uuid — "
+            "excerpt line in _build_a_section must wrap _clip(...) "
+            "with redact_ids(...) (98b59dd7 boundary)."
+        )
+        # (b) the redaction placeholder MUST be present.
+        assert "redacted" in bundle.text, (
+            "expected the redact_ids placeholder to appear in the A section"
+        )
+
+    def test_per_section_caps_respected(self):
+        big_notes = tuple(
+            ara.ChildReportCheckEvidence(
+                child_instance_id=str(uuid.uuid4()),
+                matched_terms=("ending turn",),
+                note_excerpt="x" * 2000,
+                stable_id="child_report_check:…",
+                kwargs_surface_seen=True,
+            )
+            for _ in range(ara.A_EVIDENCE_NOTES_CAP)
+        )
+        big_tail = [AIMessage(content="y" * 20000)]
+        bundle = self._assemble(rows=_tree_rows(50), notes=big_notes, ai_tail=big_tail)
+        assert bundle.a_chars <= BUNDLE_A_SECTION_MAX
+        assert bundle.b_chars <= BUNDLE_B_SECTION_MAX
+        assert bundle.c_chars <= BUNDLE_C_SECTION_MAX
+
+    def test_total_cap_respected(self):
+        big_notes = tuple(
+            ara.ChildReportCheckEvidence(
+                child_instance_id=str(uuid.uuid4()),
+                matched_terms=("ending turn",),
+                note_excerpt="x" * 4000,
+                stable_id="…",
+                kwargs_surface_seen=True,
+            )
+            for _ in range(ara.A_EVIDENCE_NOTES_CAP)
+        )
+        bundle = self._assemble(notes=big_notes, ai_tail=[AIMessage(content="y" * 20000)])
+        assert bundle.total_chars <= BUNDLE_TOTAL_MAX
+
+    def test_total_cap_hard_clip_branch_respects_bound(self, monkeypatch):
+        """Force the ``len(text) > BUNDLE_TOTAL_MAX`` hard-clip branch.
+
+        Per-section internal caps limit the natural bundle to ~8300 chars
+        (A≈2550 + B≈4762 + C≈980 + header/sections≈33), so the hard-clip
+        branch is naturally unreachable. Monkey-patch ``BUNDLE_TOTAL_MAX``
+        down to a value the natural max exceeds (so the branch fires
+        without restructuring the section builders) and assert the
+        precomputed-clip fix keeps ``len(text) <= BUNDLE_TOTAL_MAX``
+        exactly — the prior shape overshot by ``len(truncation_suffix)``
+        because the suffix length was kept out of the clip budget.
+        """
+        # Force the hard-clip branch to fire by lowering the total cap
+        # to a value the natural per-section rendering exceeds.
+        monkeypatch.setattr(ara, "BUNDLE_TOTAL_MAX", 5000)
+        big_notes = tuple(
+            ara.ChildReportCheckEvidence(
+                child_instance_id=str(uuid.uuid4()),
+                matched_terms=("ending turn",),
+                note_excerpt="x" * 2000,
+                stable_id="…",
+                kwargs_surface_seen=True,
+            )
+            for _ in range(ara.A_EVIDENCE_NOTES_CAP)
+        )
+        big_tail = [AIMessage(content="y" * 20000)]
+        bundle = self._assemble(
+            notes=big_notes,
+            ai_tail=big_tail,
+            rows=_tree_rows(20),
+        )
+        # Hard-clip branch DID fire — total MUST equal BUNDLE_TOTAL_MAX
+        # exactly (precompute + suffix leaves no slack).
+        assert len(bundle.text) == ara.BUNDLE_TOTAL_MAX, (
+            f"hard-clip overshot its own bound: len={len(bundle.text)} "
+            f"BUNDLE_TOTAL_MAX={ara.BUNDLE_TOTAL_MAX}"
+        )
+        assert "bundle truncated at total cap" in bundle.text
+        # Per-section caps still respected (the hard-clip branch is a
+        # final safety net — it must not silently widen any section).
+        assert bundle.a_chars <= BUNDLE_A_SECTION_MAX
+        assert bundle.b_chars <= BUNDLE_B_SECTION_MAX
+        assert bundle.c_chars <= BUNDLE_C_SECTION_MAX
+        assert bundle.total_chars <= ara.BUNDLE_TOTAL_MAX
+
+    def test_bundle_sha256_stable_and_size_matches(self):
+        bundle = self._assemble()
+        assert re.fullmatch(r"[0-9a-f]{64}", bundle.sha256)
+        assert bundle.total_chars == len(bundle.text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage-2 seam — provably inert (zero LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStage2SeamInert:
+    def test_stage2_seam_none_by_default(self):
+        assert ara.STAGE2_JUDGE_SEAM is None
+
+    def test_maybe_invoke_stage2_noop_when_none(self):
+        # must not raise, must not call anything
+        ara._maybe_invoke_stage2_judge(None)
+
+    def test_zero_llm_sentinel_full_gate_would_fire(self, monkeypatch, caplog):
+        """Full gate evaluate() with would_fire=True ⇒ NO LLM/judge call.
+
+        Delegated mission + un-attested + quiet tree ⇒ deny band ⇒ the
+        Stage-1 shadow assembles + logs the bundle but the judge is
+        NEVER invoked.
+        """
+        # Sentinels: ANY judge/LLM surface explodes.
+        from daemon.services import attestation_report_judge as judge_mod
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("LLM/judge invoked in Stage-1 shadow!")
+
+        monkeypatch.setattr(judge_mod, "judge_completion_report_async", _explode)
+        monkeypatch.setattr(judge_mod, "judge_completion_report_sync", _explode)
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _explode)
+        # NOTE: STAGE2_JUDGE_SEAM is deliberately NOT patched here — the
+        # inert contract is that the seam stays ``None`` (default) and the
+        # shadow never wires it. Patching it live would CAUSE an invocation.
+
+        manager = MagicMock()
+        manager.count_pending_children.return_value = 0
+        manager.get_queued_or_expected_wakeups.return_value = 0
+        manager.count_live_descendants.return_value = 0
+        manager.count_busy_descendants.return_value = 0
+        manager.get_tree_ids_permanent.return_value = []
+        reader = MagicMock(return_value=False)
+        manager.has_open_user_answer = reader
+
+        with caplog.at_level(logging.INFO):
+            decision = gate_evaluate(
+                "leader-1",
+                denied_count=0,
+                messages=_delegated_mission_state("All done, shipped."),
+                mode_resolver=GateSettings("enforce", 3, 3),
+                manager=manager,
+            )
+        assert decision.decision is Decision.DENIED  # old path authoritative
+        shadow_rows = [
+            r for r in caplog.records if "leader_completion_resolver_eval" in r.getMessage()
+        ]
+        assert shadow_rows, "shadow event must fire on a canonical gate evaluation"
+        assert "band=deny" in shadow_rows[0].getMessage()
+        assert "bundle_sha256=" in shadow_rows[0].getMessage()
+        assert "judge_invoked=False" in shadow_rows[0].getMessage()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parallel-log row shape — one structured event per gate evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+REQUIRED_SHADOW_FIELDS = (
+    "event=leader_completion_resolver_eval",
+    "instance_id=",
+    "gate_location=",
+    "mode=",
+    "fired=",
+    "band=",
+    "terms_fired=",
+    "attestation_required=",
+    "would_be_outcome=",
+    "old_decision_value=",
+    "agreement=",
+    "fail_open=",
+    "bundle_sha256=",
+    "bundle_size_chars=",
+    "judge_invoked=",
+)
+
+
+class TestShadowEventRowShape:
+    def _run_gate(self, caplog, *, messages, mode="enforce", pending=0, live=0, busy=0):
+        manager = MagicMock()
+        manager.count_pending_children.return_value = pending
+        manager.get_queued_or_expected_wakeups.return_value = 0
+        manager.count_live_descendants.return_value = live
+        manager.count_busy_descendants.return_value = busy
+        manager.get_tree_ids_permanent.return_value = []
+        manager.has_open_user_answer = MagicMock(return_value=False)
+        with caplog.at_level(logging.INFO):
+            decision = gate_evaluate(
+                "leader-shape",
+                denied_count=0,
+                messages=messages,
+                mode_resolver=GateSettings(mode, 3, 3),
+                manager=manager,
+            )
+        shadow_rows = [
+            r
+            for r in caplog.records
+            if "event=leader_completion_resolver_eval" in r.getMessage()
+        ]
+        return decision, shadow_rows
+
+    def test_row_carries_all_required_fields(self, caplog):
+        _, rows = self._run_gate(caplog, messages=_delegated_mission_state())
+        assert rows, "expected exactly the shadow row on the canonical path"
+        row = rows[0].getMessage()
+        for field in REQUIRED_SHADOW_FIELDS:
+            assert field in row, f"shadow row missing {field!r}"
+
+    def test_agreement_true_case(self, caplog):
+        # deny band vs old DENIED → agreement=true
+        decision, rows = self._run_gate(caplog, messages=_delegated_mission_state())
+        assert decision.decision is Decision.DENIED
+        row = rows[0].getMessage()
+        assert "would_be_outcome=would_deny_nudge" in row
+        assert "old_decision_value=denied" in row
+        assert "agreement=True" in row
+
+    def test_agreement_false_case_delta2(self, caplog):
+        # Δ2: A-band (busy>0, A note present) vs old
+        # ALLOWED_LEGITIMATE_PENDING_WAKEUP → would_hint vs allow → False
+        messages = _delegated_mission_state() + [_child_report_check_note()]
+        decision, rows = self._run_gate(caplog, messages=messages, live=2, busy=2)
+        assert decision.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
+        row = rows[0].getMessage()
+        assert "band=a_suspicion" in row
+        assert "would_be_outcome=would_hint" in row
+        assert "agreement=False" in row
+
+    def test_one_row_per_evaluation_no_row_on_meta_bypass(self, caplog):
+        # meta-bypass (mode=off) — the shadow never runs (zero rows
+        # where the gate doesn't run).
+        _, rows = self._run_gate(caplog, messages=_delegated_mission_state(), mode="off")
+        assert rows == []
+
+    def test_dry_mode_row_shape(self, caplog):
+        _, rows = self._run_gate(caplog, messages=_delegated_mission_state(), mode="dry")
+        assert rows
+        row = rows[0].getMessage()
+        assert "mode=dry" in row
+        # dry: old path logs DRY_LOG (mapped allow); shadow deny band →
+        # divergence false — the dry-soak signal.
+        assert "old_decision_value=dry_log" in row
+        assert "agreement=False" in row
+
+    def test_db_error_emits_fail_open_shadow_row(self, caplog):
+        manager = MagicMock()
+        manager.count_pending_children.side_effect = RuntimeError("db down")
+        with caplog.at_level(logging.INFO):
+            decision = gate_evaluate(
+                "leader-dberr",
+                denied_count=0,
+                messages=_delegated_mission_state(),
+                mode_resolver=GateSettings("enforce", 3, 3),
+                manager=manager,
+            )
+        assert decision.decision is Decision.ALLOWED  # fail-open unchanged
+        assert decision.gate_exception_seen is True
+        shadow_rows = [
+            r
+            for r in caplog.records
+            if "event=leader_completion_resolver_eval" in r.getMessage()
+        ]
+        assert shadow_rows, "C-read failure must emit the fail-open shadow row"
+        row = shadow_rows[0].getMessage()
+        assert "fail_open=True" in row
+        assert "would_be_outcome=would_allow" in row
+
+    def test_shadow_error_never_breaks_the_gate(self, caplog, monkeypatch):
+        """Exception isolation — a resolver-side crash logs an error row
+        and NEVER propagates into gate control flow."""
+        monkeypatch.setattr(
+            ara,
+            "activation_predicate",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("resolver bug")),
+        )
+        manager = MagicMock()
+        manager.count_pending_children.return_value = 0
+        manager.get_queued_or_expected_wakeups.return_value = 0
+        manager.count_live_descendants.return_value = 0
+        manager.count_busy_descendants.return_value = 0
+        manager.get_tree_ids_permanent.return_value = []
+        manager.has_open_user_answer = MagicMock(return_value=False)
+        with caplog.at_level(logging.INFO):
+            decision = gate_evaluate(
+                "leader-crash",
+                denied_count=0,
+                messages=_delegated_mission_state(),
+                mode_resolver=GateSettings("enforce", 3, 3),
+                manager=manager,
+            )
+        assert decision.decision is Decision.DENIED  # old path unaffected
+        error_rows = [
+            r
+            for r in caplog.records
+            if "leader_completion_resolver_eval_error" in r.getMessage()
+        ]
+        assert error_rows, "resolver crash must log the error row"
+
+    def test_r4_wiring_no_a_scan_needed_on_non_delegated(self, caplog):
+        # wiring parity: a non-delegated mission's shadow row records
+        # attestation_required=False and fired=False
+        messages = [
+            HumanMessage(content="what's the answer?"),
+            AIMessage(content="The answer is 42."),
+        ]
+        decision, rows = self._run_gate(caplog, messages=messages)
+        assert decision.decision is Decision.ALLOWED
+        assert rows
+        row = rows[0].getMessage()
+        assert "attestation_required=False" in row
+        assert "fired=False" in row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tree-rows provider (wiring-level C evidence collection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTreeRowsProvider:
+    def test_provider_enumerates_descendants(self):
+        root = "root-id"
+        child_ids = [str(uuid.uuid4()) for _ in range(3)]
+        manager = MagicMock()
+        manager.get_tree_ids_permanent.return_value = [root, *child_ids]
+        repo = MagicMock()
+        repo.get.side_effect = lambda iid: _Row(iid, status="running", agent_id="worker")
+        manager._instance_repository = repo
+
+        provider = ara.make_tree_rows_provider(manager, root)
+        rows = provider()
+        assert [r["instance_id"] for r in rows] == child_ids  # root excluded
+        assert all(r["status"] == "running" for r in rows)
+
+    def test_provider_no_repo_returns_empty(self):
+        manager = MagicMock(spec=["get_tree_ids_permanent"])
+        provider = ara.make_tree_rows_provider(manager, "x")
+        assert provider() == []
+
+    def test_provider_failure_returns_empty_never_raises(self):
+        manager = MagicMock()
+        manager.get_tree_ids_permanent.side_effect = RuntimeError("boom")
+        provider = ara.make_tree_rows_provider(manager, "x")
+        assert provider() == []
+
+    def test_provider_bounded(self):
+        ids = [str(uuid.uuid4()) for _ in range(ara.C_TREE_ROW_FETCH_CAP + 20)]
+        manager = MagicMock()
+        manager.get_tree_ids_permanent.return_value = ["root", *ids]
+        repo = MagicMock()
+        repo.get.side_effect = lambda iid: _Row(iid)
+        manager._instance_repository = repo
+        rows = ara.make_tree_rows_provider(manager, "root")()
+        assert len(rows) == ara.C_TREE_ROW_FETCH_CAP
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source pins — module surface (Stage-0 contract consumed verbatim)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSourcePins:
+    def test_catalog_imported_from_marker_scanner(self):
+        # The Stage-0 producer's catalog is the one source of truth.
+        from daemon.services.attestation_marker_scanner import (
+            scan_child_terminal_report_for_promises,
+        )
+
+        scan = scan_child_terminal_report_for_promises("Will write the report. Ending turn.")
+        assert scan.promise_hit is True
+        assert ara.CHILD_TERMINAL_PROMISE_MARKERS is CHILD_TERMINAL_PROMISE_MARKERS
+
+    def test_no_new_env_flag_reads(self):
+        import ast
+        import pathlib
+
+        path = pathlib.Path(ara.__file__)
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute):
+                    assert not (
+                        node.func.attr in {"environ", "getenv"}
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "os"
+                    ), "no os.environ/os.getenv reads in the Stage-1 module"

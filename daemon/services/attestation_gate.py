@@ -1025,6 +1025,38 @@ def evaluate(
                 error_class,
                 db_exc,
             )
+            # Stage-1 shadow fail-open row (additive): the gate's OWN
+            # C facade reads failed — the whole evaluation is
+            # fail-open plain-allow (the return below, untouched).
+            # The unified predicate's §4.2 C-read-failure branch
+            # carries the SAME semantics; this row records it
+            # (fail_open=True / would_be_outcome=would_allow) so the
+            # dry soak sees every evaluation class. Exception-isolated
+            # like the canonical seam.
+            try:
+                from .attestation_resolver_activation import (
+                    log_shadow_fail_open,
+                )
+
+                log_shadow_fail_open(
+                    instance_id=instance_id,
+                    gate_location=gate_location,
+                    leader_prompt_version=leader_prompt_version,
+                    mode=mode_resolver.mode,
+                    error_class=error_class,
+                    old_decision=Decision.ALLOWED,
+                )
+            except Exception as shadow_exc:  # noqa: BLE001 — never load-bearing
+                logger.error(
+                    "event=leader_completion_resolver_eval_error "
+                    "error_class=%s instance_id=%s gate_location=%s "
+                    "mode=%s detail=fail_open_row: %s",
+                    type(shadow_exc).__name__,
+                    instance_id,
+                    gate_location,
+                    mode_resolver.mode,
+                    shadow_exc,
+                )
             return GateDecision(
                 decision=Decision.ALLOWED,
                 next_denied_count=denied_count,
@@ -1374,6 +1406,73 @@ def evaluate(
                 and result.decision is Decision.DENIED
             ):
                 record_promotion_metric(METRIC_ENFORCE_DENIED_TOTAL)
+
+        # (vi) Stage-1 LCA unified-resolver parallel-dry shadow
+        # (2026-09-16, resolver-unification §4 — additive, zero routing).
+        # Runs EXACTLY where the existing gate evaluation runs (the
+        # canonical-path tail; the meta-bypass / off-mode early returns
+        # above never reach it) and emits ONE structured
+        # ``event=leader_completion_resolver_eval`` row + (when the
+        # predicate would fire) the fused evidence bundle's sha256/size.
+        # The old paths above remain AUTHORITATIVE and byte-identical —
+        # the shadow's return value is discarded; any resolver-side
+        # error is logged (``..._resolver_eval_error``) and NEVER
+        # propagates into gate control flow. Zero new LLM calls, zero
+        # new DB reads for the predicate (C values are the already-
+        # materialized facade reads; A is a pure message-walk; B values
+        # are the already-computed marker/length results).
+        try:
+            from .attestation_resolver_activation import (
+                SourceBSignals,
+                SourceCSignals,
+                evaluate_shadow_activation,
+                make_tree_rows_provider,
+            )
+
+            evaluate_shadow_activation(
+                instance_id=instance_id,
+                gate_location=gate_location,
+                leader_prompt_version=leader_prompt_version,
+                messages=messages,
+                mode=mode_resolver.mode,
+                attestation_enabled=attestation_enabled,
+                scope_applicable=scope_applicable,
+                attestation_required=attestation_required,
+                attested=scan.attested,
+                user_answer_pending=user_answer_pending,
+                c_values=SourceCSignals(
+                    pending_children=pending_children,
+                    queued_or_expected_wakeups=queued_or_expected_wakeups,
+                    live_descendants=live_descendants,
+                    busy_descendants=busy_descendants,
+                    user_answer_pending=user_answer_pending,
+                ),
+                b_values=SourceBSignals(
+                    marker_hit=result.marker_hit,
+                    marker_terms=result.marker_terms,
+                    length_trigger=result.length_trigger,
+                    final_word_count=result.final_word_count,
+                    attested=scan.attested,
+                ),
+                denied_count=denied_count,
+                deny_bound=mode_resolver.deny_bound,
+                old_decision=result.decision,
+                c_tree_rows_provider=make_tree_rows_provider(
+                    manager, instance_id
+                ),
+            )
+        except Exception as shadow_exc:  # noqa: BLE001 — shadow is never load-bearing
+            logger.error(
+                "event=leader_completion_resolver_eval_error "
+                "error_class=%s instance_id=%s gate_location=%s "
+                "mode=%s detail=%s: %s",
+                type(shadow_exc).__name__,
+                instance_id,
+                gate_location,
+                mode_resolver.mode,
+                type(shadow_exc).__name__,
+                shadow_exc,
+            )
 
         return result
 
