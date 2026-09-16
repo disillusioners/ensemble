@@ -148,13 +148,31 @@ def _deny_node(instance_id: str, denied_count: int):
 
 def _produce_nudge(instance_id: str, denied_count: int) -> HumanMessage:
     """Run one deny evaluation through the production closure and
-    return the injected nudge."""
+    return the injected nudge.
+
+    LCA Stage-2 flip re-contract (2026-09-16): the mission is
+    DELEGATED — the unified predicate's D10 meta-bypass exempts
+    non-delegated missions from the deny family entirely. The fused
+    judge's conservative not-complete/error verdict leaves the decide()
+    DENIED in place and the SAME nudge machinery runs (the FIX-3
+    stable-id contract under test)."""
+    delegation_ai = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "send_message",
+                "args": {"target": "child-id"},
+                "id": "c1",
+            }
+        ],
+    )
     node = _deny_node(instance_id, denied_count)
     result = asyncio.run(
         node(
             {
                 "messages": [
                     HumanMessage(content="please advise"),
+                    delegation_ai,
                     AIMessage(
                         content="Ending turn, awaiting your go/no-go."
                     ),

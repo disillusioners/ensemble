@@ -211,7 +211,15 @@ def _delegated_mission_attested() -> dict:
     }
 
 
-# Stub LLM invoker factories (mirror test_attestation_judge_wiring shape)
+# Stub LLM invoker factories (mirror test_attestation_judge_wiring shape).
+#
+# LCA Stage-2 flip re-contract (2026-09-16): the node's fused block is
+# the ONLY judge path; its LLM seam is the SAME ``_invoke_judge_llm``
+# (now carrying ``system_prompt=`` — the fused judge's prompt). The
+# stub payloads therefore answer in the FUSED verdict JSON shape
+# (``{"verdict": "complete"|"not_complete", "evidence_cited": [],
+# "advisory_note_text": "", "rationale": ""}``) — the legacy
+# ``is_complete_report`` shape is no longer parsed on this path.
 
 
 def _caplog_both(caplog):
@@ -225,32 +233,41 @@ def _caplog_both(caplog):
     caplog.set_level(
         logging.INFO, logger="daemon.services.attestation_gate"
     )
+    caplog.set_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
+    )
     return caplog
 
 
-async def _invoke_yes(config, user_payload, *, timeout_s):
+async def _invoke_yes(config, user_payload, *, timeout_s, system_prompt=None):
     return (
-        '{"is_complete_report": true, "reason": "genuine report"}',
+        '{"verdict": "complete", "evidence_cited": ["genuine report"], '
+        '"advisory_note_text": "", "rationale": "genuine report"}',
         "fake-quick",
     )
 
 
-async def _invoke_no(config, user_payload, *, timeout_s):
+async def _invoke_no(config, user_payload, *, timeout_s, system_prompt=None):
+    # Minimal not_complete verdict (NO evidence/advisory) so hint-shape
+    # tests can pin the byte-identical pre-D4 note; the D4 citation
+    # shape is pinned separately in test_attestation_resolver_stage2.
     return (
-        '{"is_complete_report": false, "reason": "mid-work status"}',
+        '{"verdict": "not_complete", "evidence_cited": [], '
+        '"advisory_note_text": "", "rationale": "mid-work status"}',
         "fake-quick",
     )
 
 
-async def _invoke_unparsable(config, user_payload, *, timeout_s):
+async def _invoke_unparsable(config, user_payload, *, timeout_s, system_prompt=None):
     return ("Sorry, I cannot help with that.", "fake-quick")
 
 
-async def _invoke_timeout(config, user_payload, *, timeout_s):
+async def _invoke_timeout(config, user_payload, *, timeout_s, system_prompt=None):
     raise asyncio.TimeoutError()
 
 
-async def _invoke_error(config, user_payload, *, timeout_s):
+async def _invoke_error(config, user_payload, *, timeout_s, system_prompt=None):
     raise RuntimeError("boom")
 
 
@@ -262,22 +279,25 @@ async def _invoke_error(config, user_payload, *, timeout_s):
 def test_marker_a_deny_nudge_counter_increments(monkeypatch, caplog):
     """(a) markers + judge-no + nothing pending → DENY + nudge + counter+1.
 
-    The b08f40fe-class kill: a quick-question turn whose final
-    AIMessage reads "Awaiting your reply. Ending turn, will continue
-    after your reply." (mid-work phrasing) but the conditional gate
-    is OFF (no send_message dispatched) — the gate would otherwise
-    allow. The marker scan fires; the judge says no; nothing is
-    pending; the gate converts to DENY + nudge + counter increment.
+    LCA Stage-2 flip re-contract (2026-09-16): the mission is DELEGATED
+    (the unified predicate's D10 meta-bypass exempts non-delegated
+    missions from the judge entirely — pinned separately). With nothing
+    pending the unified band is DENY (precedence over marker — c_quiet
+    wins); the fused judge's not_complete verdict leaves the decide()
+    DENIED in place and the existing nudge machinery denies + counts.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
     node, manager, ledger = _make_node(instance_id="marker-a-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting your reply. Ending turn, "
                     "will continue after your reply."
                 ),
@@ -291,12 +311,11 @@ def test_marker_a_deny_nudge_counter_increments(monkeypatch, caplog):
     ledger.increment.assert_called_once()
     assert ledger.increment.call_args.args[0] == "marker-a-it"
 
-    # Log fields present — the marker-path judge row + the routing line.
+    # Log fields present — the fused-judge row + the resolver row.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=no" in log_text
-    assert "marker-path a" in log_text
-    assert "[AttestationGate] marker-path a instance=" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +363,9 @@ def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -373,10 +395,10 @@ def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
 
     # Log fields present.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=no" in log_text
-    assert "marker-path b" in log_text
-    assert "[AttestationGate] marker-path b instance=" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "fused-judge not-complete" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -385,21 +407,24 @@ def test_marker_b_hint_injection_no_deny_no_counter(monkeypatch, caplog):
 
 
 def test_marker_c_judge_yes_allows_normally(monkeypatch, caplog):
-    """(c) markers + judge-yes → ALLOW normally, no nudge, no counter.
+    """(c) markers + judge-complete → ALLOW normally, no nudge, no counter.
 
-    The judge confirms a genuine completion report despite the
-    mid-work phrasing (e.g., "Ending turn" in a literal completion
-    paragraph). The gate allows the END.
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission (the
+    D10 meta-bypass exempts non-delegated missions); the fused judge's
+    complete verdict is the rescue — allow END with zero side effects.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_yes)
 
     node, manager, ledger = _make_node(instance_id="marker-c-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Ending turn. All four sub-tasks completed; "
                     "evidence in the per-task report above."
                 ),
@@ -416,9 +441,11 @@ def test_marker_c_judge_yes_allows_normally(monkeypatch, caplog):
 
     # Log fields present.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=yes" in log_text
-    assert "[AttestationGate] marker-path judge-yes" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=complete" in log_text
+    # Nothing pending + delegated ⇒ unified deny band ⇒ the complete
+    # verdict is the RESCUE arm (mirrors the legacy judge-yes override).
+    assert "fused-judge rescue" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,19 +457,24 @@ def test_marker_d_error_with_nothing_pending_deny(monkeypatch, caplog):
     """(d) markers + judge-error/timeout/unparsable + nothing pending → DENY.
 
     Conservative fall-through — a judge infrastructure error stays on
-    the conservative side (deny) when nothing is pending. Same as
-    (a) but routed via path "d" because the judge didn't return a
-    clean verdict.
+    the conservative side (deny) when nothing is pending. LCA Stage-2
+    flip re-contract (2026-09-16): DELEGATED mission; with nothing
+    pending the unified band is DENY and the errored fused-judge call
+    leaves the decide() DENIED in place (path-(d)-exact, DP-5
+    REJECTED — no fail-safe allow).
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_error)
 
     node, manager, ledger = _make_node(instance_id="marker-d1-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-d1-it"}},
@@ -456,8 +488,7 @@ def test_marker_d_error_with_nothing_pending_deny(monkeypatch, caplog):
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "verdict=error" in log_text
-    assert "marker-path d" in log_text
-    assert "[AttestationGate] marker-path d instance=" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -503,6 +534,9 @@ def test_marker_d_timeout_with_real_pending_hint(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -523,7 +557,7 @@ def test_marker_d_timeout_with_real_pending_hint(monkeypatch, caplog):
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "verdict=timeout" in log_text
-    assert "marker-path d" in log_text
+    assert "fused-judge path-d" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -536,16 +570,22 @@ def test_marker_d_unparsable_with_nothing_pending_deny(monkeypatch, caplog):
 
     Unparsable JSON is a judge infrastructure error (the LLM did not
     return a strict JSON object). Conservative fall-through to deny.
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission; the
+    retry-once fired inside the ONE fused invocation and BOTH attempts
+    were unparsable (``attempt=2``) — the deny stands (path-(d)-exact).
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_unparsable)
 
     node, manager, ledger = _make_node(instance_id="marker-d3-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-d3-it"}},
@@ -559,26 +599,28 @@ def test_marker_d_unparsable_with_nothing_pending_deny(monkeypatch, caplog):
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "verdict=unparsable" in log_text
-    assert "marker-path d" in log_text
+    assert "llm_judge_attempt=2" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Wrapper-fault path — judge_completion_report_async RAISES (the (d)-path
-# except branch in graph.py must still route conservatively). The d1/d2/d3
-# tests above cover the NEVER-RAISES judge path (error/timeout/unparsable
-# all return JudgeResult with is_complete_report=False). The tests below
-# cover the wrapper-layer fault class — judge_completion_report_async
-# ITSELF raises (config-load failure, import-time cycle, etc.).
+# Wrapper-fault path — judge_fused_bundle_async RAISES (the fused block's
+# except branch must still route conservatively). The d1/d2/d3 tests above
+# cover the NEVER-RAISES judge path (error/timeout/unparsable all return
+# FusedJudgeResult with is_complete=False). The tests below cover the
+# wrapper-layer fault class — the fused judge entry point ITSELF raises
+# (config-load failure, import-time cycle, etc.).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _invoke_judge_wrapper_fault(config, user_payload, *, timeout_s):
-    """Simulate a wrapper-layer fault in judge_completion_report_async.
+async def _fused_judge_wrapper_fault(bundle_text, *, config, timeout_s=None):
+    """Simulate a wrapper-layer fault in judge_fused_bundle_async.
 
-    The judge service is never-raises (timeout / unparsable / error all
-    return JudgeResult). This stub instead RAISES at the public
-    entry-point — the wrapper-layer except branch in graph.py must
-    still route conservatively (a)/(b) based on R2 inputs.
+    The fused judge service is never-raises (timeout / unparsable /
+    error all return FusedJudgeResult). This stub instead RAISES at
+    the public entry-point — the fused block's wrapper-layer except
+    branch in graph.py must still route conservatively based on the
+    band + R2 inputs.
     """
     raise RuntimeError("wrapper-layer fault (config load failure)")
 
@@ -588,25 +630,30 @@ def test_marker_wrapper_fault_with_nothing_pending_deny(
 ):
     """Wrapper fault + nothing pending → CONVERT TO DENY (path "d").
 
-    The F2 fix — when ``judge_completion_report_async`` itself RAISES,
-    the marker-path except branch must NOT silently ALLOW. With
-    nothing pending (no children / wakeups / live descendants), the
-    conservative routing is (a) — CONVERT TO DENY + nudge + counter
-    increment. Pins the F2 P0 close end-to-end.
+    The F2 fix (re-contracted to the fused seam, 2026-09-16) — when
+    ``judge_fused_bundle_async`` itself RAISES, the fused block must
+    NOT silently ALLOW. With nothing pending (no children / wakeups /
+    live descendants) the unified band is DENY and the conservative
+    routing is deny+nudge + counter increment via the existing
+    machinery. DELEGATED mission (the D10 meta-bypass exempts
+    non-delegated missions from the judge entirely).
     """
     monkeypatch.setattr(
         judge_mod,
-        "judge_completion_report_async",
-        _invoke_judge_wrapper_fault,
+        "judge_fused_bundle_async",
+        _fused_judge_wrapper_fault,
     )
 
     node, manager, ledger = _make_node(instance_id="marker-wf1-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-wf1-it"}},
@@ -623,16 +670,10 @@ def test_marker_wrapper_fault_with_nothing_pending_deny(
     # line (from the wrapper-fault path, not the post-call path).
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert (
-        "event=leader_completion_gate_marker_judge_error" in log_text
+        "event=leader_completion_gate_fused_judge_error" in log_text
     ), "F2: the wrapper-fault path MUST emit the canonical error row"
-    assert "decision=fail_safe_marker_d" in log_text
-    assert "marker-path d" in log_text
-    assert (
-        "[AttestationGate] marker-path d instance=" in log_text
-    )
-    assert (
-        "wrapper-fault path" in log_text
-    ), "F2: the (d)-routing log line MUST mark the wrapper-fault path"
+    assert "decision=fail_safe_conservative" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
@@ -641,12 +682,13 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
     The wake-up is en route; the judge wrapper faulted; the gate falls
     through to allow-with-hint so the wake-up can still arrive. NO
     counter write, NO deny, NO re-route — the turn still ends. Pins
-    the F2 P0 close on the (b)-shape half of the conservative routing.
+    the F2 P0 close on the (b)-shape half of the conservative routing
+    (re-contracted to the fused seam, 2026-09-16).
     """
     monkeypatch.setattr(
         judge_mod,
-        "judge_completion_report_async",
-        _invoke_judge_wrapper_fault,
+        "judge_fused_bundle_async",
+        _fused_judge_wrapper_fault,
     )
 
     manager = MagicMock()
@@ -679,6 +721,9 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -707,16 +752,10 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
     # line via the hint path.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert (
-        "event=leader_completion_gate_marker_judge_error" in log_text
+        "event=leader_completion_gate_fused_judge_error" in log_text
     )
-    assert "decision=fail_safe_marker_d" in log_text
-    assert "marker-path d" in log_text
-    assert (
-        "[AttestationGate] marker-path d instance=" in log_text
-    )
-    assert (
-        "wrapper-fault path" in log_text
-    ), "F2: the (d)-routing log line MUST mark the wrapper-fault path"
+    assert "decision=fail_safe_conservative" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -727,15 +766,20 @@ def test_marker_wrapper_fault_with_real_pending_hint(monkeypatch, caplog):
 def test_marker_kill_switch_env_off_no_judge_call(monkeypatch, caplog):
     """Kill-switch OFF → markers logged, NO judge call, plain ALLOW.
 
-    With the judge disabled, marker-only signal is too weak to deny
-    — allow + log. DECIDED (do not relitigate; see decisions.md
-    D-ENTRY 2026-09-11).
+    LCA Stage-2 flip re-contract (2026-09-16): the D10 meta-bypass
+    already exempts non-delegated missions from the fused judge, so
+    under the flip the kill-switch OFF row is reached only on a
+    DELEGATED marker mission. We drive a delegated mission with REAL
+    pending work (marker band — the un-attested∧quiet shape is the
+    deny band, where kill-switch-off DENIES per Q1 parity, pinned in
+    test_attestation_resolver_stage2) so the kill-switch OFF branch is
+    the actual guard; the same row surface is preserved end-to-end.
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
     # Real env var + real resolver reset.
@@ -744,13 +788,18 @@ def test_marker_kill_switch_env_off_no_judge_call(monkeypatch, caplog):
     # Sanity: the real resolver returns False.
     assert judge_resolver_mod.is_llm_judge_enabled() is False
 
-    node, manager, ledger = _make_node(instance_id="marker-ks-off-it")
+    node, manager, ledger = _make_node(
+        instance_id="marker-ks-off-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-ks-off-it"}},
@@ -767,22 +816,19 @@ def test_marker_kill_switch_env_off_no_judge_call(monkeypatch, caplog):
 
     # The canonical gate log row still carries marker_hit=True (so the
     # operator sees the hit in dry-log soak); the kill-switch OFF
-    # branch emits a NEW distinct log row (event=leader_completion_
-    # gate_marker_judge_disabled with verdict=<skipped>) — but the
-    # original marker-path judge row MUST NOT fire (the judge call
-    # itself is what would have produced the standard
-    # event=leader_completion_gate_marker_judge log line, which is
-    # what operators grep for live calls; the new disabled row is
-    # the grep-disjoint sink for kill-switch OFF). Pin both: the
-    # disabled row IS emitted, the live-judge row IS NOT.
+    # branch emits the fused disabled row
+    # (``event=leader_completion_gate_fused_judge_disabled`` with
+    # ``verdict=<skipped>``) — the fused-judge row MUST NOT fire (no
+    # invocation). Pin both: the disabled row IS emitted, the
+    # live-judge row IS NOT.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=True" in log_text
     assert (
-        "event=leader_completion_gate_marker_judge_disabled" in log_text
+        "event=leader_completion_gate_fused_judge_disabled" in log_text
     )
     assert (
-        "event=leader_completion_gate_marker_judge " not in log_text
-        and "event=leader_completion_gate_marker_judge\n" not in log_text
+        "event=leader_completion_gate_fused_judge " not in log_text
+        and "event=leader_completion_gate_fused_judge\n" not in log_text
     )
 
 
@@ -790,24 +836,31 @@ def test_marker_kill_switch_config_off_no_judge_call(monkeypatch):
     """``llm_judge_enabled=False`` in gate_config → judge never called.
 
     Same kill-switch behavior driven by the gate-config flag (not the
-    env var). The env var is the operator-tunable seam; the gate-config
+    env var). Env var is the operator-tunable seam; the gate-config
     flag is the wiring-layer seam (test embeddings flip this to bypass
     the real call without touching the env).
+
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission so
+    the kill-switch off branch is the actual guard (the D10
+    meta-bypass exempts non-delegated missions before the kill-switch
+    check).
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
     node, manager, ledger = _make_node(
-        instance_id="marker-ks-cfg-off-it", llm_judge_enabled=False
+        instance_id="marker-ks-cfg-off-it",
+        llm_judge_enabled=False,
+        pending_children=1,
     )
     result = asyncio.run(
         node(
-            _quick_question_with_marker(
+            _delegated_mission_with_marker(
                 "Awaiting reply. Ending turn."
             ),
             config={"configurable": {"thread_id": "marker-ks-cfg-off-it"}},
@@ -838,9 +891,9 @@ def test_no_markers_no_judge_call(monkeypatch, caplog):
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
@@ -872,6 +925,9 @@ def test_no_markers_no_judge_call(monkeypatch, caplog):
     node, manager, ledger = _make_node(instance_id="marker-none-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -911,9 +967,9 @@ def test_attested_allow_skips_marker_scan(monkeypatch):
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
@@ -942,22 +998,28 @@ def test_log_marker_fields_present_on_marker_a_path(monkeypatch, caplog):
     """Log fields (marker_hit / marker_terms / marker_path / verdict /
     latency_ms / error_class) are all present on the marker-(a) path.
 
-    The canonical ``event=leader_completion_gate`` log row carries
-    ``marker_path=<pending>`` — emitted by ``evaluate()`` BEFORE the
-    judge runs (the marker scan is synchronous but the judge is
-    async). The FINAL ``marker_path=a`` lands on the routing log
-    line emitted by the graph node. The test pins both: the
-    canonical-row pending state AND the routing-line final value.
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission (the
+    D10 meta-bypass exempts non-delegated missions from the judge).
+    The canonical ``event=leader_completion_gate`` log row still
+    carries ``marker_path=<pending>`` (the gate's marker stamp is
+    unchanged); the judge fields now ride the FUSED judge row
+    (``event=leader_completion_gate_fused_judge``) and the resolver
+    row carries the authoritative ``resolver_outcome=``.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
-    node, manager, ledger = _make_node(instance_id="marker-log-a-it")
+    node, manager, ledger = _make_node(
+        instance_id="marker-log-a-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting your reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-log-a-it"}},
@@ -968,19 +1030,20 @@ def test_log_marker_fields_present_on_marker_a_path(monkeypatch, caplog):
 
     # marker-row fields on the canonical gate log line.
     assert "marker_hit=True" in log_text
-    assert "marker_terms=ending turn,awaiting" in log_text
+    assert "marker_terms=ending turn" in log_text
     # Canonical row says "<pending>" (judge hasn't run yet).
     assert "marker_path=<pending>" in log_text
 
-    # judge-row fields on the marker-path judge log line.
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=no" in log_text
+    # judge-row fields on the fused-judge log line.
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
     assert "llm_judge_latency_ms=" in log_text
     assert "llm_judge_model=fake-quick" in log_text
     assert "llm_judge_error_class=" in log_text
 
-    # The FINAL marker_path="a" lands on the routing log line.
-    assert "[AttestationGate] marker-path a instance=" in log_text
+    # The authoritative outcome lands on the resolver row — pending
+    # work + not_complete verdict ⇒ allow + hint.
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 def test_log_marker_fields_present_on_no_marker_path(monkeypatch, caplog):
@@ -1020,6 +1083,9 @@ def test_log_marker_fields_present_on_no_marker_path(monkeypatch, caplog):
     node, manager, ledger = _make_node(instance_id="marker-log-none-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         asyncio.run(
             node(
@@ -1049,37 +1115,35 @@ def test_log_marker_fields_present_on_no_marker_path(monkeypatch, caplog):
 
 
 def test_verbatim_incident_phrase_killed_by_path_a(monkeypatch, caplog):
-    """The VERBATIM incident phrase MUST be killed by the marker path.
+    """The VERBATIM incident phrase MUST be killed by the fused path.
 
     The b08f40fe-class regression guard: leader b08f40fe's final
     AIMessage was "Awaiting final four: C12a/b/c + blame-worker. Then
     I aggregate and write RESULTS. Ending turn." This is a delegated
-    mission ending without attestation. After the orphan-fix
-    (live_descendants=0) the gate's natural decision is DENIED
-    (R2 predicate catches it). For this test we want to exercise
-    the marker path on a tree that would otherwise ALLOW — set
-    live_descendants=0 + use a delegated mission so the natural
-    decision is "DENIED" via the R2 predicate... wait — if pending=0
-    + wakeups=0 + live_descendants=0, the natural decision IS
-    DENIED. So we exercise the marker path on a tree that
-    would-otherwise-ALLOW via the conditional_attestation_required
-    branch — but that's not delegated. Use a quick-question mission
-    (no send_message, conditional gate OFF, no attestation). The
-    natural decision is ALLOWED with attestation_required=False;
-    the marker scan fires; judge says no; nothing pending → path
-    (a) → CONVERT TO DENY + nudge. This is exactly the spec's
-    "Ending turn, will continue after your reply" example
-    applied to the verbatim incident text.
+    mission ending without attestation — the incident's real shape.
+
+    LCA Stage-2 flip re-contract (2026-09-16): the legacy doctrine
+    drove this via a NON-delegated quick-question (the
+    conditional-off branch was scanned by the legacy marker wiring);
+    the unified predicate's D10 meta-bypass exempts non-delegated
+    missions, so the verbatim-phrase kill now rides the DELEGATED
+    deny-band row (the incident's actual shape): the fused judge says
+    not_complete → DENIED stands → nudge + counter via the existing
+    machinery. The non-delegated exemption is pinned by
+    ``test_quick_question_with_marker_does_not_reach_judge``.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
     node, manager, ledger = _make_node(instance_id="b08f40fe-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting final four: C12a/b/c + blame-worker. "
                     "Then I aggregate and write RESULTS. Ending turn."
                 ),
@@ -1087,38 +1151,45 @@ def test_verbatim_incident_phrase_killed_by_path_a(monkeypatch, caplog):
             )
         )
 
-    # The b08f40fe-class kill: marker fires → judge-no → DENY + nudge.
+    # The b08f40fe-class kill: marker fires → judge-not-complete →
+    # DENIED + nudge.
     assert "messages" in result
     assert result["attestation_route"] == "agent"
     ledger.increment.assert_called_once()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "verdict=no" in log_text
-    assert "marker-path a" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Conditional-attestation OFF quick-question with mid-work phrasing — the
-# brief's exact example "Ending turn, will continue after your reply"
+# brief's original example "Ending turn, will continue after your reply".
+# LCA Stage-2 flip (2026-09-16): the D10 meta-bypass EXEMPTS non-delegated
+# missions from the judge — this test now pins the EXEMPTION (the unified
+# predicate's Term-1 short-circuit; stricter than the legacy marker-scan
+# wiring, per decisions.md D-RES1 spec-vs-landed delta + D-RES2).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_quick_question_with_marker_reaches_judge(monkeypatch, caplog):
-    """Brief example: a quick answer ending 'Ending turn, will continue
-    after your reply' must reach the judge.
+def test_quick_question_with_marker_does_not_reach_judge(monkeypatch, caplog):
+    """Brief's original quick-question example: under the unified
+    resolver the judge is NEVER called (D10 meta-bypass —
+    ``¬attestation_required`` ⇒ A/B never evaluated, plain allow,
+    zero LLM).
 
-    This is the canonical quick-question mission (no send_message,
-    conditional gate OFF, no attestation). The natural decision is
-    ALLOWED with attestation_required=False. The marker scan runs
-    anyway (per the brief's "Do NOT skip the attestation_required=false
-    allow — scan it too") and the judge gets called.
+    The legacy wiring scanned the conditional-off branch and reached
+    the judge there; the unified predicate deliberately does NOT
+    (spec §4.2 Term 1 / R4-D10 mirror — suspicion work is delegated-
+    missions-only). Pinned as the exemption invariant.
     """
     calls = []
 
-    async def record_call(config, user_payload, *, timeout_s):
+    async def record_call(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(user_payload)
         return (
-            '{"is_complete_report": false, "reason": "mid-work status"}',
+            '{"verdict": "not_complete", "evidence_cited": [], '
+            '"advisory_note_text": "", "rationale": "mid-work status"}',
             "fake-quick",
         )
 
@@ -1127,6 +1198,9 @@ def test_quick_question_with_marker_reaches_judge(monkeypatch, caplog):
     node, manager, ledger = _make_node(instance_id="marker-qq-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1138,13 +1212,20 @@ def test_quick_question_with_marker_reaches_judge(monkeypatch, caplog):
             )
         )
 
-    # Judge WAS called — the marker reached it.
-    assert len(calls) == 1
+    # Judge was NOT called — the D10 exemption held.
+    assert calls == []
 
-    # Nothing pending → (a) → DENY + nudge.
-    assert "messages" in result
-    assert result["attestation_route"] == "agent"
-    ledger.increment.assert_called_once()
+    # Plain ALLOW — no nudge, no counter, no hint.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    # The resolver row records the meta-bypass (not fired).
+    assert "attestation_required=False" in log_text
+    assert "fired=False" in log_text
+    assert "bypass_reason=meta_bypass" in log_text
+    assert "judge_invoked=False" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1168,16 +1249,16 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
     end contract on a delegated-mission dry run.
     """
     # The judge service must NEVER be called on the dry-mode path —
-    # the marker-path judge wiring in graph.py early-outs for DRY_LOG
-    # via the tuple check ``decision.decision in (Decision.ALLOWED,
-    # Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP)``. Track any
-    # accidental call as a regression.
+    # the fused block skips the judge when the snapshot mode is not
+    # "enforce" (R3: dry = activation computed + logged, node
+    # skipped). Track any accidental call as a regression.
     judge_calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         judge_calls.append(True)
         return (
-            '{"is_complete_report": true, "reason": "genuine"}',
+            '{"verdict": "complete", "evidence_cited": [], '
+            '"advisory_note_text": "", "rationale": "genuine"}',
             "fake-quick",
         )
 
@@ -1214,6 +1295,9 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
 
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1446,22 +1530,23 @@ def test_completion_check_note_compaction_seam_hoists_once():
 def test_marker_kill_switch_off_stamps_skipped_verdict(
     monkeypatch, caplog
 ):
-    """Green #1: kill-switch OFF stamps marker_judge_verdict=<skipped>.
+    """Green #1 (re-contracted to the fused seam, 2026-09-16): kill-switch
+    OFF emits the disabled row with verdict=<skipped>.
 
-    The kill-switch OFF branch in graph.py stamps
-    ``marker_judge_verdict="<skipped>"`` on the decision AND emits a
-    distinct log row so operators can grep-distinguish OFF-skipped
-    from judge-error/timeout/unparsable. Pin both: the decision
-    field AND the new log row.
+    LCA Stage-2 flip: the legacy ``<skipped>`` decision stamp rode the
+    now-dead marker block; the operator-observable signal is the
+    ``event=leader_completion_gate_fused_judge_disabled`` row
+    (``verdict=<skipped>``). Delegated + pending mission (marker band)
+    so the kill-switch branch is the actual guard.
     """
     # The judge service must NEVER be called on the kill-switch OFF
     # path — track any accidental call as a regression.
     judge_calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         judge_calls.append(True)
         return (
-            '{"is_complete_report": true, "reason": "genuine"}',
+            '{"verdict": "complete"}',
             "fake-quick",
         )
 
@@ -1474,13 +1559,18 @@ def test_marker_kill_switch_off_stamps_skipped_verdict(
     judge_resolver_mod.reset_llm_judge_resolver_for_tests()
     assert judge_resolver_mod.is_llm_judge_enabled() is False
 
-    node, manager, ledger = _make_node(instance_id="marker-skip-it")
+    node, manager, ledger = _make_node(
+        instance_id="marker-skip-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting reply. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "marker-skip-it"}},
@@ -1491,13 +1581,12 @@ def test_marker_kill_switch_off_stamps_skipped_verdict(
     assert judge_calls == []
 
     # Distinct log row emitted by the kill-switch OFF branch —
-    # ``event=leader_completion_gate_marker_judge_disabled`` with
-    # ``verdict=<skipped>``. Grep-disjoint from the existing judge
-    # event family so operators can pinpoint the operator-disabled
-    # case.
+    # ``event=leader_completion_gate_fused_judge_disabled`` with
+    # ``verdict=<skipped>``. Grep-disjoint from the fused judge event
+    # family so operators can pinpoint the operator-disabled case.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert (
-        "event=leader_completion_gate_marker_judge_disabled" in log_text
+        "event=leader_completion_gate_fused_judge_disabled" in log_text
     ), "green #1: kill-switch OFF MUST emit the disabled-row signal"
     assert "verdict=<skipped>" in log_text, (
         "green #1: the disabled-row verdict MUST be the literal "
@@ -1623,30 +1712,43 @@ def _long_completion_report() -> str:
 def test_length_short_no_marker_judge_fires(monkeypatch, caplog):
     """Short AIMessage + no markers → length trigger fires → judge runs.
 
-    The brevity-only trigger path (no marker phrases, just short prose):
-    "Understood, continuing." (2 words) — well under 150 — the judge
-    is the verdict. With nothing pending, judge-no → path (a) → DENY.
+    The brevity-only trigger path (no marker phrases, just short
+    prose): "Understood, continuing." (2 words) — well under 150 —
+    the judge is the verdict. LCA Stage-2 flip re-contract
+    (2026-09-16): DELEGATED mission (D10 exempts non-delegated);
+    judge-not-complete + nothing pending → DENY via the existing
+    machinery.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
-    node, manager, ledger = _make_node(instance_id="length-a-it")
+    # NOTE: a delegated ∧ quiet row decides DENIED and the gate's
+    # marker/length scan never runs (allow-family only) — the unified
+    # deny band drives the judge there. To exercise the LENGTH signal
+    # reaching the judge we use a row with real pending work (marker
+    # band).
+    node, manager, ledger = _make_node(
+        instance_id="length-a-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Understood, continuing."
                 ),
                 config={"configurable": {"thread_id": "length-a-it"}},
             )
         )
 
-    # DENIED via path (a) — marker_path="a" on the routing log line;
-    # judge-no + nothing pending.
+    # Allow + hint — length trigger fired, judge said not-complete,
+    # real pending work is en route.
     assert "messages" in result
-    assert result["attestation_route"] == "agent"
-    ledger.increment.assert_called_once()
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
 
     # Log row carries the length-trigger fields — neither marker
     # fired (no marker phrases in the prose) but length did.
@@ -1654,8 +1756,8 @@ def test_length_short_no_marker_judge_fires(monkeypatch, caplog):
     assert "marker_hit=False" in log_text
     assert "length_trigger=True" in log_text
     assert "trigger_source=length" in log_text
-    assert "marker-path a" in log_text
-    assert "verdict=no" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
+    assert "verdict=not_complete" in log_text
 
 
 def test_length_long_no_marker_no_judge_cost_control(monkeypatch, caplog):
@@ -1668,15 +1770,18 @@ def test_length_long_no_marker_no_judge_cost_control(monkeypatch, caplog):
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
     node, manager, ledger = _make_node(instance_id="length-cost-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1696,7 +1801,7 @@ def test_length_long_no_marker_no_judge_cost_control(monkeypatch, caplog):
     assert "marker_hit=False" in log_text
     assert "length_trigger=False" in log_text
     assert "trigger_source=<none>" in log_text
-    assert "event=leader_completion_gate_marker_judge" not in log_text
+    assert "event=leader_completion_gate_fused_judge" not in log_text
 
 
 def test_length_short_complete_artifact_judge_yes_allows(
@@ -1705,10 +1810,11 @@ def test_length_short_complete_artifact_judge_yes_allows(
     """Short AIMessage containing a quick-answer artifact → judge fires,
     judge says yes → ALLOW normally.
 
-    A short-but-complete quick answer (e.g., "Here is the chart you
-    asked for. <chart>" under 150 words, content includes the
-    artifact). The brevity class is real here, but the judge confirms
-    the artifact IS the deliverable. Verdict=yes → path (c) → ALLOW.
+    A short-but-complete answer (e.g., "Here is the chart you asked
+    for. <chart>" under 150 words, content includes the artifact).
+    The brevity class is real here, but the judge confirms the
+    artifact IS the deliverable. LCA Stage-2 flip re-contract
+    (2026-09-16): DELEGATED mission; complete verdict → allow END.
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_yes)
 
@@ -1716,13 +1822,18 @@ def test_length_short_complete_artifact_judge_yes_allows(
         "Here is the chart you asked for.\n\n```mermaid\n"
         "flowchart TD\n    A[Start] --> B[End]\n```\n"
     )
-    node, manager, ledger = _make_node(instance_id="length-c-it")
+    node, manager, ledger = _make_node(
+        instance_id="length-c-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(short_with_artifact),
+                _delegated_mission_with_marker(short_with_artifact),
                 config={"configurable": {"thread_id": "length-c-it"}},
             )
         )
@@ -1733,11 +1844,11 @@ def test_length_short_complete_artifact_judge_yes_allows(
     ledger.increment.assert_not_called()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    # Length trigger fired (short text); judge said yes; allow.
+    # Length trigger fired (short text); judge said complete; allow.
     assert "length_trigger=True" in log_text
     assert "trigger_source=length" in log_text
-    assert "verdict=yes" in log_text
-    assert "[AttestationGate] marker-path judge-yes" in log_text
+    assert "verdict=complete" in log_text
+    assert "resolver_outcome=allow" in log_text
 
 
 def test_length_short_real_pending_hint(monkeypatch, caplog):
@@ -1784,6 +1895,9 @@ def test_length_short_real_pending_hint(monkeypatch, caplog):
     short_no_marker = "Understood, continuing — child reply coming."
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1804,8 +1918,8 @@ def test_length_short_real_pending_hint(monkeypatch, caplog):
     assert "length_trigger=True" in log_text
     assert "marker_hit=False" in log_text
     assert "trigger_source=length" in log_text
-    assert "verdict=no" in log_text
-    assert "marker-path b" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 def test_length_short_markers_judge_combined_trigger_source(
@@ -1814,38 +1928,44 @@ def test_length_short_markers_judge_combined_trigger_source(
     """Short AIMessage WITH marker phrases → BOTH triggers fire →
     trigger_source="markers+length", judge runs.
 
-    The combined-trigger path — a quick answer like "Understood,
+    The combined-trigger path — an answer like "Understood,
     continuing. Ending turn." is BOTH a brevity-class AND a marker
     phrase. The OR-composition flips trigger_source to the combined
-    literal; the judge runs.
+    literal; the judge runs. LCA Stage-2 flip re-contract
+    (2026-09-16): DELEGATED mission (D10 exempts non-delegated).
     """
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _invoke_no)
 
-    node, manager, ledger = _make_node(instance_id="length-combined-it")
+    node, manager, ledger = _make_node(
+        instance_id="length-combined-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Understood, continuing. Ending turn."
                 ),
                 config={"configurable": {"thread_id": "length-combined-it"}},
             )
         )
 
-    # DENIED via path (a) — both triggers fire.
+    # Allow + hint — both triggers fire; judge-not-complete; pending.
     assert "messages" in result
-    assert result["attestation_route"] == "agent"
-    ledger.increment.assert_called_once()
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     # BOTH halves fire — trigger_source is the combined literal.
     assert "marker_hit=True" in log_text
     assert "length_trigger=True" in log_text
     assert "trigger_source=markers+length" in log_text
-    assert "marker-path a" in log_text
-    assert "verdict=no" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
+    assert "verdict=not_complete" in log_text
 
 
 def test_length_trigger_source_markers_only(monkeypatch, caplog):
@@ -1858,26 +1978,31 @@ def test_length_trigger_source_markers_only(monkeypatch, caplog):
     long_with_marker = (
         _long_completion_report() + " Ending turn."
     )
-    node, manager, ledger = _make_node(instance_id="length-m-it")
+    node, manager, ledger = _make_node(
+        instance_id="length-m-it", pending_children=1
+    )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(long_with_marker),
+                _delegated_mission_with_marker(long_with_marker),
                 config={"configurable": {"thread_id": "length-m-it"}},
             )
         )
 
-    # DENIED via path (a) — markers fired.
+    # Allow + hint — markers fired; judge-not-complete; pending.
     assert "messages" in result
-    assert result["attestation_route"] == "agent"
+    assert result["attestation_route"] is None
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=True" in log_text
     assert "length_trigger=False" in log_text
     assert "trigger_source=markers" in log_text
-    assert "marker-path a" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
@@ -1890,9 +2015,9 @@ def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
@@ -1926,6 +2051,9 @@ def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1950,7 +2078,7 @@ def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
     assert "trigger_source=length" in log_text
     assert "marker_path=<pending>" in log_text
     # No judge log row.
-    assert "event=leader_completion_gate_marker_judge" not in log_text
+    assert "event=leader_completion_gate_fused_judge" not in log_text
 
 
 def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
@@ -1963,18 +2091,26 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     """
     calls = []
 
-    async def must_not_be_called(config, user_payload, *, timeout_s):
+    async def must_not_be_called(config, user_payload, *, timeout_s, system_prompt=None):
         calls.append(True)
-        return ('{"is_complete_report": true, "reason": "yes"}', "fake-quick")
+        return ('{"verdict": "complete"}', "fake-quick")
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
     monkeypatch.setenv("ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED", "0")
     judge_resolver_mod.reset_llm_judge_resolver_for_tests()
     assert judge_resolver_mod.is_llm_judge_enabled() is False
 
+    # LCA Stage-2 flip re-contract (2026-09-16): non-delegated mission
+    # (quick question) — the D10 meta-bypass exempts it from the judge
+    # BEFORE the kill-switch is even consulted, so the length-only
+    # signal stays logged + plain allow (the marker-band kill-switch
+    # row is pinned by test_marker_kill_switch_env_off_no_judge_call).
     node, manager, ledger = _make_node(instance_id="length-ks-off-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -1996,15 +2132,12 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     # Length-trigger signal still surfaces on the canonical row.
     assert "length_trigger=True" in log_text
     assert "trigger_source=length" in log_text
-    # Distinct kill-switch OFF log row is emitted with verdict=<skipped>.
+    # D10 exemption: not fired, no judge row of any kind.
+    assert "fired=False" in log_text
+    assert "bypass_reason=meta_bypass" in log_text
     assert (
-        "event=leader_completion_gate_marker_judge_disabled" in log_text
-    )
-    assert "verdict=<skipped>" in log_text
-    # No live-judge log row.
-    assert (
-        "event=leader_completion_gate_marker_judge " not in log_text
-        and "event=leader_completion_gate_marker_judge\n" not in log_text
+        "event=leader_completion_gate_fused_judge" not in log_text
+        and "event=leader_completion_gate_fused_judge_disabled" not in log_text
     )
 
 
@@ -2211,6 +2344,9 @@ def test_busy_running_child_suppresses_marker_trigger_no_judge_no_hint(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -2267,6 +2403,9 @@ def test_busy_waiting_child_suppresses_marker_trigger(monkeypatch, caplog):
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -2305,6 +2444,9 @@ def test_busy_waiting_children_child_suppresses_marker_trigger(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -2344,6 +2486,9 @@ def test_paused_child_keeps_trigger_armed_no_suppression(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -2364,10 +2509,10 @@ def test_paused_child_keeps_trigger_armed_no_suppression(
     assert "busy_descendants=0" in log_text
     assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
     assert "trigger_source=markers+length" in log_text  # both halves fired
-    # Judge ran.
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=no" in log_text
-    assert "[AttestationGate] marker-path b instance=" in log_text
+    # Judge ran (fused).
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=allow_hint" in log_text
 
 
 def test_busy_suppression_short_only_length_trigger_no_judge(
@@ -2401,6 +2546,9 @@ def test_busy_suppression_short_only_length_trigger_no_judge(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
@@ -2431,14 +2579,13 @@ def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
     NOT regress the existing deny path.
 
     Pin the historical contract: when trigger fires, busy=0, and
-    nothing is pending, the gate converts to DENY + nudge + counter
-    increment. This test mirrors the original
-    ``test_marker_a_deny_nudge_counter_increments`` shape (the
-    non-delegated mission where ``attestation_required=False`` — the
-    natural ALLOW path is the only way to reach the (a) route). The
-    test exercises the new busy-input plumbing explicitly
-    (``busy_descendants=0``) so any future refactor that accidentally
-    drops the busy read is caught.
+    nothing is pending, the gate denies + nudges + increments.
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission
+    (the D10 meta-bypass exempts non-delegated; the deny band +
+    judge-not-complete reaches the same outcome). The test exercises
+    the busy-input plumbing explicitly (``busy_descendants=0``) so
+    any future refactor that accidentally drops the busy read is
+    caught.
     """
     monkeypatch.setattr(
         "daemon.services.attestation_report_judge._invoke_judge_llm",
@@ -2451,17 +2598,20 @@ def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting your reply. Ending turn, will continue after."
                 ),
                 config={"configurable": {"thread_id": "busy-zero-deny-it"}},
             )
         )
 
-    # Path (a) — DENY + nudge + counter+1, UNCHANGED.
+    # DENY + nudge + counter+1, UNCHANGED.
     assert result["attestation_route"] == "agent"
     # Deny path injects a nudge message into state.
     assert "messages" in result
@@ -2473,11 +2623,15 @@ def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=0" in log_text
     assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
-    assert "marker_hit=True" in log_text
-    # Judge ran.
-    assert "event=leader_completion_gate_marker_judge" in log_text
-    assert "verdict=no" in log_text
-    assert "[AttestationGate] marker-path a instance=" in log_text
+    # NOTE: quiet delegated rows never run the marker scan (the gate
+    # scans allow-family decisions only) — the unified DENY band
+    # drives the judge; marker_hit stays False on the canonical row.
+    assert "marker_hit=False" in log_text
+    # Judge ran (fused) — deny band rescue attempt, not_complete.
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "band=deny" in log_text
+    assert "verdict=not_complete" in log_text
+    assert "resolver_outcome=deny_nudge" in log_text
 
 
 def test_deny_path_suite_unchanged_existing_marker_a_still_works(
@@ -2489,21 +2643,26 @@ def test_deny_path_suite_unchanged_existing_marker_a_still_works(
 
     This is a regression guard — the marker_a_deny_nudge_counter_
     increments test shape, re-run with the busy plumbing in place.
+    LCA Stage-2 flip re-contract (2026-09-16): DELEGATED mission
+    (D10 meta-bypass).
     """
     monkeypatch.setattr(
         "daemon.services.attestation_report_judge._invoke_judge_llm",
         _invoke_no,
     )
-    # busy=0, live=0 — clean (a)-path. Same shape as
+    # busy=0, live=0 — clean deny-band shape. Same shape as
     # test_marker_a_deny_nudge_counter_increments but exercises the
-    # new _make_node defaults (busy_descendants=0).
+    # _make_node defaults (busy_descendants=0).
     node, manager, ledger = _make_node(instance_id="marker-a-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(
-                _quick_question_with_marker(
+                _delegated_mission_with_marker(
                     "Awaiting your reply. Ending turn, will continue after."
                 ),
                 config={"configurable": {"thread_id": "marker-a-it"}},
@@ -2541,6 +2700,9 @@ def test_busy_suppression_short_only_length_trigger_log_has_both_fields(
     node, manager, ledger = _make_node(instance_id="log-pin-it")
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         asyncio.run(
             node(
@@ -2587,6 +2749,9 @@ def test_busy_suppression_both_triggers_combined_no_judge(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         asyncio.run(
             node(
@@ -2655,6 +2820,9 @@ def test_busy_suppression_dry_mode_log_only_no_judge_no_hint(
     )
     with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
         logging.INFO, logger="daemon.services.attestation_gate"
+    ), caplog.at_level(
+        logging.INFO,
+        logger="daemon.services.attestation_resolver_activation",
     ):
         result = asyncio.run(
             node(

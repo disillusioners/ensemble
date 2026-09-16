@@ -164,32 +164,38 @@ def _delegated_mission_without_attest(
     }
 
 
-# Stub LLM invoker factories
+# Stub LLM invoker factories.
+#
+# LCA Stage-2 flip re-contract (2026-09-16): the node's fused block is
+# the ONLY judge path; the stub payloads answer in the FUSED verdict
+# JSON shape and the seam signature carries ``system_prompt=``.
 
 
-async def _invoke_yes(config, user_payload, *, timeout_s):
+async def _invoke_yes(config, user_payload, *, timeout_s, system_prompt=None):
     return (
-        '{"is_complete_report": true, "reason": "detailed outcomes delivered"}',
+        '{"verdict": "complete", "evidence_cited": ["detailed outcomes delivered"], '
+        '"advisory_note_text": "", "rationale": "detailed outcomes delivered"}',
         "fake-quick",
     )
 
 
-async def _invoke_no(config, user_payload, *, timeout_s):
+async def _invoke_no(config, user_payload, *, timeout_s, system_prompt=None):
     return (
-        '{"is_complete_report": false, "reason": "short status only"}',
+        '{"verdict": "not_complete", "evidence_cited": [], '
+        '"advisory_note_text": "", "rationale": "short status only"}',
         "fake-quick",
     )
 
 
-async def _invoke_unparsable(config, user_payload, *, timeout_s):
+async def _invoke_unparsable(config, user_payload, *, timeout_s, system_prompt=None):
     return ("Sorry, I cannot help with that.", "fake-quick")
 
 
-async def _invoke_timeout(config, user_payload, *, timeout_s):
+async def _invoke_timeout(config, user_payload, *, timeout_s, system_prompt=None):
     raise asyncio.TimeoutError()
 
 
-async def _invoke_error(config, user_payload, *, timeout_s):
+async def _invoke_error(config, user_payload, *, timeout_s, system_prompt=None):
     raise RuntimeError("boom")
 
 
@@ -225,10 +231,10 @@ def test_judge_yes_allows_without_nudge_no_counter_increment(monkeypatch, caplog
 
     # Log fields present.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" in log_text
-    assert "verdict=yes" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=complete" in log_text
     assert "llm_judge_model=fake-quick" in log_text
-    assert "[AttestationGate] judge-yes override" in log_text
+    assert "[AttestationGate] fused-judge rescue" in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -287,9 +293,9 @@ def test_judge_yes_at_bound_minus_one_does_not_escalate(
 
     # Log fields present — the judge-yes override fired.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" in log_text
-    assert "verdict=yes" in log_text
-    assert "[AttestationGate] judge-yes override" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=complete" in log_text
+    assert "[AttestationGate] fused-judge rescue" in log_text
     # The bound-exceeded log line MUST NOT fire — pinning the
     # counter-no-escalation invariant.
     assert "event=leader_completion_gate_terminal_after_bound" not in log_text
@@ -323,8 +329,8 @@ def test_judge_no_falls_through_to_deny_nudge_increments_counter(
 
     # Log fields present.
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" in log_text
-    assert "verdict=no" in log_text
+    assert "event=leader_completion_gate_fused_judge" in log_text
+    assert "verdict=not_complete" in log_text
     assert "[AttestationGate] deny instance=" in log_text
 
 
@@ -441,7 +447,10 @@ def test_judge_not_called_when_gate_config_flag_off(monkeypatch, caplog):
     ledger.increment.assert_called_once()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_fused_judge " not in log_text
+        and "event=leader_completion_gate_fused_judge\n" not in log_text
+    )
 
 
 def test_judge_not_called_when_env_kill_switch_off_real_resolver(
@@ -490,7 +499,10 @@ def test_judge_not_called_when_env_kill_switch_off_real_resolver(
     assert result["attestation_route"] == "agent"
     ledger.increment.assert_called_once()
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_fused_judge " not in log_text
+        and "event=leader_completion_gate_fused_judge\n" not in log_text
+    )
 
 
 def test_judge_not_called_when_env_kill_switch_off(monkeypatch, caplog):
@@ -530,7 +542,10 @@ def test_judge_not_called_when_env_kill_switch_off(monkeypatch, caplog):
     assert result["attestation_route"] == "agent"
     ledger.increment.assert_called_once()
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    assert "event=leader_completion_gate_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_fused_judge " not in log_text
+        and "event=leader_completion_gate_fused_judge\n" not in log_text
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -862,7 +877,10 @@ def test_judge_not_called_on_terminal_after_bound_path(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "event=leader_completion_gate_terminal_after_bound" in log_text
     assert "completion_gate_escalated=true" in log_text
-    assert "event=leader_completion_gate_judge" not in log_text
+    assert (
+        "event=leader_completion_gate_fused_judge " not in log_text
+        and "event=leader_completion_gate_fused_judge\n" not in log_text
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -886,12 +904,12 @@ def test_log_fields_present_on_judge_yes(monkeypatch, caplog):
     judge_log = [
         r.getMessage()
         for r in caplog.records
-        if "event=leader_completion_gate_judge" in r.getMessage()
+        if "event=leader_completion_gate_fused_judge" in r.getMessage()
     ]
     assert len(judge_log) >= 1
     msg = judge_log[0]
-    assert "event=leader_completion_gate_judge" in msg
-    assert "verdict=yes" in msg
+    assert "event=leader_completion_gate_fused_judge" in msg
+    assert "verdict=complete" in msg
     # W3 review fix — the duplicate ``llm_judge_verdict`` field was
     # dropped (it carried the same value as ``verdict`` and confused
     # log grep). The model name still lives on the dedicated
@@ -919,7 +937,7 @@ def test_log_fields_present_on_judge_error(monkeypatch, caplog):
     judge_log = [
         r.getMessage()
         for r in caplog.records
-        if "event=leader_completion_gate_judge" in r.getMessage()
+        if "event=leader_completion_gate_fused_judge" in r.getMessage()
     ]
     assert len(judge_log) >= 1
     msg = judge_log[0]
@@ -979,7 +997,7 @@ def test_model_fallback_to_main_when_keywords_empty(monkeypatch, caplog):
     judge_log = [
         r.getMessage()
         for r in caplog.records
-        if "event=leader_completion_gate_judge" in r.getMessage()
+        if "event=leader_completion_gate_fused_judge" in r.getMessage()
     ]
     assert len(judge_log) >= 1
     assert "llm_judge_model=gpt-fallback-main" in judge_log[0]
@@ -1028,7 +1046,7 @@ def test_model_uses_keywords_when_set(monkeypatch, caplog):
     judge_log = [
         r.getMessage()
         for r in caplog.records
-        if "event=leader_completion_gate_judge" in r.getMessage()
+        if "event=leader_completion_gate_fused_judge" in r.getMessage()
     ]
     assert len(judge_log) >= 1
     assert "llm_judge_model=gpt-quick" in judge_log[0]

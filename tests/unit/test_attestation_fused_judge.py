@@ -1,0 +1,315 @@
+"""LCA unified resolver — Stage-2 fused judge unit tests (2026-09-16).
+
+Covers :func:`daemon.services.attestation_report_judge.
+judge_fused_bundle_async` — the ONE judge call site of the flipped
+resolver (graph-node fused block):
+
+* Verdict-JSON parsing (:func:`_parse_fused_judge_response`) — the
+  strict/tolerant shape mirrors the legacy judge's parser; the
+  load-bearing field is ``verdict`` ("complete"|"not_complete").
+* Retry-once-on-unparsable (incident 98b59dd7 semantics, mirrored):
+  the retry fires ONLY when the model responded but the verdict JSON
+  did not parse — NEVER on timeout / exception; ``attempt=2`` +
+  ``first_unparsable_excerpt`` on the retry paths.
+* The ``invoked`` real-invocation flag (Stage-1 review hazard pin:
+  the eval row's ``judge_invoked`` derives from it) — True on every
+  LLM-attempt path, False ONLY on the degenerate empty-bundle guard.
+* Transport invariants SHARED with the legacy judge via the single
+  ``_invoke_judge_llm`` seam: the fused call passes its own system
+  prompt; the legacy default prompt is untouched (backward pin).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from unittest.mock import MagicMock
+
+import pytest
+
+from daemon.services import attestation_report_judge as jm
+from daemon.services.attestation_report_judge import (
+    FUSED_JUDGE_SYSTEM_PROMPT,
+    FusedJudgeResult,
+    judge_fused_bundle_async,
+)
+
+
+def _config() -> MagicMock:
+    cfg = MagicMock()
+    cfg.llm.model_keywords = "quick"
+    cfg.llm.request_timeout = 30.0
+    return cfg
+
+
+def _complete_payload() -> str:
+    return (
+        '{"verdict": "complete", "evidence_cited": ["report enumerates outcomes"], '
+        '"advisory_note_text": "", "rationale": "genuine"}'
+    )
+
+
+def _not_complete_payload() -> str:
+    return (
+        '{"verdict": "not_complete", "evidence_cited": ["child promised future work"], '
+        '"advisory_note_text": "Check the child", "rationale": "contradiction"}'
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestParseFusedJudgeResponse:
+    def test_complete_verdict(self):
+        parsed = jm._parse_fused_judge_response(_complete_payload())
+        assert parsed is not None
+        is_complete, evidence, advisory, rationale = parsed
+        assert is_complete is True
+        assert evidence == ("report enumerates outcomes",)
+        assert advisory == ""
+        assert rationale == "genuine"
+
+    def test_not_complete_verdict(self):
+        parsed = jm._parse_fused_judge_response(_not_complete_payload())
+        assert parsed is not None
+        is_complete, evidence, advisory, _ = parsed
+        assert is_complete is False
+        assert evidence == ("child promised future work",)
+        assert advisory == "Check the child"
+
+    def test_missing_optional_fields_tolerated(self):
+        parsed = jm._parse_fused_judge_response('{"verdict": "complete"}')
+        assert parsed == (True, (), "", "")
+
+    def test_wrong_verdict_value_is_unparsable(self):
+        assert jm._parse_fused_judge_response('{"verdict": "maybe"}') is None
+        assert jm._parse_fused_judge_response('{"verdict": null}') is None
+        assert jm._parse_fused_judge_response("{}") is None
+
+    def test_legacy_shape_is_unparsable(self):
+        # The legacy {"is_complete_report": bool} shape does NOT parse —
+        # the fused contract is the verdict-JSON only.
+        assert (
+            jm._parse_fused_judge_response(
+                '{"is_complete_report": true, "reason": "x"}'
+            )
+            is None
+        )
+
+    def test_prose_is_unparsable(self):
+        assert jm._parse_fused_judge_response("Sure, here you go.") is None
+        assert jm._parse_fused_judge_response("") is None
+
+    def test_code_fence_tolerated(self):
+        fenced = f"```json\n{_not_complete_payload()}\n```"
+        parsed = jm._parse_fused_judge_response(fenced)
+        assert parsed is not None
+        assert parsed[0] is False
+
+    def test_evidence_caps(self):
+        items = [f"quote {i}" for i in range(10)]
+        long_item = "x" * 500
+        payload = json.dumps(
+            {
+                "verdict": "not_complete",
+                "evidence_cited": [*items, long_item],
+            }
+        )
+        _, evidence, _, _ = jm._parse_fused_judge_response(payload)
+        assert len(evidence) == jm.FUSED_JUDGE_EVIDENCE_ITEMS_MAX
+        assert all(
+            len(item) <= jm.FUSED_JUDGE_EVIDENCE_ITEM_MAX_CHARS
+            for item in evidence
+        )
+
+    def test_advisory_capped(self):
+        payload = json.dumps(
+            {"verdict": "not_complete", "advisory_note_text": "a" * 500}
+        )
+        _, _, advisory, _ = jm._parse_fused_judge_response(payload)
+        assert len(advisory) <= jm.FUSED_JUDGE_ADVISORY_MAX_CHARS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# judge_fused_bundle_async — verdict paths + retry semantics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFusedJudgeVerdictPaths:
+    def test_complete(self, monkeypatch):
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            return (_complete_payload(), "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle text", config=_config())
+        )
+        assert isinstance(result, FusedJudgeResult)
+        assert result.invoked is True
+        assert result.is_complete is True
+        assert result.verdict == "complete"
+        assert result.attempt == 1
+        assert result.error_class is None
+        # advisory cleared on complete verdicts (no hint fires on allow)
+        assert result.advisory_note_text == ""
+
+    def test_not_complete_carries_evidence(self, monkeypatch):
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            return (_not_complete_payload(), "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle text", config=_config())
+        )
+        assert result.is_complete is False
+        assert result.verdict == "not_complete"
+        assert result.evidence_cited == ("child promised future work",)
+        assert result.advisory_note_text == "Check the child"
+
+    def test_timeout_no_retry_conservative(self, monkeypatch):
+        calls = []
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls.append(1)
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle text", config=_config())
+        )
+        assert result.verdict == "timeout"
+        assert result.is_complete is False
+        assert result.error_class == "TimeoutError"
+        # NO retry on timeout (98b59dd7 contract) — one HTTP attempt.
+        assert len(calls) == 1
+        assert result.attempt == 1
+
+    def test_error_no_retry_conservative(self, monkeypatch):
+        calls = []
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle text", config=_config())
+        )
+        assert result.verdict == "error"
+        assert result.is_complete is False
+        assert result.error_class == "RuntimeError"
+        assert len(calls) == 1
+
+    def test_empty_bundle_guard_invoked_false(self):
+        result = asyncio.run(
+            judge_fused_bundle_async("", config=_config())
+        )
+        assert result.invoked is False
+        assert result.verdict == "error"
+        assert result.error_class == "EmptyBundle"
+
+    def test_never_raises_on_wrapper_stub_explosion(self, monkeypatch):
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _boom)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        # never-raises contract: error verdict, conservative.
+        assert result.verdict == "error"
+        assert result.is_complete is False
+
+
+class TestFusedJudgeRetryOnceOnUnparsable:
+    def test_retry_recovers(self, monkeypatch):
+        responses = ["prose, no JSON", _not_complete_payload()]
+        calls = []
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls.append(payload)
+            return (responses[len(calls) - 1], "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        assert len(calls) == 2
+        assert result.attempt == 2
+        assert result.verdict == "not_complete"
+        assert result.first_unparsable_excerpt  # forensic excerpt preserved
+
+    def test_both_unparsable_conservative(self, monkeypatch):
+        calls = []
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls.append(1)
+            return ("Sorry, cannot help.", "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        assert len(calls) == 2  # exactly ONE retry — never a third
+        assert result.verdict == "unparsable"
+        assert result.is_complete is False
+        assert result.attempt == 2
+        assert result.first_unparsable_excerpt
+
+    def test_retry_timeout_carries_attempt2(self, monkeypatch):
+        state = {"n": 0}
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            state["n"] += 1
+            if state["n"] == 1:
+                return ("prose", "fake-quick")
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        assert result.verdict == "timeout"
+        assert result.attempt == 2
+        assert result.first_unparsable_excerpt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared transport seam pins
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedTransportSeam:
+    def test_fused_call_passes_its_own_system_prompt(self, monkeypatch):
+        seen = {}
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            seen["prompt"] = system_prompt
+            seen["payload"] = payload
+            return (_complete_payload(), "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        asyncio.run(
+            judge_fused_bundle_async("[LCA FUSED EVIDENCE BUNDLE v1]", config=_config())
+        )
+        assert seen["prompt"] == FUSED_JUDGE_SYSTEM_PROMPT
+        # The bundle is the payload VERBATIM (no re-truncation).
+        assert seen["payload"] == "[LCA FUSED EVIDENCE BUNDLE v1]"
+
+    def test_legacy_default_prompt_unchanged(self):
+        # Backward pin: the legacy window judge's default prompt is the
+        # module constant (the additive system_prompt kwarg defaults to
+        # the legacy value — old callers byte-identical).
+        import inspect
+
+        sig = inspect.signature(jm._invoke_judge_llm)
+        assert sig.parameters["system_prompt"].default == jm.JUDGE_SYSTEM_PROMPT
+
+    def test_fused_prompt_names_all_three_sources(self):
+        # The prompt must orient the judge to the bundle's three
+        # sections so evidence_cited can reference them.
+        assert "SOURCE A" in FUSED_JUDGE_SYSTEM_PROMPT
+        assert "SOURCE B" in FUSED_JUDGE_SYSTEM_PROMPT
+        assert "SOURCE C" in FUSED_JUDGE_SYSTEM_PROMPT
+        assert "not_complete" in FUSED_JUDGE_SYSTEM_PROMPT

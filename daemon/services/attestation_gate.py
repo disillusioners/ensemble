@@ -418,6 +418,19 @@ class GateDecision:
     #: hint, no counter movement. Logged as the 18th canonical
     #: schema field.
     user_answer_pending: bool = False
+    #: 2026-09-16 LCA resolver Stage-2 flip — the unified resolver's
+    #: evaluation snapshot (``ResolverEvalSnapshot``: activation
+    #: result with the fused bundle, would-be outcome, agreement, row
+    #: context), computed at the §(vi) seam of the canonical
+    #: ``evaluate()`` path. ``None`` on the meta-bypass / off-mode
+    #: early returns, the C-read DB-error fail-open branch, and every
+    #: pre-Stage-2 construction site (additive default). The graph
+    #: node's fused block consumes it as the AUTHORITATIVE completion
+    #: outcome source (band + bundle → fused judge → outcome mapping)
+    #: and emits the ``event=leader_completion_resolver_eval`` row
+    #: from it. NOT part of any log schema (the row carries the
+    #: fields); this field is control-flow plumbing only.
+    resolver: "Any | None" = None
 
 
 #: Marker-path enum constants — the canonical strings the gate emits on
@@ -830,6 +843,7 @@ def evaluate(
     tool_name: str = DEFAULT_ATTESTATION_TOOL_NAME,
     leader_prompt_version: str = "",
     gate_location: str = GATE_LOCATION_GRAPH_END_CANDIDATE,
+    ledger: Any = None,
 ) -> GateDecision:
     """Glue: scanner → R2 facade reads → decide → canonical log entry.
 
@@ -1407,29 +1421,32 @@ def evaluate(
             ):
                 record_promotion_metric(METRIC_ENFORCE_DENIED_TOTAL)
 
-        # (vi) Stage-1 LCA unified-resolver parallel-dry shadow
-        # (2026-09-16, resolver-unification §4 — additive, zero routing).
-        # Runs EXACTLY where the existing gate evaluation runs (the
+        # (vi) LCA unified-resolver evaluation (Stage-1 shadow seam,
+        # Stage-2 flip, 2026-09-16, resolver-unification §4). Runs
+        # EXACTLY where the existing gate evaluation runs (the
         # canonical-path tail; the meta-bypass / off-mode early returns
-        # above never reach it) and emits ONE structured
-        # ``event=leader_completion_resolver_eval`` row + (when the
-        # predicate would fire) the fused evidence bundle's sha256/size.
-        # The old paths above remain AUTHORITATIVE and byte-identical —
-        # the shadow's return value is discarded; any resolver-side
-        # error is logged (``..._resolver_eval_error``) and NEVER
-        # propagates into gate control flow. Zero new LLM calls, zero
-        # new DB reads for the predicate (C values are the already-
-        # materialized facade reads; A is a pure message-walk; B values
-        # are the already-computed marker/length results).
+        # above never reach it). Computes the activation predicate +
+        # fused bundle and attaches the :class:`ResolverEvalSnapshot`
+        # to the decision — the GRAPH NODE's fused block (the
+        # AUTHORITATIVE completion outcome source post-flip) invokes
+        # the fused judge from it and emits the ONE structured
+        # ``event=leader_completion_resolver_eval`` row. Any
+        # resolver-side error is logged
+        # (``..._resolver_eval_error``) and NEVER propagates into gate
+        # control flow. Zero new DB reads for the predicate (C values
+        # are the already-materialized facade reads; A is a pure
+        # message-walk; B values are the already-computed marker/
+        # length results); the tree-rows provider runs lazily and only
+        # on would-fire.
         try:
             from .attestation_resolver_activation import (
                 SourceBSignals,
                 SourceCSignals,
-                evaluate_shadow_activation,
+                evaluate_resolver_activation,
                 make_tree_rows_provider,
             )
 
-            evaluate_shadow_activation(
+            resolver_snapshot = evaluate_resolver_activation(
                 instance_id=instance_id,
                 gate_location=gate_location,
                 leader_prompt_version=leader_prompt_version,
@@ -1461,11 +1478,14 @@ def evaluate(
                     manager, instance_id
                 ),
             )
-        except Exception as shadow_exc:  # noqa: BLE001 — shadow is never load-bearing
+            # Stage-2 flip: the snapshot rides the decision to the
+            # graph node (frozen dataclass — ``replace`` rebuilds).
+            result = replace(result, resolver=resolver_snapshot)
+        except Exception as shadow_exc:  # noqa: BLE001 — resolver compute is never load-bearing
             logger.error(
                 "event=leader_completion_resolver_eval_error "
                 "error_class=%s instance_id=%s gate_location=%s "
-                "mode=%s detail=%s: %s",
+                "mode=%s gate_exception_seen=true detail=%s: %s",
                 type(shadow_exc).__name__,
                 instance_id,
                 gate_location,
@@ -1473,6 +1493,44 @@ def evaluate(
                 type(shadow_exc).__name__,
                 shadow_exc,
             )
+            # F-C (2026-09-16) — stamp the transient
+            # ``gate_exception_seen`` marker on the instance row via
+            # the shared helper (FR-13 contract: "set a transient
+            # gate_exception_seen=true flag on the instance row").
+            # The caller (``graph.py:attestation_gate_node``) passes
+            # the ``ledger`` kwarg — if absent (legacy callers, the
+            # standalone ``evaluate`` unit tests), the marker write
+            # is a no-op (the unit tests already assert the row
+            # emission directly; the marker write is the canonical
+            # observability stamp for the production graph path).
+            #
+            # NOTE: we deliberately do NOT also flip
+            # ``decision.gate_exception_seen=True`` here — that
+            # field is the early-return trigger at graph.py:5170
+            # (the FR-13 full fail-open allow path on the
+            # scanner/decide seam). Setting it here would bypass
+            # Phase-3 deny+nudge (DP-5 REJECTED — resolver-fault on
+            # the deny band stays conservative deny via the existing
+            # ledger+nudge machinery; the marker stamp is the
+            # observability side, not the outcome flip). The
+            # ledger write is the canonical FR-13 stamp; the
+            # outcome stays whatever ``decide()`` returned.
+            if ledger is not None:
+                try:
+                    from daemon.graph import (
+                        _persist_gate_exception_marker,
+                    )
+
+                    _persist_gate_exception_marker(ledger, instance_id)
+                except Exception as marker_exc:  # noqa: BLE001 — marker is diagnostic only
+                    logger.warning(
+                        "event=leader_completion_gate_db_error "
+                        "method=persist_gate_exception_marker "
+                        "instance_id=%s detail=%s: %s",
+                        instance_id,
+                        type(marker_exc).__name__,
+                        marker_exc,
+                    )
 
         return result
 

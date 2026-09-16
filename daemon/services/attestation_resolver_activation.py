@@ -1,21 +1,23 @@
-"""LCA unified resolver — Stage 1 parallel-dry activation predicate (shadow).
+"""LCA unified resolver — Stage 1 activation predicate + Stage 2 flip support.
 
-Implements the additive Stage-1 shadow of the unified 3-source completion
-resolver (spec: ``.agents/shared/planning/leader-completion-attestation/
-resolver-unification.md`` §4.1/§4.2/§4.3). NOTHING in this module routes,
-denies, nudges, hints, or calls an LLM — the old gate paths remain
-AUTHORITATIVE and byte-identical; every evaluation of this shadow emits ONE
-structured ``event=leader_completion_resolver_eval`` log row (the soak
-signal) and nothing else.
+Implements the unified 3-source completion resolver (spec:
+``.agents/shared/planning/leader-completion-attestation/
+resolver-unification.md`` §4.1/§4.2/§4.3). **Stage 2 (the flip,
+2026-09-16)**: the resolver's outcome mapping is AUTHORITATIVE at the
+completion seam — this module computes the predicate + fused bundle in
+the gate thread and the GRAPH NODE's fused block invokes the fused
+judge + maps the outcome + emits the structured
+``event=leader_completion_resolver_eval`` row (with ``judge_invoked``
+DERIVED from the real invocation flag). The two legacy judge sites in
+``daemon/graph.py`` are dead-but-present (Stage 3 deletes).
 
-Stage-1 scope (user-locked 2026-09-16):
+Stage-2 scope (user-locked 2026-09-16):
   * Δ1–Δ4 approved (evidence fusion shapes); Δ2 mirrored exactly — Source A
     is NOT busy-suppressed; Source B IS busy-muted.
-  * DP-5 REJECTED — judge error/timeout stays path-(d) deny in the TARGET
-    design; Stage 1 has no live effect (the would-be mapping is judge-free).
-  * R1–R8 retirement is Stage 3 ONLY — this cycle removes/alters nothing.
-  * NO new env flags (repo convention n). ZERO new LLM calls (budget
-    parity ABSOLUTE).
+  * DP-5 REJECTED — judge error/timeout stays conservative path-(d) deny;
+    the rejected fail-safe-allow shape appears nowhere.
+  * R1–R8 retirement is Stage 3 ONLY — legacy blocks stay present.
+  * NO new env flags (repo convention n).
 
 Components
 ----------
@@ -30,26 +32,31 @@ Components
     (``attestation_gate.evaluate``, gate DB-error handler).
 
 ``compute_would_be_outcome`` (pure)
-    The §4.3 NO-JUDGE mapping — Stage 1 has no fused LLM node, so the
-    would-be outcome is derived from the band + the shared deny bound +
-    route-(b)'s pending predicate: deny band → ``would_deny_nudge``
-    (``would_terminal`` when ``deny_bound_exceeded``); marker/A bands →
+    The §4.3 NO-JUDGE mapping — the kill-switch-off / dry-mode reference
+    outcome (deny band → ``would_deny_nudge`` /
+    ``would_terminal`` at the SHARED bound predicate; marker/A bands →
     ``would_hint`` when route-(b) pending (pending ∨ wakeups ∨ live, the
-    graph.py ``nothing_pending`` composition) else ``would_allow``.
+    graph.py ``nothing_pending`` composition) else ``would_allow``).
 
 ``assemble_fused_bundle`` (pure)
     Spec §4.1 bundle: A child-report evidence ≤3000 chars + B leader
     signals / last-3-AIMessages ≤6000 + C first-10 per-descendant tree rows
-    (id-redacted) + scalar counts ≤3000, total ≤12000. Stage 1 only
-    assembles + hashes it; the Stage-2 invocation seam
-    (:data:`STAGE2_JUDGE_SEAM`) exists structurally but is inert (None).
+    (id-redacted) + scalar counts ≤3000, total ≤12000. Stage 2 feeds this
+    bundle to :func:`attestation_report_judge.judge_fused_bundle_async`
+    (the ONE fused judge call site, invoked from the graph node).
 
-``evaluate_shadow_activation``
-    The wiring orchestrator: predicate → would-be outcome → agreement vs
-    the old-path decision → conditional bundle assembly → ONE log row.
-    Exception-isolated at the CALLER (the gate wraps it) AND internally
-    best-effort: a resolver-side error logs
+``evaluate_resolver_activation``
+    The gate-thread wiring: predicate → would-be outcome → agreement vs
+    the old-path decision → conditional bundle assembly → ONE
+    :class:`ResolverEvalSnapshot` (NO logging, NO LLM — the graph node
+    owns both post-flip). Exception-isolated at the CALLER (the gate
+    wraps it) — a resolver-side error logs
     ``event=leader_completion_resolver_eval_error`` and never propagates.
+
+``emit_resolver_eval_row``
+    The node-side row emission — byte-compatible with the Stage-1 row
+    shape plus the additive ``judge_verdict=`` / ``resolver_outcome=``
+    tail fields; ``judge_invoked`` is the DERIVED real-invocation flag.
 
 Naming divergence (recorded in decisions.md): the spec §4.1 suggested
 ``event=leader_activation`` and module ``attestation_activation.py``; the
@@ -93,7 +100,11 @@ __all__ = [
     "SourceBSignals",
     "SourceCSignals",
     "FusedBundle",
-    "STAGE2_JUDGE_SEAM",
+    "RESOLVER_OUTCOME_ALLOW",
+    "RESOLVER_OUTCOME_ALLOW_HINT",
+    "RESOLVER_OUTCOME_DENY_NUDGE",
+    "RESOLVER_OUTCOME_TERMINAL_AFTER_BOUND",
+    "ResolverEvalSnapshot",
     "TERM_A_SUSPICION",
     "TERM_B_FIRES",
     "TERM_C_QUIET",
@@ -106,7 +117,8 @@ __all__ = [
     "collect_source_a_signals",
     "compute_agreement",
     "compute_would_be_outcome",
-    "evaluate_shadow_activation",
+    "emit_resolver_eval_row",
+    "evaluate_resolver_activation",
     "log_shadow_fail_open",
     "make_tree_rows_provider",
     "map_old_decision_to_outcome",
@@ -301,6 +313,47 @@ class ActivationResult:
     fail_open_error_class: str | None = None
     #: The fused evidence bundle, assembled when ``fired`` (else None).
     bundle: FusedBundle | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class ResolverEvalSnapshot:
+    """One resolver evaluation's compute output, ready for row emission.
+
+    Stage 2 (the flip, 2026-09-16): the predicate + bundle are computed
+    in the gate thread (``attestation_gate.evaluate`` canonical-path
+    tail) and the structured ``event=leader_completion_resolver_eval``
+    row is emitted by the GRAPH NODE — AFTER the fused judge decision —
+    so ``judge_invoked`` is DERIVED from the real invocation flag
+    (:attr:`FusedJudgeResult.invoked` via
+    :func:`attestation_report_judge.judge_fused_bundle_async`) instead
+    of the Stage-1 literal ``False`` (the Stage-1 review hazard pin).
+    The snapshot carries everything both sides need: the node consumes
+    :attr:`result` (band + bundle) for the judge plan and the outcome
+    mapping; :func:`emit_resolver_eval_row` consumes the rest for the
+    log row.
+    """
+
+    #: The activation predicate's structured output (with bundle when
+    #: fired).
+    result: ActivationResult
+    #: §4.3 NO-JUDGE would-be outcome — post-flip this remains the
+    #: kill-switch-off / dry-mode reference outcome (the would-be the
+    #: resolver WOULD map without a judge), still compared against the
+    #: gate ``decide()`` value for the agreement flag.
+    would_be_outcome: str
+    #: The gate ``decide()`` value's ``.value`` string (log-shaped).
+    old_decision_value: str
+    #: Agreement between :attr:`would_be_outcome` and the old decision
+    #: mapped into the four-value space (Stage-1 semantics, kept —
+    #: post-flip the old JUDGE paths are dead-but-present and no longer
+    #: evaluated, so the flag compares the resolver's no-judge would-be
+    #: against the still-computed gate decision; documented in
+    #: decisions.md D-RES2 + docs/setup.md).
+    agreement: bool
+    instance_id: str | None
+    gate_location: str
+    leader_prompt_version: str
+    mode: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -619,9 +672,12 @@ def compute_agreement(would_be_outcome: str, old_outcome: str) -> bool:
 def redact_ids(text: str, slot_hint: str = "id") -> str:
     """Replace UUID-shape tokens with stable slot placeholders.
 
-    Per the 98b59dd7 evidence boundary: the fused bundle carries NO raw
-    instance ids. Non-UUID ids (short tokens, agent names) pass through —
-    the bundle's id-bearing fields are UUIDs by construction.
+    Per the 98b59dd7 evidence boundary: structural id-bearing fields are
+    redacted (A-section and C-section tree rows). B-section leader-prose
+    excerpts (≤3 × 1500 chars) are quoted verbatim and may contain
+    instance ids the leader itself quoted; full B-redaction lands in
+    Stage 3. Non-UUID ids (short tokens, agent names) pass through —
+    the structural id-bearing fields are UUIDs by construction.
     """
     counter = {"n": 0}
 
@@ -741,11 +797,14 @@ def assemble_fused_bundle(
 
     Per-section caps: A ≤3000, B ≤6000, C ≤3000 (sum = the ≤12000 total —
     enforced defensively by a final hard clip with a truncation marker).
-    Ids are redacted (:func:`redact_ids`) per the 98b59dd7 boundary.
-    Stage 1 NEVER sends this bundle anywhere — the orchestrator hashes it
-    and logs ``sha256`` + size; the Stage-2 seam
-    (:data:`STAGE2_JUDGE_SEAM`) consumes it only when wired (it is None
-    in Stage 1 — provably inert).
+    Structural id-bearing fields are redacted (:func:`redact_ids`;
+    A-section and C-section tree rows). B-section leader-prose excerpts
+    (≤3 × 1500 chars) are quoted verbatim and may contain instance ids
+    the leader itself quoted; full B-redaction lands in Stage 3.
+    Stage 2 (the flip): the graph node's fused block feeds this bundle
+    VERBATIM to :func:`attestation_report_judge.judge_fused_bundle_async`
+    — the ONE judge call site (the Stage-1 module-global seam is
+    retired; see decisions.md D-RES2).
     """
     a_section = _clip(_build_a_section(a_signals), BUNDLE_A_SECTION_MAX)
     b_section = _clip(_build_b_section(b_signals, ai_tail_messages), BUNDLE_B_SECTION_MAX)
@@ -776,22 +835,21 @@ def assemble_fused_bundle(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage-2 invocation seam — STRUCTURALLY present, PROVABLY inert
+# Stage-2 invocation seam — RETIRED into the graph-node fused block
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Stage-2 fused-node invocation hook. ``None`` in Stage 1 (and by default
-#: forever until an explicit Stage-2 wiring sets it): the shadow assembles
-#: + hashes the bundle but NEVER invokes a judge/LLM. Budget parity
-#: ABSOLUTE in Stage 1 — zero new LLM calls.
-STAGE2_JUDGE_SEAM: Callable[[FusedBundle], None] | None = None
-
-
-def _maybe_invoke_stage2_judge(bundle: FusedBundle | None) -> None:
-    """Inert in Stage 1: no seam wired ⇒ no-op. Never raises."""
-    if STAGE2_JUDGE_SEAM is None or bundle is None:
-        return
-    # Stage 2 will wire the fused-node call here. Unreachable in Stage 1.
-    STAGE2_JUDGE_SEAM(bundle)  # pragma: no cover — Stage-2 seam
+# Stage 1 shipped a structurally-present, provably-inert module-global seam
+# (``STAGE2_JUDGE_SEAM`` + ``_maybe_invoke_stage2_judge``). Stage 2 (the
+# flip, 2026-09-16) wires the REAL invocation at its natural home — the
+# graph node's fused block (async context, mirrors the two legacy judge
+# sites it replaces), calling
+# :func:`attestation_report_judge.judge_fused_bundle_async` ONCE per
+# evaluation. The module-global seam mechanism is retired by that wiring:
+# the single judge call site IS the seam, and the invocation flag it
+# produces (:attr:`FusedJudgeResult.invoked`) is the derivation source for
+# the ``judge_invoked=`` field on ``event=leader_completion_resolver_eval``
+# rows (the Stage-1 review hazard pin — no literals). See decisions.md
+# D-RES2.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -849,7 +907,7 @@ def make_tree_rows_provider(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def evaluate_shadow_activation(
+def evaluate_resolver_activation(
     *,
     instance_id: str | None,
     gate_location: str,
@@ -867,8 +925,8 @@ def evaluate_shadow_activation(
     deny_bound: int,
     old_decision: Any,
     c_tree_rows_provider: Callable[[], list[dict[str, Any]]] | None = None,
-) -> ActivationResult:
-    """Run the parallel-dry shadow evaluation and log ONE event row.
+) -> ResolverEvalSnapshot:
+    """Compute ONE resolver evaluation and return the log-ready snapshot.
 
     Called ONLY from the canonical path of
     ``attestation_gate.evaluate`` (post canonical log row, pre return —
@@ -880,9 +938,16 @@ def evaluate_shadow_activation(
     The tree-rows provider runs LAZILY and ONLY when the predicate
     fires (bundle assembly time).
 
-    The caller wraps this in its own try/except (exception isolation);
-    this function additionally never allows the Stage-2 seam to raise
-    into the log contract.
+    Stage 2 (the flip): this function COMPUTES only — predicate →
+    would-be outcome → agreement → conditional bundle assembly →
+    snapshot. It does NOT log and does NOT invoke any LLM; the
+    graph node's fused block consumes the snapshot (band + bundle),
+    invokes the fused judge when the plan fires, and emits the
+    structured row via :func:`emit_resolver_eval_row` with the
+    DERIVED ``judge_invoked`` flag. The caller wraps this in its own
+    try/except (exception isolation) — a resolver-side error is
+    logged there as ``event=leader_completion_resolver_eval_error``
+    and never propagates into gate control flow.
     """
     result = activation_predicate(
         attestation_enabled=attestation_enabled,
@@ -897,7 +962,6 @@ def evaluate_shadow_activation(
     )
     would_be = compute_would_be_outcome(result, denied_count=denied_count, deny_bound=deny_bound)
     old_outcome = map_old_decision_to_outcome(old_decision)
-    agreement = compute_agreement(would_be, old_outcome)
 
     bundle: FusedBundle | None = None
     if result.fired:
@@ -912,9 +976,55 @@ def evaluate_shadow_activation(
             ai_tail_messages=messages,
         )
         result = replace(result, bundle=bundle)
-        # Stage-2 seam — inert in Stage 1 (STAGE2_JUDGE_SEAM is None).
-        _maybe_invoke_stage2_judge(bundle)
 
+    return ResolverEvalSnapshot(
+        result=result,
+        would_be_outcome=would_be,
+        old_decision_value=getattr(old_decision, "value", str(old_decision)),
+        agreement=compute_agreement(would_be, old_outcome),
+        instance_id=instance_id,
+        gate_location=gate_location,
+        leader_prompt_version=leader_prompt_version,
+        mode=mode,
+    )
+
+
+#: Authoritative resolver outcome values (Stage 2). Emitted on the
+#: ``resolver_outcome=`` field of the eval row — the soak watches these
+#: directly post-flip (the agreement flag's role shrinks to the no-judge
+#: reference comparison; see docs/setup.md).
+RESOLVER_OUTCOME_ALLOW: str = "allow"
+RESOLVER_OUTCOME_ALLOW_HINT: str = "allow_hint"
+RESOLVER_OUTCOME_DENY_NUDGE: str = "deny_nudge"
+RESOLVER_OUTCOME_TERMINAL_AFTER_BOUND: str = "terminal_after_bound"
+
+
+def emit_resolver_eval_row(
+    snapshot: ResolverEvalSnapshot,
+    *,
+    judge_invoked: bool,
+    judge_verdict: str = "<none>",
+    resolver_outcome: str = RESOLVER_OUTCOME_ALLOW,
+) -> None:
+    """Emit the ONE structured ``leader_completion_resolver_eval`` row.
+
+    Stage 2: called by the graph node's fused block AFTER the judge
+    decision (or the no-judge plan decision). ``judge_invoked`` MUST be
+    the DERIVED real-invocation flag — ``fused_result.invoked`` when a
+    :class:`~.attestation_report_judge.FusedJudgeResult` exists, else
+    ``False`` — never a literal (Stage-1 review hazard pin). The row
+    shape is byte-compatible with Stage 1 (same fields, same order);
+    the two additive tail fields ``judge_verdict=`` and
+    ``resolver_outcome=`` carry the post-flip authoritative decision so
+    the soak can watch resolver outcomes directly.
+
+    NOTE (grep hygiene): ``leader_completion_resolver_eval`` is a PREFIX
+    of ``leader_completion_resolver_eval_error`` — dashboards must
+    anchor greps on the TRAILING token (e.g. ``resolver_eval `` /
+    ``resolver_eval_error``), never on the bare prefix. Documented in
+    docs/setup.md (Stage-1 review hazard pin, carried forward).
+    """
+    result = snapshot.result
     c = result.c_signals
     a = result.a_signals
     logger.info(
@@ -929,11 +1039,11 @@ def evaluate_shadow_activation(
         "would_be_outcome=%s old_decision_value=%s agreement=%s "
         "fail_open=%s bundle_sha256=%s bundle_size_chars=%s "
         "bundle_a_chars=%s bundle_b_chars=%s bundle_c_chars=%s "
-        "judge_invoked=%s",
-        instance_id,
-        gate_location,
-        leader_prompt_version,
-        mode,
+        "judge_invoked=%s judge_verdict=%s resolver_outcome=%s",
+        snapshot.instance_id,
+        snapshot.gate_location,
+        snapshot.leader_prompt_version,
+        snapshot.mode,
         result.fired,
         result.band or "<none>",
         ",".join(result.terms_fired) if result.terms_fired else "<none>",
@@ -955,18 +1065,19 @@ def evaluate_shadow_activation(
             if a and a.evidence
             else False
         ),
-        would_be,
-        getattr(old_decision, "value", str(old_decision)),
-        agreement,
+        snapshot.would_be_outcome,
+        snapshot.old_decision_value,
+        snapshot.agreement,
         result.fail_open,
-        bundle.sha256 if bundle else "<none>",
-        bundle.total_chars if bundle else 0,
-        bundle.a_chars if bundle else 0,
-        bundle.b_chars if bundle else 0,
-        bundle.c_chars if bundle else 0,
-        False,  # judge_invoked — Stage 1 is provably zero-LLM
+        result.bundle.sha256 if result.bundle else "<none>",
+        result.bundle.total_chars if result.bundle else 0,
+        result.bundle.a_chars if result.bundle else 0,
+        result.bundle.b_chars if result.bundle else 0,
+        result.bundle.c_chars if result.bundle else 0,
+        judge_invoked,
+        judge_verdict,
+        resolver_outcome,
     )
-    return result
 
 
 def log_shadow_fail_open(
@@ -985,8 +1096,16 @@ def log_shadow_fail_open(
     §4.2 C-read-failure branch is the same semantics — this row records
     it with ``fail_open=True`` / ``would_be_outcome=would_allow`` so the
     soak data is complete. Never raises.
+
+    ``judge_invoked`` here is derived, not literal: a fail-open
+    evaluation short-circuits BEFORE any resolver computation — no
+    snapshot, no fused judge plan, no invocation record exists — so the
+    derived value is the absence-of-record default (``False``), same
+    derivation rule the node's fused block applies (no
+    :class:`~.attestation_report_judge.FusedJudgeResult` ⇒ not invoked).
     """
     old_outcome = map_old_decision_to_outcome(old_decision)
+    judge_invoked = False  # derived: no invocation record can exist on fail-open
     logger.info(
         "event=leader_completion_resolver_eval instance_id=%s "
         "gate_location=%s leader_prompt_version=%s mode=%s "
@@ -1001,7 +1120,7 @@ def log_shadow_fail_open(
         "would_be_outcome=%s old_decision_value=%s agreement=%s "
         "fail_open=True bundle_sha256=<none> bundle_size_chars=0 "
         "bundle_a_chars=0 bundle_b_chars=0 bundle_c_chars=0 "
-        "judge_invoked=False error_class=%s",
+        "judge_invoked=%s error_class=%s",
         instance_id,
         gate_location,
         leader_prompt_version,
@@ -1009,5 +1128,6 @@ def log_shadow_fail_open(
         WOULD_ALLOW,
         getattr(old_decision, "value", str(old_decision)),
         compute_agreement(WOULD_ALLOW, old_outcome),
+        judge_invoked,
         error_class,
     )

@@ -77,9 +77,10 @@ async def _judge_must_not_be_called(config, user_payload, *, timeout_s):
     )
 
 
-async def _judge_incomplete(config, user_payload, *, timeout_s):
+async def _judge_incomplete(config, user_payload, *, timeout_s, system_prompt=None):
     return (
-        '{"is_complete_report": false, "reason": "mid-work"}',
+        '{"verdict": "not_complete", "evidence_cited": [], '
+        '"advisory_note_text": "", "rationale": "mid-work"}',
         "fake-quick",
     )
 
@@ -138,6 +139,26 @@ def _awaiting_turn(final_text: str) -> dict:
     return {
         "messages": [
             HumanMessage(content="please review and give me a go/no-go"),
+            AIMessage(content=final_text),
+        ]
+    }
+
+
+def _delegated_awaiting_turn(final_text: str) -> dict:
+    """Delegated twin of ``_awaiting_turn`` — LCA Stage-2 flip
+    re-contract (2026-09-16): the unified resolver's D10 meta-bypass
+    exempts non-delegated missions from the judge; the deny-reachable
+    stale-guard tests therefore ride the delegated shape."""
+    delegation_ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "send_message", "args": {"target": "child-id"}, "id": "c1"}
+        ],
+    )
+    return {
+        "messages": [
+            HumanMessage(content="please review and give me a go/no-go"),
+            delegation_ai,
             AIMessage(content=final_text),
         ]
     }
@@ -304,7 +325,9 @@ def test_no_answer_pending_deny_path_still_reachable(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
         result = asyncio.run(
             node(
-                _awaiting_turn("Ending turn, awaiting your go/no-go."),
+                _delegated_awaiting_turn(
+                    "Ending turn, awaiting your go/no-go."
+                ),
                 config={
                     "configurable": {"thread_id": "fix2-negative-guard"}
                 },
@@ -322,9 +345,11 @@ def test_no_answer_pending_deny_path_still_reachable(monkeypatch, caplog):
         if "event=leader_completion_gate " in r.message
     )
     assert "user_answer_pending=False" in row
-    assert "marker_hit=True" in row, (
-        "no open answer: the marker scan runs as before"
-    )
+    # LCA Stage-2 flip: the delegated∧quiet row decides DENIED directly —
+    # the gate's marker scan never runs on DENIED (allow-family only);
+    # the fused deny band drives the judge there. The deny-reachable
+    # contract is the outcome itself (asserted above), not the marker
+    # fields.
 
 
 def test_truthy_non_bool_facade_value_never_arms_the_bypass(monkeypatch):
@@ -345,7 +370,9 @@ def test_truthy_non_bool_facade_value_never_arms_the_bypass(monkeypatch):
         )
         result = asyncio.run(
             node(
-                _awaiting_turn("Ending turn, awaiting your go/no-go."),
+                _delegated_awaiting_turn(
+                    "Ending turn, awaiting your go/no-go."
+                ),
                 config={
                     "configurable": {"thread_id": "fix2-duck-guard"}
                 },
@@ -380,7 +407,7 @@ def test_missing_facade_reads_as_not_pending(monkeypatch):
     )
     result = asyncio.run(
         node(
-            _awaiting_turn("Ending turn, awaiting your go/no-go."),
+            _delegated_awaiting_turn("Ending turn, awaiting your go/no-go."),
             config={"configurable": {"thread_id": "fix2-missing-facade"}},
         )
     )

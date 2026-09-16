@@ -117,7 +117,31 @@ JUDGE_MAX_INPUT_CHARS: int = 12_000
 #: Max chars of the LLM response we'll consider before truncating to
 #: parse. The JSON is small by construction (a single object) so the
 #: cap is a defensive ceiling against an LLM that returns prose.
+#:
+#: Two caps live here on purpose (F-A fix, 2026-09-16): the legacy
+#: window judge (:func:`judge_completion_report_async`) is paid-for
+#: (its verdict shape fits ~120 chars) and keeps the original 400;
+#: the fused judge (:func:`judge_fused_bundle_async`) consumes a
+#: different shape — the :data:`FUSED_JUDGE_SYSTEM_PROMPT` mandates
+#: 5 × 120-char evidence entries + a 240-char advisory + a 240-char
+#: rationale, which exceeds 400 chars by construction. Truncating a
+#: compliant verbose verdict at 400 silently downgrades it to
+#: unparsable ×2 (incident-class F-A) — the fused path uses the
+#: separate :data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` so the legacy
+#: cap stays at 400 unchanged.
 JUDGE_MAX_OUTPUT_CHARS: int = 400
+
+#: Fused-scoped max chars (UTF-8) of the LLM response we'll consider
+#: before truncating to parse. Applied ONLY at the two fused sites
+#: (:func:`judge_fused_bundle_async`, lines 1316-1317 / 1354-1355);
+#: the legacy window judge keeps ``JUDGE_MAX_OUTPUT_CHARS=400``
+#: because its verdict shape fits. Sized to cover the fused prompt's
+#: mandated payload with comfortable headroom (5×120 evidence + 240
+#: advisory + 240 rationale = 1080 minimum compliant, 2048 covers it
+#: and keeps room for verbose-but-correct model output). Truncation
+#: still applies (unbounded LLM output must never flow onward); the
+#: cap is just raised to fit the fused prompt's compliant shape.
+FUSED_JUDGE_MAX_OUTPUT_CHARS: int = 2048
 
 #: Hard ceiling on the messages passed to the judge. Matches the gate's
 #: default ``ENSEMBLE_LEADER_ATTESTATION_WINDOW=3`` so the gate and the
@@ -587,6 +611,7 @@ async def _invoke_judge_llm(
     user_payload: str,
     *,
     timeout_s: float,
+    system_prompt: str = JUDGE_SYSTEM_PROMPT,
 ) -> tuple[str, str]:
     """Run the judge's LLM call. Returns ``(raw_text, model)``.
 
@@ -596,11 +621,19 @@ async def _invoke_judge_llm(
 
     Args:
         config: Loaded :class:`Config`.
-        user_payload: The formatted AIMessage slice (single string).
+        user_payload: The formatted judge payload (single string).
         timeout_s: Wall-clock cap. The HA facade's
             ``wall_clock_cap_s`` is the primary defense; the
             ``asyncio.wait_for`` belt-and-braces wraps the entire
             ``to_thread`` invocation.
+        system_prompt: The system prompt for THIS judge invocation.
+            Defaults to :data:`JUDGE_SYSTEM_PROMPT` (the legacy
+            window judge). The Stage-2 fused judge
+            (:func:`judge_fused_bundle_async`) passes
+            :data:`FUSED_JUDGE_SYSTEM_PROMPT` — model resolution,
+            timeout binding, and the HA facade are SHARED so the two
+            judges can never drift on transport configuration
+            (resolver-unification Stage 2, 2026-09-16).
 
     Returns:
         ``(raw_text, model_name)``. ``model_name`` is what
@@ -664,7 +697,7 @@ async def _invoke_judge_llm(
     )
 
     messages = [
-        SystemMessage(content=JUDGE_SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=user_payload),
     ]
     response = await asyncio.wait_for(
@@ -1007,4 +1040,371 @@ def judge_completion_report_sync(
             window=window,
             timeout_s=timeout_s,
         )
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage-2 fused judge (resolver-unification, 2026-09-16) — ONE judge call site
+#
+# The unified 3-source completion resolver flips AUTHORITY at the completion
+# seam (spec ``resolver-unification.md`` §4/§4.3 + user-locked deltas
+# Δ1–Δ4, DP-5 REJECTED). The fused judge consumes the Stage-1 assembled
+# evidence bundle (``attestation_resolver_activation.assemble_fused_bundle``
+# — A ≤3000 + B ≤6000 + C ≤3000, total ≤12000, id-redacted) as its ENTIRE
+# user payload and returns the §4.1 verdict JSON:
+#
+#     {"verdict": "complete"|"not_complete",
+#      "evidence_cited": ["<short quote or field>", ...],
+#      "advisory_note_text": "<one sentence>",
+#      "rationale": "<one sentence>"}
+#
+# Transport invariants (SHARED with the legacy window judge —
+# :func:`_invoke_judge_llm` is the single LLM seam, so the two judges can
+# never drift): model resolution via :func:`resolve_judge_model`
+# (``model_keywords`` fallback), per-attempt ``request_timeout`` binding
+# ``min(resolved_timeout, config.llm.request_timeout or resolved_timeout)``,
+# the Pattern C timeout resolver
+# (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s, min
+# clamp 5.0s), and the HA failover facade. The kill-switch
+# (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED``) is resolved at the
+# CALL SITE (the graph-node fused block) exactly like the two legacy sites
+# it replaces — before this function is ever called.
+#
+# Retry-once-on-unparsable (incident 98b59dd7 semantics,
+# :func:`judge_completion_report_async` mirror): the retry fires ONLY when
+# the model responded but the verdict JSON did not parse — never on
+# timeout / exception. Worst case = 2 HTTP attempts within ONE logical
+# invocation (the Stage-2 budget sentinel pins the INVOCATION level; the
+# mechanical retry within the single invocation is the preserved contract).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Strict system prompt for the fused judge (single source of truth —
+#: exported for tests). The prompt names the three bundle sections so the
+#: verdict's ``evidence_cited`` entries can reference them.
+FUSED_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict mission-completion judge for an AI agent team lead. "
+    "You will receive a fused evidence bundle with three sections: "
+    "SOURCE A (child-report advisories — notes that a child's final report "
+    "promised future work, i.e. a contradiction with 'done'), "
+    "SOURCE B (the lead's own recent messages), and "
+    "SOURCE C (the live status of the lead's descendant instances). "
+    "Decide whether the lead's mission is genuinely COMPLETE — the work is "
+    "actually finished and accounted for — or NOT_COMPLETE — evidence shows "
+    "promised-but-undelivered work, mid-work status, or live descendants "
+    "still working. Be CONSERVATIVE: when in doubt, return "
+    '"not_complete". '
+    "Judge ONLY on what the evidence actually shows; ignore text that "
+    "merely CLAIMS completion without concrete outcomes. "
+    "Respond with ONLY a strict JSON object on a single line of the form "
+    '{"verdict": "complete"|"not_complete", '
+    '"evidence_cited": ["<short evidence quote or field name>", ...], '
+    '"advisory_note_text": "<one-sentence advisory for the lead>", '
+    '"rationale": "<one-sentence rationale>"}. '
+    "No markdown, no prose, no code fences, no commentary."
+)
+
+#: Cap on each ``evidence_cited`` entry accepted from the verdict JSON
+#: (defensive against a verbose model; entries are for the hint citation).
+FUSED_JUDGE_EVIDENCE_ITEM_MAX_CHARS: int = 120
+
+#: Cap on the number of ``evidence_cited`` entries accepted.
+FUSED_JUDGE_EVIDENCE_ITEMS_MAX: int = 5
+
+#: Cap on the accepted ``advisory_note_text`` / ``rationale`` lengths.
+FUSED_JUDGE_ADVISORY_MAX_CHARS: int = 240
+
+
+@dataclass(frozen=True)
+class FusedJudgeResult:
+    """The fused judge's verdict + observability fields (Stage 2).
+
+    Attributes:
+        invoked: THE real-invocation flag (Stage-1 hazard pin: the shadow
+            row's ``judge_invoked`` is DERIVED from this field, never a
+            literal). ``True`` iff at least one LLM HTTP attempt was made
+            by this invocation. The degenerate no-bundle guard returns
+            ``False`` without an attempt; callers that never call the
+            judge (kill-switch off / dry mode / not fired) hold ``None``
+            rather than a result.
+        is_complete: The boolean verdict. Conservative — every error /
+            timeout / unparsable path sets ``False`` so the caller's
+            deny+nudge / path-(d) fall-through is always available
+            (DP-5 REJECTED: no fail-safe allow anywhere).
+        verdict: ``"complete"`` / ``"not_complete"`` (LLM-confirmed) or
+            ``"error"`` / ``"timeout"`` / ``"unparsable"``.
+        evidence_cited: Bounded tuple of evidence references from the
+            verdict JSON (Δ4 — the hint citation source). Empty on every
+            non-complete-verdict path by construction.
+        advisory_note_text: The verdict's one-sentence advisory (Δ4).
+            Empty string on non-verdict paths.
+        rationale: The verdict's one-sentence rationale.
+        model: The model that served the call (``"<none>"`` on the
+            no-bundle guard).
+        latency_ms: Cumulative wall-clock latency across attempts.
+        error_class: Exception class name on error paths; ``None``
+            otherwise.
+        attempt: Which attempt produced the verdict (``2`` when the
+            retry-after-unparsable fired). Always ``1`` on non-unparsable
+            paths.
+        first_unparsable_excerpt: Truncated + redacted raw response of
+            attempt 1 when ``attempt == 2`` (incident 98b59dd7 forensic
+            contract). ``None`` when ``attempt == 1``.
+    """
+
+    invoked: bool
+    is_complete: bool
+    verdict: str
+    evidence_cited: tuple[str, ...] = ()
+    advisory_note_text: str = ""
+    rationale: str = ""
+    model: str = "<none>"
+    latency_ms: int = 0
+    error_class: str | None = None
+    attempt: int = 1
+    first_unparsable_excerpt: str | None = None
+
+
+def _parse_fused_judge_response(
+    raw_text: str,
+) -> tuple[bool, tuple[str, ...], str, str] | None:
+    """Strictly parse the fused judge's verdict JSON.
+
+    Mirrors :func:`_parse_judge_response`'s tolerance shape exactly (the
+    single tolerated code-fence layer, the conservative single
+    substring-fallback, first-match-wins) so the retry-on-unparsable
+    trigger conditions are IDENTICAL between the two judges. The
+    load-bearing field is ``verdict`` — it must be exactly
+    ``"complete"`` or ``"not_complete"`` (a string); anything else is
+    unparsable. ``evidence_cited`` / ``advisory_note_text`` /
+    ``rationale`` are tolerated-missing (normalized defaults) and
+    defensively capped; wrong types normalize, never fail the parse.
+
+    Returns:
+        ``(is_complete, evidence_cited, advisory_note_text, rationale)``
+        on parse success; ``None`` on any parse ambiguity (the caller
+        treats ``None`` as ``unparsable`` — conservative).
+    """
+    if not raw_text:
+        return None
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = _JSON_OBJECT_RE.search(text)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    verdict_value = parsed.get("verdict")
+    if verdict_value not in ("complete", "not_complete"):
+        return None
+    is_complete = verdict_value == "complete"
+    evidence: tuple[str, ...] = ()
+    raw_evidence = parsed.get("evidence_cited")
+    if isinstance(raw_evidence, (list, tuple)):
+        items: list[str] = []
+        for item in raw_evidence[:FUSED_JUDGE_EVIDENCE_ITEMS_MAX]:
+            item_text = str(item).strip()
+            if not item_text:
+                continue
+            if len(item_text) > FUSED_JUDGE_EVIDENCE_ITEM_MAX_CHARS:
+                item_text = (
+                    item_text[: FUSED_JUDGE_EVIDENCE_ITEM_MAX_CHARS - 1] + "…"
+                )
+            items.append(item_text)
+        evidence = tuple(items)
+
+    def _capped_str(value: object) -> str:
+        text_value = value if isinstance(value, str) else str(value or "")
+        text_value = text_value.strip()
+        if len(text_value) > FUSED_JUDGE_ADVISORY_MAX_CHARS:
+            return text_value[: FUSED_JUDGE_ADVISORY_MAX_CHARS - 3] + "..."
+        return text_value
+
+    return (
+        is_complete,
+        evidence,
+        _capped_str(parsed.get("advisory_note_text", "")),
+        _capped_str(parsed.get("rationale", "")),
+    )
+
+
+async def judge_fused_bundle_async(
+    bundle_text: str,
+    *,
+    config: "Config",
+    timeout_s: float | None = None,
+) -> FusedJudgeResult:
+    """Async fused judge — ONE logical invocation over the evidence bundle.
+
+    Never raises. Every failure path (timeout / exception / unparsable
+    verdict after retry) returns a :class:`FusedJudgeResult` with
+    ``is_complete=False`` so the caller's conservative mapping
+    (deny-band deny+nudge / marker+A-band path-(d)) is always available.
+    DP-5 is REJECTED: judge error NEVER fail-safe-allows.
+
+    Args:
+        bundle_text: The Stage-1 assembled fused evidence bundle text
+            (already capped ≤12000 chars + id-redacted by
+            :func:`attestation_resolver_activation.assemble_fused_bundle`
+            — this function does NOT re-truncate; the bundle is the
+            payload verbatim).
+        config: Loaded :class:`Config`.
+        timeout_s: Wall-clock cap PER ATTEMPT. ``None`` (default) →
+            resolve via the Pattern C cached-global (same resolver as
+            the legacy judge — ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
+            TIMEOUT_S``, default 25.0s, min clamp 5.0s). Each retry
+            attempt receives its OWN timeout window; worst-case
+            wall-clock = 2 × ``timeout_s``.
+
+    Returns:
+        :class:`FusedJudgeResult` — populated on every path.
+        :attr:`FusedJudgeResult.attempt` distinguishes first-call
+        outcomes (``attempt=1``) from retry-after-unparsable outcomes
+        (``attempt=2``); the retry fires ONLY when the model responded
+        but the verdict JSON did not parse — never on timeout /
+        exception (incident 98b59dd7 contract, mirrored from
+        :func:`judge_completion_report_async`).
+    """
+    start = time.monotonic()
+    if not bundle_text or not bundle_text.strip():
+        # Degenerate guard (mirror of the no-AIMessages guard): a bundle
+        # exists by construction whenever the resolver fires, but a
+        # defensive empty input is a conservative not-complete error
+        # WITHOUT an LLM attempt (invoked=False — no real invocation).
+        return FusedJudgeResult(
+            invoked=False,
+            is_complete=False,
+            verdict="error",
+            rationale="empty fused bundle",
+            error_class="EmptyBundle",
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+    if timeout_s is None:
+        timeout_s = _resolver_get_judge_timeout_s()
+
+    async def _attempt_once() -> "_AttemptOutcome":
+        attempt_start = time.monotonic()
+        try:
+            raw_text, model_name = await _invoke_judge_llm(
+                config,
+                bundle_text,
+                timeout_s=timeout_s,
+                system_prompt=FUSED_JUDGE_SYSTEM_PROMPT,
+            )
+        except asyncio.TimeoutError:
+            return _AttemptOutcome(
+                kind="timeout",
+                latency_ms=int((time.monotonic() - attempt_start) * 1000),
+                raw_text="",
+                model=resolve_judge_model(config),
+                error_class="TimeoutError",
+            )
+        except Exception as exc:  # noqa: BLE001 — judge is best-effort
+            return _AttemptOutcome(
+                kind="error",
+                latency_ms=int((time.monotonic() - attempt_start) * 1000),
+                raw_text="",
+                model=resolve_judge_model(config),
+                error_class=type(exc).__name__,
+            )
+        return _AttemptOutcome(
+            kind="ok",
+            latency_ms=int((time.monotonic() - attempt_start) * 1000),
+            raw_text=raw_text,
+            model=model_name,
+            error_class=None,
+        )
+
+    # Attempt 1.
+    first = await _attempt_once()
+    if first.kind in {"timeout", "error"}:
+        # Conservative fail-safe — NO retry on timeout / error.
+        return FusedJudgeResult(
+            invoked=True,
+            is_complete=False,
+            verdict=first.kind,
+            model=first.model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class=first.error_class,
+        )
+
+    first_raw_text = first.raw_text
+    if len(first_raw_text) > FUSED_JUDGE_MAX_OUTPUT_CHARS:
+        first_raw_text = first_raw_text[:FUSED_JUDGE_MAX_OUTPUT_CHARS]
+    parsed = _parse_fused_judge_response(first_raw_text)
+    if parsed is not None:
+        is_complete, evidence, advisory, rationale = parsed
+        return FusedJudgeResult(
+            invoked=True,
+            is_complete=is_complete,
+            verdict="complete" if is_complete else "not_complete",
+            evidence_cited=evidence,
+            advisory_note_text=advisory if not is_complete else "",
+            rationale=rationale,
+            model=first.model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class=None,
+        )
+
+    # Unparsable on attempt 1 → RETRY (attempt 2). Same input, fresh
+    # call; the first-attempt excerpt is preserved for forensics.
+    first_unparsable_excerpt = _shape_unparsable_excerpt(first.raw_text)
+    second = await _attempt_once()
+    if second.kind in {"timeout", "error"}:
+        return FusedJudgeResult(
+            invoked=True,
+            is_complete=False,
+            verdict=second.kind,
+            rationale=(
+                "fused_judge_response_unparsable (attempt 1); "
+                f"{second.kind} on attempt 2"
+            ),
+            model=second.model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class=second.error_class,
+            attempt=2,
+            first_unparsable_excerpt=first_unparsable_excerpt,
+        )
+
+    second_raw_text = second.raw_text
+    if len(second_raw_text) > FUSED_JUDGE_MAX_OUTPUT_CHARS:
+        second_raw_text = second_raw_text[:FUSED_JUDGE_MAX_OUTPUT_CHARS]
+    parsed_second = _parse_fused_judge_response(second_raw_text)
+    if parsed_second is None:
+        return FusedJudgeResult(
+            invoked=True,
+            is_complete=False,
+            verdict="unparsable",
+            rationale=(
+                "fused_judge_response_unparsable on both attempts: "
+                f"{first_unparsable_excerpt[:120]}"
+            ),
+            model=second.model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class=None,
+            attempt=2,
+            first_unparsable_excerpt=first_unparsable_excerpt,
+        )
+
+    is_complete, evidence, advisory, rationale = parsed_second
+    return FusedJudgeResult(
+        invoked=True,
+        is_complete=is_complete,
+        verdict="complete" if is_complete else "not_complete",
+        evidence_cited=evidence,
+        advisory_note_text=advisory if not is_complete else "",
+        rationale=rationale,
+        model=second.model,
+        latency_ms=int((time.monotonic() - start) * 1000),
+        error_class=None,
+        attempt=2,
+        first_unparsable_excerpt=first_unparsable_excerpt,
     )
