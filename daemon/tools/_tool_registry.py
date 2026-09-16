@@ -93,11 +93,14 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_pool_status",
     # service tools (service-tool Phase 1, 2026-09-15) — created by
     # create_service_tools() factory (daemon/tools/service_tools.py).
-    # Privileged category (D4 Option A) — ``service_*`` tools spawn
+    # Default-grant per override 2026-09-16 (see
+    # .agents/shared/planning/service-tool/decisions.md §D4 override
+    # note — D4 Option A reversed): the five ``service_*`` tools spawn
     # persistent detached OS processes that survive instance
-    # termination AND daemon restart; default-deny via
-    # ``PRIVILEGED_TOOL_CATEGORIES``, reachable only via an explicit
-    # ``tools.allow`` entry naming ``service``.
+    # termination AND daemon restart; bash/proc-capable agents receive
+    # them via meta-grant IFF (bash OR proc in effective toolset →
+    # service in tools.allow). Global kill-switch
+    # ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` is the unconditional off.
     "service_start",
     "service_stop",
     "service_status",
