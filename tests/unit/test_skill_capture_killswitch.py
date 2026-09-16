@@ -596,6 +596,69 @@ class TestMetricsServiceCaptureKillSwitch:
                 duration_seconds=120,
             )
 
+    @pytest.mark.asyncio
+    async def test_record_task_completion_with_invalid_env_warns_does_not_crash(
+        self, ks_metrics_service, ks_repos, ks_instance_repo, monkeypatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """``ENSEMBLE_SKILL_CAPTURE_ENABLED=banana`` at the public
+        ``record_task_completion`` entry → ``ValueError`` from
+        ``_resolve_capture_enabled`` is CONTAINED by the existing soft-fail
+        boundary (lines 487-501); the usage-record metrics path still runs
+        and the dispatcher enqueue is never awaited.
+
+        Complements :meth:`test_invalid_env_raises_value_error` (above),
+        which pins the direct ``_check_capture_eligibility`` path: there
+        the resolver error propagates loudly because the caller is the
+        test/operator. Here the caller is the job-queue completion hook
+        — which MUST return cleanly to its caller — so the soft-fail
+        boundary catches the ``ValueError``, logs it loudly as a
+        warning, preserves the just-written usage records, and ensures
+        capture never fires. This pins the contract that an invalid
+        env surfaces loudly in the daemon logs (operators can spot
+        the misconfiguration) without breaking the metrics path or
+        raising back to the job-queue completion hook.
+        """
+        monkeypatch.setenv(SKILL_CAPTURE_KILL_SWITCH_ENV, "banana")
+        skill_id = self._seed_skill(ks_repos)
+        inst = SimpleNamespace(
+            instance_id="inst-ks-banana",
+            instance_metadata={INJECTED_SKILLS_METADATA_KEY: [skill_id]},
+        )
+        ks_instance_repo.get = MagicMock(return_value=inst)
+        ks_repos.usage.has_applied_for_instance = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            "WARNING", logger="daemon.services.skill_metrics_service"
+        ):
+            result = await ks_metrics_service.record_task_completion(
+                instance_id="inst-ks-banana",
+                agent_id="agent-x",
+                project_id="p-ks",
+                task_succeeded=True,
+                iterations=10,         # > capture_min_iterations (5)
+                duration_seconds=120,  # > capture_min_duration_seconds (60)
+                task_message="invalid-env task — soft-fail boundary pin",
+            )
+
+        # Soft-fail swallowed the ValueError and the job-queue
+        # completion hook returned cleanly — the usage-record
+        # metrics path still ran end-to-end (1 record for the 1
+        # injected skill).
+        assert result >= 1
+        # Capture never fired: the resolver raised BEFORE Gate 1
+        # could wire any task_details back to the dispatcher, and
+        # ``_resolve_capture_enabled`` only returns True on a
+        # recognized ON value.
+        assert ks_metrics_service._skill_job_dispatcher.enqueue_capture.await_count == 0
+        # Soft-fail logged a warning with the instance id so
+        # operators can spot the misconfiguration in the daemon logs.
+        assert any(
+            "CAPTURED eligibility check failed" in rec.message
+            and "inst-ks-banana" in rec.message
+            for rec in caplog.records
+        )
+
 
 # =============================================================================
 # Group 4: Tool gate — `skill_execute_capture` LangChain tool

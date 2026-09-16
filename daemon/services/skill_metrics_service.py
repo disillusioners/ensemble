@@ -582,8 +582,16 @@ class SkillMetricsService:
         # ``_resolve_repair_enabled`` exemplar at
         # ``daemon/tools/ens_db_tools.py:131``. Invalid env values
         # raise ``ValueError`` from the resolver (fail-closed) —
-        # we let that propagate so a misconfigured env surfaces
-        # loudly rather than silently enabling capture.
+        # at THIS seam the raise is caught by the
+        # ``record_task_completion`` soft-fail boundary
+        # (lines 487-501) and logged loudly as a warning (metrics
+        # preserved, capture never enabled). The same ``ValueError``
+        # DOES propagate to the agent loop at the
+        # ``skill_execute_capture`` tool seam, where the operator
+        # is the immediate caller and loud-failure is the right
+        # default. We choose observability + metrics preservation
+        # over propagation here so the job-queue completion hook
+        # (which calls this method) never blocks on metrics.
         if not _resolve_capture_enabled():
             return None
 
