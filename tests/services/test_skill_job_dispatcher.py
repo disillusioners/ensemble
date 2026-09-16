@@ -296,6 +296,21 @@ class TestEnqueueEvolution:
 class TestEnqueueCapture:
     """Tests for ``SkillJobDispatcher.enqueue_capture``."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_skill_capture_killswitch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` to ON for this class.
+
+        ``SkillJobDispatcher.enqueue_capture`` now short-circuits to
+        ``None`` when the kill-switch is OFF (default). These tests
+        pin the ON path so the routing / metadata assertions still
+        verify the real capture-flow dispatch — they were authored
+        against the pre-flag behavior. Per-test kill-switch coverage
+        lives in ``tests/unit/services/test_skill_capture_killswitch.py``.
+        """
+        monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
+
     async def test_enqueue_capture(self, dispatcher, job_service):
         """Enqueues with job_type='skill_capture' + task_details in metadata."""
         task_details = {
@@ -374,6 +389,21 @@ class TestRoutingInvariant:
     concurrency=1. The dispatcher is the single chokepoint that fixes
     this — every test below asserts the resolved queue_id was passed.
     """
+
+    @pytest.fixture(autouse=True)
+    def _enable_skill_capture_killswitch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` to ON for this class.
+
+        Three of the four routing tests below call
+        ``d.enqueue_capture(...)`` and assert it produces a real
+        ``job_service.enqueue`` call. With the kill-switch OFF the
+        dispatcher short-circuits to ``None`` and the ``enqueue``
+        await count would be 3 instead of 4. Pin ON so the routing
+        invariants remain byte-identical to the pre-flag codebase.
+        """
+        monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
 
     async def test_all_jobs_use_parallel_queue_id(
         self, job_service,

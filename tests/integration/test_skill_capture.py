@@ -211,6 +211,24 @@ def _set_injected(repo, instance_id: str, skill_ids: list[str]) -> None:
 class TestSkillCapture:
     """End-to-end CAPTURED-flow eligibility tests via the metrics service."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_skill_capture_killswitch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin the ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` flag to ON for this class.
+
+        The class exercises the existing post-execution CAPTURED
+        trigger through ``SkillMetricsService.record_task_completion``,
+        which now gates on the ``ENSEMBLE_SKILL_CAPTURE_ENABLED``
+        kill-switch (default OFF). With the kill-switch OFF these
+        tests would silently no-op — the autouse pin restores the
+        pre-flag behavior the suite was authored against.
+        ``TestCaptureServiceLevel`` (below) does NOT need this pin
+        because it bypasses the metrics-service gate and exercises
+        ``SkillEvolutionService.check_and_capture`` directly.
+        """
+        monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
+
     @pytest.mark.asyncio
     async def test_capture_on_complex_success(
         self,
