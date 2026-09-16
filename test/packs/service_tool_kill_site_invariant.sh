@@ -42,15 +42,16 @@
 # Plan-sanctioned service-tool surface (1.B landed d5001641 +
 # 1.A store 9d2ab405 — this allowlist was extended at 1.C time,
 # exactly these paths, per the A1-sanctioned mechanism):
-#   daemon/tools/service_spawner.py         — service_spawner.stop:
-#                                             os.killpg(pid, sig) process-
-#                                             GROUP signals (A1 BLOCKING
-#                                             amendment — pgid == pid for
-#                                             setsid leaders; reaches
-#                                             fork-children with zero added
-#                                             reachability) + get_process_
-#                                             start_time /proc/<pid>/stat
-#                                             read (D5 PID-reuse defense).
+#   daemon/tools/service_spawner.py         — get_process_start_time
+#                                             /proc/<pid>/stat read (D5
+#                                             PID-reuse defense). NOTE:
+#                                             the legacy service_spawner
+#                                             .stop helper was DELETED
+#                                             in F2 (1cdd9551) — the
+#                                             SOLE service-kill path is
+#                                             the inline stop loop in
+#                                             daemon/services/service_tool
+#                                             _manager.py (listed next).
 #   daemon/tools/service_tools.py           — docstring-only mentions of
 #                                             the sanctioned os.killpg
 #                                             mechanism (no executable
