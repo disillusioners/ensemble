@@ -411,6 +411,13 @@ class GateDecision:
     #: alongside the marker fields; additive to the canonical
     #: 17-field tuple.
     trigger_suppressed_by: str = ""
+    #: 2026-09-16 answer-gate blindness fix (incident 6a0d60c9,
+    #: FIX-2) — True when the leader has an OPEN awaiting-answer
+    #: suspension handle at gate time (the FIFTH legitimate-pending
+    #: input). Plain allow: no marker scan, no judge, no nudge, no
+    #: hint, no counter movement. Logged as the 18th canonical
+    #: schema field.
+    user_answer_pending: bool = False
 
 
 #: Marker-path enum constants — the canonical strings the gate emits on
@@ -428,6 +435,49 @@ MARKER_PATH_D = "d"             # markers + judge-error/timeout/unparsable
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def deny_bound_exceeded(denied_count: int, bound: int) -> bool:
+    """Shared deny_bound escalation predicate (2026-09-16, FIX-1).
+
+    Incident 6a0d60c9: the deny bound was enforced ONLY on the
+    ``decide()`` step-(6) path. The marker-path allow→deny conversions
+    in ``daemon/graph.py`` (routes (a) and (d)) incremented the deny
+    counter WITHOUT consulting the bound, so a leader whose every
+    turn-end trips a mid-work marker could deny-nudge forever — 123
+    gate evaluations / 115 deny+nudge injections over 27 min with the
+    ``terminal_after_bound`` backstop never firing anywhere in the
+    fleet log.
+
+    This predicate is the SINGLE shared definition of "this deny is
+    the one that trips the bound" — extracted verbatim from the
+    former inline ``denied_count + 1 > bound`` check in ``decide()``
+    step (6). ALL THREE deny producers consult it:
+
+      1. ``decide()`` step (6) — the canonical path (unchanged
+         semantics, now via this helper);
+      2. ``daemon/graph.py`` marker-path (a) conversion (judge
+         verdict=no, nothing pending);
+      3. ``daemon/graph.py`` marker-path (d) conversion (judge
+         timeout/error/unparsable, nothing pending).
+
+    When it returns True the caller MUST produce the canonical
+    terminal outcome — mirroring ``decide()`` step (6) EXACTLY:
+    ``Decision.TERMINAL_AFTER_BOUND`` with ``next_denied_count = 0``
+    and ``should_inject_nudge = False`` (no nudge re-injection), so
+    the existing terminal machinery in the gate node (ledger
+    ``set_escalated_and_reset`` + the
+    ``event=leader_completion_gate_terminal_after_bound`` operator
+    event + plain allow END) runs unchanged.
+
+    Args:
+        denied_count: Current ``attestation_denied_count``.
+        bound: Deny bound (D5, default 3).
+
+    Returns:
+        True when this deny would exceed the bound.
+    """
+    return denied_count + 1 > bound
+
+
 def decide(
     attested: bool,
     pending_children: int,
@@ -440,6 +490,7 @@ def decide(
     attestation_enabled: bool,
     *,
     attestation_required: bool,
+    user_answer_pending: bool = False,
 ) -> GateDecision:
     """Pure gate decision over the R2 inputs (plan 2.2 logic tree).
 
@@ -485,6 +536,22 @@ def decide(
        ``next_denied_count = denied_count + 1`` and
        ``should_inject_nudge = True``.
 
+    2026-09-16 amendment (incident 6a0d60c9, FIX-2 — answer-gate
+    blindness): a NEW arm (3.b) sits between the conditional gate
+    check and the attested check — ``user_answer_pending=True`` (the
+    leader has an OPEN awaiting-answer suspension handle at gate time)
+    → :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
+    counter UNCHANGED and zero nudge/hint. The pending party is the
+    USER; the leader cannot progress alone, so the awaiting answer is
+    the FIFTH legitimate-pending input (after ``pending_children``,
+    ``queued_or_expected_wakeups``, ``live_descendants``, and the
+    trigger-suppression input ``busy_descendants``). The arm fires
+    BEFORE the attested check deliberately: the plain-allow contract
+    is ZERO counter movement — an attested-allow reset (trigger 1)
+    does not run while an answer is pending. The gate's ``evaluate``
+    glue additionally skips the marker/length trigger entirely on
+    this arm (no marker scan, no judge, no nudge, no hint).
+
     An unrecognized ``mode`` fails OPEN to :attr:`Decision.ALLOWED`
     (mirrors the resolver's fail-open ruling); the resolver's one-shot
     WARN is the typo safety net.
@@ -514,6 +581,14 @@ def decide(
             ON. ``False`` means no delegation happened — the gate is
             OFF for this turn-end and the leader does not need to
             ``attest_completion``.
+        user_answer_pending: Keyword-only, default False (2026-09-16,
+            incident 6a0d60c9 FIX-2). True when the leader has an OPEN
+            awaiting-answer suspension handle at gate time (DB-backed:
+            ``task.suspension_reason='awaiting_answer'`` +
+            ``resume_target_turn_id IS NOT NULL`` + ``status='paused'``
+            + freshness guard, read via
+            ``InstanceManager.has_open_user_answer``). Arms the plain
+            allow (arm 3.b) with ZERO counter movement.
 
     Returns:
         :class:`GateDecision` — the decision core.
@@ -562,6 +637,23 @@ def decide(
             attestation_required=False,
         )
 
+    # (3.b) user answer pending — the FIFTH legitimate-pending input
+    # (2026-09-16, incident 6a0d60c9, FIX-2 answer-gate blindness).
+    # The leader has an OPEN awaiting-answer suspension handle: the
+    # pending party is the USER and the leader cannot progress alone.
+    # PLAIN ALLOW with the counter UNCHANGED (zero counter movement —
+    # deliberately BEFORE the attested check so even an attested-allow
+    # reset does not run while an answer is pending). The evaluate()
+    # glue additionally skips the marker/length trigger entirely on
+    # this input (no marker scan, no judge, no nudge, no hint).
+    if user_answer_pending:
+        return GateDecision(
+            decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
+            next_denied_count=denied_count,
+            should_inject_nudge=False,
+            attestation_required=attestation_required,
+        )
+
     # (4) attested allow — reset trigger 1.
     if attested:
         return GateDecision(
@@ -588,7 +680,11 @@ def decide(
         )
 
     # (6) bound exceeded — escalation; counter reset (trigger 2).
-    if denied_count + 1 > bound:
+    # FIX-1 (2026-09-16, incident 6a0d60c9): the bound predicate is
+    # the SHARED helper ``deny_bound_exceeded`` — the marker-path
+    # allow→deny conversions in graph.py consult the SAME predicate so
+    # the bound backstop can no longer be bypassed on the marker path.
+    if deny_bound_exceeded(denied_count, bound):
         return GateDecision(
             decision=Decision.TERMINAL_AFTER_BOUND,
             next_denied_count=0,
@@ -662,6 +758,9 @@ CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
     "mode",
     "scanner_window_truncated",
     "scanner_summary_seen",
+    # 2026-09-16 answer-gate blindness fix (incident 6a0d60c9, FIX-2)
+    # — the FIFTH legitimate-pending input; 18th canonical field.
+    "user_answer_pending",
 )
 
 
@@ -867,6 +966,28 @@ def evaluate(
             )
             live_descendants = manager.count_live_descendants(instance_id)
             busy_descendants = manager.count_busy_descendants(instance_id)
+            # FIX-2 (2026-09-16, incident 6a0d60c9) — the FIFTH
+            # legitimate-pending input: an OPEN awaiting-answer
+            # suspension handle. Read via the manager facade (same DB
+            # seam + fail-open contract as the sibling R2 reads; the
+            # facade mirrors ``count_busy_descendants`` — errors
+            # propagate into the ``except`` below and the whole
+            # evaluation fail-open-allows with the -1 sentinels).
+            #
+            # Duck-typing guard: the value arms the plain-allow bypass
+            # ONLY when it is the literal ``True``. A MagicMock /
+            # test-double return (truthy-but-not-True) reads as False
+            # so the deny path stays reachable — a missing or mocked
+            # facade can NEVER false-positive into a permanent allow
+            # bypass (the new silent-completion hole this fix must
+            # not open). A facade that is absent entirely reads as
+            # False too.
+            _answer_reader = getattr(manager, "has_open_user_answer", None)
+            user_answer_pending = (
+                _answer_reader(instance_id) is True
+                if callable(_answer_reader)
+                else False
+            )
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam
             error_class = type(db_exc).__name__
             logger.error(
@@ -918,6 +1039,10 @@ def evaluate(
                 queued_or_expected_wakeups=-1,
                 live_descendants=-1,
                 busy_descendants=-1,
+                # FIX-2: DB-seam failure reads as NOT pending — the
+                # allow here is the pre-existing whole-eval fail-open,
+                # not an answer-pending bypass.
+                user_answer_pending=False,
                 denied_count=denied_count,
                 gate_exception_seen=True,
             )
@@ -934,6 +1059,7 @@ def evaluate(
             mode=mode_resolver.mode,
             attestation_enabled=attestation_enabled,
             attestation_required=attestation_required,
+            user_answer_pending=user_answer_pending,
         )
 
         # Attach diagnostics + R2 inputs → log-ready object.
@@ -956,6 +1082,7 @@ def evaluate(
             queued_or_expected_wakeups=queued_or_expected_wakeups,
             live_descendants=live_descendants,
             busy_descendants=busy_descendants,
+            user_answer_pending=user_answer_pending,
             denied_count=denied_count,
             delegation_since_last_user=delegation_scan.delegation_since_last_user,
             last_real_user_found=delegation_scan.last_real_user_found,
@@ -1014,6 +1141,13 @@ def evaluate(
                 Decision.DRY_LOG,
             )
             and not result.attestation_present
+            # FIX-2 (2026-09-16, incident 6a0d60c9) — answer-gate
+            # blindness: an OPEN awaiting-answer handle means the
+            # pending party is the USER. PLAIN ALLOW before ANY
+            # trigger/judge work: NO marker scan, NO length trigger,
+            # NO judge, NO nudge, NO hint, NO counter movement. The
+            # awaiting answer is the whole turn's purpose.
+            and not result.user_answer_pending
         ):
             # (iii.c.1) — Mid-work marker scan (2026-09-11, incident
             # b08f40fe). The marker scan is the TRIGGER half of a
@@ -1162,7 +1296,8 @@ def evaluate(
             "marker_hit=%s marker_terms=%s marker_path=%s "
             "marker_judge_verdict=%s marker_judge_latency_ms=%s "
             "marker_judge_error_class=%s "
-            "length_trigger=%s final_word_count=%s trigger_source=%s",
+            "length_trigger=%s final_word_count=%s trigger_source=%s "
+            "user_answer_pending=%s",
             result.decision.value,
             instance_id,
             gate_location,
@@ -1196,6 +1331,7 @@ def evaluate(
             result.length_trigger,
             result.final_word_count,
             result.trigger_source or "<none>",
+            result.user_answer_pending,
             extra=meta,
         )
 
@@ -1226,6 +1362,11 @@ def evaluate(
                     and result.pending_children == 0
                     and result.queued_or_expected_wakeups == 0
                     and result.live_descendants == 0
+                    # FIX-2 (2026-09-16): an open awaiting-answer handle
+                    # blocks denial under the NEW enforce semantics —
+                    # exclude it from the would-have-denied subset so
+                    # the dry→enforce adjudication signal stays honest.
+                    and not result.user_answer_pending
                 ):
                     record_promotion_metric(METRIC_DRY_LOG_DENY_PREDICATE_TOTAL)
             elif (

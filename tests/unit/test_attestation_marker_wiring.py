@@ -2008,14 +2008,15 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     )
 
 
-def test_length_log_placeholder_count_is_33():
+def test_length_log_placeholder_count_is_34():
     """The canonical ``event=leader_completion_gate`` log format
-    string has exactly 33 placeholders (31 → 33 with the two new
+    string has exactly 34 placeholders (31 → 33 with the two new
     busy trigger-suppression fields ``busy_descendants`` +
-    ``trigger_suppressed_by``). Pinned by source grep — drift pin
-    so log-row format-string changes surface in code review (a
-    regression to 31 placeholders breaks grep-based soak tooling
-    silently).
+    ``trigger_suppressed_by``; 33 → 34 with
+    ``user_answer_pending`` — 2026-09-16 incident 6a0d60c9 FIX-2,
+    the FIFTH legitimate-pending input). Pinned by source grep —
+    drift pin so log-row format-string changes surface in code
+    review (a regression breaks grep-based soak tooling silently).
 
     TWO-LAYER PIN: substring-count alone cannot catch an arg-shift
     (Python's ``logging`` swallows format errors via
@@ -2061,9 +2062,10 @@ def test_length_log_placeholder_count_is_33():
                 break
     format_text = "\n".join(format_string_lines)
     placeholder_count = format_text.count("%s")
-    assert placeholder_count == 33, (
+    assert placeholder_count == 34, (
         f"canonical gate log format string placeholder count drifted: "
-        f"expected 33 (31 + busy_descendants + trigger_suppressed_by), "
+        f"expected 34 (31 + busy_descendants + trigger_suppressed_by "
+        f"+ user_answer_pending [2026-09-16 incident 6a0d60c9 FIX-2]), "
         f"got {placeholder_count}. Update the drift pin if the "
         f"placeholder count is correct for the new schema."
     )

@@ -385,16 +385,22 @@ class TestSelfReferenceTrapEvaluateLevel:
 
 
 class TestConditionalSchemaPin:
-    """The canonical log schema MUST grow 16→17 fields and include
-    ``attestation_required``. A drift here is silent — a future
-    pinch that drops the field would break operators' observability
-    of the new conditional gate (per O8 unit-guard convention)."""
+    """The canonical log schema MUST grow 17→18 fields and include
+    ``attestation_required`` + ``user_answer_pending``. A drift here
+    is silent — a future pinch that drops a field would break
+    operators' observability of the new conditional gate (per O8
+    unit-guard convention)."""
 
-    def test_canonical_schema_count_is_17(self) -> None:
-        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 17
+    def test_canonical_schema_count_is_18(self) -> None:
+        # 2026-09-16 (incident 6a0d60c9, FIX-2): +user_answer_pending
+        # (18th) — the FIFTH legitimate-pending input.
+        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 18
 
     def test_canonical_schema_includes_attestation_required(self) -> None:
         assert "attestation_required" in CANONICAL_LOG_SCHEMA_FIELDS
+
+    def test_canonical_schema_includes_user_answer_pending(self) -> None:
+        assert "user_answer_pending" in CANONICAL_LOG_SCHEMA_FIELDS
 
     def test_attestation_required_positioned_after_live_descendants(self) -> None:
         # 2026-09-06 amendment positioned the new field after the

@@ -170,6 +170,7 @@ def _stable_id_for(
     ``project``            ``project:{instance_id}``                    ``instance_id``
     ``shared_meta_kv``     ``kv:{context_key}``                         ``context_key``
     ``completion_check_note``  ``completion_check_note:{instance_id}``   ``instance_id``
+    ``attestation_nudge``  ``attestation_nudge:{instance_id}``       ``instance_id``
     =====================  ===========================================  =====================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
@@ -194,6 +195,16 @@ def _stable_id_for(
     synthetic precedents, which have their own stable-id helpers —
     raises: this helper is not a universal mint and must not silently
     grow kinds without a decision.
+
+    ``attestation_nudge`` (2026-09-16, incident 6a0d60c9 fix cycle
+    FIX-3) mints a stable id per ``instance_id`` for the
+    attestation-gate deny nudge so CONSECUTIVE denies on the same
+    instance supersede the prior nudge block in place via LangGraph's
+    ``add_messages`` reducer (mirroring the ``completion_check_note``
+    contract). Both deny producers — the plain ``decide()`` deny and
+    the marker-path (a)/(d) allow-to-deny conversions — funnel through
+    the single nudge construction site in ``daemon/graph.py``, so all
+    three mint the SAME id and supersede each other.
 
     Args:
         kind: The block kind (see table above).
@@ -231,10 +242,17 @@ def _stable_id_for(
                 "instance_id"
             )
         return f"completion_check_note:{instance_id}"
+    if kind == "attestation_nudge":
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('attestation_nudge') requires "
+                "instance_id"
+            )
+        return f"attestation_nudge:{instance_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
-        "for 'project', 'shared_meta_kv', and 'completion_check_note' "
-        "blocks"
+        "for 'project', 'shared_meta_kv', 'completion_check_note', "
+        "and 'attestation_nudge' blocks"
     )
 
 

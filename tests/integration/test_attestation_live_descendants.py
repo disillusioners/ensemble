@@ -1270,11 +1270,12 @@ class TestCanonicalLogSchema:
     sanity check).
     """
 
-    def test_canonical_schema_has_17_fields(self):
+    def test_canonical_schema_has_18_fields(self):
         # 2026-09-06: 15 original + live_descendants (16th, 2026-09-06) +
         # attestation_required (17th, 2026-09-06 fastfollow — conditional
-        # gate flag).
-        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 17
+        # gate flag) + user_answer_pending (18th, 2026-09-16 incident
+        # 6a0d60c9 FIX-2 — the FIFTH legitimate-pending input).
+        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 18
 
     def test_canonical_schema_includes_live_descendants(self):
         assert "live_descendants" in CANONICAL_LOG_SCHEMA_FIELDS
