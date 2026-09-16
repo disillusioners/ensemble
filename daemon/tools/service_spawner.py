@@ -25,11 +25,11 @@ Design notes (D1 of ``.agents/shared/planning/service-tool/decisions.md``):
   parses ``ps -o lstart`` to epoch seconds. Windows raises
   ``NotImplementedError`` — the platform is not supported (no frozen
   PyInstaller build ships on Windows for the ``service`` track today).
-* The :func:`stop` low-level helper is exported but is **NEVER** called
-  without ``(pid, start_time)`` ownership verification at the manager
-  boundary (F7). The F1 poll-loop re-verify and the F1 pre-kill
-  re-verify at ``daemon/services/service_tool_manager.py`` are the only
-  legitimate call sites for this helper.
+* There is deliberately NO ``stop`` helper here (council Finding 2
+  deleted the dead, ownership-unverified one): the manager's inline
+  grace loop in ``daemon/services/service_tool_manager.py`` is the
+  SOLE kill path for the service track, and every signal site there
+  re-verifies ``(pid, start_time)`` ownership before signaling.
 
 NOT registered in any tool registry — this module exposes *helpers*, not
 @tool-decorated LangChain tools. The 1.C lane wires
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -435,84 +434,21 @@ def _is_alive_darwin(pid: int) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# stop — low-level helper (NEVER called without ownership verification)
+# (no low-level stop helper)
 # ─────────────────────────────────────────────────────────────────────
-
-
-def stop(
-    pid: int,
-    force: bool,
-    *,
-    grace_seconds: float = 5.0,
-) -> None:
-    """Low-level kill helper — SIGTERM → grace → SIGKILL escalation.
-
-    **This is the lowest-level signal helper in the service track.**
-    It is exported for the F7 seam layering requirement but is **NEVER**
-    called without ``(pid, start_time)`` ownership verification at the
-    manager boundary. The two legitimate call sites are:
-
-    1. The F1 poll-loop in ``ServiceToolManager.stop`` — each iteration
-       re-verifies ``get_process_start_time(pid) == row.start_time``
-       before / after every signal.
-    2. The F1 pre-kill escalation path — re-verifies immediately before
-       SIGKILL to catch the rare "recycled in the last 100 ms" race.
-
-    Args:
-        pid: PID to signal.
-        force: ``True`` skips SIGTERM and sends SIGKILL immediately
-            (caller still owns the verify-before-signal contract).
-        grace_seconds: How long to wait between SIGTERM and SIGKILL
-            when ``force=False``. Default 5.0s (matches
-            ``proc_tools._STOP_GRACE_SECONDS=5``). The caller may
-            parametrize a shorter value in tests; the manager-layer
-            constant ``_STOP_GRACE_SECONDS`` is the plan binding
-            contract.
-
-    Raises:
-        NotImplementedError: Platform is Windows (killpg is POSIX-only).
-        ProcessLookupError: The PID is already dead (ESRCH) — the
-            manager layer treats this as a clean exit and does NOT
-            propagate to the caller.
-    """
-    if sys.platform == "win32":
-        raise NotImplementedError(
-            "service_spawner.stop is not supported on Windows"
-        )
-
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    # A1: ``os.killpg(row.pid, sig)`` — a setsid'd service IS its own
-    # session + group leader (pgid == pid); killing the group reaches
-    # fork-children (e.g. ``npm run dev`` workers) with zero added
-    # reachability beyond the existing ``proc_tools.py`` precedent.
-    # ``killpg`` raises ``ProcessLookupError`` if the pgid has no
-    # members (ESRCH) — the manager layer treats that as "already
-    # dead" and returns cleanly.
-    try:
-        os.killpg(pid, sig)
-    except ProcessLookupError:
-        # Already dead — nothing to do; the manager layer is the
-        # authoritative owner of the cleanup state.
-        return
-
-    if force:
-        return
-
-    # Grace period — ``time.sleep`` here is INTENTIONAL. This helper
-    # is called from the manager layer via ``await asyncio.to_thread``;
-    # the awaitable wrapping means the event loop is never blocked
-    # (the manager awaits the to_thread future). ``time.sleep`` is
-    # CORRECT inside a thread.
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
-        time.sleep(0.1)
-        if not is_process_alive(pid):
-            return
-    # Loop expired — escalate to SIGKILL.
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
+#
+# The former ``stop(pid, force, grace_seconds)`` low-level helper was
+# DELETED (council Finding 2): it was dead code — the manager
+# implements its own grace loop — and its grace loop carried NO
+# ``(pid, start_time)`` ownership re-verify, so keeping it exported
+# preserved an unsafe kill path behind a stale "verified-call-boundary"
+# docstring. The manager's inline loop IS the sole kill path for the
+# service track, and EVERY signal site there is ownership-verified
+# (pre-signal / per-poll / pre-escalation / lost-race cleanup — see
+# the PID-reuse-defense enumeration in
+# ``daemon/services/service_tool_manager.py``). Do not re-introduce a
+# signal helper here; signals belong behind the manager's ownership
+# re-verify.
 
 
 __all__ = [
@@ -522,5 +458,4 @@ __all__ = [
     "is_process_alive",
     "kill_log_path",
     "spawn",
-    "stop",
 ]

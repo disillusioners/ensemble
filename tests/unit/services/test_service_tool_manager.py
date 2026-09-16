@@ -20,8 +20,10 @@ Covers the BLOCKING acceptance criteria for the manager layer:
 * **A2** — ``stop`` is async; the 5s grace uses
   ``await asyncio.to_thread(get_process_start_time, pid)`` polling
   (NOT ``time.sleep`` busy-wait).
-* **F7** — the spawner ``stop`` is NEVER called without ownership
-  verification at this manager boundary.
+* **F7** — the manager's inline grace loop is the SOLE kill path;
+  every signal site in the manager re-verifies ``(pid, start_time)``
+  ownership before signaling (the former ``service_spawner.stop``
+  helper was deleted — council Finding 2).
 * **A13** — ``mark_exited`` row-count return is consumed; race-lost
   updates are treated as idempotent success.
 * **Cap** — ``start`` enforces ``cap`` BEFORE any side effect.

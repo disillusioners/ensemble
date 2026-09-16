@@ -299,9 +299,11 @@ async def service_stop(name: str, force: bool) -> dict:
     # A1: `os.killpg(row.pid, sig)` — a setsid'd service IS its own session+group leader
     # (pgid == pid); killing the group reaches fork-children (e.g., `npm run dev` workers)
     # with zero added reachability beyond the existing `proc_tools.py:1010` precedent.
-    # F7: `service_spawner.stop` is NEVER called without (pid, start_time) ownership
-    # verification here — the re-verify on each poll (F1) and re-verify-before-SIGKILL
-    # escalation (F1) are the same invariant.
+    # F7: this inline `os.killpg` IS the sole kill path for the service track (the former
+    # `service_spawner.stop` helper was deleted — council Finding 2) and EVERY signal site
+    # in the manager re-verifies (pid, start_time) ownership before signaling: the
+    # pre-signal re-verify (F1), the per-poll re-verify (F1), the pre-SIGKILL-escalation
+    # re-verify (F1), and the F2 lost-race cleanup killpg in `start`.
     sig = signal.SIGKILL if force else signal.SIGTERM
     await asyncio.to_thread(os.killpg, row.pid, sig)
     if not force:
@@ -396,7 +398,7 @@ async def service_start(name: str, command: list[str], cwd: Optional[str]) -> di
     return {"name": name, "pid": pid, "status": "running", "log_path": log_path}
 ```
 
-**F7 — async/sync seam layering:** sync reconciliation code (the sweep's `repo.list_active`/`mark_exited` SQL calls, ~100ms wall-time at the default cap of 10 rows) is wrapped in `await asyncio.to_thread(...)` so it NEVER blocks the event loop. Pattern precedent: `EligiblePendingSweepService.sweep_once` at `daemon/services/eligible_pending_sweep.py:212-215`. `service_spawner.stop(pid, force, grace_seconds)` is never called without `(pid, start_time)` ownership verification (the F1 re-verify on each poll + the F1 re-verify-before-SIGKILL escalation are the same invariant applied at two points in the kill path).
+**F7 — async/sync seam layering:** sync reconciliation code (the sweep's `repo.list_active`/`mark_exited` SQL calls, ~100ms wall-time at the default cap of 10 rows) is wrapped in `await asyncio.to_thread(...)` so it NEVER blocks the event loop. Pattern precedent: `EligiblePendingSweepService.sweep_once` at `daemon/services/eligible_pending_sweep.py:212-215`. CORRECTED per council Finding 2: the manager's inline grace loop in `ServiceToolManager.stop` IS the sole kill path for the service track — the former low-level `service_spawner.stop(pid, force, grace_seconds)` helper was dead code (never called) and carried an ownership-unverified grace loop, so it was DELETED rather than fixed. Every signal site in the manager re-verifies `(pid, start_time)` ownership before signaling: the F1 pre-signal re-verify, the F1 per-poll re-verify, the F1 re-verify-before-SIGKILL escalation, and the F2 lost-race cleanup killpg in `start` (council Finding 1 added that re-verify — the fifth guarded signal site).
 
 **A13 — atomic-guard UPDATEs (folded into repo methods, not the tool layer):**
 - `repo.mark_exited(id, exit_code=None)` MUST be guarded `WHERE id=? AND status IN ('starting','running')` and return whether the row was actually transitioned (0 rows updated = a sweep↔stop race lost; the caller treats this as idempotent success).
