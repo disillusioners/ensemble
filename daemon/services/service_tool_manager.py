@@ -126,16 +126,32 @@ _NAME_PATTERN: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
 #: Service-name max length — matches the D3 tool schema (1-64 chars).
 _NAME_MAX_LEN: int = 64
 
-#: Disabled marker for the str-returning ``logs`` surface (council
-#: F4): the canonical ``{"status": "disabled", "reason": ...}`` dict
-#: shape rendered as text — the str twin of the marker the dict
-#: surfaces return, so every surface expresses the SAME disabled
-#: contract. Logs is a diagnostic read; a structured marker string is
-#: the clearest honest "nothing to read: the category is off" answer
-#: without silently masquerading as an empty log.
-DISABLED_LOGS_MARKER: str = (
-    '{"status": "disabled", "reason": "service_tool_enabled=False"}'
-)
+#: Single-source-of-truth disabled contract (Block 9).
+#:
+#: The ``service_tool_enabled=False`` disabled marker is the canonical
+#: ``{"status": "disabled", "reason": ...}`` dict shape that every
+#: disabled surface returns. Centralizing it as a single ``DISABLED``
+#: dict prevents the per-surface literal duplication (the pre-refactor
+#: code had this dict literal at 4 sites in service_tool_manager.py
+#: plus the ``DISABLED_LOGS_MARKER`` str twin + a separate tool-layer
+#: dict in service_tools.py — six divergent copies of the same
+#: contract).
+#:
+#: The str twin (``DISABLED_LOGS_MARKER``) is derived via
+#: :func:`json.dumps` so any future change to ``DISABLED`` propagates
+#: automatically to the log surface without a parallel edit. The
+#: tool-layer marker in :mod:`daemon.tools.service_tools` derives
+#: from the SAME source via an import — see
+#: :data:`daemon.tools.service_tools._MANAGER_UNAVAILABLE_MARKER`.
+DISABLED: dict[str, str] = {
+    "status": "disabled",
+    "reason": "service_tool_enabled=False",
+}
+
+#: str twin of :data:`DISABLED` for the ``service_logs`` surface
+#: (council F4 — the diagnostic read returns a structured marker
+#: string rather than a silent empty log).
+DISABLED_LOGS_MARKER: str = json.dumps(DISABLED)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -234,11 +250,7 @@ class ServiceToolManager:
         ``asyncio.to_thread`` (A2 / F7 seam layering).
         """
         if not self.enabled:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_enabled=False",
-            }
+            return {**DISABLED, "name": name}
 
         # Name validation (defense in depth — the tool-layer Field
         # constraint should catch this first, but the manager is also
@@ -483,11 +495,7 @@ class ServiceToolManager:
         polling (NEVER ``time.sleep`` busy-wait — A2 BLOCKING).
         """
         if not self.enabled:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_enabled=False",
-            }
+            return {**DISABLED, "name": name}
 
         # ── Resolve the row (active-only first; fall back to any-status
         # for the idempotent "already exited" return) ────────────
@@ -675,11 +683,7 @@ class ServiceToolManager:
             return the EXITED shape with ``reason="pid_recycled"``.
         """
         if not self.enabled:
-            return {
-                "name": name,
-                "status": "disabled",
-                "reason": "service_tool_enabled=False",
-            }
+            return {**DISABLED, "name": name}
 
         row = await asyncio.to_thread(self.repo.get_by_name_any_status, name)
         if row is None:
@@ -750,12 +754,7 @@ class ServiceToolManager:
         ``start`` / ``stop`` / ``status``.
         """
         if not self.enabled:
-            return [
-                {
-                    "status": "disabled",
-                    "reason": "service_tool_enabled=False",
-                }
-            ]
+            return [{**DISABLED}]
         rows = await asyncio.to_thread(self.repo.list_all)
         out: list[dict] = []
         for row in rows:

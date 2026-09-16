@@ -573,3 +573,41 @@ def test_service_start_then_stop_smoke(manager_stub: SimpleNamespace, tmp_path) 
         )
     finally:
         os.environ.pop("ENSEMBLE_SERVICE_LOG_DIR", None)
+
+
+def test_disabled_marker_shape_matches_manager_source() -> None:
+    """Block 9: pin the disabled-contract single-source invariant.
+
+    Asserts the SHAPE of the tool-layer disabled marker matches the
+    manager-side :data:`DISABLED` dict (same keys, same ``status``
+    value); only the ``reason`` differs (manager-None vs kill-switch).
+    Also asserts the str twin is a byte-accurate
+    :func:`json.dumps` of the dict so the str surface cannot drift
+    from the dict surface.
+    """
+    import json
+
+    from daemon.services.service_tool_manager import DISABLED
+    from daemon.tools.service_tools import (
+        _get_manager_unavailable_text,
+        _manager_unavailable_marker,
+        MANAGER_UNAVAILABLE_REASON,
+    )
+
+    marker = _manager_unavailable_marker()
+    assert set(marker.keys()) == set(DISABLED.keys()), (
+        f"manager-None marker keys drifted from DISABLED shape: "
+        f"{sorted(marker.keys())} vs {sorted(DISABLED.keys())}"
+    )
+    assert marker["status"] == DISABLED["status"], (
+        f"status drifted: {marker['status']!r} vs {DISABLED['status']!r}"
+    )
+    assert marker["reason"] == MANAGER_UNAVAILABLE_REASON, (
+        f"reason drifted: {marker['reason']!r} vs "
+        f"{MANAGER_UNAVAILABLE_REASON!r}"
+    )
+    text = _get_manager_unavailable_text()
+    assert text == json.dumps(marker), (
+        f"str twin drifted from dict twin: "
+        f"{text!r} vs {json.dumps(marker)!r}"
+    )

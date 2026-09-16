@@ -49,6 +49,7 @@ amendment) asserts this ordering by source-grep.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Annotated, Optional
 
@@ -76,19 +77,38 @@ def _manager_unavailable_marker() -> dict:
     Council F4b: every ``manager._service_tool_manager``-missing call
     site returns this shape (wrapped per return type — see the module
     docstring), never an empty container.
+
+    Block 9: the SHAPE is inherited from
+    :data:`daemon.services.service_tool_manager.DISABLED` so any
+    future change to the disabled contract (e.g. adding a third
+    key) propagates automatically; only the reason differs (this
+    marker fires when the manager is None, NOT when the kill switch
+    is off — same ``status`` value, different semantic class).
     """
-    return {
-        "status": "disabled",
-        "reason": MANAGER_UNAVAILABLE_REASON,
-    }
+    from daemon.services.service_tool_manager import DISABLED
+
+    return {**DISABLED, "reason": MANAGER_UNAVAILABLE_REASON}
 
 
 #: The str-surface rendering of the marker (``service_logs``): the
 #: dict above as JSON text, so the str tool surfaces the same
 #: {status, reason} contract instead of a silent empty string.
-_MANAGER_UNAVAILABLE_TEXT: str = (
-    '{"status": "disabled", "reason": "service_tool_manager_not_available"}'
-)
+#: Block 9: derived via :func:`json.dumps` from the manager-None
+#: marker above so the str twin cannot drift from the dict twin —
+#: but lazily (the import chain ``daemon.services.service_tool_manager
+#: → daemon.tools.service_spawner → daemon.tools.__init__ →
+#: daemon.tools.instance → daemon.tools.service_tools`` is cyclic at
+#: module-init time, so we cannot call ``_manager_unavailable_marker``
+#: at module scope). The str twin is computed on first read.
+_MANAGER_UNAVAILABLE_TEXT: str | None = None
+
+
+def _get_manager_unavailable_text() -> str:
+    """Lazy str-twin accessor (Block 9 — drift-proof shape contract)."""
+    global _MANAGER_UNAVAILABLE_TEXT
+    if _MANAGER_UNAVAILABLE_TEXT is None:
+        _MANAGER_UNAVAILABLE_TEXT = json.dumps(_manager_unavailable_marker())
+    return _MANAGER_UNAVAILABLE_TEXT
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -553,7 +573,7 @@ Returns:
         if service_manager is None:
             # Council F4b: the marker dict rendered as text (str
             # surface) — never a silent empty string.
-            return _MANAGER_UNAVAILABLE_TEXT
+            return _get_manager_unavailable_text()
         return await service_manager.logs(name=name, tail_lines=tail_lines)
 
     service_logs._full_doc_ = """\
