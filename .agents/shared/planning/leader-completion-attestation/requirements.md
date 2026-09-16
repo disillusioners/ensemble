@@ -1070,3 +1070,44 @@ Judge pure-function unit tests (33 cases in `tests/unit/test_attestation_report_
 - New tests: `tests/integration/test_attestation_marker_bound_enforcement_lca.py`, `tests/integration/test_attestation_user_answer_pending_lca.py`, `tests/unit/test_attestation_user_answer_pending_decide.py`, `tests/integration/test_attestation_nudge_supersede_lca.py`.
 - Updated pins: `test_attestation_conditional_gate_outcomes.py`, `test_attestation_live_descendants.py`, `test_attestation_marker_wiring.py`, `test_attestation_bound_escalation.py`.
 - Docs: `docs/setup.md` (runbook), `decisions.md` + `requirements.md` (this entry).
+
+
+# CTD — Child-Terminal Contradiction Detection (2026-09-16)
+
+The complementary bug class to the LCA leader-side gate: a CHILD instance that emits a final report promising future work ("Then I aggregate and write RESULTS. Ending turn.") and then transitions to terminal. The promised "next report" never arrives — the parent wakes up on the completion signal and trusts the report as if the work were done. This is the original hallucination bug class, caught at the SOURCE rather than at the parent's gate.
+
+The detector lives in the same directory as the LCA scanner (`daemon/services/attestation_marker_scanner.py`) but uses a SEPARATE catalog (`CHILD_TERMINAL_PROMISE_MARKERS`, 17 entries) with a SEPARATE function (`scan_child_terminal_report_for_promises`). It is invoked from the child→parent terminal-report delivery seam (`daemon/services/child_reports.py::_process_child_completion_db_sync`) and attaches an ADVISORY `[SYSTEM CONTEXT: Child Report Check]` note to the parent as a SEPARATE `MessageQueue` row. The detector is zero-LLM (pure substring scan) and ships always-on (no new `ENSEMBLE_*` env flag).
+
+## Acceptance criteria
+
+* **CTD-1 (catalog membership)**: `CHILD_TERMINAL_PROMISE_MARKERS` holds 10–18 entries; every spec seed phrase is present (`ending turn`, `awaiting`, `then i`, `to be continued`, `in progress`, `still pending`, `not yet complete`, `will report back`). Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalPromiseScan.test_catalog_size_in_range` and `test_canonical_seed_phrases_all_present`.
+
+* **CTD-2 (stable-id format)**: `_stable_id_for("child_report_check", instance_id=parent_id, agent_id=child_id)` returns `child_report_check:{parent_id}:{child_id}`. Two distinct parents receiving reports from the same child MUST NOT collide (different supersede slots). Two distinct children reporting to the same parent MUST NOT collide. Missing parent_id or missing child_id raises `ValueError`. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildReportCheckStableId` (5 tests).
+
+* **CTD-3 (hook fires on canonical positive)**: Child terminal report `"will write RESULTS. Ending turn."` produces TWO `MessageQueue` rows on the parent — the report (type=`completion_report`) and the note (type=`system`). The note's content starts with `[SYSTEM CONTEXT: Child Report Check]`. The note's source carries `child_report_check:{child_id}:{report_message_id}`. The note's `message_metadata` carries `child_report_check=True`, `context_kind=child_report_check`, `injected_message=True`, `child_report_check_terms=["ending turn", "will write"]`. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_a_promise_report_attaches_note`.
+
+* **CTD-4 (hook stays quiet on clean completion)**: Child terminal report `"Done, 5/5, merged abc123"` produces ONE `MessageQueue` row on the parent (the report only — no note). Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_b_clean_completion_does_not_attach_note`.
+
+* **CTD-5 (near-FP adjudication)**: `"completed X, awaiting your merge decision"` FIRES (note attached). The note text surfaces the advisory / heuristic framing. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_c_near_fp_awaiting_fires_with_advisory_note`.
+
+* **CTD-6 (supersede on repeat)**: Two `HumanMessage`s carrying the same stable id `child_report_check:{parent}:{child}` collapse to ONE block via the REAL `langgraph.graph.message.add_messages` reducer. The surviving block carries the most-recent content. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_d_supersede_on_repeat_real_add_messages`.
+
+* **CTD-7 (depth-agnostic)**: A grandchild instance whose report is being delivered to its child-parent fires the same hook — the detector is agent-agnostic. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_e_grandchild_to_child_case_fires`.
+
+* **CTD-8 (zero LLM calls)**: The detector is a pure substring scan. NO LLM call fires on the hook path. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_f_zero_llm_calls` (sentinels on every plausible LLM-call surface; any accidental LLM call raises AssertionError).
+
+* **CTD-9 (timing unchanged)**: The note rides as a second INSERT in the SAME transaction; report delivery timing is unchanged. The parent's first turn picks up BOTH the report and the note in the standard drain order. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_g_report_delivery_timing_unchanged`.
+
+* **CTD-10 (dead-parent skip)**: When the parent is `TERMINATED`, the note INSERT is suppressed along with the `PROCESS_REPORT` task creation (the note would accumulate in the queue forever otherwise). Pinned by `tests/unit/test_child_terminal_contradiction.py::TestChildTerminalContradictionHook.test_dead_parent_skips_note_insert`.
+
+* **CTD-11 (no new env flag)**: The detector ships always-on. Zero new `ENSEMBLE_*` env reads in the touched files. Pinned by `tests/unit/test_child_terminal_contradiction.py::TestSourcePins.test_no_new_env_flag_added` (AST walk over the three touched modules; any new `os.environ` / `os.getenv` call mentioning `CHILD_REPORT_CHECK` raises AssertionError).
+
+* **CTD-12 (no LLM gating of the child path)**: The detector is COMPLETELY independent of the LCA leader gate (`decide()`, judge service, marker/length triggers, busy suppression, deny-bound escalation). LCA kill-switches (`ENSEMBLE_LEADER_ATTESTATION_MODE`, `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`, `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`) do not affect the child-terminal contradiction detector. The two subsystems share the `leader_completion_gate_*` event-namespace prefix (operability) but the runtime contract is independent.
+
+## Files (this requirement):
+
+- `daemon/services/attestation_marker_scanner.py` — catalog + scan function (CTD-1).
+- `daemon/services/context_messages.py` — kind + stable-id format (CTD-2).
+- `daemon/services/child_reports.py` — hook at the terminal-report delivery seam (CTD-3, CTD-4, CTD-5, CTD-7, CTD-9, CTD-10); structured `event=leader_completion_gate_child_report_check_fired` log line (CTD-12).
+- New tests: `tests/unit/test_child_terminal_contradiction.py` (30 — pure-function matrix, stable-id format, hook surface, source-level pins).
+- Docs: `decisions.md` (D-CTD-1..6), `requirements.md` (this CTD-1..CTD-12 AC list), `docs/setup.md` (runbook entry under the LCA section).

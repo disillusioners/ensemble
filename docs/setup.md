@@ -1162,3 +1162,54 @@ Three fixes shipped always-on (fix/flag policy — no new `ENSEMBLE_*` flags; re
 **References:**
 - `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-16 (incident 6a0d60c9 fix cycle FIX-1+2+3)
 - `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-6A0D-1..AC-6A0D-14 (incident 6a0d60c9 acceptance)
+
+
+## LCA child-terminal contradiction detection (2026-09-16, child-side advisory)
+
+The LCA stack closes the *leader-side* hallucination bug (an LLM that emits a final assistant message without doing the actual work — gate denies the END, judge disambiguates, marker/length triggers + busy suppression keep FPs tolerable). The complementary *child-side* bug class — a child instance that emits a final report promising future work ("Then I aggregate and write RESULTS. Ending turn.") and then transitions to terminal — is closed by a separate, ADVISORY subsystem: the **child-terminal contradiction detector**.
+
+The detector is a **pure substring scan** (zero LLM involvement) at the child→parent terminal-report delivery seam (`daemon/services/child_reports.py::_process_child_completion_db_sync`). It fires AFTER the existing `PROCESS_REPORT` task INSERT and BEFORE the `report_injections` queue INSERT — same transaction, four-row crash-consistency. There is **no deny**, no delay, no gate; the detector only ATTACHES a `[SYSTEM CONTEXT: Child Report Check]` note to the parent's queue as a SEPARATE `MessageQueue` row. The parent's existing deny-path judge / nudge machinery is UNTOUCHED.
+
+### Note semantics
+
+* **Header:** `[SYSTEM CONTEXT: Child Report Check]` — reuses the canonical context-message prefix so `is_real_user_message` and the compaction three-bucket seam recognize it as the same `[SYSTEM CONTEXT: ...]` family.
+* **Body (server-authored constant):** "Child {child_id} completed while its final report promises future work ({matched_terms}) — likely premature completion. Its promised next report will never arrive. Verify the actual work state; if unfinished, revive it via send_message (e.g. 'continue your work') or verify its subtree before relying on this report. (Advisory / heuristic — marker scan is a substring match, not an LLM verdict.)"
+* **Stable id:** `child_report_check:{parent_id}:{child_id}` — keyed on the (parent, child) pair so two distinct parents receiving reports from the same child do NOT collide; two distinct children reporting to the same parent do NOT collide. New row in the canonical `_stable_id_for` id-format table (`daemon/services/context_messages.py`), mirroring the `completion_check_note:{instance_id}` F1 Shape A precedent. LangGraph's `add_messages` reducer SUPERSEDES repeats in place — exactly ONE note block per (parent, child) pair regardless of how many times the child fires its promise-while-stopping terminal report.
+* **Marker kwargs:** `additional_kwargs.child_report_check=True` + `child_report_check_terms=[...]` (the matched catalog substrings, surfaced as structured data so observability / compaction hooks can pin them without reparsing the prose body).
+
+### Catalog
+
+`CHILD_TERMINAL_PROMISE_MARKERS` (17 entries, FP-tight range 10–18 per the 2026-09-16 spec). The catalog is a TIGHTER subset of the leader-path `MID_WORK_MARKERS` (16 entries) because the detector has NO LLM judge to disambiguate FPs — markers are BOTH the trigger AND the verdict. The FP cost is borne by an explicitly advisory note text; the near-FP case "completed X, awaiting your merge decision" DOES fire (note attached) and the parent LLM judges the heuristic framing before acting.
+
+### Scope guards
+
+* Advisory ONLY — does NOT modify the child's report content; does NOT block / delay the child's terminal transition; does NOT block / delay the report delivery to the parent.
+* Agent-agnostic — fires for ANY agent's terminal report. Tested depth-agnostic via a grandchild-to-child case in `test_e_grandchild_to_child_case_fires`.
+* The note INSERT is suppressed on `marker_paused` / `db_paused` / `db_dead_parent` (the same branches that suppress the `PROCESS_REPORT` task creation) — a stranded note to a dead parent would feed Lane-3/4's `find_pending_past_age` past the 10-min bound and inflate `recovered` metric.
+
+### Observability
+
+Structured log line emitted inside `_process_child_completion_db_sync` at the time the note INSERT succeeds:
+
+```
+event=leader_completion_gate_child_report_check_fired parent_id={short} child_id={short} matched_terms={csv} note_message_id={uuid} stable_id={id} enqueued_at={iso}
+```
+
+Operators `grep event=leader_completion_gate_child_report_check_fired` to count firings; `grep matched_terms=awaiting` to compute the FP rate on the most common promise-while-stopping phrasing the leader-side incident family produces.
+
+### What does NOT change
+
+The detector does NOT touch the leader gate, the LCA judge service, the marker/length trigger logic, the busy-suppression logic, the deny-bound escalation predicate, the `_ChildCompletionDbResult` NamedTuple, the `report_injections` INSERT, or any of the LCA kill-switches (`ENSEMBLE_LEADER_ATTESTATION_MODE`, `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`, `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`). The two subsystems share the `leader_completion_gate_*` event-namespace prefix (operability) but the runtime contract is independent.
+
+**No new `ENSEMBLE_*` env flag** — the detector ships always-on (fix/flag policy 7d5285aa: bugfixes/improvements are not user-togglable). Operators wanting to disable the LCA subsystem as a whole can flip `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (the existing LCA kill-switch); this does NOT disable the child-terminal contradiction detector (intentional separation — the two subsystems cover different bug classes). Restart required after upgrading, code change only.
+
+**Related files:**
+- `daemon/services/attestation_marker_scanner.py` — `CHILD_TERMINAL_PROMISE_MARKERS` catalog (17 entries), `ChildTerminalPromiseScanResult` NamedTuple, `scan_child_terminal_report_for_promises` pure function.
+- `daemon/services/context_messages.py` — `CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"` enum constant; new row in the canonical `_stable_id_for` id-format table.
+- `daemon/services/child_reports.py` — `_process_child_completion_db_sync` hook + structured log line + scope guards.
+
+**Tests:** `tests/unit/test_child_terminal_contradiction.py` (30 — pure-function matrix, stable-id format, hook surface (a)/(b)/(c)/(d)/(e)/(f)/(g), source-level pins for catalog lives in scanner / kind lives in context_messages / hook lives in child_reports / no new env flag).
+
+**References:**
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-CTD-1..D-CTD-6 (2026-09-16 child-terminal contradiction detection entry)
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — CTD-1..CTD-12 (2026-09-16 child-terminal contradiction detection acceptance criteria)

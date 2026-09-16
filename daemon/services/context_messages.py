@@ -103,6 +103,16 @@ CONTEXT_KIND_SHARED_META_KV = "shared_meta_kv"
 # later compaction verbatim (mirrors how compaction docs and system
 # context blocks are treated) instead of being summarizable history.
 CONTEXT_KIND_SYMPTOM_REPAIR = "symptom_repair"
+# Child-terminal contradiction detection (2026-09-16). Attached to the
+# PARENT alongside the child's terminal report when the child is going
+# terminal but its final outgoing report contains promise-while-stopping
+# markers (see
+# :data:`daemon.services.attestation_marker_scanner.CHILD_TERMINAL_PROMISE_MARKERS`).
+# The note is delivered as a SEPARATE HumanMessage — it MUST NOT modify
+# the child's report content. Marker kwargs carry
+# ``child_report_check=True`` so downstream consumers can identify and
+# filter these notes (e.g. compaction three-bucket partition).
+CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -171,6 +181,7 @@ def _stable_id_for(
     ``shared_meta_kv``     ``kv:{context_key}``                         ``context_key``
     ``completion_check_note``  ``completion_check_note:{instance_id}``   ``instance_id``
     ``attestation_nudge``  ``attestation_nudge:{instance_id}``       ``instance_id``
+    ``child_report_check`` ``child_report_check:{parent_id}:{child_id}``  ``parent_id`` and ``child_id``
     =====================  ===========================================  =====================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
@@ -189,6 +200,25 @@ def _stable_id_for(
     compaction (merge 77ce4ae8) and dominate the budget
     (``INJECTIONS_DOMINATE`` skip). The id is what collapses the
     unbounded hint accumulation the original F1 backlog flagged.
+
+    ``child_report_check`` (2026-09-16, child-terminal contradiction
+    detection, decisions.md D-CTD-2) mints a stable id keyed on the
+    (parent, child) pair so repeated terminal reports from the same
+    child to the same parent SUPERSEDE in place via LangGraph's
+    ``add_messages`` reducer — the resulting state carries EXACTLY
+    ONE Child Report Check block per (parent, child) pair regardless
+    of how many times the child fires its promise-while-stopping
+    terminal report. Without the stable id, the note would compound
+    as a permanently-hoisted ``context_kind=child_report_check`` tail
+    under three-bucket compaction (same failure mode as the F1
+    backlog that drove the ``completion_check_note`` Shape A). The
+    id is keyed on the pair (not just child) so two distinct parents
+    receiving reports from the same child do NOT collide — each
+    pair has its own supersede slot. The note is delivered via
+    :func:`_make_context_message` factory (same as the rest) with
+    ``additional_kwargs.child_report_check=True`` so downstream
+    consumers can filter and the compaction seam can keep the note
+    in the non-selectable / permanently-hoisted bucket.
 
     C0 scope: only the ``project`` + ``shared_meta_kv`` kinds mint ids
     (S16). Any other kind — including the existing auto-load /
@@ -249,6 +279,25 @@ def _stable_id_for(
                 "instance_id"
             )
         return f"attestation_nudge:{instance_id}"
+    if kind == "child_report_check":
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('child_report_check') requires "
+                "instance_id (the parent_id \u2014 caller is on the "
+                "parent-side hook, so the parent id MUST be in scope). "
+                "The (parent, child) pair id is keyed on BOTH parts so "
+                "two distinct parents receiving reports from the same "
+                "child do NOT collide; child_id is passed via the "
+                "agent_id slot (see kind='child_report_check' branch)."
+            )
+        if not agent_id:
+            raise ValueError(
+                "_stable_id_for('child_report_check') requires "
+                "agent_id (the child_id) \u2014 the (parent, child) pair "
+                "id is keyed on BOTH parts; see docstring entry for "
+                "kind=child_report_check"
+            )
+        return f"child_report_check:{instance_id}:{agent_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'completion_check_note', "
