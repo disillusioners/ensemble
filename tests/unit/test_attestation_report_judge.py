@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from daemon.services import attestation_report_judge as judge_mod
 from daemon.services.attestation_report_judge import (
     JUDGE_DEFAULT_WINDOW,
+    JUDGE_EXCERPT_MAX_CHARS,
     JUDGE_MAX_INPUT_CHARS,
     JUDGE_MAX_OUTPUT_CHARS,
     JUDGE_SYSTEM_PROMPT,
@@ -371,6 +372,26 @@ def test_judge_async_returns_no_verdict(monkeypatch):
 
 
 def test_judge_async_unparsable_response_is_conservative(monkeypatch):
+    """Unparsable path: retry fired, attempt=2, reason non-empty,
+    first_unparsable_excerpt carries the redacted+truncated raw text.
+
+    The stub ``_stub_invoke_unparsable`` returns the SAME unparsable
+    body on both attempts (the retry is internal — the LLM invoker
+    is the same patched function). With my retry logic:
+
+    * attempt 1 → unparsable (raw_text="Sorry, I cannot help with that.")
+    * retry (attempt 2) → unparsable (same body)
+    * final verdict: ``unparsable``, ``attempt=2``,
+      ``first_unparsable_excerpt`` carries the redacted+truncated
+      raw text from attempt 1 (incident 98b59dd7 forensic surface).
+
+    The conservative semantics are preserved: ``is_complete_report=False``
+    so the gate's deny+nudge fall-through fires on retry exhaustion.
+    The brief explicitly closes the incident 98b59dd7 root cause:
+    the ``reason`` field is no longer empty on unparsable rows (the
+    empty ``reason`` on the unparsable verdict was the unrecoverable
+    diagnostic gap).
+    """
     monkeypatch.setattr(
         judge_mod, "_invoke_judge_llm", _stub_invoke_unparsable
     )
@@ -382,7 +403,14 @@ def test_judge_async_unparsable_response_is_conservative(monkeypatch):
     # Conservative: unparsable != report (gate fall-through to nudge).
     assert result.is_complete_report is False
     assert result.verdict == "unparsable"
-    assert result.reason == ""
+    # Retry fired (attempt 1 was unparsable, retry was also unparsable).
+    assert result.attempt == 2
+    # Reason is no longer empty on unparsable (incident 98b59dd7 fix).
+    assert result.reason != ""
+    assert "judge_response_unparsable" in result.reason
+    # First-attempt excerpt is captured (forensic surface).
+    assert result.first_unparsable_excerpt is not None
+    assert "Sorry" in result.first_unparsable_excerpt
     assert result.error_class is None
 
 
@@ -501,6 +529,12 @@ def test_constants_pinned():
     assert JUDGE_MAX_INPUT_CHARS == 12_000
     assert JUDGE_MAX_OUTPUT_CHARS == 400
     assert JUDGE_DEFAULT_WINDOW == 3
+    # Excerpt cap (incident 98b59dd7 forensic surface) — pin the
+    # module-level constant. The cap is bounded so the canonical
+    # log row stays grep-friendly on the worst-case
+    # unparseable-amplified output. Deliberately NOT env-tunable
+    # (one knob fewer; the brief is explicit about the cap).
+    assert JUDGE_EXCERPT_MAX_CHARS == 400
     # System prompt shape — must lead with "You are a strict" so the
     # LLM recognizes the role; must end with "no commentary" so the
     # format constraint is the LAST instruction.
@@ -526,14 +560,25 @@ def test_judge_result_is_frozen_and_error_class_defaults_none():
     * ``error_class=None`` is the default (success / parse-failure
       paths set it ``None`` explicitly; only the exception paths
       stamp the exception class name);
+    * ``attempt=1`` is the default (single-attempt outcomes —
+      the retry adds ``attempt=2`` for the retry-after-unparsable
+      path; incident 98b59dd7, 2026-09-16);
+    * ``first_unparsable_excerpt=None`` is the default (no
+      unparsable happened on attempt 1 — only populated when the
+      retry fired AND attempt 1 returned unparsable);
     * ``hashable`` — frozen dataclasses are hashable by default,
       required so callers can put ``JudgeResult`` instances into
       ``set`` / use as ``dict`` keys without surprise ``TypeError``s.
+    * **Field-order pin** — the canonical eight fields are listed
+      in EXACTLY this order so a future reorder / rename surfaces
+      in code review (drift breaks the log-line format-string
+      positional-arg binding in :mod:`daemon.graph` and the
+      call-site keyword-only contracts).
     """
     from dataclasses import FrozenInstanceError, fields
 
-    # Default error_class=None — direct construction with the six
-    # positional fields suffices.
+    # Default error_class=None / attempt=1 / first_unparsable_excerpt=None
+    # — direct construction with the six positional fields suffices.
     result = JudgeResult(
         is_complete_report=False,
         verdict="no",
@@ -542,7 +587,9 @@ def test_judge_result_is_frozen_and_error_class_defaults_none():
         latency_ms=42,
     )
     assert result.error_class is None
-    # Field set is exactly the six canonical fields — prevents a
+    assert result.attempt == 1
+    assert result.first_unparsable_excerpt is None
+    # Field set is exactly the eight canonical fields — prevents a
     # silent rename from breaking log-line / kwargs contracts.
     field_names = [f.name for f in fields(JudgeResult)]
     assert field_names == [
@@ -552,6 +599,14 @@ def test_judge_result_is_frozen_and_error_class_defaults_none():
         "model",
         "latency_ms",
         "error_class",
+        # 2026-09-16 (incident 98b59dd7 retry fix) — appended at the
+        # END of the field list so existing positional-construction
+        # call sites (which use the first six fields positionally) are
+        # NOT broken. New fields default-friendly so backward compat
+        # is preserved (constructors using only positional args get
+        # ``attempt=1``, ``first_unparsable_excerpt=None``).
+        "attempt",
+        "first_unparsable_excerpt",
     ]
     # frozen=True — mutation raises FrozenInstanceError.
     import pytest
@@ -562,3 +617,450 @@ def test_judge_result_is_frozen_and_error_class_defaults_none():
     assert hash(result) == hash(result)
     # Set membership proves hashability without extra ceremony.
     assert result in {result}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Judge retry semantics — incident 98b59dd7, 2026-09-16
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+#: Stub counters — track how many times the LLM invoker is called
+#: so we can pin the retry behavior exactly (call count == 1 when
+#: no retry, == 2 when retry fired).
+class _CallCounter:
+    def __init__(self) -> None:
+        self.count: int = 0
+
+
+def _stub_unparsable_then_yes(payload_text: str):
+    """Return a stub that emits unparsable on call 1 and 'yes' on call 2."""
+
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        if counter.count == 1:
+            return (payload_text, "fake-quick")
+        return (
+            '{"is_complete_report": true, "reason": "delivered final report"}',
+            "fake-quick",
+        )
+
+    return _stub, counter
+
+
+def _stub_unparsable_then_yes_no_tracking(payload_text: str):
+    """Same shape but without the counter (for tests that don't care
+    about call count)."""
+
+    async def _stub(config, user_payload, *, timeout_s):
+        if _stub_unparsable_then_yes_no_tracking.calls == 0:
+            _stub_unparsable_then_yes_no_tracking.calls += 1
+            return (payload_text, "fake-quick")
+        return (
+            '{"is_complete_report": true, "reason": "delivered final report"}',
+            "fake-quick",
+        )
+
+    _stub_unparsable_then_yes_no_tracking.calls = 0
+    return _stub
+
+
+def test_judge_async_unparsable_retries_and_succeeds_on_attempt_2(monkeypatch):
+    """Retry succeeds: attempt 1 unparsable → attempt 2 parses → ALLOWED.
+
+    Pinned contract: when the retry fires AND parses, the final
+    verdict is the retry's verdict (NOT a conservative fail-safe).
+    ``is_complete_report=True`` lets the gate flip to ALLOWED without
+    demanding the ``attest_completion`` toolcall. ``attempt=2`` and
+    ``first_unparsable_excerpt`` carry the failed attempt 1 onto
+    the result for operator forensics — even on the success-after-
+    retry path, the first-attempt shape is preserved so operators
+    can see "yes" was a RECOVERY, not a clean single-attempt pass.
+    """
+    stub, counter = _stub_unparsable_then_yes(
+        "Sorry, I cannot help with that."
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    # Retry fired exactly once.
+    assert counter.count == 2
+    # Final verdict = retry verdict (success after retry).
+    assert result.is_complete_report is True
+    assert result.verdict == "yes"
+    assert result.reason == "delivered final report"
+    # attempt=2 + first_unparsable_excerpt preserved.
+    assert result.attempt == 2
+    assert result.first_unparsable_excerpt is not None
+    assert "Sorry" in result.first_unparsable_excerpt
+    assert result.error_class is None
+
+
+def test_judge_async_unparsable_exhaust_retry_keeps_conservative(monkeypatch):
+    """Retry exhausted: attempt 1 unparsable + attempt 2 unparsable →
+    conservative fail-safe. The brief's deny-path symmetry guard relies
+    on this — long-form + unparsable + unparsable-retry → nudge only
+    after attempt 2 fires (the gate sees ``is_complete_report=False``
+    AFTER the retry is exhausted, so the nudge is gated by retry
+    exhaustion, not by single-attempt unparsable).
+    """
+    monkeypatch.setattr(
+        judge_mod, "_invoke_judge_llm", _stub_invoke_unparsable
+    )
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert result.is_complete_report is False
+    assert result.verdict == "unparsable"
+    assert result.attempt == 2
+    assert result.first_unparsable_excerpt is not None
+    # Reason is the new non-empty shape (incident 98b59dd7 fix).
+    assert "judge_response_unparsable" in result.reason
+
+
+def test_judge_async_timeout_does_not_retry(monkeypatch):
+    """Timeout path: NO retry (incident 98b59dd7 contract).
+
+    The retry fires ONLY when the model RESPONDED but the response
+    did not parse. Timeout / HTTP / LLM errors keep the existing
+    fail-safe semantics — no retry, single attempt, ``attempt=1``.
+    """
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 1  # NO retry fired.
+    assert result.verdict == "timeout"
+    assert result.attempt == 1
+    assert result.first_unparsable_excerpt is None
+    assert result.error_class == "TimeoutError"
+
+
+def test_judge_async_generic_error_does_not_retry(monkeypatch):
+    """Generic error path: NO retry (incident 98b59dd7 contract)."""
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 1  # NO retry fired.
+    assert result.verdict == "error"
+    assert result.attempt == 1
+    assert result.first_unparsable_excerpt is None
+    assert result.error_class == "RuntimeError"
+
+
+def test_judge_async_yes_does_not_retry(monkeypatch):
+    """Success path: NO retry (the response parsed → no need to retry)."""
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        return (
+            '{"is_complete_report": true, "reason": "delivered"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 1
+    assert result.verdict == "yes"
+    assert result.attempt == 1
+    assert result.first_unparsable_excerpt is None
+
+
+def test_judge_async_no_does_not_retry(monkeypatch):
+    """Clean-no path: NO retry (the response parsed → no need to retry)."""
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        return (
+            '{"is_complete_report": false, "reason": "short"}',
+            "fake-quick",
+        )
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 1
+    assert result.verdict == "no"
+    assert result.attempt == 1
+    assert result.first_unparsable_excerpt is None
+
+
+def test_judge_async_first_unparsable_then_timeout_records_both(monkeypatch):
+    """Retry-after-unparsable itself times out → conservative verdict
+    is the retry's transport failure (``timeout``), but the
+    ``first_unparsable_excerpt`` is preserved so operators see BOTH
+    shapes (the first-attempt unparseable AND the second-attempt
+    timeout) on the same log row.
+    """
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        if counter.count == 1:
+            return ("Sorry, garbage response.", "fake-quick")
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 2
+    assert result.verdict == "timeout"
+    assert result.attempt == 2
+    assert result.first_unparsable_excerpt is not None
+    assert "Sorry" in result.first_unparsable_excerpt
+    # Reason carries the dual-shape signal (operator forensics).
+    assert "unparsable" in result.reason.lower()
+    assert "timeout" in result.reason.lower()
+    assert result.error_class == "TimeoutError"
+
+
+def test_judge_async_first_unparsable_then_error_records_both(monkeypatch):
+    """Retry-after-unparsable itself raises a non-timeout exception →
+    same dual-shape forensic surface (the brief is explicit: where
+    a response body exists on the timeout/error row, surface it).
+    """
+    counter = _CallCounter()
+
+    async def _stub(config, user_payload, *, timeout_s):
+        counter.count += 1
+        if counter.count == 1:
+            return ("Random non-JSON prose.", "fake-quick")
+        raise RuntimeError("network blip")
+
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    assert counter.count == 2
+    assert result.verdict == "error"
+    assert result.attempt == 2
+    assert result.first_unparsable_excerpt is not None
+    assert "Random" in result.first_unparsable_excerpt
+    assert result.error_class == "RuntimeError"
+
+
+def test_redact_secrets_redacts_bearer_token():
+    """Bearer-style tokens are redacted before logging."""
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = (
+        "The auth was bearer abcdefghijklmnopqrstuvwxyz1234 in the header."
+    )
+    out = _redact_secrets(text)
+    assert "abcdefghijklmnopqrstuvwxyz1234" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_secrets_redacts_api_key_shapes():
+    """API-key-shaped strings are redacted before logging."""
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = (
+        "curl -H 'api_key=abcdefgh1234567890' "
+        '{"api-key": "abcdefgh1234567890"} '
+        "and token=abcdefgh1234567890"
+    )
+    out = _redact_secrets(text)
+    # All three secret-shaped strings are gone.
+    assert "abcdefgh1234567890" not in out
+    assert out.count("[REDACTED]") == 3
+
+
+def test_redact_secrets_redacts_secret_shapes():
+    """Generic secret-shaped strings are redacted."""
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = "Configured secret=abcdefgh1234567890 for the run."
+    out = _redact_secrets(text)
+    assert "abcdefgh1234567890" not in out
+    assert "[REDACTED]" in out
+
+
+def test_redact_secrets_preserves_short_tokens():
+    """Tokens below the 8-char minimum are NOT redacted (avoid
+    false positives on common prose words like 'token economy')."""
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = "token economy and bearer of good news"
+    out = _redact_secrets(text)
+    # The short 'bearer' is matched but no token-shaped secret is
+    # present; the prose shape stays intact (no [REDACTED]).
+    assert out == text
+
+
+def test_truncate_excerpt_caps_at_max_chars():
+    """Excerpt is capped at ``JUDGE_EXCERPT_MAX_CHARS``."""
+    from daemon.services.attestation_report_judge import (
+        _truncate_excerpt,
+    )
+
+    long_text = "x" * 1000
+    out = _truncate_excerpt(long_text)
+    assert len(out) == 400
+    assert out.endswith("[truncated]")
+
+
+def test_truncate_excerpt_collapses_whitespace():
+    """Whitespace runs are collapsed (a runaway LLM that emits 1000
+    newlines does not stretch the log row)."""
+    from daemon.services.attestation_report_judge import (
+        _truncate_excerpt,
+    )
+
+    text = "a\n\n\nb\t\tc   d"
+    out = _truncate_excerpt(text)
+    assert out == "a b c d"
+
+
+def test_truncate_excerpt_handles_empty_input():
+    from daemon.services.attestation_report_judge import (
+        _truncate_excerpt,
+    )
+
+    assert _truncate_excerpt("") == ""
+    assert _truncate_excerpt("   ") == ""
+
+
+def test_shape_unparsable_excerpt_composes_redact_then_truncate(monkeypatch):
+    """End-to-end: shape_unparsable_excerpt redacts AND truncates.
+
+    Pinned: the shape is the composition of redact → truncate (the
+    canonical log-row excerpt surface). Order matters — redaction
+    first operates on the raw value so we don't lose secret markers
+    to whitespace collapse; truncation then bounds the size for
+    log-row grep-friendliness.
+    """
+    from daemon.services.attestation_report_judge import (
+        _shape_unparsable_excerpt,
+    )
+
+    # Construct an input that exercises both helpers: a secret token
+    # embedded in long prose that overflows the cap.
+    token = "abcdefgh1234567890"
+    text = (
+        "Bearer " + token + " here\n\n" + ("y" * 500)
+    )
+    out = _shape_unparsable_excerpt(text)
+    # Token redacted.
+    assert token not in out
+    assert "[REDACTED]" in out
+    # Whitespace collapsed (the double-newline becomes a single space).
+    assert "\n" not in out
+    # Capped at JUDGE_EXCERPT_MAX_CHARS.
+    assert len(out) == 400
+    # Truncation tail marker present.
+    assert out.endswith("[truncated]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deny-path symmetry guard — incident 98b59dd7, brief §3
+#
+# On Decision.DENIED with a long-form final AIMessage (>150 words),
+# the nudge fires only after the retry is exhausted. This is
+# AUTOMATIC via the retry: a successful retry → is_complete_report=True
+# → gate flips to ALLOWED, no nudge. A failed retry →
+# is_complete_report=False → existing deny+nudge path. The brief
+# pins (i) and (ii) below as regression tests.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_deny_symmetry_long_form_unparsable_then_unparsable_nudge_after_retry(
+    monkeypatch,
+):
+    """Brief pin (i): long-form final AIMessage + unparsable on
+    attempt 1 + unparsable on attempt 2 (retry exhausted) →
+    conservative verdict fires the deny+nudge path AFTER attempt 2.
+
+    Concretely: the judge service returns
+    ``is_complete_report=False, attempt=2`` after retry exhaustion,
+    so the gate's deny+nudge machinery sees the post-retry state
+    (NOT a single-attempt unparsable). This is the symmetry guard
+    the brief mandates — the nudge is gated by retry exhaustion,
+    not by single-attempt unparsable.
+    """
+    monkeypatch.setattr(
+        judge_mod, "_invoke_judge_llm", _stub_invoke_unparsable
+    )
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    # Retry exhausted → conservative fail-safe.
+    assert result.is_complete_report is False
+    assert result.verdict == "unparsable"
+    assert result.attempt == 2  # The nudge gates on post-retry state.
+    # Gate sees ``is_complete_report=False`` AFTER attempt 2 — the
+    # deny+nudge machinery runs as documented. The first-attempt
+    # excerpt is preserved for forensics.
+    assert result.first_unparsable_excerpt is not None
+
+
+def test_deny_symmetry_long_form_unparsable_then_parse_success_no_nudge(
+    monkeypatch,
+):
+    """Brief pin (ii): long-form final AIMessage + unparsable on
+    attempt 1 + parse-success on attempt 2 → ``is_complete_report=True``
+    → gate flips to ALLOWED → NO nudge fires.
+
+    The retry is what closes the false-positive class from
+    incident 98b59dd7 — without the retry, a single-attempt
+    unparsable would have flipped a genuine 2328-char final
+    report into a deny+nudge path. With the retry, the parse-
+    success on attempt 2 rescues the verdict.
+    """
+    stub, counter = _stub_unparsable_then_yes(
+        "Sorry, I cannot help with that."
+    )
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", stub)
+    result = asyncio.run(
+        judge_completion_report_async(
+            _messages_for_judge(), config=_FakeCfg()
+        )
+    )
+    # Parse success on retry → ALLOWED (no nudge path).
+    assert result.is_complete_report is True
+    assert result.verdict == "yes"
+    assert result.attempt == 2
+    assert counter.count == 2
+    # First-attempt excerpt preserved on the result even though the
+    # final verdict is success — operators can see the retry was
+    # triggered (the incident 98b59dd7 forensic surface).
+    assert result.first_unparsable_excerpt is not None
