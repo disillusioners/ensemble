@@ -1213,3 +1213,31 @@ The detector does NOT touch the leader gate, the LCA judge service, the marker/l
 **References:**
 - `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-CTD-1..D-CTD-6 (2026-09-16 child-terminal contradiction detection entry)
 - `.agents/shared/planning/leader-completion-attestation/requirements.md` — CTD-1..CTD-12 (2026-09-16 child-terminal contradiction detection acceptance criteria)
+
+## LCA unified resolver — Stage 1 parallel-dry shadow (2026-09-16, additive)
+
+The LCA stack's planned consolidation (fuse sources A/B/C into ONE resolver — spec: `.agents/shared/planning/leader-completion-attestation/resolver-unification.md`) ships its **Stage 1** as a purely additive **shadow**: a pure activation predicate (`daemon/services/attestation_resolver_activation.py`) evaluated in PARALLEL at the existing gate seam (`attestation_gate.evaluate`, canonical-path tail + the C-read DB-error fail-open branch), emitting ONE structured log row per gate evaluation. **Nothing routes through it** — the old gate paths remain authoritative and byte-identical; there are ZERO new LLM calls (the Stage-2 fused-node invocation seam exists structurally but is inert), zero new env flags, and zero nudge/hint/text changes.
+
+### The dry-soak runbook (how to adjudicate)
+
+The soak signal is the **divergence rate between the shadow's would-be outcome and the old path's actual decision**, counted per outcome class. Grep the structured log for:
+
+```
+event=leader_completion_resolver_eval
+```
+
+Each row carries: `fired`, `band` (`deny|marker|a_suspicion|<none>`), `terms_fired`, `bypass_reason` (`term0_scope_or_mode|meta_bypass|fail_open|none`), the C snapshot (`pending_children`, `queued_or_expected_wakeups`, `live_descendants`, `busy_descendants`), the B snapshot (`marker_hit`, `length_trigger`, `final_word_count`), the A snapshot (`a_advisory_present`, `a_notes`, `a_kwargs_seen`), `would_be_outcome` (`would_allow|would_hint|would_deny_nudge|would_terminal`), `old_decision_value`, `agreement`, `fail_open`, and — when the predicate fires — the fused evidence bundle's `bundle_sha256` + `bundle_size_chars` + per-section sizes, plus `judge_invoked=False` (the zero-LLM witness).
+
+**Would-be-outcome mapping (no judge in Stage 1).** Deny band → `would_deny_nudge`, or `would_terminal` when the shared deny bound would be exceeded. Marker/A bands → `would_hint` when route-(b) pending work exists (pending ∨ wakeups ∨ live), else `would_allow` (marker-only signal is too weak to deny — the same posture as the judge kill-switch). Fail-open / not-fired → `would_allow`.
+
+**Adjudication rules of thumb:**
+
+1. **`agreement=False` on would-be-deny rows** (`would_deny_nudge`/`would_terminal` vs an allow-family `old_decision_value`) — the resolver would deny where the old path allowed. Investigate each: the deny band is the same R2 predicate family as `decide()` step (6), so a divergence here means an input-visibility difference, not a logic difference.
+2. **`band=a_suspicion` rows** — the Δ2 shape (child-terminal contradiction suspicion fires with a non-quiet tree). These map to `would_hint` and NEVER agree at this seam (the old path has no hint outcome at `evaluate()`; its route-(b) hint rides the graph node's post-judge conversion) — count them per mission as the Δ2 spend estimate for Stage 2, do not triage them as gate divergence.
+3. **`fail_open=True` rows** — the gate's own C facade reads failed (old behavior: whole-eval fail-open allow). The shadow row mirrors it; a rise in this counter is a DB-health signal, not an LCA signal.
+4. **`bypass_reason=meta_bypass` with `fired=False`** on delegated missions — expected quiet shape (attested / answer-pending / no delegation). `bypass_reason=term0_scope_or_mode` rows should be absent entirely: the shadow never runs where the gate doesn't (off-mode / non-leader / master-off return before the seam).
+5. **Divergence rate per outcome class** — compute `agreement=False` counts grouped by `would_be_outcome` and `band`. Healthy Stage-1: near-zero `would_deny_nudge`/`would_terminal` divergence; `would_hint` divergence tracks the marker/A-band fire rate (the Δ2/Δ4 soak counter). A rising `would_allow` vs `old_decision_value=denied` divergence means the OLD deny path fired where the resolver would not — check the gate log row's R2 inputs against the shadow row's C snapshot (they are read in the same evaluation, so they should never disagree).
+
+**Error rows:** `event=leader_completion_resolver_eval_error` — a resolver-side exception, isolated from gate control flow (the gate decision is unaffected by construction). Any occurrence is a bug in the shadow; file it against the resolver module, never against the gate.
+
+**Related files:** `daemon/services/attestation_resolver_activation.py` (predicate + bundle + event), `daemon/services/attestation_gate.py` §(vi) (the additive shadow seam), `tests/unit/test_attestation_resolver_activation.py` (63 — R4 short-circuit invariant, predicate matrix incl. the Δ2 row, §10.2 busy⊆live source pin, bundle caps/redaction/Δ1/Δ3, zero-LLM sentinel, row-shape + agreement, exception isolation).

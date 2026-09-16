@@ -327,3 +327,34 @@ class TestEscalationPathDocTruth:
             "runbook postmortem SQL selects a nonexistent 'id' column — "
             "the instances PK is instance_id"
         )
+
+
+# =============================================================================
+# Resolver shadow row-shape doc truth — the doc names the canonical row
+# fields the activation_predicate log emitter writes (cross-check: doc ↔
+# emitter source). Closes F3 of the bb17d7fe review.
+# =============================================================================
+
+
+class TestResolverShadowRowShapeDocTruth:
+    @pytest.fixture(autouse=True)
+    def _sources(self):
+        assert SETUP_MD.is_file(), f"missing runbook doc: {SETUP_MD}"
+        self.text = SETUP_MD.read_text(encoding="utf-8")
+        return self.text
+
+    def test_doc_names_canonical_old_decision_value_token(self):
+        # The emitter field is ``old_decision_value=denied`` (renamed from
+        # ``old_decision`` precisely to avoid substring collisions with
+        # other LCA log tokens). The runbook rule 5 must use the same
+        # canonical token — not the retired ``old_decision=denied``.
+        assert "old_decision_value=denied" in self.text, (
+            "runbook divergence-class rule must use the canonical emitter "
+            "field name 'old_decision_value' (the resolver shadow emits "
+            "'old_decision_value', not 'old_decision')"
+        )
+        assert "old_decision=denied" not in self.text, (
+            "runbook uses the retired 'old_decision=denied' token — the "
+            "resolver shadow emitter field is 'old_decision_value' (the "
+            "suffix disambiguates from sibling LCA log tokens)"
+        )

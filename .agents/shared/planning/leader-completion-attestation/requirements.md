@@ -1111,3 +1111,39 @@ The detector lives in the same directory as the LCA scanner (`daemon/services/at
 - `daemon/services/child_reports.py` — hook at the terminal-report delivery seam (CTD-3, CTD-4, CTD-5, CTD-7, CTD-9, CTD-10); structured `event=leader_completion_gate_child_report_check_fired` log line (CTD-12).
 - New tests: `tests/unit/test_child_terminal_contradiction.py` (30 — pure-function matrix, stable-id format, hook surface, source-level pins).
 - Docs: `decisions.md` (D-CTD-1..6), `requirements.md` (this CTD-1..CTD-12 AC list), `docs/setup.md` (runbook entry under the LCA section).
+
+---
+
+## R-RES — Stage 1 parallel-dry shadow acceptance criteria (2026-09-16, unified 3-source resolver)
+
+Origin: `resolver-unification.md` §4 (Stage 1) + user-locked decisions Δ1–Δ4 approved / Δ2 A-not-busy-suppressed / DP-5 rejected / R1–R8 Stage-3-only / no new flags / zero LLM. Tests: `tests/unit/test_attestation_resolver_activation.py` (63).
+
+* **R-RES-1 (R4/D10 mirror, TDD-first)**: `¬attestation_required` (no-delegation mission) ⇒ suspicion sources A/B are NEVER evaluated — the predicate short-circuits BEFORE the A/B provider calls. The invariant test was written FIRST and failed on import before implementation. Pinned by `TestR4ShortCircuitInvariant` (incl. attested + user-answer-pending meta-bypass rows and the delegated-mission positive control).
+
+* **R-RES-2 (Term 0)**: `¬attestation_enabled ∨ ¬scope_applicable ∨ mode="off"` ⇒ not fired, nothing evaluated (outermost). Dry/enforce compute normally. Pinned by `TestTerm0ScopeMode`.
+
+* **R-RES-3 (§4.2 predicate semantics)**: `c_quiet := pending=0 ∧ wakeups=0 ∧ live=0`; `b_fires := (marker_hit ∨ length_trigger) ∧ busy=0`; `a_suspicion := advisory ∨ contradiction ∨ phrase ∨ word-count-below`; `activation := c_quiet ∨ b_fires ∨ a_suspicion`; band precedence deny > marker > a_suspicion. Pinned by `TestPredicateMatrix`.
+
+* **R-RES-4 (Δ2)**: Source A fires ALONE while `busy_descendants>0` (markers busy-muted, tree not quiet) ⇒ `band=a_suspicion`. Source B busy-muted entirely. Pinned by `test_delta2_a_band_fires_alone_while_busy` + `test_busy_mutes_source_b`.
+
+* **R-RES-5 (C-read failure)**: a raising C provider ⇒ whole-eval fail-open plain-allow (`fail_open=True`, `would_allow`). Pinned by `TestCReadFailureFailOpen`; wiring parity pinned by `test_db_error_emits_fail_open_shadow_row`.
+
+* **R-RES-6 (§10.2 structural pin)**: `busy>0 ⇒ ¬c_quiet` guarded at the facade status-set source — busy statuses ⊆ unconditional-live statuses in `InstanceManager._count_descendants_busy_and_live`; PAUSED live-not-busy. Pinned by `TestSourceSetPins` (source-level subset extraction).
+
+* **R-RES-7 (would-be-outcome mapping)**: §4.3 no-judge mapping — deny band → `would_deny_nudge` / `would_terminal` at the shared bound; marker/A bands → `would_hint` on route-(b) pending, else `would_allow`; not-fired/fail-open → `would_allow`. Old-decision mapping + agreement (would_hint never agrees at the evaluate() seam). Pinned by `TestWouldBeOutcomeMapping`.
+
+* **R-RES-8 (Source A = landed Stage-0 contract)**: dual-surface note detection (kwargs `context_kind=child_report_check` OR `[SYSTEM CONTEXT: Child Report Check]` prefix), kwargs-first term/child-id recovery with body re-scan fallback, bounded evidence. Pinned by `TestSourceACollection`.
+
+* **R-RES-9 (bundle, Δ1+Δ3)**: A child-report evidence present; C first-10 rows + `+N more` suffix + scalar counts; per-section caps (3000/6000/3000) and total ≤12000; UUID id-redaction; stable sha256 + size witnesses. Pinned by `TestFusedBundle`.
+
+* **R-RES-10 (zero-LLM sentinel)**: full gate evaluation with would_fire=true ⇒ judge/LLM client NEVER invoked; `STAGE2_JUDGE_SEAM` defaults None and is provably inert; the event row carries `judge_invoked=False`. Pinned by `TestStage2SeamInert`.
+
+* **R-RES-11 (parallel-log row shape)**: ONE structured `event=leader_completion_resolver_eval` row per canonical gate evaluation with stable field names; agreement true/false cases; NO row on meta-bypass/off; dry-mode row shape; fail-open row on the DB-error seam. Pinned by `TestShadowEventRowShape`.
+
+* **R-RES-12 (exception isolation)**: a resolver-side crash logs `event=leader_completion_resolver_eval_error` and NEVER propagates into gate control flow (old decision unchanged). Pinned by `test_shadow_error_never_breaks_the_gate`.
+
+* **R-RES-13 (tree-rows provider)**: enumerates descendants via the public `get_tree_ids_permanent` facade (root excluded, fetch-capped), returns `[]` on any failure (never raises), no-repo → empty. Pinned by `TestTreeRowsProvider`.
+
+* **R-RES-14 (no new env flags)**: zero new `os.environ`/`os.getenv` reads in the Stage-1 module. Pinned by `TestSourcePins.test_no_new_env_flag_reads` (AST walk).
+
+* **R-RES-15 (old family unchanged)**: the existing attestation test family passes byte-identical (no behavior change; grep guards: old-path files touched only at the additive shadow seam; no new LLM/judge call sites; nudge/hint/note text constants untouched). Verified by the full-family run in the Stage-1 verification report.
