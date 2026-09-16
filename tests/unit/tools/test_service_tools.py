@@ -115,6 +115,84 @@ def test_factory_returns_empty_for_falsy_current_instance_id() -> None:
         )
 
 
+def test_service_start_cwd_is_truly_optional(
+    manager_stub_none: SimpleNamespace,
+) -> None:
+    """Phase 1 plan §3.A.3 case (g) — ``cwd`` is genuinely Optional[str].
+
+    Regression pin for tester obs (a) on
+    ``feature/service-tool @ 13964b15``: langchain's ``@tool`` decorator
+    requires the parameter to carry a real Python default (``= None``)
+    for ``Field(default=None, ...)`` inside ``Annotated[...]`` to
+    suppress ``required``. Without ``= None``, the schema marks
+    ``cwd`` as required and ainvoke raises ``ValidationError`` on
+    ``{name, command}`` (no cwd). The fix is the parameter-default
+    shape — the schema validator chain is unchanged.
+
+    Asserts all three acceptable call shapes — omitted, explicit
+    ``None``, explicit absolute path — validate and return the
+    manager-None disabled marker.
+    """
+    import asyncio
+
+    from daemon.tools.service_tools import (
+        MANAGER_UNAVAILABLE_REASON,
+        create_service_tools,
+    )
+
+    tools = {
+        t.name: t
+        for t in create_service_tools(
+            manager=manager_stub_none,
+            current_instance_id="inst-test",
+            agent_id="worker",
+        )
+    }
+    start = tools["service_start"]
+    schema = start.args_schema.model_json_schema()
+    # Schema pin: cwd is NOT in required (the contract under test).
+    assert "cwd" not in schema.get("required", []), (
+        f"service_start schema marked cwd required: required={schema.get('required')!r}"
+    )
+    # Type-shape pin: cwd allows null.
+    cwd_schema = schema["properties"]["cwd"]
+    assert "null" in {t.get("type") for t in cwd_schema.get("anyOf", [])} or \
+        cwd_schema.get("type") == "null" or \
+        cwd_schema.get("default", "__no_default__") is None, (
+        f"cwd schema must allow null: {cwd_schema!r}"
+    )
+
+    # Invocation pin: omitted cwd validates AND returns disabled-marker
+    # (the manager is None in this fixture, so the marker is the
+    # expected response — what matters here is that the schema
+    # accepted the input and the tool ran).
+    result = asyncio.run(
+        start.ainvoke({"name": "x", "command": ["echo", "hi"]})
+    )
+    assert result == {"name": "x", "status": "disabled",
+                       "reason": MANAGER_UNAVAILABLE_REASON}, (
+        f"omitted-cwd invoke must yield disabled-marker, got {result!r}"
+    )
+
+    # Back-compat pin: explicit cwd=None still works (older callers).
+    result_none = asyncio.run(
+        start.ainvoke({"name": "y", "command": ["echo"], "cwd": None})
+    )
+    assert result_none == {"name": "y", "status": "disabled",
+                            "reason": MANAGER_UNAVAILABLE_REASON}, (
+        f"explicit cwd=None invoke must yield disabled-marker, got {result_none!r}"
+    )
+
+    # Back-compat pin: explicit cwd="/tmp" still works.
+    result_path = asyncio.run(
+        start.ainvoke({"name": "z", "command": ["echo"], "cwd": "/tmp"})
+    )
+    assert result_path == {"name": "z", "status": "disabled",
+                            "reason": MANAGER_UNAVAILABLE_REASON}, (
+        f"explicit cwd path invoke must yield disabled-marker, got {result_path!r}"
+    )
+
+
 def test_factory_returns_five_tools_for_truthy_id(manager_stub: SimpleNamespace) -> None:
     """Five tools are produced when ``current_instance_id`` is truthy."""
     from daemon.tools.service_tools import create_service_tools

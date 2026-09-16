@@ -216,18 +216,19 @@ def create_service_tools(
             Field(
                 default=None,
                 description=(
-                    "Absolute working directory. ``None`` inherits the "
-                    "daemon cwd."
+                    "Absolute working directory. Omitted (or ``None``) "
+                    "inherits the daemon cwd."
                 ),
             ),
-        ],
+        ] = None,
     ) -> dict:
         """Start a long-lived service. Survives instance + daemon restart. Use tool_help('service_start') for details.
 
         Args:
             name: Unique service name (``^[a-zA-Z0-9_-]+$``, 1-64 chars).
             command: Argv array (no shell expansion).
-            cwd: Working directory (absolute path).
+            cwd: Working directory (absolute path). Omitted → the
+                service inherits the daemon process working directory.
 
         Returns:
             ``{"name", "pid", "status": "running", "log_path"}`` on
@@ -266,8 +267,9 @@ Args:
     command: Argv array (NOT a shell string). No shell expansion = no
         shell injection. e.g. ``["npm", "run", "dev"]``,
         ``["python", "-m", "http.server", "8000"]``.
-    cwd: Absolute working directory for the child. ``None`` inherits
-        the daemon cwd. A bad cwd returns ``spawn_failed`` synchronously.
+    cwd: Absolute working directory for the child. Omitted (or
+        ``None``) inherits the daemon cwd. A bad cwd returns
+        ``spawn_failed`` synchronously.
 
 Returns:
     On success: ``{"name", "pid", "status": "running", "log_path",

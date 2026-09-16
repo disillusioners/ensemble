@@ -150,6 +150,58 @@ def test_f8_bad_cwd_writes_exited_row(manager: ServiceToolManager, repo: Service
     sys.platform == "win32",
     reason="service_spawner is not supported on Windows",
 )
+def test_omitted_cwd_inherits_daemon_cwd(
+    manager: ServiceToolManager, repo: ServiceRepo, tmp_path
+) -> None:
+    """Phase 1 plan §3.A.3 case (g) — ``cwd=None`` semantic end-to-end.
+
+    Regression pin for tester obs (a) on
+    ``feature/service-tool @ 13964b15``: ``ServiceToolManager.start`` MUST
+    accept ``cwd=None`` and inherit the daemon's working directory
+    (Popen(cwd=None) is the canonical "inherit" semantic; the row's
+    ``cwd`` column is filled with ``os.getcwd()`` so forensic reads are
+    deterministic). The chain
+    ``service_start(name, command)`` → ``start(cwd=None)`` →
+    ``spawner.spawn(cwd=None)`` → ``subprocess.Popen(cwd=None)`` must
+    produce a running service whose resolved cwd matches the test
+    process cwd (the daemon cwd in production).
+    """
+    import os
+
+    os.environ["ENSEMBLE_SERVICE_LOG_DIR"] = str(tmp_path / "logs")
+    try:
+        result = asyncio.run(_start(manager, "omit-cwd", ["sleep", "30"]))
+        assert result.get("status") == "running", (
+            f"start(cwd=None) must succeed; got {result!r}"
+        )
+        pid = result.get("pid")
+        assert pid is not None and pid > 0
+
+        # Row forensics: cwd must be filled with the daemon cwd
+        # (os.getcwd() at the moment of the manager call), NOT None.
+        row = repo.get_by_name_any_status("omit-cwd")
+        assert row is not None
+        assert row.cwd == os.getcwd(), (
+            f"row.cwd should be the daemon cwd (os.getcwd()); "
+            f"got {row.cwd!r}"
+        )
+    finally:
+        os.environ.pop("ENSEMBLE_SERVICE_LOG_DIR", None)
+        # Best-effort cleanup so the sleep does not linger across tests.
+        try:
+            import signal as _sig  # noqa: PLC0415
+            import os as _os  # noqa: PLC0415
+            row = repo.get_by_name_any_status("omit-cwd")
+            if row is not None and row.pid:
+                _os.killpg(row.pid, _sig.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
 def test_f8_missing_binary_writes_exited_row(manager: ServiceToolManager, repo: ServiceRepo) -> None:
     """Missing binary ⇒ Popen raises OSError ⇒ EXITED row written."""
     result = asyncio.run(
