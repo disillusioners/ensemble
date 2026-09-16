@@ -1054,3 +1054,93 @@ grep "event=leader_completion_gate.*trigger_suppressed_by=busy_descendants" data
 - `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring (extended to `decision.marker_hit or decision.length_trigger` for the OR-composition, with `and not decision.trigger_suppressed_by` short-circuit)
 - `daemon/manager.py` — `count_busy_descendants` (new LCA input) + `_count_descendants_busy_and_live` shared BFS helper
 - `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (42 tests; +11 LCA busy trigger suppression tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)
+
+
+---
+
+## LCA judge unparsable retry + forensic logging (2026-09-16, incident 98b59dd7)
+
+The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_judge.py`) now retries ONCE on `verdict="unparsable"`. The retry fires ONLY when the model responded with a body AND the body did not parse (the strict `_parse_judge_response` returned `None`); timeout / HTTP / LLM errors do NOT trigger a retry (existing fail-safe semantics preserved).
+
+### Retry semantics
+
+| Outcome of attempt 1 | Retry fires? | `attempt` | `verdict` | `is_complete_report` |
+|---|---|---|---|---|
+| Parse success ("yes") | No | 1 | `yes` | `True` |
+| Parse success ("no") | No | 1 | `no` | `False` |
+| Unparseable body | **YES** (same input, fresh call) | 1 or 2 | retry's outcome | retry's outcome |
+| `asyncio.TimeoutError` | No | 1 | `timeout` | `False` |
+| Any other exception | No | 1 | `error` | `False` |
+
+### Worst-case latency bound
+
+The retry uses its OWN per-attempt timeout window (`timeout_s`). Total worst-case wall-clock = `2 × timeout_s`. With the default 25.0s cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`), worst-case = **50.0s**. The HA facade's `wall_clock_cap_s` and `asyncio.wait_for` bounds still apply per-attempt (the retry does NOT stack timeouts across attempts). Each retry attempt is a fresh LLM call — same prompt, same model, same config; no prompt mutation, no model swap, no backoff delay.
+
+### New log-row fields (`event=leader_completion_gate_judge` + `event=leader_completion_gate_marker_judge`)
+
+Both log rows gain two additive placeholders:
+
+| Field | Description |
+|---|---|
+| `llm_judge_attempt=%s` | `JudgeResult.attempt` value (`1` for first-attempt; `2` for retry-after-unparsable) |
+| `llm_judge_first_unparsable_excerpt=%s` | `JudgeResult.first_unparsable_excerpt` value (the truncated + redacted raw response of attempt 1, capped at 400 chars, whitespace-normalized, secrets redacted). `<none>` when `attempt == 1` |
+
+The `llm_judge_first_unparsable_excerpt` field closes the incident 98b59dd7 forensic gap — operators can now read the unparsable row's raw LLM output directly from the canonical log row without needing to re-run the probe.
+
+### Reason field no longer empty on unparsable
+
+The `reason` field on `JudgeResult` is no longer empty on `verdict="unparsable"` rows:
+
+| Path | `reason` shape |
+|---|---|
+| Retry exhausted (both unparsable) | `"judge_response_unparsable on both attempts: <excerpt-head>"` (excerpt-head capped at 120 chars) |
+| Retry-then-timeout (attempt 1 unparsable, attempt 2 `TimeoutError`) | `"judge_response_unparsable (attempt 1); timeout on attempt 2"` |
+| Retry-then-error (attempt 1 unparsable, attempt 2 generic exception) | `"judge_response_unparsable (attempt 1); error on attempt 2"` |
+| Retry-success (attempt 1 unparsable, attempt 2 parsed) | The retry's LLM rationale (unchanged from single-attempt success path) |
+| Single-attempt success ("yes" / "no") | The LLM's one-sentence rationale (unchanged) |
+| Single-attempt timeout / error | Empty string (unchanged — no response body exists) |
+
+### Redaction contract
+
+Secret-shaped substrings in `first_unparsable_excerpt` are redacted before logging:
+
+* `bearer <token>` (Authorization header prefix + value)
+* `api_key` / `api-key` / `apikey` in three shapes: query-style `api_key=value`, env-style `api_key=value`, JSON-style `"api-key": "value"`
+* `token=value` (env / query) and `"token": "value"` (JSON)
+* `secret=value` (env / query) and `"secret": "value"` (JSON)
+
+Minimum token length is 8 chars (`{8,}`); prose words like "token economy" or "bearer of good news" are NOT redacted (false-positive guard). The redaction sentinel is `[REDACTED]`. Whitespace runs are collapsed to a single space; the excerpt is capped at `JUDGE_EXCERPT_MAX_CHARS=400` chars with a `[truncated]` tail marker (single source of truth, NOT env-tunable by design).
+
+### Deny-path symmetry guard
+
+The brief mandates: on `Decision.DENIED` with a long-form final AIMessage (>150 words), the nudge fires only after the retry is exhausted. This is AUTOMATIC via the retry semantics (no separate gate logic):
+
+* (i) Long-form + unparsable on attempt 1 + unparsable on attempt 2 → `is_complete_report=False, attempt=2` → gate sees post-retry state → existing deny+nudge fires. Pinned by `test_deny_symmetry_long_form_unparsable_then_unparsable_nudge_after_retry`.
+* (ii) Long-form + unparsable on attempt 1 + parse-success on attempt 2 → `is_complete_report=True, attempt=2` → gate flips to ALLOWED → NO nudge. Pinned by `test_deny_symmetry_long_form_unparsable_then_parse_success_no_nudge`.
+
+The `>150 words` check uses the existing `SHORT_REPORT_WORD_THRESHOLD` constant from `daemon/services/attestation_marker_scanner.py` (no duplicate constant, no env-tunable knob — single source of truth).
+
+### Kill-switch OFF = zero judge calls (including zero retries)
+
+The kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` is checked at the graph layer in `daemon/graph.py:5483-5486` BEFORE the judge is called. When the kill-switch is OFF, the judge is never called → zero retries by construction. The existing pin `test_judge_not_called_when_env_kill_switch_off_real_resolver` (asserts `calls == []`) covers this; no new test was added because the architecture guarantees it.
+
+### KB-trap: DENIED rows have default marker fields
+
+On `Decision.DENIED` rows, the marker/length scanner NEVER runs (the scan is gated on `result.decision in (ALLOWED, ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG) AND not attestation_present` — see `daemon/services/attestation_gate.py:1009-1017`). The `marker_hit` / `length_trigger` / `final_word_count` / `marker_path` fields on `GateDecision` therefore stay at their dataclass defaults (False / False / 0 / "") on a DENIED row. Operators / future readers MUST NOT interpret those fields as measurements of the final AIMessage content on a DENIED row — they are noise on the deny path. Pinned by `TestDeniedRowsHaveDefaultMarkerFields` (4 tests) in `tests/unit/test_attestation_gate.py`.
+
+### Operator quick-reference
+
+* **Did the retry fire?** Grep `event=leader_completion_gate_judge llm_judge_attempt=2` (or `event=leader_completion_gate_marker_judge llm_judge_attempt=2`).
+* **What did the first attempt return?** Check `llm_judge_first_unparsable_excerpt=<value>` — the truncated + redacted raw response of attempt 1 (capped at 400 chars, secrets replaced with `[REDACTED]`).
+* **Was the retry exhausted?** `llm_judge_attempt=2` AND `verdict=unparsable` (or `timeout` / `error`).
+* **Was the retry successful?** `llm_judge_attempt=2` AND `verdict=yes|no`.
+* **Is this a false-positive retry-recovery?** `llm_judge_attempt=2` AND `verdict=yes` (incident 98b59dd7 class — the retry rescued a genuine 2328-char final report).
+
+### References
+
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-16 (judge unparsable retry + forensic logging + deny-path symmetry guard)
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-JUDGE-RETRY-1..AC-JUDGE-RETRY-16 (incident 98b59dd7 acceptance)
+- `daemon/services/attestation_report_judge.py` — `JudgeResult` extended (`attempt`, `first_unparsable_excerpt`); `_redact_secrets` / `_truncate_excerpt` / `_shape_unparsable_excerpt` helpers; `_AttemptOutcome` NamedTuple; retry refactor in `judge_completion_report_async`; module docstring updated
+- `daemon/graph.py` — two log rows extended with `llm_judge_attempt=%s` + `llm_judge_first_unparsable_excerpt=%s`
+- `tests/unit/test_attestation_report_judge.py` — 18 new tests + 2 updated tests + 1 new constants pin
+- `tests/unit/test_attestation_gate.py` — new `TestDeniedRowsHaveDefaultMarkerFields` class with 4 tests

@@ -576,3 +576,99 @@ class TestGateExceptionMarkerDry:
         ledger.increment.assert_not_called()
         ledger.reset.assert_not_called()
         ledger.set_escalated_and_reset.assert_not_called()
+
+
+# =============================================================================
+# KB-trap pin — incident 98b59dd7 follow-up (brief §4)
+#
+# On Decision.DENIED rows the marker/length scanner NEVER runs (the
+# scan is gated on ``result.decision in (ALLOWED,
+# ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG) AND not
+# attestation_present`` — see ``daemon/services/attestation_gate.py:
+# 1009-1017``). The ``marker_hit`` / ``length_trigger`` /
+# ``final_word_count`` fields on :class:`GateDecision` therefore
+# stay at their dataclass defaults (False / False / 0) on a DENIED
+# row. Operators / future readers MUST NOT interpret those fields as
+# measurements of the final AIMessage content on a DENIED row —
+# they are noise on the deny path.
+# =============================================================================
+
+
+class TestDeniedRowsHaveDefaultMarkerFields:
+    """Pin that the marker/length fields on DENIED rows are dataclass
+    defaults, not measurements.
+
+    The marker/length scanner is the TRIGGER half of a two-stage
+    disambiguator that fires only on ALLOW paths (incident b08f40fe
+    family). On DENIED rows the scanner never runs — the deny path
+    consumes ``decision.should_inject_nudge`` + the ledger writes
+    and exits; the marker/length fields are not relevant. The
+    canonical log row still stamps them (33 placeholders include
+    them all), but their values are the dataclass defaults.
+
+    This pin closes a future-readability hazard: a reader who
+    interprets ``marker_hit=True`` on a DENIED row as "the
+    marker scanner actually fired and saw a marker on the final
+    message" would be wrong — the scanner literally never ran.
+    """
+
+    def test_denied_rows_have_marker_hit_default_false(self):
+        manager = make_manager(pending_children=0, wakeups=0)
+        settings = GateSettings(mode="enforce", window=3, deny_bound=3)
+        result = evaluate(
+            "inst-denied-marker", 0, plain_messages(), settings, manager,
+        )
+        # DENIED is the canonical deny path — scanner does NOT run.
+        assert result.decision is Decision.DENIED
+        assert result.marker_hit is False, (
+            "marker_hit on a DENIED row MUST be the dataclass default "
+            "(False) — the scanner does not run on the deny path. "
+            "Reading marker_hit=True on a DENIED row as 'the marker "
+            "saw a marker on the final message' would be wrong."
+        )
+
+    def test_denied_rows_have_length_trigger_default_false(self):
+        manager = make_manager(pending_children=0, wakeups=0)
+        settings = GateSettings(mode="enforce", window=3, deny_bound=3)
+        result = evaluate(
+            "inst-denied-length", 0, plain_messages(), settings, manager,
+        )
+        assert result.decision is Decision.DENIED
+        assert result.length_trigger is False, (
+            "length_trigger on a DENIED row MUST be the dataclass "
+            "default (False) — the length scanner does not run on "
+            "the deny path. A length_trigger=True value on DENIED "
+            "is a measurement of the scanner-never-ran state, not "
+            "a measurement of the final message."
+        )
+
+    def test_denied_rows_have_final_word_count_default_zero(self):
+        manager = make_manager(pending_children=0, wakeups=0)
+        settings = GateSettings(mode="enforce", window=3, deny_bound=3)
+        result = evaluate(
+            "inst-denied-wordcount", 0, plain_messages(), settings, manager,
+        )
+        assert result.decision is Decision.DENIED
+        assert result.final_word_count == 0, (
+            "final_word_count on a DENIED row MUST be the dataclass "
+            "default (0) — the word-count scanner does not run on "
+            "the deny path. A non-zero value on DENIED is a sentinel "
+            "that the scanner-never-ran state was mis-stamped; either "
+            "the gate logic regressed or the field was set elsewhere."
+        )
+
+    def test_denied_rows_have_default_marker_path_empty_string(self):
+        """Bonus pin: ``marker_path`` stays empty on DENIED rows
+        (the scanner never runs, so no path can be recorded)."""
+        manager = make_manager(pending_children=0, wakeups=0)
+        settings = GateSettings(mode="enforce", window=3, deny_bound=3)
+        result = evaluate(
+            "inst-denied-path", 0, plain_messages(), settings, manager,
+        )
+        assert result.decision is Decision.DENIED
+        assert result.marker_path == "", (
+            "marker_path on a DENIED row MUST stay empty — the scanner "
+            "does not run on the deny path, so no a/b/c/d route can "
+            "be recorded. A non-empty value here would indicate the "
+            "trigger ran on the deny path (a regression)."
+        )

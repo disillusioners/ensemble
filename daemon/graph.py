@@ -5343,18 +5343,31 @@ def create_attestation_gate_node(
                     # operators grep one set of log keys for both
                     # paths). The verdict is the canonical signal;
                     # latency_ms / model / reason / error_class ride
-                    # alongside.
+                    # alongside. The ``attempt`` /
+                    # ``first_unparsable_excerpt`` fields are
+                    # populated on the retry-after-unparsable path
+                    # (incident 98b59dd7, 2026-09-16) so operators
+                    # can see whether the verdict came from a fresh
+                    # call or a retry, AND what the first attempt
+                    # returned if the retry was triggered. Empty /
+                    # "<none>" on every other path (no retry).
                     logger.info(
                         "event=leader_completion_gate_marker_judge "
                         "instance_id=%s verdict=%s "
                         "llm_judge_model=%s "
                         "llm_judge_latency_ms=%s "
+                        "llm_judge_attempt=%s "
+                        "llm_judge_first_unparsable_excerpt=%s "
                         "llm_judge_reason=%s llm_judge_error_class=%s "
                         "marker_terms=%s",
                         effective_instance_id,
                         marker_judge_result.verdict,
                         marker_judge_result.model,
                         marker_judge_result.latency_ms,
+                        marker_judge_result.attempt,
+                        marker_judge_result.first_unparsable_excerpt
+                        if marker_judge_result.first_unparsable_excerpt
+                        else "<none>",
                         marker_judge_result.reason,
                         marker_judge_result.error_class or "<none>",
                         ",".join(decision.marker_terms) if decision.marker_terms else "<none>",
@@ -5560,16 +5573,33 @@ def create_attestation_gate_node(
                     # earlier ``llm_judge_verdict=%s`` duplicate was
                     # dropped (W3 review fix — both fields carried
                     # ``judge_result.verdict`` and confused log grep).
+                    #
+                    # 2026-09-16 (incident 98b59dd7 retry-fix) — the
+                    # ``llm_judge_attempt`` /
+                    # ``llm_judge_first_unparsable_excerpt`` fields are
+                    # populated on the retry-after-unparsable path.
+                    # Operators can now see whether the verdict came
+                    # from a fresh call or a retry, AND what the first
+                    # attempt returned if the retry was triggered
+                    # (the empty-reason row that was the root cause
+                    # of the 98b59dd7 unrecoverable diagnostic is
+                    # closed). Empty / "<none>" on every other path.
                     logger.info(
                         "event=leader_completion_gate_judge "
                         "instance_id=%s verdict=%s "
                         "llm_judge_model=%s "
                         "llm_judge_latency_ms=%s "
+                        "llm_judge_attempt=%s "
+                        "llm_judge_first_unparsable_excerpt=%s "
                         "llm_judge_reason=%s llm_judge_error_class=%s",
                         effective_instance_id,
                         judge_result.verdict,
                         judge_result.model,
                         judge_result.latency_ms,
+                        judge_result.attempt,
+                        judge_result.first_unparsable_excerpt
+                        if judge_result.first_unparsable_excerpt
+                        else "<none>",
                         judge_result.reason,
                         judge_result.error_class or "<none>",
                     )
