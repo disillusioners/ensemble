@@ -69,3 +69,42 @@ No full matrix rerun required — no other files change.
 - Jobs: 8 PASS / 1 FAIL (Job 8 → F-A) / 0 TIMEOUT / 0 incomplete
 - ensure.md Core: ✅ 2/2 (Release Gate scoped out, see Scope Decision)
 - **Testing Complete: ❌ NOT READY — merge blocked on F-A (fused-judge truncation); F-B strongly recommended pre-merge; F-C + clarifications documented for Stage-3**
+
+
+---
+
+# RE-ADJUDICATION — Hotfix 26035633 (F-A/F-B/F-C closures)
+
+Date: 2026-09-16 (same session) · Scope: independent confirmation of the three blocker closures at `26035633` (parent `28edbdd8` = this gate's evidence commit) · 3 workers (exec 733f25f3, live 00c8a87b, static 775a2e23) · zero production changes by testers.
+
+## VERDICT: ✅ PASS-WITH-NOTES — FAIL verdict LIFTED; merge-blockers F-A/F-B/F-C all closed and independently verified (execution + live-LLM + static)
+
+### Closure evidence per finding
+
+**F-A (truncation) — CLOSED, verified 3 ways**
+- Repro probe re-run @ HEAD: case (a) compact 122-char → `complete` attempt=1; case (b) verbose 997-char (the live-failure shape) → `complete` attempt=1, `evidence_count=5`, `first_unparsable_excerpt_len=0`, `cap_chars=2048`. The pre-fix unparsable×2 class is unreproducible.
+- New unit pins `tests/unit/test_attestation_fused_judge_truncation.py` **7/7**: compliant-verbose parses attempt=1; 3072-char runaway still truncated → conservative fail-safe PRESERVED; drift pins (`2048 ≠ legacy 400`, fused-sites-use-fused-cap via `inspect.getsource`, legacy-sites-still-400).
+- Live-LLM probe re-run (creds present, `quick`): genuine report → `complete` → ALLOW (15.6s, attempt=1); child-lie bundle → `not_complete` → DENY_NUDGE (21.7s, attempt=1); no unparsable excerpts. Matches developer's 18.0s/19.1s within latency variance.
+- Static: `FUSED_JUDGE_MAX_OUTPUT_CHARS=2048` (:144) at fused sites :1340/:1378 ONLY; legacy 400 (:132) untouched at :921-922/:963-964 (dead-but-present); no other hunks in the file.
+
+**F-B (fused-block crash seam) — CLOSED**
+- Execution: failopen suite **17/17** — seam-iv (verdict-mapping/emission raise) × 3 bands: gate SURVIVES, `leader_completion_gate_error` row (`gate_location=fused_block`, `decision=fail_open_allowed`, `gate_exception_seen=true`), marker stamped, deny-band KEEPS deny+nudge (counter increments — DP-5 path-d-exact); marker/A bands plain allow. F2 wakeup re-fire still PASSES (both scenarios).
+- Static: `git diff -w 28edbdd8..26035633 -- daemon/graph.py` reduces to **3 non-whitespace additions** (ledger kwarg passthrough + try@:5260 + except@:5532) — the ~85-line body re-indent is mechanical, not behavioral. Except body (genuinely new, :5532-5568): error row + `_persist_gate_exception_marker` + fall-through to Phase-3 (no early return).
+
+**F-C (unstamped marker / FR-13 shape) — CLOSED**
+- Execution: 3 ledger-stamp pins PASS (`test_fc_seam_i/ii/iv_deny_band_stamps_marker_via_ledger` — `ledger.set_metadata(..., "attestation_gate_exception_seen", True)` asserted per seam).
+- Static: `evaluate()` optional `ledger=None` kwarg (all pre-existing callers unaffected); lazy import avoids the cycle; marker write itself try-wrapped. **Stamp-not-flip rationale CODE-VALIDATED**: `decision.gate_exception_seen` deliberately NOT set — `graph.py:5171-5176` would early-return the full fail-open-allow shape and bypass Phase-3 deny+nudge on the deny band (DP-5 violation). The ledger write is the canonical FR-13 observability stamp; outcome stays `decide()`'s. Documented in code + D-RES3 ADR.
+
+### Regression spot-checks post-hotfix
+incident-abc pack 8/8 · budget-parity pack 20/20 · family spot (fused_judge + resolver_stage2) 50/50 · developer recipe additionally reports family 268/268 + de 2/2.
+
+### Notes (non-blocking)
+1. **D-1 (brief drift):** re-adjudication brief listed `tests/unit/test_attestation_stage2_failopen.py`; the 17 tests actually live in `tests/integration/test_attestation_stage2_failopen.py` (the gate's original file, extended by the hotfix — +seam-iv re-contract +F-C pins). Count claim accurate; path in brief was wrong. No action.
+2. **D-2:** 7th file in the hotfix range is `.agents/shared/planning/leader-completion-attestation/decisions.md` (+80, D-RES3 ADR) — legitimate planning artifact accompanying the fix; range otherwise exactly 3 production + 4 test/probe files, +1187/−363.
+3. **Kill-switch + marker-routing packs not re-executed post-hotfix** — justified: the wrap is proven mechanical (`diff -w` = 3 non-whitespace lines, exception-path-only additions); those packs' cells do not raise inside the fused block, so their code path is semantically identical pre/post hotfix. Residual risk ≈ nil; full matrix re-run remains unnecessary per the recipe.
+4. **Standing items (unchanged by this re-adjudication):** activation still restart-gated (flip activates on daemon rebuild+restart post-merge; runtime soak items live); legacy dead-site deletion deferred to Stage 3; FR-13 deny-band resolver-fault outcome remains conservative-deny (documented deliberate choice, now loud + stamped).
+
+### Re-adjudication commit lineage
+`28edbdd8` (gate evidence) → `26035633` (hotfix: 3 production + 4 test files) → this re-adjudication's evidence commit (RESULTS + PACKS update).
+
+**Overall Status (re-adjudicated): Testing Complete — ✅ READY FOR MERGE (PASS-with-notes).**
