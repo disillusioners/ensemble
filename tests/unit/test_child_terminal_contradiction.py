@@ -861,6 +861,281 @@ class TestChildTerminalContradictionHook:
         assert rows[0].status == MessageStatus.FAILED.value
         assert rows[0].type == MessageType.COMPLETION_REPORT.value
 
+    def test_savepoint_fail_open_on_note_insert(
+        self, service, engine, bus, monkeypatch, caplog
+    ):
+        """FAIL-OPEN contract — when the SYSTEM-type Child Report
+        Check note INSERT raises ``IntegrityError`` (synthetic — e.g.
+        a constraint failure on the MessageQueue row), the outer
+        child-completion transaction MUST still commit:
+
+          (a) parent queue still has the child COMPLETION_REPORT row
+              (READY, not rolled back)
+          (b) the PROCESS_REPORT Task exists (PENDING)
+          (c) the report_injection row still commits (PENDING)
+          (d) ``event=leader_completion_gate_child_report_check_failed``
+              is logged at WARNING level (caplog)
+          (e) NO exception propagates to the caller
+
+        This pins the load-bearing SAVEPOINT contract: the note is
+        advisory — a missed note is tolerable, a blocked child
+        completion is NOT. Selectively patch ``Session.flush`` so the
+        synthetic ``IntegrityError`` fires ONLY when a ``MessageQueue``
+        with ``type=SYSTEM`` and ``context_kind="child_report_check"``
+        is in the pending-new set (the note INSERT site). Earlier
+        flushes (report message INSERT, task INSERT, report_injection
+        INSERT) pass through to the real flush so the function
+        reaches the note INSERT and commits the rest normally.
+        """
+        from sqlalchemy.exc import IntegrityError as SAIntegrityError
+        from sqlmodel import Session as SQLModelSession
+
+        parent_id = "parent-failopen"
+        child_id = "child-failopen"
+        _seed_instance(engine, instance_id=parent_id)
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        # Synthetic error shaped like a generic FK / NOT-NULL
+        # violation on ``message_queue``. We deliberately use an
+        # opaque message so no caller-side discriminator could
+        # possibly mistake it for the obligation-triple class (this
+        # is a DIFFERENT row — note vs. report_injection — and a
+        # different constraint class entirely).
+        synthetic_orig = RuntimeError(
+            "synthetic: child_report_check note INSERT violated "
+            "message_queue constraint"
+        )
+        synthetic_err = SAIntegrityError(
+            "INSERT INTO message_queue (...)",
+            params={},
+            orig=synthetic_orig,
+        )
+
+        # Selective flush wrapper — raises ONLY for the note row.
+        # Inspect ``session.new`` for the pending-new MessageQueue
+        # carrying ``context_kind="child_report_check"``; all other
+        # flushes (report message, task, report_injection) pass
+        # through unchanged so the canonical child-completion path
+        # commits normally.
+        original_flush = SQLModelSession.flush
+
+        def _selective_flush(self, *args, **kwargs):
+            new_objs = list(getattr(self, "new", set()) or set())
+            for obj in new_objs:
+                if (
+                    isinstance(obj, MessageQueue)
+                    and obj.type == MessageType.SYSTEM.value
+                    and isinstance(obj.message_metadata, dict)
+                    and obj.message_metadata.get("context_kind")
+                    == CONTEXT_KIND_CHILD_REPORT_CHECK
+                ):
+                    raise synthetic_err
+            return original_flush(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLModelSession, "flush", _selective_flush)
+
+        # (e) NO exception propagates to the caller.
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.child_reports"
+        ):
+            result = service._process_child_completion_db_sync(
+                child_id,
+                completed_message_id="msg-failopen",
+                last_content="will write the next report. Ending turn.",
+            )
+
+        # Outcome is regular completion — the synthetic failure on
+        # the note INSERT MUST NOT reclassify the result.
+        assert result.outcome == "regular_child_completed", (
+            f"synthetic IntegrityError on the note MUST NOT alter "
+            f"the completion outcome; got {result.outcome}"
+        )
+
+        # (a) Parent queue still has the child COMPLETION_REPORT row
+        # (READY). Zero SYSTEM child_report_check rows — the
+        # SAVEPOINT-scoped INSERT rolled back.
+        with Session(engine) as s:
+            note_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.SYSTEM.value,
+                )
+                .all()
+            )
+            report_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.COMPLETION_REPORT.value,
+                )
+                .all()
+            )
+        assert len(note_rows) == 0, (
+            f"note row MUST NOT commit when its INSERT raised; got "
+            f"{len(note_rows)} note row(s)"
+        )
+        assert len(report_rows) == 1, (
+            f"report row MUST commit despite the note failure; got "
+            f"{len(report_rows)} report row(s)"
+        )
+        assert report_rows[0].status == MessageStatus.READY.value
+
+        # (b) PROCESS_REPORT task exists in PENDING.
+        with Session(engine) as s:
+            tasks = (
+                s.query(Task)
+                .filter(
+                    Task.instance_id == parent_id,
+                    Task.task_type == TaskType.PROCESS_REPORT.value,
+                )
+                .all()
+            )
+        assert len(tasks) == 1, (
+            f"PROCESS_REPORT task MUST exist despite note failure; "
+            f"got {len(tasks)} task(s)"
+        )
+        assert tasks[0].status == TaskStatus.PENDING.value
+
+        # (c) report_injection row still commits (PENDING).
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+
+        with Session(engine) as s:
+            inj_rows = (
+                s.query(ReportInjection)
+                .filter(ReportInjection.parent_instance_id == parent_id)
+                .all()
+            )
+        assert len(inj_rows) == 1, (
+            f"report_injection row MUST commit despite note "
+            f"failure; got {len(inj_rows)} row(s)"
+        )
+        assert inj_rows[0].state == ReportInjectionState.PENDING.value
+
+        # (d) event=leader_completion_gate_child_report_check_failed
+        # is logged at WARNING level (caplog). Pin the event name
+        # verbatim so log-grep survives future renames.
+        failure_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "event=leader_completion_gate_child_report_check_failed"
+            in r.getMessage()
+        ]
+        assert len(failure_records) == 1, (
+            f"expected exactly one failure log line; got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        # Error class is surfaced so operators can diagnose.
+        assert "IntegrityError" in failure_records[0].getMessage()
+
+    def test_marker_paused_skips_note_insert(
+        self, service, engine, bus
+    ):
+        """Scope guard — when the parent is in the marker-paused
+        set (``_deferred_question_pause``), the note INSERT is
+        suppressed (mirrors the PROCESS_REPORT + report_injection
+        skip on the same branch). Without the skip, the note would
+        accumulate in the queue forever — the parent's live agent-
+        node is paused, so the note cannot be drained.
+        """
+        parent_id = "parent-markerpaused"
+        child_id = "child-markerpaused"
+        _seed_instance(engine, instance_id=parent_id)
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        # Trigger marker_paused by adding the parent id to the
+        # manager's deferred-question-pause set (the same set the
+        # production code consults at child_reports.py:3022-3024).
+        service._manager._deferred_question_pause.add(parent_id)
+
+        result = service._process_child_completion_db_sync(
+            child_id,
+            completed_message_id="msg-markerpaused",
+            last_content="will write the next report. Ending turn.",
+        )
+
+        assert result.outcome == "regular_child_completed"
+
+        with Session(engine) as s:
+            note_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.SYSTEM.value,
+                )
+                .all()
+            )
+        assert len(note_rows) == 0, (
+            f"marker_paused MUST suppress the note INSERT; got "
+            f"{len(note_rows)} note row(s) for parent={parent_id}"
+        )
+        # And the skip is reported on the same marker_paused reason.
+        # The report message + PROCESS_REPORT task + report_injection
+        # row still commit normally (only the note is suppressed).
+        with Session(engine) as s:
+            report_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.COMPLETION_REPORT.value,
+                )
+                .all()
+            )
+        assert len(report_rows) == 1
+
+    def test_db_paused_skips_note_insert(
+        self, service, engine, bus
+    ):
+        """Scope guard — when the parent's DB status is PAUSED
+        (``db_paused``), the note INSERT is suppressed (mirrors the
+        PROCESS_REPORT + report_injection skip on the same branch).
+        Same rationale as ``test_marker_paused_skips_note_insert``.
+        """
+        parent_id = "parent-dbpaused"
+        child_id = "child-dbpaused"
+        _seed_instance(engine, instance_id=parent_id, status=InstanceStatus.PAUSED.value)
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        result = service._process_child_completion_db_sync(
+            child_id,
+            completed_message_id="msg-dbpaused",
+            last_content="will write the next report. Ending turn.",
+        )
+
+        # db_paused takes the marker/db_status branch (NOT
+        # dead_parent_skip — the parent is PAUSED, not TERMINATED).
+        assert result.outcome == "regular_child_completed"
+
+        with Session(engine) as s:
+            note_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.SYSTEM.value,
+                )
+                .all()
+            )
+        assert len(note_rows) == 0, (
+            f"db_paused MUST suppress the note INSERT; got "
+            f"{len(note_rows)} note row(s) for parent={parent_id}"
+        )
+        with Session(engine) as s:
+            report_rows = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.COMPLETION_REPORT.value,
+                )
+                .all()
+            )
+        assert len(report_rows) == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source-level pins — defend against catalog/id-format drift

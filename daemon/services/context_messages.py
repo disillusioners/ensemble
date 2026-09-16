@@ -174,15 +174,15 @@ def _stable_id_for(
     single source of truth — all callers route through this helper so
     the mint site stays grep-able and the formats stay append-only):
 
-    =====================  ===========================================  =====================
-    ``kind``               id format                                    required parts
-    =====================  ===========================================  =====================
-    ``project``            ``project:{instance_id}``                    ``instance_id``
-    ``shared_meta_kv``     ``kv:{context_key}``                         ``context_key``
-    ``completion_check_note``  ``completion_check_note:{instance_id}``   ``instance_id``
-    ``attestation_nudge``  ``attestation_nudge:{instance_id}``       ``instance_id``
-    ``child_report_check`` ``child_report_check:{parent_id}:{child_id}``  ``parent_id`` and ``child_id``
-    =====================  ===========================================  =====================
+    ========================  =============================================  =========================
+    ``kind``                  id format                                       required parts
+    ========================  =============================================  =========================
+    ``project``               ``project:{instance_id}``                       ``instance_id``
+    ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
+    ``completion_check_note`` ``completion_check_note:{instance_id}``         ``instance_id``
+    ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
+    ``child_report_check``    ``child_report_check:{parent_id}:{child_id}``  ``parent_id`` and ``child_id``
+    ========================  =============================================  =========================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
     id suffix IS the partition the block content was read from, so
@@ -220,11 +220,14 @@ def _stable_id_for(
     consumers can filter and the compaction seam can keep the note
     in the non-selectable / permanently-hoisted bucket.
 
-    C0 scope: only the ``project`` + ``shared_meta_kv`` kinds mint ids
-    (S16). Any other kind — including the existing auto-load /
-    synthetic precedents, which have their own stable-id helpers —
-    raises: this helper is not a universal mint and must not silently
-    grow kinds without a decision.
+    C0 scope: the ``project``, ``shared_meta_kv``, ``completion_check_note``,
+    ``attestation_nudge``, and ``child_report_check`` kinds all mint ids
+    via this helper (S16 + 2026-09-12 attestation completion-check +
+    2026-09-16 incident 6a0d60c9 nudge + 2026-09-16 child-terminal
+    contradiction detection). Any other kind — including the existing
+    auto-load / synthetic precedents, which have their own stable-id
+    helpers — raises: this helper is not a universal mint and must not
+    silently grow kinds without a decision.
 
     ``attestation_nudge`` (2026-09-16, incident 6a0d60c9 fix cycle
     FIX-3) mints a stable id per ``instance_id`` for the
@@ -301,7 +304,7 @@ def _stable_id_for(
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'completion_check_note', "
-        "and 'attestation_nudge' blocks"
+        "'attestation_nudge', and 'child_report_check' blocks"
     )
 
 

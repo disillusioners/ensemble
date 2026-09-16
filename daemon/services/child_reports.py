@@ -3161,7 +3161,14 @@ Provide a concise summary:"""
                 # Stamp the marker kwarg the spec requires (downstream
                 # consumers can filter on this; mirrors the additional
                 # kwargs pattern used by the rest of the context-message
-                # family).
+                # family). The PERSISTED surface is the SAME-shape
+                # ``message_metadata`` dict on the MessageQueue row
+                # below (``child_report_check=True``,
+                # ``child_report_check_terms=[...]``) — these
+                # HumanMessage kwargs ride alongside as spec-letter
+                # + rehydration insurance if any consumer reads the
+                # context block from the LangGraph state channel
+                # rather than the DB row.
                 _note_message.additional_kwargs["child_report_check"] = True
                 # Surface the matched terms as a structured kwarg so
                 # observability / compaction hooks can pin them without
@@ -3186,8 +3193,6 @@ Provide a concise summary:"""
                         f"child={instance.instance_id[:8]}..., "
                         f"matched_terms={list(_promise_scan.matched_terms)})"
                     )
-                    child_report_check_note_row = None
-                    child_report_check_fired = False
                 else:
                     # Enqueue the note as a SECOND MessageQueue row on
                     # the parent's queue. The note has its OWN
@@ -3253,7 +3258,6 @@ Provide a concise summary:"""
                         session.add(child_report_check_note_row)
                         session.flush()
                         _note_sp.commit()
-                        child_report_check_fired = True
                         logger.info(
                             f"event=leader_completion_gate_child_report_check_fired "
                             f"parent_id="
@@ -3272,7 +3276,6 @@ Provide a concise summary:"""
                         # is UNTOUCHED. The note is lost; operator
                         # sees a structured failure row.
                         _note_sp.rollback()
-                        child_report_check_fired = False
                         logger.warning(
                             f"event=leader_completion_gate_child_report_check_failed "
                             f"parent_id="
@@ -3285,11 +3288,6 @@ Provide a concise summary:"""
                             f"error_class={type(_note_err).__name__} "
                             f"error={_note_err!s}"
                         )
-            else:
-                child_report_check_note_row = None
-                child_report_check_fired = False
-
-
             # ─── Report-injection queue (deadlock fix) ───────────────────
             # Enqueue a row in ``report_injections`` in the SAME
             # transaction as the completion_report message + the

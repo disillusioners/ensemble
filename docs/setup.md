@@ -1179,7 +1179,7 @@ The detector is a **pure substring scan** (zero LLM involvement) at the child→
 
 ### Catalog
 
-`CHILD_TERMINAL_PROMISE_MARKERS` (17 entries, FP-tight range 10–18 per the 2026-09-16 spec). The catalog is a TIGHTER subset of the leader-path `MID_WORK_MARKERS` (16 entries) because the detector has NO LLM judge to disambiguate FPs — markers are BOTH the trigger AND the verdict. The FP cost is borne by an explicitly advisory note text; the near-FP case "completed X, awaiting your merge decision" DOES fire (note attached) and the parent LLM judges the heuristic framing before acting.
+`CHILD_TERMINAL_PROMISE_MARKERS` (17 entries, FP-tight range 10–18 per the 2026-09-16 spec). The catalog has 17 entries vs. the leader-path `MID_WORK_MARKERS` (16 entries); the extra entry is the explicit `"awaiting"` seed the spec mandates despite its known FP cost. TIGHTER is a PER-ENTRY property, not a COUNT property — each entry is a more specific substring (e.g. `"will write"`, `"will aggregate"`) than the leader-path equivalents, so per-match FP rate is lower even though the catalog carries one more entry overall. The detector has NO LLM judge to disambiguate FPs — markers are BOTH the trigger AND the verdict. The FP cost is borne by an explicitly advisory note text; the near-FP case "completed X, awaiting your merge decision" DOES fire (note attached) and the parent LLM judges the heuristic framing before acting.
 
 ### Scope guards
 

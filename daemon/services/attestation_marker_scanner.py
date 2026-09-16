@@ -185,13 +185,17 @@ class MarkerScanResult(NamedTuple):
 #     the child→parent terminal-report delivery seam. There is NO LLM
 #     in this feature (zero LLM calls per the spec — see decisions.md
 #     D-CTD-1, 2026-09-16). Markers are BOTH the trigger AND the
-#     verdict, so the catalog must be TIGHTER (lower FP rate) than the
-#     leader-path catalog — a FP here directly spams the parent's
-#     message queue with a strongly-worded "likely premature completion"
-#     note. The :data:`CHILD_TERMINAL_PROMISE_MARKERS` catalog
-#     deliberately holds FEWER entries than :data:`MID_WORK_MARKERS`
-#     (15 vs 16) and skews toward the strongest promise-while-stopping
-#     signals.
+#     verdict, so the catalog must be TIGHTER (lower FP rate PER
+#     ENTRY) than the leader-path catalog — a FP here directly spams
+#     the parent's message queue with a strongly-worded "likely
+#     premature completion" note. The :data:`CHILD_TERMINAL_PROMISE_MARKERS`
+#     catalog has 17 entries (vs. :data:`MID_WORK_MARKERS` = 16); the
+#     extra entry is the explicit ``"awaiting"`` seed the spec
+#     mandates despite its known FP cost. TIGHTER is a PER-ENTRY
+#     property, not a COUNT property — each entry is a more specific
+#     substring (e.g. ``"will write"``, ``"will aggregate"``) than the
+#     leader-path equivalents, so per-match FP rate is lower even
+#     though the catalog carries one more entry overall.
 #
 # Pattern selection (spec seed phrases, FP-tight)
 # -------------------------------------------------------------------------
