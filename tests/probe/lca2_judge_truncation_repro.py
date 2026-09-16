@@ -9,50 +9,66 @@ proof by stubbing the SAME seam ``judge_fused_bundle_async`` consumes
 the single LLM seam — the same one ``tests/unit/test_attestation_fused_
 judge.py`` monkeypatches).
 
+History
+-------
+* **Original (2026-09-16, commit 20024fda).** The fused judge's
+  truncation cap was :data:`JUDGE_MAX_OUTPUT_CHARS` = 400 (hardcoded
+  module constant, no env knob, shared with the legacy window judge at
+  attestation_report_judge.py:120). The fused path truncated BEFORE
+  parse (attestation_report_judge.py:1316-1318). The fused
+  :data:`FUSED_JUDGE_SYSTEM_PROMPT` (attestation_report_judge.py:
+  1059-1079) mandates four fields including ``evidence_cited`` (up to
+  5 × 120 chars), an advisory, and a rationale — the realistic
+  payload exceeded 400 chars; a compact minimal JSON (verdict-only)
+  fit.
+* **F-A fix (2026-09-16).** A fused-scoped cap
+  (:data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` = 2048) was introduced at the
+  two fused sites ONLY; the legacy window judge keeps 400. The probe's
+  case-(b) expectation was FLIPPED — the verbose-but-correct verdict
+  now PARSES on attempt 1 (the live failure is closed). CI-registered
+  coverage lives at ``tests/unit/test_attestation_fused_judge_
+  truncation.py``; this manual probe remains for live re-verification
+  when an operator wants to run it by hand.
+
 Hypothesis under test
 --------------------
-H1. The fused judge's truncation cap is :data:`JUDGE_MAX_OUTPUT_CHARS`
-    = 400 (hardcoded module constant, no env knob, shared with the
-    legacy window judge at attestation_report_judge.py:120).
-H2. The fused path truncates BEFORE parse
-    (attestation_report_judge.py:1316-1318):
-        first_raw_text = first.raw_text
-        if len(first_raw_text) > JUDGE_MAX_OUTPUT_CHARS:
-            first_raw_text = first_raw_text[:JUDGE_MAX_OUTPUT_CHARS]
-        parsed = _parse_fused_judge_response(first_raw_text)
+H1. The fused judge now uses a SEPARATE cap
+    (:data:`FUSED_JUDGE_MAX_OUTPUT_CHARS`, default 2048) at the two
+    fused sites; the legacy window judge keeps
+    :data:`JUDGE_MAX_OUTPUT_CHARS` = 400.
+H2. The fused path still truncates BEFORE parse
+    (attestation_report_judge.py:1340-1341 / 1378-1379 — caps
+    raised to the fused-scoped value).
 H3. The fused :data:`FUSED_JUDGE_SYSTEM_PROMPT`
     (attestation_report_judge.py:1059-1079) mandates four fields
     including ``evidence_cited`` (up to 5 × 120 chars), an advisory,
-    and a rationale — the realistic payload WILL exceed 400 chars;
-    a compact minimal JSON (verdict-only) fits.
+    and a rationale — the realistic payload fits UNDER 2048 chars;
+    only a compact minimal JSON (verdict-only) fits under 400.
 
 Expected outcomes
 -----------------
-Case (a) — compact payload (~340 chars, verdict=complete):
+Case (a) — compact payload (~122 chars, verdict=complete):
     raw_text passes through truncation unchanged
-    (len(raw_text) < JUDGE_MAX_OUTPUT_CHARS);
+    (len(raw_text) < FUSED_JUDGE_MAX_OUTPUT_CHARS);
     parse succeeds; result.verdict == "complete",
     result.is_complete is True, result.attempt == 1.
 
-Case (b) — verbose realistic payload (~700 chars, verdict=complete
+Case (b) — verbose realistic payload (~997 chars, verdict=complete
     with 5 evidence_cited items + advisory + rationale):
-    raw_text IS truncated to exactly JUDGE_MAX_OUTPUT_CHARS = 400;
-    the truncated fragment is invalid JSON (cut mid-string);
-    parse returns None → first attempt unparsable →
-    retry fires (same LLM seam, same payload, same truncation) →
-    BOTH attempts unparsable →
-    result.verdict == "unparsable",
-    result.is_complete is False,
-    result.attempt == 2,
-    result.first_unparsable_excerpt carries the (truncated+redacted)
-    first-attempt excerpt.
+    raw_text fits UNDER the fused 2048 cap; truncation is a no-op;
+    parse succeeds on attempt 1; result.verdict == "complete",
+    result.is_complete is True, result.attempt == 1.
+    (Pre-fix this case returned unparsable×2; post-fix it parses
+    cleanly. THIS IS THE F-A REGRESSION CASE — flipping it
+    documents the fix landed.)
 
-Together: confirms the order (truncate → parse), confirms the cap is
-shared with the legacy judge, confirms a verbose-but-correct fused
-verdict is silently downgraded to unparsable WITHOUT ever reaching
-the parser, and confirms the conservative fail-safe mapping the gate
-applies (verdict="unparsable" → is_complete=False → deny+nudge on the
-deny band per graph.py:5401-5406).
+Together: confirms the fused-scoped cap is applied at the fused
+sites (case (b) parses under 2048 but would have been truncated
+under the legacy 400), confirms the conservative fail-safe still
+preserves ``is_complete=False`` for unbounded output, and confirms
+the legacy window judge's cap was NOT touched (out of scope for
+this probe; see ``tests/unit/test_attestation_fused_judge_
+truncation.py::TestFusedCapDriftPin`` for the pin).
 
 NOT registered in CI / packs. Manual-only. NO production-code changes.
 """
@@ -67,7 +83,7 @@ from unittest.mock import MagicMock
 # Same import path graph.py:5306 uses
 from daemon.services import attestation_report_judge as jm
 from daemon.services.attestation_report_judge import (
-    JUDGE_MAX_OUTPUT_CHARS,
+    FUSED_JUDGE_MAX_OUTPUT_CHARS,
     judge_fused_bundle_async,
 )
 
@@ -191,9 +207,9 @@ async def _run_case(name: str, payload: str, monkeypatch_attr=None) -> dict:
     return {
         "case": name,
         "payload_chars": len(payload),
-        "cap_chars": JUDGE_MAX_OUTPUT_CHARS,
-        "exceeds_cap": len(payload) > JUDGE_MAX_OUTPUT_CHARS,
-        "truncated_to": min(len(payload), JUDGE_MAX_OUTPUT_CHARS),
+        "cap_chars": FUSED_JUDGE_MAX_OUTPUT_CHARS,
+        "exceeds_cap": len(payload) > FUSED_JUDGE_MAX_OUTPUT_CHARS,
+        "truncated_to": min(len(payload), FUSED_JUDGE_MAX_OUTPUT_CHARS),
         "verdict": result.verdict,
         "is_complete": result.is_complete,
         "attempt": result.attempt,
@@ -223,7 +239,11 @@ def main() -> int:
     print("=" * 78)
     print("LCA Stage-2 fused judge — DETERMINISTIC truncation-before-parse repro")
     print("=" * 78)
-    print(f"JUDGE_MAX_OUTPUT_CHARS = {JUDGE_MAX_OUTPUT_CHARS} (hardcoded, no env knob)")
+    print(
+        f"FUSED_JUDGE_MAX_OUTPUT_CHARS = {FUSED_JUDGE_MAX_OUTPUT_CHARS} "
+        f"(separate from legacy JUDGE_MAX_OUTPUT_CHARS=400, applies at "
+        f"the fused sites only)"
+    )
     print()
     for name, card in cards.items():
         print(f"--- Case ({ {'compact': 'a', 'verbose': 'b'}[name] }) — {name} ---")
@@ -240,26 +260,33 @@ def main() -> int:
         and a["attempt"] == 1
         and a["exceeds_cap"] is False
     )
+    # F-A fix flipped case (b): the verbose compliant verdict now
+    # parses complete on attempt 1 under the fused-scoped 2048 cap
+    # (it exceeded the legacy 400 cap by construction — that was the
+    # live failure).
     ok_b = (
-        b["verdict"] == "unparsable"
-        and b["is_complete"] is False
-        and b["attempt"] == 2
-        and b["exceeds_cap"] is True
-        and b["first_unparsable_excerpt_len"] > 0
+        b["verdict"] == "complete"
+        and b["is_complete"] is True
+        and b["attempt"] == 1
+        and b["exceeds_cap"] is False
+        and b["evidence_count"] == 5
     )
     print("ASSERTIONS:")
     print(f"  case (a) compact fits-under-cap → parsed complete: "
           f"{'PASS' if ok_a else 'FAIL'}")
-    print(f"  case (b) verbose exceeds-cap   → unparsable×2 retry:"
-          f" {'PASS' if ok_b else 'FAIL'}")
+    print(f"  case (b) verbose fits-under-fused-cap → parsed complete: "
+          f"{'PASS' if ok_b else 'FAIL'}")
     print()
     if ok_a and ok_b:
-        print("DEFECT REPRODUCED: cap=400 + truncate-before-parse + fused "
-              "prompt mandates >400-char payload = silent unparsable on "
-              "every verbose-but-correct verdict.")
+        print("FIX VERIFIED: fused-scoped cap=2048 + truncate-before-parse "
+              "+ fused prompt's compliant payload (~997 chars) fits under "
+              "2048 → verbose-but-correct verdict now parses complete on "
+              "attempt 1. The pre-fix unparsable×2 defect is closed.")
         return 0
     else:
-        print("DEFECT NOT REPRODUCED — investigate.")
+        print("FIX NOT VERIFIED — investigate (case (b) is the live "
+              "regression — verbose-but-correct verdict should now "
+              "parse).")
         return 1
 
 
@@ -279,15 +306,15 @@ def test_compact_case_passes():
     assert card["exceeds_cap"] is False
 
 
-def test_verbose_case_unparsable():
+def test_verbose_case_parses_complete():
     import pytest
 
     card = asyncio.run(_run_case("verbose", _verbose_payload()))
-    assert card["verdict"] == "unparsable"
-    assert card["is_complete"] is False
-    assert card["attempt"] == 2
-    assert card["exceeds_cap"] is True
-    assert card["first_unparsable_excerpt_len"] > 0
+    assert card["verdict"] == "complete"
+    assert card["is_complete"] is True
+    assert card["attempt"] == 1
+    assert card["exceeds_cap"] is False
+    assert card["evidence_count"] == 5
 
 
 if __name__ == "__main__":

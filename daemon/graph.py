@@ -5166,6 +5166,7 @@ def create_attestation_gate_node(
                 leader_prompt_version=gate_config.get(
                     "leader_prompt_version", ""
                 ),
+                ledger=ledger,
             )
             if decision.gate_exception_seen:
                 _persist_gate_exception_marker(ledger, effective_instance_id)
@@ -5241,277 +5242,330 @@ def create_attestation_gate_node(
         # tests/unit/test_attestation_resolver_stage2.py).
         resolver_snapshot = getattr(decision, "resolver", None)
         if _LCA_STAGE2_RESOLVER_FLIP and resolver_snapshot is not None:
-            from .services.attestation_resolver_activation import (
-                BAND_A_SUSPICION as _RES_BAND_A,
-                BAND_DENY as _RES_BAND_DENY,
-                BAND_MARKER as _RES_BAND_MARKER,
-                RESOLVER_OUTCOME_ALLOW as _RES_ALLOW,
-                RESOLVER_OUTCOME_ALLOW_HINT as _RES_ALLOW_HINT,
-                RESOLVER_OUTCOME_DENY_NUDGE as _RES_DENY_NUDGE,
-                RESOLVER_OUTCOME_TERMINAL_AFTER_BOUND as _RES_TERMINAL,
-                emit_resolver_eval_row as _emit_resolver_row,
-            )
-
-            act = resolver_snapshot.result
-            # Judge plan: fire ONLY on enforce-mode fired rows, and on
-            # the deny band ONLY for a would-be-DENY decision (a
-            # TERMINAL_AFTER_BOUND decision gets no judge today —
-            # budget parity).
-            judge_plan_on = bool(
-                act.fired
-                and act.bundle is not None
-                and resolver_snapshot.mode == "enforce"
-                and not (
-                    act.band == _RES_BAND_DENY
-                    and decision.decision is not Decision.DENIED
+            # F-B (2026-09-16) — fail-open wrapper around the ENTIRE
+            # fused block (verdict mapping / hint factory /
+            # ``_emit_resolver_row``). The fused block lives OUTSIDE
+            # the gate node's outer try/except (graph.py:5176); any
+            # exception here used to crash the gate on all bands (no
+            # fail-open, no loud row, no ``gate_exception_seen`` stamp
+            # — tester seam-iv finding). The wrapper mirrors the
+            # outer catch's discipline: loud error row + stamp
+            # ``gate_exception_seen`` + fall through so Phase-3 keeps
+            # the existing ``decision.decision`` direction (DP-5
+            # REJECTED preserved — deny-band keeps deny+nudge via the
+            # existing ledger+nudge machinery, allow bands plain
+            # allow). Early ``return``s inside the block (rescue,
+            # route-(c), allow+hint path-(d)) are NOT caught — only
+            # raised exceptions are.
+            try:
+                from .services.attestation_resolver_activation import (
+                    BAND_A_SUSPICION as _RES_BAND_A,
+                    BAND_DENY as _RES_BAND_DENY,
+                    BAND_MARKER as _RES_BAND_MARKER,
+                    RESOLVER_OUTCOME_ALLOW as _RES_ALLOW,
+                    RESOLVER_OUTCOME_ALLOW_HINT as _RES_ALLOW_HINT,
+                    RESOLVER_OUTCOME_DENY_NUDGE as _RES_DENY_NUDGE,
+                    RESOLVER_OUTCOME_TERMINAL_AFTER_BOUND as _RES_TERMINAL,
+                    emit_resolver_eval_row as _emit_resolver_row,
                 )
-            )
-            fused_judge_on = False
-            if judge_plan_on:
-                try:
-                    from .services.attestation_judge_resolver import (
-                        is_llm_judge_enabled,
-                    )
-                    fused_judge_on = is_llm_judge_enabled() and gate_config.get(
-                        "llm_judge_enabled", True
-                    )
-                except Exception:  # noqa: BLE001 — kill-switch resolver fault
-                    fused_judge_on = False
-                if not fused_judge_on:
-                    # Kill-switch OFF — mirrors the legacy
-                    # ``..._marker_judge_disabled`` operator row so the
-                    # grep surface survives the flip (docs/setup.md).
-                    logger.info(
-                        "event=leader_completion_gate_fused_judge_disabled "
-                        "instance_id=%s band=%s verdict=<skipped> "
-                        "trigger_source=%s",
-                        effective_instance_id,
-                        act.band,
-                        decision.trigger_source or "<none>",
-                    )
-            fused_result = None
-            fused_wrapper_fault = False
-            if judge_plan_on and fused_judge_on:
-                try:
-                    from .services.attestation_report_judge import (
-                        judge_fused_bundle_async,
-                    )
-                    # Config resolution mirrors the two legacy sites:
-                    # the manager facade's live Config, else a direct
-                    # ``load_config``.
-                    fused_config = getattr(manager, "config", None)
-                    if fused_config is None:
-                        from .config import load_config
-                        fused_config = load_config()
-                    fused_result = await judge_fused_bundle_async(
-                        act.bundle.text,
-                        config=fused_config,
-                    )
-                except Exception as fused_exc:  # noqa: BLE001 — wrapper-layer fault
-                    # Defense-in-depth — ``judge_fused_bundle_async``
-                    # never raises by contract; this catch only fires
-                    # on a wrapper-layer bug (import cycle / config
-                    # load failure). Conservative mapping below treats
-                    # it EXACTLY like verdict="error" (path-(d)); no
-                    # invocation record exists, so ``judge_invoked``
-                    # derives to False.
-                    fused_wrapper_fault = True
-                    logger.error(
-                        "event=leader_completion_gate_fused_judge_error "
-                        "error_class=%s instance_id=%s band=%s "
-                        "gate_location=%s decision=fail_safe_conservative",
-                        type(fused_exc).__name__,
-                        effective_instance_id,
-                        act.band,
-                        gate_config.get("gate_location", "graph_end_candidate"),
-                    )
-                if fused_result is not None:
-                    # Structured judge row — mirrors the legacy
-                    # ``event=leader_completion_gate_judge`` /
-                    # ``..._marker_judge`` row shape (same diagnostic
-                    # keys + the derived invocation flag) so operators
-                    # grep ONE set of log keys for the fused path.
-                    logger.info(
-                        "event=leader_completion_gate_fused_judge "
-                        "instance_id=%s band=%s verdict=%s "
-                        "llm_judge_model=%s "
-                        "llm_judge_latency_ms=%s "
-                        "llm_judge_attempt=%s "
-                        "llm_judge_first_unparsable_excerpt=%s "
-                        "llm_judge_reason=%s llm_judge_error_class=%s "
-                        "judge_invoked=%s",
-                        effective_instance_id,
-                        act.band,
-                        fused_result.verdict,
-                        fused_result.model,
-                        fused_result.latency_ms,
-                        fused_result.attempt,
-                        fused_result.first_unparsable_excerpt
-                        if fused_result.first_unparsable_excerpt
-                        else "<none>",
-                        fused_result.rationale,
-                        fused_result.error_class or "<none>",
-                        fused_result.invoked,
-                    )
 
-            # judge_invoked is DERIVED from the real invocation flag —
-            # never a literal (Stage-1 review hazard pin).
-            judge_invoked = bool(
-                fused_result is not None and fused_result.invoked
-            )
-            judge_verdict = (
-                fused_result.verdict
-                if fused_result is not None
-                else ("error" if fused_wrapper_fault else "<none>")
-            )
-            resolver_outcome = _RES_ALLOW
-
-            if act.fired and resolver_snapshot.mode == "enforce":
-                if act.band == _RES_BAND_DENY:
-                    if decision.decision is Decision.TERMINAL_AFTER_BOUND:
-                        # At-bound terminal — NO judge (budget parity),
-                        # existing terminal machinery runs below.
-                        resolver_outcome = _RES_TERMINAL
-                    elif (
-                        fused_result is not None
-                        and fused_result.is_complete
-                    ):
-                        # Rescue — mirrors the legacy judge-yes override
-                        # (allow END without attestation, no counter
-                        # movement).
+                act = resolver_snapshot.result
+                # Judge plan: fire ONLY on enforce-mode fired rows, and on
+                # the deny band ONLY for a would-be-DENY decision (a
+                # TERMINAL_AFTER_BOUND decision gets no judge today —
+                # budget parity).
+                judge_plan_on = bool(
+                    act.fired
+                    and act.bundle is not None
+                    and resolver_snapshot.mode == "enforce"
+                    and not (
+                        act.band == _RES_BAND_DENY
+                        and decision.decision is not Decision.DENIED
+                    )
+                )
+                fused_judge_on = False
+                if judge_plan_on:
+                    try:
+                        from .services.attestation_judge_resolver import (
+                            is_llm_judge_enabled,
+                        )
+                        fused_judge_on = is_llm_judge_enabled() and gate_config.get(
+                            "llm_judge_enabled", True
+                        )
+                    except Exception:  # noqa: BLE001 — kill-switch resolver fault
+                        fused_judge_on = False
+                    if not fused_judge_on:
+                        # Kill-switch OFF — mirrors the legacy
+                        # ``..._marker_judge_disabled`` operator row so the
+                        # grep surface survives the flip (docs/setup.md).
                         logger.info(
-                            "[AttestationGate] fused-judge rescue "
-                            "instance=%s band=deny verdict=%s model=%s "
-                            "latency_ms=%s; allowing END without "
-                            "attestation",
+                            "event=leader_completion_gate_fused_judge_disabled "
+                            "instance_id=%s band=%s verdict=<skipped> "
+                            "trigger_source=%s",
                             effective_instance_id,
-                            fused_result.verdict,
-                            fused_result.model,
-                            fused_result.latency_ms,
+                            act.band,
+                            decision.trigger_source or "<none>",
                         )
-                        resolver_outcome = _RES_ALLOW
-                        _emit_resolver_row(
-                            resolver_snapshot,
-                            judge_invoked=judge_invoked,
-                            judge_verdict=judge_verdict,
-                            resolver_outcome=resolver_outcome,
+                fused_result = None
+                fused_wrapper_fault = False
+                if judge_plan_on and fused_judge_on:
+                    try:
+                        from .services.attestation_report_judge import (
+                            judge_fused_bundle_async,
                         )
-                        return {"attestation_route": None}
-                    else:
-                        # not_complete / error / timeout / unparsable×2
-                        # / kill-switch OFF / wrapper fault → the
-                        # decision STAYS DENIED; the existing Phase-3
-                        # ledger + nudge machinery denies (path-(d)-exact,
-                        # Q1 parity).
-                        resolver_outcome = _RES_DENY_NUDGE
-                elif act.band in (_RES_BAND_MARKER, _RES_BAND_A):
-                    if (
-                        fused_result is not None
-                        and fused_result.is_complete
-                    ):
-                        # Route-(c) mirror — plain ALLOW, no nudge, no
-                        # hint, no counter.
+                        # Config resolution mirrors the two legacy sites:
+                        # the manager facade's live Config, else a direct
+                        # ``load_config``.
+                        fused_config = getattr(manager, "config", None)
+                        if fused_config is None:
+                            from .config import load_config
+                            fused_config = load_config()
+                        fused_result = await judge_fused_bundle_async(
+                            act.bundle.text,
+                            config=fused_config,
+                        )
+                    except Exception as fused_exc:  # noqa: BLE001 — wrapper-layer fault
+                        # Defense-in-depth — ``judge_fused_bundle_async``
+                        # never raises by contract; this catch only fires
+                        # on a wrapper-layer bug (import cycle / config
+                        # load failure). Conservative mapping below treats
+                        # it EXACTLY like verdict="error" (path-(d)); no
+                        # invocation record exists, so ``judge_invoked``
+                        # derives to False.
+                        fused_wrapper_fault = True
+                        logger.error(
+                            "event=leader_completion_gate_fused_judge_error "
+                            "error_class=%s instance_id=%s band=%s "
+                            "gate_location=%s decision=fail_safe_conservative",
+                            type(fused_exc).__name__,
+                            effective_instance_id,
+                            act.band,
+                            gate_config.get("gate_location", "graph_end_candidate"),
+                        )
+                    if fused_result is not None:
+                        # Structured judge row — mirrors the legacy
+                        # ``event=leader_completion_gate_judge`` /
+                        # ``..._marker_judge`` row shape (same diagnostic
+                        # keys + the derived invocation flag) so operators
+                        # grep ONE set of log keys for the fused path.
                         logger.info(
-                            "[AttestationGate] fused-judge complete "
-                            "instance=%s band=%s verdict=%s model=%s "
-                            "latency_ms=%s; allowing END without "
-                            "deny or hint",
+                            "event=leader_completion_gate_fused_judge "
+                            "instance_id=%s band=%s verdict=%s "
+                            "llm_judge_model=%s "
+                            "llm_judge_latency_ms=%s "
+                            "llm_judge_attempt=%s "
+                            "llm_judge_first_unparsable_excerpt=%s "
+                            "llm_judge_reason=%s llm_judge_error_class=%s "
+                            "judge_invoked=%s",
                             effective_instance_id,
                             act.band,
                             fused_result.verdict,
                             fused_result.model,
                             fused_result.latency_ms,
+                            fused_result.attempt,
+                            fused_result.first_unparsable_excerpt
+                            if fused_result.first_unparsable_excerpt
+                            else "<none>",
+                            fused_result.rationale,
+                            fused_result.error_class or "<none>",
+                            fused_result.invoked,
                         )
-                        resolver_outcome = _RES_ALLOW
-                        _emit_resolver_row(
-                            resolver_snapshot,
-                            judge_invoked=judge_invoked,
-                            judge_verdict=judge_verdict,
-                            resolver_outcome=resolver_outcome,
-                        )
-                        return {"attestation_route": None}
-                    if fused_result is None and not fused_wrapper_fault:
-                        # Kill-switch OFF (or judge never planned on
-                        # this band) — plain ALLOW, no hint, no judge:
-                        # marker/A-only signal is too weak to deny
-                        # (exact today semantics).
-                        resolver_outcome = _RES_ALLOW
-                    else:
-                        nothing_pending = (
-                            decision.pending_children == 0
-                            and decision.queued_or_expected_wakeups == 0
-                            and decision.live_descendants == 0
-                        )
-                        if nothing_pending:
-                            # Belt-and-braces arm (structurally
-                            # unreachable on marker/A bands — ¬c_quiet
-                            # by construction; mirrors the legacy
-                            # (a)/(d)-nothing-pending conversion,
-                            # bound-enforced via the shared predicate).
-                            if deny_bound_exceeded(
-                                decision.denied_count,
-                                gate_config.get(
-                                    "deny_bound", DEFAULT_DENY_BOUND
-                                ),
-                            ):
-                                decision = _replace(
-                                    decision,
-                                    decision=Decision.TERMINAL_AFTER_BOUND,
-                                    next_denied_count=0,
-                                    should_inject_nudge=False,
-                                )
-                                resolver_outcome = _RES_TERMINAL
-                            else:
-                                decision = _replace(
-                                    decision,
-                                    decision=Decision.DENIED,
-                                    should_inject_nudge=True,
-                                    next_denied_count=(
-                                        decision.denied_count + 1
-                                    ),
-                                )
-                                resolver_outcome = _RES_DENY_NUDGE
-                        else:
-                            # (b)/(d)-with-pending → ALLOW +
-                            # checkpoint-durable hint (D4: the hint
-                            # gains the evidence citation when the
-                            # verdict carries one). NO counter write,
-                            # NO deny, NO re-route.
+    
+                # judge_invoked is DERIVED from the real invocation flag —
+                # never a literal (Stage-1 review hazard pin).
+                judge_invoked = bool(
+                    fused_result is not None and fused_result.invoked
+                )
+                judge_verdict = (
+                    fused_result.verdict
+                    if fused_result is not None
+                    else ("error" if fused_wrapper_fault else "<none>")
+                )
+                resolver_outcome = _RES_ALLOW
+    
+                if act.fired and resolver_snapshot.mode == "enforce":
+                    if act.band == _RES_BAND_DENY:
+                        if decision.decision is Decision.TERMINAL_AFTER_BOUND:
+                            # At-bound terminal — NO judge (budget parity),
+                            # existing terminal machinery runs below.
+                            resolver_outcome = _RES_TERMINAL
+                        elif (
+                            fused_result is not None
+                            and fused_result.is_complete
+                        ):
+                            # Rescue — mirrors the legacy judge-yes override
+                            # (allow END without attestation, no counter
+                            # movement).
                             logger.info(
-                                "[AttestationGate] fused-judge %s "
-                                "instance=%s band=%s verdict=%s; "
-                                "allowing END and injecting "
-                                "checkpoint-durable hint",
-                                "path-d" if fused_wrapper_fault or (
-                                    fused_result is not None
-                                    and fused_result.verdict
-                                    in {"error", "timeout", "unparsable"}
-                                ) else "not-complete",
+                                "[AttestationGate] fused-judge rescue "
+                                "instance=%s band=deny verdict=%s model=%s "
+                                "latency_ms=%s; allowing END without "
+                                "attestation",
+                                effective_instance_id,
+                                fused_result.verdict,
+                                fused_result.model,
+                                fused_result.latency_ms,
+                            )
+                            resolver_outcome = _RES_ALLOW
+                            _emit_resolver_row(
+                                resolver_snapshot,
+                                judge_invoked=judge_invoked,
+                                judge_verdict=judge_verdict,
+                                resolver_outcome=resolver_outcome,
+                            )
+                            return {"attestation_route": None}
+                        else:
+                            # not_complete / error / timeout / unparsable×2
+                            # / kill-switch OFF / wrapper fault → the
+                            # decision STAYS DENIED; the existing Phase-3
+                            # ledger + nudge machinery denies (path-(d)-exact,
+                            # Q1 parity).
+                            resolver_outcome = _RES_DENY_NUDGE
+                    elif act.band in (_RES_BAND_MARKER, _RES_BAND_A):
+                        if (
+                            fused_result is not None
+                            and fused_result.is_complete
+                        ):
+                            # Route-(c) mirror — plain ALLOW, no nudge, no
+                            # hint, no counter.
+                            logger.info(
+                                "[AttestationGate] fused-judge complete "
+                                "instance=%s band=%s verdict=%s model=%s "
+                                "latency_ms=%s; allowing END without "
+                                "deny or hint",
                                 effective_instance_id,
                                 act.band,
-                                judge_verdict,
+                                fused_result.verdict,
+                                fused_result.model,
+                                fused_result.latency_ms,
                             )
-                            hint_message = _make_completion_check_note_message(
-                                effective_instance_id,
-                                evidence_citation=_fused_hint_citation(
-                                    fused_result
-                                ),
+                            resolver_outcome = _RES_ALLOW
+                            _emit_resolver_row(
+                                resolver_snapshot,
+                                judge_invoked=judge_invoked,
+                                judge_verdict=judge_verdict,
+                                resolver_outcome=resolver_outcome,
                             )
-                            decision = _replace(
-                                decision,
-                                marker_hint_message=hint_message,
+                            return {"attestation_route": None}
+                        if fused_result is None and not fused_wrapper_fault:
+                            # Kill-switch OFF (or judge never planned on
+                            # this band) — plain ALLOW, no hint, no judge:
+                            # marker/A-only signal is too weak to deny
+                            # (exact today semantics).
+                            resolver_outcome = _RES_ALLOW
+                        else:
+                            nothing_pending = (
+                                decision.pending_children == 0
+                                and decision.queued_or_expected_wakeups == 0
+                                and decision.live_descendants == 0
                             )
-                            resolver_outcome = _RES_ALLOW_HINT
-
-            # The ONE structured resolver row per evaluation —
-            # emitted at the node (post-judge) so ``judge_invoked``
-            # is the derived real-invocation flag.
-            _emit_resolver_row(
-                resolver_snapshot,
-                judge_invoked=judge_invoked,
-                judge_verdict=judge_verdict,
-                resolver_outcome=resolver_outcome,
-            )
+                            if nothing_pending:
+                                # Belt-and-braces arm (structurally
+                                # unreachable on marker/A bands — ¬c_quiet
+                                # by construction; mirrors the legacy
+                                # (a)/(d)-nothing-pending conversion,
+                                # bound-enforced via the shared predicate).
+                                if deny_bound_exceeded(
+                                    decision.denied_count,
+                                    gate_config.get(
+                                        "deny_bound", DEFAULT_DENY_BOUND
+                                    ),
+                                ):
+                                    decision = _replace(
+                                        decision,
+                                        decision=Decision.TERMINAL_AFTER_BOUND,
+                                        next_denied_count=0,
+                                        should_inject_nudge=False,
+                                    )
+                                    resolver_outcome = _RES_TERMINAL
+                                else:
+                                    decision = _replace(
+                                        decision,
+                                        decision=Decision.DENIED,
+                                        should_inject_nudge=True,
+                                        next_denied_count=(
+                                            decision.denied_count + 1
+                                        ),
+                                    )
+                                    resolver_outcome = _RES_DENY_NUDGE
+                            else:
+                                # (b)/(d)-with-pending → ALLOW +
+                                # checkpoint-durable hint (D4: the hint
+                                # gains the evidence citation when the
+                                # verdict carries one). NO counter write,
+                                # NO deny, NO re-route.
+                                logger.info(
+                                    "[AttestationGate] fused-judge %s "
+                                    "instance=%s band=%s verdict=%s; "
+                                    "allowing END and injecting "
+                                    "checkpoint-durable hint",
+                                    "path-d" if fused_wrapper_fault or (
+                                        fused_result is not None
+                                        and fused_result.verdict
+                                        in {"error", "timeout", "unparsable"}
+                                    ) else "not-complete",
+                                    effective_instance_id,
+                                    act.band,
+                                    judge_verdict,
+                                )
+                                hint_message = _make_completion_check_note_message(
+                                    effective_instance_id,
+                                    evidence_citation=_fused_hint_citation(
+                                        fused_result
+                                    ),
+                                )
+                                decision = _replace(
+                                    decision,
+                                    marker_hint_message=hint_message,
+                                )
+                                resolver_outcome = _RES_ALLOW_HINT
+    
+                # The ONE structured resolver row per evaluation —
+                # emitted at the node (post-judge) so ``judge_invoked``
+                # is the derived real-invocation flag.
+                _emit_resolver_row(
+                    resolver_snapshot,
+                    judge_invoked=judge_invoked,
+                    judge_verdict=judge_verdict,
+                    resolver_outcome=resolver_outcome,
+                )
+            except Exception as fused_block_exc:  # noqa: BLE001 — F-B fail-open (seam iv)
+                # F-B (2026-09-16) — the fused block lives OUTSIDE the
+                # outer try/except at graph.py:5176 (verdict mapping /
+                # hint factory / ``_emit_resolver_row`` paths). Any
+                # exception here used to crash the gate on ALL bands
+                # (no fail-open, no loud row, no ``gate_exception_seen``
+                # stamp). The wrapper stamps the marker, emits a loud
+                # ``leader_completion_gate_error`` row keyed on
+                # ``gate_location=fused_block`` (greppable, distinct
+                # from the node-level catch), and falls through to
+                # Phase-3 — the existing ``decision.decision`` is the
+                # canonical direction (DP-5 REJECTED preserved):
+                #   * deny-band: Phase-3 deny+nudge machinery runs
+                #     (counter increments + nudge injects) — same shape
+                #     as the legacy Q1 row.
+                #   * marker/A bands: Phase-3 ALLOWED path runs (no
+                #     hint, NO ledger write — marker-only signal too
+                #     weak to deny on this seam).
+                # The ``gate_exception_seen`` flag rides the
+                # LangGraph state via the same channel the outer catch
+                # uses, so FE/observability see the unified marker.
+                logger.error(
+                    "event=leader_completion_gate_error error_class=%s "
+                    "instance_id=%s gate_location=fused_block "
+                    "decision=fail_open_allowed gate_exception_seen=true "
+                    "detail=fused-block catch: %s: %s",
+                    type(fused_block_exc).__name__,
+                    effective_instance_id,
+                    type(fused_block_exc).__name__,
+                    fused_block_exc,
+                )
+                _persist_gate_exception_marker(
+                    ledger, effective_instance_id
+                )
+                # Fall through to Phase-3 — the existing
+                # ``decision.decision`` drives the per-band outcome;
+                # no early return so deny-band keeps deny+nudge.
 
         # Phase 6 fastfollow (2026-09-11, incident b08f40fe) — mid-work
         # marker scan trigger on the ALLOW path. The marker scan ran

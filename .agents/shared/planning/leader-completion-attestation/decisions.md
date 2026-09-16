@@ -1553,3 +1553,83 @@ Branch `feature/lca-resolver-stage2` (isolated worktree, base 0ea60d91 = Stage-1
 **Test re-contracting ledger (superseded-contract class):** `tests/unit/test_attestation_resolver_activation.py` (row emission → snapshot+emitter; seam retirement; 63 green), `tests/unit/test_attestation_marker_wiring.py` (delegated-mission doctrine + fused rows; D10 exemption pin `test_quick_question_with_marker_does_not_reach_judge`; 42 green), `tests/unit/test_attestation_judge_wiring.py` (verdict vocabulary complete/not_complete + fused event names; trailing-token grep guards; 26 green), `tests/integration/test_attestation_marker_routing_lca.py` (scenarios a–e + configless trio → fused seam; 16 green), `tests/integration/test_attestation_marker_bound_enforcement_lca.py` (delegated 6a0d60c9 loop shape; 7 green), `tests/integration/test_attestation_user_answer_pending_lca.py` (delegated stale-guards; 7 green), `tests/integration/test_attestation_nudge_supersede_lca.py` (delegated `_produce_nudge` — the FIX-3 stable-id/supersede contract itself unchanged; 3 green). New: `tests/unit/test_attestation_fused_judge.py` (21), `tests/unit/test_attestation_resolver_stage2.py` (29). LIVE-LLM incident tests (`test_attestation_mid_work_report_testcase.py` live variants, `test_attestation_idle_orphan_incident.py`, `test_attestation_incident_acceptance_lca.py`) run against the real endpoint when `OPENAI_API_KEY` is exported — unchanged in shape, real-judge latency (~1–2 min/file) requires the 300s per-test timeout.
 
 **Files (this decision):** `daemon/graph.py` (flip constant + fused block + guards + D4 helpers), `daemon/services/attestation_report_judge.py` (fused judge + `system_prompt` seam + parser), `daemon/services/attestation_resolver_activation.py` (snapshot + emitter + seam retirement + rename), `daemon/services/attestation_gate.py` (`resolver` field + §(vi) re-wire), `docs/setup.md` (Stage-2 soak + revert runbook), `tests/unit/test_attestation_fused_judge.py` (new), `tests/unit/test_attestation_resolver_stage2.py` (new), the six re-contracted files above, this entry + requirements.md R-RES2.
+
+---
+
+## D-RES3 — Stage-2 flip blocker closure: F-A fused-scoped cap + F-B fused-block fail-open wrap + F-C gate_exception_seen stamps (2026-09-16)
+
+Branch `feature/lca-resolver-stage2` (worktree `agents-ensemble-wt-lca-stage2`, base `f926de24` + tester evidence at `28edbdd8`; this commit stacks the F-A/B/C fixes on top, ship-into-merge-gate only). Three tester findings from `RESULTS/2026-09-16-lca-stage2-flip-verification.md` (and `LESSONS/2026-09-16-lca-stage2-failopen-seam-findings.md`) closed in one cycle. **The lesson:** the live-LLM probe + deterministic repro caught what static review could not — the F-A cap shared with the legacy window judge silently downgraded every compliant verbose verdict to unparsable ×2; the fused block sat outside the gate node's try/except (seam-iv); `gate_exception_seen` was unstamped on the new Stage-2 seam faults. The defensive discipline (separate caps per call site; fail-open wrap on every new code path; stamp the FR-13 marker on every catch) is now applied symmetrically.
+
+**Lifecycle:** live-LLM probe `tests/probe/lca2_live_fused_judge_probe.py` (model `quick`, both payloads) returned `unparsable` even though the raw model output contained the correct verdict JSON — verifier-side cap+truncate-before-parse was discarding the verdict before the parser ever saw it. The deterministic credentials-free repro `tests/probe/lca2_judge_truncation_repro.py` (`20024fda`) confirmed the order (compact 122-char JSON → `complete`; compliant 997-char JSON → truncated at 400 → `unparsable`×2). The flip made the shared cap the authoritative truncation point on the AUTHORITATIVE completion path (the legacy window judge was dead-but-present but paid-for; the fused judge became the only real consumer of LLM verdicts post-flip) — the silent downgrade was structurally unreachable before the flip and structurally unavoidable after it.
+
+### F-A — fused-scoped output cap (the blocker)
+
+`daemon/services/attestation_report_judge.py` introduces a SECOND module constant `FUSED_JUDGE_MAX_OUTPUT_CHARS = 2048` (kept adjacent to the legacy `JUDGE_MAX_OUTPUT_CHARS = 400` for greppability; docstring explicitly states the legacy cap is dead-but-present and deleted in Stage 3). The two fused truncation sites (`attestation_report_judge.py:1340-1341` and `:1378-1379`, inside `judge_fused_bundle_async`) now reference the fused cap; the two legacy truncation sites (`:921-922` and `:963-964`, inside `judge_completion_report_async`) are UNTOUCHED.
+
+Sizing rationale (preserved in the docstring): the fused prompt's compliant payload is `5 × 120 evidence + 240 advisory + 240 rationale = 1080 minimum`; 2048 covers it with comfortable headroom for verbose-but-correct model output. Truncation still applies at the fused cap (unbounded LLM output must never flow onward); the cap is just raised to fit the fused prompt's compliant shape. Conservative fail-safe preserved on case (c) (runaway >2048 payload → truncated at 2048 → unparsable ×2 → `is_complete=False`).
+
+The CI-registered regression lives at `tests/unit/test_attestation_fused_judge_truncation.py` (new file, 7 tests). Matrix:
+- **(a) 122-char compact verdict** → parses complete on attempt 1 (both pre-fix and post-fix).
+- **(b) 997-char compliant verbose verdict** → parses complete on attempt 1 post-fix (was `unparsable×2` pre-fix; this is the LIVE-FAILURE case).
+- **(c) 3072-char runaway verdict (3× the cap)** → truncation at 2048 → unparsable ×2 → `is_complete=False` (conservative fail-safe preserved; unbounded output never reaches the parser unmangled).
+
+Three drift pins (same file) ensure the legacy/fused cap distinction never silently re-merges: `test_fused_cap_is_2048_distinct_from_legacy_400`, `test_legacy_sites_still_use_legacy_cap`, `test_fused_sites_use_fused_cap` (the third uses an `inspect.getsource` + bare-token regex to assert the fused function never references the un-prefixed legacy token).
+
+The manual-only probe at `tests/probe/lca2_judge_truncation_repro.py` was updated in lockstep: the case-(b) assertion FLIPPED (now `verdict=complete` / `attempt=1` instead of `unparsable` / `attempt=2`); the docstring rewrites the hypothesis under test from "shared cap downgrades verbose verdict" to "fused-scoped cap accommodates the compliant payload"; both cases now print `FIX VERIFIED` on success.
+
+### F-B — fused-block fail-open wrap (robustness, strongly-recommended)
+
+`daemon/graph.py` wraps the ENTIRE fused block (the `if _LCA_STAGE2_RESOLVER_FLIP and resolver_snapshot is not None:` body, lines `~5243`–`~5567` after the F-A commit's re-indent) in a try/except modeled on the outer scanner/decide catch at `graph.py:5176`:
+
+- **Loud error row** — `event=leader_completion_gate_error` with `gate_location=fused_block` (greppable, distinct from the node-level catch) + `error_class` + `decision=fail_open_allowed` + `gate_exception_seen=true`.
+- **Stamp the FR-13 marker** via `_persist_gate_exception_marker(ledger, effective_instance_id)` — same helper the outer catch uses, same instance-row key (`attestation_gate_exception_seen`).
+- **Conservative per-band outcome** — falls through to Phase-3 (no early return). The existing `decision.decision` from `decide()` drives the per-band recovery (DP-5 REJECTED preserved):
+  - deny-band → Phase-3 deny+nudge machinery runs (counter increments + in-graph nudge injects); `attestation_route=agent`.
+  - marker/A bands → Phase-3 ALLOWED_LEGITIMATE_PENDING_WAKEUP arm runs (no hint, no nudge, no counter write — marker-only signal too weak to deny on this seam); `attestation_route=None`.
+- **Early returns inside the block** (rescue at `:5399`, route-(c) at `:5432`, allow+hint path-(d) at `:5504`) are NOT caught — only raised exceptions fall into the wrapper.
+
+Existing seam-iv tests (`tests/integration/test_attestation_stage2_failopen.py::TestSeamIVOutcomeMappingRaises`) re-contracted from `pytest.raises(RuntimeError)` to assert the fail-open behavior: `result["attestation_route"]` per-band, `ledger.increment` per-band, loud row + `gate_location=fused_block`, `ledger.set_metadata(...)` call for the marker stamp. Class docstring rewritten from "document the crash finding" to "pinned fail-open contract post-F-B"; the per-band recovery shape is now the contract.
+
+### F-C — `gate_exception_seen` stamps on Stage-2 seam faults
+
+Two surfaces closed:
+
+1. **Resolver-compute faults catch (`daemon/services/attestation_gate.py:1483-1518`)** — seam (i) `activation_predicate` raising and seam (ii) `evaluate_resolver_activation` / `assemble_fused_bundle` raising now stamp the FR-13 marker via the shared helper. Mechanism: `evaluate()` gained an optional `ledger: Any = None` kwarg (default keeps every pre-existing caller signature-compatible); `graph.py:attestation_gate_node` passes its `ledger` through at the call site. The catch stamps ONLY via the helper — it does NOT flip `decision.gate_exception_seen=True` (that field is the early-return trigger at `graph.py:5170`; flipping it would bypass Phase-3 deny+nudge, violating DP-5 on the resolver-fault deny band). Lazy-import of `_persist_gate_exception_marker` inside the catch avoids the graph.py ←→ attestation_gate.py import cycle.
+
+2. **New F-B wrapper (graph.py ~5551-5567)** — already covered above; the same helper stamps the instance row on every fused-block raise.
+
+Pin suite: `tests/integration/test_attestation_stage2_failopen.py::TestGateExceptionSeenStampFC` (new class, 3 tests) — `test_fc_seam_i_deny_band_stamps_marker_via_ledger`, `test_fc_seam_ii_deny_band_stamps_marker_via_ledger`, `test_fc_seam_iv_deny_band_stamps_marker_via_ledger`. Each asserts `ledger.set_metadata.assert_called_once_with(<id>, "attestation_gate_exception_seen", True)` AND that the conservative per-band outcome holds (deny-band → counter increments + nudge injects). Seam (iii) judge wrapper faults are EXPLICITLY out of scope for the F-C pin — they live inside the fused block's existing try/except at `graph.py:5294-5319` and stamp via the fused-judge-error row + decision-shape; extending the F-C contract to it would be a separate contract change.
+
+### Hazard-pin adjudications (re-stated post-fix)
+
+- **DP-5 conservative direction** — preserved on every seam. The F-B wrapper falls through, never promotes. The seam (i)/(ii) catch stamps the marker but does NOT flip `decision.gate_exception_seen=True` (would trigger the graph.py:5170 early-return). The fused judge (`verdict=unparsable` ×2) still maps to `is_complete=False` at the parser level (DP-5 reject any path to fail-safe-allow).
+- **FR-13 literal compliance** — the marker write to the instance row is the canonical stamp (not the result-dict propagation); the outer catch's result-dict shape (`{"attestation_route": None, "gate_exception_seen": True}`) is unchanged because the outer catch is still the only path that triggers the early-return.
+- **Convention-n compliance** — zero new `os.environ`/`os.getenv` reads under `daemon/`. The two caps are module constants (no env knob, no resolver) — the legacy cap was paid-for and dead-but-present; the fused cap is module-level. Convention-(i) drift-pin: the legacy judge code references `JUDGE_MAX_OUTPUT_CHARS` and never `FUSED_JUDGE_MAX_OUTPUT_CHARS` (TestFusedCapDriftPin); the fused judge references only `FUSED_JUDGE_MAX_OUTPUT_CHARS` (no bare `JUDGE_MAX_OUTPUT_CHARS` token).
+
+### Files (this decision)
+
+- `daemon/services/attestation_report_judge.py` — F-A constant + two fused-site swaps; legacy sites unchanged.
+- `daemon/graph.py` — F-B try/except wrap around the fused block + F-C `_persist_gate_exception_marker` call on the F-B exception path; `evaluate()` call site passes `ledger=ledger`.
+- `daemon/services/attestation_gate.py` — F-C `evaluate()` signature gains `ledger: Any = None`; seam (i)/(ii) catch stamps via the helper when `ledger is not None`.
+- `tests/unit/test_attestation_fused_judge_truncation.py` (new) — F-A regression matrix (7 tests).
+- `tests/integration/test_attestation_stage2_failopen.py` — seam (iv) re-contract + new `TestGateExceptionSeenStampFC` class (3 tests).
+- `tests/probe/lca2_judge_truncation_repro.py` — flipped case-(b) expectation; docstring rewritten; still manual-only.
+- `.agents/tester/RESULTS/2026-09-16-lca-stage2-flip-verification.md` — verifier's recipe (already shipped at `28edbdd8`).
+- `docs/setup.md` — unaffected; Stage-2 soak runbook unchanged (the F-A/B/C fixes restore the post-flip behavior to its spec, the soak invariants are unchanged).
+- This entry.
+
+### Re-verify recipe (post-fix; per the tester's post-fix re-verification section)
+
+- `tests/probe/lca2_judge_truncation_repro.py` → case (b) now parses `complete` (was `unparsable`×2 pre-fix). Both cases print `FIX VERIFIED`.
+- Live-LLM probe `tests/probe/lca2_live_fused_judge_probe.py` → if creds allow, both payloads parse `complete` (the live-failure regression is closed). If creds unavailable, the credentials-free repro is the ground-truth substitute.
+- `tests/integration/test_attestation_stage2_failopen.py` → 17/17 (was 14/14 pre-fix; +3 from `TestGateExceptionSeenStampFC`).
+- `tests/integration/test_attestation_stage2_incident_abc.py` → expected 8/8 unchanged (the F-A cap change is transparent to the payload fixtures that fit).
+- `tests/integration/test_attestation_stage2_budget_parity.py` → expected 20/20 unchanged (F-A/B/C do not change the budget guard — same ONE invocation per evaluation).
+- `tests/unit/test_attestation_fused_judge_truncation.py` → 7/7 new (F-A regression).
+- No full matrix rerun required (per the tester's scope decision).
+
+### Convention sweep
+
+- `docs/setup.md` Stage-2 soak section — unaffected (the F-A/B/C fixes restore spec behavior, no new invariants). `[CriticalNotes:state]`/`pinned_count` unchanged.
+- `requirements.md` R-RES2 — unaffected (the FR-13 contract is now pinned at the implementation level via the new tests; no spec text change required).
+- `.agents/tester/RESULTS/2026-09-16-lca-stage2-flip-verification.md` — the verifier's `Post-fix re-verification recipe` section already prescribes exactly the suite above; this commit is the implementation that satisfies it.

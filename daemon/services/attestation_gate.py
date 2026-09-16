@@ -843,6 +843,7 @@ def evaluate(
     tool_name: str = DEFAULT_ATTESTATION_TOOL_NAME,
     leader_prompt_version: str = "",
     gate_location: str = GATE_LOCATION_GRAPH_END_CANDIDATE,
+    ledger: Any = None,
 ) -> GateDecision:
     """Glue: scanner → R2 facade reads → decide → canonical log entry.
 
@@ -1484,7 +1485,7 @@ def evaluate(
             logger.error(
                 "event=leader_completion_resolver_eval_error "
                 "error_class=%s instance_id=%s gate_location=%s "
-                "mode=%s detail=%s: %s",
+                "mode=%s gate_exception_seen=true detail=%s: %s",
                 type(shadow_exc).__name__,
                 instance_id,
                 gate_location,
@@ -1492,6 +1493,44 @@ def evaluate(
                 type(shadow_exc).__name__,
                 shadow_exc,
             )
+            # F-C (2026-09-16) — stamp the transient
+            # ``gate_exception_seen`` marker on the instance row via
+            # the shared helper (FR-13 contract: "set a transient
+            # gate_exception_seen=true flag on the instance row").
+            # The caller (``graph.py:attestation_gate_node``) passes
+            # the ``ledger`` kwarg — if absent (legacy callers, the
+            # standalone ``evaluate`` unit tests), the marker write
+            # is a no-op (the unit tests already assert the row
+            # emission directly; the marker write is the canonical
+            # observability stamp for the production graph path).
+            #
+            # NOTE: we deliberately do NOT also flip
+            # ``decision.gate_exception_seen=True`` here — that
+            # field is the early-return trigger at graph.py:5170
+            # (the FR-13 full fail-open allow path on the
+            # scanner/decide seam). Setting it here would bypass
+            # Phase-3 deny+nudge (DP-5 REJECTED — resolver-fault on
+            # the deny band stays conservative deny via the existing
+            # ledger+nudge machinery; the marker stamp is the
+            # observability side, not the outcome flip). The
+            # ledger write is the canonical FR-13 stamp; the
+            # outcome stays whatever ``decide()`` returned.
+            if ledger is not None:
+                try:
+                    from daemon.graph import (
+                        _persist_gate_exception_marker,
+                    )
+
+                    _persist_gate_exception_marker(ledger, instance_id)
+                except Exception as marker_exc:  # noqa: BLE001 — marker is diagnostic only
+                    logger.warning(
+                        "event=leader_completion_gate_db_error "
+                        "method=persist_gate_exception_marker "
+                        "instance_id=%s detail=%s: %s",
+                        instance_id,
+                        type(marker_exc).__name__,
+                        marker_exc,
+                    )
 
         return result
 

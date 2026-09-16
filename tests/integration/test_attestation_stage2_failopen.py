@@ -880,19 +880,37 @@ class TestSeamIIIJudgeInvocationRaises:
 
 class TestSeamIVOutcomeMappingRaises:
     """``emit_resolver_eval_row`` raises AFTER the band → outcome
-    mapping has already run. This seam is OUTSIDE the gate node's
-    outer try/except (the fused block at indent=8 follows the
-    outer try's return; graph.py:5507 sits in the open). The
-    exception propagates UP to LangGraph — the gate node CRASHES
-    on the asyncio coroutine. This is a CONTRACT DEVIATION vs
-    FR-13's fail-open contract; document the finding.
+    mapping has already run. PRE-FIX this seam was OUTSIDE the gate
+    node's outer try/except (the fused block at indent=8 followed
+    the outer try's return; graph.py:5507 sat in the open). The
+    exception propagated UP to LangGraph — the gate node crashed on
+    the asyncio coroutine. This was a CONTRACT DEVIATION vs FR-13's
+    fail-open contract.
 
-    NOTE: the test bodies here invoke ``_run`` and ASSERT that a
-    RuntimeError IS raised (the absence of a caught exception IS
-    the finding). All three bands exercise the same code path
-    (the emit is always called); the per-band differentiation
-    here is documenting the failure MODE band-by-band, not the
-    per-band recovery shape."""
+    POST-FIX (F-B, 2026-09-16): the fused block is wrapped in its
+    own try/except (graph.py ~5243-5567). Any raise in the verdict
+    mapping, hint factory, or row emission is caught: a loud
+    ``event=leader_completion_gate_error`` row fires with
+    ``gate_location=fused_block``, ``_persist_gate_exception_marker``
+    stamps ``gate_exception_seen`` on the ledger, and the gate node
+    falls through to Phase-3 (no early return). The existing
+    ``decision.decision`` from ``decide()`` drives the per-band
+    outcome (DP-5 REJECTED preserved):
+
+    * **deny-band** (decision.decision = DENIED) → Phase-3 deny+nudge
+      machinery runs: counter increments, in-graph nudge injects.
+    * **marker/A bands** (decision.decision = ALLOWED_LEGITIMATE_
+      PENDING_WAKEUP) → Phase-3 plain ALLOW path runs: NO hint, NO
+      counter write, NO nudge (marker-only signal too weak to deny
+      on this seam).
+
+    The test bodies here now assert the FAIL-OPEN behavior (no raise,
+    loud row + marker, per-band outcome) — what used to be a
+    documented finding is now the pinned contract.
+
+    NOTE: All three bands exercise the same code path (the emit is
+    always called); the per-band differentiation here pins the
+    per-band recovery shape post-fix."""
 
     def _install_emit_boom(self, monkeypatch):
         def boom(*_args, **_kwargs):
@@ -906,7 +924,18 @@ class TestSeamIVOutcomeMappingRaises:
             boom,
         )
 
-    def test_seam_iv_deny_band_crashes_gate(self, monkeypatch, caplog):
+    def test_seam_iv_deny_band_fail_open_keeps_deny_nudge(
+        self, monkeypatch, caplog
+    ):
+        """F-B (2026-09-16) — seam (iv) on the deny band: the fused
+        block's ``_emit_resolver_eval_row`` raises AFTER the mapping
+        arm set ``resolver_outcome=deny_nudge``. The F-B wrapper
+        catches the exception, stamps ``gate_exception_seen`` (F-C)
+        on the instance row via ``_persist_gate_exception_marker``,
+        and falls through. Phase-3 sees ``decision.decision=DENIED``
+        and runs the deny+nudge path (counter increments; in-graph
+        nudge injects; ``attestation_route=agent``). The gate node
+        SURVIVES — no propagation to LangGraph."""
         _drift_pin()
         spy = _JudgeSpy(
             ['{"verdict": "complete", "rationale": "unused"}']
@@ -923,29 +952,61 @@ class TestSeamIVOutcomeMappingRaises:
             denied_count=0,
         )
         with _capture(caplog).at_level(logging.INFO):
-            with pytest.raises(RuntimeError, match="injected"):
-                _run(
-                    node, _delegated_state("All done."), "seam-iv-deny"
-                )
+            result = _run(
+                node, _delegated_state("All done."), "seam-iv-deny"
+            )
 
-        # Audit — NEITHER resolver-eval-error NOR gate-error row
-        # is emitted (the raised exception leaves the gate node
-        # entirely). No marker writeback (no _persist_gate_exception
-        # call either).
-        assert _rows(
+        # Loud F-B row fired (gate_location=fused_block is the F-B
+        # marker that distinguishes the inner wrapper from the outer
+        # scanner/decide catch at graph.py:5176).
+        fje_rows = _rows(
             caplog, "event=leader_completion_gate_error "
-        ) == [], (
-            "Seam (iv) deny-band: the outer gate-error row does "
-            "NOT fire (the exception propagates PAST the outer "
-            "try/except — Contract deviation vs FR-13)"
         )
-        assert _rows(
-            caplog, "event=leader_completion_resolver_eval_error"
-        ) == []
-        # Counter NOT incremented (the gate crashed mid-pipeline).
-        ledger.increment.assert_not_called()
+        assert fje_rows, (
+            "Seam (iv) deny-band: F-B wrapper MUST emit a loud "
+            "leader_completion_gate_error row"
+        )
+        assert any(
+            "gate_location=fused_block" in r for r in fje_rows
+        ), (
+            "Seam (iv) deny-band: row MUST carry "
+            "gate_location=fused_block (the F-B seam marker)"
+        )
+        assert any(
+            "gate_exception_seen=true" in r and "decision=fail_open_allowed" in r
+            for r in fje_rows
+        ), (
+            "Seam (iv) deny-band: row MUST carry gate_exception_seen=true "
+            "+ decision=fail_open_allowed"
+        )
+        # F-C — ``_persist_gate_exception_marker`` was called on the
+        # ledger to stamp the marker on the instance row (FR-13
+        # "transient gate_exception_seen=true flag on the instance
+        # row" contract). Asserted on the ledger mock (MagicMock auto-
+        # creates ``set_metadata`` as a callable MagicMock).
+        ledger.set_metadata.assert_called_once_with(
+            "seam-iv-deny",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Per-band conservative: deny+nudge — Phase-3 runs the
+        # existing machinery. Decision.DENIED is the canonical
+        # answer that drove decide(), and Phase-3 increments the
+        # counter + injects the nudge.
+        assert result["attestation_route"] == "agent", (
+            "Seam (iv) deny-band: deny+nudge path runs (route=agent)"
+        )
+        ledger.increment.assert_called_once()
 
-    def test_seam_iv_marker_band_crashes_gate(self, monkeypatch, caplog):
+    def test_seam_iv_marker_band_fail_open_plain_allow(
+        self, monkeypatch, caplog
+    ):
+        """F-B (2026-09-16) — seam (iv) on the marker band: the
+        exception is caught, ``gate_exception_seen`` is stamped on the
+        instance row (F-C), and the gate falls through. Phase-3 sees
+        ``decision.decision=ALLOWED_LEGITIMATE_PENDING_WAKEUP`` and
+        runs plain ALLOW (no hint, NO nudge, NO counter write —
+        marker-only signal too weak to deny on this seam)."""
         _drift_pin()
         spy = _JudgeSpy(
             ['{"verdict": "complete", "rationale": "unused"}']
@@ -958,22 +1019,50 @@ class TestSeamIVOutcomeMappingRaises:
             pending_children=1,
         )
         with _capture(caplog).at_level(logging.INFO):
-            with pytest.raises(RuntimeError, match="injected"):
-                _run(
-                    node,
-                    _delegated_state(
-                        "Awaiting child reply. Ending turn."
-                    ),
-                    "seam-iv-marker",
-                )
+            result = _run(
+                node,
+                _delegated_state(
+                    "Awaiting child reply. Ending turn."
+                ),
+                "seam-iv-marker",
+            )
 
-        assert _rows(caplog, "event=leader_completion_gate_error ") == []
-        assert _rows(
-            caplog, "event=leader_completion_resolver_eval_error"
-        ) == []
+        # Loud F-B row fires.
+        fje_rows = _rows(
+            caplog, "event=leader_completion_gate_error "
+        )
+        assert fje_rows, (
+            "Seam (iv) marker-band: F-B wrapper MUST emit a loud row"
+        )
+        assert any("gate_location=fused_block" in r for r in fje_rows)
+        # F-C — ledger stamp on the instance row.
+        ledger.set_metadata.assert_called_once_with(
+            "seam-iv-marker",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Per-band conservative: plain ALLOW — no hint, no nudge,
+        # no counter write. Decision was ALLOWED_LEGITIMATE_PENDING_
+        # WAKEUP from decide(); Phase-3 takes the plain-allow arm.
+        assert result["attestation_route"] is None, (
+            "Seam (iv) marker-band: plain ALLOW path runs (route=None)"
+        )
+        # No nudge, no hint (no message injected).
+        assert "messages" not in result or result["messages"] == [], (
+            "Seam (iv) marker-band: NO hint/nudge on this seam "
+            "(marker-only signal too weak to deny)"
+        )
         ledger.increment.assert_not_called()
 
-    def test_seam_iv_a_band_crashes_gate(self, monkeypatch, caplog):
+    def test_seam_iv_a_band_fail_open_plain_allow(
+        self, monkeypatch, caplog
+    ):
+        """F-B (2026-09-16) — seam (iv) on the A band: same shape as
+        the marker band (plain ALLOW, no hint, no nudge, no counter
+        write). Verifies the per-band conservative mapping holds on
+        every band — the F-B wrapper does NOT promote a denied
+        decision to allow (DP-5 REJECTED), and does NOT add a hint
+        to an allowed-band allow."""
         _drift_pin()
         spy = _JudgeSpy(
             ['{"verdict": "complete", "rationale": "unused"}']
@@ -992,13 +1081,26 @@ class TestSeamIVOutcomeMappingRaises:
             extra_messages=[_child_report_check_note()],
         )
         with _capture(caplog).at_level(logging.INFO):
-            with pytest.raises(RuntimeError, match="injected"):
-                _run(node, state, "seam-iv-a")
+            result = _run(node, state, "seam-iv-a")
 
-        assert _rows(caplog, "event=leader_completion_gate_error ") == []
-        assert _rows(
-            caplog, "event=leader_completion_resolver_eval_error"
-        ) == []
+        # Loud F-B row fires.
+        fje_rows = _rows(
+            caplog, "event=leader_completion_gate_error "
+        )
+        assert fje_rows, (
+            "Seam (iv) A-band: F-B wrapper MUST emit a loud row"
+        )
+        assert any("gate_location=fused_block" in r for r in fje_rows)
+        # F-C — ledger stamp on the instance row.
+        ledger.set_metadata.assert_called_once_with(
+            "seam-iv-a",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Per-band conservative: plain ALLOW (A-band decision is
+        # ALLOWED_LEGITIMATE_PENDING_WAKEUP — no hint on this seam).
+        assert result["attestation_route"] is None
+        assert "messages" not in result or result["messages"] == []
         ledger.increment.assert_not_called()
 
 
@@ -1243,3 +1345,161 @@ class TestF2WakeupRefire:
         # Real outcome reached via the real judge (verdict=error
         # because MagicMock config cannot construct an LLM).
         assert second_result["attestation_route"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F-C PIN — ``gate_exception_seen`` ledger stamp on Stage-2 seam faults
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestGateExceptionSeenStampFC:
+    """F-C (2026-09-16) — Stage-2 seam faults (i / ii / iv) MUST
+    stamp the transient ``gate_exception_seen`` marker on the
+    instance row (FR-13 contract: "set a transient
+    ``gate_exception_seen=true`` flag on the instance row"). The
+    canonical stamp path is
+    :func:`daemon.graph._persist_gate_exception_marker` →
+    ``ledger.set_metadata(instance_id, "attestation_gate_exception_
+    seen", True)``.
+
+    These tests pin the F-C contract directly (independent of the
+    per-band outcome assertions in :class:`TestSeamI…` and
+    :class:`TestSeamIV…` which exercise the same surface). The
+    seam-(iii) wrapper fault is NOT covered here — it lives INSIDE
+    the fused block's own try/except (graph.py:5294-5319) and
+    already stamps via the fused-judge-error row + decision-shape;
+    extending the F-C contract to it would be a contract change
+    (not part of the F-A/B/C hotfix scope).
+
+    Conservative direction preserved (DP-5 REJECTED): the marker is
+    stamped but the outcome is NOT flipped — seam-(i)/(ii) deny-band
+    faults still deny+nudge via Phase-3 (verified by the per-band
+    tests above), seam-(iv) marker/A-band faults plain-allow.
+    """
+
+    def test_fc_seam_i_deny_band_stamps_marker_via_ledger(
+        self, monkeypatch, caplog
+    ):
+        """F-C — seam (i) activation-predicate exception on the deny
+        band: ``_persist_gate_exception_marker`` is called, the
+        outcome stays DENIED (Phase-3 deny+nudge still runs)."""
+        _drift_pin()
+        spy = _JudgeSpy(
+            ['{"verdict": "complete", "rationale": "unused"}']
+        )
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+        monkeypatch.setattr(
+            resolver_activation_mod,
+            "activation_predicate",
+            _ActivationPredicateBoom(),
+        )
+
+        node, _manager, ledger = _make_node(
+            instance_id="fc-seam-i-deny",
+            pending_children=0,
+            queued_wakeups=0,
+            live_descendants=0,
+            busy_descendants=0,
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result = _run(
+                node, _delegated_state("All done."), "fc-seam-i-deny"
+            )
+
+        # F-C — ledger stamp on the instance row.
+        ledger.set_metadata.assert_called_once_with(
+            "fc-seam-i-deny",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Conservative direction preserved — DENIED path runs
+        # (Phase-3 increments the counter + injects the nudge).
+        assert result["attestation_route"] == "agent"
+        ledger.increment.assert_called_once()
+
+    def test_fc_seam_ii_deny_band_stamps_marker_via_ledger(
+        self, monkeypatch, caplog
+    ):
+        """F-C — seam (ii) fused-payload build exception on the deny
+        band: same shape as seam (i) — marker stamped, DENIED path
+        runs."""
+        _drift_pin()
+        spy = _JudgeSpy(
+            ['{"verdict": "complete", "rationale": "unused"}']
+        )
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+        monkeypatch.setattr(
+            resolver_activation_mod,
+            "evaluate_resolver_activation",
+            _AssembleFusedBundleBoom(),
+        )
+
+        node, _manager, ledger = _make_node(
+            instance_id="fc-seam-ii-deny",
+            pending_children=0,
+            queued_wakeups=0,
+            live_descendants=0,
+            busy_descendants=0,
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result = _run(
+                node, _delegated_state("All done."), "fc-seam-ii-deny"
+            )
+
+        # F-C — ledger stamp on the instance row.
+        ledger.set_metadata.assert_called_once_with(
+            "fc-seam-ii-deny",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Conservative direction preserved — DENIED path runs.
+        assert result["attestation_route"] == "agent"
+        ledger.increment.assert_called_once()
+
+    def test_fc_seam_iv_deny_band_stamps_marker_via_ledger(
+        self, monkeypatch, caplog
+    ):
+        """F-C — seam (iv) fused-block emit/raise on the deny band:
+        the F-B wrapper stamps the marker via the SAME helper
+        (``_persist_gate_exception_marker``), outcome stays DENIED.
+        """
+        _drift_pin()
+        spy = _JudgeSpy(
+            ['{"verdict": "complete", "rationale": "unused"}']
+        )
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+        # Re-use the seam-(iv) install helper from the upstream class.
+        seam_iv_class = TestSeamIVOutcomeMappingRaises()
+        seam_iv_class._install_emit_boom(monkeypatch)
+
+        node, _manager, ledger = _make_node(
+            instance_id="fc-seam-iv-deny",
+            pending_children=0,
+            queued_wakeups=0,
+            live_descendants=0,
+            busy_descendants=0,
+            denied_count=0,
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result = _run(
+                node, _delegated_state("All done."), "fc-seam-iv-deny"
+            )
+
+        # F-C — ledger stamp on the instance row.
+        ledger.set_metadata.assert_called_once_with(
+            "fc-seam-iv-deny",
+            "attestation_gate_exception_seen",
+            True,
+        )
+        # Conservative direction preserved — DENIED path runs
+        # (Phase-3 increments the counter + injects the nudge).
+        assert result["attestation_route"] == "agent"
+        ledger.increment.assert_called_once()
+        # Loud F-B row fires (the F-B seam marker).
+        assert _rows(
+            caplog, "event=leader_completion_gate_error "
+        ), "F-C seam (iv) deny: F-B wrapper MUST emit a loud row"
+        assert any(
+            "gate_location=fused_block" in r
+            for r in _rows(caplog, "event=leader_completion_gate_error ")
+        )

@@ -117,7 +117,31 @@ JUDGE_MAX_INPUT_CHARS: int = 12_000
 #: Max chars of the LLM response we'll consider before truncating to
 #: parse. The JSON is small by construction (a single object) so the
 #: cap is a defensive ceiling against an LLM that returns prose.
+#:
+#: Two caps live here on purpose (F-A fix, 2026-09-16): the legacy
+#: window judge (:func:`judge_completion_report_async`) is paid-for
+#: (its verdict shape fits ~120 chars) and keeps the original 400;
+#: the fused judge (:func:`judge_fused_bundle_async`) consumes a
+#: different shape — the :data:`FUSED_JUDGE_SYSTEM_PROMPT` mandates
+#: 5 × 120-char evidence entries + a 240-char advisory + a 240-char
+#: rationale, which exceeds 400 chars by construction. Truncating a
+#: compliant verbose verdict at 400 silently downgrades it to
+#: unparsable ×2 (incident-class F-A) — the fused path uses the
+#: separate :data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` so the legacy
+#: cap stays at 400 unchanged.
 JUDGE_MAX_OUTPUT_CHARS: int = 400
+
+#: Fused-scoped max chars (UTF-8) of the LLM response we'll consider
+#: before truncating to parse. Applied ONLY at the two fused sites
+#: (:func:`judge_fused_bundle_async`, lines 1316-1317 / 1354-1355);
+#: the legacy window judge keeps ``JUDGE_MAX_OUTPUT_CHARS=400``
+#: because its verdict shape fits. Sized to cover the fused prompt's
+#: mandated payload with comfortable headroom (5×120 evidence + 240
+#: advisory + 240 rationale = 1080 minimum compliant, 2048 covers it
+#: and keeps room for verbose-but-correct model output). Truncation
+#: still applies (unbounded LLM output must never flow onward); the
+#: cap is just raised to fit the fused prompt's compliant shape.
+FUSED_JUDGE_MAX_OUTPUT_CHARS: int = 2048
 
 #: Hard ceiling on the messages passed to the judge. Matches the gate's
 #: default ``ENSEMBLE_LEADER_ATTESTATION_WINDOW=3`` so the gate and the
@@ -1313,8 +1337,8 @@ async def judge_fused_bundle_async(
         )
 
     first_raw_text = first.raw_text
-    if len(first_raw_text) > JUDGE_MAX_OUTPUT_CHARS:
-        first_raw_text = first_raw_text[:JUDGE_MAX_OUTPUT_CHARS]
+    if len(first_raw_text) > FUSED_JUDGE_MAX_OUTPUT_CHARS:
+        first_raw_text = first_raw_text[:FUSED_JUDGE_MAX_OUTPUT_CHARS]
     parsed = _parse_fused_judge_response(first_raw_text)
     if parsed is not None:
         is_complete, evidence, advisory, rationale = parsed
@@ -1351,8 +1375,8 @@ async def judge_fused_bundle_async(
         )
 
     second_raw_text = second.raw_text
-    if len(second_raw_text) > JUDGE_MAX_OUTPUT_CHARS:
-        second_raw_text = second_raw_text[:JUDGE_MAX_OUTPUT_CHARS]
+    if len(second_raw_text) > FUSED_JUDGE_MAX_OUTPUT_CHARS:
+        second_raw_text = second_raw_text[:FUSED_JUDGE_MAX_OUTPUT_CHARS]
     parsed_second = _parse_fused_judge_response(second_raw_text)
     if parsed_second is None:
         return FusedJudgeResult(
