@@ -54,10 +54,32 @@
 --   ``daemon/repositories/service_tool/models.py`` is the real
 --   source of truth and supplies values on every insert path (even
 --   when the SQL DEFAULT would also fire). The PG mirror in
---   ``EnsembleManager._ensure_postgres_columns`` (lands in Phase
---   1.C task 1.C.13b) emits ``ALTER TABLE ADD COLUMN IF NOT
---   EXISTS`` statements WITHOUT SQL DEFAULTs for the same reason
---   Python-side factory is authoritative on PG too.
+--   ``InstanceManager._ensure_postgres_columns`` emits ``ALTER TABLE
+--   ADD COLUMN IF NOT EXISTS`` statements WITHOUT SQL DEFAULTs for the
+--   same reason Python-side factory is authoritative on PG too.
+--
+-- PG SAFETY CONTRACT (by construction — both paths landed):
+--   * SQLite: this .sql file is applied by the migration runner; the
+--     runner is the SINGLE source of DDL truth for fresh SQLite DBs.
+--   * PostgreSQL: ``InstanceManager._ensure_postgres_columns``
+--     (see ``daemon/manager.py:5940-5998``) emits the BYTE-IDENTICAL
+--     table + index DDL at startup; the migration runner is a NO-OP
+--     on PG so this .sql never executes there. The mirror HAS
+--     landed (Phase 1.C.13b shipped) — the future-tense wording in
+--     earlier revisions is now obsolete.
+--   * The column DDL is dialect-neutral; the ONLY PG-specific deltas
+--     in the mirror are ``BIGSERIAL`` (vs SQLite ``INTEGER PRIMARY
+--     KEY AUTOINCREMENT``) and PG's index-name canonicalization
+--     (the names themselves are byte-identical). NO SQL DEFAULTs on
+--     either path (Python-side ``_now_utc_iso`` is authoritative on
+--     both backends — the SQLite ``strftime`` DEFAULT only fires
+--     when no Python value is supplied, which never happens in
+--     production).
+--   * 3-site index name lockstep: this .sql, the SQLModel
+--     ``__table_args__`` block, and the PG mirror all carry the same
+--     three names (``idx_service_tracking_name_active``,
+--     ``idx_service_tracking_pid``) — pinned by the un-skipped
+--     ``test_index_name_in_manager_py`` arm.
 --
 -- A13 - atomic-guard UPDATE contract (lives in the repository, NOT
 --   here). Every status-mutating UPDATE statement in
@@ -122,17 +144,11 @@ CREATE TABLE IF NOT EXISTS service_tracking (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
--- 3-site index registration. Names MUST be byte-identical to:
---   1. THIS FILE (the .sql migration, the SQLite path).
---   2. daemon/repositories/service_tool/models.py __table_args__
---      (fresh databases via SQLModel.metadata.create_all).
---   3. daemon/manager.py _ensure_postgres_columns (Phase 1.C.13b,
---      NOT YET WRITTEN. The Phase 1.A name-pin test skips the
---      manager.py arm with an explicit pending marker).
 -- A11: this partial UNIQUE index is the actual D5 same-name guard.
 -- The literal case ('starting','running') MUST stay in lockstep
 -- with the storage enum values in
 -- daemon/repositories/service_tool/models.py:ServiceStatus (lowercase, exact).
+-- The PG mirror at _ensure_postgres_columns uses the SAME predicate.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_service_tracking_name_active
     ON service_tracking (name)
     WHERE status IN ('starting','running');
