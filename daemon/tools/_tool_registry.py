@@ -114,36 +114,34 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 })
 
 
-# Categories that are DEFAULT-DENY regardless of the empty-allow default.
-#
-# BEHAVIORAL membership criterion (rewritten per D4 Option A,
-# leader-ratified 2026-09-15 — the criterion that has actually governed
-# this set since R-SR16): categories here are NEVER default-granted.
-# An agent reaches them ONLY through an explicit ``tools.allow`` entry
-# naming the category or one of its tools.
+# Categories that are OPT-IN-ONLY regardless of the empty-allow default.
 #
 # R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
 # ``resolve_tool_filter`` treats an absent/empty allow list as "everything
 # is potentially allowed" — which would default-grant these categories to
 # every agent created without an explicit allow-list (watcher is empty-allow
-# today). Privileged categories NEVER join that default universe.
-# Enforced structurally in ``daemon.tools.instance`` (the
-# ``resolve_tool_filter`` empty-allow branch and the default-allow paths
-# of ``_apply_tool_filter``) — no deny rules needed.
+# today). Privileged categories NEVER join that default universe: an agent
+# reaches them ONLY through an explicit ``tools.allow`` entry naming the
+# category or one of its tools. Enforced structurally in
+# ``daemon.tools.instance`` (the ``resolve_tool_filter`` empty-allow branch
+# and the default-allow paths of ``_apply_tool_filter``) — no deny rules
+# needed. The set is exactly three entries — daemon-internal authority
+# semantics: ``system_upgrade`` (restart/upgrade authority),
+# ``system-log`` (daemon log forensics — designated break-glass for the
+# ``worker`` agent), ``ens-db`` (direct ``ensemble_prod`` read + guarded
+# repair writer — maintenancer only).
 #
-# This is a default-deny UNION, NOT a trust-tier hierarchy: membership
-# answers one question — "does this category need filter-level
-# default-deny?" — and nothing else. Categories qualify when they mint
-# persistent, daemon-escaping authority that no registry-scoped kill
-# site can reach or undo. Current members:
-# ``system_upgrade`` (restart/upgrade authority), ``system-log``
-# (daemon log forensics — designated break-glass for the ``worker``
-# agent), ``ens-db`` (direct ``ensemble_prod`` read + guarded repair
-# writer — maintenancer only), and ``service`` (persistent detached
-# OS processes that escape the daemon's lifecycle — a spawned service
-# survives instance termination and daemon restart, and no
-# registry-scoped kill site can reach its process group, so the only
-# reliable fence is filter-level default-deny).
+# OVERRIDE 2026-09-16 (user decision): the ``service`` category was
+# REMOVED from this set by user directive (D4 reversed) and is now
+# default-enabled for any agent whose effective toolset can include
+# ``bash`` or ``proc``. See
+# ``.agents/shared/planning/service-tool/decisions.md`` §D4 override
+# note. SECURITY TRADEOFF acknowledged: empty-allow agents and any
+# bash/proc-capable agent gain process-group authority by default; the
+# global kill-switch ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` remains the
+# unconditional off. ``service`` no longer qualifies as
+# daemon-internal authority and was moved out of this UNION; the trio
+# is still triple-pinned below.
 #
 # SAME-PR RULE (D18/A14): the set is TRIPLE-pinned by exact-equality
 # asserts. Adding or removing a category REQUIRES updating ALL THREE
@@ -157,7 +155,6 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
-    "service",
 })
 
 

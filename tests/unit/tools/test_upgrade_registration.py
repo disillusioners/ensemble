@@ -95,24 +95,23 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_four(self) -> None:
-        """D4 Option A: the default-deny set is exactly four entries —
-        ``system_upgrade``, ``system-log``, ``ens-db``, ``service`` —
-        after the service-tool Phase 1 privilege add (leader-ratified
-        2026-09-15; architect §1 of architecture-recommendation.md).
-        Membership is BEHAVIORAL (never default-granted; explicit
-        ``tools.allow`` only) — NOT a "daemon-internal" trust tier.
-        Adding a category here is a deliberate trust decision, and
-        this pin makes silent additions visible (D18/A14 — same-PR
-        pin updates; this is pin file 1 of 3). The ``service``
-        category mints persistent daemon-escaping OS authority no
-        registry-scoped kill site can reach, so it joins the
-        filter-level default-deny union."""
+    def test_privileged_categories_is_exactly_three(self) -> None:
+        """The default-deny set is exactly three entries —
+        ``system_upgrade``, ``system-log``, ``ens-db`` — the trio of
+        daemon-internal authority categories.
+
+        ``service`` was REMOVED from this set by user override
+        2026-09-16 (D4 reversed; see
+        ``.agents/shared/planning/service-tool/decisions.md`` §D4
+        override note): the category is now default-enabled for any
+        agent whose effective toolset can include ``bash`` or
+        ``proc``. Adding a category here is a deliberate trust
+        decision, and this pin makes silent additions visible
+        (D18/A14 — same-PR pin updates; this is pin file 1 of 3)."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
-            "service",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:
