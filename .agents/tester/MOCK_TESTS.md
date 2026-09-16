@@ -368,3 +368,39 @@ The widened defer-gate admission semantics at RUNTIME (real repository code, not
 - **Quick Fixes**: 3 harness-only during authoring (import path `daemon.services.job_lock_manager`; per-scenario fresh file-backed SQLite isolation; S4 SQLite bool coercion). S5 background-sister assertion corrected to INFO (defer work IS non-background work per 2026-07-23 defer-leak fix — by-design).
 - **Commit**: ab567195 (test-code only: the pack pair)
 - **Report**: RESULTS/2026-09-03-defer-gate-full-gate.md
+
+## Mock Test: fe_edit_agent_e2e_test (source-edit-agent real-DOM smoke)
+
+### Metadata
+- **Created**: 2026-09-16
+- **Script**: test/packs/fe_edit_agent_e2e_test.sh (+ fe_edit_agent_e2e_test/mock_server.js, harness.js — untracked)
+- **Language**: Bash + Node (plain http) + Playwright-as-library
+- **Status**: ACTIVE (gate 2026-09-16, branch feature/fix-source-edit-agent @ 55de0a16)
+
+### Configuration
+- **Timeout**: internal 240s / outer 300s (dual-layer); actual pack runtime 17s; build (~13s) outside the pack
+- **Service Port**: 127.0.0.1:10180 ONLY (mock range; serves frontend/dist/ + /api on one origin — relative API_BASE needs no override)
+- **Mock Ports**: none beyond 10180
+- **Cleanup**: server PID recorded, SIGTERM in harness finally{}; lsof-proven zero listeners post-run; prod 9797 / dev 8079 / FE 4199 / 8088 never touched
+
+### What It Tests
+Edit-Source modal agent selection fix (WeakMap memoization of toSelectOptions + frozen EMPTY_SELECT_OPTIONS): typed search text survives CD cycles with a preselected value; a DIFFERENT agent is selectable and persists in the PUT payload; ADD flow not regressed.
+
+### Mock Services Required
+- One-origin Node http server: static dist + GET /api/agents (7 fake agents incl. shared-prefix pair coder/code-reviewer), GET /api/sources (4 fake sources: preselected-leader Slack, null-default_agent telegram, wanderer-default Slack), GET source-by-id, PUT/POST /api/sources (capture bodies to JSON log), minimal boot endpoints + SSE stream. App-level polling endpoints (/api/queues, /api/missions, …) intentionally 404 — harness-noise, documented.
+
+### Test Scenarios
+1. S1 EDIT different agent: type "cod" → retained across CD cycles (mouse moves + input events + 1.6s) → filtered panel → select coder → PUT config.default_agent = new agent
+2. S2 ADD: type → select → POST config carries agent
+3. S3 null default_agent: type → select → PUT carries agent, sibling config keys preserved
+4. S4 re-select SAME agent: PUT still carries it
+5. S5 switch sources: cancel S1, edit S3 → no stale state → PUT to S3's id
+
+### Success Criteria
+- [x] 5/5 scenarios PASS; payloads captured verbatim
+- [x] 0 uncaught page errors
+- [x] Port freed, prod daemon untouched (PID-verified)
+
+### Last Run
+- **Date**: 2026-09-16 · **Worker**: 070f5c22 (e2e-test) · **Result**: PASS 5/5
+- **Report**: RESULTS/2026-09-16-source-edit-agent-verification.md + smoke-artifacts/

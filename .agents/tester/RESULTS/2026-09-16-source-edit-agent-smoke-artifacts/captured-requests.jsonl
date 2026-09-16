@@ -1,0 +1,1 @@
+{"method":"PUT","path":"/api/sources/src-slack-s3","scenario":null,"source_id":"src-slack-s3","body":{"name":"S3 Slack Staging","config":{"default_agent":"agent-reviewer","channel_require_mention":false},"enabled":true,"autostart":true},"ts":1789565378548}
