@@ -53,7 +53,10 @@ interface SourceTypeConfig {
 
 // Stable empty-options reference: toSelectOptions must return an identity-stable
 // array even for fields without options (see memo rationale below its definition).
-const EMPTY_SELECT_OPTIONS: SearchableSelectOption[] = [];
+// Object.freeze + readonly make the immutability explicit both at runtime
+// (mutation silently no-ops on the frozen instance) and at the type level
+// (consumers cannot push/splice through this handle).
+const EMPTY_SELECT_OPTIONS: readonly SearchableSelectOption[] = Object.freeze([]);
 
 @Component({
   selector: 'app-add-source-modal',
@@ -245,7 +248,7 @@ export class AddSourceModalComponent implements OnInit {
   // field.options may be string[] or {value, label}[] depending on the source type.
   protected toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
     if (!options) {
-      return EMPTY_SELECT_OPTIONS;
+      return EMPTY_SELECT_OPTIONS as SearchableSelectOption[];
     }
     let mapped = this.selectOptionsMemo.get(options);
     if (!mapped) {

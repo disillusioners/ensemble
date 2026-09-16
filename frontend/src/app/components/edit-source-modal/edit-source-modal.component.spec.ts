@@ -64,7 +64,6 @@ function makeSlackSource(): Source {
 interface ModalHandle {
   component: EditSourceModalComponent;
   close: jest.Mock;
-  setAgentsError: () => void;
 }
 
 /** Direct class instantiation — no TestBed (see file docblock). */
@@ -79,12 +78,10 @@ function makeModal(source: Source): ModalHandle {
     { source },
     api,
   );
-  const failingApi = api as { listAgents: jest.Mock };
   component.ngOnInit();
   return {
     component,
     close,
-    setAgentsError: () => failingApi.listAgents.mockReturnValue(throwError(() => new Error('boom'))),
   };
 }
 
@@ -110,7 +107,6 @@ describe('EditSourceModal — agent options population (edit mode)', () => {
 
   it('populates options even when listAgents fails (dropdown empty, form still usable)', () => {
     const handle = makeModal(makeSlackSource());
-    handle.setAgentsError();
     const fresh = new EditSourceModalComponent(
       { close: jest.fn() } as unknown as ConstructorParameters<typeof EditSourceModalComponent>[0],
       { source: makeSlackSource() },
@@ -216,7 +212,7 @@ describe('EditSourceModal — toSelectOptions identity stability across CD cycle
       { id: 'governor', agent_id: 'governor', name: 'Governor', description: 'd', icon: 'i', color: 'c' },
     ]);
     const after = component['toSelectOptions'](
-      (component as unknown as { configFields: () => Array<{ options?: unknown[] }> }).configFields().find((f) => f.key === 'default_agent')!.options as Array<{ value: string; label: string }>,
+      (component as unknown as { configFields: () => Array<{ key: string; options?: unknown[] }> }).configFields().find((f) => f.key === 'default_agent')!.options as Array<{ value: string; label: string }>,
     ) as SearchableSelectOption[];
     expect(after).not.toBe(before);
     expect(after.map((o) => o.value)).toContain('governor');
@@ -316,7 +312,7 @@ describe('Mechanism mirror — SearchableSelectComponent options-effect (pinned)
   it('ADD-mode asymmetry: value stays null until first selection → the guard skips the rewrite (why add worked)', () => {
     const displayText = { v: '' };
     const options = [{ value: 'ari', label: 'Ari' }];
-    runMirroredEffect(displayText, null, () => options);
+    runMirroredEffect(displayText, null, options);
     expect(displayText.v).toBe('');
   });
 });
