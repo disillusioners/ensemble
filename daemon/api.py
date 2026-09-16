@@ -1231,6 +1231,7 @@ async def lifespan(app: FastAPI):
                 # restart-survival from racing the first tick. If the
                 # first sweep fails, log loudly and continue (do not
                 # abort boot).
+                # Accepted residual: pre-boot-sweep tolerated (Note 11) — A6 guaranteed boot pass; failure logs + continues, never aborts boot.
                 try:
                     boot_counters = await service_reconciliation.sweep_once()
                     logger.info(

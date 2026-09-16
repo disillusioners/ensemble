@@ -119,6 +119,7 @@
 -- UP
 CREATE TABLE IF NOT EXISTS service_tracking (
     -- SQLite-friendly autoincrement serial. PG tolerates this on create_all tests (1.C.13b mirrors BIGSERIAL).
+    -- Accepted residual: SQLite-native INTEGER PRIMARY KEY AUTOINCREMENT (Note 12) — PG mirror uses BIGSERIAL; both produce a monotonic PK.
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     -- JSON-encoded argv array (no shell expansion = no shell injection).

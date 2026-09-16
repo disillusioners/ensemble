@@ -269,6 +269,7 @@ class ServiceToolManager:
         # Cap check FIRST — no side effect, no spawn, no insert.
         # ``list_active`` is cheap (the partial UNIQUE index makes the
         # active-row scan O(active_rows), which is bounded by ``cap``).
+        # Accepted residual: cap check is a pure DB read; cap=10 brief default (Note 9).
         active_count = await asyncio.to_thread(
             lambda: len(self.repo.list_active())
         )
@@ -385,6 +386,7 @@ class ServiceToolManager:
             )
             if cleanup_start is not None and cleanup_start == start_time:
                 try:
+                    # Accepted residual: signal-adjacent killpg (Note 8) — F2 lost-race cleanup; (pid, start_time) re-verified above.
                     await asyncio.to_thread(
                         os.killpg, pid, signal.SIGKILL
                     )
@@ -551,6 +553,7 @@ class ServiceToolManager:
         # ── A1: signal the WHOLE GROUP via killpg ────────────────
         sig = signal.SIGKILL if force else signal.SIGTERM
         try:
+            # Accepted residual: signal-adjacent killpg (Note 8) — SIGTERM (force=False) / SIGKILL (force=True) stop escalation; ownership re-verified in F1 pre-signal block above.
             await asyncio.to_thread(os.killpg, row.pid, sig)
         except ProcessLookupError:
             # Process already dead between the F1 re-verify and the
@@ -639,6 +642,7 @@ class ServiceToolManager:
             # A1: SIGKILL via killpg too — same rationale as SIGTERM
             # (reach fork-children of the setsid leader).
             try:
+                # Accepted residual: signal-adjacent killpg (Note 8) — post-grace SIGKILL escalation after pre-kill re-verify.
                 await asyncio.to_thread(os.killpg, row.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
