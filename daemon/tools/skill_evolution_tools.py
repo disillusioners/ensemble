@@ -48,6 +48,11 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
 
+from daemon.services.skill_job_dispatcher import (
+    SKILL_CAPTURE_KILL_SWITCH_ENV,
+    _resolve_capture_enabled,
+)
+
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:
@@ -367,7 +372,44 @@ the returned payload is a JSON metrics document.
         validates that the task succeeded with sufficient complexity,
         then asks the LLM to distill it into a reusable skill body
         with ``lineage_origin='captured'``.
+
+        Kill-switch contract: when
+        ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` is unset / empty / falsy
+        (default OFF), the tool returns a JSON envelope with
+        ``{"skipped": true, "reason": "...", "new_skill_id": null,
+        "instance_id": ..., "kill_switch_env":
+        "ENSEMBLE_SKILL_CAPTURE_ENABLED"}`` and does NOT invoke
+        ``_skill_evolution_service.capture_skill``. This closes the
+        known bypass path around ``check_and_capture`` — the tool
+        has historically been able to trigger capture even when the
+        post-execution eligibility gate would have refused it (the
+        metrics-service path enforces more gates, but the tool path
+        does not). When the kill-switch is ON (``=1``/``true``/etc.)
+        the tool behavior is byte-identical to the pre-flag codebase.
         """
+        # ── Kill-switch gate ─────────────────────────────────────
+        # Closes the bypass path around ``check_and_capture``: the
+        # tool path historically skipped the metrics-service gates
+        # and could trigger capture even when the post-execution
+        # eligibility check would have refused it. We short-circuit
+        # BEFORE constructing task_details / dispatching to the
+        # service — the service records nothing, no job is enqueued,
+        # no LLM is invoked.
+        if not _resolve_capture_enabled():
+            envelope = {
+                "skipped": True,
+                "reason": (
+                    f"skill capture disabled (env "
+                    f"{SKILL_CAPTURE_KILL_SWITCH_ENV}=disabled); "
+                    f"no skill_capture job will be enqueued and no "
+                    f"record will be written"
+                ),
+                "new_skill_id": None,
+                "instance_id": instance_id,
+                "kill_switch_env": SKILL_CAPTURE_KILL_SWITCH_ENV,
+            }
+            return json.dumps(envelope, default=str, indent=2)
+
         # ``current_instance_id`` is captured in the closure; the
         # caller-supplied ``instance_id`` is forwarded into the
         # task_details dict for lineage/audit purposes.

@@ -45,11 +45,67 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from daemon.services.project_normalizer import normalize_project_id
 
 logger = logging.getLogger(__name__)
+
+
+# Kill-switch env for the automatic CAPTURED flow (Phase 5 of Skill
+# Evolution). Default OFF — automatic skill capture from successful
+# tasks is opt-in. Per-call env resolution (no cached config field) to
+# match the ``_resolve_repair_enabled`` exemplar at
+# ``daemon/tools/ens_db_tools.py``. When OFF, every entry point that
+# could spawn a ``skill_capture`` job must no-op:
+# ``SkillJobDispatcher.enqueue_capture`` returns ``None``;
+# ``SkillMetricsService._check_capture_eligibility`` returns ``None``
+# without invoking the evolution service; the
+# ``skill_execute_capture`` LangChain tool returns a ``{"skipped":
+# true, "reason": ...}`` envelope without dispatching. Per-call
+# resolution (vs a cached ``SkillEvolutionConfig`` knob) keeps the
+# kill-switch live across hot-reload and operator env flips — see
+# the no-new-ENSEMBLE_*-flags fix/flag policy (this flag is
+# explicitly owner-authorized, not a free-form addition).
+SKILL_CAPTURE_KILL_SWITCH_ENV = "ENSEMBLE_SKILL_CAPTURE_ENABLED"
+
+
+def _resolve_capture_enabled() -> bool:
+    """Resolve the skill-capture kill-switch (default OFF; flag-ON enables).
+
+    Resolution order:
+
+    1. ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` env (canonical).
+    2. Unset / empty string → default OFF (capture disabled).
+
+    Recognized ON values (case-insensitive): ``"1"``, ``"true"``,
+    ``"yes"``, ``"on"``. Recognized OFF values: ``"0"``, ``"false"``,
+    ``"no"``, ``"off"`` (and the default-OFF unset/empty case).
+
+    Invalid env values raise ``ValueError`` — fail-closed on
+    misconfiguration rather than silently enabling capture (parity
+    with ``_resolve_repair_enabled`` at
+    ``daemon/tools/ens_db_tools.py:131``).
+
+    Returns:
+        ``True`` if automatic capture should run; ``False`` if the
+        kill-switch is OFF (every capture entry point must no-op).
+    """
+    raw = os.environ.get(SKILL_CAPTURE_KILL_SWITCH_ENV)
+    if raw is None:
+        return False  # default OFF
+    val = raw.strip().lower()
+    if val == "":
+        return False  # empty string = use default (OFF)
+    if val in ("0", "false", "no", "off"):
+        return False
+    if val in ("1", "true", "yes", "on"):
+        return True
+    raise ValueError(
+        f"Invalid value for {SKILL_CAPTURE_KILL_SWITCH_ENV}: {raw!r} "
+        f"(expected 0/1/true/false/yes/no/on/off; unset/empty = default OFF)"
+    )
 
 
 # Job types created by this dispatcher. String literals because
@@ -355,7 +411,7 @@ class SkillJobDispatcher:
         self,
         project_id: str | None,
         task_details: dict[str, Any],
-    ) -> str:
+    ) -> str | None:
         """Enqueue a ``skill_capture`` job (CAPTURED flow).
 
         Called by :meth:`SkillEvolutionService.check_and_capture` when
@@ -375,8 +431,28 @@ class SkillJobDispatcher:
                 keys when prompting the LLM.
 
         Returns:
-            ``job_id`` of the capture JobItem.
+            ``job_id`` of the capture JobItem, or ``None`` when the
+            ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` kill-switch is OFF
+            (per-call resolved via :func:`_resolve_capture_enabled`).
+            ``None`` is the no-op contract — ``record_task_completion``
+            ignores the return value, so disabled callers proceed
+            silently without dispatching.
         """
+        # ── Kill-switch gate ─────────────────────────────────────
+        # Belt-and-braces: even though the metrics-service gate at
+        # ``SkillMetricsService._check_capture_eligibility`` is the
+        # primary "skip the trigger entirely" check, this gate covers
+        # every other producer of ``skill_capture`` jobs (incl. jobs
+        # already-queued and re-dispatched after a flag flip).
+        if not _resolve_capture_enabled():
+            logger.debug(
+                "SkillJobDispatcher.enqueue_capture: kill-switch OFF "
+                "(env %s=disabled). No-op — no skill_capture job "
+                "will be enqueued.",
+                SKILL_CAPTURE_KILL_SWITCH_ENV,
+            )
+            return None
+
         message = f"Capture skill from task. Details: {task_details}"
         return await self._enqueue_skill_keeper_job(
             project_id,

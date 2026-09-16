@@ -90,6 +90,11 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+from daemon.services.skill_job_dispatcher import (
+    SKILL_CAPTURE_KILL_SWITCH_ENV,
+    _resolve_capture_enabled,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -519,6 +524,13 @@ class SkillMetricsService:
 
         The check is gated on:
 
+        0. ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` kill-switch (default
+           OFF). When the kill-switch is OFF the gate returns
+           ``None`` immediately — the trigger is skipped entirely
+           and no downstream cost (DB reads, evolution-service
+           call, dispatcher enqueue) is paid. When the kill-switch
+           is ON (e.g. ``=1``), behavior is byte-identical to the
+           pre-flag codebase.
         1. ``evolution_service`` is wired in — otherwise capture
            is a no-op for this service.
         2. ``task_succeeded`` — only successful tasks are
@@ -560,6 +572,21 @@ class SkillMetricsService:
             the metrics service itself does not act on the
             return value.
         """
+        # Gate 0: ENSEMBLE_SKILL_CAPTURE_ENABLED kill-switch
+        # (default OFF). When the kill-switch is OFF, the trigger
+        # is skipped entirely — no agent metadata lookup, no
+        # usage-record DB read, no evolution-service call, no
+        # dispatcher enqueue. Per-call env resolution (via
+        # ``_resolve_capture_enabled``) keeps the flag live across
+        # operator env flips and matches the
+        # ``_resolve_repair_enabled`` exemplar at
+        # ``daemon/tools/ens_db_tools.py:131``. Invalid env values
+        # raise ``ValueError`` from the resolver (fail-closed) —
+        # we let that propagate so a misconfigured env surfaces
+        # loudly rather than silently enabling capture.
+        if not _resolve_capture_enabled():
+            return None
+
         # Gate 1: evolution service must be wired. This is the
         # most common no-op path during Phase 4 (capture is
         # Phase 5+).

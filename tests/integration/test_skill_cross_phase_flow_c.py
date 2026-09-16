@@ -78,6 +78,19 @@ pytestmark = pytest.mark.integration
 
 
 # ---------------------------------------------------------------------------
+# Kill-switch pin: ENSEMBLE_SKILL_CAPTURE_ENABLED must be ON for every
+# test in this file (Flow C exercises the capture pipeline). With the
+# default-OFF flag the dispatcher gate short-circuits to None and the
+# metrics-service gate short-circuits before reaching the evolution
+# service, breaking the Flow C assertions. The dedicated kill-switch
+# coverage lives in tests/unit/test_skill_capture_killswitch.py.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _enable_skill_capture_killswitch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
+
+
+# ---------------------------------------------------------------------------
 # Shared constants for Flow C
 # ---------------------------------------------------------------------------
 

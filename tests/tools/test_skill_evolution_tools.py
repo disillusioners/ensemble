@@ -62,6 +62,25 @@ SKILL_EVOLUTION_TOOL_NAMES: frozenset[str] = frozenset({
 STUB_NEEDLE = "\u23f3"
 
 
+@pytest.fixture(autouse=True)
+def _enable_skill_capture_killswitch(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` to ON for every test in this file.
+
+    ``skill_execute_capture`` now short-circuits to a ``skipped: true``
+    envelope when the kill-switch is OFF (default). The 5+ existing
+    tests in this file (``TestStubWhenServiceMissing``, the
+    ``TestStubWhenServiceAvailable.test_skill_execute_capture_*``
+    suite, the ``TestPhase5Dispatch.test_skill_execute_capture_*``
+    trio) all exercise the pre-flag behavior the suite was authored
+    against. Pinning ON restores that semantic — the dedicated
+    kill-switch coverage lives in
+    ``tests/unit/tools/test_skill_capture_killswitch.py``.
+    """
+    monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
+
+
 @pytest.fixture
 def skill_evolution_tools():
     """Build the 5 LangChain tools, indexed by name."""
