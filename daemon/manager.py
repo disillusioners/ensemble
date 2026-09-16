@@ -9219,6 +9219,51 @@ class InstanceManager:
         busy_count, _ = self._count_descendants_busy_and_live(instance_id)
         return busy_count
 
+    def has_open_user_answer(self, instance_id: str) -> bool:
+        """Does this instance have an OPEN awaiting-answer suspension
+        handle? (LCA answer-gate blindness fix — 2026-09-16, incident
+        6a0d60c9, FIX-2.)
+
+        Attestation-gate FIFTH legitimate-pending input
+        (``user_answer_pending``). When True the gate plain-allows the
+        turn-end BEFORE any trigger/judge work: the pending party is
+        the USER and the leader cannot progress alone — the awaiting
+        answer is the whole turn's purpose.
+
+        Source of truth: DB-backed, NOT the in-memory question pack
+        keying. Reads the ``task`` row via
+        :meth:`has_open_answer_handle_for_gate`
+        (``daemon/repositories/task/repository.py``) — the SAME
+        ``suspension_reason='awaiting_answer'`` handle the answer
+        endpoint's resume selector
+        (``find_suspended_turn_for_answer`` →
+        ``route_outcome=answer_gate_existing_turn``) consumes. The
+        handle self-clears when the answer is consumed
+        (``ResumeTurn``: ``status='paused' → 'pending'`` with
+        ``suspension_reason``/``resume_target_turn_id`` nulled in ONE
+        atomic guarded UPDATE), so there is NO stale-allow window; the
+        repo's freshness guard (handle must be the instance's NEWEST
+        task row) expires any leaked pre-revive handle so the
+        plain-allow can never become a permanent bypass.
+
+        Fail-open contract: DB errors PROPAGATE (mirrors
+        :meth:`count_busy_descendants`) — the gate's ``except
+        Exception`` DB seam converts them to the fail-open allow with
+        the -1 sentinels. The ``ValueError`` ambiguity shape (>1
+        matching handles — invariant violation) is refused inside the
+        repo method (returns False — the deny path stays reachable),
+        mirroring how the resume path surfaces the same violation
+        without fabricating a handle.
+
+        Args:
+            instance_id: The leader instance id (langgraph thread_id).
+
+        Returns:
+            True iff exactly one FRESH open awaiting-answer handle
+            exists for the instance.
+        """
+        return self._task_repo.has_open_answer_handle_for_gate(instance_id)
+
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
 

@@ -5043,7 +5043,9 @@ def create_attestation_gate_node(
     # import cycle.
     from .services.attestation_gate import (
         DEFAULT_ATTESTATION_TOOL_NAME,
+        DEFAULT_DENY_BOUND,
         Decision,
+        deny_bound_exceeded,
         evaluate,
     )
     from .services.attestation_ledger import (
@@ -5052,6 +5054,8 @@ def create_attestation_gate_node(
         safe_reset,
         safe_set_escalated_and_reset,
     )
+    # FIX-3 (2026-09-16, incident 6a0d60c9) — stable nudge id mint.
+    from .services.context_messages import _stable_id_for
 
     getter = denied_count_getter
 
@@ -5288,25 +5292,62 @@ def create_attestation_gate_node(
                         # the post-call (a)/(d) branch below).
                         # Counter write + nudge injection consume
                         # the DENIED value.
-                        logger.info(
-                            "[AttestationGate] marker-path %s "
-                            "instance=%s verdict=%s; converting "
-                            "ALLOW to DENY via existing nudge "
-                            "machinery (wrapper-fault path)",
-                            marker_path,
-                            effective_instance_id,
-                            marker_judge_verdict,
-                        )
-                        decision = _replace(
-                            decision,
-                            decision=Decision.DENIED,
-                            should_inject_nudge=True,
-                            next_denied_count=(
-                                decision.denied_count + 1
-                            ),
-                            marker_path=marker_path,
-                            marker_judge_verdict=marker_judge_verdict,
-                        )
+                        #
+                        # FIX-1 (2026-09-16, incident 6a0d60c9): the
+                        # conversion consults the SHARED bound
+                        # predicate ``deny_bound_exceeded`` — past the
+                        # deny_bound this is NOT a deny+nudge; it is
+                        # the canonical terminal outcome mirroring
+                        # ``decide()`` step (6) EXACTLY
+                        # (``next_denied_count = 0``, no nudge), so the
+                        # existing TERMINAL_AFTER_BOUND machinery below
+                        # (ledger ``set_escalated_and_reset`` + the
+                        # ``event=leader_completion_gate_terminal_
+                        # after_bound`` operator event + plain allow
+                        # END) runs unchanged.
+                        if deny_bound_exceeded(
+                            decision.denied_count,
+                            gate_config.get("deny_bound", DEFAULT_DENY_BOUND),
+                        ):
+                            logger.info(
+                                "[AttestationGate] marker-path %s "
+                                "instance=%s verdict=%s; deny_bound "
+                                "exceeded (denied_count=%s) — "
+                                "terminal_after_bound, NO nudge "
+                                "(wrapper-fault path)",
+                                marker_path,
+                                effective_instance_id,
+                                marker_judge_verdict,
+                                decision.denied_count,
+                            )
+                            decision = _replace(
+                                decision,
+                                decision=Decision.TERMINAL_AFTER_BOUND,
+                                next_denied_count=0,
+                                should_inject_nudge=False,
+                                marker_path=marker_path,
+                                marker_judge_verdict=marker_judge_verdict,
+                            )
+                        else:
+                            logger.info(
+                                "[AttestationGate] marker-path %s "
+                                "instance=%s verdict=%s; converting "
+                                "ALLOW to DENY via existing nudge "
+                                "machinery (wrapper-fault path)",
+                                marker_path,
+                                effective_instance_id,
+                                marker_judge_verdict,
+                            )
+                            decision = _replace(
+                                decision,
+                                decision=Decision.DENIED,
+                                should_inject_nudge=True,
+                                next_denied_count=(
+                                    decision.denied_count + 1
+                                ),
+                                marker_path=marker_path,
+                                marker_judge_verdict=marker_judge_verdict,
+                            )
                     else:
                         # (d)-with-pending → ALLOW + checkpoint-
                         # durable hint. NO counter write, NO deny,
@@ -5413,32 +5454,80 @@ def create_attestation_gate_node(
                         # the gate decision's marker_path so the log
                         # row carries it; the existing DENY branch
                         # below consumes the nudge injection.
-                        logger.info(
-                            "[AttestationGate] marker-path %s instance=%s "
-                            "verdict=%s; converting ALLOW to DENY "
-                            "via existing nudge machinery",
-                            marker_path,
-                            effective_instance_id,
-                            marker_judge_result.verdict,
-                        )
-                        # Drop the marker scan back to the surface so
-                        # the existing DENY branch emits the nudge +
-                        # counter increment. The Decision enum is
-                        # unchanged — we mutate the dataclass on the
-                        # synchronous gate local. The frozen dataclass
-                        # requires ``dataclasses.replace`` — but
-                        # ``decision`` here is a local and we only
-                        # rebuild it for the path-flip.
-                        decision = _replace(
-                            decision,
-                            decision=Decision.DENIED,
-                            should_inject_nudge=True,
-                            next_denied_count=decision.denied_count + 1,
-                            marker_path=marker_path,
-                            marker_judge_verdict=marker_judge_result.verdict,
-                            marker_judge_latency_ms=marker_judge_result.latency_ms,
-                            marker_judge_error_class=marker_judge_result.error_class,
-                        )
+                        #
+                        # FIX-1 (2026-09-16, incident 6a0d60c9): the
+                        # conversion consults the SHARED bound
+                        # predicate ``deny_bound_exceeded`` (the same
+                        # helper ``decide()`` step (6) uses). Past the
+                        # deny_bound this is the canonical terminal
+                        # outcome — ``next_denied_count = 0``, NO
+                        # nudge — so the existing
+                        # TERMINAL_AFTER_BOUND machinery below (ledger
+                        # ``set_escalated_and_reset`` + the
+                        # ``event=leader_completion_gate_terminal_
+                        # after_bound`` operator event + plain allow
+                        # END) runs unchanged. This closes the
+                        # unbounded marker-path deny-nudge loop (123
+                        # evaluations / 115 deny-nudges over 27 min
+                        # with ZERO terminal_after_bound events).
+                        if deny_bound_exceeded(
+                            decision.denied_count,
+                            gate_config.get("deny_bound", DEFAULT_DENY_BOUND),
+                        ):
+                            logger.info(
+                                "[AttestationGate] marker-path %s instance=%s "
+                                "verdict=%s; deny_bound exceeded "
+                                "(denied_count=%s) — terminal_after_bound, "
+                                "NO nudge",
+                                marker_path,
+                                effective_instance_id,
+                                marker_judge_result.verdict,
+                                decision.denied_count,
+                            )
+                            # Drop the marker scan back to the surface so
+                            # the terminal machinery stamps the routing
+                            # fields. The frozen dataclass requires
+                            # ``dataclasses.replace`` — the terminal
+                            # mirror keeps ``next_denied_count = 0`` and
+                            # ``should_inject_nudge = False`` EXACTLY as
+                            # ``decide()`` step (6) produces them.
+                            decision = _replace(
+                                decision,
+                                decision=Decision.TERMINAL_AFTER_BOUND,
+                                next_denied_count=0,
+                                should_inject_nudge=False,
+                                marker_path=marker_path,
+                                marker_judge_verdict=marker_judge_result.verdict,
+                                marker_judge_latency_ms=marker_judge_result.latency_ms,
+                                marker_judge_error_class=marker_judge_result.error_class,
+                            )
+                        else:
+                            logger.info(
+                                "[AttestationGate] marker-path %s instance=%s "
+                                "verdict=%s; converting ALLOW to DENY "
+                                "via existing nudge machinery",
+                                marker_path,
+                                effective_instance_id,
+                                marker_judge_result.verdict,
+                            )
+                            # Drop the marker scan back to the surface so
+                            # the existing DENY branch emits the nudge +
+                            # counter increment. The Decision enum is
+                            # unchanged — we mutate the dataclass on the
+                            # synchronous gate local. The frozen dataclass
+                            # requires ``dataclasses.replace`` — but
+                            # ``decision`` here is a local and we only
+                            # rebuild it for the path-flip.
+                            decision = _replace(
+                                decision,
+                                decision=Decision.DENIED,
+                                should_inject_nudge=True,
+                                next_denied_count=decision.denied_count + 1,
+                                marker_path=marker_path,
+                                marker_judge_verdict=marker_judge_result.verdict,
+                                marker_judge_latency_ms=marker_judge_result.latency_ms,
+                                marker_judge_error_class=marker_judge_result.error_class,
+                            )
                     else:
                         # (b)/(d)-with-pending → ALLOW + checkpoint-
                         # durable hint. NO counter write, NO deny, NO
@@ -5735,9 +5824,27 @@ def create_attestation_gate_node(
                 decision.denied_count,
                 decision.next_denied_count,
             )
+            # FIX-3 (2026-09-16, incident 6a0d60c9): the nudge carries
+            # a STABLE per-instance id (``attestation_nudge:{id}``,
+            # minted via ``_stable_id_for``) so CONSECUTIVE denies
+            # supersede the prior nudge block in place via LangGraph's
+            # ``add_messages`` reducer instead of accumulating one
+            # block per deny. ALL deny producers — this branch (the
+            # plain ``decide()`` deny) AND the marker-path (a)/(d)
+            # allow→deny conversions (which funnel into this same
+            # branch) — mint the SAME id, so marker-path nudges
+            # supersede decide-path nudges and vice versa. Mirrors the
+            # ``completion_check_note:{id}`` supersede contract
+            # (F1 Shape A). ``additional_kwargs`` are unchanged.
             nudge = HumanMessage(
                 content=ATTESTATION_NUDGE_TEXT,
-                id=str(uuid.uuid4()),
+                id=(
+                    _stable_id_for(
+                        "attestation_nudge", instance_id=effective_instance_id
+                    )
+                    if effective_instance_id
+                    else str(uuid.uuid4())
+                ),
                 additional_kwargs={
                     "attestation_nudge": True,
                     # C1 (2026-09-12 review): stamp server-injected like

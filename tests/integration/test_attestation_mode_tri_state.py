@@ -65,7 +65,11 @@ def _nudge_count(messages) -> int:
         # delegation step before the un-attested hallucinated turns.
         ("off", 0, None, 2, 0),
         ("dry", 0, "dry_log", 2, 0),
-        ("enforce", 2, "denied", 5, 2),
+        # FIX-3 (2026-09-16, incident 6a0d60c9): the two deny events
+        # mint the SAME stable nudge id, so the add_messages reducer
+        # supersedes them to ONE block in the final channel (deny
+        # EVENTS are still pinned via expected_denies=2 below).
+        ("enforce", 1, "denied", 5, 2),
     ],
     ids=["mode-off", "mode-dry", "mode-enforce"],
 )

@@ -396,6 +396,89 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    def has_open_answer_handle_for_gate(self, instance_id: str) -> bool:
+        """Gate-time detection: is this instance's CURRENT turn suspended
+        awaiting a user answer? (2026-09-16, incident 6a0d60c9, FIX-2.)
+
+        Read-only predicate consumed by the leader completion
+        attestation gate via ``InstanceManager.has_open_user_answer``
+        (the FIFTH legitimate-pending input). DB-backed source of
+        truth — the SAME ``suspension_reason='awaiting_answer'``
+        handle the answer-resume selector
+        (:meth:`find_suspended_turn_for_answer`) routes on — NOT the
+        in-memory question pack keying.
+
+        Filter shape (mirrors ``find_suspended_turn_for_answer``):
+
+          * ``suspension_reason = 'awaiting_answer'``
+          * ``resume_target_turn_id IS NOT NULL`` (invariant 2)
+          * ``status = 'paused'`` (a consumed handle is cleared by
+            ``ResumeTurn`` — ``status='paused' → 'pending'`` with the
+            handle columns nulled in ONE atomic guarded UPDATE — so
+            the detection self-clears the moment the answer is
+            consumed; NO stale-allow window)
+
+        Freshness guard (the false-positive half): the handle must be
+        the NEWEST ``task`` row for the instance (by autoincrement
+        ``id`` — monotonic insertion order). A leaked /
+        never-consumed handle from an earlier era (e.g. the instance
+        was terminated-while-suspended and later revived with a NEWER
+        turn) must NOT arm a permanent allow bypass — the newest-row
+        requirement expires it the moment any later turn exists.
+        This is what keeps the plain-allow from becoming a new
+        silent-completion hole.
+
+        Ambiguity policy (conservative for the gate): 0 matches →
+        False (no pending answer); MORE than 1 match → False (the
+        answer gate has exactly one authoritative suspension handle
+        per instance — duplicates are an invariant violation and must
+        NOT be resolved by recency INTO an allow bypass). The resume
+        path raises ``ValueError`` on the same shape; the gate is
+        read-only and refuses the bypass instead.
+
+        Args:
+            instance_id: The langgraph thread_id / instance_id.
+
+        Returns:
+            True iff exactly one fresh open awaiting-answer handle
+            exists for the instance. Never raises for the normal
+            no-row shape; DB errors propagate to the caller's seam.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            handle_filter = (
+                Task.instance_id == instance_id,
+                Task.suspension_reason
+                == SuspensionReason.AWAITING_ANSWER.value,
+                Task.resume_target_turn_id.isnot(None),
+                Task.status == TaskStatus.PAUSED.value,
+            )
+            count_stmt = select(func.count(col(Task.id))).where(*handle_filter)
+            match_count = db_session.exec(count_stmt).one()
+            if match_count != 1:
+                # 0 = no pending answer; >1 = ambiguous invariant
+                # violation — both refuse the allow bypass (False).
+                return False
+
+            handle = db_session.exec(
+                select(Task).where(*handle_filter)
+            ).first()
+            if handle is None or handle.id is None:
+                return False
+
+            # Freshness: no NEWER task row may exist for this
+            # instance (autoincrement ``id`` is the monotonic
+            # insertion-order proxy — created_at is wall-clock and
+            # can tie). A newer row means the suspension era is over
+            # (the instance moved on to a later turn): the handle is
+            # stale and must not arm the gate bypass.
+            newer_stmt = (
+                select(func.count(col(Task.id)))
+                .where(Task.instance_id == instance_id)
+                .where(col(Task.id) > handle.id)
+            )
+            newer_count = db_session.exec(newer_stmt).one()
+            return newer_count == 0
+
     def find_paused_or_cancellable_turn(
         self, instance_id: str
     ) -> Task | None:

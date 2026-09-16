@@ -97,7 +97,28 @@ async def test_bound_plus_one_escalates_once_without_fourth_nudge(
             },
         )
 
-    assert _nudge_count(state["messages"]) == 3
+    # FIX-3 (2026-09-16, incident 6a0d60c9): consecutive denies mint the
+    # SAME stable nudge id (``attestation_nudge:{instance_id}``) — the
+    # ``add_messages`` reducer SUPERSEDES prior blocks in place, so the
+    # three deny events collapse to ONE nudge block in the final channel
+    # (the pre-FIX-3 accumulate-3-blocks shape is retired). The three
+    # deny EVENTS are still pinned below via ``decision=denied`` log
+    # counts; the surviving block carries the LAST deny's counter stamp.
+    assert _nudge_count(state["messages"]) == 1
+    _nudge_blocks = [
+        m
+        for m in state["messages"]
+        if isinstance(m, HumanMessage)
+        and m.additional_kwargs.get("attestation_nudge")
+    ]
+    assert _nudge_blocks[0].id == f"attestation_nudge:{INSTANCE_ID}", (
+        "the surviving nudge block MUST carry the stable per-instance id"
+    )
+    assert _nudge_blocks[0].additional_kwargs[
+        "attestation_nudge_denied_count"
+    ] == 3, (
+        "the superseded block MUST carry the LAST deny's counter stamp (3)"
+    )
     assert caplog.text.count("decision=denied") == 3
     assert caplog.text.count("decision=terminal_after_bound") == 1
     assert caplog.text.count("event=leader_completion_gate_terminal_after_bound") == 1
