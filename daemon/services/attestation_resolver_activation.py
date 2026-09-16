@@ -672,9 +672,12 @@ def compute_agreement(would_be_outcome: str, old_outcome: str) -> bool:
 def redact_ids(text: str, slot_hint: str = "id") -> str:
     """Replace UUID-shape tokens with stable slot placeholders.
 
-    Per the 98b59dd7 evidence boundary: the fused bundle carries NO raw
-    instance ids. Non-UUID ids (short tokens, agent names) pass through —
-    the bundle's id-bearing fields are UUIDs by construction.
+    Per the 98b59dd7 evidence boundary: structural id-bearing fields are
+    redacted (A-section and C-section tree rows). B-section leader-prose
+    excerpts (≤3 × 1500 chars) are quoted verbatim and may contain
+    instance ids the leader itself quoted; full B-redaction lands in
+    Stage 3. Non-UUID ids (short tokens, agent names) pass through —
+    the structural id-bearing fields are UUIDs by construction.
     """
     counter = {"n": 0}
 
@@ -794,7 +797,10 @@ def assemble_fused_bundle(
 
     Per-section caps: A ≤3000, B ≤6000, C ≤3000 (sum = the ≤12000 total —
     enforced defensively by a final hard clip with a truncation marker).
-    Ids are redacted (:func:`redact_ids`) per the 98b59dd7 boundary.
+    Structural id-bearing fields are redacted (:func:`redact_ids`;
+    A-section and C-section tree rows). B-section leader-prose excerpts
+    (≤3 × 1500 chars) are quoted verbatim and may contain instance ids
+    the leader itself quoted; full B-redaction lands in Stage 3.
     Stage 2 (the flip): the graph node's fused block feeds this bundle
     VERBATIM to :func:`attestation_report_judge.judge_fused_bundle_async`
     — the ONE judge call site (the Stage-1 module-global seam is
