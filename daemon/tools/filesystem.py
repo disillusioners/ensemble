@@ -471,8 +471,10 @@ def _expand_include_glob(search_path: Path, include: str) -> list[Path]:
     ``search_path`` matched by ``include``.
 
     Behavior:
-    - Empty include falls back to the byte-identical ``**/*`` glob (recursive
-      over every file in the tree).
+    - Empty include falls back to the same ``**/*`` glob as the pre-fix baseline
+      (recursive over every file in the tree). Iteration order is now
+      deterministically sorted (pre-fix was platform-dependent pathlib.glob
+      walk order).
     - When ``include`` contains no ``**`` segment, ``**/`` is prepended so the
       filter is recursive at any depth under ``search_path`` (e.g. ``*.py`` →
       ``**/*.py``).
@@ -486,10 +488,21 @@ def _expand_include_glob(search_path: Path, include: str) -> list[Path]:
     """
     pattern = include if include else ""
     if not pattern:
-        # Byte-identical fallback to the pre-fix "**/*" recursion baseline.
+        # Same `**/*` glob as the pre-fix baseline. Iteration order is now
+        # deterministically sorted (pre-fix was platform-dependent pathlib
+        # walk order) — a side-effect of the sorted() wrapper below.
         return sorted(p for p in search_path.glob("**/*") if p.is_file())
 
     # Recursion: prepend "**/" when the pattern does not already recurse.
+    # ORDER MATTERS: the `**`-check runs BEFORE brace expansion. This keeps
+    # the `**/` prefix intact in EVERY alternate — e.g. `*.{ts,html}` →
+    # `**/*.{ts,html}` then expands to `**/*.ts` and `**/*.html`. A naive
+    # refactor that expanded braces first and then unconditionally
+    # prepended `**/` to each result would produce `**/**.ts` /
+    # `**/**.html` for `**/*.{ts,html}` — a double-`/` glob pathlib treats
+    # as literal `**` segments and matches nothing. Keep the prepend on
+    # the WHOLE pre-expansion pattern (the prefix lives in `head`, the
+    # brace group sits in the suffix).
     if "**" not in pattern:
         pattern = "**/" + pattern
 
@@ -535,7 +548,8 @@ def grep_files(
             return f"ERROR: Path does not exist: {path}"
 
         # Resolve include filter (recursive + single-level brace expansion).
-        # No-include path stays byte-identical (uses "**/*" internally).
+        # No-include path uses the same "**/*" glob as the pre-fix baseline;
+        # iteration order is deterministically sorted.
         candidate_files = _expand_include_glob(search_path, include)
 
         # Compile regex
@@ -605,11 +619,23 @@ Args:
               optional (ignored) when `path` is absolute.
     path: Directory to search in. Absolute paths are allowed (workdir not needed);
           relative paths are resolved against `workdir`. Default: "."
-    include: Glob pattern to filter files. Recursive by default (matches at
-              any depth under `path`). Brace alternates like "{*.py,*.txt}" or
-              "*.{py,txt}" are supported. Patterns containing "**" (e.g.
-              "**/*.ts", "src/**/*.py") are passed through verbatim. Examples:
-              "*.py", "**/*.ts", "*.{js,ts}"
+    include: Glob pattern to filter files. Recursive by default — prefix-less
+              patterns (e.g. "*.py", "*.{py,html}") match at ANY depth under
+              `path` (the tool prepends `**/`). Path-prefixed patterns (e.g.
+              "src/*.ts") are ANCHORED to a single `src/` directory and only
+              match DIRECT children — use "src/**/*.ts" for deep matching
+              under `src/`. Brace semantics: only the FIRST top-level
+              `{a,b,c}` group is expanded (subsequent groups are treated
+              literally — `*.{ts,html}.{bak,tmp}` only expands `ts`/`html`,
+              the `.{bak,tmp}` suffix is left as-is). Empty alternates are
+              harmless (`{a,}` works). Mixed-brace consequence: when the
+              WHOLE pattern contains `**`, ALL alternates are used verbatim
+              with no per-alternate `**/` prepend — so prefer
+              `**/*.{ts,html}` (recursive over both extensions) over
+              `{**/*.ts,*.html}` (the `*.html` alternate only matches
+              root-level). Patterns already containing "**" (e.g. "**/*.ts",
+              "src/**/*.py") are passed through verbatim. Examples: "*.py",
+              "**/*.ts", "*.{js,ts}", "src/**/*.html"
     case_sensitive: Whether search is case-sensitive (default: False)
     whole_word: Match whole words only (default: False)
     offset: Number of results to skip (default: 0)

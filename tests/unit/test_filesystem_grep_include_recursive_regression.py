@@ -249,3 +249,282 @@ class TestNonExistentPath:
         )
         assert "ERROR" in out, f"Expected ERROR prefix, got: {out!r}"
         assert "does not exist" in out, f"Expected 'does not exist' in error: {out!r}"
+
+
+# ---------------------------------------------------------------------------
+# W3/W4/W5/S3/S5 — additional pins appended to lock in recursion semantics
+# ---------------------------------------------------------------------------
+#
+# Background: the original recursion fix (commit 3fe667fa) wrapped the
+# no-include fallback in sorted() and added recursive + brace expansion to the
+# include filter. These pins lock in the semantics so future refactors (e.g.
+# stripping the `**`-check, swapping expansion order, removing the sorted
+# wrapper, or losing union/dedupe) get caught.
+#
+# Two access patterns are used here:
+#  - ``_grep`` (the public grep_files.invoke entry point) — for tests that
+#    pin observable behavior (pagination, match output, dedupe in output).
+#  - ``_expand_include_glob`` (the internal helper) — for tests that pin
+#    the FILE SET produced by include resolution (W3/W4/W5). Parsing match
+#    lines to recover paths is fragile; the helper returns the resolved
+#    list directly.
+
+
+class TestDoubleStarVerbatim:
+    """W3: `**`-verbatim passthrough — must return the SAME file set as
+    prefix-less ``*.py``.
+
+    A refactor that strips the `**`-check (or makes the prepend
+    unconditional) would fail this:
+
+      - Strip the check → ``*.py`` becomes root-only (2 files), but
+        ``**/*.py`` is unchanged (4 files). Sets differ → pin fires.
+      - Make prepend unconditional → ``**/*.py`` becomes ``**/**/*.py``,
+        which pathlib treats as recursive but is clearly wrong intent; a
+        future tightening of glob semantics would diverge the two sets.
+    """
+
+    def test_double_star_py_same_set_as_prefix_less_py(self, grep_tree: Path):
+        from daemon.tools.filesystem import _expand_include_glob
+
+        verbatim = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "**/*.py")
+        )
+        prefix_less = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "*.py")
+        )
+        assert verbatim == prefix_less, (
+            "include='**/*.py' returned a different file set than include='*.py' "
+            "— the `**`-check or the recursion prepend regressed:\n"
+            f"  verbatim   = {verbatim}\n"
+            f"  prefixless = {prefix_less}"
+        )
+        # Pin that the recursion is real (>=3 .py files in the fixture).
+        assert len(verbatim) >= 3, (
+            f"Expected recursive .py match to include ≥3 files, got {len(verbatim)}"
+        )
+
+
+class TestRecursionBraceCombo:
+    """W4: ``**/*.{ext1,ext2}`` union — order-of-ops regression guard.
+
+    Pins that brace expansion preserves the ``**/`` prefix in EACH alternate
+    (the prepend happens on the WHOLE pre-expansion pattern, not per-alternate).
+    The fixture has 4 .py + 2 .txt files, no .ts or .html — we use the
+    available extensions; the semantics being pinned is the SAME.
+    """
+
+    def test_recursive_brace_brace_union_matches_py_and_txt(self, grep_tree: Path):
+        from daemon.tools.filesystem import _expand_include_glob
+
+        py_set = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "**/*.py")
+        )
+        txt_set = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "**/*.txt")
+        )
+        brace_set = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "**/*.{py,txt}")
+        )
+
+        # Sanity on the fixture shape (4 .py + 2 .txt, no .log).
+        assert len(py_set) == 4, (
+            f"Expected 4 .py files in fixture, got {len(py_set)}: {py_set}"
+        )
+        assert len(txt_set) == 2, (
+            f"Expected 2 .txt files in fixture, got {len(txt_set)}: {txt_set}"
+        )
+
+        # The brace result MUST equal the union of the two single-extension
+        # recursive results (deduped, sorted).
+        expected = sorted(set(py_set) | set(txt_set))
+        assert brace_set == expected, (
+            "include='**/*.{py,txt}' result differs from union of "
+            "'**/*.py' + '**/*.txt' — brace expansion or recursion prepend "
+            "regressed:\n"
+            f"  brace    = {brace_set}\n"
+            f"  expected = {expected}"
+        )
+        # No duplicates in the brace result (union dedup worked).
+        assert len(brace_set) == len(set(brace_set)), (
+            f"Duplicates in brace result (union dedup broken): {brace_set}"
+        )
+
+
+class TestNestedBraceLiteral:
+    """W5: nested-brace patterns are passed through VERBATIM to pathlib.
+
+    Pins that the single-level brace expander does NOT touch nested forms
+    like ``{a,{b,c}}`` — those reach ``Path.glob`` literally (which itself
+    does not expand braces, so it matches no files unless a filename actually
+    contains braces). The pin: tool result equals direct ``path.glob()``
+    of the same literal pattern.
+    """
+
+    def test_nested_brace_literal_equals_direct_pathlib_glob(self, grep_tree: Path):
+        from daemon.tools.filesystem import _expand_include_glob
+
+        tool_result = sorted(
+            str(p) for p in _expand_include_glob(grep_tree, "{a,{b,c}}")
+        )
+        direct_glob = sorted(str(p) for p in grep_tree.glob("{a,{b,c}}"))
+        assert tool_result == direct_glob, (
+            "Nested-brace literal pattern diverged between tool and direct "
+            f"pathlib.glob:\n  tool={tool_result}\n  glob={direct_glob}"
+        )
+        # Pin the fixture's literal-brace surface: no filenames contain
+        # literal braces, so both sides return empty.
+        assert tool_result == [], (
+            f"Expected empty for nested-brace literal on this fixture:\n{tool_result}"
+        )
+
+
+class TestPaginationAndOrderPins:
+    """S3: pagination + W1 deterministic-order pins.
+
+    Pins three observable behaviors:
+      (a) limit= truncates the FINAL output (after union/dedupe), not the
+          per-glob scan.
+      (b) offset=1, limit=1 skips the first sorted match and surfaces a
+          next-page hint at offset=2.
+      (c) Empty-include path returns matches in deterministically sorted
+          order across runs — pins the W1 resolution.
+    """
+
+    def test_limit_truncation_applied_after_union_dedupe(self, grep_tree: Path):
+        """limit=N produces exactly N matches from the union result."""
+        # Pattern "=" appears once per line in 4 .py + 2 .txt = 6 lines total
+        # under include="*.{py,txt}" (brace union).
+        out = _grep(grep_tree, pattern="=", include="*.{py,txt}", limit=3)
+        match_lines = [
+            line
+            for line in out.split("\n")
+            if line and not line.startswith("---") and not line.startswith("Showing")
+        ]
+        assert len(match_lines) == 3, (
+            f"Expected exactly 3 matches with limit=3 on brace union, got "
+            f"{len(match_lines)}:\n{out}"
+        )
+
+    def test_offset_one_skips_first_sorted_match(self, grep_tree: Path):
+        """offset=1, limit=1 returns the SECOND match in sorted order.
+
+        Pins that offset acts on the match list (post sort) — the FIRST
+        match (lowest-path .py file) is skipped.
+        """
+        first = _grep(
+            grep_tree,
+            pattern="TOKEN_HERE",
+            include="*.py",
+            limit=1,
+            offset=0,
+        )
+        second = _grep(
+            grep_tree,
+            pattern="TOKEN_HERE",
+            include="*.py",
+            limit=1,
+            offset=1,
+        )
+        assert "No matches found" not in first, (
+            f"offset=0 returned no matches (fixture broken?):\n{first}"
+        )
+        assert "No matches found" not in second, (
+            f"offset=1 returned no matches — pagination ate past available "
+            f"results:\n{second}"
+        )
+        # The two calls must return DIFFERENT matches (offset shifted by 1).
+        assert first != second, (
+            "offset=1 returned the same match as offset=0 — pagination "
+            f"did not advance:\n  first={first!r}\n  second={second!r}"
+        )
+        # Pin sort order: offset=0 returns the lex-smallest match (nested/
+        # deep.py), offset=1 returns the next-smallest (nested/deeper/
+        # deepest.py). Fixture has 3 TOKEN_HERE matches in 3 distinct .py
+        # files.
+        assert "nested/deep.py:1" in first, (
+            f"Expected offset=0 to surface 'nested/deep.py' (sorted first):\n{first}"
+        )
+        assert "nested/deeper/deepest.py:1" in second, (
+            f"Expected offset=1 to surface 'nested/deeper/deepest.py' "
+            f"(next in sorted order):\n{second}"
+        )
+
+    def test_empty_include_returns_deterministic_sorted_order(self, grep_tree: Path):
+        """Empty-include path matches deterministically across runs.
+
+        Pins the W1 resolution: the no-include fallback returns a sorted
+        file list, so match iteration is stable.
+        """
+        first_run = _grep(grep_tree, pattern="=", include="", limit=10)
+        second_run = _grep(grep_tree, pattern="=", include="", limit=10)
+        assert first_run == second_run, (
+            "Empty-include path produced non-deterministic output across "
+            "runs — the sorted() wrapper was lost:\n"
+            f"  run1: {first_run!r}\n"
+            f"  run2: {second_run!r}"
+        )
+        # Pin that the FIRST match comes from the lex-smallest absolute path.
+        # With sorted str(path), 'nested/...' < 'root_...' < 'txt_branch/...'
+        # ('n' < 'r' < 't'), so nested/deep.py must surface first.
+        assert "nested/deep.py:1" in first_run, (
+            f"Expected first match from 'nested/deep.py' (sorted first):\n{first_run}"
+        )
+
+
+class TestOverlappingAlternateDedupe:
+    """S5: overlapping alternates in a brace pattern must dedupe.
+
+    Pins that the union step collapses repeated files: include
+    ``{*.py,**/*.py}`` should scan each .py file exactly once even though
+    the two alternates overlap (``**/*.py`` covers everything ``*.py``
+    covers and more).
+    """
+
+    def test_overlapping_py_alternates_scan_each_file_once(self, grep_tree: Path):
+        out = _grep(
+            grep_tree,
+            pattern="=",
+            include="{*.py,**/*.py}",
+            limit=100,
+        )
+        # Parse match lines into (path, line_num, content) and count per path.
+        # Substring matching is unreliable here because match CONTENT also
+        # contains the filename (e.g. line content "x = 1" doesn't, but
+        # "NESTED_TOKEN_HERE = 'present in nested/deep.py'" does — substring
+        # count of 'nested/deep.py' would double-count).
+        expected_files = [
+            "root_marker.py",
+            "root_no_marker.py",
+            "nested/deep.py",
+            "nested/deeper/deepest.py",
+        ]
+        path_counts: dict[str, int] = {f: 0 for f in expected_files}
+        for line in out.split("\n"):
+            if not line or line.startswith("---") or line.startswith("Showing"):
+                continue
+            # Format: "{abs_path}:{line_num}: {content}". Split on first ':'
+            # after the absolute-path prefix — paths here have no ':'.
+            parts = line.split(":", 2)
+            if len(parts) < 2:
+                continue
+            abs_path = parts[0]
+            for fname in expected_files:
+                if abs_path.endswith("/" + fname) or abs_path.endswith(fname):
+                    path_counts[fname] += 1
+                    break
+        for fname, count in path_counts.items():
+            assert count == 1, (
+                f"File {fname} appeared {count} times in output (expected 1) "
+                f"— overlapping-alternate dedupe broken:\n{out}"
+            )
+        # 4 matches total (one per .py file). No pagination hint expected
+        # (total matches < limit and content < 6000 chars).
+        match_lines = [
+            line
+            for line in out.split("\n")
+            if line and not line.startswith("---") and not line.startswith("Showing")
+        ]
+        assert len(match_lines) == 4, (
+            f"Expected 4 matches from overlapping dedupe, got {len(match_lines)}:\n{out}"
+        )
