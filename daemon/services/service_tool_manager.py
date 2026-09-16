@@ -766,10 +766,14 @@ class ServiceToolManager:
                 alive = await asyncio.to_thread(is_process_alive, row.pid)
                 if not alive or current_start is None:
                     await asyncio.to_thread(self.repo.mark_exited, row.id)
-                    row = self.repo.get_by_id(row.id) or row
+                    row = (
+                        await asyncio.to_thread(self.repo.get_by_id, row.id)
+                    ) or row
                 elif current_start != row.start_time:
                     await asyncio.to_thread(self.repo.mark_exited, row.id)
-                    row = self.repo.get_by_id(row.id) or row
+                    row = (
+                        await asyncio.to_thread(self.repo.get_by_id, row.id)
+                    ) or row
             try:
                 command = (
                     json.loads(row.command)
