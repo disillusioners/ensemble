@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # LCA stage2 attestation matrix pack (Job 1/9) - frozen at tip f926de24
-# Pack: lca2_matrix_6_integration_b_integration_test
+# Pack: lca2_matrix_6_integration_b_integration_test  (rev2: judge-latency-aware re-partition, measured runtimes)
 # Dual-layer timeout: outer 'timeout 300' at invocation + inner 290s guard below.
 # Invocation contract: timeout 300 bash test/packs/lca2_matrix_6_integration_b_integration_test.sh  (from worktree root)
 set -u
@@ -8,12 +8,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PACK="lca2_matrix_6_integration_b_integration_test"
 FILES=(
-  tests/integration/test_attestation_live_descendants.py
-  tests/integration/test_attestation_marker_bound_enforcement_lca.py
-  tests/integration/test_attestation_marker_routing_lca.py
-  tests/integration/test_attestation_mid_work_report_testcase.py
-  tests/integration/test_attestation_mode_tri_state.py
-  tests/integration/test_attestation_must_not_break.py
+  tests/integration/test_attestation_nudge_supersede_lca.py
+  tests/integration/test_attestation_o1_boot_assert.py
+  tests/integration/test_attestation_observability.py
+  tests/integration/test_attestation_performance.py
+  tests/integration/test_attestation_runbook_drift.py
+  tests/integration/test_attestation_user_answer_pending_lca.py
+  tests/integration/test_attestation_wakeups_helper.py
 )
 echo "=== Test Pack: ${PACK} ==="
 START=$(date +%s)
