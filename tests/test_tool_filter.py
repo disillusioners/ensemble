@@ -763,6 +763,65 @@ class TestExpandAllowForInnateSkills:
         assert "test-category" in result
         assert "bash" in result
 
+    def test_privileged_category_not_expanded_from_innate_skill(self):
+        """SECURITY (council Note 6): the expander is a second door —
+        categories in ``PRIVILEGED_TOOL_CATEGORIES`` NEVER expand into
+        ``allow`` via an innate skill.
+
+        A future mapping whose value intersects the privileged set
+        (``system_upgrade`` / ``system-log`` / ``ens-db`` / ``service``)
+        would otherwise default-grant a default-deny category to EVERY
+        agent declaring the hosting innate skill. Fail-closed: the
+        privileged category is silently dropped from the expansion
+        while non-privileged categories from the SAME skill still
+        expand (the fence must not break legitimate skills).
+        """
+        from daemon.tools._tool_registry import PRIVILEGED_TOOL_CATEGORIES
+
+        privileged_category = sorted(PRIVILEGED_TOOL_CATEGORIES)[0]
+        original = dict(INNATE_SKILL_TOOL_CATEGORIES)
+        INNATE_SKILL_TOOL_CATEGORIES["rogue-skill"] = [
+            privileged_category,
+            "chart",  # non-privileged control in the SAME skill
+        ]
+        try:
+            result = expand_allow_for_innate_skills(
+                ["bash"], ["rogue-skill"]
+            )
+        finally:
+            INNATE_SKILL_TOOL_CATEGORIES.clear()
+            INNATE_SKILL_TOOL_CATEGORIES.update(original)
+
+        assert privileged_category not in result, (
+            f"council N6 violation: innate skill expanded privileged "
+            f"category {privileged_category!r} into allow: {result!r} "
+            f"— the expander must be fail-closed"
+        )
+        # Non-privileged sibling category still expands.
+        assert "chart" in result
+        assert "bash" in result
+
+    def test_expander_returns_allow_unchanged_when_only_privileged(self):
+        """Council N6: a skill mapping ONLY to privileged categories
+        expands nothing — the original allow list is returned as-is
+        (no phantom copy, no empty diff)."""
+        from daemon.tools._tool_registry import PRIVILEGED_TOOL_CATEGORIES
+
+        privileged_category = sorted(PRIVILEGED_TOOL_CATEGORIES)[0]
+        original = dict(INNATE_SKILL_TOOL_CATEGORIES)
+        INNATE_SKILL_TOOL_CATEGORIES["all-privileged-skill"] = [
+            privileged_category
+        ]
+        try:
+            result = expand_allow_for_innate_skills(
+                ["bash"], ["all-privileged-skill"]
+            )
+        finally:
+            INNATE_SKILL_TOOL_CATEGORIES.clear()
+            INNATE_SKILL_TOOL_CATEGORIES.update(original)
+
+        assert result == ["bash"]
+
     def test_apply_tool_filter_grants_opencode_tools_for_innate_skill(self):
         """End-to-end: agent with innate_skills=['opencode'] gets opencode tools."""
         tools = [

@@ -140,9 +140,10 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly three entries after
-        W1-P2 (privilege promotion — ``system_upgrade``,
-        ``system-log``, ``ens-db``). The attestation category is
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly four entries after
+        the service-tool Phase 1 add (D4 Option A —
+        ``system_upgrade``, ``system-log``, ``ens-db``, ``service``).
+        The attestation category is
         opt-in-only by convention (fail-closed authz), NOT because
         it is privileged — D7 sub-question RESOLVED-by-leader:
         NOT privileged. Adding ``attestation`` to
@@ -154,11 +155,13 @@ class TestStaticRegistrationChecklist:
         # updated in the same PR as the privilege promotion. The
         # mechanism is "silent additions visible" — promoting a new
         # category without bumping this pin would trip a regression
-        # here.
+        # here. D4 Option A (2026-09-15) added ``service`` (pin file
+        # 2 of 3 — A14 triple-pin discovery).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
+            "service",
         })
 
 

@@ -173,15 +173,20 @@ def expand_allow_for_innate_skills(
     If the agent has no explicit allow list (None), it already has access to
     every tool, so no expansion is needed. Otherwise, any categories mapped
     from innate skills in :data:`INNATE_SKILL_TOOL_CATEGORIES` are appended
-    (de-duplicated) to the allow list.
+    (de-duplicated) to the allow list — EXCEPT privileged categories
+    (``PRIVILEGED_TOOL_CATEGORIES``): those never expand into ``allow``
+    (council Note 6 — fail-closed second door). An innate skill whose
+    mapped category is privileged simply does not expand; the agent must
+    reach the category through an explicit ``tools.allow`` entry like
+    everyone else.
 
     Args:
         allow: The agent's configured `tools.allow` list (or None).
         innate_skills: The agent's `innate_skills` list (or None).
 
     Returns:
-        The allow list with innate-skill categories merged in, or the
-        original value if no expansion was needed.
+        The allow list with non-privileged innate-skill categories merged
+        in, or the original value if no expansion was needed.
     """
     if not innate_skills or allow is None:
         return allow
@@ -189,6 +194,16 @@ def expand_allow_for_innate_skills(
     extra: list[str] = []
     for skill in innate_skills:
         for category in INNATE_SKILL_TOOL_CATEGORIES.get(skill, []):
+            # Council Note 6 — fail-closed: the expander is a second
+            # door into tool categories; a future mapping whose value
+            # intersects PRIVILEGED_TOOL_CATEGORIES must NOT
+            # default-grant a default-deny category to every agent
+            # declaring the hosting skill. The static pin in
+            # tests/unit/tools/test_service_registration.py screams on
+            # such a mapping; THIS filter is the runtime fence if one
+            # lands anyway.
+            if category in PRIVILEGED_TOOL_CATEGORIES:
+                continue
             if category not in allow and category not in extra:
                 extra.append(category)
 
@@ -237,6 +252,7 @@ from .system_log_tools import create_system_log_tools
 from .upgrade_tools import create_upgrade_tools
 from .attestation import create_attestation_tools
 from .ens_db_tools import create_ens_db_tools
+from .service_tools import create_service_tools
 from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from .tunables import create_set_instance_tunable_tool
@@ -4699,6 +4715,20 @@ Returns:
     )
     tools.extend(ens_db_tool_list)
 
+    # ── service tools (service-tool Phase 1, 1.C.5) — detached process management ──
+    # Privileged category (D4 Option A): in PRIVILEGED_TOOL_CATEGORIES —
+    # never default-granted; an agent reaches service_* ONLY via an
+    # explicit tools.allow entry naming "service". Manager dereferenced
+    # at CALL time (the factory tolerates a None-stub manager for the
+    # loader warm-list). Decorator-only registration is SILENTLY
+    # INVISIBLE — the extend below is the third step of the
+    # three-step registration seam (decorator + registry entry +
+    # construction — all three required).
+    service_tool_list = create_service_tools(
+        manager, current_instance_id, agent_id, version_tag=version_tag
+    )
+    tools.extend(service_tool_list)
+
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
     # because create_help_tool needs MCP tool names for category expansion.
@@ -4741,14 +4771,22 @@ Returns:
 
 
 def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
-    """Remove privileged-category tools from a default-allow (unfiltered) list.
+    """Strip default-deny categories from a default-allow (unfiltered) list.
 
-    R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
-    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``)
-    are opt-in-only — an agent reaches them ONLY through an explicit
-    ``tools.allow`` entry naming the category or one of its tools. The
-    default-allow paths below (no tools config at all, or an empty
-    allow+deny pair — e.g. ``watcher``) would otherwise default-grant them.
+    BEHAVIORAL criterion (rewritten per D4 Option A, 2026-09-15):
+    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today:
+    ``system_upgrade``, ``system-log``, ``ens-db``, ``service``) are
+    never default-granted — an agent reaches them ONLY through an
+    explicit ``tools.allow`` entry naming the category or one of its
+    tools. The default-allow paths below (no tools config at all, or an
+    empty allow+deny pair — e.g. ``watcher``) would otherwise
+    default-grant them.
+
+    The set is the behavioral union of default-deny categories, NOT a
+    trust-tier hierarchy: "privileged" here answers exactly one
+    question — "does this category need filter-level default-deny?"
+    (persistent, daemon-escaping authority no registry-scoped kill
+    site can reach) — and does NOT rank categories by trust.
 
     Defense-in-depth with the ``resolve_tool_filter`` empty-allow branch:
     that one covers the empty-allow + non-empty-deny universe construction;

@@ -91,6 +91,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "ens_db_inspect",
     "ens_db_repair_execute",
     "ens_db_pool_status",
+    # service tools (service-tool Phase 1, 2026-09-15) — created by
+    # create_service_tools() factory (daemon/tools/service_tools.py).
+    # Privileged category (D4 Option A) — ``service_*`` tools spawn
+    # persistent detached OS processes that survive instance
+    # termination AND daemon restart; default-deny via
+    # ``PRIVILEGED_TOOL_CATEGORIES``, reachable only via an explicit
+    # ``tools.allow`` entry naming ``service``.
+    "service_start",
+    "service_stop",
+    "service_status",
+    "service_list",
+    "service_logs",
 })
 
 
@@ -102,29 +114,50 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 })
 
 
-# Categories that are OPT-IN-ONLY regardless of the empty-allow default.
+# Categories that are DEFAULT-DENY regardless of the empty-allow default.
+#
+# BEHAVIORAL membership criterion (rewritten per D4 Option A,
+# leader-ratified 2026-09-15 — the criterion that has actually governed
+# this set since R-SR16): categories here are NEVER default-granted.
+# An agent reaches them ONLY through an explicit ``tools.allow`` entry
+# naming the category or one of its tools.
 #
 # R-SR16 (P2.2 tool-api-design.md §3.5, architect-resolved 2026-08-22):
 # ``resolve_tool_filter`` treats an absent/empty allow list as "everything
 # is potentially allowed" — which would default-grant these categories to
 # every agent created without an explicit allow-list (watcher is empty-allow
-# today). Privileged categories NEVER join that default universe: an agent
-# reaches them ONLY through an explicit ``tools.allow`` entry naming the
-# category or one of its tools. Enforced structurally in
-# ``daemon.tools.instance`` (the ``resolve_tool_filter`` empty-allow branch
-# and the default-allow paths of ``_apply_tool_filter``) — no deny rules
-# needed. The set is exactly three entries after W1-P2 (privilege
-# promotion — detail-plan §4.4, architect §4.4): ``system_upgrade``
-# (restart/upgrade authority), ``system-log`` (daemon log forensics —
-# designated break-glass for the ``worker`` agent), ``ens-db`` (direct
-# ``ensemble_prod`` read + guarded repair writer — maintenancer only).
-# Silent additions are caught by the exact-equality pin tests
-# ``tests/unit/tools/test_upgrade_registration.py:100`` and
-# ``tests/unit/tools/test_attestation_registration.py:154``.
+# today). Privileged categories NEVER join that default universe.
+# Enforced structurally in ``daemon.tools.instance`` (the
+# ``resolve_tool_filter`` empty-allow branch and the default-allow paths
+# of ``_apply_tool_filter``) — no deny rules needed.
+#
+# This is a default-deny UNION, NOT a trust-tier hierarchy: membership
+# answers one question — "does this category need filter-level
+# default-deny?" — and nothing else. Categories qualify when they mint
+# persistent, daemon-escaping authority that no registry-scoped kill
+# site can reach or undo. Current members:
+# ``system_upgrade`` (restart/upgrade authority), ``system-log``
+# (daemon log forensics — designated break-glass for the ``worker``
+# agent), ``ens-db`` (direct ``ensemble_prod`` read + guarded repair
+# writer — maintenancer only), and ``service`` (persistent detached
+# OS processes that escape the daemon's lifecycle — a spawned service
+# survives instance termination and daemon restart, and no
+# registry-scoped kill site can reach its process group, so the only
+# reliable fence is filter-level default-deny).
+#
+# SAME-PR RULE (D18/A14): the set is TRIPLE-pinned by exact-equality
+# asserts. Adding or removing a category REQUIRES updating ALL THREE
+# pins in the same commit:
+# ``tests/unit/tools/test_upgrade_registration.py``,
+# ``tests/unit/tools/test_attestation_registration.py``, and
+# ``tests/integration/test_maintenancer_spawn_resolves_tools.py``.
+# Silent additions and silent removals (fail-open regressions) both
+# trip the pins.
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
+    "service",
 })
 
 
@@ -522,6 +555,13 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (CLOSED-by-leader) — full boundary argument in
     # daemon/tools/attestation.py module docstring header.
     "attestation": "daemon.tools.attestation",
+    # service tool category (service-tool Phase 1, 2026-09-15) —
+    # long-lived detached processes tracked in the service_tracking
+    # table. PRIVILEGED (D4 Option A: in PRIVILEGED_TOOL_CATEGORIES —
+    # never default-granted; explicit tools.allow only). The five
+    # tools are factory-created (create_service_tools) and also
+    # listed in DYNAMIC_TOOL_NAMES below.
+    "service": "daemon.tools.service_tools",
 }
 
 
@@ -700,6 +740,11 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file",
     "release_info",
     "send_message",
+    "service_list",
+    "service_logs",
+    "service_start",
+    "service_status",
+    "service_stop",
     "set_instance_tunable",
     "shared_meta_kv",
     "skill_analyze",
@@ -740,7 +785,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "upgrade_status",
     "watch_job",
     "watch_jobs",
-    "write_file",})
+    "write_file",
+})
 
 
 def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list[str]]:

@@ -16,7 +16,9 @@ functionally:
 
 Plus the R-SR16 default-deny surface (review minor #3's functional gap):
 
-* ``PRIVILEGED_TOOL_CATEGORIES = {"system_upgrade"}`` — opt-in-only.
+* ``PRIVILEGED_TOOL_CATEGORIES = {"system_upgrade", "system-log",
+  "ens-db", "service"}`` — never default-granted (behavioral
+  criterion; D4 Option A added ``service``).
 * An agent with ``tools.allow=["system_upgrade"]`` resolves ALL 4 tool
   objects through the REAL ``create_instance_tools()`` path; without it,
   NONE — including an EMPTY-allow agent (watcher-like) which would
@@ -93,19 +95,24 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_three(self) -> None:
-        """R-SR16: the opt-in-only set is exactly three entries —
-        ``system_upgrade``, ``system-log``, ``ens-db`` — after the
-        W1-P2 privilege promotion (detail-plan §4.4, architect §4.4).
+    def test_privileged_categories_is_exactly_four(self) -> None:
+        """D4 Option A: the default-deny set is exactly four entries —
+        ``system_upgrade``, ``system-log``, ``ens-db``, ``service`` —
+        after the service-tool Phase 1 privilege add (leader-ratified
+        2026-09-15; architect §1 of architecture-recommendation.md).
+        Membership is BEHAVIORAL (never default-granted; explicit
+        ``tools.allow`` only) — NOT a "daemon-internal" trust tier.
         Adding a category here is a deliberate trust decision, and
-        this pin makes silent additions visible (D18 — same-PR pin
-        updates). The ``ens-db`` category is the maintenancer's direct
-        ``ensemble_prod`` path; ``system-log`` is the daemon's own log
-        forensics surface (worker is the designated break-glass)."""
+        this pin makes silent additions visible (D18/A14 — same-PR
+        pin updates; this is pin file 1 of 3). The ``service``
+        category mints persistent daemon-escaping OS authority no
+        registry-scoped kill site can reach, so it joins the
+        filter-level default-deny union."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
+            "service",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

@@ -1157,6 +1157,108 @@ async def lifespan(app: FastAPI):
         f"queue_freshness_threshold={config.services.readiness_queue_freshness_threshold_seconds}s"
     )
 
+    # ─────────────────────────────────────────────────────────────
+    # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.
+    # D6 boot sweep + periodic PID-liveness / start-time-match
+    # reconcile for the ``service_tracking`` table (mark dead or
+    # PID-recycled rows EXITED; NO re-spawn — the kernel reaps).
+    #
+    # A5 BLOCKING: the manager is grabbed via getattr off the
+    # MANAGER singleton (``manager._service_tool_manager``) — NOT
+    # off app.state (app.state never holds manager attributes; the
+    # original pseudocode read a phantom source of truth and would
+    # have left reconciliation receiving None and NEVER running).
+    # Only the SWEEP SERVICE itself is stored on app.state
+    # (``service_reconciliation_service``) for shutdown — the same
+    # house pattern as the sweeps above (read manager attrs, store
+    # the service).
+    #
+    # A6 BLOCKING: ``await svc.sweep_once()`` runs BEFORE the
+    # lifespan yield — the guaranteed boot pass (precedents:
+    # ``recover_stale_job_locks()`` above;
+    # ``orphan_watcher_sweep.py`` startup sweep) so restart-survival
+    # cannot race the first tick. A boot-sweep failure logs and
+    # CONTINUES (never aborts boot).
+    #
+    # A8: the cadence is read DIRECTLY off the real ServicesConfig
+    # field (``service_tool_reconcile_interval_seconds``, ge=1
+    # fail-fast — house ``{name}_interval_seconds`` convention); no
+    # getattr fallback. The D7 kill-switch
+    # (``ENSEMBLE_SERVICE_TOOL_ENABLED=0``) leaves the manager
+    # constructed but STOPS the sweep here — OFF = byte-identical
+    # pre-feature behavior.
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from daemon.services.service_reconciliation import (
+            ServiceReconciliationService,
+        )
+        reconcile_interval = (
+            config.services.service_tool_reconcile_interval_seconds
+        )
+        service_tool_manager = getattr(
+            manager, "_service_tool_manager", None
+        )
+        if not config.services.service_tool.enabled:
+            # D7 kill-switch: OFF = the sweep never starts (the
+            # table still works — no auto-reconcile). Byte-identical
+            # to pre-Phase-1 behavior.
+            logger.info(
+                "ServiceReconciliationService DISABLED "
+                "(service_tool_enabled=False)"
+            )
+        elif service_tool_manager is None:
+            # A8 None-manager guard: skip start + log DISABLED
+            # (template DEBUG no-op precedent —
+            # eligible_pending_sweep.py).
+            logger.warning(
+                "ServiceReconciliationService DISABLED "
+                "(no service_tool_manager)"
+            )
+        else:
+            # A9: inject ServiceRepo DIRECTLY (narrowest collaborator),
+            # not via the ServiceToolManager facade beyond fetching it.
+            service_reconciliation = ServiceReconciliationService(
+                repo=service_tool_manager.repo,
+                interval_seconds=reconcile_interval,
+            )
+            if service_reconciliation.interval_seconds < 1:
+                logger.error(
+                    "ServiceReconciliationService DISABLED (interval < 1)"
+                )
+            else:
+                await service_reconciliation.start()
+                # A6: awaited guaranteed boot pass — prevents
+                # restart-survival from racing the first tick. If the
+                # first sweep fails, log loudly and continue (do not
+                # abort boot).
+                # Accepted residual: pre-boot-sweep tolerated (Note 11) — A6 guaranteed boot pass; failure logs + continues, never aborts boot.
+                try:
+                    boot_counters = await service_reconciliation.sweep_once()
+                    logger.info(
+                        "[ServiceTool] reconcile_boot_sweep alive=%s "
+                        "reaped=%s errors=%s",
+                        boot_counters["alive"],
+                        boot_counters["reaped"],
+                        boot_counters["errors"],
+                    )
+                except Exception:
+                    logger.exception(
+                        "ServiceReconciliationService boot sweep failed; "
+                        "continuing"
+                    )
+                app.state.service_reconciliation_service = (
+                    service_reconciliation
+                )
+                logger.info(
+                    "ServiceReconciliationService started: interval=%ss",
+                    service_reconciliation.interval_seconds,
+                )
+    except Exception:
+        logger.exception(
+            "Failed to start ServiceReconciliationService; continuing "
+            "without reconciliation"
+        )
+
     # --- VS Code Server Manager (Phase 3: editor integration) ---
     # Construct AFTER manager.initialize() but BEFORE router DI so
     # the settings router can read it via app.state. Do NOT auto-start
@@ -1552,6 +1654,24 @@ async def lifespan(app: FastAPI):
                 f"JobLockSweepService shutdown error: {e}"
             )
         app.state.job_lock_sweep = None
+
+    # --- ServiceReconciliationService shutdown (service-tool 1.C.15) ---
+    # getattr-guarded stop — survives partial startup failures where
+    # the service was never stored (kill-switch OFF, None-manager
+    # guard, or a construction failure). Mirrors the
+    # JobLockSweepService shape above.
+    service_reconciliation = getattr(
+        app.state, "service_reconciliation_service", None
+    )
+    if service_reconciliation is not None:
+        try:
+            await service_reconciliation.stop()
+            logger.info("ServiceReconciliationService stopped")
+        except Exception:
+            logger.exception(
+                "ServiceReconciliationService shutdown error"
+            )
+        app.state.service_reconciliation_service = None
 
     # --- VS Code Server shutdown ---
     # Stop the code-server process BEFORE the manager shuts down

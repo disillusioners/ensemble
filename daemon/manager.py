@@ -55,6 +55,7 @@ from .repositories import (
     MessageMetadataRepository,
     ReportInjectionRepository,
     InstanceUiPrefsRepository,
+    ServiceRepo,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -650,6 +651,26 @@ class InstanceManager:
         # ``SQLModel.metadata.create_all()`` (model registered via
         # ``daemon/repositories/__init__.py``).
         self._instance_ui_prefs_repo = InstanceUiPrefsRepository(engine=self._engine)
+
+        # Service-tool store (service-tool Phase 1.C.13 — wiring 1.A's
+        # repo + 1.B's manager into the facade). ``ServiceRepo`` is
+        # the frozen-interface (F3) sync store for the
+        # ``service_tracking`` table; ``ServiceToolManager`` is the
+        # manager-held facade (NOT a module singleton) the five
+        # ``service_*`` tools dereference at CALL time via
+        # ``manager._service_tool_manager``. The cap + kill-switch
+        # come from the 1.C config knobs
+        # (``ServicesConfig.service_tool.*``, fail-fast at boot);
+        # the D6 reconcile sweep injects ``_service_tool_repo``
+        # directly (A9 — narrowest collaborator) from the api
+        # lifespan.
+        self._service_tool_repo = ServiceRepo(engine=self._engine)
+        from .services.service_tool_manager import ServiceToolManager
+        self._service_tool_manager = ServiceToolManager(
+            repo=self._service_tool_repo,
+            cap=self.config.services.service_tool.max_concurrent,
+            enabled=self.config.services.service_tool.enabled,
+        )
 
         # Fast-path hint set for the report-injection drain: holds the
         # parent instance ids that have at least one PENDING
@@ -5916,6 +5937,65 @@ class InstanceManager:
             # (create_all() never emitted the column — the Project model
             # has no such field).
             "ALTER TABLE projects DROP COLUMN IF EXISTS critical_notes",
+            # ── service_tracking table (service-tool Phase 1.C.13b) ──
+            # PostgreSQL counterpart of migration
+            # ``daemon/migrations/versions/20260915_212810_create_service_tracking.sql``
+            # (the .sql runner is a NO-OP on PG — runner.py:446-448), so
+            # the CREATE TABLE + both indexes run here at startup for
+            # existing PG databases. Fresh PG databases pick the table
+            # + indexes up from ``SQLModel.metadata.create_all()`` via
+            # the ``ServiceTracking`` model (registered by
+            # ``daemon/repositories/__init__.py``); this mirror brings
+            # pre-existing databases to parity. 3-SITE INDEX PATTERN:
+            # the index names below MUST be byte-identical to the .sql
+            # migration AND the model ``__table_args__`` — pinned by
+            # ``tests/unit/repositories/test_service_tool_repository.py``
+            # (the un-skipped ``test_index_name_in_manager_py`` arm).
+            #
+            # A11: the partial UNIQUE index
+            # ``idx_service_tracking_name_active`` IS the D5 same-name
+            # guard — the ``name`` column itself carries NO full unique
+            # constraint (that would kill name-reuse-after-EXITED). The
+            # predicate literal ``('starting','running')`` is LOCKSTEP
+            # with the ``ServiceStatus`` enum values (lowercase, exact).
+            #
+            # A12: NO SQL DEFAULTs on the timestamp columns — the
+            # Python-side ``_now_utc_iso()`` default factory is the
+            # authoritative source on every insert path (PG has no
+            # ``strftime``; the .sql DEFAULT clauses never execute on
+            # PG because the runner is a NO-OP here).
+            (
+                "CREATE TABLE IF NOT EXISTS service_tracking ("
+                "id BIGSERIAL PRIMARY KEY, "
+                "name TEXT NOT NULL, "
+                "command TEXT NOT NULL, "
+                "pid INTEGER, "
+                "start_time INTEGER, "
+                "cwd TEXT NOT NULL, "
+                "status TEXT NOT NULL DEFAULT 'starting', "
+                "started_by_instance_id TEXT NOT NULL, "
+                "started_by_agent_id TEXT NOT NULL, "
+                "log_path TEXT NOT NULL, "
+                "exit_code INTEGER, "
+                "created_at TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL"
+                ")"
+            ),
+            # A11 partial UNIQUE index — the D5 same-name guard. Name
+            # MUST stay byte-identical to the .sql migration and the
+            # SQLModel __table_args__ (3-site pin).
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_tracking_name_active "
+                "ON service_tracking (name) "
+                "WHERE status IN ('starting','running')"
+            ),
+            # Plain non-unique PID index (PIDs are kernel-recycled — a
+            # unique index would also reject EXITED rows carrying the
+            # historical PID). Name MUST stay byte-identical (3-site pin).
+            (
+                "CREATE INDEX IF NOT EXISTS idx_service_tracking_pid "
+                "ON service_tracking (pid)"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

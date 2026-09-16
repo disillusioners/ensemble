@@ -1080,6 +1080,47 @@ class SlashCommandConfig(BaseSettings):
     )
 
 
+class ServiceToolConfig(BaseModel):
+    """Knobs for the ``service`` tool category (service-tool Phase 1).
+
+    Mounted on :class:`ServicesConfig` as ``service_tool`` so the
+    operator surface is ``services.service_tool.*`` (yaml) and the
+    ``ENSEMBLE_SERVICE_TOOL_*`` env family (resolved explicitly in
+    :func:`load_config` — the init-kwarg-beats-env inversion trap is
+    closed the same way as ``compaction.proactive_enabled``).
+
+    A8 naming note: the reconciliation cadence is NOT a member here —
+    it is the flat sibling field
+    ``ServicesConfig.service_tool_reconcile_interval_seconds``
+    (house ``{name}_interval_seconds`` convention, real
+    ``Field(ge=1)`` fail-fast, read directly by the api lifespan —
+    precedent ``eligible_pending_sweep_interval_seconds`` /
+    ``job_lock_sweep_interval_seconds``).
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Service-tool kill-switch (ENSEMBLE_SERVICE_TOOL_ENABLED, "
+            "default ON). OFF = byte-identical pre-feature behavior: "
+            "the ServiceToolManager gate is closed and the "
+            "ServiceReconciliationService never starts. Restart to "
+            "flip (resolved once at config-load time)."
+        ),
+    )
+    max_concurrent: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Daemon-global cap on concurrent (starting|running) "
+            "services (ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT, default "
+            "10 — matches the proc_tools MAX_PROCESSES_PER_INSTANCE "
+            "precedent). Enforced by ServiceToolManager.start BEFORE "
+            "the spawn; the value is fail-fast at boot via ge=1."
+        ),
+    )
+
+
 class ServicesConfig(BaseSettings):
     """Worker pool and background service configuration."""
 
@@ -1523,6 +1564,45 @@ class ServicesConfig(BaseSettings):
             "interval knob tunes responsiveness vs DB load. "
             "Floor 1s; out-of-range values FAIL FAST AT BOOT. "
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
+        ),
+    )
+    # service-tool Phase 1 (A8): reconciliation cadence for
+    # ``ServiceReconciliationService`` — the D6 boot sweep +
+    # periodic PID-liveness / start-time-match reconcile that marks
+    # dead or recycled services EXITED. House
+    # ``{name}_interval_seconds`` convention (real ``Field(ge=1)``
+    # fail-fast knob read DIRECTLY by ``daemon/api.py`` — no getattr
+    # fallback); precedent
+    # ``eligible_pending_sweep_interval_seconds`` above. Default 90s
+    # shares the A3/eligible/orphan/job-lock sweep cadence. The
+    # enabled / max_concurrent knobs live in the nested
+    # ``ServiceToolConfig`` block (``service_tool.``) — the interval
+    # is flat here so the lifespan read matches the house pattern.
+    service_tool_reconcile_interval_seconds: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "service-tool Phase 1 (A8): how often the "
+            "``ServiceReconciliationService`` reconcile tick runs "
+            "(seconds). Default 90s shares the A3 cadence. The sweep "
+            "scans ``service_tracking`` rows in ('starting','running') "
+            "and marks dead / PID-recycled rows EXITED (NO re-spawn). "
+            "Override via ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL "
+            "(resolved explicitly in load_config) or the "
+            "SERVICES_SERVICE_TOOL_RECONCILE_INTERVAL_SECONDS "
+            "BaseSettings binding. Floor 1s; out-of-range values FAIL "
+            "FAST AT BOOT via pydantic ValidationError."
+        ),
+    )
+    # service-tool Phase 1: kill-switch + cap block (mounted).
+    service_tool: ServiceToolConfig = Field(
+        default_factory=ServiceToolConfig,
+        description=(
+            "service-tool kill-switch (``enabled``) and daemon-global "
+            "concurrent-services cap (``max_concurrent``). The "
+            "reconciliation interval is the flat "
+            "``service_tool_reconcile_interval_seconds`` sibling "
+            "field (A8 house naming)."
         ),
     )
     lease_heartbeat_interval_seconds: float = Field(
@@ -2924,6 +3004,158 @@ def _resolve_proactive_enabled(
     return bool(yaml_value)
 
 
+# ── service-tool knobs (Phase 1 of service-tool) ────────────────────────────
+#
+# Resolved-once cache (restart-to-flip; Shape-A precedent —
+# ``_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED`` /
+# ``_VSCODE_WEBVIEW_CSP_FIX``). ``load_config`` reads each
+# ``ENSEMBLE_SERVICE_TOOL_*`` env ONCE at TOP LEVEL (outside the
+# ``"services" in processed_config`` guard — the section-absent
+# review-MAJOR-2 class), resolves via the ``_resolve_service_tool_*``
+# functions below, installs the kill-switch here via
+# :func:`_install_service_tool_enabled`, and emits the one boot INFO
+# line naming the resolved state (S13 reviewer gate: emitted AT
+# CONFIG-RESOLUTION time — a lazy first-call emit would make a
+# quiet-daemon boot-log grep false-fail).
+_SERVICE_TOOL_ENABLED: bool | None = None
+
+#: Env var names — kept as module constants so the boot probe, the
+#: resolvers, and tests all name the operator surface from one place.
+ENSEMBLE_SERVICE_TOOL_ENABLED = "ENSEMBLE_SERVICE_TOOL_ENABLED"
+ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT = "ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT"
+ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL = "ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL"
+
+
+def _resolve_service_tool_enabled(ens_value: str | None, yaml_value: Any) -> bool:
+    """Pure resolver for the ``ENSEMBLE_SERVICE_TOOL_ENABLED`` kill-switch.
+
+    Precedence: env > yaml (``services.service_tool.enabled``) >
+    default ``True``. Empty-string safe (a bare ``KEY=`` line in
+    ``.env`` normalizes to UNSET — the ``_clean_env_value``
+    contract); an unrecognized NON-empty value raises
+    :class:`ValueError` naming the env (kill-switch fail-loud
+    convention — ``_parse_bool_switch``).
+    """
+    cleaned = _clean_env_value(ens_value)
+    if cleaned is not None:
+        return _parse_bool_switch(cleaned, setting=ENSEMBLE_SERVICE_TOOL_ENABLED)
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return True  # documented default ON (D7)
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            return True  # defensive — yaml shipped an empty string
+        return _parse_bool_switch(yaml_value, setting="services.service_tool.enabled")
+    return bool(yaml_value)
+
+
+def _parse_service_tool_int(v: Any, *, env_name: str) -> int:
+    """Strict int parse for the service-tool knob envs.
+
+    Non-integer (or non-positive-integer-looking) strings raise
+    :class:`ValueError` naming the offending env so an operator typo
+    fails boot loud instead of silently falling back to the default.
+    """
+    if isinstance(v, bool):
+        raise ValueError(
+            f"Invalid {env_name} value {v!r} — expected an integer"
+        )
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid {env_name} value {v!r} — expected an integer"
+            ) from None
+    raise ValueError(
+        f"Invalid {env_name} value {v!r} — expected an integer"
+    )
+
+
+def _resolve_service_tool_max_concurrent(ens_value: str | None, yaml_value: Any) -> int:
+    """Pure resolver for ``ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT``.
+
+    Precedence: env > yaml (``services.service_tool.max_concurrent``)
+    > default 10 (the ``proc_tools.MAX_PROCESSES_PER_INSTANCE``
+    precedent). Empty-string safe; non-int raises
+    :class:`ValueError` naming the env. The ``ge=1`` floor is
+    enforced by the ``ServiceToolConfig.max_concurrent`` pydantic
+    constraint at model validation (fail-fast at boot).
+    """
+    cleaned = _clean_env_value(ens_value)
+    if cleaned is not None:
+        return _parse_service_tool_int(
+            cleaned, env_name=ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT
+        )
+    if yaml_value is None:
+        return 10  # documented default (D5)
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return 10  # defensive — yaml shipped an empty string
+    return _parse_service_tool_int(
+        yaml_value, env_name="services.service_tool.max_concurrent"
+    )
+
+
+def _resolve_service_tool_reconcile_interval(ens_value: str | None, yaml_value: Any) -> int:
+    """Pure resolver for ``ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL``.
+
+    Precedence: env > yaml > default 90 (shares the A3 sweep
+    cadence). Empty-string safe; non-int raises
+    :class:`ValueError` naming the env. The ``ge=1`` floor is
+    enforced by the ``ServicesConfig.service_tool_reconcile_interval_seconds``
+    pydantic constraint at model validation (fail-fast at boot).
+    """
+    cleaned = _clean_env_value(ens_value)
+    if cleaned is not None:
+        return _parse_service_tool_int(
+            cleaned, env_name=ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL
+        )
+    if yaml_value is None:
+        return 90  # documented default (D6)
+    if isinstance(yaml_value, str) and not yaml_value.strip():
+        return 90  # defensive — yaml shipped an empty string
+    return _parse_service_tool_int(
+        yaml_value, env_name="services.service_tool_reconcile_interval_seconds"
+    )
+
+
+def _install_service_tool_enabled(value: bool) -> None:
+    """Install the RESOLVED kill-switch into the module cache.
+
+    Called from ``load_config`` only (after the boot probe's source
+    values are final). The runtime consumer (Phase 2
+    ``ServiceToolManager`` gate and the api lifespan DISABLED branch)
+    reads the cache via :func:`service_tool_enabled`.
+    """
+    global _SERVICE_TOOL_ENABLED
+    _SERVICE_TOOL_ENABLED = bool(value)
+
+
+def service_tool_enabled() -> bool:
+    """Read the resolved service-tool kill-switch (no-arg, cached).
+
+    SILENT — the boot INFO line is owned by ``load_config`` (S13
+    reviewer gate). Warm cache: return the installed value
+    (restart-to-flip). Cold cache (tests / programmatic boots that
+    never call ``load_config``): resolve ONCE from the env var
+    directly; unset/empty → the documented ``True`` default.
+    """
+    global _SERVICE_TOOL_ENABLED
+    if _SERVICE_TOOL_ENABLED is None:
+        raw = os.environ.get(ENSEMBLE_SERVICE_TOOL_ENABLED)
+        _SERVICE_TOOL_ENABLED = _resolve_service_tool_enabled(raw, None)
+    return _SERVICE_TOOL_ENABLED
+
+
+def _reset_service_tool_for_tests() -> None:
+    """Clear the cached kill-switch state (test-only reset)."""
+    global _SERVICE_TOOL_ENABLED
+    _SERVICE_TOOL_ENABLED = None
+
+
 # ── kv-ambient ambient KV gate (C2 — kv-ambient-awareness-fix, Shape A) ──────
 #
 # Resolved-once cache (restart-to-flip; phase3-plan Kill-Switch Design →
@@ -3630,7 +3862,38 @@ def load_config(config_path: str | None = None) -> Config:
             k: v for k, v in sc_raw.items() if v is not None
         }
     if "services" in processed_config:
-        config_dict["services"] = processed_config["services"]
+        # service-tool Phase 1 (1.C.10): the three ENSEMBLE_SERVICE_TOOL_*
+        # env reads sit at TOP LEVEL — they run whether or not the yaml
+        # carries a ``services:`` section (section-absent review-MAJOR-2
+        # class: an env-only deployment must still see the operator
+        # kill-switch). The resolved values are injected into
+        # ``services_config`` (below) as init kwargs so pydantic-settings
+        # never re-reads the env (init-kwarg-beats-env inversion trap).
+        services_config: Dict[str, Any] = dict(processed_config["services"]) \
+            if isinstance(processed_config["services"], dict) else {}
+    else:
+        services_config = {}
+    # Extract the yaml-side values (nested ``service_tool:`` block for
+    # enabled/max_concurrent; the flat A8-named interval field).
+    _st_yaml_block = services_config.get("service_tool")
+    _st_yaml_block = _st_yaml_block if isinstance(_st_yaml_block, dict) else {}
+    services_config["service_tool"] = {
+        "enabled": _resolve_service_tool_enabled(
+            os.environ.get(ENSEMBLE_SERVICE_TOOL_ENABLED),
+            _st_yaml_block.get("enabled"),
+        ),
+        "max_concurrent": _resolve_service_tool_max_concurrent(
+            os.environ.get(ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT),
+            _st_yaml_block.get("max_concurrent"),
+        ),
+    }
+    services_config["service_tool_reconcile_interval_seconds"] = (
+        _resolve_service_tool_reconcile_interval(
+            os.environ.get(ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL),
+            services_config.get("service_tool_reconcile_interval_seconds"),
+        )
+    )
+    config_dict["services"] = services_config
     if "job_system" in processed_config:
         config_dict["job_system"] = processed_config["job_system"]
     if "mcp_pool" in processed_config:
@@ -3730,6 +3993,21 @@ def load_config(config_path: str | None = None) -> Config:
 
     # Create and validate config
     config = Config(**config_dict)
+
+    # service-tool Phase 1 (1.C.10) — install the RESOLVED kill-switch
+    # into the module cache and emit the boot INFO line HERE, at
+    # config-resolution time (S13 reviewer gate: the line MUST stay on
+    # the boot path so a quiet-daemon grep never false-fails; EXACT
+    # format pinned by plan task 1.C.10). Operators verify the live
+    # state via: grep '\[ServiceTool\]' data/logs/ensemble.log
+    _install_service_tool_enabled(config.services.service_tool.enabled)
+    logger.info(
+        "[ServiceTool] service_tool_enabled=%s (env ENSEMBLE_SERVICE_TOOL_ENABLED), "
+        "max_concurrent=%s, reconcile_interval=%ss",
+        config.services.service_tool.enabled,
+        config.services.service_tool.max_concurrent,
+        config.services.service_tool_reconcile_interval_seconds,
+    )
 
     # kv-ambient C2 (S13 reviewer gate) — install the RESOLVED flag
     # into the module cache and emit the boot INFO line HERE, at

@@ -39,13 +39,16 @@ def _default_documented_tools(mcp_tool_names: list[str] | None = None) -> set[st
     """Docs-side equivalent of instance.py's ``_strip_privileged_category_tools``.
 
     The execution side strips categories in ``PRIVILEGED_TOOL_CATEGORIES``
-    (R-SR16, P2.2 tool-api-design.md §3.5) from the default-allow universe,
+    (R-SR16, P2.2 tool-api-design.md §3.5) — the behavioral union of
+    DEFAULT-DENY categories (never default-granted; reachable ONLY via
+    an explicit ``tools.allow`` entry; NOT a trust-tier hierarchy) —
+    from the default-allow universe,
     so the None (no-allow-list) docs paths must not advertise them either:
-    privileged categories are documented ONLY to agents whose explicit
+    these categories are documented ONLY to agents whose explicit
     ``tools.allow`` names the category or one of its tools.
 
     Returns the documented-tool universe for the None paths: every
-    registered tool except privileged-category tools, plus MCP tool names
+    registered tool except default-deny-category tools, plus MCP tool names
     when provided (mirrors ``resolve_tool_filter`` MCP expansion).
 
     Shared with ``daemon.loader.load_tools_doc_for_agent`` so the two docs
