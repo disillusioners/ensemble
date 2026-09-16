@@ -37,6 +37,16 @@ PID-reuse defense (F1 + A1 + A2 + A13 — the binding acceptance):
 * Immediately before the SIGKILL escalation, the loop re-verifies
   ONE MORE TIME (``reason="pid_recycled_pre_kill"`` if the PID was
   recycled in the last 100 ms before the deadline).
+* The F2 lost-race cleanup ``killpg`` in ``start`` (the
+  ``IntegrityError`` branch — the orphaned child of a lost
+  same-name race) re-verifies ownership BEFORE signaling too
+  (council Finding 1): ``(pid, start_time)`` equality against the
+  spawn-returned token; a mismatch SKIPs the signal with the
+  ``pid_recycled_before_cleanup`` WARNING and still returns the
+  ``name_in_use`` shape. This is the FIFTH guarded signal site —
+  with it, EVERY ``killpg`` in this module sits behind an
+  ownership re-verify (pre-signal / per-poll / pre-escalation /
+  force-escalation / lost-race cleanup).
 * All status-mutating UPDATEs are delegated to the repo's
   ``mark_exited`` / ``update_status`` which enforce the A13 atomic
   guard (``WHERE id=? AND status IN ('starting','running')``); the
@@ -201,9 +211,11 @@ class ServiceToolManager:
            the child never existed). Return ``spawn_failed``.
         6. **F2 concurrent-race path** — ``try repo.insert(...)``
            (the partial UNIQUE index raises IntegrityError if a
-           concurrent caller won the race); ``killpg`` the
+           concurrent caller won the race); re-verify ``(pid,
+           start_time)`` ownership, then ``killpg`` the
            just-spawned child (otherwise it leaks as a live untracked
-           kill-exempt process) and return ``name_in_use``.
+           kill-exempt process; a recycled PID skips the signal —
+           ``pid_recycled_before_cleanup``) and return ``name_in_use``.
         7. **Happy path** — return
            ``{"name": ..., "pid": ..., "status": "running",
            "log_path": ...}``.
@@ -343,21 +355,52 @@ class ServiceToolManager:
             # kill-exempt (no daemon knows it exists). We MUST
             # ``killpg`` it now — without this branch, every lost
             # race leaks a live untracked OS process.
-            try:
-                await asyncio.to_thread(os.killpg, pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError) as exc:
+            #
+            # F1 (council Finding 1): ownership re-verify BEFORE the
+            # cleanup signal — the same invariant every other signal
+            # site in this module applies. The window between the
+            # spawn and this handler is exactly where a fast-exiting
+            # child's PID could be recycled onto an unrelated process;
+            # a blind ``killpg`` there would be a stray kill. We own
+            # ``(pid, start_time)`` from the spawn that just
+            # succeeded, so equality means the group is still ours.
+            # A mismatch (including a dead read ⇒ ``None``) SKIPs the
+            # signal (class token ``pid_recycled_before_cleanup``);
+            # the ``name_in_use`` resolution below is unaffected
+            # either way (the INSERT never committed, so there is no
+            # DB row to clean up).
+            cleanup_start = await asyncio.to_thread(
+                get_process_start_time, pid
+            )
+            if cleanup_start is not None and cleanup_start == start_time:
+                try:
+                    await asyncio.to_thread(
+                        os.killpg, pid, signal.SIGKILL
+                    )
+                except (ProcessLookupError, PermissionError) as exc:
+                    logger.warning(
+                        "[ServiceTool] service_start concurrent_race killpg_failed "
+                        "name=%s pid=%s err=%s",
+                        name,
+                        pid,
+                        exc,
+                    )
                 logger.warning(
-                    "[ServiceTool] service_start concurrent_race killpg_failed "
-                    "name=%s pid=%s err=%s",
+                    "[ServiceTool] service_start concurrent_race name=%s pid=%s killed",
                     name,
                     pid,
-                    exc,
                 )
-            logger.warning(
-                "[ServiceTool] service_start concurrent_race name=%s pid=%s killed",
-                name,
-                pid,
-            )
+            else:
+                logger.warning(
+                    "[ServiceTool] service_start pid_recycled_before_cleanup "
+                    "name=%s pid=%s expected_start=%s got=%s — cleanup killpg "
+                    "SKIPPED (the PID may have been recycled onto an unrelated "
+                    "process; no signal sent)",
+                    name,
+                    pid,
+                    start_time,
+                    cleanup_start,
+                )
             return {
                 "name": name,
                 "status": "name_in_use",

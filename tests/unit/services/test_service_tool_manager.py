@@ -7,8 +7,10 @@ Covers the BLOCKING acceptance criteria for the manager layer:
   block for the Phase-2 reaper).
 * **F2** — concurrent same-name race returns
   ``{"status": "name_in_use", "reason": "concurrent_start_won_race"}``
-  AND ``killpg``s the just-spawned child (the orphan otherwise leaks
-  as a live untracked kill-exempt process).
+  AND, after a ``(pid, start_time)`` ownership re-verify (council
+  Finding 1), ``killpg``s the just-spawned child (the orphan otherwise
+  leaks as a live untracked kill-exempt process; a recycled PID skips
+  the signal — ``pid_recycled_before_cleanup``).
 * **A1 + F1** — ``stop`` signals the process GROUP via ``os.killpg``,
   re-verifies ``(pid, start_time)`` ownership BEFORE the signal and
   on EVERY grace-poll iteration and immediately BEFORE the SIGKILL
@@ -277,12 +279,14 @@ def test_f2_duplicate_name_uses_python_pre_check(
 def test_f2_integrity_error_killpg_orphan(
     manager: ServiceToolManager, repo: ServiceRepo, monkeypatch
 ) -> None:
-    """F2 lost-race branch: ``IntegrityError`` on insert ⇒ killpg(SIGKILL) the orphan.
+    """F2 lost-race branch: ``IntegrityError`` on insert ⇒ VERIFIED killpg(SIGKILL) the orphan.
 
     ``repo.insert`` is mocked to raise ``sqlalchemy.exc.IntegrityError``
     (what the partial UNIQUE index ``idx_service_tracking_name_active``
     raises when a concurrent caller won the same-name race) while a
     REAL ``/bin/sleep 30`` child is spawned. The manager MUST
+    re-verify ``(pid, start_time)`` ownership (council Finding 1 —
+    the 5th guarded signal site) and, on MATCH,
     ``os.killpg(pid, SIGKILL)`` the just-spawned orphan and return
     ``{"status": "name_in_use", "reason": "concurrent_start_won_race"}``.
     Without this branch the child leaks as a live, untracked,
@@ -291,16 +295,29 @@ def test_f2_integrity_error_killpg_orphan(
     import daemon.services.service_tool_manager as _stm
 
     # Spy on the spawner seam (delegating wrapper) to capture the REAL
-    # pid — needed for the finally-cleanup even if asserts fail.
+    # (pid, start_time) pair — the pair feeds the ownership scripting
+    # below AND the finally-cleanup even if asserts fail.
     spawned: list[int | None] = [None]
+    spawned_start: list[int | None] = [None]
     real_spawn = _stm.spawner_spawn
 
     def _spying_spawn(argv, log_path, cwd=None):  # noqa: ANN001
         pid, start_time = real_spawn(argv, log_path, cwd)
         spawned[0] = pid
+        spawned_start[0] = start_time
         return pid, start_time
 
     monkeypatch.setattr(_stm, "spawner_spawn", _spying_spawn)
+
+    # Council Finding 1 (a): the manager re-reads ownership via
+    # ``get_process_start_time`` BEFORE the cleanup killpg. Script a
+    # MATCH (the child is genuinely ours) so the verified kill path
+    # fires deterministically.
+    monkeypatch.setattr(
+        _stm,
+        "get_process_start_time",
+        lambda pid: spawned_start[0],
+    )
 
     killpg_calls = _recording_killpg(monkeypatch)
 
@@ -327,15 +344,12 @@ def test_f2_integrity_error_killpg_orphan(
     assert result["reason"] == "concurrent_start_won_race"
     assert result["pid"] == spawned[0]
 
-    # Exactly one killpg: SIGKILL against the just-spawned orphan.
+    # Exactly one killpg: SIGKILL against the just-spawned orphan,
+    # fired ONLY AFTER the ownership re-verify matched.
     assert killpg_calls == [(spawned[0], signal.SIGKILL)], (
         f"F2 violation: expected exactly one SIGKILL on the orphan, "
         f"got {killpg_calls}"
     )
-
-    # The loser MUST NOT leave a row behind (the concurrent winner
-    # owns the name — the row insert never committed).
-    assert repo.get_by_name_any_status("f2-race") is None
 
     # The real child is actually dead (the recorder FORWARDED the
     # SIGKILL — record-then-forward, never a no-op patch).
@@ -345,6 +359,94 @@ def test_f2_integrity_error_killpg_orphan(
     assert not is_process_alive(spawned[0]), (
         "F2 violation: the orphaned child survived the killpg(SIGKILL)"
     )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="service_spawner is not supported on Windows",
+)
+def test_f2_cleanup_killpg_skipped_on_pid_recycle(
+    manager: ServiceToolManager, repo: ServiceRepo, monkeypatch, caplog
+) -> None:
+    """Council Finding 1 (a) mismatch leg: ownership re-verify MISMATCH
+    ⇒ cleanup killpg SKIPPED, ``name_in_use`` still returned, WARNING
+    logged with the ``pid_recycled_before_cleanup`` class token.
+
+    Same lost-race setup as ``test_f2_integrity_error_killpg_orphan``
+    (real spawn + ``repo.insert`` raising IntegrityError), but the
+    manager-seam ``get_process_start_time`` returns a DISTINCT
+    integer token — simulating a fast-exit child whose PID the
+    kernel recycled before the cleanup ran. Signaling a recycled PID
+    would be a stray kill against an unrelated user process (the
+    exact hazard F1 closes); the DB resolution is unaffected (the
+    INSERT never committed).
+    """
+    import logging as _logging
+
+    import daemon.services.service_tool_manager as _stm
+
+    spawned: list[int | None] = [None]
+    spawned_start: list[int | None] = [None]
+    real_spawn = _stm.spawner_spawn
+
+    def _spying_spawn(argv, log_path, cwd=None):  # noqa: ANN001
+        pid, start_time = real_spawn(argv, log_path, cwd)
+        spawned[0] = pid
+        spawned_start[0] = start_time
+        return pid, start_time
+
+    monkeypatch.setattr(_stm, "spawner_spawn", _spying_spawn)
+
+    recycled_token = (spawned_start[0] or 0) + 555_777_999  # DISTINCT INTEGER
+
+    monkeypatch.setattr(
+        _stm,
+        "get_process_start_time",
+        lambda pid: recycled_token,
+    )
+
+    killpg_calls = _recording_killpg(monkeypatch)
+
+    def _losing_insert(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise IntegrityError(
+            "INSERT INTO service_tracking ... (partial UNIQUE index)",
+            {"name": "f2-recycle"},
+            None,
+        )
+
+    monkeypatch.setattr(repo, "insert", _losing_insert)
+
+    try:
+        with caplog.at_level(
+            _logging.WARNING, logger="daemon.services.service_tool_manager"
+        ):
+            result = asyncio.run(
+                _start(manager, "f2-recycle", ["/bin/sleep", "30"], cwd="/tmp")
+            )
+    finally:
+        # No signal was sent on this path — the child is still alive;
+        # the real-killpg fallback is the only cleanup.
+        _hard_kill(spawned[0])
+
+    # The name_in_use shape is STILL returned — the row resolution is
+    # unaffected by the skipped signal.
+    assert result["status"] == "name_in_use"
+    assert result["reason"] == "concurrent_start_won_race"
+    assert result["pid"] == spawned[0]
+
+    # NO signal fired — the (forwarding) recorder stayed empty.
+    assert killpg_calls == [], (
+        f"F1 violation: cleanup killpg fired on a recycled PID: "
+        f"{killpg_calls}"
+    )
+
+    # The class-token WARNING carries expected vs got.
+    assert "pid_recycled_before_cleanup" in caplog.text
+    assert str(spawned_start[0]) in caplog.text  # expected
+    assert str(recycled_token) in caplog.text  # got
+
+    # No row leaked (the loser's INSERT never committed).
+    assert repo.get_by_name_any_status("f2-recycle") is None
 
 
 # ── A1 + F1 — PID-reuse defense ─────────────────────────────────────
