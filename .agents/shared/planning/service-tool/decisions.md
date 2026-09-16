@@ -919,6 +919,7 @@ Deviations are documented **in-code and in commit messages** (each commit messag
 
 - `docs/architecture/instance-lifecycle.md` — the kill-exemption invariant (plan 3.B.3 + 3.B.3a): causal statement, by-construction proof shape over K1–K13, regression net (the parametric matrix), the A7 CI grep-gate allowlist and same-PR rule, the STANDING registry-scoped rule for future kill-site authors, the registry limitation `service` solves, and the CODEOWNERS-TODO note.
 - `docs/service-tool.md` — feature/ops note (plan 3.B.7 incl. F4 Deployment/Activation): verified knob/env surface, restart-pending semantics, rebuild-vs-restart activation, boot-probe verification recipe, kill-switch-vs-activation distinction, post-deploy manual restart-survival recipe, cap-exceeded operator recovery, and the accepted-limitations table (F18 TOCTOU advisory cap, CODEOWNERS pending, F14/OQ#1 revisit trigger, OQ#2 single-daemon, F15/F16/F22, OQ#3).
+- **3.A.7 amendment (review-found):** W2 `list_all` OFF-gate was a real byte-identical-contract gap found and fixed in review — `daemon/services/service_tool_manager.py` `list_all` was performing inline `mark_exited` writes under the OFF path; commit `ebd8a5e6` gates `list_all` on the enabled flag (byte-identical OFF contract restored).
 
 ### Packaging note
 

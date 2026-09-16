@@ -112,7 +112,7 @@ Phases 1 and 2 land the buildable surface and prove the kill-site exemption by t
 
 Caller-pinned fact: `pyproject.toml` line 80 sets `addopts = "-m 'not integration and not postgres'"`, so integration-marked tests are deselected by default and a bare invocation would collect zero and pass vacuously. Integration files (e.g. `tests/integration/test_service_tool_kill_site_exemption.py` carries `@pytest.mark.integration` on the parametric 13-site cases — verified at `:182`, `:236`, `:282`, `:328`, `:382`, `:432`, `:472`, `:528`, `:583`, `:608`, `:649`, `:922`) MUST be invoked with an explicit `-m integration`. The runbook below therefore splits the `3.MG.1` file list into a UNIT block (plain `pytest`, harmless under the default `addopts` because these files carry no `integration` / `postgres` mark) and an INTEGRATION block (must carry `-m integration`). Each command line is independently copy-pasteable.
 
-Status legend: `[exists]` = file present in the worktree, runnable today; `[pending 3.A.x]` = file does not exist yet, will be created by the cited Phase 3.A task and is NOT runnable until that task lands.
+Status legend: `[exists]` = file present in the worktree, runnable today; `[done 3.A.x — <sha>]` = Phase-3 test landed, runnable today (sha = landing commit); `[pending 3.A.x]` = file does not exist yet, will be created by the cited Phase 3.A task and is NOT runnable until that task lands.
 
 #### UNIT block (plain invocation)
 
@@ -120,7 +120,7 @@ Status legend: `[exists]` = file present in the worktree, runnable today; `[pend
 [exists]    uv run python -m pytest tests/unit/tools/test_service_registration.py
 [exists]    uv run python -m pytest tests/unit/repositories/test_service_tool_repository.py
 [exists]    uv run python -m pytest tests/unit/tools/test_service_tools.py
-[pending 3.A.4]  uv run python -m pytest tests/unit/test_service_spawner.py
+[done 3.A.4 — d617bd5b]  uv run python -m pytest tests/unit/test_service_spawner.py
 [exists]    uv run python -m pytest tests/unit/services/test_service_reconciliation.py
 [exists]    uv run python -m pytest tests/test_loader.py::TestMaintenancerToolsDocColdBoot
 [exists]    uv run python -m pytest tests/unit/tools/test_frozen_tool_name_discovery.py
@@ -134,8 +134,8 @@ Status legend: `[exists]` = file present in the worktree, runnable today; `[pend
 ```
 [exists]    uv run python -m pytest tests/integration/test_maintenancer_spawn_resolves_tools.py -m integration -q
 [exists]    uv run python -m pytest tests/integration/test_service_tool_kill_site_exemption.py -m integration -q
-[pending 3.A.6]  uv run python -m pytest tests/integration/test_service_tool_cap_enforcement.py -m integration -q
-[pending 3.A.7]  uv run python -m pytest tests/integration/test_service_tool_flag_off_byte_identical.py -m integration -q
+[done 3.A.6 — bf0b6590]  uv run python -m pytest tests/integration/test_service_tool_cap_enforcement.py -m integration -q
+[done 3.A.7 — 68680519 + ebd8a5e6 (W2)]  uv run python -m pytest tests/integration/test_service_tool_flag_off_byte_identical.py -m integration -q
 [pending — conditional per plan row]  uv run python -m pytest tests/integration/test_service_reconciliation_real_pg.py -m integration -q
 ```
 
@@ -148,7 +148,7 @@ Status legend: `[exists]` = file present in the worktree, runnable today; `[pend
 #### PG smoke pack (Phase 3.A.8)
 
 ```
-[pending 3.A.8]  bash test/packs/service_tool_pg_smoke_integration_test.sh
+[done 3.A.8 — c11529df]  bash test/packs/service_tool_pg_smoke_integration_test.sh
 ```
 
 #### Notes
