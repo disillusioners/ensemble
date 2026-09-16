@@ -1,0 +1,9 @@
+{
+  "name": "S1 Slack Production",
+  "config": {
+    "default_agent": "agent-coder",
+    "channel_require_mention": true
+  },
+  "enabled": true,
+  "autostart": true
+}

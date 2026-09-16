@@ -1,0 +1,9 @@
+{
+  "name": "S3 Slack Staging",
+  "config": {
+    "default_agent": "agent-reviewer",
+    "channel_require_mention": false
+  },
+  "enabled": true,
+  "autostart": true
+}

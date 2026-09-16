@@ -51,6 +51,13 @@ interface SourceTypeConfig {
   fields: SimpleField[];
 }
 
+// Stable empty-options reference: toSelectOptions must return an identity-stable
+// array even for fields without options (see memo rationale below its definition).
+// Object.freeze + readonly make the immutability explicit both at runtime
+// (mutation silently no-ops on the frozen instance) and at the type level
+// (consumers cannot push/splice through this handle).
+const EMPTY_SELECT_OPTIONS: readonly SearchableSelectOption[] = Object.freeze([]);
+
 @Component({
   selector: 'app-add-source-modal',
   standalone: true,
@@ -225,14 +232,34 @@ export class AddSourceModalComponent implements OnInit {
     return value !== undefined ? String(value) : '';
   }
 
+  // Memo for toSelectOptions: the template binds `[options]="toSelectOptions(...)"`,
+  // which re-evaluates on every change-detection cycle. Returning a fresh array
+  // each time re-fires SearchableSelectComponent's options-tracking effect
+  // (searchable-select.component.ts constructor), which rewrites the visible
+  // text back to the selected label — once a value is selected (e.g. picking a
+  // different agent in this modal), the search text is clobbered and the panel
+  // collapses to the exact current match, so the user could not RE-select.
+  // Memoizing per source-array identity keeps the binding stable across
+  // cycles; the child effect then fires only when the options content
+  // genuinely changes (agents reload).
+  private readonly selectOptionsMemo = new WeakMap<object, SearchableSelectOption[]>();
+
   // Map dynamic schema options to SearchableSelectOption[].
   // field.options may be string[] or {value, label}[] depending on the source type.
   protected toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
-    return (options || []).map(o =>
-      typeof o === 'string'
-        ? { value: o, label: o }
-        : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
-    );
+    if (!options) {
+      return EMPTY_SELECT_OPTIONS as SearchableSelectOption[];
+    }
+    let mapped = this.selectOptionsMemo.get(options);
+    if (!mapped) {
+      mapped = options.map(o =>
+        typeof o === 'string'
+          ? { value: o, label: o }
+          : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
+      );
+      this.selectOptionsMemo.set(options, mapped);
+    }
+    return mapped;
   }
 
   // Handle value changes from <app-searchable-select> (ngModelChange)
