@@ -1,0 +1,13 @@
+{
+  "source_id": "src-add-s2",
+  "source_type": "telegram",
+  "name": "S2 Add Test",
+  "config": {
+    "default_agent": "agent-tester"
+  },
+  "credentials": {
+    "bot_token": "123456:ABC-MOCK-TOKEN"
+  },
+  "enabled": true,
+  "autostart": true
+}

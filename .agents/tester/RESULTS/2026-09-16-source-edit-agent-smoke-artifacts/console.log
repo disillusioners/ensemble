@@ -1,0 +1,86 @@
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] active leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] recent leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] liveMissions leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] instances leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] deferBlocked leg degraded: $e
+[log] SourceListComponent ngOnInit called
+[log] loadSources() called, calling API...
+[log] listSources response: {sources: Array(4)}
+[log] Closing dialog with source update: {name: S1 Slack Production, config: Object, credentials: undefined, enabled: true, autostart: true}
+[log] Edit dialog closed with result: {name: S1 Slack Production, config: Object, credentials: undefined, enabled: true, autostart: true}
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] active leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] recent leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] liveMissions leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] instances leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] deferBlocked leg degraded: $e
+[log] SourceListComponent ngOnInit called
+[log] loadSources() called, calling API...
+[log] listSources response: {sources: Array(4)}
+[log] Closing dialog with source: {source_id: src-add-s2, source_type: telegram, name: S2 Add Test, config: Object, credentials: Object}
+[log] Dialog closed with result: {source_id: src-add-s2, source_type: telegram, name: S2 Add Test, config: Object, credentials: Object}
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] liveMissions leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] active leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] recent leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] instances leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] deferBlocked leg degraded: $e
+[log] SourceListComponent ngOnInit called
+[log] loadSources() called, calling API...
+[log] listSources response: {sources: Array(4)}
+[log] Closing dialog with source update: {name: S2 Telegram Bot, config: Object, credentials: undefined, enabled: true, autostart: true}
+[log] Edit dialog closed with result: {name: S2 Telegram Bot, config: Object, credentials: undefined, enabled: true, autostart: true}
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] liveMissions leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] active leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] recent leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] instances leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] deferBlocked leg degraded: $e
+[log] SourceListComponent ngOnInit called
+[log] loadSources() called, calling API...
+[log] listSources response: {sources: Array(4)}
+[log] Closing dialog with source update: {name: S1 Slack Production, config: Object, credentials: undefined, enabled: true, autostart: true}
+[log] Edit dialog closed with result: {name: S1 Slack Production, config: Object, credentials: undefined, enabled: true, autostart: true}
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] active leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] recent leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] liveMissions leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] instances leg degraded: $e
+[error] Failed to load resource: the server responded with a status of 404 (Not Found)
+[warning] [JobQueueIndicator] deferBlocked leg degraded: $e
+[log] SourceListComponent ngOnInit called
+[log] loadSources() called, calling API...
+[log] listSources response: {sources: Array(4)}
+[log] Edit dialog closed with result: undefined
+[log] Closing dialog with source update: {name: S3 Slack Staging, config: Object, credentials: undefined, enabled: true, autostart: true}
+[log] Edit dialog closed with result: {name: S3 Slack Staging, config: Object, credentials: undefined, enabled: true, autostart: true}
