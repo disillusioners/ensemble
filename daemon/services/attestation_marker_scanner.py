@@ -158,6 +158,184 @@ class MarkerScanResult(NamedTuple):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Child-terminal promise markers (2026-09-16, child-terminal contradiction
+# detection).
+#
+# A child that is transitioning to terminal (its final report) AND whose
+# final outgoing report text contains "promise-while-stopping" markers is
+# the original hallucination bug caught at the source: the child LLM is
+# signalling that more work remains, but the instance is going terminal
+# anyway — the parent's "I have a final report" wake-up fires, but the
+# promised next report will never arrive (the child is dead). This
+# catalog is the trigger half of a NON-LLM, advisory gate that attaches
+# a system-framed Child Report Check note to the parent at the
+# terminal-report delivery seam (see
+# ``daemon/services/child_reports.py``).
+#
+# Why a separate catalog (rather than reusing :data:`MID_WORK_MARKERS`)
+# -------------------------------------------------------------------------
+# The two catalogs detect overlapping but distinct bug classes:
+#
+#   * :data:`MID_WORK_MARKERS` — fires on the LEADER's allow path
+#     (mid-work phrasing while the leader LLM is trying to close). The
+#     judge is the verdict; markers are the trigger. Optimized for HIGH
+#     RECALL at tolerable FP, since the judge confirms/denies.
+#
+#   * :data:`CHILD_TERMINAL_PROMISE_MARKERS` (THIS catalog) — fires at
+#     the child→parent terminal-report delivery seam. There is NO LLM
+#     in this feature (zero LLM calls per the spec — see decisions.md
+#     D-CTD-1, 2026-09-16). Markers are BOTH the trigger AND the
+#     verdict, so the catalog must be TIGHTER (lower FP rate PER
+#     ENTRY) than the leader-path catalog — a FP here directly spams
+#     the parent's message queue with a strongly-worded "likely
+#     premature completion" note. The :data:`CHILD_TERMINAL_PROMISE_MARKERS`
+#     catalog has 17 entries (vs. :data:`MID_WORK_MARKERS` = 16); the
+#     extra entry is the explicit ``"awaiting"`` seed the spec
+#     mandates despite its known FP cost. TIGHTER is a PER-ENTRY
+#     property, not a COUNT property — each entry is a more specific
+#     substring (e.g. ``"will write"``, ``"will aggregate"``) than the
+#     leader-path equivalents, so per-match FP rate is lower even
+#     though the catalog carries one more entry overall.
+#
+# Pattern selection (spec seed phrases, FP-tight)
+# -------------------------------------------------------------------------
+# Seed phrases from the user-approved 2026-09-16 spec:
+#   "will X" / "then i" / "to be continued" / "in progress" /
+#   "ending turn" / "still pending" / "not yet complete" /
+#   "will report back" / "awaiting"
+#
+# The catalog below translates those seeds into concrete substring
+# literals — each entry is a lowercase substring matched
+# case-insensitively against the lowercased child terminal report text.
+# Justifications per entry (FP-tight):
+#
+#   * "ending turn" / "ending my turn" — canonical promise-while-
+#     stopping phrasing (incident b08f40fe lineage). Highest-signal
+#     entry; the child explicitly says "ending" AND claims more.
+#   * "then i aggregate" / "then i compile" / "then i " / "then i'll" —
+#     promise tail pattern ("then I will X"). The trailing space on
+#     "then i " is intentional — it avoids matching "then in" /
+#     "then it" / etc. that are common in legit completions.
+#   * "will write" / "will aggregate" / "will compile" / "will continue"
+#     / "will report back" / "will run the" / "will deploy" /
+#     "will start" / "will create" / "will send" / "will merge" /
+#     "will execute" — specific "will X" patterns. Bare "will" is
+#     EXCLUDED: too broad; "I will note this for future reference" or
+#     "you will receive the next phase separately" would fire.
+#   * "to be continued" — explicit continuation promise.
+#   * "in progress" / "still pending" / "not yet complete" — explicit
+#     mid-work self-declaration.
+#   * "standby" / "stand by" / "interim" — explicit mid-work
+#     self-declaration.
+#
+# Excluded patterns (would false-positive on legitimate completions):
+#   * "done" / "completed" / "finished" / "shipped" — bare completion
+#     tokens that mark genuine reports.
+#   * "summary" / "results" — too broad; results sections are how the
+#     child writes its report.
+#   * bare "will" — see above.
+#   * bare "awaiting" — INCLUDED (per spec seed) despite known FP cost
+#     on legitimate "awaiting your merge decision" reports. The note
+#     text is clearly advisory/heuristic so the parent LLM retains
+#     judgment. Adjudicated in the spec: the alternative (excluding
+#     "awaiting") would lose detection on the most common
+#     promise-while-stopping phrasing the leader-side incident family
+#     produces; the FP cost is borne by an explicitly advisory note.
+#
+# Adjudication: "completed X, awaiting your merge decision" FIRES the
+# scanner (note attached). The note text is framed as advisory and
+# tells the parent to VERIFY before reviving. Operators see the
+# `event=leader_completion_gate_child_report_check` row with
+# `matched_terms="awaiting"` and can grep FP rate from log rows.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+CHILD_TERMINAL_PROMISE_MARKERS: tuple[str, ...] = (
+    # Canonical promise-while-stopping (incident b08f40fe lineage)
+    "ending turn",
+    "ending my turn",
+    # Explicit awaiting (spec seed; tolerated FP per adjudication above)
+    "awaiting",
+    # "then i" family — promise tail (trailing space avoids "then in/it")
+    "then i ",
+    "then i'll",
+    # "will X" family — promise of future action (specific verbs only;
+    # bare "will" is too broad)
+    "will write",
+    "will aggregate",
+    "will compile",
+    "will continue",
+    "will report back",
+    # Explicit continuation promise
+    "to be continued",
+    # Self-declaration of mid-work state
+    "in progress",
+    "still pending",
+    "not yet complete",
+    "standby",
+    "stand by",
+    "interim",
+)
+
+
+class ChildTerminalPromiseScanResult(NamedTuple):
+    """The child-terminal promise scanner's verdict.
+
+    Attributes:
+        promise_hit: True when at least one promise marker substring was
+            found in the child terminal report text.
+        matched_terms: Distinct marker substrings that fired (ordered
+            by their first occurrence in
+            :data:`CHILD_TERMINAL_PROMISE_MARKERS`). Empty when
+            ``promise_hit`` is False.
+    """
+
+    promise_hit: bool
+    matched_terms: tuple[str, ...]
+
+
+def scan_child_terminal_report_for_promises(
+    text: str,
+) -> ChildTerminalPromiseScanResult:
+    """Scan a child terminal report for promise-while-stopping markers.
+
+    Pure function; no I/O, NO LLM call. Case-insensitive substring match
+    against :data:`CHILD_TERMINAL_PROMISE_MARKERS`. Used by the
+    child-terminal contradiction detector at the terminal-report
+    delivery seam (see ``daemon/services/child_reports.py``) to
+    decide whether to attach the advisory Child Report Check note to
+    the parent.
+
+    Args:
+        text: The child instance's terminal report content (the
+            ``last_content`` string captured at the child-completion
+            path). ``None``/empty inputs return ``promise_hit=False``
+            (defensive floor — the note MUST NOT fire on an empty
+            report).
+
+    Returns:
+        :class:`ChildTerminalPromiseScanResult` — ``promise_hit`` and
+        ``matched_terms`` (distinct catalog-ordered matchers).
+    """
+    if not text:
+        return ChildTerminalPromiseScanResult(
+            promise_hit=False,
+            matched_terms=(),
+        )
+    lower = text.lower()
+    ordered_terms: list[str] = []
+    seen: set[str] = set()
+    for marker in CHILD_TERMINAL_PROMISE_MARKERS:
+        if marker in lower and marker not in seen:
+            ordered_terms.append(marker)
+            seen.add(marker)
+    return ChildTerminalPromiseScanResult(
+        promise_hit=bool(ordered_terms),
+        matched_terms=tuple(ordered_terms),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Length trigger — word-count signal on the LAST AIMessage content (2026-09-12)
 #
 # Mid-work ACKs are often SHORT ("Understood, continuing.", "OK, waiting on
@@ -409,6 +587,9 @@ __all__ = [
     "LengthScanResult",
     "count_words",
     "scan_for_short_final_ai",
+    "CHILD_TERMINAL_PROMISE_MARKERS",
+    "ChildTerminalPromiseScanResult",
+    "scan_child_terminal_report_for_promises",
 ]
 
 
@@ -423,4 +604,18 @@ if not 12 <= len(MID_WORK_MARKERS) <= 18:
     raise RuntimeError(
         "MID_WORK_MARKERS must hold 12-18 patterns per the brief; "
         "see module docstring + tests/unit/test_attestation_marker_scanner.py"
+    )
+
+# Companion sanity guard for the child-terminal contradiction catalog
+# (2026-09-16). Smaller range than :data:`MID_WORK_MARKERS` (15 entries
+# vs 16) by design — this catalog is BOTH the trigger AND the verdict
+# (zero LLM involvement), so it must be FP-tighter than the
+# leader-path catalog. The lower bound (>=10) is a degenerate floor:
+# fewer patterns and the catalog stops being a useful detector; more
+# than 18 and the FP rate climbs past operator-tolerable.
+if not 10 <= len(CHILD_TERMINAL_PROMISE_MARKERS) <= 18:
+    raise RuntimeError(
+        "CHILD_TERMINAL_PROMISE_MARKERS must hold 10-18 patterns per "
+        "the 2026-09-16 spec (FP-tight, zero LLM involvement); see "
+        "module docstring + child-terminal contradiction tests."
     )

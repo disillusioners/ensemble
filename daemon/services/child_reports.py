@@ -2984,7 +2984,7 @@ Provide a concise summary:"""
                 enqueued_at=now_utc_naive(),
             )
             session.add(report_message)
-            
+
             # Create task for parent to process the report.
             #
             # C2 torn-state guard: the deferred-pause pattern exists because
@@ -3087,7 +3087,207 @@ Provide a concise summary:"""
                     created_at=now_utc_naive(),
                 )
                 session.add(report_task)
+            # ─── Child-terminal contradiction detection (2026-09-16) ────
+            # Scan the child's terminal report for promise-while-stopping
+            # markers (see
+            # ``daemon.services.attestation_marker_scanner.scan_child_terminal_report_for_promises``).
+            # When the report text matches, attach an advisory Child
+            # Report Check note to the PARENT as a SEPARATE message so
+            # the parent can verify the actual work state before
+            # trusting the report.
+            #
+            # Scope guards (per spec):
+            #   * Advisory ONLY — does NOT modify the child's report
+            #     content (the note rides as a separate MessageQueue
+            #     row).
+            #   * Agent-agnostic — fires for ANY agent's terminal report.
+            #   * Zero LLM involvement (pure substring scan).
+            #   * Note carries stable id keyed on (parent, child) pair
+            #     (LangGraph ``add_messages`` reducer SUPERSEDES
+            #     repeats in place — no accumulation).
+            #
+            # Inserted in the SAME transaction as the report_message +
+            # PROCESS_REPORT task INSERTs so the trio is
+            # crash-consistent. The note is delivered to the parent via
+            # the standard MessageQueue drain (graph turn pickup), not
+            # via the report_injection hot path — the note is a
+            # system-framed side-channel, NOT a child-to-parent
+            # delivery. The note is suppressed on the same
+            # dead-parent / paused-parent / dead-line branches as the
+            # PROCESS_REPORT task (the note is meaningless to a dead
+            # parent — its queue is dead-lettered anyway).
+            from .attestation_marker_scanner import (
+                scan_child_terminal_report_for_promises,
+            )
+            from .context_messages import (
+                CONTEXT_KIND_CHILD_REPORT_CHECK,
+                _make_context_message,
+                _stable_id_for,
+            )
 
+            _promise_scan = scan_child_terminal_report_for_promises(
+                last_content
+            )
+            if _promise_scan.promise_hit:
+                # Build the note via the canonical context-message
+                # factory so downstream consumers (compaction seam,
+                # API display) see the same shape as the rest of the
+                # ``[SYSTEM CONTEXT: ...]`` family. The note body is
+                # server-authored constant text — never comes from the
+                # child — so the parent sees an unambiguous system
+                # signal, not an LLM-generated continuation.
+                _note_body = (
+                    f'Child {instance.instance_id} completed while its '
+                    f'final report promises future work '
+                    f'("{", ".join(_promise_scan.matched_terms)}") \u2014 '
+                    f"likely premature completion. Its promised next "
+                    f"report will never arrive. Verify the actual work "
+                    f"state; if unfinished, revive it via send_message "
+                    f'(e.g. "continue your work") or verify its subtree '
+                    f"before relying on this report. (Advisory / "
+                    f"heuristic \u2014 marker scan is a substring "
+                    f"match, not an LLM verdict.)"
+                )
+                _note_message = _make_context_message(
+                    kind=CONTEXT_KIND_CHILD_REPORT_CHECK,
+                    title="Child Report Check",
+                    content=_note_body,
+                    id_=_stable_id_for(
+                        "child_report_check",
+                        instance_id=instance.parent_id,
+                        agent_id=instance.instance_id,
+                    ),
+                )
+                # Stamp the marker kwarg the spec requires (downstream
+                # consumers can filter on this; mirrors the additional
+                # kwargs pattern used by the rest of the context-message
+                # family). The PERSISTED surface is the SAME-shape
+                # ``message_metadata`` dict on the MessageQueue row
+                # below (``child_report_check=True``,
+                # ``child_report_check_terms=[...]``) — these
+                # HumanMessage kwargs ride alongside as spec-letter
+                # + rehydration insurance if any consumer reads the
+                # context block from the LangGraph state channel
+                # rather than the DB row.
+                _note_message.additional_kwargs["child_report_check"] = True
+                # Surface the matched terms as a structured kwarg so
+                # observability / compaction hooks can pin them without
+                # reparsing the prose body.
+                _note_message.additional_kwargs[
+                    "child_report_check_terms"
+                ] = list(_promise_scan.matched_terms)
+
+                # Skip the note INSERT when the parent's queue is
+                # unreachable (mirrors the dead_parent / marker_paused
+                # / db_paused branches above). A note to a dead parent
+                # would accumulate in the queue forever (Lane-3/4
+                # past-age sweep would catch it eventually, but the
+                # ~10-min dead-letter window is operator noise).
+                if marker_paused or db_paused or db_dead_parent:
+                    logger.info(
+                        f"child_reports: skipping Child Report Check "
+                        f"note INSERT for parent "
+                        f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                        f"(reason="
+                        f"{'marker_paused' if marker_paused else 'db_paused' if db_paused else 'dead_parent'}, "
+                        f"child={instance.instance_id[:8]}..., "
+                        f"matched_terms={list(_promise_scan.matched_terms)})"
+                    )
+                else:
+                    # Enqueue the note as a SECOND MessageQueue row on
+                    # the parent's queue. The note has its OWN
+                    # message_id (separate from the report_message_id
+                    # — the report-injection hot path keys on
+                    # ``report_message_id`` and the note must NOT
+                    # collide with it). source is stamped as
+                    # ``child_report_check:`` so operators can grep
+                    # for it without scanning all message rows.
+                    #
+                    # Fail-safety: the note INSERT is wrapped in its
+                    # own SAVEPOINT so a constraint failure (FK,
+                    # NOT NULL, etc.) cannot abort the canonical
+                    # child-completion transaction. The note is
+                    # ADVISORY — a missed note is tolerable, a
+                    # blocked child completion is NOT. On any error
+                    # the SAVEPOINT rolls back, the outer
+                    # transaction commits the report + task +
+                    # report_injection normally, and the operator
+                    # sees the
+                    # ``event=leader_completion_gate_child_report_check_failed``
+                    # structured log row.
+                    note_message_id = str(uuid.uuid4())
+                    child_report_check_note_row = MessageQueue(
+                        message_id=note_message_id,
+                        instance_id=instance.parent_id,
+                        content=_note_message.content,
+                        source=(
+                            f"child_report_check:{instance.instance_id}:"
+                            f"{report_message_id}"
+                        ),
+                        type=MessageType.SYSTEM.value,
+                        status=MessageStatus.READY.value,
+                        # priority=0 so the note preempts normal user
+                        # traffic — same convention as the report
+                        # message it accompanies.
+                        priority=0,
+                        # Naive-UTC digits (DC-A fix).
+                        enqueued_at=now_utc_naive(),
+                        message_metadata={
+                            "context_kind": (
+                                CONTEXT_KIND_CHILD_REPORT_CHECK
+                            ),
+                            "injected_message": True,
+                            "child_report_check": True,
+                            "child_report_check_terms": list(
+                                _promise_scan.matched_terms
+                            ),
+                            "child_instance_id": instance.instance_id,
+                            "child_message_id": (
+                                str(completed_message_id)
+                                if completed_message_id
+                                else None
+                            ),
+                        },
+                    )
+                    # SAVEPOINT-scope the note INSERT — must NOT
+                    # block the canonical child completion if it
+                    # fails. The note is advisory; a missed note is
+                    # acceptable; a stuck child is not.
+                    _note_sp = session.begin_nested()
+                    try:
+                        session.add(child_report_check_note_row)
+                        session.flush()
+                        _note_sp.commit()
+                        logger.info(
+                            f"event=leader_completion_gate_child_report_check_fired "
+                            f"parent_id="
+                            f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                            f"child_id={instance.instance_id[:8]}... "
+                            f"matched_terms="
+                            f"{','.join(_promise_scan.matched_terms)} "
+                            f"note_message_id={note_message_id} "
+                            f"stable_id={_note_message.id} "
+                            f"enqueued_at="
+                            f"{child_report_check_note_row.enqueued_at.isoformat() if child_report_check_note_row.enqueued_at else '?'}"
+                        )
+                    except Exception as _note_err:
+                        # SAVEPOINT-scoped rollback: the outer
+                        # transaction (report + task + report_injection)
+                        # is UNTOUCHED. The note is lost; operator
+                        # sees a structured failure row.
+                        _note_sp.rollback()
+                        logger.warning(
+                            f"event=leader_completion_gate_child_report_check_failed "
+                            f"parent_id="
+                            f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                            f"child_id={instance.instance_id[:8]}... "
+                            f"matched_terms="
+                            f"{','.join(_promise_scan.matched_terms)} "
+                            f"note_message_id={note_message_id} "
+                            f"stable_id={_note_message.id} "
+                            f"error_class={type(_note_err).__name__} "
+                            f"error={_note_err!s}"
+                        )
             # ─── Report-injection queue (deadlock fix) ───────────────────
             # Enqueue a row in ``report_injections`` in the SAME
             # transaction as the completion_report message + the
