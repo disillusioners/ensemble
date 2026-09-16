@@ -173,15 +173,20 @@ def expand_allow_for_innate_skills(
     If the agent has no explicit allow list (None), it already has access to
     every tool, so no expansion is needed. Otherwise, any categories mapped
     from innate skills in :data:`INNATE_SKILL_TOOL_CATEGORIES` are appended
-    (de-duplicated) to the allow list.
+    (de-duplicated) to the allow list — EXCEPT privileged categories
+    (``PRIVILEGED_TOOL_CATEGORIES``): those never expand into ``allow``
+    (council Note 6 — fail-closed second door). An innate skill whose
+    mapped category is privileged simply does not expand; the agent must
+    reach the category through an explicit ``tools.allow`` entry like
+    everyone else.
 
     Args:
         allow: The agent's configured `tools.allow` list (or None).
         innate_skills: The agent's `innate_skills` list (or None).
 
     Returns:
-        The allow list with innate-skill categories merged in, or the
-        original value if no expansion was needed.
+        The allow list with non-privileged innate-skill categories merged
+        in, or the original value if no expansion was needed.
     """
     if not innate_skills or allow is None:
         return allow
@@ -189,6 +194,16 @@ def expand_allow_for_innate_skills(
     extra: list[str] = []
     for skill in innate_skills:
         for category in INNATE_SKILL_TOOL_CATEGORIES.get(skill, []):
+            # Council Note 6 — fail-closed: the expander is a second
+            # door into tool categories; a future mapping whose value
+            # intersects PRIVILEGED_TOOL_CATEGORIES must NOT
+            # default-grant a default-deny category to every agent
+            # declaring the hosting skill. The static pin in
+            # tests/unit/tools/test_service_registration.py screams on
+            # such a mapping; THIS filter is the runtime fence if one
+            # lands anyway.
+            if category in PRIVILEGED_TOOL_CATEGORIES:
+                continue
             if category not in allow and category not in extra:
                 extra.append(category)
 
