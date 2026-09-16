@@ -39,6 +39,10 @@ interface SourceTypeConfig {
   fields: SimpleField[];
 }
 
+// Stable empty-options reference: toSelectOptions must return an identity-stable
+// array even for fields without options (see memo rationale below its definition).
+const EMPTY_SELECT_OPTIONS: SearchableSelectOption[] = [];
+
 @Component({
   selector: 'app-edit-source-modal',
   standalone: true,
@@ -173,14 +177,33 @@ export class EditSourceModalComponent implements OnInit {
     return value !== undefined ? String(value) : '';
   }
 
+  // Memo for toSelectOptions: the template binds `[options]="toSelectOptions(...)"`,
+  // which re-evaluates on every change-detection cycle. Returning a fresh array
+  // each time re-fires SearchableSelectComponent's options-tracking effect
+  // (searchable-select.component.ts constructor), which rewrites the visible
+  // text back to the selected label — clobbering the focus-cleared/typed
+  // search whenever a value is already preselected (edit mode), so the user
+  // could not pick a different agent. Memoizing per source-array identity
+  // keeps the binding stable across cycles; the child effect then fires only
+  // when the options content genuinely changes (agents reload).
+  private readonly selectOptionsMemo = new WeakMap<object, SearchableSelectOption[]>();
+
   // Map dynamic schema options to SearchableSelectOption[].
   // field.options may be string[] or {value, label}[] depending on the source type.
   protected toSelectOptions(options: any[] | undefined): SearchableSelectOption[] {
-    return (options || []).map(o =>
-      typeof o === 'string'
-        ? { value: o, label: o }
-        : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
-    );
+    if (!options) {
+      return EMPTY_SELECT_OPTIONS;
+    }
+    let mapped = this.selectOptionsMemo.get(options);
+    if (!mapped) {
+      mapped = options.map(o =>
+        typeof o === 'string'
+          ? { value: o, label: o }
+          : { value: o.value ?? o, label: o.label ?? o.name ?? String(o) }
+      );
+      this.selectOptionsMemo.set(options, mapped);
+    }
+    return mapped;
   }
 
   // Handle value changes from <app-searchable-select> (ngModelChange)
