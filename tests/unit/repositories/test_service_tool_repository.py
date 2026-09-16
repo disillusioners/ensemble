@@ -71,24 +71,13 @@ from daemon.repositories.service_tool.repository import ServiceRepo
 def engine(tmp_path) -> Iterator[Engine]:
     """File-backed SQLite engine (NullPool + WAL + busy_timeout).
 
-    Mirrors ``tests/test_chart_tools_reuse_integration.py:80-109``
-    (the canonical pattern, pinned by the Testing & QC blueprint).
+    Thin wrapper around :func:`tests.helpers.service_tool_sqlite.
+    make_file_backed_engine`. See that module for the busy_timeout
+    drift fix (10000 vs the pre-refactor 30000).
     """
-    db_path = tmp_path / "service-tracking-test.sqlite"
-    eng = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False, "timeout": 30},
-        poolclass=NullPool,
-    )
+    from tests.helpers.service_tool_sqlite import make_file_backed_engine
 
-    @sa_event.listens_for(eng, "connect")
-    def _set_sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=30000")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.close()
-
+    eng = make_file_backed_engine(tmp_path)
     SQLModel.metadata.create_all(eng)
     try:
         yield eng

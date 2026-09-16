@@ -41,9 +41,7 @@ from typing import AsyncIterator, Iterator, Tuple
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel, Session
 
 # Register all SQLModel tables before create_all runs.
@@ -73,28 +71,14 @@ from daemon.services.service_tool_manager import ServiceToolManager
 def file_backed_engine(tmp_path) -> Iterator[Engine]:
     """File-backed SQLite engine (NullPool + WAL + busy_timeout).
 
-    Mirrors the canonical pattern at
-    ``tests/test_chart_tools_reuse_integration.py:80-109`` (the
-    blueprint-pinned test fixture for service-tool). File-backed
-    (NEVER ``:memory:`` / StaticPool) because we want one shared
-    database across the test's sessions and the spawned service's
-    env.
+    Thin wrapper around :func:`tests.helpers.service_tool_sqlite.
+    make_file_backed_engine` — the per-file fixture name is preserved
+    so test signatures stay unchanged. The shared helper centralizes
+    the house busy_timeout value (10000; pre-refactor copies used 30000).
     """
-    db_path = tmp_path / "service-kill-site-exemption.sqlite"
-    eng = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False, "timeout": 30},
-        poolclass=NullPool,
-    )
+    from tests.helpers.service_tool_sqlite import make_file_backed_engine
 
-    @sa_event.listens_for(eng, "connect")
-    def _set_sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=30000")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.close()
-
+    eng = make_file_backed_engine(tmp_path)
     SQLModel.metadata.create_all(eng)
     try:
         yield eng

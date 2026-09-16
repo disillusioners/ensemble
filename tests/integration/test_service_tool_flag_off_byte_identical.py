@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
-from sqlalchemy import create_engine, event as sa_event, inspect as sa_inspect
+from sqlalchemy import create_engine, inspect as sa_inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
@@ -114,24 +114,13 @@ def _reset_module_state():
 def file_backed_engine(tmp_path) -> Iterator[Engine]:
     """File-backed SQLite engine (NullPool + WAL + busy_timeout).
 
-    Mirrors the canonical service-tool fixture pattern (house
-    contract — NullPool + WAL + busy_timeout=30000).
+    Thin wrapper around :func:`tests.helpers.service_tool_sqlite.
+    make_file_backed_engine`. See that module for the busy_timeout
+    drift fix (10000 vs the pre-refactor 30000).
     """
-    db_path = tmp_path / "service-flag-off-test.sqlite"
-    eng = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False, "timeout": 30},
-        poolclass=NullPool,
-    )
+    from tests.helpers.service_tool_sqlite import make_file_backed_engine
 
-    @sa_event.listens_for(eng, "connect")
-    def _set_sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=30000")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.close()
-
+    eng = make_file_backed_engine(tmp_path)
     SQLModel.metadata.create_all(eng)
     try:
         yield eng
@@ -484,12 +473,13 @@ def test_manager_status_inline_reconcile_disabled_when_off(
     repo = ServiceRepo(engine=file_backed_engine)
 
     # Seed an active row to prove the manager would touch it if the
-    # gate were not in place.
-    from daemon.repositories.service_tool.models import ServiceTracking
+    # gate were not in place. Uses the shared ``seed_service_row``
+    # helper from :mod:`tests.helpers.service_tool_sqlite`.
+    from tests.helpers.service_tool_sqlite import seed_service_row
 
-    seed = ServiceTracking(
+    seed = seed_service_row(
+        file_backed_engine,
         name="would-be-touched",
-        command="echo hello",
         pid=os.getpid(),
         start_time=1,
         cwd="/tmp",
@@ -498,12 +488,8 @@ def test_manager_status_inline_reconcile_disabled_when_off(
         started_by_agent_id="flag-off-tester",
         log_path="/tmp/would-be-touched.log",
     )
-    with _session_using(file_backed_engine) as session:
-        session.add(seed)
-        session.commit()
-        session.refresh(seed)
-        seeded_id = seed.id
-        seeded_status = seed.status
+    seeded_id = seed.id
+    seeded_status = seed.status
 
     # Manager with ``enabled=False`` — every public surface returns
     # the disabled shape.
@@ -586,9 +572,10 @@ def test_manager_list_all_disabled_when_off(
     #   - "already-exited": EXITED with a stale PID (idempotency
     #                  baseline — must NOT be touched by either
     #                  path).
-    from daemon.repositories.service_tool.models import ServiceTracking
+    from tests.helpers.service_tool_sqlite import seed_service_row
 
-    alive_seed = ServiceTracking(
+    alive_seed = seed_service_row(
+        file_backed_engine,
         name="alive-row",
         command="echo alive",
         pid=os.getpid(),
@@ -599,7 +586,8 @@ def test_manager_list_all_disabled_when_off(
         started_by_agent_id="flag-off-tester",
         log_path="/tmp/alive-row.log",
     )
-    dead_seed = ServiceTracking(
+    dead_seed = seed_service_row(
+        file_backed_engine,
         name="dead-row",
         command="echo dead",
         pid=1,  # PID 1 is init — not owned by this test; guaranteed-dead.
@@ -610,7 +598,8 @@ def test_manager_list_all_disabled_when_off(
         started_by_agent_id="flag-off-tester",
         log_path="/tmp/dead-row.log",
     )
-    exited_seed = ServiceTracking(
+    exited_seed = seed_service_row(
+        file_backed_engine,
         name="already-exited",
         command="echo exited",
         pid=99999,
@@ -622,15 +611,12 @@ def test_manager_list_all_disabled_when_off(
         log_path="/tmp/already-exited.log",
     )
 
-    seeded_ids = {}
-    seeded_statuses = {}
-    with _session_using(file_backed_engine) as session:
-        for row in (alive_seed, dead_seed, exited_seed):
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-            seeded_ids[row.name] = row.id
-            seeded_statuses[row.name] = row.status
+    seeded_ids = {
+        row.name: row.id for row in (alive_seed, dead_seed, exited_seed)
+    }
+    seeded_statuses = {
+        row.name: row.status for row in (alive_seed, dead_seed, exited_seed)
+    }
 
     # Sanity — the rows are visible BEFORE the OFF call.
     for name in ("alive-row", "dead-row", "already-exited"):
@@ -721,10 +707,11 @@ def test_manager_logs_disabled_when_off(
     import asyncio
 
     from daemon.services.service_tool_manager import DISABLED_LOGS_MARKER
-    from daemon.repositories.service_tool.models import ServiceTracking
+    from tests.helpers.service_tool_sqlite import seed_service_row
 
     repo = ServiceRepo(engine=file_backed_engine)
-    seed = ServiceTracking(
+    seed = seed_service_row(
+        file_backed_engine,
         name="logged-row",
         command="echo logged",
         pid=os.getpid(),
@@ -735,12 +722,8 @@ def test_manager_logs_disabled_when_off(
         started_by_agent_id="flag-off-tester",
         log_path="/tmp/logged-row.log",
     )
-    with _session_using(file_backed_engine) as session:
-        session.add(seed)
-        session.commit()
-        session.refresh(seed)
-        seeded_id = seed.id
-        seeded_status = seed.status
+    seeded_id = seed.id
+    seeded_status = seed.status
 
     manager = ServiceToolManager(
         repo=repo,

@@ -35,9 +35,7 @@ from typing import Iterator
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel, Session, select
 
 # Register the service_tool model so create_all emits the table.
@@ -67,11 +65,25 @@ from daemon.tools import service_spawner
 
 
 @pytest.fixture
-def repo() -> MagicMock:
-    """A ServiceRepo stand-in — the Phase-1 stub never calls it, but
-    the constructor contract (A9: repo injected directly) is pinned
-    by passing it here."""
-    return MagicMock(name="ServiceRepo")
+def repo_stub() -> MagicMock:
+    """A ServiceRepo stand-in for the Phase-1 unit tests.
+
+    Renamed from ``repo`` (Block 8): the Phase-2 sweep tests below
+    define a SECOND ``repo`` fixture (``engine``-backed real
+    ``ServiceRepo``) that shadowed this stub, silently injecting a
+    real repo into Phase-1 tests. Keeping both names would let the
+    drift recur; the stub is now ``repo_stub`` so any Phase-1 test
+    that wants a MagicMock MUST request it explicitly.
+
+    The stub returns an empty list from ``list_active`` so the
+    Phase-1 ``TestSweepOnceStub`` tests get the zeroed-counters
+    shape without needing a real engine. Tests that need real
+    repo behavior should take ``repo`` (the engine-backed fixture
+    declared further below).
+    """
+    stub = MagicMock(name="ServiceRepo")
+    stub.list_active.return_value = []
+    return stub
 
 
 # ── importability + constants ───────────────────────────────────────
@@ -85,44 +97,44 @@ class TestModuleContract:
         assert DEFAULT_SWEEP_INTERVAL_SECONDS == 90
         assert DEFAULT_STARTING_GRACE_SECONDS == 30
 
-    def test_constructor_accepts_repo_positionally(self, repo) -> None:
+    def test_constructor_accepts_repo_positionally(self, repo_stub) -> None:
         """A9: the narrowest collaborator (ServiceRepo) is the FIRST
         constructor arg — injected directly, NOT via ServiceManager."""
-        svc = ServiceReconciliationService(repo, 120, 45)
+        svc = ServiceReconciliationService(repo_stub, 120, 45)
         assert svc.interval_seconds == 120
         assert svc.starting_grace_seconds == 45
 
-    def test_constructor_defaults(self, repo) -> None:
-        svc = ServiceReconciliationService(repo)
+    def test_constructor_defaults(self, repo_stub) -> None:
+        svc = ServiceReconciliationService(repo_stub)
         assert svc.interval_seconds == DEFAULT_SWEEP_INTERVAL_SECONDS
         assert svc.starting_grace_seconds == DEFAULT_STARTING_GRACE_SECONDS
 
-    def test_interval_floor_clamped_in_ctor(self, repo) -> None:
+    def test_interval_floor_clamped_in_ctor(self, repo_stub) -> None:
         """Direct construction with a sub-1 interval clamps to 1 —
         the loop can never spin (the authoritative ge=1 floor is the
         pydantic Field at config level; this is the second line of
         defence for legacy fixtures)."""
-        svc = ServiceReconciliationService(repo, interval_seconds=0)
+        svc = ServiceReconciliationService(repo_stub, interval_seconds=0)
         assert svc.interval_seconds == 1
 
-    def test_no_max_concurrent_param(self, repo) -> None:
+    def test_no_max_concurrent_param(self, repo_stub) -> None:
         """A8: the dead ``max_concurrent`` param is DROPPED — the cap
         lives on ServiceToolManager; the reconcile service only marks
         rows EXITED and never enforces capacity."""
         with pytest.raises(TypeError):
-            ServiceReconciliationService(repo, max_concurrent=5)  # type: ignore[call-arg]
+            ServiceReconciliationService(repo_stub, max_concurrent=5)  # type: ignore[call-arg]
 
 
 # ── lifecycle ───────────────────────────────────────────────────────
 
 
 class TestLifecycle:
-    def test_start_is_idempotent(self, repo) -> None:
+    def test_start_is_idempotent(self, repo_stub) -> None:
         """Double start() spawns ONE task — the second call is a
         silent no-op (template pattern)."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo)
+            svc = ServiceReconciliationService(repo_stub)
             await svc.start()
             first_task = svc._task
             assert first_task is not None and not first_task.done()
@@ -134,7 +146,7 @@ class TestLifecycle:
 
         asyncio.run(scenario())
 
-    def test_stop_when_never_started_is_safe(self, repo) -> None:
+    def test_stop_when_never_started_is_safe(self, repo_stub) -> None:
         """stop() on a never-started service is a silent no-op — the
         shutdown path must survive partial startup failures."""
 
@@ -145,13 +157,13 @@ class TestLifecycle:
 
         asyncio.run(scenario())
 
-    def test_stop_cancels_and_awaits_the_task(self, repo) -> None:
+    def test_stop_cancels_and_awaits_the_task(self, repo_stub) -> None:
         """A8 template semantics: stop() sets the stop event, cancels
         the task, awaits it (CancelledError swallowed) and clears the
         handle — no un-awaited cancelled task leak."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo, interval_seconds=1)
+            svc = ServiceReconciliationService(repo_stub, interval_seconds=1)
             await svc.start()
             task = svc._task
             assert task is not None
@@ -161,12 +173,12 @@ class TestLifecycle:
 
         asyncio.run(scenario())
 
-    def test_restart_after_stop(self, repo) -> None:
+    def test_restart_after_stop(self, repo_stub) -> None:
         """start() after a clean stop() respawns the task (restart
         symmetry — the lifespan may stop then re-start in tests)."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo)
+            svc = ServiceReconciliationService(repo_stub)
             await svc.start()
             first = svc._task
             await svc.stop()
@@ -182,14 +194,14 @@ class TestLifecycle:
 
 
 class TestSweepOnceStub:
-    def test_sweep_once_returns_zeroed_counters(self, repo) -> None:
+    def test_sweep_once_returns_zeroed_counters(self, repo_stub) -> None:
         """The Phase-1 stub returns the EXACT counters dict shape the
         Phase-2 body must preserve (the A6 boot pass and the
         ``[ServiceTool] reconcile_boot_sweep`` lifespan log index into
         these keys)."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo)
+            svc = ServiceReconciliationService(repo_stub)
             counters = await svc.sweep_once()
             assert counters == {
                 "alive": 0,
@@ -200,11 +212,11 @@ class TestSweepOnceStub:
 
         asyncio.run(scenario())
 
-    def test_sweep_once_ticks_the_counter(self, repo) -> None:
+    def test_sweep_once_ticks_the_counter(self, repo_stub) -> None:
         """Each call bumps the public tick counter (observability)."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo)
+            svc = ServiceReconciliationService(repo_stub)
             await svc.sweep_once()
             await svc.sweep_once()
             assert svc.ticks_total == 2
@@ -217,13 +229,13 @@ class TestSweepOnceStub:
 
         asyncio.run(scenario())
 
-    def test_loop_survives_a_raising_sweep(self, repo) -> None:
+    def test_loop_survives_a_raising_sweep(self, repo_stub) -> None:
         """Defense-in-depth: a sweep body that raises is swallowed +
         counted and the loop keeps ticking (the Phase-2 body inherits
         this guarantee — a bad row must never kill the sweep)."""
 
         async def scenario() -> None:
-            svc = ServiceReconciliationService(repo, interval_seconds=1)
+            svc = ServiceReconciliationService(repo_stub, interval_seconds=1)
             calls = {"n": 0}
 
             async def boom() -> dict[str, int]:
@@ -254,23 +266,15 @@ class TestSweepOnceStub:
 
 @pytest.fixture
 def engine(tmp_path) -> Iterator[Engine]:
-    """File-backed SQLite (NullPool + WAL + busy_timeout) — Phase-1
-    canonical pattern (``test_repo_contract.py``)."""
-    db_path = tmp_path / "service-reconciliation-sweep.sqlite"
-    eng = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False, "timeout": 30},
-        poolclass=NullPool,
-    )
+    """File-backed SQLite (NullPool + WAL + busy_timeout).
 
-    @sa_event.listens_for(eng, "connect")
-    def _set_sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=30000")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.close()
+    Thin wrapper around :func:`tests.helpers.service_tool_sqlite.
+    make_file_backed_engine`. See that module for the busy_timeout
+    drift fix (10000 vs the pre-refactor 30000).
+    """
+    from tests.helpers.service_tool_sqlite import make_file_backed_engine
 
+    eng = make_file_backed_engine(tmp_path)
     SQLModel.metadata.create_all(eng)
     try:
         yield eng
@@ -722,9 +726,22 @@ class TestRepoFailureIsolation:
     def test_list_active_failure_does_not_raise(
         self, engine: Engine, repo: ServiceRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A repo read failure surfaces the error and returns the
+        zeroed counters.
+
+        Block 7 narrowed the catch from ``Exception`` to
+        ``(SQLAlchemyError, OSError)`` (the known fault surface);
+        this test uses ``OperationalError`` (the SQLAlchemy-side
+        equivalent of the old ``RuntimeError("synthetic repo
+        failure")``) so the assertion still exercises the same
+        branch.
+        """
+
         async def scenario() -> None:
             def boom():
-                raise RuntimeError("synthetic repo failure")
+                from sqlalchemy.exc import OperationalError
+
+                raise OperationalError("stmt", {}, Exception("synthetic"))
 
             monkeypatch.setattr(repo, "list_active", boom)
             svc = ServiceReconciliationService(repo, interval_seconds=1)
@@ -787,9 +804,16 @@ class TestRepoFailureIsolation:
             )
 
             def flaky(p):
-                # Bad PID ⇒ synthetic error; good PID ⇒ real token.
+                # Bad PID ⇒ synthetic SQLAlchemyError; good PID ⇒ real
+                # token. Block 7 narrowed the per-row catch to
+                # (SQLAlchemyError, OSError), so this branch exercises
+                # the same fault surface as the pre-Block-7 test.
+                from sqlalchemy.exc import OperationalError
+
                 if p == bad_pid:
-                    raise RuntimeError("synthetic row-level failure")
+                    raise OperationalError(
+                        "stmt", {}, Exception("synthetic row-level failure")
+                    )
                 return real_start
 
             monkeypatch.setattr(
