@@ -438,16 +438,16 @@ class ServiceToolManager:
         }
 
     async def stop(self, name: str, force: bool = False) -> dict:
-        """Stop a service by name. 4-result-tuple (running / exited /
-        not_found / pid_recycled) extended with F1 grace-window
-        reasons.
+        """Stop a service by name. Resolves to a TERMINAL shape (council F3).
+
+        ``stop`` blocks through the grace window and ALWAYS returns a
+        resolved outcome — there is no ``{"status": "running"}``
+        return (an earlier revision of this docstring advertised one;
+        no code path ever produced it).
 
         Returns:
             One of:
 
-            * ``{"name": ..., "pid": ..., "status": "running"}`` —
-              signaled, awaiting graceful exit (no row transition yet;
-              the caller can ``status(name)`` to poll the transition).
             * ``{"name": ..., "pid": ..., "status": "exited"}`` —
               clean exit. May carry ``exit_code``.
             * ``{"name": ..., "status": "not_found"}`` — no row ever
@@ -464,6 +464,8 @@ class ServiceToolManager:
             * ``{"name": ..., "status": "exited", "reason": "pid_recycled_pre_kill"}``
               — recycle detected immediately BEFORE the SIGKILL
               escalation (F1 second layer).
+            * ``{"name": ..., "status": "disabled", ...}`` — kill
+              switch off.
 
         The 5s grace uses ``await asyncio.to_thread(get_process_start_time, pid)``
         polling (NEVER ``time.sleep`` busy-wait — A2 BLOCKING).

@@ -274,10 +274,10 @@ Notes:
             force: ``True`` skips SIGTERM and SIGKILL immediately.
 
         Returns:
-            The canonical 4-result shape plus F1 grace-window and
-            short-circuit reasons:
+            A TERMINAL shape — ``stop`` blocks through the grace
+            window, so ``{"status": "running"}`` is NEVER returned
+            (council F3 doc correction):
 
-            * ``{"name": ..., "status": "running"}`` — signaled, awaiting graceful exit (no row transition yet).
             * ``{"name": ..., "pid": ..., "status": "exited"}`` — clean exit. May carry ``exit_code``.
             * ``{"name": ..., "status": "starting", "reason": "pid_not_yet_assigned"}`` — row exists in STARTING but no PID was assigned yet (F8 synchronous-spawn-failure path).
             * ``{"name": ..., "pid": ..., "status": "exited", "reason": "pid_dead"}`` — stored PID already dead (no signal needed).

@@ -323,6 +323,57 @@ def test_full_doc_documents_grandchild_setsid_escape(
     )
 
 
+def test_stop_docs_never_promise_running_return(
+    manager_stub: SimpleNamespace,
+) -> None:
+    """Council F3 lockstep pin: the ``service_stop`` docs must NOT
+    advertise a ``{"status": "running"}`` return.
+
+    ``stop`` blocks through the grace window and always resolves to a
+    terminal shape (exited / not_found / starting+pid_not_yet_assigned
+    / exited+pid_dead / exited+pid_recycled family / disabled). An
+    earlier revision of the tool docstring advertised a ``running``
+    return that NO code path ever produced — this pin keeps the
+    corrected docs honest in both doc surfaces (the tool docstring
+    and its ``_full_doc_``).
+
+    The pin matches the EXACT old advertised return bullets (so the
+    correction's own "there is no ``{\"status\": \"running\"}``
+    return" negation text does not false-trip it).
+    """
+    import inspect
+
+    import daemon.services.service_tool_manager as _stm
+    from daemon.tools.service_tools import create_service_tools
+
+    tools = create_service_tools(
+        manager=manager_stub,
+        current_instance_id="inst-test",
+        agent_id="worker",
+    )
+    stop_tool = next(t for t in tools if getattr(t, "name", None) == "service_stop")
+    full_doc = getattr(stop_tool, "_full_doc_", "")
+    tool_doc = inspect.getdoc(stop_tool) or ""
+    manager_doc = inspect.getdoc(_stm.ServiceToolManager.stop) or ""
+
+    old_bullets = (
+        '{"name": ..., "pid": ..., "status": "running"}',
+        '{"name": ..., "status": "running"}',
+    )
+    for label, doc in (
+        ("service_stop tool docstring", tool_doc),
+        ("service_stop._full_doc_", full_doc),
+        ("ServiceToolManager.stop docstring", manager_doc),
+    ):
+        for bullet in old_bullets:
+            assert bullet not in doc, (
+                f"council F3: {label} still advertises the 'running' "
+                f"stop return bullet {bullet!r} — no code path produces "
+                f"one (stop blocks through grace and always resolves "
+                f"to a terminal shape)"
+            )
+
+
 # ── decorator order ────────────────────────────────────────────────
 
 
