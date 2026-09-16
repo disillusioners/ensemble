@@ -909,30 +909,150 @@ async def test_f9_full_cascade_does_not_kill_service(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Matrix summary — prints the per-site status for grep by Phase 3.
+# Matrix summary — pin the per-site coverage via real assertions so
+# the K-inventory cannot silently rot (Note 13).
 # ─────────────────────────────────────────────────────────────────────
 
 
-_KILL_SITES: list = [
-    "K1+K2", "K3", "K4+K5", "K6", "K7", "K8",
-    "K9+K10", "K11", "K12", "K13",
+# Authoritative K-inventory: the 13 kill-site clusters the docs +
+# gate-script reference. K12 is Windows-only (bash.py:172/:183 —
+# Windows pid branch), so it carries the platform-aware skipif marker
+# and accounts as a SKIP on darwin / linux.
+_KILL_SITES: list[str] = [
+    "K1+K2",
+    "K3",
+    "K4+K5",
+    "K6",
+    "K7",
+    "K8",
+    "K9+K10",
+    "K11",
+    "K12",
+    "K13",
 ]
+
+
+# Owning test name per K site (must resolve via globals() introspection
+# below — pins the cluster ↔ test binding the docs reference).
+_OWNING_TEST: dict[str, str] = {
+    "K1+K2": "test_k1_k2_bash_timeout_does_not_kill_service",
+    "K3": "test_k3_bash_cancelled_error_does_not_kill_service",
+    "K4+K5": "test_k4_k5_bash_registry_cleanup_does_not_kill_service",
+    "K6": "test_k6_proc_run_stop_does_not_kill_service",
+    "K7": "test_k7_start_process_race_guard_does_not_kill_service",
+    "K8": "test_k8_proc_cleanup_does_not_kill_service",
+    "K9+K10": "test_k9_k10_vscode_stop_does_not_kill_service",
+    "K11": "test_k11_vscode_orphan_kill_does_not_kill_service",
+    "K12": "test_k12_windows_pid_branch_does_not_kill_service",
+    "K13": "test_k13_git_diff_timeout_does_not_kill_service",
+}
 
 
 @pytest.mark.integration
 def test_kill_site_exemption_matrix_summary() -> None:
-    """Parametric summary that asserts the matrix is covered.
+    """Pin the 13-site matrix structurally so a future K addition
+    cannot rot silently (Note 13).
 
-    The per-K tests above are the authoritative matrix. This test
-    prints the matrix indices so ``pytest -v`` output shows every
-    site explicitly. The plan's 13/13 darwin-PASS criterion is met
-    when each per-K test above passes (K12 SKIP on darwin via the
-    ``skipif`` marker)."""
-    print(
-        "K-site exemption matrix:\n"
-        + "\n".join(
-            f"  {kid}: covered by test above" for kid in _KILL_SITES
-        )
-        + "\nFor detailed per-site PASS/SKIP, run:\n"
-        "  pytest -v tests/integration/test_service_tool_kill_site_exemption.py"
+    Asserts:
+
+    * the documented K-inventory equals exactly the cluster set
+      ``{K1+K2, K3, K4+K5, K6, K7, K8, K9+K10, K11, K12, K13}``
+      (10 clusters covering K1..K13 — the docs reference this set),
+    * every owning test name resolves via ``globals()`` introspection
+      (no missing test names — a silent rename or deletion fails the
+      assertion rather than a bare print),
+    * the K12 skipif marker is honored (12 PASS + 1 SKIP on darwin /
+      linux; never a bare 13-PASS assert that would silently regress
+      on the wrong platform).
+    """
+    import pytest as _pytest  # local import — assertion-time only
+
+    cluster_set = set(_KILL_SITES)
+    expected = {
+        "K1+K2", "K3", "K4+K5", "K6", "K7", "K8",
+        "K9+K10", "K11", "K12", "K13",
+    }
+    assert cluster_set == expected, (
+        f"K-inventory drifted from the docs: got {sorted(cluster_set)}, "
+        f"expected {sorted(expected)}"
     )
+
+    # Owning-test introspection — fail loud on a missing / renamed test.
+    g = globals()
+    missing = [k for k, t in _OWNING_TEST.items() if t not in g]
+    assert not missing, (
+        f"K-inventory references tests that no longer exist: {missing} — "
+        f"update _OWNING_TEST or restore the missing test"
+    )
+
+    # K12 skipif accounting: the K12 owning test carries a
+    # ``platform.system() != "Windows"`` skipif marker (see :583-587),
+    # so on darwin / linux pytest reports it as SKIPPED. The
+    # platform-aware expectation: 12 PASS + 1 SKIP on darwin / linux
+    # (never a bare 13-PASS that would silently regress on the wrong
+    # host — the A7 plan exit criterion explicitly excludes Windows).
+    k12_test = g[_OWNING_TEST["K12"]]
+    skipif_markers = [
+        m for m in getattr(k12_test, "pytestmark", [])
+        if m.name == "skipif"
+    ]
+    assert len(skipif_markers) == 1, (
+        f"K12 owning test must carry exactly one skipif marker; "
+        f"got {len(skipif_markers)}"
+    )
+    k12_marker = skipif_markers[0]
+    # A skipif marker stores its condition as the FIRST positional arg,
+    # eagerly evaluated at apply-time. The original SOURCE lives in the
+    # function's source line; pull it via inspect so a future regression
+    # that drops the ``platform.system() != "Windows"`` guard fails
+    # loud (rather than a silent SKIP that masks the K12 Windows
+    # branch's actual coverage).
+    import inspect as _inspect
+
+    src = _inspect.getsource(k12_test)
+    assert "@pytest.mark.skipif" in src, (
+        "K12 owning test must carry an explicit @pytest.mark.skipif "
+        "decorator (the matrix pin relies on its source being visible)"
+    )
+    assert "platform.system()" in src, (
+        "K12 skipif condition must reference platform.system() so the "
+        "Windows-only branch is exercised when the host is Windows"
+    )
+    assert '"Windows"' in src or "'Windows'" in src, (
+        "K12 skipif condition must reference the literal 'Windows'"
+    )
+
+    is_windows = platform.system() == "Windows"
+    # K-site accounting: the 10 cluster tests cover 13 individual K
+    # sites (K1+K2 = 2, K3 = 1, K4+K5 = 2, ... K12 = 1, K13 = 1).
+    # On darwin / linux K12 SKIPs — 12 PASS + 1 SKIP per the A7 plan
+    # exit criterion. On Windows all 13 sites PASS (the plan exit
+    # criterion explicitly excludes Windows; the assertion form is
+    # platform-aware so neither platform can silently regress to a
+    # bare 13-PASS or a bare-13 assert).
+    cluster_to_k_count = {
+        "K1+K2": 2, "K3": 1, "K4+K5": 2, "K6": 1, "K7": 1, "K8": 1,
+        "K9+K10": 2, "K11": 1, "K12": 1, "K13": 1,
+    }
+    total_k_sites = sum(cluster_to_k_count[c] for c in _KILL_SITES)
+    assert total_k_sites == 13, (
+        f"K-site inventory must cover exactly 13 sites; "
+        f"got {total_k_sites}"
+    )
+    if is_windows:
+        expected_pass = total_k_sites  # 13 PASS on Windows
+        expected_skip = 0
+    else:
+        expected_pass = total_k_sites - 1  # K12 SKIPs on darwin/linux
+        expected_skip = 1
+    print(
+        f"K-site exemption matrix pinned: {len(_KILL_SITES)} clusters "
+        f"covering {total_k_sites} K sites "
+        f"({expected_pass} PASS + {expected_skip} SKIP on this host)"
+    )
+    # The matrix-summary test is structural — it does not re-run the
+    # parametric tests. Per-site PASS/SKIP counts are visible via
+    # ``pytest -v`` on the owning tests; the assertion above pins the
+    # cluster set and the K12 skipif semantics so a future regression
+    # in EITHER dimension fails loud here.
+    _ = _pytest  # silence unused-import lint
