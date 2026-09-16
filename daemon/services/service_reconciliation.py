@@ -74,6 +74,8 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from sqlalchemy.exc import SQLAlchemyError
+
 if TYPE_CHECKING:
     from daemon.repositories.service_tool.repository import ServiceRepo
 
@@ -353,9 +355,15 @@ class ServiceReconciliationService:
 
         try:
             active_rows = await asyncio.to_thread(self._repo.list_active)
-        except Exception:
+        except (SQLAlchemyError, OSError):
             # Repo read failure (DB locked / engine dropped) — the
             # tick must surface the error but never kill the loop.
+            # Narrowed from ``Exception`` (Block 7 — leader-approved
+            # behavior change): SQLAlchemyError covers the DB-layer
+            # failures we know to expect, OSError covers transient
+            # filesystem faults; anything else is caught by the
+            # outer ``_run_loop`` backstop at :486 so the lifespan
+            # never breaks.
             self.sweep_errors += 1
             logger.exception(
                 "ServiceReconciliationService.sweep_once: list_active failed"
@@ -437,7 +445,12 @@ class ServiceReconciliationService:
                 else:
                     # PID-and-start-time match — service is live.
                     counters["alive"] += 1
-            except Exception:
+            except (SQLAlchemyError, OSError):
+                # Per-row repo / filesystem failure — record and
+                # continue. Narrowed from ``Exception`` (Block 7):
+                # SQLAlchemyError + OSError cover the known fault
+                # surface; anything else propagates to the outer
+                # ``_run_loop`` backstop at :486.
                 counters["errors"] += 1
                 logger.exception(
                     "Reconcile error for row id=%s name=%s",
