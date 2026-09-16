@@ -123,3 +123,32 @@ Consolidated row added (base-evidenced @ ebd57cfc by adjudication-2/3): answer_d
 - **C (live daemon): ✅ PASS** (C.1–C.4; C.5 PASS-WITH-NOTE mechanism)
 - **D (sanity): ✅ PASS** (FE 0 hits; SQLite boot = known pre-existing trap + service-tool items green)
 - **VERDICT: SHIP (GO for merge)**
+
+---
+
+# ADDENDUM — OVERRIDE GATE: default-enablement (D4 reversed) — 2026-09-16 (later same day)
+
+- **Branch**: `feature/service-meta-grant` @ `a29778c6` (base `282c20b3`) — USER OVERRIDE: service tools default-enabled for all agents. **Proportionate gate** (targeted families + live boot only; full suite NOT rerun by design — dev pre-ran pins/registration 62/62, flipped core 69/69, 217 family, 9 flag-off, 251 service suites, 23/1-skip service integration, harness exit 0 ×2).
+- **VERDICT: ✅ GO for merge.**
+
+## 1. Harness — PASS
+`timeout 120 uv run python tools/dev/verify_service_default_open.py` → **exit 0**, ~30s. Table: **24 agents gain +5 service tools, 13 unchanged**; final line `OK — all agents match the meta-grant IFF invariant.` (e.g. watcher `default`-shape 0→5; charter/coder/wanderer/worker non-empty 0→5; leader/blueprinter/explorer/governor… unchanged.)
+
+## 2. Targeted families — ALL GREEN (217P/0F/0E)
+`tests/test_tool_filter.py` 55P (expander family fully green under default-open) · pins: `test_upgrade_registration` 21P + `test_attestation_registration` 24P + `test_maintenancer_spawn_resolves_tools` 13P · `test_service_tool_flag_off_byte_identical` 9P (`-m integration`) · `test_service_tool_config` 71P · `test_service_registration` 17P · `test_frozen_tool_name_discovery` 7P.
+
+## 3. Known-red registry-consumer family — IDENTICAL (no new sensitivity)
+`test_builtin_mcp_servers` 17E + `test_context7_builtin` 4E + `test_webfetch_builtin` 2E = **23 errors, node-for-node + signature IDENTICAL to this gate's base-A/B** (`AttributeError: Mock object has no attribute 'service_tool'` on all) — the documented mock-ripple family reproduces unchanged; default-open introduces no new red nodes.
+
+## 4. meta.json regression diff — ALLOW-APPENDS-ONLY ✓
+`git diff 282c20b3..a29778c6 -- 'agents/*/meta.json'` = **22 files, uniform `"service"` append to tools.allow**; deny arrays byte-identical (v2 agents); no other field changes; no adds/deletes/renames. Count reconciliation 24-vs-22: `_baby_template` + `watcher` receive service via the default-open expansion path itself (empty/other allow shapes) — consistent with the harness IFF invariant; no per-file append needed.
+
+## 5. Live boot (dev.sh :8079, `ensemble_dev`; prod 9797 untouched) — PASS
+- **Default boot**: probe `[ServiceTool] service_tool_enabled=True (env …), max_concurrent=10, reconcile_interval=90s`; /livez + /readyz 200.
+- **REVERSAL PROOF**: `watcher` (`tools.allow: []` — default universe) resolves the FULL 237-tool universe incl. all 5 `service_*` (no filter-removal line — nothing removed); `charter` (allow incl. `service`) filter line `237 → 20 (removed: …217…)` with **all 5 service tools KEPT, none in removed set**; arithmetic 20+217=237 ✓. Inverse of the default-DENY branch (wanderer `237 → 88`, all 5 removed — Section C.2 above).
+- **Flag-OFF boot** (`ENSEMBLE_SERVICE_TOOL_ENABLED=0`): probe `service_tool_enabled=False`; `ServiceReconciliationService DISABLED (service_tool_enabled=False)` — **no sweep lines**; /livez 200; **call-time disable marker** verified via real-LLM `service_status` call → tool_call output verbatim `{"status": "disabled", "reason": "service_tool_enabled=False", "name": "flagoff-probe"}`.
+- Cleanup: 4 instances terminated, daemon stopped, 8079 free, env unset, `git status` clean.
+
+## Override-gate status
+- 1 Harness ✅ · 2 Targeted families ✅ (217P/0F) · 3 Known-family identical ✅ · 4 meta.json allow-appends-only ✅ · 5 Live reversal + flag-OFF ✅
+- **VERDICT: GO for merge.** (Follow-ups inherited unchanged from the main gate: cwd-Optionality 🟠, critical-notes boolean DDL 🟠, mock-family fixture updates 🟢.)
