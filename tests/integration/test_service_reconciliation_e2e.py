@@ -580,13 +580,22 @@ async def test_c6_oq2_multidaemon_v1_limitation(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_a13_concurrent_stop_vs_sweep_race(
+async def test_a13_concurrent_mark_exited_rowcount_race(
     tmp_path: Path,
     file_backed_engine: Engine,
     service_tool_manager: ServiceToolManager,
 ) -> None:
-    """A13 race test — concurrent ``service_stop`` + ``sweep_once``
-    on the same row.
+    """A13 rowcount race (repo layer) — two concurrent ``mark_exited``
+    calls on the same row.
+
+    RENAMED per council Note 7: this test races two ``mark_exited``
+    calls, NOT a production ``service_stop`` against a
+    ``sweep_once`` — its honest subject is the repo-layer A13 atomic
+    guard itself (rowcount=1 for the winner, 0 for the loser). The
+    PRODUCTION stop-vs-sweep shape (a real ``manager.stop`` racing a
+    concurrent ``sweep_once`` on the same row, exactly-one-winner +
+    single-signal + consistent final state) is covered by
+    ``test_a13_production_stop_vs_sweep_race`` below.
 
     The A13 guarded ``mark_exited`` returns rowcount=1 to the
     winner and rowcount=0 to the loser. Both treat 0 as idempotent
@@ -598,11 +607,9 @@ async def test_a13_concurrent_stop_vs_sweep_race(
     ``reaped + alive + errors`` counters from the sweep equal the
     starting row count.
 
-    We simulate the race by running two concurrent tasks that
-    BOTH call ``mark_exited`` on the same row — the closest
-    deterministic analog of the production race. ``ThreadPool``
-    is a deliberate choice (the production race can cross event
-    loops; the rowcount invariant is the same either way).
+    ``ThreadPool`` threads are a deliberate choice (the production
+    race can cross event loops; the rowcount invariant is the same
+    either way).
     """
     started = await service_tool_manager.start(
         name="a13_race",
@@ -663,3 +670,159 @@ async def test_a13_concurrent_stop_vs_sweep_race(
         await service_tool_manager.stop("a13_race", force=True)
     except Exception:
         pass
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a13_production_stop_vs_sweep_race(
+    tmp_path: Path,
+    file_backed_engine: Engine,
+    service_tool_manager: ServiceToolManager,
+    svc_repo: ServiceRepo,
+    monkeypatch,
+) -> None:
+    """A13 race — the PRODUCTION shape (council Note 7): a real
+    ``manager.stop(name, force=True)`` (full F1 re-verify + kill path)
+    racing a concurrent ``sweep_once()`` on the SAME row.
+
+    The repo-layer rowcount race is pinned separately by
+    ``test_a13_concurrent_mark_exited_rowcount_race``; THIS test pins
+    the production composition:
+
+    * **Exactly-one-winner** — both parties attempt the A13 guarded
+      ``mark_exited``; the rowcounts across both are exactly {0, 1}
+      (one winner, one idempotent loser).
+    * **Single-signal** — the sweep NEVER signals (it only reconciles
+      rows); the killpg recorder shows exactly ONE ``SIGKILL``, from
+      the stop.
+    * **Consistent final state** — the row ends EXITED; the sweep
+      reports ``alive == 0``.
+
+    Determinism via seams (no sleeps, no global time patches):
+
+    * ``daemon.services.service_tool_manager.get_process_start_time``
+      returns the spawn-true token ⇒ the stop's F1 pre-signal
+      re-verify MATCHES and the real ``SIGKILL`` fires.
+    * ``daemon.tools.service_spawner.get_process_start_time`` returns
+      ``None`` ⇒ the sweep's liveness read says dead ⇒ the sweep
+      ALWAYS attempts ``mark_exited`` (no interleaving where it sees
+      the row as alive and skips).
+    * A ``threading.Barrier(2)`` inside tagged record-and-forward
+      wrappers on each party's repo forces BOTH ``mark_exited`` calls
+      to rendezvous before either UPDATE lands — the deterministic
+      race window. ``BrokenBarrierError`` is tolerated (bounded 2s
+      wait) so a party that never arrives cannot hang the test.
+
+    Wall-clock budget: < 5s (force stop has no grace; barrier bound
+    2s; spawn is a 2s-capped sleep that the SIGKILL reaps early).
+    """
+    import threading
+
+    import daemon.services.service_tool_manager as _stm
+    from daemon.tools import service_spawner as _spawner
+
+    started = await service_tool_manager.start(
+        name="a13_prod_race",
+        argv=SHORT_ARGV,
+        cwd=str(tmp_path),
+        started_by_instance_id="a13_prod_owner",
+        started_by_agent_id="a13_prod_owner",
+    )
+    assert started["status"] == "running"
+    row = svc_repo.get_by_name("a13_prod_race")
+    assert row is not None and row.pid is not None
+    assert row.start_time is not None
+
+    # ── Seams (installed AFTER start — the spawn's real start_time
+    # read must not be faked) ──────────────────────────────────────
+
+    # Stop side: F1 pre-signal re-verify MATCHES ⇒ SIGKILL fires.
+    monkeypatch.setattr(
+        _stm, "get_process_start_time", lambda pid: row.start_time
+    )
+    # Sweep side: scripted dead-read ⇒ sweep always attempts
+    # mark_exited.
+    monkeypatch.setattr(_spawner, "get_process_start_time", lambda pid: None)
+
+    # Record-and-forward killpg at the manager seam (real signals
+    # always delivered — the child dies on schedule).
+    killpg_calls: list[tuple[int, int]] = []
+    _real_killpg = os.killpg
+
+    def _record_and_forward_killpg(pid: int, sig: int) -> None:
+        killpg_calls.append((pid, sig))
+        _real_killpg(pid, sig)
+
+    monkeypatch.setattr(
+        "daemon.services.service_tool_manager.os.killpg",
+        _record_and_forward_killpg,
+    )
+
+    # Tagged record-and-forward mark_exited per party, rendezvousing
+    # on a 2-party barrier (the deterministic race window).
+    barrier = threading.Barrier(2)
+    rowcounts: list[tuple[str, int]] = []
+    _lock = threading.Lock()
+
+    def _make_recorder(tag: str, real):
+        def _record(row_id: int, exit_code=None):  # noqa: ANN001
+            try:
+                barrier.wait(timeout=2.0)
+            except threading.BrokenBarrierError:
+                pass  # bounded fallback — never hang the test
+            n = real(row_id, exit_code)
+            with _lock:
+                rowcounts.append((tag, n))
+            return n
+
+        return _record
+
+    monkeypatch.setattr(svc_repo, "mark_exited", _make_recorder("stop", svc_repo.mark_exited))
+    sweep_repo = ServiceRepo(engine=file_backed_engine)
+    monkeypatch.setattr(
+        sweep_repo, "mark_exited", _make_recorder("sweep", sweep_repo.mark_exited)
+    )
+
+    sweep = ServiceReconciliationService(
+        repo=sweep_repo,
+        interval_seconds=90,
+        enabled_check=None,
+    )
+
+    try:
+        stop_result, sweep_counters = await asyncio.gather(
+            service_tool_manager.stop("a13_prod_race", force=True),
+            sweep.sweep_once(),
+        )
+    finally:
+        # Best-effort teardown — the stop's own SIGKILL usually reaped
+        # the child already; on macOS the freed PID can be recycled
+        # onto an unrelated process before this cleanup runs (EPERM),
+        # which is the documented F1 hazard — tolerate and move on.
+        try:
+            _real_killpg(row.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    # Exactly-one-winner: one rowcount 1, at most one 0 — across BOTH
+    # parties (the barrier guarantees both attempted).
+    assert sorted(n for _, n in rowcounts) == [0, 1], (
+        f"A13 violation: expected exactly one winner + one loser "
+        f"across stop/sweep mark_exited, got {rowcounts!r}"
+    )
+    assert {tag for tag, _ in rowcounts} == {"stop", "sweep"}
+
+    # Single-signal: ONLY the stop signaled (the sweep never signals).
+    assert killpg_calls == [(row.pid, signal.SIGKILL)], (
+        f"A13 violation: expected exactly one SIGKILL from the stop, "
+        f"got {killpg_calls!r}"
+    )
+
+    # Consistent outcomes.
+    assert stop_result["status"] == "exited"
+    assert sweep_counters["alive"] == 0
+
+    # Consistent final state: EXITED, exactly once.
+    final = svc_repo.get_by_name_any_status("a13_prod_race")
+    assert final is not None
+    assert final.status == ServiceStatus.EXITED.value
