@@ -491,6 +491,13 @@ _SECRET_REDACT_RE = re.compile(
 )
 _SECRET_REDACT_SENTINEL: str = "[REDACTED]"
 
+#: Trailing glue (``-``/``.``/``_``) stripped off a matched run and
+#: re-emitted after the sentinel, so run-final punctuation (e.g. a
+#: sentence-final dot after ``key=value.``) survives redaction instead
+#: of being swallowed into ``[REDACTED]``. Glue chars alone are never
+#: secret material, so the trim is leak-free.
+_SECRET_TRAILING_GLUE_CHARS = "-._"
+
 
 def _redact_secrets(text: str) -> str:
     """Replace secret-shaped substrings with :data:`_SECRET_REDACT_SENTINEL`.
@@ -503,10 +510,29 @@ def _redact_secrets(text: str) -> str:
     :data:`JUDGE_EXCERPT_MAX_CHARS` chars away from the full log row
     — the canonical log row already elides request-side secrets via the
     upstream truncation, and the response-side surface is narrower.
+
+    Boundary policy (incident 98b59dd7 review): the secret run ends at
+    the first char outside ``[A-Za-z0-9._\\-]``. Prose separated from
+    the run by whitespace/punctuation is preserved; run-final glue is
+    re-emitted after the sentinel. A run GLUED to prose with no
+    delimiter has an undetectable boundary — every char is class-valid
+    — so the whole run is redacted (safe-by-default; we do not guess
+    where the secret ends). A trailing ``(?!\\w)`` lookahead was
+    evaluated and rejected: no-op for glued ASCII shapes (the run
+    already ends at whitespace/EOL, where the lookahead holds) and it
+    un-redacts Unicode-adjacent matches (backtracking fails the whole
+    pattern, leaking the ASCII secret fragment).
     """
     if not text:
         return text
-    return _SECRET_REDACT_RE.sub(_SECRET_REDACT_SENTINEL, text)
+
+    def _replace(match: "re.Match[str]") -> str:
+        run = match.group(0)
+        stripped = run.rstrip(_SECRET_TRAILING_GLUE_CHARS)
+        glue = run[len(stripped):]
+        return _SECRET_REDACT_SENTINEL + glue
+
+    return _SECRET_REDACT_RE.sub(_replace, text)
 
 
 def _truncate_excerpt(text: str, *, cap: int = JUDGE_EXCERPT_MAX_CHARS) -> str:
@@ -519,7 +545,7 @@ def _truncate_excerpt(text: str, *, cap: int = JUDGE_EXCERPT_MAX_CHARS) -> str:
        LLM that emits 1000 newlines does not stretch the log row).
     2. Strip leading / trailing whitespace.
     3. Truncate to ``cap`` chars; if truncation happened, append an
-       explicit ``" [truncated]"`` tail marker (15 chars including
+       explicit ``" [truncated]"`` tail marker (12 chars including
        the space) so operators can tell the excerpt was cut from an
        excerpt that just happened to end mid-sentence. Mirror of the
        ``"[truncated]"`` marker used by
@@ -532,7 +558,7 @@ def _truncate_excerpt(text: str, *, cap: int = JUDGE_EXCERPT_MAX_CHARS) -> str:
     if len(normalized) <= cap:
         return normalized
     # The trailing marker is included in the cap budget — the marker
-    # itself is 13 chars ("[truncated]" + leading space).
+    # itself is 12 chars ("[truncated]" + leading space).
     tail_marker = " [truncated]"
     keep = max(0, cap - len(tail_marker))
     return normalized[:keep] + tail_marker

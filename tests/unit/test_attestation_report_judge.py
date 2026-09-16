@@ -649,23 +649,6 @@ def _stub_unparsable_then_yes(payload_text: str):
     return _stub, counter
 
 
-def _stub_unparsable_then_yes_no_tracking(payload_text: str):
-    """Same shape but without the counter (for tests that don't care
-    about call count)."""
-
-    async def _stub(config, user_payload, *, timeout_s):
-        if _stub_unparsable_then_yes_no_tracking.calls == 0:
-            _stub_unparsable_then_yes_no_tracking.calls += 1
-            return (payload_text, "fake-quick")
-        return (
-            '{"is_complete_report": true, "reason": "delivered final report"}',
-            "fake-quick",
-        )
-
-    _stub_unparsable_then_yes_no_tracking.calls = 0
-    return _stub
-
-
 def test_judge_async_unparsable_retries_and_succeeds_on_attempt_2(monkeypatch):
     """Retry succeeds: attempt 1 unparsable → attempt 2 parses → ALLOWED.
 
@@ -923,6 +906,67 @@ def test_redact_secrets_preserves_short_tokens():
     # The short 'bearer' is matched but no token-shaped secret is
     # present; the prose shape stays intact (no [REDACTED]).
     assert out == text
+
+
+def test_redact_secrets_preserves_prose_after_hyphen_glued_run():
+    """Hyphen-glued run: prose after whitespace survives redaction.
+
+    The whole hyphen-joined run (``abc-def-ghi-jkl-mnop``) is treated
+    as ONE secret-shaped run — the class deliberately includes
+    ``-``/``.``/``_`` because real tokens (base64url, UUID-ish) contain
+    them; splitting at glue chars would leak real token tails. Prose
+    separated from the run by whitespace IS preserved (98b59dd7
+    review Finding #1).
+    """
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = "bearer abc-def-ghi-jkl-mnop standing in the middle of prose"
+    out = _redact_secrets(text)
+    assert out == "[REDACTED] standing in the middle of prose"
+
+
+def test_redact_secrets_restores_trailing_punctuation_after_secret():
+    """Run-final glue (``-``/``.``/``_``) is re-emitted after the sentinel.
+
+    A secret at the end of a clause (``api_key=<token>.``) used to
+    swallow the sentence-final dot into ``[REDACTED]``; the dot is
+    glue, not secret material, so it is restored after the sentinel
+    (98b59dd7 review Finding #1, dot-joined degradation).
+    """
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = "with api_key=abcdefgh1234567890. Next sentence intact."
+    assert _redact_secrets(text) == "with [REDACTED]. Next sentence intact."
+
+    hyphen = "env token=abcdefgh1234567890- is set here"
+    assert _redact_secrets(hyphen) == "env [REDACTED]- is set here"
+
+
+def test_redact_secrets_glued_no_delimiter_run_redacts_whole_run():
+    """Glued run with NO delimiter → full-run redaction (safe-by-default).
+
+    In ``bearer <token>then_more_text_no_space`` the boundary between
+    secret and prose is UNDETECTABLE — every char is class-valid, so
+    any split point is a guess that could leak a real secret. The
+    whole run is redacted; prose separated from the run by whitespace
+    still survives. Deliberate: do NOT "fix" this by guessing. (A
+    trailing ``(?!\\w)`` lookahead is a verified no-op here — the run
+    already ends at whitespace/EOL where the lookahead holds.)
+    """
+    from daemon.services.attestation_report_judge import _redact_secrets
+
+    text = "bearer abcdefgh1234567890then_more_text_no_space"
+    assert _redact_secrets(text) == "[REDACTED]"
+
+    # Dot/underscore-glued continuations behave the same way.
+    assert (
+        _redact_secrets("bearer abcdefgh1234567890.Then prose keeps going")
+        == "[REDACTED] prose keeps going"
+    )
+    assert (
+        _redact_secrets("bearer abcdefgh1234567890_then_more_prose_words")
+        == "[REDACTED]"
+    )
 
 
 def test_truncate_excerpt_caps_at_max_chars():
