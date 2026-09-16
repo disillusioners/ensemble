@@ -483,6 +483,78 @@ Planner leaned "YES, ship `default_open` follow-up." **OVERRULED.** The `default
 ### Reversibility (architect-confirmed)
 Easy — remove `"service"` from the frozenset; update **THREE** pin tests. Net effect: `service` becomes default-open. Cost: zero code changes, but every existing agent that relied on `tools.allow: ["service", ...]` keeps working. (Nothing breaks.)
 
+### OVERRIDE 2026-09-16 (user decision) — D4 REVERSED
+
+> **OVERRIDE 2026-09-16 (user decision): `service` moved OUT of
+> `PRIVILEGED_TOOL_CATEGORIES` — default-enabled for bash/proc-capable
+> agents.**
+>
+> **Rationale**: user directive; security trade-off acknowledged
+> (empty-allow agents gain process-group authority by default;
+> kill-switch remains the global off).
+>
+> **Scope** (this commit family, branch `feature/service-meta-grant` off
+> 282c20b3):
+>
+> 1. `daemon/tools/_tool_registry.py` — restore
+>    `PRIVILEGED_TOOL_CATEGORIES` to the trio
+>    `{system_upgrade, system-log, ens-db}`. Comment block rewritten
+>    to describe the trio accurately; OVERRIDE note added pointing
+>    at this section.
+> 2. THREE pin tests flipped back to the trio (same commit per
+>    D18/A14 same-PR rule):
+>    * `tests/unit/tools/test_upgrade_registration.py` —
+>      `test_privileged_categories_is_exactly_three`.
+>    * `tests/unit/tools/test_attestation_registration.py` —
+>      `test_attestation_not_in_privileged_categories`.
+>    * `tests/integration/test_maintenancer_spawn_resolves_tools.py` —
+>      `TestPrivilegedCategoryRegistryShape.
+>      test_privileged_categories_contains_three_entries`.
+> 3. `tests/unit/tools/test_service_registration.py` — SC-6 flips to
+>    default-GRANT; `TestSC6DefaultDenyBehavior` renamed to
+>    `TestSC6DefaultGrantBehavior`; the INNATE ∩ PRIV = ∅ negative
+>    pin kept green (service is no longer privileged; the pin is
+>    forward-looking against any future re-introduction or new
+>    default-deny category sneaking into the innate-skill map).
+> 4. `tests/integration/test_service_tool_flag_off_byte_identical.py`
+>    — case (b) flipped: list-presence is restored under the OFF
+>    flag (call-time disable, not list-absence); the zero-side-
+>    effects invariant is preserved. Cases (a, c, d, e, f, g, h)
+>    UNCHANGED — runtime OFF contracts (disabled markers, zero DB
+>    writes) are unaffected by the override.
+> 5. `daemon/tools/instance.py` `expand_allow_for_innate_skills` —
+>    unchanged. Reads `PRIVILEGED_TOOL_CATEGORIES` dynamically; the
+>    2 behavioral expander pins from commit 62003dcb
+>    (`tests/test_tool_filter.py`) still pass.
+> 6. `docs/service-tool.md` — granting section rewritten (§1 access
+>    model, §5 kill-switch, §6 verification recipe).
+> 7. Per-agent `meta.json` files — `"service"` appended to
+>    `tools.allow` for every bash/proc-capable agent (22 agents;
+>    full table in the branch's final report). Default-universe
+>    agents (watcher) get service via the default-open universe
+>    automatically — no meta change needed. Agents with no bash/proc
+>    in effective allow are untouched. Agents whose `tools.deny`
+>    contains BOTH bash AND proc are untouched (none currently).
+>
+> **Acceptance**: `tools/dev/verify_service_default_open.py`
+> (committed harness, per-agent) computes each agent's effective
+> service reach via the real `create_instance_tools` /
+> `resolve_tool_filter` path in two subprocesses — BEFORE (ref
+> 282c20b3 worktree) and AFTER (working tree) — and asserts:
+>
+>     delta == 5  iff bash OR proc in effective allow
+>     delta == 0  otherwise
+>                 (default-universe + deny-both edge flagged, not failed)
+>
+> **Architecture history preservation**: this override note is the
+> ONLY mutation to §D4. The `architecture-recommendation.md` (the
+> architect's original ADR) is NOT rewritten — the override is a
+> user-level reversal, not a re-derivation of the architecture. The
+> override stands as a dated amendment that supersedes D4 Option A
+> in effect; the underlying analysis (Option A's blast radius, the
+> triple-pin net, etc.) is preserved verbatim above as historical
+> record.
+
 ---
 
 ## D5 — Abuse guards

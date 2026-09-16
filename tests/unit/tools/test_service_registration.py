@@ -1,4 +1,4 @@
-"""Registration + default-deny tests for the ``service`` tool category
+"""Registration + default-grant tests for the ``service`` tool category
 (service-tool Phase 1.C, tasks 1.C.7 SC-6 acceptance + the 10-step
 registration checklist).
 
@@ -105,10 +105,13 @@ class TestStaticRegistrationChecklist:
         assert "create_service_tools(" in source
 
     def test_category_is_privileged_d4_option_a(self) -> None:
-        """D4 Option A: the category is in the default-deny union —
-        the exact-equality side is pinned in the three pin files;
-        this asserts the membership side."""
-        assert SERVICE_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
+        """OVERRIDE 2026-09-16: ``service`` is NO LONGER in
+        ``PRIVILEGED_TOOL_CATEGORIES`` (D4 reversed by user directive —
+        default-grant; see decisions.md §D4 override note). The
+        exact-equality side is pinned in the three pin files; this
+        asserts the membership side of the REVERSAL (i.e. the
+        negative: service is NOT in the trio)."""
+        assert SERVICE_CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
 
 
 # ── 3.B.3b innate-skill ∩ privileged isolation pin (architect rider) ──────
@@ -135,7 +138,10 @@ class TestInnateSkillPrivilegedIsolation:
     this worth pinning: any future agent declaring
     ``innate_skills: ["service-tools-skill"]`` would default-grant
     system-process-spawning authority without ever naming ``service``
-    in its ``tools.allow``.
+    in its ``tools.allow``. The 2026-09-16 override REMOVED ``service``
+    from the privileged set, so the negative pin is the structural
+    invariant against any FUTURE re-introduction (or against any other
+    future default-deny category sneaking into the innate-skill map).
 
     The pin screams on any such future mapping — the regression
     printout names the offending category(ies) AND the current
@@ -264,7 +270,7 @@ class TestLiveToolBehavior:
         assert create_service_tools(None, None) == []
 
 
-# ── SC-6 behavioral: default-deny vs explicit allow (REAL filter path) ──────
+# ── SC-6 behavioral: default-grant (override 2026-09-16) vs explicit allow (REAL filter path) ──────
 
 
 def _stage_synthetic_agent(
@@ -316,12 +322,13 @@ def _build_instance_tools(agent_id: str) -> dict[str, object]:
     return {getattr(t, "name", "?"): t for t in tools}
 
 
-class TestSC6DefaultDenyBehavior:
+class TestSC6DefaultGrantBehavior:
     def test_allow_service_resolves_all_five(
         self, tmp_path: Path, registry_for
     ) -> None:
         """tools.allow=["service"] resolves ALL five tools through the
-        REAL create_instance_tools() path."""
+        REAL create_instance_tools() path. Explicit-grant path —
+        unchanged by the override."""
         agents_dir = _stage_synthetic_agent(
             tmp_path, "syn-svc-allow", {"allow": [SERVICE_CATEGORY]}
         )
@@ -333,45 +340,77 @@ class TestSC6DefaultDenyBehavior:
             f"tools.allow=[service] must resolve all 5, got {sorted(got)}"
         )
 
-    def test_default_configured_agent_resolves_zero_service_tools(
+    def test_default_universe_resolves_all_five(
         self, tmp_path: Path, registry_for
     ) -> None:
-        """SC-6 core: a default-configured agent (allow list WITHOUT
-        service) resolves ZERO service_* tools — the behavioral effect
-        of the D4 Option A frozenset add."""
-        _stage_synthetic_agent(
-            tmp_path,
-            "syn-svc-none",
-            {"allow": ["bash", "filesystem", "time", "help"]},
-        )
+        """SC-6 core (override 2026-09-16): a default-universe agent
+        (empty allow / no tools config) gets service via the
+        default-open universe — the override made ``service``
+        default-grant for ALL agents.
+
+        NOTE: the meta-grant IFF rule (``bash OR proc in effective
+        toolset → append ``service`` to allow``) is enforced via the
+        meta files, not the filter — this test verifies the filter-
+        level default-grant semantics, NOT the meta-grant policy. The
+        meta-grant policy is verified by
+        ``tools/dev/verify_service_default_open.py`` (per-agent harness)
+        and by the metas under ``agents/``.
+        """
+        # Empty allow = true default universe. (A non-empty allow with
+        # bash/proc is the meta-grant IFF case — covered by the
+        # per-agent harness, NOT the filter.)
+        _stage_synthetic_agent(tmp_path, "syn-svc-default", {"allow": []})
         registry_for(tmp_path / "agents")
-        by_name = _build_instance_tools("syn-svc-none")
+        by_name = _build_instance_tools("syn-svc-default")
         got = _service_names(by_name)
-        assert got == set(), (
-            f"default-configured agent resolved service_* tools {sorted(got)} "
-            f"— the PRIVILEGED_TOOL_CATEGORIES default-deny seam regressed"
+        assert got == SERVICE_TOOL_NAMES, (
+            f"default-universe agent resolved service_* tools "
+            f"{sorted(got)} — the override 2026-09-16 default-grant "
+            f"seam regressed (want all 5, got {len(got)})"
         )
 
-    def test_empty_allow_resolves_zero_service_tools(
+    def test_non_bash_proc_agent_with_explicit_service_still_grants(
         self, tmp_path: Path, registry_for
     ) -> None:
-        """R-SR16 empty-allow path: "everything non-privileged" must
-        NOT include service (watcher-like agent)."""
+        """Explicit-grant still works for non-bash/non-proc agents
+        (no auto-grant by category; explicit allow=["service"] is the
+        mechanism when neither bash nor proc is reachable)."""
+        _stage_synthetic_agent(
+            tmp_path,
+            "syn-svc-nobash-explicit",
+            {"allow": [SERVICE_CATEGORY, "filesystem", "time", "help"]},
+        )
+        registry_for(tmp_path / "agents")
+        by_name = _build_instance_tools("syn-svc-nobash-explicit")
+        got = _service_names(by_name)
+        assert got == SERVICE_TOOL_NAMES, (
+            f"non-bash/proc agent with explicit service allow resolved "
+            f"{sorted(got)}; want all 5 (explicit-grant path)"
+        )
+
+    def test_empty_allow_resolves_all_five_via_default_universe(
+        self, tmp_path: Path, registry_for
+    ) -> None:
+        """Default-universe (empty allow): ``service`` is in the
+        default-open universe now (override 2026-09-16) — every
+        default-configured agent gets all five service_* tools."""
         _stage_synthetic_agent(tmp_path, "syn-svc-empty", {"allow": []})
         registry_for(tmp_path / "agents")
         by_name = _build_instance_tools("syn-svc-empty")
-        assert _service_names(by_name) == set(), (
-            "empty-allow agent default-granted the privileged service "
-            "category — D4 Option A / R-SR16 regression"
+        got = _service_names(by_name)
+        assert got == SERVICE_TOOL_NAMES, (
+            f"empty-allow agent default-grant failed; got {sorted(got)} — "
+            f"the override 2026-09-16 default-grant seam regressed"
         )
-        # …but the agent still gets ordinary categories (scoped deny).
+        # The agent still gets ordinary categories (sanity check).
         assert "bash" in by_name or "time" in by_name
 
-    def test_no_tools_config_at_all_resolves_zero_service_tools(
+    def test_no_tools_config_at_all_resolves_all_five(
         self, tmp_path: Path, registry_for
     ) -> None:
-        """The other default-allow path (tools config entirely ABSENT)
-        — the strip must apply there too (defense-in-depth)."""
+        """The no-tools-config path (tools config entirely ABSENT)
+        resolves all five service_* tools via default-universe
+        default-grant."""
         _stage_synthetic_agent(tmp_path, "syn-svc-no-tools", None)
         import json
 
@@ -381,8 +420,32 @@ class TestSC6DefaultDenyBehavior:
         meta_path.write_text(json.dumps(meta))
         registry_for(tmp_path / "agents")
         by_name = _build_instance_tools("syn-svc-no-tools")
-        assert _service_names(by_name) == set(), (
-            "no-tools-config agent default-granted the privileged "
-            "service category — the _strip_privileged_category_tools "
-            "defense-in-depth regressed"
+        got = _service_names(by_name)
+        assert got == SERVICE_TOOL_NAMES, (
+            f"no-tools-config agent default-grant failed; got {sorted(got)} "
+            f"— the override 2026-09-16 default-grant seam regressed"
+        )
+
+    def test_control_unprivileged_category_unaffected(
+        self, tmp_path: Path, registry_for
+    ) -> None:
+        """Control: a non-privileged category (``filesystem``) is
+        unaffected by the override — its default-grant semantics were
+        unchanged. Empty-allow agent gets filesystem tools."""
+        # Empty allow = true default universe — filesystem category
+        # is non-privileged and should be present.
+        _stage_synthetic_agent(tmp_path, "syn-svc-ctrl", {"allow": []})
+        registry_for(tmp_path / "agents")
+        by_name = _build_instance_tools("syn-svc-ctrl")
+        filesystem_tools = [
+            n for n in by_name
+            if n in {
+                "list_directory", "read_file", "glob_files",
+                "grep_files", "edit_file", "write_file",
+            }
+        ]
+        assert filesystem_tools, (
+            "filesystem category control regressed — the override "
+            "should not have touched non-privileged categories "
+            f"(got {sorted(by_name)[:5]}...)"
         )

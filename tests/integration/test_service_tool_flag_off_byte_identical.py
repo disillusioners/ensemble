@@ -1,16 +1,22 @@
-"""Service-tool Phase 3.A.7 — flag-OFF byte-identical integration tests.
+"""Service-tool Phase 3.A.7 — flag-OFF zero-side-effect integration tests.
 
-Proves the ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` state is byte-identical
-to pre-Phase-1 behavior at every layer:
+Proves the ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` state has ZERO side
+effects at every layer — runtime gates short-circuit to disabled
+markers without touching the DB or doing any work:
 
 * **(a)** Boot probe line shows ``service_tool_enabled=False`` —
   the EXACT format pinned at ``daemon/config.py:4004-4010``.
-* **(b)** The ``service_*`` tool names are PRIVILEGED-category
-  (D4 Option A — the ``service`` key sits in
-  ``PRIVILEGED_TOOL_CATEGORIES``). A default-allow / empty-allow
-  agent NEVER receives any ``service_*`` tool — the privilege-strip
-  is identical to ``system_upgrade``, ``system-log``, and
-  ``ens-db``. SC-6 negative.
+* **(b)** Under user override 2026-09-16 (D4 reversed), ``service``
+  is NO LONGER in ``PRIVILEGED_TOOL_CATEGORIES`` — it is
+  default-enabled for any agent whose effective toolset can include
+  ``bash`` or ``proc``. Therefore a default-agent (bash-capable)
+  now SEES the five ``service_*`` tools in its resolved tool list
+  EVEN when ``service_tool_enabled=False``. The OFF contract is
+  now CALL-TIME DISABLE: tool calls return the disabled marker
+  (``{"status": "disabled", ...}`` shape), with zero DB rows
+  written, zero probe/sweep effects. The list-absence behavior is
+  gone — that was the D4 Option A privilege-strip contract. The
+  zero-side-effect invariant is what survives the override.
 * **(c)** The lifespan mount (``daemon/api.py`` ``lifespan``
   context manager) does NOT start ``ServiceReconciliationService``
   when the flag is OFF — it logs ``DISABLED`` and skips the
@@ -28,6 +34,13 @@ to pre-Phase-1 behavior at every layer:
   is a no-op when ``enabled=False`` — returns
   ``{"status": "disabled"}`` WITHOUT touching the DB (no
   ``mark_exited`` write, no row transition).
+* **(g)** ``ServiceToolManager.list_all()`` returns the disabled
+  marker shape when ``enabled=False`` — NO DB query, NO
+  ``mark_exited`` write, NO inline reconciliation, NO liveness
+  probes.
+* **(h)** ``ServiceToolManager.logs()`` returns the disabled
+  marker text when ``enabled=False`` — NO DB query, no row
+  lookup.
 
 Anti-duplication: the 2.A.6 zero-query gate (``sweep_once``
 returns the disabled-shape counters with NO DB queries when
@@ -35,9 +48,9 @@ returns the disabled-shape counters with NO DB queries when
 ``tests/unit/services/test_service_reconciliation.py`` —
 this file does NOT duplicate it. Instead, it exercises the
 surfaces ABOVE the gate: the resolver + boot probe format, the
-privilege-strip in the resolved tool list, the lifespan mount,
-the schema flag-independence, and the manager.status
-inline-reconciliation gate.
+list-presence assertion (case b under the override), the lifespan
+mount, the schema flag-independence, and the manager.* inline-
+reconciliation gates.
 
 All cases carry ``@pytest.mark.integration`` (addopts deselects by
 default — invoke with ``pytest -m integration``).
@@ -168,41 +181,53 @@ def test_boot_probe_format_when_off(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Case (b): service_* tools are PRIVILEGED; default-allow agent gets zero
+# Case (b): service_* tools are NOT privileged under override 2026-09-16;
+# default-agent resolves them in its tool list even when OFF (call-time
+# disable, not list-absence)
 # ─────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-def test_service_category_is_privileged_and_default_stripped() -> None:
-    """Case (b): ``service_*`` tools are PRIVILEGED (D4 Option A) —
-    a default-allow agent resolves ZERO service tools.
+def test_service_category_is_default_enabled_not_stripped() -> None:
+    """Case (b) — override 2026-09-16: ``service`` is no longer in
+    ``PRIVILEGED_TOOL_CATEGORIES`` (D4 reversed by user directive —
+    see ``.agents/shared/planning/service-tool/decisions.md`` §D4
+    override note). The list-presence contract is now:
 
-    The five ``service_*`` tools are listed in KNOWN_TOOL_NAMES (the
-    source-discovered universe — merged with KNOWN_TOOL_NAMES for
-    frozen-binary safety). The category is registered in
-    ``PRIVILEGED_TOOL_CATEGORIES``. The privilege-strip
-    (``_strip_privileged_category_tools`` and the
-    ``resolve_tool_filter`` empty-allow branch in
-    ``daemon/tools/instance.py``) guarantees that a default-allow
-    agent (no explicit ``tools.allow`` entry) NEVER sees any
-    ``service_*`` tool — the SC-6 negative.
+    * ``service_*`` tools APPEAR in a default-agent's resolved tool
+      list (the override made them default-enabled for bash/proc-
+      capable agents; default-universe agents get them via the
+      default-open universe).
+    * The ``_strip_privileged_category_tools`` privilege-strip no
+      longer drops the service category — only ``system_upgrade``,
+      ``system-log``, and ``ens-db`` are stripped.
+    * The runtime OFF contract (case c–h) is call-time disable: every
+      service_* tool call returns the disabled marker shape with
+      zero DB side effects — NOT list-absence.
 
-    This is byte-identical to the privilege-strip applied to
-    ``system_upgrade``, ``system-log``, and ``ens-db``.
+    The five ``service_*`` tools are still listed in
+    ``KNOWN_TOOL_NAMES`` (the source-discovered universe — merged
+    with ``KNOWN_TOOL_NAMES`` for frozen-binary safety), still
+    registered in ``CATEGORY_MODULES``, and still discoverable via
+    ``discover_all_tool_names()``.
     """
-    # (1) The service category is in PRIVILEGED_TOOL_CATEGORIES.
-    assert "service" in PRIVILEGED_TOOL_CATEGORIES, (
-        "service category MUST be in PRIVILEGED_TOOL_CATEGORIES — "
-        "D4 Option A contract"
+    # (1) The service category is NOT in PRIVILEGED_TOOL_CATEGORIES
+    # (override 2026-09-16 — D4 reversed).
+    assert "service" not in PRIVILEGED_TOOL_CATEGORIES, (
+        "service category MUST NOT be in PRIVILEGED_TOOL_CATEGORIES — "
+        "user override 2026-09-16 reversed D4 Option A (default-enabled). "
+        "If this fails, the registry flip in "
+        "daemon/tools/_tool_registry.py regressed."
     )
 
-    # (2) The service category is registered in CATEGORY_MODULES.
+    # (2) The service category is still registered in CATEGORY_MODULES.
     assert "service" in CATEGORY_MODULES, (
-        "service category MUST be in CATEGORY_MODULES"
+        "service category MUST still be in CATEGORY_MODULES "
+        "(registration unchanged by the override)"
     )
     assert CATEGORY_MODULES["service"] == "daemon.tools.service_tools"
 
-    # (3) All five ``service_*`` tools are in KNOWN_TOOL_NAMES.
+    # (3) All five ``service_*`` tools are still in KNOWN_TOOL_NAMES.
     for name in (
         "service_start",
         "service_stop",
@@ -214,10 +239,7 @@ def test_service_category_is_privileged_and_default_stripped() -> None:
             f"{name} must be in KNOWN_TOOL_NAMES (the static fallback)"
         )
 
-    # (4) Source-discovered names must include all five — the
-    # bidirectional-drift pin. ``discover_all_tool_names`` returns the
-    # static union (the source scan is canonical where present;
-    # KNOWN_TOOL_NAMES is the frozen-binary fallback).
+    # (4) Source-discovered names still include all five.
     discovered = discover_all_tool_names()
     for name in (
         "service_start",
@@ -232,10 +254,12 @@ def test_service_category_is_privileged_and_default_stripped() -> None:
             f"universes drift apart"
         )
 
-    # (5) ``_strip_privileged_category_tools`` drops the service
-    # category from a default-allow tool list — the
-    # ``daemon.tools.instance`` privilege-strip is the SC-6 negative
-    # pin.
+    # (5) ``_strip_privileged_category_tools`` no longer strips
+    # ``service`` — it strips ONLY the daemon-internal authority trio
+    # (``system_upgrade``, ``system-log``, ``ens-db``). The override
+    # moved service out of the trio, so a default-agent's resolved
+    # tool list includes service_* tools under the OFF flag (call-
+    # time disable, not list-absence).
     from daemon.tools.instance import _strip_privileged_category_tools
     fake_tools = [
         type("FakeTool", (), {"_tool_category": "service", "name": "service_start"}),
@@ -244,10 +268,23 @@ def test_service_category_is_privileged_and_default_stripped() -> None:
         type("FakeTool", (), {"_tool_category": "system-log", "name": "ens_system_log_list"}),
     ]
     stripped = _strip_privileged_category_tools(fake_tools)
-    # Two ``service_*`` tools + one ``system-log`` (privileged) dropped;
-    # only the ``filesystem`` tool survives.
-    assert len(stripped) == 1
-    assert getattr(stripped[0], "_tool_category") == "filesystem"
+    # Two ``service_*`` tools SURVIVE (no longer privileged); one
+    # ``system-log`` (privileged) dropped; only the privileged
+    # ``system-log`` tool is stripped — filesystem + service pass
+    # through.
+    surviving_categories = {
+        getattr(t, "_tool_category") for t in stripped
+    }
+    assert "service" in surviving_categories, (
+        "service tools MUST survive _strip_privileged_category_tools "
+        "under override 2026-09-16 (service is no longer privileged)"
+    )
+    assert "system-log" not in surviving_categories, (
+        "system-log tools MUST still be stripped (the trio stays "
+        "default-deny)"
+    )
+    # filesystem is non-privileged → survives (control).
+    assert "filesystem" in surviving_categories
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -752,31 +789,32 @@ def test_manager_logs_disabled_when_off(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Sanity — PRIVILEGED_TOOL_CATEGORIES is the same set as
-# system_upgrade + system-log + ens-db + service (3-site pin
-# documented in daemon/tools/_tool_registry.py:148-161)
+# Sanity — PRIVILEGED_TOOL_CATEGORIES is back to the trio
+# (system_upgrade + system-log + ens-db) after override 2026-09-16.
+# The 3-site pin lives in tests/unit/tools/test_upgrade_registration.py,
+# tests/unit/tools/test_attestation_registration.py, and
+# tests/integration/test_maintenancer_spawn_resolves_tools.py.
 # ─────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 def test_privileged_category_set_is_pinned() -> None:
     """Sanity: the 3-site pin at ``PRIVILEGED_TOOL_CATEGORIES``
-    is intact — ``service`` joined the union without bumping the
-    count.
+    is intact — ``service`` was REMOVED from the union by user
+    override 2026-09-16 (D4 reversed; see decisions.md §D4
+    override note).
 
     The 3-site pin lives in
     ``tests/unit/tools/test_upgrade_registration.py``,
     ``tests/unit/tools/test_attestation_registration.py``, and
     ``tests/integration/test_maintenancer_spawn_resolves_tools.py``
-    (the SAME-PR RULE per D18 / A14). This integration-layer
-    sanity pin duplicates the set check to ensure the OFF flag
-    test runs in a category universe where ``service`` is
-    structurally equivalent to ``system_upgrade`` — the
-    privilege-strip applies symmetrically.
+    (the SAME-PR RULE per D18 / A14). This integration-layer sanity
+    pin duplicates the set check to ensure the OFF flag test runs in
+    a category universe where the trio is the canonical set.
     """
     assert PRIVILEGED_TOOL_CATEGORIES == frozenset(
-        {"system_upgrade", "system-log", "ens-db", "service"}
+        {"system_upgrade", "system-log", "ens-db"}
     ), (
-        f"PRIVILEGED_TOOL_CATEGORIES drifted from the leader-ratified "
-        f"set; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
+        f"trio; got {PRIVILEGED_TOOL_CATEGORIES}"
     )

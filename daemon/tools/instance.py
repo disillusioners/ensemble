@@ -4716,12 +4716,13 @@ Returns:
     tools.extend(ens_db_tool_list)
 
     # ── service tools (service-tool Phase 1, 1.C.5) — detached process management ──
-    # Privileged category (D4 Option A): in PRIVILEGED_TOOL_CATEGORIES —
-    # never default-granted; an agent reaches service_* ONLY via an
-    # explicit tools.allow entry naming "service". Manager dereferenced
-    # at CALL time (the factory tolerates a None-stub manager for the
-    # loader warm-list). Decorator-only registration is SILENTLY
-    # INVISIBLE — the extend below is the third step of the
+    # Default-grant per override 2026-09-16
+    # (.agents/shared/planning/service-tool/decisions.md §D4 — D4
+    # Option A reversed; service REMOVED from PRIVILEGED_TOOL_CATEGORIES);
+    # bash/proc-capable agents receive the tools via meta-grant IFF.
+    # Manager dereferenced at CALL time (the factory tolerates a None-stub
+    # manager for the loader warm-list). Decorator-only registration is
+    # SILENTLY INVISIBLE — the extend below is the third step of the
     # three-step registration seam (decorator + registry entry +
     # construction — all three required).
     service_tool_list = create_service_tools(
@@ -4773,10 +4774,11 @@ Returns:
 def _strip_privileged_category_tools(tools: list[Any]) -> list[Any]:
     """Strip default-deny categories from a default-allow (unfiltered) list.
 
-    BEHAVIORAL criterion (rewritten per D4 Option A, 2026-09-15):
-    categories in ``PRIVILEGED_TOOL_CATEGORIES`` (today:
-    ``system_upgrade``, ``system-log``, ``ens-db``, ``service``) are
-    never default-granted — an agent reaches them ONLY through an
+    BEHAVIORAL criterion (trio as of override 2026-09-16;
+    see .agents/shared/planning/service-tool/decisions.md §D4 —
+    D4 Option A reversed, service REMOVED): categories in
+    ``PRIVILEGED_TOOL_CATEGORIES`` (today: ``system_upgrade``,
+    ``system-log``, ``ens-db``) are never default-granted — an agent reaches them ONLY through an
     explicit ``tools.allow`` entry naming the category or one of its
     tools. The default-allow paths below (no tools config at all, or an
     empty allow+deny pair — e.g. ``watcher``) would otherwise

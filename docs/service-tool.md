@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-09-15 |
-| **Status** | As-built — operator/ops documentation for the `service` tool category (v1) |
-| **Audience** | Daemon operators; agents holding `tools.allow=["service"]` |
+| **Date** | 2026-09-15 (initial); **2026-09-16 (override — D4 reversed)** |
+| **Status** | As-built under default-grant (override 2026-09-16) — operator/ops documentation for the `service` tool category (v1) |
+| **Audience** | Daemon operators; agents holding `bash`/`proc` (default grant) or `tools.allow=["service"]` (explicit grant) |
 | **Architecture invariant** | [`docs/architecture/instance-lifecycle.md`](architecture/instance-lifecycle.md) → *The invariant* (why services are kill-exempt) |
 | **Plan** | `.agents/shared/planning/service-tool/plan-overview.md` (D1–D7 decisions, F13–F22 dispositions) |
 
@@ -12,7 +12,7 @@
 
 ## 1. What this feature is
 
-The `service` tool category lets an opted-in agent start long-lived processes
+The `service` tool category lets an agent start long-lived processes
 (dev servers, databases, watchers) that:
 
 1. **live outside instance lifecycle** — instance termination, cancellation,
@@ -29,9 +29,35 @@ Tool surface (5 tools, name-keyed, documented per-tool via `tool_help` /
 `not_found` / `pid_recycled` / `cap_exceeded` / `disabled` / `invalid_name` /
 `invalid_argv` / `name_in_use` / `spawn_failed`.
 
-Access model: `service` is a member of `PRIVILEGED_TOOL_CATEGORIES`
-(default-closed) — no agent sees the tools without an explicit
-`tools.allow=["service"]` in its `meta.json` (decision D4, Option A).
+### Access model — default-grant (override 2026-09-16)
+
+As of override 2026-09-16 (D4 reversed by user directive — see
+`.agents/shared/planning/service-tool/decisions.md` §D4 override note):
+
+* **Default-grant** — `service` is **not** in `PRIVILEGED_TOOL_CATEGORIES`.
+  Every agent whose **effective** toolset (post allow-expansion, post
+  deny-strip) can include `bash` OR `proc` is granted the 5 `service_*`
+  tools. Empty/absent `tools.allow` (default-universe agents) also
+  receive the 5 tools via the default-open universe.
+* **Meta-grant IFF policy** — the meta-grant is enforced via per-agent
+  `meta.json` files: bash/proc-capable agents have `"service"` appended
+  to their `tools.allow`. The filter does NOT auto-grant service when
+  bash/proc is present — meta files carry the entry. Verified by
+  `tools/dev/verify_service_default_open.py` (per-agent harness).
+* **Per-agent opt-out** — set `tools.deny=["service"]` in the agent's
+  `meta.json`. The agent keeps bash/proc but loses the 5 `service_*`
+  tools.
+* **Global kill-switch** — `ENSEMBLE_SERVICE_TOOL_ENABLED=0` flips every
+  service tool call to the disabled marker shape (`{"status": "disabled",
+  ...}`) regardless of allow/deny — see §5.
+
+Before the override (D4 Option A, 2026-09-15), `service` was a member of
+`PRIVILEGED_TOOL_CATEGORIES` (default-closed, explicit `tools.allow`
+only). The override reversed that decision; the privilege-strip in
+`daemon/tools/instance.py` (`_strip_privileged_category_tools` and the
+`resolve_tool_filter` empty-allow branch) still strips the daemon-
+internal authority trio (`system_upgrade`, `system-log`, `ens-db`)
+unchanged — only `service` moved out.
 
 ---
 
@@ -139,15 +165,27 @@ The same boot also logs the reconcile service's state from the api lifespan:
 | **Activate the feature itself** | **REBUILD + restart** | First deployment only |
 
 Once activated, the code is in the binary permanently; the kill-switch merely
-gates behavior at runtime. OFF-state semantics (verified): the
-`ServiceToolManager` gate closes (every tool call returns a structured
-`{"status": "disabled", ...}` shape), the `ServiceReconciliationService` never
-starts, and `service_*` tools are stripped from every agent's resolved tool
-list (privilege-strip, same mechanism as the `system_upgrade` precedent). The
-`service_tracking` schema still applies — flipping back ON needs **no**
-migration replay. Note for hot-unwind: services already running when the switch
-goes OFF keep running as unmanaged OS processes (nothing signals them; there is
-no auto-reconcile while OFF).
+gates behavior at runtime. OFF-state semantics (verified under the 2026-09-16
+override — `service` is no longer privileged, so list-presence survives the
+OFF flag):
+
+* The `ServiceToolManager` gate closes — every tool call returns the
+  structured disabled shape (`{"status": "disabled", ...}`).
+* The `ServiceReconciliationService` never starts.
+* The 5 `service_*` tools REMAIN in the agent's resolved tool list
+  (override 2026-09-16 — they were previously stripped under D4 Option A).
+  The OFF contract is now **call-time disable, not list-absence**: tool
+  calls return the disabled marker, with zero DB rows written, zero
+  probe/sweep effects.
+* The `service_tracking` schema still applies — flipping back ON needs
+  **no** migration replay.
+* Note for hot-unwind: services already running when the switch goes OFF
+  keep running as unmanaged OS processes (nothing signals them; there is
+  no auto-reconcile while OFF).
+
+For per-agent opt-out (instead of the global kill-switch), set
+`tools.deny=["service"]` in the agent's `meta.json`. The agent keeps
+bash/proc but loses the 5 `service_*` tools at resolve-time.
 
 ---
 
@@ -155,9 +193,11 @@ no auto-reconcile while OFF).
 
 End-to-end proof of the feature's one-sentence acceptance (plan SC-2):
 
-1. **Start a service** via an allow-listed agent (`tools.allow=["service"]`)
-   calling `service_start` (e.g. a long sleep process). Confirm the tool result
-   carries `status: "running"`, a `pid`, and a `start_time`.
+1. **Start a service** via a bash/proc-capable agent (default grant
+   under override 2026-09-16 — every worker / coder / tester / etc.
+   agent qualifies) calling `service_start` (e.g. a long sleep
+   process). Confirm the tool result carries `status: "running"`, a
+   `pid`, and a `start_time`.
 2. **Terminate that instance** (terminate cascade). The instance dies; the
    service must not.
 3. **Verify the OS process SURVIVES**: `ps -p <pid>` still lists it, and
