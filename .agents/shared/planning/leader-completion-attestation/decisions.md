@@ -1674,7 +1674,7 @@ The `*_marker_judge*` event names and the bare `leader_completion_gate_judge` ro
 - **(e) `noqa: BLE001` justification — VERIFIED.** Every BLE001 suppression in the fused region carries an explanatory note (kill-switch resolver fault / wrapper-layer fault / F-B fail-open seam iv); pinned by `test_attestation_stage3_census.py::TestR5R6CensusTriggerPlumbingDeleted::test_noqa_ble001_comments_justified_in_fused_region`.
 
 ### Census (deleted-code negative pins)
-`tests/unit/test_attestation_stage3_census.py` (22 tests): flip constant, legacy judge entry points + helpers + events, R1 field, R2 config keys + decide signature, R3/R4 branches, R5/R6 fields + constants, scanner-catalog SURVIVAL pins, ledger-(c) seam pins — any resurrection is loud.
+`tests/unit/test_attestation_stage3_census.py` (23 tests; 22 at the retirement commit + 1 added in the review round — the bare `leader_completion_gate_judge_error` suffix-variant pin, see §10 of the retirement report): flip constant, legacy judge entry points + helpers + events, R1 field, R2 config keys + decide signature, R3/R4 branches, R5/R6 fields + constants, scanner-catalog SURVIVAL pins, ledger-(c) seam pins — any resurrection is loud.
 
 ### Family test reconciliation (SQLite lane)
 Baseline 940 collected / 64 files → post-retirement: unit 671 green (incl. +22 census, −~40 legacy-judge/legacy-field tests, re-contracted classes throughout), integration 214 green / 31 skipped / 1 pre-existing hang (see report), migration 18, probes 2. Arithmetic + per-file detail: `stage3-retirement-report.md`.
@@ -1682,3 +1682,5 @@ Baseline 940 collected / 64 files → post-retirement: unit 671 green (incl. +22
 ### Pre-existing issues found (NOT introduced here)
 - `tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge` HANGS (asyncio selector wedges past the pytest-timeout thread dump) at BASELINE (f7588291, zero edits) in this worktree — pre-existing; excluded from the family matrix and left for the tester lane.
 - resolver-unification.md §2.2 D10 claim ("the marker scan never runs today, gate.py:1101") was WRONG about the pre-retirement gate (both f2611f07 and f7588291 scanned the conditional-off branch, log-only); the plan's D10 mirror is now literally true post-R4 (the scan is skipped). Recorded here so nobody "fixes" it back.
+
+- Backlog: council doc-pass suggestions 5–8 (2026-09-17) deferred by council decision — not folded in the 7089e73b follow-ups.

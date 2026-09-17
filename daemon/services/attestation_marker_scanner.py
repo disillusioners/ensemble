@@ -61,7 +61,7 @@ Marker hit does NOT modify the gate's primary decision value. The
 ``Decision`` enum is unchanged. Stage 3 (R6): the marker scan emits
 the additive signal fields on :class:`GateDecision`
 (``marker_hit``, ``marker_terms``) that the activation predicate
-consumes; the retired ``marker_path`` route enum and the
+consumes; the retired route enum and the
 (a)/(b)/(c)/(d) judge-routing block were deleted with their call
 sites — the fused block owns the verdict mapping (allow / allow+hint
 / deny+nudge / terminal_after_bound; decisions.md D-RES4).
