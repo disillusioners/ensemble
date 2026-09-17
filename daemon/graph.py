@@ -9276,6 +9276,83 @@ def _resolve_watcher_model(
     return (getattr(llm_cfg, "model", "") or "").strip()
 
 
+def _coerce_meta_int(
+    watcher_config: dict,
+    key: str,
+    default: int,
+) -> int:
+    """Safely coerce a watcher meta key to int, WARNING on bad type/value.
+
+    The evaluator constructor reads three int-valued keys from
+    ``watcher_config`` (timeout_seconds, delta_max_messages,
+    max_denials_per_turn). A bad value type — e.g. ``"timeout_seconds":
+    "fast"`` (non-numeric string) or explicit ``null`` (key PRESENT in
+    the dict, so the ``.get`` default never fires but the value is
+    ``None``) — would raise ``TypeError`` / ``ValueError`` through
+    ``int(...)`` and bubble up via :func:`create_watchover_check_node`
+    graph wiring into the instance build, crashing with a raw
+    traceback. The meta-file loading layer
+    (:func:`_load_watcher_meta_config`, graph.py:9111-9139) and the
+    wiring comment (graph.py:11352-11355) both promise
+    "read-fail → defaults → graph still builds", but the unguarded
+    ``int(...)`` breaks that promise on a non-numeric or null value.
+
+    This helper catches ``(TypeError, ValueError)``, logs a
+    ``[Watchover]``-prefixed WARNING naming the key + the offending
+    raw value + the fallback used, and returns ``default``. The
+    explicit-null branch is split out so the WARNING is meaningful
+    (an int-coercion failure on ``"fast"`` is different in operator
+    debugging than an explicit ``null`` that should mean "use the
+    default").
+
+    The returned value then flows into the existing
+    :data:`WATCHOVER_TIMEOUT_MIN_SECONDS` floor-clamp at the
+    ``timeout_seconds`` call site (graph.py:9510+ for the clamp
+    branch). Coercion failures land on the module default (90s),
+    which is above the floor — no regression on the floor logic.
+
+    Args:
+        watcher_config: The meta ``watchover`` dict, already
+            normalized to a non-None dict by the caller (the
+            :class:`WatchoverEvaluator` constructor does
+            ``watcher_config or {}`` before calling the helper).
+        key: The meta key to look up (e.g. ``"timeout_seconds"``,
+            ``"delta_max_messages"``, ``"max_denials_per_turn"``).
+        default: The fallback value returned when the key is
+            absent, when the value is ``None`` (explicit null in
+            meta.json), or when ``int(...)`` raises.
+
+    Returns:
+        The coerced int value, or ``default`` on coercion failure /
+        absent key / explicit null.
+    """
+    raw = watcher_config.get(key, default)
+    # Explicit null in meta.json — key is present (so ``.get`` default
+    # doesn't fire) but the value is None. Common operator intent is
+    # "use the default", which is what we do. The WARNING is the
+    # operator-visibility seam so the null doesn't silently downgrade
+    # the evaluator to the module default.
+    if raw is None:
+        logger.warning(
+            f"[Watchover] watcher_config['{key}'] is null; "
+            f"falling back to default {default}"
+        )
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        # ``TypeError`` covers non-numeric strings (e.g. ``"fast"``)
+        # and other non-int types (None was caught above). ``ValueError``
+        # covers numeric strings that fail int parsing (e.g.
+        # ``"10.5"``) and any custom object whose ``__int__`` raises.
+        logger.warning(
+            f"[Watchover] watcher_config['{key}']={raw!r} cannot be "
+            f"coerced to int ({type(exc).__name__}: {exc}); "
+            f"falling back to default {default}"
+        )
+        return default
+
+
 def _compute_deny_state(state: Any, max_denials: int) -> tuple[int, str]:
     """Compute the incremented denial count and resulting watchover route.
 
@@ -9493,10 +9570,19 @@ class WatchoverEvaluator:
             isinstance(watcher_config, dict) and bool(watcher_config)
         )
         watcher_config = watcher_config or {}
-        raw_timeout = int(
-            watcher_config.get(
-                "timeout_seconds", WATCHOVER_TIMEOUT_SECONDS_DEFAULT
-            )
+        # M1 fix: safe int coercion — a non-numeric meta value or
+        # explicit null in the meta dict would otherwise raise through
+        # ``int(...)`` and crash graph wiring (the meta-file loader's
+        # "read-fail → defaults → graph still builds" promise was
+        # broken on the unguarded coercion). See
+        # :func:`_coerce_meta_int` for the WARNING format. The
+        # returned value flows into the floor-clamp check below —
+        # module default (90s) is above the 15s floor, so coercion
+        # failures do not regress the floor logic.
+        raw_timeout = _coerce_meta_int(
+            watcher_config,
+            "timeout_seconds",
+            WATCHOVER_TIMEOUT_SECONDS_DEFAULT,
         )
         # Sanity floor — see WATCHOVER_TIMEOUT_MIN_SECONDS docstring.
         # A sub-floor value (e.g. the pre-fix 10s ``meta.json``
@@ -9533,15 +9619,19 @@ class WatchoverEvaluator:
             )
             raw_timeout = WATCHOVER_TIMEOUT_MIN_SECONDS
         self._timeout_seconds: int = raw_timeout
-        self._delta_max: int = int(
-            watcher_config.get(
-                "delta_max_messages", WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT
-            )
+        # M1 fix: same safe-coercion helper as ``timeout_seconds``
+        # above. See :func:`_coerce_meta_int`. No floor-clamp for
+        # these two (they are sliding-window / counter tunables, not
+        # the per-call timeout that triggered the 15s floor).
+        self._delta_max: int = _coerce_meta_int(
+            watcher_config,
+            "delta_max_messages",
+            WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT,
         )
-        self._max_denials: int = int(
-            watcher_config.get(
-                "max_denials_per_turn", WATCHOVER_MAX_DENIALS_DEFAULT
-            )
+        self._max_denials: int = _coerce_meta_int(
+            watcher_config,
+            "max_denials_per_turn",
+            WATCHOVER_MAX_DENIALS_DEFAULT,
         )
         # Sliding-window state. ``_snapshot`` is the cached LLM-generated
         # summary of older conversation turns; ``_delta_messages`` is the

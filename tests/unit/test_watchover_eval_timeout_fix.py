@@ -410,6 +410,122 @@ class TestTimeoutFloor:
 
 
 # =============================================================================
+# M1 — safe meta int coercion (non-numeric / explicit null)
+# =============================================================================
+
+
+class TestMetaTypeCoercion:
+    """M1: a non-numeric meta value or explicit null must NOT crash
+    graph wiring.
+
+    Pre-M1 the evaluator constructor did unguarded ``int(...)``
+    coercion at three sites (graph.py:9496 / 9536 / 9541). A meta
+    dict containing ``"timeout_seconds": "fast"`` (non-numeric
+    string) or ``"timeout_seconds": null`` (key PRESENT, so
+    ``.get`` default never fires, value is ``None``) raised
+    ``TypeError`` / ``ValueError`` through
+    ``create_watchover_check_node`` into graph wiring → instance
+    build crashed with a raw traceback. The meta-file loader's
+    "read-fail → defaults → graph still builds" promise
+    (graph.py:9111-9139, wiring comment at 11352-11355) was broken
+    on bad types.
+
+    The fix is the ``_coerce_meta_int`` helper (graph.py:9279) —
+    ``try/except (TypeError, ValueError)`` + ``[Watchover]``-prefixed
+    WARNING naming the key + the offending value + the fallback.
+    Tests below pin both the non-numeric-string path and the
+    explicit-null path on ``timeout_seconds`` (the same shape
+    applies to ``delta_max_messages`` and ``max_denials_per_turn``;
+    the helper is unit-tested in isolation for those — see
+    :func:`_coerce_meta_int`).
+    """
+
+    def test_non_numeric_string_timeout_falls_back_to_default(
+        self, caplog
+    ):
+        """M1(a): ``timeout_seconds="fast"`` → WARNING + default 90.
+
+        Pre-M1 this raised ``ValueError: invalid literal for int()
+        with base 10: 'fast'`` through ``create_watchover_check_node`
+        graph wiring → instance build crash. Post-M1 the helper
+        catches the ``ValueError`` and returns the module default
+        (90s) with a WARNING that names the key + the offending
+        value + the fallback used.
+        """
+        manager = _make_manager_with_config()
+        with caplog.at_level("WARNING"):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid-non-numeric-test",
+                watcher_config={"timeout_seconds": "fast"},
+            )
+
+        # No raise — the evaluator constructed successfully.
+        # Effective timeout falls back to the module default (90s),
+        # which is above the 15s floor (no floor-clamp WARNING fires).
+        assert evaluator._timeout_seconds == WATCHOVER_TIMEOUT_SECONDS_DEFAULT
+        assert evaluator._timeout_seconds == 90
+
+        # WARNING names the key, the offending raw value, the
+        # coercion failure type, and the fallback used.
+        assert any(
+            "timeout_seconds" in r.message
+            and "'fast'" in r.message
+            and "ValueError" in r.message
+            and "default 90" in r.message
+            for r in caplog.records
+        ), (
+            f"expected coercion WARNING with key/value/exception/"
+            f"fallback; got {[r.message for r in caplog.records]}"
+        )
+
+    def test_explicit_null_timeout_falls_back_to_default(self, caplog):
+        """M1(b): ``timeout_seconds=null`` (key PRESENT, value None) →
+        WARNING + default 90.
+
+        Pre-M1 this raised ``TypeError: int() argument must be a
+        string, a bytes-like object or a real number, not 'NoneType'``
+        through graph wiring → instance build crash. The ``.get``
+        default DOES NOT fire because the key is present in the dict
+        — only the value is None. The M1 fix splits this into a
+        dedicated branch (raw is None → WARNING + default) so the
+        WARNING is meaningful (operator sees "you explicitly nulled
+        this key" rather than "int() got None").
+        """
+        manager = _make_manager_with_config()
+        with caplog.at_level("WARNING"):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid-null-test",
+                # ``timeout_seconds=None`` is the JSON-decoded form
+                # of an explicit null in meta.json. The key is
+                # PRESENT so ``.get`` default doesn't fire; the
+                # value is None.
+                watcher_config={"timeout_seconds": None},
+            )
+
+        # No raise — evaluator constructed successfully.
+        assert evaluator._timeout_seconds == WATCHOVER_TIMEOUT_SECONDS_DEFAULT
+        assert evaluator._timeout_seconds == 90
+
+        # WARNING specifically identifies the null + the fallback
+        # (different from the non-numeric branch which includes the
+        # ``ValueError`` line — operators reading the boot log can
+        # tell the two cases apart at a glance).
+        assert any(
+            "timeout_seconds" in r.message
+            and "null" in r.message
+            and "default 90" in r.message
+            for r in caplog.records
+        ), (
+            f"expected null-WARNING with key/null/fallback; got "
+            f"{[r.message for r in caplog.records]}"
+        )
+
+
+# =============================================================================
 # Root cause 3 — first-call delta seed
 # =============================================================================
 
