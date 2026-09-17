@@ -541,7 +541,7 @@ N_le_min_recent_window=WARN: WINDOW=<N> > min_recent_window=<floor>;
 **Dry→enforce promotion SOP (the "instrumented dry-run")**
 
 1. **Ship at `dry`.** Operators do NOT need to flip anything — `dry` is the ship default.
-2. **Observe.** Grep the log for `event=leader_completion_gate decision=dry_log`. Every entry carries the full canonical schema (`event`, `decision`, `instance_id`, `attestation_present`, `denied_count`, `gate_location`, `leader_prompt_version`, `pending_children`, `queued_or_expected_wakeups`, `live_descendants`, `attestation_required`, `attest_seen_outside_window`, `messages_scanned`, `scanned_window_size`, `mode`, `scanner_window_truncated`, `scanner_summary_seen`, `user_answer_pending` — 18 fields, exported as `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS` for drift tests; `live_descendants` added 2026-09-06 as the third R2 input closing the 809e2a59 waiting_children false-deny incident class — count of descendants whose status is NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}, bounded BFS at `LIVE_DESCENDANTS_BFS_CAP = 500`; `attestation_required` added 2026-09-06 (Phase 6 fastfollow) as the conditional-attestation flag — `True` when the leader dispatched a child (`send_message` tool call) since the last real user message, `False` when the gate is OFF for this turn-end; `user_answer_pending` added 2026-09-16 (incident 6a0d60c9 FIX-2) as the FIFTH legitimate-pending input — see the runbook note below).
+2. **Observe.** Grep the log for `event=leader_completion_gate decision=dry_log`. Every entry carries the full canonical schema (`event`, `decision`, `instance_id`, `attestation_present`, `denied_count`, `gate_location`, `leader_prompt_version`, `pending_children`, `queued_or_expected_wakeups`, `live_descendants`, `attestation_required`, `messages_scanned`, `scanned_window_size`, `mode`, `scanner_window_truncated`, `scanner_summary_seen`, `user_answer_pending` — 17 fields (Stage-3 retirement 2026-09-17 dropped the log-only `attest_seen_outside_window` diagnostic; was 18), exported as `daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS` for drift tests; `live_descendants` added 2026-09-06 as the third R2 input closing the 809e2a59 waiting_children false-deny incident class — count of descendants whose status is NOT IN {COMPLETED, TERMINATED, ERROR, FAILED}, bounded BFS at `LIVE_DESCENDANTS_BFS_CAP = 500`; `attestation_required` added 2026-09-06 (Phase 6 fastfollow) as the conditional-attestation flag — `True` when the leader dispatched a child (`send_message` tool call) since the last real user message, `False` when the gate is OFF for this turn-end; `user_answer_pending` added 2026-09-16 (incident 6a0d60c9 FIX-2) as the FIFTH legitimate-pending input — see the runbook note below).
 
    **Supplementary diagnostic fields** (NOT in the canonical 17-field tuple but present in every log line for FR-3 conditionality audit): `last_real_user_found` (bool — `False` in degenerate no-real-user states), `last_real_user_index` (int, `-1` when none), `first_delegation_after_last_user_index` (int, `-1` when no `send_message` tool call at-or-after the last real user message), `delegation_tool_call_total` (int — normalized count of `send_message` calls in the walked tail), `delegation_since_last_user` (bool — the scanner's high-level verdict).
 3. **Adjudicate false positives** using the canonical counters (task 4.6, `daemon/services/attestation_resolver.py`):
@@ -579,9 +579,9 @@ Invalid env values (typo'd mode, non-integer window/bound) **fail OPEN to `enfor
 4. Check the instance row for `completion_gate_escalated=true` — find the escalation boundary.
 5. If the gate is firing on legitimate completions (false positive), flip to `dry` or `off` for instant revert + restart.
 
-**Inline-LLM completion-report judge (Phase 6 fastfollow, 2026-09-07)**
+**Inline-LLM completion judge (Phase 6 fastfollow 2026-09-07; fused + sole site since the Stage-2 flip 2026-09-16; legacy window-judge deleted by the Stage-3 retirement 2026-09-17)**
 
-The leader completion gate sits on the would-be-deny path BEFORE the in-graph nudge is injected. When the gate reaches `decision=denied` (delegated mission, no `attest_completion` in window, nothing pending), an inline LLM judge asks: "are the leader's last messages a REAL completion report?" — outcomes, evidence, follow-ups (not a short summary, not mid-work status text). If the judge says yes, the gate flips to `allowed` without demanding the toolcall and WITHOUT a counter increment. If the judge says no (or the call errors / times out / returns unparsable JSON), the existing deny+nudge path runs unchanged.
+The fused judge is invoked by the graph node's fused block whenever the activation predicate fires (delegated mission, not attested, and one of: quiet tree / marker-length signal / child-report-check suspicion). It consumes the pre-capped, id-redacted A+B+C evidence bundle and answers: "is this a REAL completion?" — outcomes, evidence, follow-ups (not a short summary, not mid-work status text). A `complete` verdict can rescue an otherwise-deny row (allow END without the toolcall, no counter increment). Every other verdict (not_complete / error / timeout / unparsable×2 after the one retry) maps conservatively per the band matrix above (deny band: deny+nudge bound-enforced; marker/A bands: pending → allow+hint, else conservative).
 
 The judge is a pure inline chat completion — no instance spawn, no message persistence. Model resolution honors `OPENAI_MODEL_KEYWORDS` (= `config.llm.model_keywords`) with fallback to `OPENAI_MODEL` (= `config.llm.model`). This mirrors the existing `daemon/services/keyword_extraction.py` model-resolution semantics — set `OPENAI_MODEL_KEYWORDS=quick` (or similar) to pin the judge to a fast model; leave unset to inherit the main `OPENAI_MODEL`.
 
@@ -591,7 +591,7 @@ Kill-switch via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (Pattern C resta
 Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=25.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED).
 ```
 
-When the kill-switch is OFF, the line carries `llm_judge_model=<disabled>` so operators see at a glance that no judge call will fire. Bounds: `JUDGE_TIMEOUT_S=25.0s` wall-clock cap (env-tunable via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`; minimum clamp 5.0s — values below clamp with a one-shot WARN; restart-read Pattern C resolver at `daemon/services/attestation_judge_timeout_resolver.py`); `JUDGE_MAX_INPUT_CHARS=12,000` chars of user-role payload; `JUDGE_MAX_OUTPUT_CHARS=400` chars of LLM response (a defensive ceiling against a runaway LLM that returns prose instead of JSON).
+When the kill-switch is OFF, the line carries `llm_judge_model=<disabled>` so operators see at a glance that no judge call will fire. Bounds: `JUDGE_TIMEOUT_S=25.0s` wall-clock cap per attempt (env-tunable via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`; minimum clamp 5.0s — values below clamp with a one-shot WARN; restart-read Pattern C resolver at `daemon/services/attestation_judge_timeout_resolver.py`); input side: the fused bundle arrives pre-capped (≤12,000 chars total, per-section 3000/6000/3000, id-redacted) from `assemble_fused_bundle` — the judge does not re-truncate; output side: `FUSED_JUDGE_MAX_OUTPUT_CHARS=2048` chars of LLM response (a defensive ceiling against a runaway LLM that returns prose instead of JSON; sized for the fused verdict payload 5×120 evidence + 240 advisory + 240 rationale — the retired legacy judge's 400-char cap was the F-A incident class).
 
 **Judge wall-clock cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`)** — Pattern C restart-read resolver (sibling to the kill-switch resolver); default `25.0` seconds; minimum clamp `5.0` seconds. Resolver home: `daemon/services/attestation_judge_timeout_resolver.py`. Failure / clamp policy (fail-OPEN):
 
@@ -607,20 +607,24 @@ Rationale (operator tuning decision 2026-09-07 grounded in the tester live-LLM p
 
 Trade-off: a longer worst-case turn-end wait on the rare deny path (the judge runs only on the WOULD-BE-DENY branch, so the cost is bounded by the per-instance `deny_bound=3` escalation + the existing 3-deny escalation guard) vs fewer false nudges of genuine reports. The 25.0s default keeps the wait bounded while letting the quick-model tail latency ride. Operators with a known-fast quick-model can tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` (or similar) for a faster worst-case bound; operators with a slow quick-model can loosen to `=40`. Restart required to flip (Pattern C — no live flip).
 
-Observability fields (logged on every judge call):
+Observability fields (logged on every fused judge invocation):
 
 | Field | Source | Purpose |
 |-------|--------|---------|
-| `event=leader_completion_gate_judge` | gate node | One-shot structured log line on the would-be-deny path; emitted after the judge call |
-| `verdict` | JudgeResult | `yes` / `no` / `error` / `timeout` / `unparsable` |
-| `llm_judge_model` | JudgeResult | The resolved quick model (or main model fallback) |
-| `llm_judge_latency_ms` | JudgeResult | Wall-clock latency of the judge call |
-| `llm_judge_reason` | JudgeResult | The LLM's one-sentence rationale (empty on error paths) |
-| `llm_judge_error_class` | JudgeResult | Exception class name on the error path; `<none>` otherwise |
+| `event=leader_completion_gate_fused_judge` | graph node fused block | One-shot structured log line; emitted after the judge call (the ONLY judge event family post-Stage-3) |
+| `verdict` | FusedJudgeResult | `complete` / `not_complete` / `error` / `timeout` / `unparsable` |
+| `band` | activation snapshot | `deny` / `marker` / `a_suspicion` |
+| `llm_judge_model` | FusedJudgeResult | The resolved quick model (or main model fallback) |
+| `llm_judge_latency_ms` | FusedJudgeResult | Cumulative wall-clock latency across attempts |
+| `llm_judge_attempt` | FusedJudgeResult | `1` or `2` (the retry-after-unparsable) |
+| `llm_judge_first_unparsable_excerpt` | FusedJudgeResult | Truncated + redacted attempt-1 raw response on a 2-attempt row (98b59dd7 forensic contract) |
+| `llm_judge_reason` | FusedJudgeResult | The LLM's one-sentence rationale (empty on error paths) |
+| `llm_judge_error_class` | FusedJudgeResult | Exception class name on the error path; `<none>` otherwise |
+| `judge_invoked` | derived | True iff a real invocation record exists |
 
-These fields are diagnostic extras (NOT in the canonical 17-field `leader_completion_gate` tuple). They live alongside the supplementary conditional-attestation fields (`last_real_user_found`, `last_real_user_index`, `delegation_tool_call_total`, etc.) — same shape, same grep pattern.
+These fields are diagnostic extras (NOT in the canonical 17-field `leader_completion_gate` tuple).
 
-The judge is fail-safe: every failure path (timeout, exception, unparsable JSON) returns `is_complete_report=False` so the existing deny+nudge path runs unchanged. The 3-deny escalation bound caps worst-case misfires. A judge-error wrapper-layer bug emits a separate `event=leader_completion_gate_judge_error` log line with `error_class` and degrades to the existing deny+nudge path.
+The judge is conservative (DP-5 REJECTED — no fail-safe allow anywhere): every failure path (timeout, exception, unparsable JSON ×2) returns `is_complete=False` so the band-mapped conservative outcome runs (deny band: deny+nudge bound-enforced). The 3-deny escalation bound caps worst-case misfires. A judge-wrapper-layer bug emits a separate `event=leader_completion_gate_fused_judge_error` log line with `error_class` and `decision=fail_safe_conservative`.
 
 **Runbook note (2026-09-11, incident b08f40fe): `live_descendants` now means WORK-BEARING descendants.** The third R2 input no longer counts every non-terminal descendant. Two-set semantics: `RUNNING`/`WAITING`/`WAITING_CHILDREN`/`PAUSED` are unconditionally live; dormant `IDLE`/`QUEUED` descendants count live ONLY with work en route — a not-yet-processed `message_queue` row (`PENDING`/`READY`/`PROCESSING`/`RETRYING`) OR a not-yet-settled `job_queue_items` row (`admission_state` QUEUED | ACTIVE) targeting that descendant. IDLE orphans (spawned but never dispatched — no message row, no unsettled job) are EXCLUDED, so the deny/nudge ladder sees the true zero instead of branch (5) holding the gate open for a report that will never arrive. Operator reading of the canonical log row is unchanged: `live_descendants=0` now truthfully means "nothing in my subtree will ever wake me"; a `live_descendants=-1` row is the DB-error fail-open sentinel (gate allowed, signal unknown). Restart required after upgrading (code change, no env). Incident reference: leader `b08f40fe` completed 2026-09-11 14:50:10 UTC via `allowed_legitimate_pending_wakeup` on four never-dispatched IDLE-orphan grandchildren; regression-pinned by `tests/integration/test_attestation_idle_orphan_incident.py`.
 
@@ -942,6 +946,8 @@ ver |
 
 ## Mid-work marker scan (LCA Phase 6.5 follow-up, 2026-09-11)
 
+> **Stage-3 retirement note (2026-09-17).** The scanner itself (16-pattern catalog + length threshold) SURVIVES as an activation-signal producer for the unified resolver's `b_fires` term. The route plumbing documented below is HISTORICAL: the `(a)/(b)/(c)/(d)` routing, the `marker_path`/`marker_judge_*`/`trigger_source`/`trigger_suppressed_by` log fields, and the `*_marker_judge*` event family were DELETED (R5/R6/R7/R8 — decisions.md D-RES4). The fused judge + the band matrix above own the routing now; the Completion Check Note hint still fires on the fused path's allow+hint outcome.
+
 The completion gate's ALLOW branches (`Decision.ALLOWED` not-attested + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP`) trigger a cheap mid-work marker scan before the END. Markers fire → the existing inline-LLM judge runs (verdict) → verdict + R2 inputs drive the (a)/(b)/(c)/(d) routing. This is the incident b08f40fe-class kill: a leader whose final AIMessage reads mid-work phrasing while the R2 inputs are clean would otherwise complete silently.
 
 ### Marker catalog (16 patterns, 12-18 balance)
@@ -963,11 +969,11 @@ Case-insensitive substring match against the AIMessage content; catalog is curat
 
 The marker path respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED` (default ON; `=0` / `=false` / `=no` / `=off` disables). With the judge disabled, marker hits are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: marker-only signal is too weak to deny — the LLM verdict disambiguates ambiguous marker hits; without the verdict, plain allow + log is the safer default.
 
-When the kill-switch is OFF, the marker path emits a distinct `event=leader_completion_gate_marker_judge_disabled` log row with `verdict=<skipped>` (grep-disjoint from the existing `event=leader_completion_gate_marker_judge` family — operators grep the correct event for the operator-disabled case). This row is the operator-observable signal that the canonical `event=leader_completion_gate` row's `marker_judge_verdict` field stayed at the transient `<pending>` sentinel — the gate did not call the judge (kill-switch open), did not inject a hint, and did not deny.
+**Stage-3 update:** with the judge disabled, the fused block emits `event=leader_completion_gate_fused_judge_disabled` with `verdict=<skipped>` plus the band and the raw B-signal fields (`marker_hit` / `length_trigger`). This row is the operator-observable signal that the gate did not call the judge (kill-switch open), did not inject a hint, and did not deny. (The historical `*_marker_judge_disabled` row name retired with R8.)
 
 ### Dry-mode marker logging
 
-The marker scan runs in `dry` mode (Decision.DRY_LOG) too — the scan is side-effect-free and pure LOG-ONLY: it populates `marker_hit` / `marker_terms` / `marker_path` on the canonical log row so operators see the signal in `decision=dry_log` soak rows. No judge call fires (the marker-path judge wiring in `daemon/graph.py` early-outs for DRY_LOG decisions before any judge/hint/deny/counter side effect), no hint is injected, no deny, no counter — the dry-mode `allow unconditionally` posture is preserved end-to-end. The marker scan runs on DRY_LOG so the bake-time observability surfaces how often mid-work phrasing would have triggered the marker path; the gate still allows the END as before. The marker-path's `"<pending>"` marker_path sentinel stays as the final value on the dry-log row (log-only; never resolved to `a`/`b`/`c`/`d` because no judge ran).
+**Stage-3 update:** the marker scan still runs in `dry` mode (pure LOG-ONLY: `marker_hit` / `marker_terms` on the canonical row) — but ONLY on DELEGATED missions (the R4/D10 mirror skips suspicion scans on non-delegated turn-ends). No judge ever fires in dry (the fused node requires enforce mode), no hint, no deny, no counter. The retired `marker_path` sentinel no longer appears.
 
 ### Completion Check Note (path (b))
 
@@ -977,7 +983,7 @@ The hint carries a **stable id per instance** minted via `_stable_id_for("comple
 
 ### Log schema (additive)
 
-The canonical `event=leader_completion_gate` log row carries: `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `marker_path` (`""` / `"a"` / `"b"` / `"c"` / `"d"` / transient `"<pending>"`), `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`. The marker-path judge call ALSO emits a separate `event=leader_completion_gate_marker_judge` log line mirroring the would-be-deny judge's log shape so operators grep one set of keys for both paths. The kill-switch OFF path emits `event=leader_completion_gate_marker_judge_disabled` (grep-disjoint event name — distinct from the existing judge/event family so operators can pinpoint the operator-disabled case). All three events live alongside each other in the same daemon log; operators `grep event=leader_completion_gate_marker_judge` to see the live judge calls, `grep event=leader_completion_gate_marker_judge_disabled` to see the kill-switch OFF soak signal, and `grep event=leader_completion_gate_marker_judge_error` to see the wrapper-fault class.
+**Stage-3 update:** the canonical row carries the SURVIVING signal fields `marker_hit`, `marker_terms` (capped list, comma-joined; `<none>` when empty), `length_trigger`, `final_word_count`, `busy_descendants`. The route/judge-stamp fields (`marker_path`, `marker_judge_verdict`, `marker_judge_latency_ms`, `marker_judge_error_class`) and the `*_marker_judge*` event family are RETIRED — the fused judge family (`leader_completion_gate_fused_judge` / `_disabled` / `_error`) is the only judge event surface.
 
 ### Length trigger (2026-09-12, user request)
 
@@ -989,58 +995,44 @@ The completion gate's ALLOW branches also fire a word-count trigger on the LAST 
 
 **Hook scope:** identical to the marker scan — `Decision.ALLOWED` (not-attested) + `Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` + `Decision.DRY_LOG`, with `attestation_present=False`. Attested allows still skip entirely. Cost control: NEITHER trigger fires ⇒ NO judge call.
 
-**Interplay with markers:** markers catch phrasing ("ending turn", "awaiting"); length catches brevity. Both halves firing ⇒ `trigger_source="markers+length"` (combined trigger). Operators can grep the additive `trigger_source` log field to see the trigger-class distribution in soak data.
+**Interplay with markers:** markers catch phrasing ("ending turn", "awaiting"); length catches brevity. **Stage-3 update:** the composed signal is the predicate's `b_fires` term (`(marker_hit ∨ length_trigger) ∧ busy_descendants == 0`); the `trigger_source` log field is RETIRED — read the `marker_hit` / `length_trigger` values plus the resolver row's `terms_fired` for the class distribution.
 
 **Dry-mode:** length trigger is logged side-effect-free exactly like markers — no judge call, no hint, no deny, no counter (the dry-mode `allow unconditionally` posture is preserved end-to-end).
 
-**Kill-switch:** the length trigger respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`. With the judge disabled, length triggers are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: length-only signal is too weak to deny — without the LLM verdict, plain allow + log is the safer default. The existing `event=leader_completion_gate_marker_judge_disabled` row covers the length-trigger case (`verdict=<skipped>`); no new event name is introduced.
+**Kill-switch:** the length trigger respects the existing judge kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`. With the judge disabled, length triggers are logged but NO judge call fires; the gate falls through to plain ALLOW. Rationale: length-only signal is too weak to deny — without the LLM verdict, plain allow + log is the safer default. **Stage-3 update:** the disabled-signal row is `event=leader_completion_gate_fused_judge_disabled` (with `marker_hit=`/`length_trigger=` context fields).
 
 **Log schema (additive, three new fields):**
 
 * `length_trigger` (bool) — True when the LAST AIMessage word count is < `SHORT_REPORT_WORD_THRESHOLD`. False on degenerate empty / no-AI tail.
 * `final_word_count` (int, ≥0) — word count of the flattened LAST AIMessage content. `0` on degenerate empty / no-AI tail.
-* `trigger_source` ∈ `{"markers" | "length" | "markers+length" | ""}` — which trigger half fired (both = combined; neither = empty `<none>`).
-
-Format-string placeholder count grows 28 → 31 (drift pin in `test_length_log_placeholder_count_is_31`). Tuple-discipline: the three new fields ride alongside the canonical tuple in the SAME format-string log line (same shape as the supplementary conditional-attestation and marker fields).
+**Stage-3 update:** `trigger_source` retired (R6); `length_trigger` + `final_word_count` SURVIVE. Canonical format-string placeholders: 27 (drift pin `test_length_log_placeholder_count_is_27`).
 
 ### LCA busy trigger suppression (2026-09-12, user request — false-positive hint fix)
 
 A leader awaiting a healthy child (RUNNING/WAITING/WAITING_CHILDREN) writing a short mid-work ACK triggers BOTH the marker substring scan AND the length trigger on the ALLOW path — pre-fix this would call the judge, return `is_complete_report=false`, and inject a checkpoint-durable Completion Check Note on essentially every awaiting turn-end. The hint on healthy waits is noise. The LCA busy trigger suppression disarms the WHOLE trigger when at least one descendant is in the unconditional-busy subset `{RUNNING, WAITING, WAITING_CHILDREN}` — NO judge call, NO route-(b) hint, plain allow. The marker/length signal STAYS RECORDED on the canonical log row for forensics.
 
-**Trigger-site:** `daemon/services/attestation_gate.py:993-1037`. If `busy_descendants > 0 AND trigger_fires` ⇒ the WHOLE trigger is SUPPRESSED ENTIRELY:
-* `trigger_source=""` (cleared — the cheap-allow signal; logged as `<none>`)
-* `trigger_suppressed_by="busy_descendants"` stamped (the additive GateDecision field)
-* `marker_hit`, `marker_terms`, `length_trigger`, `final_word_count` STAY RECORDED for observability
-* `marker_path=""` (no judge fires — no path to record; logged as `<none>`)
+**Stage-3 update (R5):** the busy-mute now lives INSIDE the unified predicate's `b_fires` term — `(marker_hit ∨ length_trigger) ∧ busy_descendants == 0`. A busy tree mutes the marker band (no judge, no hint, plain allow); Source-A suspicion is deliberately NOT busy-muted (approved Δ2). The `trigger_suppressed_by`/`trigger_source`/`marker_path` fields retired; the suppression is observable via `busy_descendants>0` on the canonical row plus zero fused-judge rows and zero hints.
 
 **Busy subset:** `InstanceManager.count_busy_descendants(instance_id) -> int` counts descendants in `{RUNNING, WAITING, WAITING_CHILDREN}` ONLY. PAUSED is NOT busy (suspect, not healthy — the trigger stays armed so a stuck child is caught). Conditional-live dormant `IDLE`/`QUEUED` are NOT busy either (no execution — work is merely en route; the trigger stays armed so en-route-only work is caught). Terminal `COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` are excluded. The busy subset is derived from the SAME BFS as `count_live_descendants` via the shared private helper `InstanceManager._count_descendants_busy_and_live` — single source of truth for the descendant scan.
 
-**Graph-node short-circuit:** `daemon/graph.py:5161-5168` adds `and not decision.trigger_suppressed_by` to the existing `decision.marker_hit or decision.length_trigger` check. When the gate has stamped a non-empty `trigger_suppressed_by` on the decision, the entire judge block short-circuits — NO `judge_completion_report_async` call, NO route-(b) hint injection, NO counter write, plain allow.
+**Stage-3 update:** the graph-node short-circuit retired with the legacy judge block — the predicate's `b_fires=False` simply means the marker band does not fire (no judge call, no hint, no counter write, plain allow).
 
 **Suspect-pending protections UNCHANGED:** PAUSED descendants (maybe stuck — trigger stays armed), en-route-only work (IDLE + pending message OR IDLE + unsettled job — maybe lost). The deny path + the two-set live semantics are UNTOUCHED. Deny with RUNNING children is structurally impossible — `live_descendants > 0` blocks it.
 
-**Dry-mode:** busy suppression is log-only, NO judge call, NO hint, plain allow (dry-mode `allow unconditionally` posture preserved end-to-end). Operators grep `event=leader_completion_gate decision=dry_log trigger_suppressed_by=busy_descendants` to see dry-mode soak rows where the trigger was suppressed.
+**Dry-mode:** busy suppression is log-only, NO judge call, NO hint, plain allow. **Stage-3 update:** grep `event=leader_completion_gate decision=dry_log busy_descendants=N` (N>0) with `marker_hit=True` to see dry rows where the busy-mute disarmed the marker band.
 
 **Kill-switch:** busy suppression is independent of `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`. The suppression disarms the trigger BEFORE the kill-switch check, so the kill-switch continues to apply on non-suppressed paths exactly as before. No new `ENSEMBLE_*` flags are introduced (fix/flag policy 7d5285aa — behavior fixes ship always-on).
 
-**Log schema (additive, two new fields):**
-
-* `busy_descendants` (int, ≥0) — count of descendants in the unconditional-busy subset. 0 when the root is not found OR no descendants exist OR every descendant is terminal/PAUSED/dormant. Always stamped on the result; meaningful even when the trigger doesn't fire.
-* `trigger_suppressed_by` (str, default `""`) — name of the suppressor that disarmed the trigger, or `""` when the trigger was not suppressed. Currently only `"busy_descendants"` is defined. Logged as `<none>` on every other path.
-
-Format-string placeholder count grows 31 → 33 (drift pin in `test_length_log_placeholder_count_is_33`). Tuple-discipline: the two new fields ride alongside the canonical tuple in the SAME format-string log line.
+**Log schema:** `busy_descendants` (int, ≥0) SURVIVES as a predicate input + forensic count (always stamped). `trigger_suppressed_by` retired (R5). Canonical placeholders: 27.
 
 **Forensics recipe:**
 
 ```bash
-# How often is the trigger suppressed by busy descendants? (per-tree-state observability)
-grep "event=leader_completion_gate trigger_suppressed_by=busy_descendants" data/logs/ensemble.log | wc -l
+# Stage-3: how often does the busy-mute disarm the marker band? (busy>0 + a marker/length signal present)
+grep "event=leader_completion_gate" data/logs/ensemble.log | grep -E "marker_hit=True|length_trigger=True" | grep -Ev "busy_descendants=0" | wc -l
 
-# Confirm the trigger WOULD have fired but for busy suppression (marker_hit=True + suppressed):
-grep "event=leader_completion_gate.*marker_hit=True.*trigger_suppressed_by=busy_descendants" data/logs/ensemble.log
-
-# Per-decision-class breakdown (the suppression lives on ALLOW / ALLOWED_LEGITIMATE_PENDING_WAKEUP / DRY_LOG):
-grep "event=leader_completion_gate.*trigger_suppressed_by=busy_descendants" data/logs/ensemble.log \
+# Per-decision-class breakdown of those busy-muted rows:
+grep "event=leader_completion_gate" data/logs/ensemble.log | grep -E "marker_hit=True|length_trigger=True" | grep -Ev "busy_descendants=0" \
   | awk '{for(i=1;i<=NF;i++) if ($i ~ /^decision=/) {print $i}}' | sort | uniq -c
 ```
 
@@ -1051,7 +1043,7 @@ grep "event=leader_completion_gate.*trigger_suppressed_by=busy_descendants" data
 - `daemon/services/attestation_marker_scanner.py` — pure-function scanners (marker substring + length word-count) + `SHORT_REPORT_WORD_THRESHOLD` constant
 - `daemon/services/attestation_gate.py` — gate integration + additive log fields (28 → 31 → 33 placeholders); busy trigger suppression at `evaluate():993-1037`
 - `daemon/services/context_messages.py` — `_stable_id_for("completion_check_note", instance_id=...)` (F1 Shape A id-format table row)
-- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + gate-node marker-path wiring (extended to `decision.marker_hit or decision.length_trigger` for the OR-composition, with `and not decision.trigger_suppressed_by` short-circuit)
+- `daemon/graph.py` — `COMPLETION_CHECK_NOTE_TEXT` + `_make_completion_check_note_message` (stable-id plumbing) + the fused block (the historical marker-path wiring retired in Stage 3 — the OR-composition and the busy-mute live in the predicate's `b_fires` term)
 - `daemon/manager.py` — `count_busy_descendants` (new LCA input) + `_count_descendants_busy_and_live` shared BFS helper
 - `tests/unit/test_attestation_marker_scanner.py` (54 tests; +16 length-trigger tests) + `tests/unit/test_attestation_marker_wiring.py` (42 tests; +11 LCA busy trigger suppression tests, including the 2026-09-12 W1/W2/green fixes for dry-mode marker logging, Completion Check Note stable-id supersede, kill-switch OFF `<skipped>` stamp, catalog pin RuntimeError conversion, and the dead-import removal)
 
@@ -1060,7 +1052,7 @@ grep "event=leader_completion_gate.*trigger_suppressed_by=busy_descendants" data
 
 ## LCA judge unparsable retry + forensic logging (2026-09-16, incident 98b59dd7)
 
-The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_judge.py`) now retries ONCE on `verdict="unparsable"`. The retry fires ONLY when the model responded with a body AND the body did not parse (the strict `_parse_judge_response` returned `None`); timeout / HTTP / LLM errors do NOT trigger a retry (existing fail-safe semantics preserved).
+The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_judge.py`) now retries ONCE on `verdict="unparsable"`. The retry fires ONLY when the model responded with a body AND the body did not parse (the strict `_parse_fused_judge_response` returned `None`); timeout / HTTP / LLM errors do NOT trigger a retry (existing fail-safe semantics preserved).
 
 ### Retry semantics
 
@@ -1076,20 +1068,20 @@ The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_
 
 The retry uses its OWN per-attempt timeout window (`timeout_s`). Total worst-case wall-clock = `2 × timeout_s`. With the default 25.0s cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`), worst-case = **50.0s**. The HA facade's `wall_clock_cap_s` and `asyncio.wait_for` bounds still apply per-attempt (the retry does NOT stack timeouts across attempts). Each retry attempt is a fresh LLM call — same prompt, same model, same config; no prompt mutation, no model swap, no backoff delay.
 
-### New log-row fields (`event=leader_completion_gate_judge` + `event=leader_completion_gate_marker_judge`)
+### New log-row fields (Stage-3: on `event=leader_completion_gate_fused_judge` — the two legacy rows retired)
 
 Both log rows gain two additive placeholders:
 
 | Field | Description |
 |---|---|
-| `llm_judge_attempt=%s` | `JudgeResult.attempt` value (`1` for first-attempt; `2` for retry-after-unparsable) |
-| `llm_judge_first_unparsable_excerpt=%s` | `JudgeResult.first_unparsable_excerpt` value (the truncated + redacted raw response of attempt 1, capped at 400 chars, whitespace-normalized, secrets redacted). `<none>` when `attempt == 1` |
+| `llm_judge_attempt=%s` | `FusedJudgeResult.attempt` value (`1` for first-attempt; `2` for retry-after-unparsable) |
+| `llm_judge_first_unparsable_excerpt=%s` | `FusedJudgeResult.first_unparsable_excerpt` value (the truncated + redacted raw response of attempt 1, capped at 400 chars, whitespace-normalized, secrets redacted). `<none>` when `attempt == 1` |
 
 The `llm_judge_first_unparsable_excerpt` field closes the incident 98b59dd7 forensic gap — operators can now read the unparsable row's raw LLM output directly from the canonical log row without needing to re-run the probe.
 
 ### Reason field no longer empty on unparsable
 
-The `reason` field on `JudgeResult` is no longer empty on `verdict="unparsable"` rows:
+The `rationale` field on `FusedJudgeResult` is never empty on `verdict="unparsable"` rows (carried over from the retired legacy judge's `reason` contract):
 
 | Path | `reason` shape |
 |---|---|
@@ -1126,11 +1118,11 @@ The kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` is checked at 
 
 ### KB-trap: DENIED rows have default marker fields
 
-On `Decision.DENIED` rows, the marker/length scanner NEVER runs (the scan is gated on `result.decision in (ALLOWED, ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG) AND not attestation_present` — see `daemon/services/attestation_gate.py:1009-1017`). The `marker_hit` / `length_trigger` / `final_word_count` / `marker_path` fields on `GateDecision` therefore stay at their dataclass defaults (False / False / 0 / "") on a DENIED row. Operators / future readers MUST NOT interpret those fields as measurements of the final AIMessage content on a DENIED row — they are noise on the deny path. Pinned by `TestDeniedRowsHaveDefaultMarkerFields` (4 tests) in `tests/unit/test_attestation_gate.py`.
+On `Decision.DENIED` rows, the marker/length scanner NEVER runs (the scan is gated on `result.decision in (ALLOWED, ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG) AND not attestation_present` — see `daemon/services/attestation_gate.py:1100-1119`). The `marker_hit` / `length_trigger` / `final_word_count` fields on `GateDecision` therefore stay at their dataclass defaults (False / False / 0) on a DENIED row. Operators / future readers MUST NOT interpret those fields as measurements of the final AIMessage content on a DENIED row — they are noise on the deny path. Pinned by `TestDeniedRowsHaveDefaultMarkerFields` (4 tests) in `tests/unit/test_attestation_gate.py`.
 
 ### Operator quick-reference
 
-* **Did the retry fire?** Grep `event=leader_completion_gate_judge llm_judge_attempt=2` (or `event=leader_completion_gate_marker_judge llm_judge_attempt=2`).
+* **Did the retry fire?** Grep `event=leader_completion_gate_fused_judge llm_judge_attempt=2`.
 * **What did the first attempt return?** Check `llm_judge_first_unparsable_excerpt=<value>` — the truncated + redacted raw response of attempt 1 (capped at 400 chars, secrets replaced with `[REDACTED]`).
 * **Was the retry exhausted?** `llm_judge_attempt=2` AND `verdict=unparsable` (or `timeout` / `error`).
 * **Was the retry successful?** `llm_judge_attempt=2` AND `verdict=yes|no`.
@@ -1140,7 +1132,7 @@ On `Decision.DENIED` rows, the marker/length scanner NEVER runs (the scan is gat
 
 - `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-16 (judge unparsable retry + forensic logging + deny-path symmetry guard)
 - `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-JUDGE-RETRY-1..AC-JUDGE-RETRY-16 (incident 98b59dd7 acceptance)
-- `daemon/services/attestation_report_judge.py` — `JudgeResult` extended (`attempt`, `first_unparsable_excerpt`); `_redact_secrets` / `_truncate_excerpt` / `_shape_unparsable_excerpt` helpers; `_AttemptOutcome` NamedTuple; retry refactor in `judge_completion_report_async`; module docstring updated
+- `daemon/services/attestation_report_judge.py` — Stage-3: `FusedJudgeResult` carries the retry contract (`attempt`, `first_unparsable_excerpt`); `_redact_secrets` / `_truncate_excerpt` / `_shape_unparsable_excerpt` helpers; `_AttemptOutcome` NamedTuple; the legacy `judge_completion_report_async` retry path retired (R7)
 - `daemon/graph.py` — two log rows extended with `llm_judge_attempt=%s` + `llm_judge_first_unparsable_excerpt=%s`
 - `tests/unit/test_attestation_report_judge.py` — 18 new tests + 2 updated tests + 1 new constants pin
 - `tests/unit/test_attestation_gate.py` — new `TestDeniedRowsHaveDefaultMarkerFields` class with 4 tests
@@ -1151,11 +1143,11 @@ Three fixes shipped always-on (fix/flag policy — no new `ENSEMBLE_*` flags; re
 
 1. **`deny_bound` is now enforced on the marker path.** Previously the bound (`ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`, default 3) was consulted ONLY on the canonical `decide()` step-(6) deny path. The marker-path allow→deny conversions in `daemon/graph.py` — route (a) (judge verdict=no, nothing pending) and route (d) (judge timeout/error/unparsable, nothing pending) — incremented the deny counter WITHOUT consulting the bound, so a leader whose every turn-end tripped a mid-work marker could deny+nudge forever (incident 6a0d60c9: 123 gate evaluations / 115 deny+nudge injections over 27 min, `attestation_denied_count` climbing 0→122, ZERO `event=leader_completion_gate_terminal_after_bound` rows fleet-wide). Both conversion sites now consult the SHARED predicate `daemon.services.attestation_gate.deny_bound_exceeded` (the same predicate `decide()` step (6) uses). Past the bound the marker path produces the canonical terminal outcome — `set_escalated_and_reset` (flag set + counter reset in one atomic UPDATE) + the `event=leader_completion_gate_terminal_after_bound` operator event + plain allow END with NO nudge — mirroring the canonical bound semantics exactly. Operator impact: the bound is now a REAL backstop on every deny producer; `leader_completion_gate_terminal_after_bound` rows will appear for marker-path loops that previously ran unbounded.
 
-2. **New canonical log field `user_answer_pending` (18th field).** When the leader holds an OPEN awaiting-answer suspension handle at gate time (`task.suspension_reason='awaiting_answer'` + `resume_target_turn_id IS NOT NULL` + `status='paused'`, read via the DB-backed `InstanceManager.has_open_user_answer` → `TaskRepository.has_open_answer_handle_for_gate` — the SAME handle the answer endpoint's `answer_gate_existing_turn` resume consumes), the gate PLAIN ALLOWS before ANY trigger/judge work: no marker scan, no judge call, no nudge, no hint, no counter movement (`decision=allowed_legitimate_pending_wakeup` when the gate is otherwise armed, `decision=allowed` on the conditional-off path — in both cases `user_answer_pending=True` on the row). The pending party is the USER; the leader cannot progress alone. The handle self-clears when the answer is consumed (`ResumeTurn` flips `status='paused' → 'pending'` and nulls the handle columns in one atomic guarded UPDATE) — no stale-allow window — and a freshness guard (the handle must be the instance's NEWEST task row) expires any leaked pre-revive handle so the plain-allow can never become a permanent allow bypass. Grep: `user_answer_pending=True`.
+2. **New canonical log field `user_answer_pending` (the 18th field at introduction, 2026-09-16; the canonical schema is 17 fields today — R1 retired the then-18th field `attest_seen_outside_window`, decisions.md D-RES4).** When the leader holds an OPEN awaiting-answer suspension handle at gate time (`task.suspension_reason='awaiting_answer'` + `resume_target_turn_id IS NOT NULL` + `status='paused'`, read via the DB-backed `InstanceManager.has_open_user_answer` → `TaskRepository.has_open_answer_handle_for_gate` — the SAME handle the answer endpoint's `answer_gate_existing_turn` resume consumes), the gate PLAIN ALLOWS before ANY trigger/judge work: no marker scan, no judge call, no nudge, no hint, no counter movement (`decision=allowed_legitimate_pending_wakeup` when the gate is otherwise armed, `decision=allowed` on the conditional-off path — in both cases `user_answer_pending=True` on the row). The pending party is the USER; the leader cannot progress alone. The handle self-clears when the answer is consumed (`ResumeTurn` flips `status='paused' → 'pending'` and nulls the handle columns in one atomic guarded UPDATE) — no stale-allow window — and a freshness guard (the handle must be the instance's NEWEST task row) expires any leaked pre-revive handle so the plain-allow can never become a permanent allow bypass. Grep: `user_answer_pending=True`.
 
 3. **Stable attestation-nudge id.** The deny nudge `HumanMessage` previously minted a fresh `uuid4` per injection, so consecutive denies accumulated one nudge block per deny in the leader's context (incident 6a0d60c9: 115 accumulated blocks). The nudge now carries the stable per-instance id `attestation_nudge:{instance_id}` (minted via `_stable_id_for`, mirroring the `completion_check_note:{instance_id}` F1 Shape A contract); ALL deny producers — the plain `decide()` deny and BOTH marker-path conversions, which funnel through the single construction site — mint the SAME id, so LangGraph's `add_messages` reducer SUPERSEDES the prior nudge block in place and the channel holds exactly ONE nudge block regardless of how many denies fire. `additional_kwargs` (`attestation_nudge`, `injected_message`, `attestation_nudge_denied_count`) are unchanged; the surviving block carries the LATEST deny's counter stamp. Nudge text (`ATTESTATION_NUDGE_TEXT`) is unchanged.
 
-**Related files:** `daemon/services/attestation_gate.py` (shared `deny_bound_exceeded` helper; `decide()` arm 3.b; `user_answer_pending` GateDecision field + 18-field `CANONICAL_LOG_SCHEMA_FIELDS`); `daemon/graph.py` (marker-path bound consultations; stable nudge id); `daemon/manager.py` (`has_open_user_answer` facade); `daemon/repositories/task/repository.py` (`has_open_answer_handle_for_gate`); `daemon/services/context_messages.py` (`attestation_nudge` stable-id kind).
+**Related files:** `daemon/services/attestation_gate.py` (shared `deny_bound_exceeded` helper; `decide()` arm 3.b; `user_answer_pending` GateDecision field + 17-field `CANONICAL_LOG_SCHEMA_FIELDS`); `daemon/graph.py` (marker-path bound consultations; stable nudge id); `daemon/manager.py` (`has_open_user_answer` facade); `daemon/repositories/task/repository.py` (`has_open_answer_handle_for_gate`); `daemon/services/context_messages.py` (`attestation_nudge` stable-id kind).
 
 **Tests:** `tests/integration/test_attestation_marker_bound_enforcement_lca.py` (7), `tests/integration/test_attestation_user_answer_pending_lca.py` (7), `tests/unit/test_attestation_user_answer_pending_decide.py` (15 — incl. real-SQLite detection tests), `tests/integration/test_attestation_nudge_supersede_lca.py` (3 — real `add_messages` upsert).
 
@@ -1243,46 +1235,45 @@ Each row carries: `fired`, `band` (`deny|marker|a_suspicion|<none>`), `terms_fir
 **Related files:** `daemon/services/attestation_resolver_activation.py` (predicate + bundle + event), `daemon/services/attestation_gate.py` §(vi) (the additive shadow seam), `tests/unit/test_attestation_resolver_activation.py` (63 — R4 short-circuit invariant, predicate matrix incl. the Δ2 row, §10.2 busy⊆live source pin, bundle caps/redaction/Δ1/Δ3, zero-LLM sentinel, row-shape + agreement, exception isolation).
 
 
-## LCA unified resolver — Stage 2 flip (2026-09-16, authoritative)
+## LCA unified resolver — FINAL (Stage 3 retirement executed 2026-09-17)
 
-**The resolver's outcome mapping is now AUTHORITATIVE at the completion seam.** The gate thread computes the activation predicate + fused evidence bundle (`daemon/services/attestation_resolver_activation.py`, attached to the `GateDecision`); the graph node's **fused block** (`daemon/graph.py`, gated by the module constant `_LCA_STAGE2_RESOLVER_FLIP = True`) invokes **ONE fused judge** (`daemon/services/attestation_report_judge.judge_fused_bundle_async` — the single judge call site; retry-once-on-unparsable preserved) and maps the verdict onto the EXISTING outcome machinery (allow / allow+hint / deny+nudge / terminal_after_bound). The two legacy judge sites (marker-path + would-be-deny) and their route blocks are **dead-but-present** — removed from ROUTING only, zero deletions (Stage 3 deletes). There is **no runtime toggle** (repo convention n); revert = redeploy the pre-Stage-2 build (runbook below).
+**There is EXACTLY ONE completion path.** The gate thread computes the activation predicate + fused evidence bundle (`daemon/services/attestation_resolver_activation.py`, attached to the `GateDecision`); the graph node's **fused block** (guarded only by the snapshot's presence — the `_LCA_STAGE2_RESOLVER_FLIP` constant was DELETED with the Stage-3 retirement) invokes **ONE fused judge** (`daemon/services/attestation_report_judge.judge_fused_bundle_async` — the single judge entry point; retry-once-on-unparsable preserved) and maps the verdict onto the EXISTING outcome machinery (allow / allow+hint / deny+nudge / terminal_after_bound). The two legacy judge sites (marker-path + would-be-deny), their route blocks, the legacy judge service entry points, the `(a)/(b)/(c)/(d)` route enum, the trigger-derivation log fields, the busy-suppressor log field, and the outside-window diagnostic are all DELETED (resolver-unification §7 R1–R8; decisions.md D-RES4). There is **no runtime toggle** (repo convention n); revert = redeploy an earlier build (runbook below).
 
-**Post-flip behavior map** (spec §4.3, DP-5 REJECTED — no fail-safe allow anywhere):
+**Final behavior map** (spec §4.3, DP-5 REJECTED — no fail-safe allow anywhere):
 
 | Band | Judge fires? | verdict=complete | not_complete / error / timeout / unparsable×2 | kill-switch OFF |
 |---|---|---|---|---|
-| meta-bypass (no delegation / attested / answer-pending) | no — 0 LLM | — | — | — (plain allow) |
-| deny band (un-attested ∧ quiet) | yes — on a would-be-DENY decision only (an at-bound TERMINAL decision gets NO judge — budget parity) | allow (rescue) | **deny+nudge via the existing machinery, bound-enforced by `decide()` step (6)** | **deny+nudge WITHOUT judge (Q1 parity)** |
+| meta-bypass (no delegation / attested / answer-pending) | no — 0 LLM (suspicion scans SKIPPED on non-delegated missions — the D10 mirror) | — | — | — (plain allow) |
+| deny band (un-attested ∧ quiet) | yes — on a would-be-DENY decision only (an at-bound TERMINAL decision gets NO judge — budget parity) | allow (rescue) | **deny+nudge via the existing machinery, bound-enforced** | **deny+nudge WITHOUT judge (Q1 parity)** |
 | marker band (b_fires ∧ ¬quiet) | yes | plain allow | pending → allow+hint; else deny-flip (structurally unreachable) | plain allow |
-| A band (Δ2 — a_suspicion alone, ¬quiet) | yes — the new 0→1 row | plain allow | pending → **allow+hint citing A evidence (D4)**; else deny-flip (unreachable) | plain allow |
-| dry mode | no — 0 LLM (R3: computed + logged, node skipped) | — | — | — |
+| A band (Δ2 — a_suspicion alone, ¬quiet) | yes — the 0→1 row | plain allow | pending → **allow+hint citing A evidence (D4)**; else deny-flip (unreachable) | plain allow |
+| dry mode | no — 0 LLM (computed + logged, node skipped) | — | — | — |
 
-### Post-flip soak watch (what to grep now)
+### What to grep now (final)
 
-1. **Resolver decisions directly** — the eval row gained two additive tail fields; watch these, not the agreement flag:
+1. **Resolver decisions directly**:
    ```
    event=leader_completion_resolver_eval
    resolver_outcome=allow|allow_hint|deny_nudge|terminal_after_bound
    judge_invoked=True|False     # DERIVED from the real invocation flag
    judge_verdict=complete|not_complete|error|timeout|unparsable|<none>
    ```
-   `judge_invoked=True` iff the fused judge actually made an LLM attempt (the Stage-1 literal `False` is gone). `resolver_outcome` is the AUTHORITATIVE outcome the resolver routed this evaluation to.
-2. **Fused judge rows** — the legacy judge event family (`event=leader_completion_gate_marker_judge`, `event=leader_completion_gate_judge`) is **SILENT** post-flip (dead sites). The live surface is:
+2. **Fused judge rows — the ONLY judge event family** (the legacy `*_marker_judge*` names and the bare `leader_completion_gate_judge` row were removed with their call sites; dashboards grepping them must migrate):
    ```
    event=leader_completion_gate_fused_judge            # invocation + verdict
    event=leader_completion_gate_fused_judge_disabled   # kill-switch OFF, verdict=<skipped>
    event=leader_completion_gate_fused_judge_error      # wrapper-layer fault, decision=fail_safe_conservative
    ```
    Grep hygiene: `leader_completion_gate_fused_judge` is a PREFIX of the `_disabled` / `_error` rows — anchor greps on the trailing token (e.g. `grep 'leader_completion_gate_fused_judge '` with the trailing space) exactly like the `leader_completion_resolver_eval` vs `leader_completion_resolver_eval_error` prefix pair.
-3. **Agreement-flag semantics changed** (deliberate): the flag still compares the resolver's NO-JUDGE would-be outcome against the gate `decide()` value — useful as the kill-switch-off / dry reference. The old JUDGE paths are dead and no longer evaluated, so rows where `judge_invoked=True` are divergence rows BY CONSTRUCTION when the verdict flipped the no-judge mapping (rescue rows: `would_deny_nudge` + `resolver_outcome=allow`). Do NOT alert on agreement=False alone post-flip; alert on `resolver_outcome` distributions instead.
-4. **D4 hint citations**: hint rows now may append a `Completion evidence cited by the completion judge:` block + `Advisory:` line (from the verdict JSON, capped 5×120 + 240 chars). Hints without verdict evidence remain byte-identical to the pre-flip note.
-5. **Zero-LLM rows preserved**: meta-bypass / dry / not-fired / fail-open rows log `judge_invoked=False` with `bundle_sha256=<none>` or a bundle hash but no invocation.
+3. **Canonical gate row**: 17 schema fields; 27 format placeholders. Retired keys that will NEVER appear again: `attest_seen_outside_window=`, `marker_path=`, `marker_judge_verdict=`, `marker_judge_latency_ms=`, `marker_judge_error_class=`, `trigger_source=`, `trigger_suppressed_by=`. On non-delegated missions the suspicion fields (`marker_hit`/`length_trigger`/`final_word_count`) carry their False/0 defaults (the scans are skipped — D10 mirror).
+4. **D4 hint citations**: hint rows may append a `Completion evidence cited by the completion judge:` block + `Advisory:` line (capped 5×120 + 240 chars). All id-bearing bundle text (incl. leader-prose excerpts) is UUID-redacted.
+5. **Zero-LLM rows preserved**: meta-bypass / dry / not-fired / fail-open rows log `judge_invoked=False`.
 
-### Revert runbook (Stage 2)
+### Revert runbook
 
-Revert = **redeploy the pre-Stage-2 build** (frozen-PyInstaller, rebuild+restart discipline — the flip is a module constant, no env lever exists by design). Post-revert the Stage-1 shadow contract returns (old judge sites live again, `judge_invoked=False` literal rows). The kill-switch matrix to de-risk BEFORE reverting:
+Revert = **redeploy the earlier build** (frozen-PyInstaller, rebuild+restart discipline — the retirement is code deletion, no env lever exists by design). Pre-Stage-3 lineage restores the Stage-2 dead-but-present shape; pre-Stage-2 restores the legacy-authoritative shape. The kill-switch matrix to de-risk BEFORE reverting:
 
-| Knob | Effect while Stage-2 is active |
+| Knob | Effect (final architecture) |
 |---|---|
 | `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` (+restart) | Fused judge never fires: deny band → deny+nudge WITHOUT judge (Q1); marker/A bands → plain allow. Cheapest incident brake — prefer this over reverting. |
 | `ENSEMBLE_LEADER_ATTESTATION_MODE=dry` (+restart) | Resolver computed + logged, node skipped, 0 LLM, allow-everything (passive observation). |

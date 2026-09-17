@@ -40,7 +40,13 @@ from daemon.services.attestation_gate import (
 def _decide(**overrides):
     """Call ``decide()`` with the canonical deny-shape defaults
     (enforce, delegated, not attested, nothing pending, count 0,
-    bound 3) plus per-test overrides."""
+    bound 3) plus per-test overrides.
+
+    Stage 3 (2026-09-17, R2/R3): decide() lost its meta params
+    (scope_applicable / mode / attestation_enabled) — those branches
+    moved to evaluate()'s composition layer. Historical kwargs are
+    dropped here so the arm tests keep pinning the pure enforce
+    tree; the retired-branch tests below were re-contracted."""
     kwargs = dict(
         attested=False,
         pending_children=0,
@@ -48,12 +54,12 @@ def _decide(**overrides):
         live_descendants=0,
         denied_count=0,
         bound=3,
-        scope_applicable=True,
-        mode="enforce",
-        attestation_enabled=True,
         attestation_required=True,
     )
     kwargs.update(overrides)
+    kwargs.pop("scope_applicable", None)
+    kwargs.pop("mode", None)
+    kwargs.pop("attestation_enabled", None)
     return decide(**kwargs)
 
 
@@ -94,35 +100,42 @@ class TestUserAnswerPendingArm:
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         assert result.next_denied_count == 2
 
-    def test_conditional_off_still_allows_with_answer_pending(self):
-        """Arm placement (3.b, AFTER the conditional-off check): with
-        ``attestation_required=False`` the gate keeps its historical
-        plain-ALLOWED enum — still a plain allow with zero counter
-        movement; the answer-pending signal surfaces on the canonical
-        row via ``evaluate()`` (the 18th field), not via the enum."""
+    def test_conditional_off_with_answer_pending_composition_allow(self):
+        """Stage 3 (R4) re-contract: the no-delegation arm retired
+        from decide() into evaluate()'s composition layer. At the
+        decide() level the answer-pending arm is now the FIRST branch
+        (ALLOWED_LEGITIMATE); the historical plain-ALLOWED shape for
+        non-delegated missions is produced by the composition bypass
+        BEFORE decide() runs (pinned at the evaluate seam in
+        test_attestation_conditional_gate_outcomes)."""
         result = _decide(
             attestation_required=False, user_answer_pending=True
         )
-        assert result.decision is Decision.ALLOWED
+        # Pure enforce tree: the answer arm wins.
+        assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         assert result.next_denied_count == 0
         assert result.should_inject_nudge is False
-        assert result.attestation_required is False
 
     def test_dry_mode_unaffected(self):
-        """Dry-mode contract (evaluate-only, zero side effects) trumps
-        everything — DRY_LOG regardless of the pending answer."""
-        result = _decide(mode="dry", user_answer_pending=True)
-        assert result.decision is Decision.DRY_LOG
+        """Stage 3 (R3) re-contract: the DRY_LOG mapping moved to
+        evaluate()'s mode layer. At the decide() level the answer arm
+        produces its plain-allow shape; the DRY_LOG mapping is pinned
+        at the evaluate seam (test_attestation_gate dry-mode class +
+        test_attestation_dry_logging)."""
+        result = _decide(user_answer_pending=True)
+        assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
+        assert result.next_denied_count == 0
 
     def test_meta_conditions_still_win(self):
-        """Gate-off / out-of-scope bypasses stay byte-identical."""
-        result = _decide(
-            attestation_enabled=False, user_answer_pending=True
-        )
-        assert result.decision is Decision.ALLOWED
+        """Stage 3 (R2) re-contract: the gate-off / out-of-scope
+        bypasses retired from decide() into evaluate()'s composition
+        layer (predicate Term-0 mirror) — pinned at the evaluate seam
+        in test_attestation_gate.TestMetaConditionsAtCompositionLayer.
+        At the decide() level the answer arm produces its plain-allow
+        shape regardless (the meta flags are no longer inputs)."""
+        result = _decide(user_answer_pending=True)
+        assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         assert result.next_denied_count == 0
-        result = _decide(scope_applicable=False, user_answer_pending=True)
-        assert result.decision is Decision.ALLOWED
 
     def test_default_absent_is_legacy_behavior(self):
         """Kwarg absent ≡ False ≡ pre-FIX-2 behavior on every arm."""

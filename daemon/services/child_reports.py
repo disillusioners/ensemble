@@ -39,7 +39,23 @@ from .report_integrity_guard import (
     enforce_declared_waiting_violations,
     log_declared_waiting_violations,
 )
-from .context_messages import _resolve_tree_root_id
+from .context_messages import (
+    CONTEXT_KIND_CHILD_REPORT_CHECK,
+    _make_context_message,
+    _resolve_tree_root_id,
+    _stable_id_for,
+)
+# F-C ledger item (c), Stage-3 2026-09-17: the child-terminal promise
+# scanner import was previously function-local (lazy) inside
+# ``_process_child_completion_db_sync`` — paid on EVERY child
+# completion (the hot path) and, critically, an ImportError there
+# would have surfaced mid-transaction instead of at boot. Hoisted to
+# module top: the scanner is a leaf module (langchain_core only, no
+# daemon imports) so no cycle is introduced and the cost moves to the
+# one-time import.
+from .attestation_marker_scanner import (
+    scan_child_terminal_report_for_promises,
+)
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
 from .job_queue_service import TERMINAL_STATUSES
@@ -3116,15 +3132,6 @@ Provide a concise summary:"""
             # dead-parent / paused-parent / dead-line branches as the
             # PROCESS_REPORT task (the note is meaningless to a dead
             # parent — its queue is dead-lettered anyway).
-            from .attestation_marker_scanner import (
-                scan_child_terminal_report_for_promises,
-            )
-            from .context_messages import (
-                CONTEXT_KIND_CHILD_REPORT_CHECK,
-                _make_context_message,
-                _stable_id_for,
-            )
-
             _promise_scan = scan_child_terminal_report_for_promises(
                 last_content
             )
@@ -3269,6 +3276,30 @@ Provide a concise summary:"""
                             f"stable_id={_note_message.id} "
                             f"enqueued_at="
                             f"{child_report_check_note_row.enqueued_at.isoformat() if child_report_check_note_row.enqueued_at else '?'}"
+                        )
+                    except ImportError as _note_import_err:
+                        # F-C ledger item (c), Stage-3 2026-09-17 —
+                        # an ImportError at the marker-write seam is a
+                        # DEPLOY bug (a module that must exist), not an
+                        # advisory-note data failure: log it LOUD
+                        # (ERROR, distinct error_class) so it cannot
+                        # hide among benign runtime failures. The note
+                        # is still advisory — the SAVEPOINT rollback
+                        # and the outer-transaction guarantees are
+                        # identical to the runtime branch below.
+                        _note_sp.rollback()
+                        logger.error(
+                            f"event=leader_completion_gate_child_report_check_failed "
+                            f"parent_id="
+                            f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                            f"child_id={instance.instance_id[:8]}... "
+                            f"matched_terms="
+                            f"{','.join(_promise_scan.matched_terms)} "
+                            f"note_message_id={note_message_id} "
+                            f"stable_id={_note_message.id} "
+                            f"error_class=ImportError "
+                            f"deploy_bug=true "
+                            f"error={_note_import_err!s}"
                         )
                     except Exception as _note_err:
                         # SAVEPOINT-scoped rollback: the outer

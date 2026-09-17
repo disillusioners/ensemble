@@ -20,7 +20,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from daemon.graph import ATTESTATION_NUDGE_TEXT
 from daemon.services.attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
-    attestation_seen_outside_window,
     is_compaction_summary_doc,
     scan_for_attestation,
     scan_for_attestation_detailed,
@@ -84,15 +83,10 @@ class TestAC22AttestedOutsideWindow:
         attested, _ = scan_for_attestation(messages, 3)
         assert attested is False
 
-    def test_attested_outside_flagged_by_o3_helper(self):
-        messages = [ai("attesting", tool_calls=attest_call())]
-        for i in range(4):
-            messages.append(HumanMessage(content=f"filler {i}"))
-            messages.append(ai(f"chat {i}"))
-        assert attestation_seen_outside_window(messages, 3) is True
-        # ...while the attested decision stays False (bounded scan).
-        attested, _ = scan_for_attestation(messages, 3)
-        assert attested is False
+    # Stage 3 (2026-09-17, resolver-unification R1): the
+    # ``attestation_seen_outside_window`` O3 diagnostic helper was
+    # RETIRED (log-only surface, no decision weight). The bounded
+    # in-window scan above remains the decision path.
 
 
 class TestAC23TextOnlyClaim:
@@ -297,18 +291,5 @@ class TestScanMechanics:
         assert detailed.window_truncated is True
         assert detailed.summary_seen is False
 
-    def test_o3_helper_ignores_window_messages_and_summaries(self):
-        summary = SystemMessage(content="s", id="compaction-global-iid-0002")
-        messages = [
-            ai("stale attesting", tool_calls=attest_call()),
-            summary,  # crossed boundary — ignored, not counted
-            ai("w1"),
-            ai("w2"),
-            ai("w3"),
-        ]
-        assert attestation_seen_outside_window(messages, 3) is True
-        # no attestation anywhere → False
-        assert attestation_seen_outside_window([ai("plain")], 3) is False
-        # attestation only INSIDE the window → False (not "outside")
-        inside = [ai("a", tool_calls=attest_call()), ai("b"), ai("c")]
-        assert attestation_seen_outside_window(inside, 3) is False
+    # Stage 3 (R1): the O3 outside-window helper tests retired with
+    # the helper (log-only diagnostic; no decision weight).

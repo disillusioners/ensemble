@@ -42,7 +42,8 @@ def test_dry_log_has_complete_schema_and_stale_attestation_diagnostic(caplog):
     assert result.decision.value == "dry_log"
     assert result.next_denied_count == 2
     assert result.should_inject_nudge is False
-    assert result.attest_seen_outside_window is True
+    # Stage 3 (R1): the outside-window diagnostic field retired — the
+    # stale attestation in the fixture is simply not surfaced anymore.
     assert result.messages_scanned == 3
     assert result.pending_children == 0
     assert result.queued_or_expected_wakeups == 0
@@ -55,7 +56,10 @@ def test_dry_log_has_complete_schema_and_stale_attestation_diagnostic(caplog):
     for field in CANONICAL_LOG_SCHEMA_FIELDS:
         assert f"{field}=" in log_line, f"missing canonical field {field}"
     assert "messages_scanned=3" in log_line
-    assert "attest_seen_outside_window=True" in log_line
+    # Stage 3 (R1): retired log keys are ABSENT from the dry row.
+    assert "attest_seen_outside_window=" not in log_line
+    assert "marker_path=" not in log_line
+    assert "trigger_source=" not in log_line
     manager.count_pending_children.assert_called_once_with("dry-schema")
     manager.get_queued_or_expected_wakeups.assert_called_once_with("dry-schema")
     manager.enqueue_message.assert_not_called()

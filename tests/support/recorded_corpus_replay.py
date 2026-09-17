@@ -14,6 +14,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+#: The FIXTURE-CONTRACT field set (the checked-in 2026-09-05-era
+#: recordings predate the 2026-09-06+ additions). NOT a mirror of the
+#: live canonical schema — the live tuple is
+#: ``daemon.services.attestation_gate.CANONICAL_LOG_SCHEMA_FIELDS``
+#: (17 fields as of the Stage-3 retirement 2026-09-17; the
+#: ``attest_seen_outside_window`` fixture field is retired from the
+#: live row and tolerated here as historical fixture data).
 CANONICAL_FIELDS: tuple[str, ...] = (
     "event",
     "decision",

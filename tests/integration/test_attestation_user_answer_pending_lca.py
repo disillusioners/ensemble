@@ -217,7 +217,8 @@ def test_answer_pending_plain_allows_zero_judge_zero_nudge(monkeypatch, caplog):
         "FIX-2: the marker scan MUST NOT run (plain allow BEFORE any "
         "trigger work) — marker_hit stays at its default"
     )
-    assert "marker_judge_verdict=<none>" in row
+    # Stage 3 (R7): the judge-verdict stamp field retired from the row.
+    assert "marker_judge_verdict=" not in row
 
 
 def test_answer_pending_suppresses_delegated_denial(monkeypatch, caplog):

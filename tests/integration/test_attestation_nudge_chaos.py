@@ -74,9 +74,8 @@ async def test_nudge_checkpoint_survives_restart_and_leads_to_attested_allow(
     from daemon.services.attestation_gate import build_gate_config
 
     gate = real_graph_module.create_attestation_gate_node(
-        build_gate_config(
-            INSTANCE_ID, _settings(), attestation_enabled=True, scope_applicable=True
-        ),
+        # Stage 3 (R2): the gate-config meta-flag keys retired.
+        build_gate_config(INSTANCE_ID, _settings()),
         _settings(),
         manager,
         INSTANCE_ID,

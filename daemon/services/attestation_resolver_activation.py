@@ -1,22 +1,23 @@
-"""LCA unified resolver — Stage 1 activation predicate + Stage 2 flip support.
+"""LCA unified resolver — activation predicate + the single fused path.
 
 Implements the unified 3-source completion resolver (spec:
 ``.agents/shared/planning/leader-completion-attestation/
-resolver-unification.md`` §4.1/§4.2/§4.3). **Stage 2 (the flip,
-2026-09-16)**: the resolver's outcome mapping is AUTHORITATIVE at the
-completion seam — this module computes the predicate + fused bundle in
-the gate thread and the GRAPH NODE's fused block invokes the fused
-judge + maps the outcome + emits the structured
-``event=leader_completion_resolver_eval`` row (with ``judge_invoked``
-DERIVED from the real invocation flag). The two legacy judge sites in
-``daemon/graph.py`` are dead-but-present (Stage 3 deletes).
+resolver-unification.md`` §4.1/§4.2/§4.3). **Stage 2 flipped
+2026-09-16; Stage 3 retirement 2026-09-17** — the resolver's outcome
+mapping is the SOLE completion path: this module computes the
+predicate + fused bundle in the gate thread and the GRAPH NODE's fused
+block invokes the fused judge + maps the outcome + emits the
+structured ``event=leader_completion_resolver_eval`` row (with
+``judge_invoked`` DERIVED from the real invocation flag). The two
+legacy judge sites in ``daemon/graph.py`` are DELETED (Stage 3,
+R1–R8 executed; see decisions.md D-RES4).
 
-Stage-2 scope (user-locked 2026-09-16):
+Scope (user-locked 2026-09-16 / Stage-3 executed 2026-09-17):
   * Δ1–Δ4 approved (evidence fusion shapes); Δ2 mirrored exactly — Source A
     is NOT busy-suppressed; Source B IS busy-muted.
   * DP-5 REJECTED — judge error/timeout stays conservative path-(d) deny;
     the rejected fail-safe-allow shape appears nowhere.
-  * R1–R8 retirement is Stage 3 ONLY — legacy blocks stay present.
+  * R1–R8 retirement EXECUTED (dead code deleted, tests re-contracted).
   * NO new env flags (repo convention n).
 
 Components
@@ -672,12 +673,14 @@ def compute_agreement(would_be_outcome: str, old_outcome: str) -> bool:
 def redact_ids(text: str, slot_hint: str = "id") -> str:
     """Replace UUID-shape tokens with stable slot placeholders.
 
-    Per the 98b59dd7 evidence boundary: structural id-bearing fields are
-    redacted (A-section and C-section tree rows). B-section leader-prose
-    excerpts (≤3 × 1500 chars) are quoted verbatim and may contain
-    instance ids the leader itself quoted; full B-redaction lands in
-    Stage 3. Non-UUID ids (short tokens, agent names) pass through —
-    the structural id-bearing fields are UUIDs by construction.
+    Per the 98b59dd7 evidence boundary: ALL id-bearing text is
+    redacted — the structural fields (A-section child ids/stable ids,
+    C-section tree rows) AND the B-section leader-prose excerpts (the
+    leader may quote instance ids verbatim in its own prose; Stage-3
+    ledger item (a), 2026-09-17, replaced the former docstring
+    scope-note workaround from f926de24 with the real redaction).
+    Non-UUID ids (short tokens, agent names) pass through — the
+    id-bearing fields are UUIDs by construction.
     """
     counter = {"n": 0}
 
@@ -744,7 +747,7 @@ def _build_b_section(
         content = message.content if isinstance(message.content, str) else str(
             message.content or ""
         )
-        lines.append(f"[{shown + 1}] {_clip(content, 1500)}")
+        lines.append(f"[{shown + 1}] {redact_ids(_clip(content, 1500), 'leader')}")
         shown += 1
     if shown == 0:
         lines.append("(no AIMessages)")
@@ -797,14 +800,14 @@ def assemble_fused_bundle(
 
     Per-section caps: A ≤3000, B ≤6000, C ≤3000 (sum = the ≤12000 total —
     enforced defensively by a final hard clip with a truncation marker).
-    Structural id-bearing fields are redacted (:func:`redact_ids`;
-    A-section and C-section tree rows). B-section leader-prose excerpts
-    (≤3 × 1500 chars) are quoted verbatim and may contain instance ids
-    the leader itself quoted; full B-redaction lands in Stage 3.
-    Stage 2 (the flip): the graph node's fused block feeds this bundle
+    ALL id-bearing text is redacted (:func:`redact_ids`): the
+    structural fields (A-section child/stable ids, C-section tree
+    rows) AND the B-section leader-prose excerpts (≤3 × 1500 chars —
+    the leader may quote instance ids in its own prose; Stage-3
+    ledger item (a), 2026-09-17).
+    The graph node's fused block feeds this bundle
     VERBATIM to :func:`attestation_report_judge.judge_fused_bundle_async`
-    — the ONE judge call site (the Stage-1 module-global seam is
-    retired; see decisions.md D-RES2).
+    — the ONE judge call site.
     """
     a_section = _clip(_build_a_section(a_signals), BUNDLE_A_SECTION_MAX)
     b_section = _clip(_build_b_section(b_signals, ai_tail_messages), BUNDLE_B_SECTION_MAX)

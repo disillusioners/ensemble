@@ -297,14 +297,15 @@ class TestSharedTransportSeam:
         # The bundle is the payload VERBATIM (no re-truncation).
         assert seen["payload"] == "[LCA FUSED EVIDENCE BUNDLE v1]"
 
-    def test_legacy_default_prompt_unchanged(self):
-        # Backward pin: the legacy window judge's default prompt is the
-        # module constant (the additive system_prompt kwarg defaults to
-        # the legacy value — old callers byte-identical).
+    def test_system_prompt_is_required_kwarg(self):
+        # Stage 3 (R7): the legacy window judge and its prompt constant
+        # are deleted — ``system_prompt`` is now a REQUIRED keyword on
+        # the shared LLM seam (the fused judge passes
+        # FUSED_JUDGE_SYSTEM_PROMPT explicitly).
         import inspect
 
         sig = inspect.signature(jm._invoke_judge_llm)
-        assert sig.parameters["system_prompt"].default == jm.JUDGE_SYSTEM_PROMPT
+        assert sig.parameters["system_prompt"].default is inspect.Parameter.empty
 
     def test_fused_prompt_names_all_three_sources(self):
         # The prompt must orient the judge to the bundle's three

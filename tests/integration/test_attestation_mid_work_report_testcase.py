@@ -63,7 +63,6 @@ from daemon.services import attestation_report_judge as judge_mod
 from daemon.services.attestation_judge_resolver import (
     reset_llm_judge_resolver_for_tests,
 )
-from daemon.services.attestation_report_judge import JudgeResult
 from daemon.services.attestation_resolver import (
     reset_attestation_resolver_for_tests,
 )
@@ -131,82 +130,59 @@ def attest_completion() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Judge stub: patches BOTH the high-level wrapper
-# (judge_completion_report_async, which graph.py imports inside its gate
-# function body) AND the inner LLM invoker (_invoke_judge_llm, belt-and-
-# braces). Returns a canned JudgeResult.
-#
-# Patching the WRAPPER is the correct integration-test seam because
-# graph.py executes `from .services.attestation_report_judge import
-# judge_completion_report_async` inside the gate function body — the
-# import resolves at CALL time and reads the patched attribute. The
-# wrapper itself is fail-safe (returns JudgeResult on every path), so
-# patching it short-circuits both the real LLM call and any
-# config-import side effects.
+# Judge stub (Stage-3 re-contract, 2026-09-17): hooks the ONE shared
+# LLM seam — ``_invoke_judge_llm``, consumed by the fused judge
+# (``judge_fused_bundle_async``). The historical two-seam shape (the
+# legacy window-judge wrapper + the inner invoker) retired with R7;
+# the stub returns a canned fused-verdict JSON and records every
+# invocation so tests can assert the judge was (or was not) called.
 # ─────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class _JudgeStub:
-    """Async stub for ``judge_mod.judge_completion_report_async``.
+    """Judge-invocation recorder (Stage-3 re-contract).
 
-    Returns a :class:`JudgeResult` matching the real signature so the
-    graph continues past the wrapper fault catcher without ever
-    reaching the real LLM call. Records every invocation so tests can
-    assert the judge was (or was not) called AND inspect the messages
-    slice that was sent.
+    The legacy window-judge wrapper was DELETED (R7) — the stub now
+    hooks the ONE shared LLM seam (``_invoke_judge_llm``, consumed by
+    the fused judge) and records every invocation. All call sites in
+    this module assert ZERO invocations (the exercised rows are
+    suppressed / plain-allow paths where NO judge — fused included —
+    may fire).
     """
 
     is_complete_report: bool
     reason: str = "stubbed mid-work verdict"
     model_name: str = "fake-quick"
     latency_ms: int = 0
-    calls: list[list[BaseMessage]] = field(default_factory=list)
+    calls: list[Any] = field(default_factory=list)
 
     async def __call__(
         self,
-        messages: list[BaseMessage],
-        *,
         config: Any,
-        window: int = 3,
-        timeout_s: float | None = None,
-    ) -> JudgeResult:
-        self.calls.append(list(messages))
-        return JudgeResult(
-            is_complete_report=bool(self.is_complete_report),
-            verdict="no" if not self.is_complete_report else "yes",
-            reason=self.reason,
-            model=self.model_name,
-            latency_ms=self.latency_ms,
-            error_class=None,
+        user_payload: str,
+        *,
+        timeout_s: float,
+        system_prompt: str,
+    ) -> tuple[str, str]:
+        self.calls.append(user_payload)
+        return (
+            json.dumps(
+                {
+                    "verdict": (
+                        "complete" if self.is_complete_report
+                        else "not_complete"
+                    ),
+                    "rationale": self.reason,
+                }
+            ),
+            self.model_name,
         )
 
 
 def _install_judge_stub(monkeypatch, judge_stub: _JudgeStub) -> None:
-    """Install the stub at BOTH seams — wrapper + inner LLM invoker.
-
-    The wrapper patch is the canonical integration-test seam (the graph
-    re-imports the names inside its gate function body, so the patch is
-    picked up at call time). The inner-LLM patch is belt-and-braces for
-    any code path that resolves ``_invoke_judge_llm`` directly via the
-    module globals.
-    """
-    monkeypatch.setattr(judge_mod, "judge_completion_report_async", judge_stub)
-    # Mirror the unit-test pattern for completeness; if the wrapper
-    # ever short-circuits via a different call path, the inner stub
-    # still returns the canned tuple.
-    async def _inner_stub(config, user_payload, *, timeout_s):
-        return (
-            json.dumps(
-                {
-                    "is_complete_report": judge_stub.is_complete_report,
-                    "reason": judge_stub.reason,
-                }
-            ),
-            judge_stub.model_name,
-        )
-
-    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _inner_stub)
+    """Install the recorder at the single shared LLM seam."""
+    monkeypatch.setattr(judge_mod, "_invoke_judge_llm", judge_stub)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -617,15 +593,17 @@ async def test_scenario_a_children_out_allow_with_hint(
     # additive GateDecision field trigger_suppressed_by='busy_descendants'".
     # A suppressed trigger MUST NOT log "markers+length" — that would
     # be a regression (the trigger wasn't suppressed).
-    assert captured["trigger_source"] == "<none>", (
+    assert captured["trigger_source"] in (None, ""), (
         f"trigger_source MUST be cleared on busy suppression "
         f"(expecting '<none>'); got {captured['trigger_source']!r}. "
         f"A non-empty trigger_source on a busy descendant means the "
         f"trigger wasn't suppressed."
     )
-    assert captured["trigger_suppressed_by"] == "busy_descendants", (
-        f"Expected trigger_suppressed_by='busy_descendants' on "
-        f"healthy-wait suppression; got "
+    # Stage 3 (R5): the suppression-name field retired — the busy-mute
+    # observable is busy_descendants>0 (next assert) + zero judge
+    # calls + zero hints (asserted below).
+    assert captured["trigger_suppressed_by"] in (None, ""), (
+        f"trigger_suppressed_by retired in Stage 3 (R5); got "
         f"{captured['trigger_suppressed_by']!r}"
     )
     assert captured["busy_descendants"] == "3", (
@@ -983,7 +961,7 @@ async def test_scenario_c1_attested_no_scan_plain_allow(
         f"Attested allow must skip the marker scan; got marker_hit="
         f"{captured['marker_hit']!r}"
     )
-    assert captured["trigger_source"] in ("<none>", "", None), (
+    assert captured["trigger_source"] in (None, ""), (
         f"No triggers should fire on attested allow; got trigger_source="
         f"{captured['trigger_source']!r}"
     )
@@ -1115,7 +1093,7 @@ async def test_scenario_c2_long_benign_no_judge(
         f"Judge MUST NOT be called when no triggers fire; got "
         f"{captured['judge_stub_calls']} calls"
     )
-    assert captured["trigger_source"] in ("<none>", "", None), (
+    assert captured["trigger_source"] in (None, ""), (
         f"No triggers should fire on long benign; got trigger_source="
         f"{captured['trigger_source']!r}"
     )
@@ -1163,7 +1141,9 @@ async def test_scenario_c2_long_benign_no_judge(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# LIVE JUDGE variants — same A/B shape, real judge_completion_report_async
+# LIVE JUDGE variants — same A/B shape, the real judge LLM seam
+# (Stage-3: ``_invoke_judge_llm`` under ``judge_fused_bundle_async`` —
+# the legacy window-judge entry point retired with R7)
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -1226,7 +1206,8 @@ async def test_scenario_a_live_judge(
     )
     # Same attach as Test A: bypass the buggy ``from ..config import
     # load_config`` else-branch (graph.py:3429) so the real judge
-    # wrapper reaches the production ``judge_completion_report_async``.
+    # wrapper reaches the production fused-judge LLM seam
+    # (Stage-3: ``_invoke_judge_llm`` under ``judge_fused_bundle_async``).
     # See JOB 1 of the follow-up report for the bug analysis.
     from daemon.config import load_config
 
@@ -1322,13 +1303,13 @@ async def test_scenario_a_live_judge(
         f"is_complete_report=false → branch (b) → hint injection."
     )
 
-    # Suppression signal must be present on the canonical log row.
-    assert captured["trigger_suppressed_by"] == "busy_descendants", (
-        f"Expected trigger_suppressed_by='busy_descendants' on the "
-        f"healthy-wait suppression; got "
+    # Stage 3 (R5): the suppression-name field retired — the busy-mute
+    # observable is busy_descendants>0 + zero judge calls + zero hints.
+    assert captured["trigger_suppressed_by"] in (None, ""), (
+        f"trigger_suppressed_by retired in Stage 3 (R5); got "
         f"{captured['trigger_suppressed_by']!r}"
     )
-    assert captured["trigger_source"] == "<none>", (
+    assert captured["trigger_source"] in (None, ""), (
         f"Expected trigger_source cleared on suppression "
         f"(expecting '<none>'); got {captured['trigger_source']!r}"
     )
@@ -1374,8 +1355,8 @@ async def test_scenario_b_live_judge(
 
     Same shape as test_scenario_b_all_terminal_deny_nudge: 3 COMPLETED
     children, verbatim mid-work transcript. The judge stub is NOT
-    installed; the production ``judge_completion_report_async`` runs
-    against the real quick model.
+    installed; the production fused judge (``judge_fused_bundle_async``
+    over ``_invoke_judge_llm``) runs against the real quick model.
 
     NOTE: in the LIVE variant with all-terminal children, the primary
     gate DENIES directly (all R2 zero + no attestation). The marker

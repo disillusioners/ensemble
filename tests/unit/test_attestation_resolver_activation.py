@@ -885,8 +885,9 @@ class TestFusedSeamContract:
         def _explode(*args, **kwargs):
             raise AssertionError("LLM/judge invoked in gate evaluate()!")
 
-        monkeypatch.setattr(judge_mod, "judge_completion_report_async", _explode)
-        monkeypatch.setattr(judge_mod, "judge_completion_report_sync", _explode)
+        # Stage 3 (R7): the legacy window-judge entry points are
+        # deleted; the fused judge is the only invocation surface.
+        assert not hasattr(judge_mod, "judge_completion_report_async")
         monkeypatch.setattr(judge_mod, "judge_fused_bundle_async", _explode)
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", _explode)
 

@@ -1244,8 +1244,8 @@ def test_scenario_f_dry_mode_marker_hit_zero_side_effects(monkeypatch, caplog):
     # marker_path stays at the transient "<pending>" sentinel — the
     # graph node early-out never resolved it to "a"/"b"/"c"/"d" (no
     # judge ran). This is the dry-mode LOG-ONLY contract.
-    assert "marker_path=<pending>" in canonical_row
-    assert "marker_judge_verdict=<pending>" in canonical_row
+    assert "marker_path=" not in canonical_row
+    assert "marker_judge_verdict=" not in canonical_row
 
     # No marker-path judge row, no judge-error row, no kill-switch
     # disabled row — dry mode is the gate's pure-passive observer
@@ -1383,8 +1383,9 @@ def test_scenario_h_no_markers_no_judge_call(monkeypatch, caplog):
     assert "marker_terms=<none>" in log_text, (
         "(h): the canonical log row MUST carry marker_terms=<none>"
     )
-    assert "marker_path=<none>" in log_text, (
-        "(h): the canonical log row MUST carry marker_path=<none>"
+    assert "marker_path=" not in log_text, (
+        "(h): the marker-path field retired (Stage 3 R6/R7) — the "
+        "canonical row must NOT carry it"
     )
     # And NO judge row — the judge never ran.
     assert "event=leader_completion_gate_fused_judge" not in log_text, (

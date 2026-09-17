@@ -949,7 +949,8 @@ def test_no_markers_no_judge_call(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=False" in log_text
     assert "length_trigger=False" in log_text
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1032,7 +1033,7 @@ def test_log_marker_fields_present_on_marker_a_path(monkeypatch, caplog):
     assert "marker_hit=True" in log_text
     assert "marker_terms=ending turn" in log_text
     # Canonical row says "<pending>" (judge hasn't run yet).
-    assert "marker_path=<pending>" in log_text
+    assert "marker_path=" not in log_text
 
     # judge-row fields on the fused-judge log line.
     assert "event=leader_completion_gate_fused_judge" in log_text
@@ -1100,10 +1101,11 @@ def test_log_marker_fields_present_on_no_marker_path(monkeypatch, caplog):
     # half fires so the cheap allow path is taken.
     assert "marker_hit=False" in log_text
     assert "marker_terms=<none>" in log_text
-    assert "marker_path=<none>" in log_text
+    assert "marker_path=" not in log_text
     # Length trigger fields: long report (>= 150 words) ⇒ no trigger.
     assert "length_trigger=False" in log_text
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
 
     # No judge row.
     assert "event=leader_completion_gate_marker_judge" not in log_text
@@ -1226,6 +1228,71 @@ def test_quick_question_with_marker_does_not_reach_judge(monkeypatch, caplog):
     assert "fired=False" in log_text
     assert "bypass_reason=meta_bypass" in log_text
     assert "judge_invoked=False" in log_text
+
+
+def test_quick_question_marker_scan_seam_never_invoked(monkeypatch, caplog):
+    """D10 BELT pin (adversarial-review round 2026-09-17): on a
+    marker-laden NON-delegated mission the SCANNER SEAM itself is
+    never invoked — ``scan_for_mid_work_markers`` records zero calls
+    and the canonical row's ``marker_hit`` stays False (the dataclass
+    default, not a measurement).
+
+    Complements ``test_quick_question_with_marker_does_not_reach_judge``
+    (which spies the judge seam) and the census guard-grep on the
+    evaluate() source: a hypothetical SECOND scan site (a future
+    resurrection of the retired conditional-off scan) would trip this
+    spy even if the judge stayed silent.
+    """
+    from daemon.services import attestation_gate as gate_mod
+    from daemon.services.attestation_marker_scanner import (
+        scan_for_mid_work_markers as _real_scan,
+    )
+
+    scanner_calls = []
+
+    def _scan_spy(messages, window):
+        scanner_calls.append((len(messages), window))
+        return _real_scan(messages, window)
+
+    monkeypatch.setattr(
+        gate_mod, "scan_for_mid_work_markers", _scan_spy
+    )
+
+    node, manager, ledger = _make_node(instance_id="marker-qq-scan-it")
+    with caplog.at_level(logging.INFO, logger="daemon.graph"), caplog.at_level(
+        logging.INFO, logger="daemon.services.attestation_gate"
+    ):
+        result = asyncio.run(
+            node(
+                _quick_question_with_marker(
+                    "The answer is X. Ending turn, will continue after "
+                    "your reply."
+                ),
+                config={"configurable": {"thread_id": "marker-qq-scan-it"}},
+            )
+        )
+
+    # Plain ALLOW, no side effects.
+    assert "messages" not in result
+    assert result["attestation_route"] is None
+    ledger.increment.assert_not_called()
+
+    # THE BELT: the scanner seam was never invoked on the ¬required row.
+    assert scanner_calls == [], (
+        "Stage-3 D10 mirror violated: the marker scan ran on a "
+        "non-delegated mission (suspicion signals must not be "
+        f"evaluated there) — spy recorded {scanner_calls}"
+    )
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    canonical = next(
+        line
+        for line in log_text.splitlines()
+        if line.startswith("event=leader_completion_gate ")
+    )
+    assert "attestation_required=False" in canonical
+    # marker_hit is the False default — the scanner never measured it.
+    assert "marker_hit=False" in canonical
+    assert "marker_terms=<none>" in canonical
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1352,8 +1419,10 @@ def test_dry_mode_marker_hit_logs_signal_no_side_effects(
     # marker_path stays at the transient "<pending>" sentinel — the
     # graph node early-out never resolved it to "a"/"b"/"c"/"d"
     # (no judge ran). This is the dry-mode LOG-ONLY contract.
-    assert "marker_path=<pending>" in canonical_row
-    assert "marker_judge_verdict=<pending>" in canonical_row
+    assert "marker_path=" not in canonical_row
+    # Stage 3 (R7): the judge-verdict stamp fields retired — the
+    # verdict rides the fused-judge event row instead.
+    assert "marker_judge_verdict=" not in canonical_row
 
     # No marker-path judge row, no marker-path judge error row, no
     # kill-switch disabled row — dry mode is the gate's pure-passive
@@ -1602,7 +1671,9 @@ def test_marker_kill_switch_off_stamps_skipped_verdict(
         None,
     )
     assert canonical_row is not None
-    assert "marker_judge_verdict=<pending>" in canonical_row
+    # Stage 3 (R7): the judge-verdict stamp fields retired — the
+    # verdict rides the fused-judge event row instead.
+    assert "marker_judge_verdict=" not in canonical_row
 
 
 def test_marker_scan_catalog_pin_survives_optimization():
@@ -1755,7 +1826,7 @@ def test_length_short_no_marker_judge_fires(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=False" in log_text
     assert "length_trigger=True" in log_text
-    assert "trigger_source=length" in log_text
+    assert "trigger_source=" not in log_text
     assert "resolver_outcome=allow_hint" in log_text
     assert "verdict=not_complete" in log_text
 
@@ -1800,7 +1871,8 @@ def test_length_long_no_marker_no_judge_cost_control(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=False" in log_text
     assert "length_trigger=False" in log_text
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
     assert "event=leader_completion_gate_fused_judge" not in log_text
 
 
@@ -1846,7 +1918,7 @@ def test_length_short_complete_artifact_judge_yes_allows(
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     # Length trigger fired (short text); judge said complete; allow.
     assert "length_trigger=True" in log_text
-    assert "trigger_source=length" in log_text
+    assert "trigger_source=" not in log_text
     assert "verdict=complete" in log_text
     assert "resolver_outcome=allow" in log_text
 
@@ -1917,7 +1989,7 @@ def test_length_short_real_pending_hint(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "length_trigger=True" in log_text
     assert "marker_hit=False" in log_text
-    assert "trigger_source=length" in log_text
+    assert "trigger_source=" not in log_text
     assert "verdict=not_complete" in log_text
     assert "resolver_outcome=allow_hint" in log_text
 
@@ -1963,7 +2035,7 @@ def test_length_short_markers_judge_combined_trigger_source(
     # BOTH halves fire — trigger_source is the combined literal.
     assert "marker_hit=True" in log_text
     assert "length_trigger=True" in log_text
-    assert "trigger_source=markers+length" in log_text
+    assert "trigger_source=" not in log_text
     assert "resolver_outcome=allow_hint" in log_text
     assert "verdict=not_complete" in log_text
 
@@ -2001,7 +2073,7 @@ def test_length_trigger_source_markers_only(monkeypatch, caplog):
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "marker_hit=True" in log_text
     assert "length_trigger=False" in log_text
-    assert "trigger_source=markers" in log_text
+    assert "trigger_source=" not in log_text
     assert "resolver_outcome=allow_hint" in log_text
 
 
@@ -2072,11 +2144,13 @@ def test_length_dry_mode_log_only_no_judge(monkeypatch, caplog):
     assert "messages" not in result
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    # Canonical gate row carries the length-trigger signal.
+    # Canonical gate row is dry-log; Stage 3 (R4/D10 mirror): the
+    # quick-question (non-delegated) mission skips the scan entirely,
+    # so the length signal is not evaluated (False default).
     assert "decision=dry_log" in log_text
-    assert "length_trigger=True" in log_text
-    assert "trigger_source=length" in log_text
-    assert "marker_path=<pending>" in log_text
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=" not in log_text
+    assert "marker_path=" not in log_text
     # No judge log row.
     assert "event=leader_completion_gate_fused_judge" not in log_text
 
@@ -2129,9 +2203,12 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     ledger.increment.assert_not_called()
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
-    # Length-trigger signal still surfaces on the canonical row.
-    assert "length_trigger=True" in log_text
-    assert "trigger_source=length" in log_text
+    # Stage 3 (R4/D10 mirror): on a NON-delegated mission the scan is
+    # SKIPPED entirely — the length signal is not even evaluated (the
+    # row carries the False default), mirroring the predicate's
+    # Term-1 short-circuit of its A/B providers.
+    assert "length_trigger=False" in log_text
+    assert "trigger_source=" not in log_text
     # D10 exemption: not fired, no judge row of any kind.
     assert "fired=False" in log_text
     assert "bypass_reason=meta_bypass" in log_text
@@ -2141,13 +2218,13 @@ def test_length_kill_switch_off_no_judge(monkeypatch, caplog):
     )
 
 
-def test_length_log_placeholder_count_is_34():
+def test_length_log_placeholder_count_is_27():
     """The canonical ``event=leader_completion_gate`` log format
-    string has exactly 34 placeholders (31 → 33 with the two new
-    busy trigger-suppression fields ``busy_descendants`` +
-    ``trigger_suppressed_by``; 33 → 34 with
-    ``user_answer_pending`` — 2026-09-16 incident 6a0d60c9 FIX-2,
-    the FIFTH legitimate-pending input). Pinned by source grep —
+    string has exactly 27 placeholders. Stage 3 (2026-09-17,
+    resolver-unification R1/R5/R6) retired six keys from the row —
+    the outside-window diagnostic, the busy-suppressor name, the
+    marker route enum, and the three judge-verdict stamp fields —
+    taking the count 34 → 27. Pinned by source grep —
     drift pin so log-row format-string changes surface in code
     review (a regression breaks grep-based soak tooling silently).
 
@@ -2159,7 +2236,7 @@ def test_length_log_placeholder_count_is_34():
     row would appear truncated, but no test failure). The second
     layer parses the source via ``ast`` to extract the literal
     arg-tuple after the format string and asserts the arg count
-    equals the placeholder count (33 == 33). The two layers catch
+    equals the placeholder count (27 == 27). The two layers catch
     drift in opposite directions: the substring count catches a
     format-string change that drops a field; the arg-count parse
     catches a body change that adds/removes an arg without
@@ -2195,10 +2272,12 @@ def test_length_log_placeholder_count_is_34():
                 break
     format_text = "\n".join(format_string_lines)
     placeholder_count = format_text.count("%s")
-    assert placeholder_count == 34, (
+    assert placeholder_count == 27, (
         f"canonical gate log format string placeholder count drifted: "
-        f"expected 34 (31 + busy_descendants + trigger_suppressed_by "
-        f"+ user_answer_pending [2026-09-16 incident 6a0d60c9 FIX-2]), "
+        f"expected 27 (34 - attest_seen_outside_window "
+        f"- trigger_suppressed_by - marker_path - marker_judge_verdict "
+        f"- marker_judge_latency_ms - marker_judge_error_class "
+        f"- trigger_source [Stage 3 R1/R5/R6 retirements]), "
         f"got {placeholder_count}. Update the drift pin if the "
         f"placeholder count is correct for the new schema."
     )
@@ -2373,14 +2452,18 @@ def test_busy_running_child_suppresses_marker_trigger_no_judge_no_hint(
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "event=leader_completion_gate" in log_text
     assert "busy_descendants=1" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     # marker_hit STILL recorded for observability.
     assert "marker_hit=True" in log_text
     # trigger_source is cleared (cheap allow signal).
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
     # The marker_path is force-cleared to "" (no judge fires).
     # The log row stamps "<none>" for an empty marker_path.
-    assert "marker_path=<none>" in log_text
+    assert "marker_path=" not in log_text
     # No judge log row.
     assert (
         "event=leader_completion_gate_marker_judge " not in log_text
@@ -2418,9 +2501,13 @@ def test_busy_waiting_child_suppresses_marker_trigger(monkeypatch, caplog):
     ledger.increment.assert_not_called()
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=1" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     assert "marker_hit=True" in log_text
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
     # No judge log row.
     assert (
         "event=leader_completion_gate_marker_judge " not in log_text
@@ -2458,7 +2545,10 @@ def test_busy_waiting_children_child_suppresses_marker_trigger(
     assert "messages" not in result
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=1" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     assert "marker_hit=True" in log_text
 
 
@@ -2507,8 +2597,8 @@ def test_paused_child_keeps_trigger_armed_no_suppression(
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=0" in log_text
-    assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
-    assert "trigger_source=markers+length" in log_text  # both halves fired
+    assert "trigger_suppressed_by=" not in log_text  # Stage 3 (R5): key retired
+    assert "trigger_source=" not in log_text  # Stage 3: key retired
     # Judge ran (fused).
     assert "event=leader_completion_gate_fused_judge" in log_text
     assert "verdict=not_complete" in log_text
@@ -2564,11 +2654,15 @@ def test_busy_suppression_short_only_length_trigger_no_judge(
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=1" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     # length_trigger STILL recorded for observability.
     assert "length_trigger=True" in log_text
     # trigger_source cleared.
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
 
 
 def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
@@ -2622,7 +2716,7 @@ def test_deny_path_unchanged_when_busy_zero_no_markers_pending_nudge(
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=0" in log_text
-    assert "trigger_suppressed_by=<none>" in log_text  # NOT suppressed
+    assert "trigger_suppressed_by=" not in log_text  # Stage 3 (R5): key retired
     # NOTE: quiet delegated rows never run the marker scan (the gate
     # scans allow-family decisions only) — the unified DENY band
     # drives the judge; marker_hit stays False on the canonical row.
@@ -2675,7 +2769,7 @@ def test_deny_path_suite_unchanged_existing_marker_a_still_works(
 
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "busy_descendants=0" in log_text
-    assert "trigger_suppressed_by=<none>" in log_text
+    assert "trigger_suppressed_by=" not in log_text
 
 
 def test_busy_suppression_short_only_length_trigger_log_has_both_fields(
@@ -2716,7 +2810,7 @@ def test_busy_suppression_short_only_length_trigger_log_has_both_fields(
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     # The canonical log row MUST carry both new fields, ALWAYS.
     assert "busy_descendants=" in log_text
-    assert "trigger_suppressed_by=" in log_text
+    assert "trigger_suppressed_by=" not in log_text
 
 
 def test_busy_suppression_both_triggers_combined_no_judge(
@@ -2768,8 +2862,12 @@ def test_busy_suppression_both_triggers_combined_no_judge(
     # suppressed — ``trigger_source`` is force-cleared.
     assert "marker_hit=True" in log_text
     assert "length_trigger=True" in log_text
-    assert "trigger_source=<none>" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     # The combined string MUST NOT appear in the log when suppressed.
     assert "trigger_source=markers+length" not in log_text
 
@@ -2841,9 +2939,13 @@ def test_busy_suppression_dry_mode_log_only_no_judge_no_hint(
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert "decision=dry_log" in log_text
     assert "busy_descendants=1" in log_text
-    assert "trigger_suppressed_by=busy_descendants" in log_text
+    # Stage 3 (R5): the busy-mute lives in the predicate's b_fires
+    # term — the suppression is observable via busy_descendants=N
+    # plus NO judge row (asserted below/above).
+    assert "trigger_suppressed_by=" not in log_text
     assert "marker_hit=True" in log_text
-    assert "trigger_source=<none>" in log_text
+    # Stage 3 (R5/R6): the trigger-derivation fields retired.
+    assert "trigger_source=" not in log_text
     # No judge row.
     assert (
         "event=leader_completion_gate_marker_judge " not in log_text

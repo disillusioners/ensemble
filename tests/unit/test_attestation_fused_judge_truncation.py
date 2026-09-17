@@ -270,34 +270,17 @@ class TestFusedJudgeOutputCapMatrix:
 
 
 class TestFusedCapDriftPin:
-    def test_fused_cap_is_2048_distinct_from_legacy_400(self):
-        # F-A introduced a SEPARATE cap for the fused path; the legacy
-        # window judge keeps 400 because its verdict shape fits.
+    """Stage 3 (2026-09-17, R7): the legacy window judge and its
+    400-char cap are DELETED — the fused cap is the ONLY output cap.
+    The drift pins now guard the singleton-cap contract."""
+
+    def test_fused_cap_is_2048(self):
+        # F-A introduced the fused-scoped cap; Stage 3 deleted the
+        # legacy twin. The fused cap is the sole survivor.
         assert FUSED_JUDGE_MAX_OUTPUT_CHARS == 2048
-        # Legacy cap untouched (the spec explicitly says: "Legacy
-        # JUDGE_MAX_OUTPUT_CHARS=400 stays UNTOUCHED — legacy sites
-        # are dead-but-present, deleted in Stage 3").
-        assert jm.JUDGE_MAX_OUTPUT_CHARS == 400
-        # And the constants are not the same object (guards against
-        # accidental re-merging via a module-level alias).
-        assert FUSED_JUDGE_MAX_OUTPUT_CHARS is not jm.JUDGE_MAX_OUTPUT_CHARS
 
-    def test_legacy_sites_still_use_legacy_cap(self):
-        # Defensive pin — the legacy truncation sites (judge completion
-        # report async, lines 921-922 / 963-964) MUST use the legacy
-        # cap, not the fused one. If a future refactor swaps them, the
-        # whole premise of the F-A fix breaks (the legacy judge would
-        # start accepting >400-char responses that don't fit its
-        # verdict schema).
-        import inspect
-
-        src = inspect.getsource(jm.judge_completion_report_async)
-        assert "JUDGE_MAX_OUTPUT_CHARS" in src
-        assert "FUSED_JUDGE_MAX_OUTPUT_CHARS" not in src, (
-            "Legacy judge_completion_report_async must NOT use the "
-            "fused-scoped cap — the two judges have distinct verdict "
-            "shapes and distinct cap requirements."
-        )
+    def test_legacy_cap_constant_deleted(self):
+        assert not hasattr(jm, "JUDGE_MAX_OUTPUT_CHARS")
 
     def test_fused_sites_use_fused_cap(self):
         # Defensive pin — the fused truncation sites (judge fused
@@ -336,5 +319,6 @@ class TestFusedCapDriftPin:
 
 def test_module_constants_resolve():
     assert isinstance(FUSED_JUDGE_MAX_OUTPUT_CHARS, int)
-    assert isinstance(jm.JUDGE_MAX_OUTPUT_CHARS, int)
-    assert FUSED_JUDGE_MAX_OUTPUT_CHARS > jm.JUDGE_MAX_OUTPUT_CHARS
+    # Stage 3 (R7): the legacy 400-char cap constant is deleted —
+    # the fused cap is the only output cap.
+    assert not hasattr(jm, "JUDGE_MAX_OUTPUT_CHARS")

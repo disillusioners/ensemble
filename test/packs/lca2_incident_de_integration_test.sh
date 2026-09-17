@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# RETIRED (Stage-3 adversarial-review round, 2026-09-17): the pytest file
+# this pack drives (branch-scoped stage2 acceptance artifact) was DELETED —
+# its tests self-skipped outside feature/lca-resolver-stage2 and its
+# semantics are owned by tests/unit/test_attestation_stage3_census.py +
+# TestLegacySitesDeleted + the R7 invariant suite. This pack script is
+# kept as a historical record; running it will fail on the missing file.
 # LCA stage2 incident-class E2E pack (Job 2d-e of 9) — independent
 # tests for the multi-evaluation child-lie arc (d) and the non-delegated
 # marker-row R4 short-circuit (e).

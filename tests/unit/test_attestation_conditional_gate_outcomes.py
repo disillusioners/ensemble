@@ -163,20 +163,16 @@ class TestConditionalGateEvaluateOutcomes:
         conditional-gate-OFF early return) — a regression that
         clears the counter on a non-fire would silently lose the
         pre-existing ledger state."""
-        result = decide(
-            attested=False,
-            pending_children=0,
-            queued_or_expected_wakeups=0,
-            live_descendants=0,
-            denied_count=2,
-            bound=3,
-            scope_applicable=True,
-            mode="enforce",
-            attestation_enabled=True,
-            # Conditional gate OFF — the leader did not delegate
-            # since the last real user message; the gate must
-            # ALLOW without resetting the counter.
-            attestation_required=False,
+        # Stage 3 (R4): the no-delegation arm retired from decide()
+        # into evaluate()'s composition layer (the predicate Term-1
+        # mirror) — the pin holds at the composition seam now.
+        msgs = [real("what is X?"), plain_ai("The answer is …")]
+        result = evaluate(
+            "cond-off-counter",
+            2,
+            msgs,
+            GateSettings("enforce", 3, 3),
+            make_manager(),
         )
         assert result.decision is Decision.ALLOWED
         assert result.attestation_required is False
@@ -385,16 +381,19 @@ class TestSelfReferenceTrapEvaluateLevel:
 
 
 class TestConditionalSchemaPin:
-    """The canonical log schema MUST grow 17→18 fields and include
-    ``attestation_required`` + ``user_answer_pending``. A drift here
-    is silent — a future pinch that drops a field would break
-    operators' observability of the new conditional gate (per O8
-    unit-guard convention)."""
+    """The canonical log schema must include ``attestation_required``
+    + ``user_answer_pending``. Stage 3 (2026-09-17, resolver-unification
+    R1): the log-only ``attest_seen_outside_window`` diagnostic retired —
+    the schema is 17 fields (was 18 pre-retirement). A drift here is
+    silent — a future pinch that drops a field would break operators'
+    observability of the conditional gate (per O8 unit-guard
+    convention)."""
 
-    def test_canonical_schema_count_is_18(self) -> None:
-        # 2026-09-16 (incident 6a0d60c9, FIX-2): +user_answer_pending
-        # (18th) — the FIFTH legitimate-pending input.
-        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 18
+    def test_canonical_schema_count_is_17(self) -> None:
+        # 2026-09-16 added user_answer_pending (18th); Stage 3 R1
+        # (2026-09-17) retired the outside-window diagnostic → 17.
+        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 17
+        assert "attest_seen_outside_window" not in CANONICAL_LOG_SCHEMA_FIELDS
 
     def test_canonical_schema_includes_attestation_required(self) -> None:
         assert "attestation_required" in CANONICAL_LOG_SCHEMA_FIELDS
@@ -426,7 +425,6 @@ class TestConditionalSchemaPin:
             "queued_or_expected_wakeups",
             "live_descendants",
             "attestation_required",
-            "attest_seen_outside_window",
             "messages_scanned",
             "scanned_window_size",
             "mode",

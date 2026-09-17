@@ -1137,7 +1137,8 @@ def _build_timeout_capture_spy(captured: dict, *, canned_response: str):
     """Build a spy ``_invoke_judge_llm`` that captures both timeout seams.
 
     The spy is shaped like the real ``_invoke_judge_llm`` signature
-    (``async def _invoke_judge_llm(config, user_payload, *, timeout_s)``)
+    (``async def _invoke_judge_llm(config, user_payload, *, timeout_s,
+    system_prompt)``)
     so ``monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)``
     substitutes cleanly. It:
     1. Records the received ``timeout_s`` (wait_for cap +
@@ -1147,11 +1148,11 @@ def _build_timeout_capture_spy(captured: dict, *, canned_response: str):
        request_timeout OR resolved)) and records it into
        ``captured["request_timeout"]``.
     3. Returns a canned success response so the calling async judge
-       yields ``JudgeResult(is_complete_report=True, ...)`` and the
+       yields a complete-verdict result and the
        call returns without raising.
     """
 
-    async def spy(config, user_payload, *, timeout_s):
+    async def spy(config, user_payload, *, timeout_s, system_prompt):
         captured["timeout_s"] = timeout_s
         # Mirror the W1 coupling: ``min(resolved_timeout,
         # config.llm.request_timeout or resolved_timeout)`` — see
@@ -1179,7 +1180,7 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
     the W1 request_timeout coupling.
 
     Set ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=17``, reset
-    the resolver, and call :func:`judge_completion_report_async`
+    the resolver, and call :func:`judge_fused_bundle_async`
     WITHOUT an explicit ``timeout_s=`` kwarg. The spy
     :func:`_invoke_judge_llm` captures:
     * the ``timeout_s`` it received (the ``asyncio.wait_for`` cap +
@@ -1208,7 +1209,7 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
     captured: dict = {}
     spy = _build_timeout_capture_spy(
         captured,
-        canned_response='{"is_complete_report": true, "reason": "ok"}',
+        canned_response='{"verdict": "complete", "rationale": "ok"}',
     )
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -1222,7 +1223,7 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
         ),
     ]
     result = asyncio.run(
-        judge_mod.judge_completion_report_async(messages, config=cfg)
+        judge_mod.judge_fused_bundle_async("bundle text", config=cfg)
     )
 
     # Wait_for cap + wall_clock_cap_s — the operator-visible timeout.
@@ -1233,8 +1234,8 @@ def test_resolved_timeout_flows_to_judge_call(monkeypatch):
     # the resolved value (the typical operator config).
     assert captured["request_timeout"] == 17.0
     # The judge ran to completion (canned success response).
-    assert result.is_complete_report is True
-    assert result.verdict == "yes"
+    assert result.is_complete is True
+    assert result.verdict == "complete"
 
 
 def test_resolved_timeout_default_when_env_unset(monkeypatch):
@@ -1258,7 +1259,7 @@ def test_resolved_timeout_default_when_env_unset(monkeypatch):
     captured: dict = {}
     spy = _build_timeout_capture_spy(
         captured,
-        canned_response='{"is_complete_report": false, "reason": "not done"}',
+        canned_response='{"verdict": "not_complete", "rationale": "not done"}',
     )
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -1271,7 +1272,7 @@ def test_resolved_timeout_default_when_env_unset(monkeypatch):
             content="not done"
         ),
     ]
-    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+    asyncio.run(judge_mod.judge_fused_bundle_async("bundle text", config=cfg))
 
     assert captured["timeout_s"] == 25.0
     assert captured["request_timeout"] == 25.0
@@ -1295,7 +1296,7 @@ def test_resolved_timeout_below_clamp_flows_clamp_to_seams(monkeypatch):
     captured: dict = {}
     spy = _build_timeout_capture_spy(
         captured,
-        canned_response='{"is_complete_report": true, "reason": "ok"}',
+        canned_response='{"verdict": "complete", "rationale": "ok"}',
     )
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -1308,7 +1309,7 @@ def test_resolved_timeout_below_clamp_flows_clamp_to_seams(monkeypatch):
             content="done"
         ),
     ]
-    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+    asyncio.run(judge_mod.judge_fused_bundle_async("bundle text", config=cfg))
 
     assert captured["timeout_s"] == 5.0  # clamp, not the raw 2.0
     assert captured["request_timeout"] == 5.0
@@ -1334,7 +1335,7 @@ def test_resolved_timeout_explicit_kwarg_overrides_resolver(monkeypatch):
     captured: dict = {}
     spy = _build_timeout_capture_spy(
         captured,
-        canned_response='{"is_complete_report": true, "reason": "ok"}',
+        canned_response='{"verdict": "complete", "rationale": "ok"}',
     )
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -1349,8 +1350,8 @@ def test_resolved_timeout_explicit_kwarg_overrides_resolver(monkeypatch):
     ]
     # Pass an explicit ``timeout_s=`` that overrides the resolver.
     asyncio.run(
-        judge_mod.judge_completion_report_async(
-            messages, config=cfg, timeout_s=7.0
+        judge_mod.judge_fused_bundle_async(
+            "bundle text", config=cfg, timeout_s=7.0
         )
     )
 
@@ -1386,7 +1387,7 @@ def test_resolved_timeout_w1_coupling_uses_min(monkeypatch):
     captured: dict = {}
     spy = _build_timeout_capture_spy(
         captured,
-        canned_response='{"is_complete_report": true, "reason": "ok"}',
+        canned_response='{"verdict": "complete", "rationale": "ok"}',
     )
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -1400,7 +1401,7 @@ def test_resolved_timeout_w1_coupling_uses_min(monkeypatch):
             content="done"
         ),
     ]
-    asyncio.run(judge_mod.judge_completion_report_async(messages, config=cfg))
+    asyncio.run(judge_mod.judge_fused_bundle_async("bundle text", config=cfg))
 
     # The wait_for cap + wall_clock_cap_s carry the resolved value (30.0).
     assert captured["timeout_s"] == 30.0

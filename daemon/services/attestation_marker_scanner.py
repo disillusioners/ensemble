@@ -1,13 +1,17 @@
 """Mid-work marker scanner for the LCA leader completion gate (2026-09-11).
 
-Companion to :mod:`daemon.services.attestation_scanner`. The marker
-scanner is the TRIGGER half of a two-stage "marker → judge" disambiguator
-on the gate's ALLOW path. The marker patterns are CHEAP, case-insensitive
-substring matches over the LAST ``window`` AIMessages; a marker hit flips
-the would-be allow into a judge call. The judge is the VERDICT half —
-the existing inline-LLM judge service at
-:mod:`daemon.services.attestation_report_judge` (Phase 6 fastfollow,
-2026-09-07) is REUSED, untouched.
+Companion to :mod:`daemon.services.attestation_scanner`. Stage 3
+(2026-09-17, resolver-unification R6): the scanners are
+ACTIVATION-SIGNAL producers for the unified resolver — the 16-pattern
+marker catalog and the <150-word length threshold feed the activation
+predicate's ``b_fires`` term (``(marker_hit ∨ length_trigger) ∧
+busy_descendants == 0``) via :func:`attestation_gate.evaluate`; the
+CONDITIONAL fused judge (:mod:`daemon.services.attestation_report_judge.
+judge_fused_bundle_async`) is the verdict. The historical two-stage
+"trigger → judge" call-site plumbing retired with R6/R7 (decisions.md
+D-RES4): the scan never invokes anything itself, and it never runs on
+non-delegated missions (the R4/D10 mirror skips suspicion evaluation
+when ``attestation_required`` is False).
 
 Why a separate trigger stage
 ----------------------------
@@ -46,20 +50,21 @@ or "done." Those phrases do NOT appear in :data:`MID_WORK_MARKERS`;
 they survive the scan and the gate continues to allow as before.
 
 A genuine bare completion (no children dispatched) is a quick-answer
-turn — the conditional gate is already OFF for it; the marker scan
-runs (cheap), finds no markers, and the gate continues to allow. The
-brief example "Ending turn, will continue after your reply" is a
-self-correcting marker hit — the judge (judge-yes on that prose) would
-ALLOW.
+turn — the conditional gate is OFF for it and (Stage 3, the D10
+mirror) the marker scan is SKIPPED entirely; the gate allows without
+evaluating suspicion signals. The brief example "Ending turn, will
+continue after your reply" would be a marker hit on a delegated
+mission — the fused judge (verdict=complete on that prose) would
+allow.
 
 Marker hit does NOT modify the gate's primary decision value. The
-``Decision`` enum is unchanged. The marker scan emits additive fields
-on :class:`GateDecision` (``marker_hit``, ``marker_terms``,
-``marker_path``) and is the entry point to the new routing — judge
-verdict converts a marker-hit allow into one of:
-  * (a) deny + nudge — nothing pending;
-  * (b) allow + checkpoint-durable hint — real pending work;
-  * (c) allow normally — judge confirmed a genuine report.
+``Decision`` enum is unchanged. Stage 3 (R6): the marker scan emits
+the additive signal fields on :class:`GateDecision`
+(``marker_hit``, ``marker_terms``) that the activation predicate
+consumes; the retired route enum and the
+(a)/(b)/(c)/(d) judge-routing block were deleted with their call
+sites — the fused block owns the verdict mapping (allow / allow+hint
+/ deny+nudge / terminal_after_bound; decisions.md D-RES4).
 
 Kill-switch coupling
 --------------------
@@ -393,10 +398,10 @@ class LengthScanResult(NamedTuple):
 def _flatten_ai_content(content: object) -> str:
     """Normalize an AIMessage's content into a plain string.
 
-    Mirrors :func:`daemon.services.attestation_report_judge._format_window_for_judge`
-    semantics: list-of-blocks content (LangChain text + reasoning
-    blocks) is flattened to plain text; everything else is coerced via
-    ``str(...)``. The marker scan is content-only — it ignores
+    List-of-blocks content (LangChain text + reasoning blocks) is
+    flattened to plain text (dict blocks contribute their ``text``
+    value, anything else its ``str(...)``); everything else is coerced
+    via ``str(...)``. The marker scan is content-only — it ignores
     tool_calls (a tool_call AIMessage is not the prose the leader
     would put markers in).
     """
