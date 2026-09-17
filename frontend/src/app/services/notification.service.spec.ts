@@ -871,7 +871,7 @@ describe('NotificationService Signal Behavior', () => {
 
 describe('NotificationService Sound Exclusion', () => {
   // Sound exclusion set matching the real service logic
-  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer', 'kb-writer']);
+  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-importer', 'experiencer', 'kb-writer', 'skill-keeper']);
 
   class MockAudio {
     playCallCount = 0;
@@ -942,6 +942,22 @@ describe('NotificationService Sound Exclusion', () => {
       instance_id: 'instance-2',
       agent_id: 'experiencer',
       name: 'Experiencer Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(0);
+  });
+
+  it('should NOT play sound for skill-keeper agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-3',
+      agent_id: 'skill-keeper',
+      name: 'Skill Keeper Notification',
       status: 'COMPLETED' as const,
       timestamp: new Date().toISOString(),
     });
