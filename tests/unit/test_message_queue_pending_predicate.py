@@ -741,6 +741,41 @@ class TestFinalizerCountsAsPendingAdvisoryGuard:
 
         assert finalizer_counts_as_pending(row, engine) is True
 
+    @pytest.mark.parametrize(
+        "status",
+        [MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value],
+        ids=["processing", "retrying"],
+    )
+    def test_task_carrying_advisory_non_ready_status_counts(
+        self, engine: Engine, status: str
+    ) -> None:
+        """In-flight delivery is never masked: a ``child_report_check:``
+        row in a non-READY base-filter status (PROCESSING/RETRYING)
+        WITH a correlated Task counts. The advisory carve-out keys on
+        carrier absence only; with a carrier the row falls through to
+        the base predicate, whose positive guard counts it because the
+        correlated Task is live (PENDING).
+        """
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"note-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source=f"child_report_check:child-1:report-1",
+            status=status,
+        )
+        _seed_task(engine, instance_id=instance_id, message_id=mid)
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        # Base predicate: PROCESSING/RETRYING + a live (PENDING)
+        # correlated work_id → counts (delivery in flight).
+        assert message_queue_counts_as_pending(row, engine) is True
+        # Finalizer variant: task-CARRYING advisory → base semantics.
+        assert finalizer_counts_as_pending(row, engine) is True
+
     def test_taskless_advisory_processing_row_excluded(
         self, engine: Engine
     ) -> None:

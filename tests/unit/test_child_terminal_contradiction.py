@@ -985,6 +985,29 @@ class TestChildTerminalContradictionHook:
         )
         assert report_rows[0].status == MessageStatus.READY.value
 
+        # (a2) SAVEPOINT atomicity — the co-minted PROCESS_MESSAGE
+        # delivery Task rides in the SAME SAVEPOINT as the failed note
+        # row (child_reports.py mint-with-delivery), so it MUST roll
+        # back with it. The note's message_id is minted inside the
+        # function (unobservable here), so probe by type: the
+        # completion path mints PROCESS_REPORT only — ANY
+        # process_message Task on the parent would be the note's
+        # leaked carrier.
+        with Session(engine) as s:
+            note_delivery_tasks = (
+                s.query(Task)
+                .filter(
+                    Task.instance_id == parent_id,
+                    Task.task_type == TaskType.PROCESS_MESSAGE.value,
+                )
+                .all()
+            )
+        assert len(note_delivery_tasks) == 0, (
+            f"co-minted PROCESS_MESSAGE delivery Task MUST roll back "
+            f"with the failed note INSERT; got "
+            f"{len(note_delivery_tasks)} row(s)"
+        )
+
         # (b) PROCESS_REPORT task exists in PENDING.
         with Session(engine) as s:
             tasks = (
@@ -1323,13 +1346,36 @@ class TestChildReportCheckMintWithDelivery:
         # The async caller must wake the worker pool after commit.
         assert result.notify_worker_pool is True
 
-    def test_terminal_completed_parent_suppresses_note_mint(
-        self, service, engine, bus, caplog
+    @pytest.mark.parametrize(
+        "parent_status, expected_rung",
+        [
+            # COMPLETED/ERROR/FAILED reach the terminal-parent rung:
+            # report path intact, skip logged as terminal_parent.
+            (InstanceStatus.COMPLETED.value, "terminal_parent"),
+            (InstanceStatus.ERROR.value, "terminal_parent"),
+            (InstanceStatus.FAILED.value, "terminal_parent"),
+            # TERMINATED is caught EARLIER by db_dead_parent (pre-
+            # existing rung: outcome=dead_parent_skip, report FAILED,
+            # no PROCESS_REPORT task) — the terminal_parent leg is
+            # defensive redundancy for it. Suppression holds either way.
+            (InstanceStatus.TERMINATED.value, "dead_parent"),
+        ],
+        ids=["completed", "error", "failed", "terminated"],
+    )
+    def test_terminal_parent_suppresses_note_mint(
+        self, service, engine, bus, caplog, parent_status, expected_rung
     ):
-        """(b) Terminal-parent mint suppression — a COMPLETED parent
-        receives NO note and NO note delivery Task. The REPORT path is
-        untouched (report row + PROCESS_REPORT task still mint — that
-        is the pre-existing sanctioned enqueue shape).
+        """(b) Terminal-parent mint suppression — a parent in ANY of
+        the four terminal states receives NO note and NO note delivery
+        Task (suppression contract holds for the whole
+        ``db_terminal_parent`` tuple; deleting any leg must fail here).
+
+        The REPORT path shape is rung-dependent: COMPLETED/ERROR/FAILED
+        hit the terminal_parent rung (report row + PROCESS_REPORT task
+        still mint — the pre-existing sanctioned enqueue shape), while
+        TERMINATED is caught earlier by the dead_parent rung
+        (outcome=dead_parent_skip, report FAILED, no PROCESS_REPORT
+        task — pinned by test_dead_parent_skips_note_insert).
         """
         import logging as _logging
 
@@ -1338,7 +1384,7 @@ class TestChildReportCheckMintWithDelivery:
         _seed_instance(
             engine,
             instance_id=parent_id,
-            status=InstanceStatus.COMPLETED.value,
+            status=parent_status,
         )
         _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
 
@@ -1349,7 +1395,11 @@ class TestChildReportCheckMintWithDelivery:
                 last_content="will write the next report. Ending turn.",
             )
 
-        assert result.outcome == "regular_child_completed"
+        assert result.outcome == (
+            "regular_child_completed"
+            if expected_rung == "terminal_parent"
+            else "dead_parent_skip"
+        )
         assert result.notify_worker_pool is False
 
         with Session(engine) as s:
@@ -1378,23 +1428,34 @@ class TestChildReportCheckMintWithDelivery:
             t.task_type != TaskType.PROCESS_MESSAGE.value for t in tasks
         ), f"no process_message Task may be minted for the note; got {tasks}"
 
-        # Report path unchanged: report row READY + PROCESS_REPORT task.
         report = next(
             r for r in rows if r.type == MessageType.COMPLETION_REPORT.value
         )
-        assert report.status == MessageStatus.READY.value
-        assert any(
-            t.task_type == TaskType.PROCESS_REPORT.value
-            and t.message_id == report.message_id
-            for t in tasks
-        )
+        if expected_rung == "terminal_parent":
+            # Report path unchanged: report row READY + PROCESS_REPORT
+            # task keyed on the report's message_id.
+            assert report.status == MessageStatus.READY.value
+            assert any(
+                t.task_type == TaskType.PROCESS_REPORT.value
+                and t.message_id == report.message_id
+                for t in tasks
+            )
+            expected_reason = "reason=terminal_parent"
+        else:
+            # dead_parent rung (pre-existing shape): report FAILED
+            # inline, no PROCESS_REPORT task.
+            assert report.status == MessageStatus.FAILED.value
+            assert not any(
+                t.task_type == TaskType.PROCESS_REPORT.value for t in tasks
+            )
+            expected_reason = "reason=dead_parent"
 
-        # Observability: the skip is logged with the terminal reason
+        # Observability: the skip is logged with the rung's reason
         # (captured via the at_level(INFO) scope around the call).
         assert any(
-            "reason=terminal_parent" in rec.message
+            expected_reason in rec.message
             for rec in caplog.records
-        ), "terminal-parent skip must be observable in the log"
+        ), f"{expected_rung} skip must be observable in the log"
 
     async def test_worker_pool_woken_after_commit(
         self, service, engine, bus, monkeypatch
