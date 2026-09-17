@@ -238,6 +238,17 @@ class _ChildCompletionDbResult(NamedTuple):
     # dormant behind the kill-switch — with the flag OFF this field is
     # dead weight (one object reference, zero notice work).
     b_violation_report: Any = None
+    # Stage-0 mint-with-delivery wedge fix (2026-09-17): True when the
+    # advisory ``child_report_check`` note minted its PROCESS_MESSAGE
+    # delivery Task in the SAME transaction (SAVEPOINT-scoped). The
+    # async caller fires ``worker_pool.notify_work()`` AFTER
+    # ``asyncio.to_thread`` returns (= after the commit is durable) so
+    # a dispatcher claims the Task — message delivery is task-driven
+    # only (``message_processing_pipeline.py`` claims by Task); a
+    # task-less note row can never be delivered and strands the root
+    # finalizer at WAITING_CHILDREN forever. Mirrors the
+    # enqueue-shaped ordering: commit first, notify_work() after.
+    notify_worker_pool: bool = False
 
 
 class ChildReportsService:
@@ -1923,6 +1934,22 @@ Provide a concise summary:"""
                 last_content,
             )
 
+        # Stage-0 mint-with-delivery wake (2026-09-17): when the
+        # advisory ``child_report_check`` note minted its
+        # PROCESS_MESSAGE delivery Task, wake the worker pool NOW —
+        # the to_thread call has returned, so the transaction (note
+        # row + Task) is durably committed before any worker can
+        # claim. Same commit-then-notify ordering as
+        # ``enqueue_message``. Without this wake the Task sits
+        # PENDING until an unrelated notify happens — under a quiet
+        # pool that is never, and the note strands (the exact wedge
+        # class this fix closes).
+        if (
+            getattr(result, "notify_worker_pool", False)
+            and self._manager._worker_pool is not None
+        ):
+            self._manager._worker_pool.notify_work()
+
         # Dispatch post-commit side effects on the event loop.
         await self._dispatch_post_commit_side_effects(
             result, last_content, completed_message_id
@@ -2441,9 +2468,12 @@ Provide a concise summary:"""
                 # fallbacks at ``child_reports.py:863`` / ``:2058`` /
                 # ``error_reporting.py:270`` are gated behind bus-active
                 # early-returns and are dead code in production). The
-                # ``pending_count`` now uses the shared positive-polarity
-                # predicate ``message_queue_counts_as_pending`` — see
-                # ``daemon/repositories/message_queue/predicates.py``.
+                # ``pending_count`` uses the hardened finalizer variant
+                # ``finalizer_counts_as_pending`` (see
+                # ``daemon/repositories/message_queue/predicates.py``); the
+                # base predicate ``message_queue_counts_as_pending`` only
+                # lives in the dead-code fallbacks below (bus-active
+                # early-return gated).
                 # The base status filter (READY/PROCESSING/RETRYING) is
                 # unchanged; the predicate handles the terminal/live
                 # decision per row using ``work_id`` as the identity
@@ -2452,7 +2482,7 @@ Provide a concise summary:"""
                 # ``processing`` with terminal backing Tasks and the
                 # parent stayed stuck at ``WAITING_CHILDREN`` forever.
                 from ..repositories.message_queue.predicates import (
-                    message_queue_counts_as_pending,
+                    finalizer_counts_as_pending,
                 )
                 # ``.scalars().all()`` ensures we get MessageQueue
                 # instances (not ``Row`` objects) on every dialect —
@@ -2471,10 +2501,17 @@ Provide a concise summary:"""
                         MessageStatus.RETRYING.value,
                     ]))
                 ).scalars().all()
+                # Stage-0 strand wedge fix (2026-09-17): the hardened
+                # finalizer variant excludes task-less
+                # ``child_report_check:`` advisory rows (undeliverable —
+                # delivery is task-driven only) so a stranded note can
+                # never re-park a root at WAITING_CHILDREN. Unknown
+                # task-less READY rows still count conservatively (with
+                # a WARNING) — semantics unchanged for other producers.
                 pending_count = sum(
                     1
                     for _row in _candidate_rows
-                    if message_queue_counts_as_pending(_row, self._manager.engine)
+                    if finalizer_counts_as_pending(_row, self._manager.engine)
                 )
                 del _candidate_rows  # scope hygiene
 
@@ -3135,6 +3172,13 @@ Provide a concise summary:"""
             _promise_scan = scan_child_terminal_report_for_promises(
                 last_content
             )
+            # Stage-0 mint-with-delivery wake flag (see the Task mint
+            # below): set True ONLY when the note + its PROCESS_MESSAGE
+            # delivery Task BOTH committed in the SAVEPOINT. Read by the
+            # regular-child return paths to stamp
+            # ``notify_worker_pool`` on the result so the async caller
+            # wakes the worker pool after the commit.
+            _note_task_minted = False
             if _promise_scan.promise_hit:
                 # Build the note via the canonical context-message
                 # factory so downstream consumers (compaction seam,
@@ -3190,6 +3234,26 @@ Provide a concise summary:"""
                 # would accumulate in the queue forever (Lane-3/4
                 # past-age sweep would catch it eventually, but the
                 # ~10-min dead-letter window is operator noise).
+                #
+                # Terminal-parent suppression (Stage-0 strand wedge fix,
+                # 2026-09-17): the note is also meaningless to a parent
+                # in ANY terminal state (completed / error / failed —
+                # TERMINATED and missing are already covered by
+                # ``db_dead_parent``). A terminal parent can never act
+                # on the note: with mint-with-delivery it would mint a
+                # delivery Task whose claim risks revival churn; without
+                # delivery it strands as a task-less READY row. Either
+                # way the correct move is to NOT mint.
+                db_terminal_parent = (
+                    parent is None
+                    or parent.status
+                    in (
+                        InstanceStatus.COMPLETED.value,
+                        InstanceStatus.TERMINATED.value,
+                        InstanceStatus.ERROR.value,
+                        InstanceStatus.FAILED.value,
+                    )
+                )
                 if marker_paused or db_paused or db_dead_parent:
                     logger.info(
                         f"child_reports: skipping Child Report Check "
@@ -3197,6 +3261,17 @@ Provide a concise summary:"""
                         f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
                         f"(reason="
                         f"{'marker_paused' if marker_paused else 'db_paused' if db_paused else 'dead_parent'}, "
+                        f"child={instance.instance_id[:8]}..., "
+                        f"matched_terms={list(_promise_scan.matched_terms)})"
+                    )
+                elif db_terminal_parent:
+                    logger.info(
+                        f"child_reports: skipping Child Report Check "
+                        f"note mint for terminal parent "
+                        f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                        f"(reason=terminal_parent, "
+                        f"parent_status="
+                        f"{parent.status if parent else 'missing'}, "
                         f"child={instance.instance_id[:8]}..., "
                         f"matched_terms={list(_promise_scan.matched_terms)})"
                     )
@@ -3256,6 +3331,32 @@ Provide a concise summary:"""
                             ),
                         },
                     )
+                    # Mint-with-delivery (Stage-0 strand wedge fix,
+                    # 2026-09-17): the note MUST mint its delivery
+                    # carrier — a PENDING PROCESS_MESSAGE Task keyed on
+                    # ``note_message_id`` — in the SAME transaction.
+                    # Message delivery is task-driven only
+                    # (``message_processing_pipeline.py`` claims by
+                    # Task); a task-less READY row is NEVER delivered
+                    # (``dequeue()``/``list_ready()`` have zero
+                    # production callers) and strands the root turn-end
+                    # finalizer at WAITING_CHILDREN forever. The Task
+                    # rides inside the SAME SAVEPOINT as the note row so
+                    # the pair is crash-consistent and the fail-open
+                    # contract below rolls back BOTH on any error. The
+                    # worker pool is woken AFTER the outer commit by the
+                    # async caller (``notify_worker_pool`` result flag)
+                    # — same commit-then-notify ordering as
+                    # ``enqueue_message``.
+                    note_delivery_task = Task(
+                        task_type=TaskType.PROCESS_MESSAGE.value,
+                        instance_id=instance.parent_id,
+                        message_id=note_message_id,
+                        status=TaskStatus.PENDING.value,
+                        # Naive-UTC digits (DC-A fix) — naive column bind.
+                        created_at=now_utc_naive(),
+                    )
+                    _note_task_minted = False
                     # SAVEPOINT-scope the note INSERT — must NOT
                     # block the canonical child completion if it
                     # fails. The note is advisory; a missed note is
@@ -3263,8 +3364,10 @@ Provide a concise summary:"""
                     _note_sp = session.begin_nested()
                     try:
                         session.add(child_report_check_note_row)
+                        session.add(note_delivery_task)
                         session.flush()
                         _note_sp.commit()
+                        _note_task_minted = True
                         logger.info(
                             f"event=leader_completion_gate_child_report_check_fired "
                             f"parent_id="
@@ -3274,6 +3377,7 @@ Provide a concise summary:"""
                             f"{','.join(_promise_scan.matched_terms)} "
                             f"note_message_id={note_message_id} "
                             f"stable_id={_note_message.id} "
+                            f"delivery_task=process_message "
                             f"enqueued_at="
                             f"{child_report_check_note_row.enqueued_at.isoformat() if child_report_check_note_row.enqueued_at else '?'}"
                         )
@@ -3546,6 +3650,10 @@ Provide a concise summary:"""
                         instance_id=instance_id,
                         agent_id=instance.agent_id,
                         parent_id=instance.parent_id,
+                        # The note + delivery Task (if minted above)
+                        # committed with this transaction — the worker
+                        # pool must still be woken for the note Task.
+                        notify_worker_pool=_note_task_minted,
                     )
             # Success path — release the SAVEPOINT so the injection
             # INSERT is promoted into the outer transaction. The
@@ -3842,6 +3950,9 @@ Provide a concise summary:"""
                 parent_agent_id=parent_agent_id,
                 parent_waiting_children_sse=parent_waiting_children_sse,
                 waiting_children_parent_agent_id=waiting_children_parent_agent_id,
+                # Stage-0 mint-with-delivery: wake the worker pool when
+                # the advisory note's PROCESS_MESSAGE Task committed.
+                notify_worker_pool=_note_task_minted,
             )
 
     async def _dispatch_post_commit_side_effects(

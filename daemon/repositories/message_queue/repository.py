@@ -89,7 +89,13 @@ class SQLModelMessageQueueRepository:
         message_id: str | None = None,
         images: list[str] | None = None,
     ) -> MessageQueue:
-        """Add a message to the queue."""
+        """Add a message to the queue.
+
+        WARNING: delivery is task-driven only — a task-less insert sits at
+        READY forever (Stage-0 ``child_report_check:`` wedge, d5e6adee
+        strands a root at WAITING_CHILDREN). Mint row + delivery Task
+        in the SAME transaction.
+        """
         message_id = message_id or str(uuid.uuid4())
         
         message = MessageQueue(
