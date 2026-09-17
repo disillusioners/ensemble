@@ -9162,61 +9162,95 @@ def _resolve_watcher_model(
     Fallback chain (graceful — NEVER raises):
 
       1. ``requested_model`` empty / ``None`` / whitespace → return
-         ``config.llm.model`` (the instance session model — what the
-         watched agent itself uses).
+         ``""``. The :func:`create_watchover_check_node` factory treats
+         ``""`` the same as ``None`` — no model override is applied,
+         and the watched instance's own ``llm_config["model"]``
+         (its spawn-time model) flows through unmodified. This is the
+         contract: the resolver is purely a *purpose-bound* quick-mirror
+         wiring; when there is nothing to wire (no key, or the key is
+         ``"quick"`` with no operator-pinned mirror), we MUST NOT
+         silently override the instance model with the daemon-global
+         ``config.llm.model`` (which would diverge from the
+         per-instance-model deployment the instance chose at spawn).
+
       2. ``requested_model == "quick"`` (the sentinel) → return
-         ``config.llm.model_keywords or config.llm.model``. The
-         ``model_keywords`` mirror is the operator-set quick model;
-         empty means the operator never pinned one and we fall back to
-         the session model.
-      3. ``requested_model`` is any other string → return it as-is IF
-         ``config.llm.allowed_models`` is empty (unrestricted) OR
-         case-insensitively matches an entry. Otherwise fall back to
-         ``config.llm.model`` and log a WARNING.
+         ``config.llm.model_keywords`` when the operator has pinned one
+         via ``OPENAI_MODEL_KEYWORDS``. When ``model_keywords`` is
+         ``None`` / unset (the ``config.py:149`` default), return
+         ``""`` for the same contract reason as branch 1 — the
+         instance's own model flows through unmodified. NOTE: this is
+         a behavior change vs. the pre-W1 helper (which fell back to
+         the daemon-global ``config.llm.model`` here); the pre-W1
+         behavior overrode the watched instance's spawn-time model on
+         every deployment where ``OPENAI_MODEL_KEYWORDS`` was unset.
+
+      3. ``requested_model`` is any other literal string → honor it
+         verbatim IF ``config.llm.allowed_models`` is empty
+         (unrestricted) OR case-insensitively matches an entry.
+         Otherwise log a WARNING and fall back to ``config.llm.model``
+         (the daemon-global default).
+
+    Branch 3 differs from branches 1+2 on purpose: branches 1+2 are
+    *no-op* paths that must NEVER override the instance model; branch 3
+    is an explicit "operator asked for X, X is unavailable" path that
+    falls back to the daemon-global default (with a logged WARNING) so
+    the gate at least stays functional at the daemon-default model. The
+    WARNING preserves operator visibility. Reviewer (2026-09-17)
+    accepted the branch-3 behavior as a documented trade-off; the
+    fix is scoped to branches 1+2 only.
 
     The third branch matters because ``spawn_instance`` is documented
     to RAISE on an unavailable model, but the watcher must NEVER raise
     inside the evaluation path (LD-2 fail-open semantics on infra
     errors presupposes a functioning evaluator). Falling back to the
-    session model preserves availability at the cost of using the
-    slower model — strictly better than the gate going inert.
+    daemon-global default model preserves availability at the cost of
+    using a possibly-slower model — strictly better than the gate
+    going inert.
 
     Args:
         config: The daemon :class:`Config` (or any object exposing a
             ``.llm`` attribute with ``model`` / ``model_keywords`` /
             ``allowed_models``). Tests may pass ``None`` or an object
-            missing the attribute — we degrade silently to
-            ``requested_model`` (or empty string) so callers can detect
-            a missing config and pick a different fallback.
+            missing the attribute — we degrade silently to ``""`` for
+            branches 1+2 and to ``requested_model`` for branch 3, so
+            callers can detect a missing config and pick a different
+            fallback.
         requested_model: The literal value from
             ``agents/watcher/meta.json`` ``watchover.llm_model`` (or
             ``snapshot_llm_model``). May be ``None`` / empty / the
             sentinel ``"quick"`` / a real model name.
 
     Returns:
-        A non-empty model name ready to be slotted into the
-        ``llm_config["model"]`` field. Empty string is returned ONLY
-        when ``config`` is missing the ``llm`` attribute AND the
-        caller passed no ``requested_model``; in that pathological
-        case the watcher's ``_get_llm`` falls back to the unmodified
-        session config's model name.
+        The resolved model name. The factory treats ``""`` as "no
+        override, leave the instance's own ``llm_config["model"]``
+        alone" (per the contract). Non-empty returns are used as the
+        ``model`` field of the LLM config.
     """
-    # No requested model → use session model.
+    # Branch 1: nothing requested → no-op (preserve instance model).
     if not requested_model or not requested_model.strip():
+        return ""
+
+    requested = requested_model.strip()
+
+    # Branch 2: "quick" sentinel → resolve to operator-pinned mirror
+    # if it exists; otherwise no-op (preserve instance model).
+    if requested.lower() == "quick":
         if config is None:
             return ""
         llm_cfg = getattr(config, "llm", None)
         if llm_cfg is None:
             return ""
-        session_model = (getattr(llm_cfg, "model", "") or "").strip()
-        return session_model
+        mirror = (getattr(llm_cfg, "model_keywords", "") or "").strip()
+        if mirror:
+            return mirror
+        # No mirror configured — preserve the instance model rather
+        # than silently overriding with the daemon-global default.
+        return ""
 
-    requested = requested_model.strip()
-
-    # No config available → pass through requested string verbatim.
-    # Caller decides what to do (typically: use as-is on the existing
-    # llm_config["model"]; tests with bare MagicMock managers take this
-    # branch).
+    # No config available for the literal-name branch → pass through
+    # requested string verbatim. Caller decides what to do (typically:
+    # use as-is on the existing llm_config["model"]; tests with bare
+    # MagicMock managers take this branch).
     if config is None:
         return requested
 
@@ -9224,15 +9258,8 @@ def _resolve_watcher_model(
     if llm_cfg is None:
         return requested
 
-    # Sentinel "quick" → resolve to the operator-pinned quick mirror.
-    if requested.lower() == "quick":
-        mirror = (getattr(llm_cfg, "model_keywords", "") or "").strip()
-        if mirror:
-            return mirror
-        # No mirror configured — fall back to session model.
-        return (getattr(llm_cfg, "model", "") or "").strip()
-
-    # Specific model name → honor if allowed, else warn + fallback.
+    # Branch 3: specific literal model name → honor if allowed,
+    # otherwise WARN + fall back to daemon-global default.
     allowed = getattr(llm_cfg, "allowed_models", None) or []
     if not allowed:
         # Empty list = unrestricted (per LLMConfig contract); pass through.
@@ -9244,7 +9271,7 @@ def _resolve_watcher_model(
     logger.warning(
         f"[Watchover] requested model '{requested}' is not in "
         f"config.llm.allowed_models {allowed}; falling back to "
-        f"session model '{getattr(llm_cfg, 'model', '')}'"
+        f"daemon-global default '{getattr(llm_cfg, 'model', '')}'"
     )
     return (getattr(llm_cfg, "model", "") or "").strip()
 
@@ -9456,6 +9483,15 @@ class WatchoverEvaluator:
             self._snapshot_model_override = self._model_override
         else:
             self._snapshot_model_override = None
+        # Capture the "was the caller explicit" signal BEFORE the
+        # ``or {}`` normalization — the original ``None`` / ``{}`` /
+        # ``{"timeout_seconds": 5}`` distinction is what the
+        # clamp WARNING logs (operator wants to know whether the bad
+        # value came from a meta.json read or a module-default
+        # fallback). See site 9476-9477 in the commit message.
+        watcher_config_was_explicit = (
+            isinstance(watcher_config, dict) and bool(watcher_config)
+        )
         watcher_config = watcher_config or {}
         raw_timeout = int(
             watcher_config.get(
@@ -9470,15 +9506,30 @@ class WatchoverEvaluator:
         # shows up in the boot log instead of as a per-tool-call
         # silent degradation.
         if raw_timeout < WATCHOVER_TIMEOUT_MIN_SECONDS:
+            # Source attribution: ``watcher_config_was_explicit`` is True
+            # when the caller passed a non-None non-empty dict
+            # (typically the result of reading
+            # ``agents/watcher/meta.json`` ``watchover`` section, or a
+            # test override). False when the caller passed None/{} and
+            # the module default was applied. The instance id is
+            # intentionally NOT logged here because the constructor
+            # is invoked from :func:`create_watchover_check_node`
+            # with ``instance_id=""`` (patched on every call below)
+            # — the pre-fix log printed ``(unset)`` which conveyed
+            # no operator-actionable signal.
+            source = (
+                "explicit watcher_config"
+                if watcher_config_was_explicit
+                else "module default"
+            )
             logger.warning(
                 f"[Watchover] configured timeout_seconds={raw_timeout} "
                 f"is below WATCHOVER_TIMEOUT_MIN_SECONDS="
-                f"{WATCHOVER_TIMEOUT_MIN_SECONDS} for "
-                f"{instance_id[:8] or '(unset)'}...; clamping to "
-                f"{WATCHOVER_TIMEOUT_MIN_SECONDS}. (Pre-fix 10s "
-                f"override caused the watchover gate to go 100% inert "
-                f"in prod 2026-09-17 — see project_cn_list for the "
-                f"locked diagnosis.)"
+                f"{WATCHOVER_TIMEOUT_MIN_SECONDS} (source: {source}); "
+                f"clamping to {WATCHOVER_TIMEOUT_MIN_SECONDS}. (Pre-fix "
+                f"10s override caused the watchover gate to go 100% "
+                f"inert in prod 2026-09-17 — see project_cn_list for "
+                f"the locked diagnosis.)"
             )
             raw_timeout = WATCHOVER_TIMEOUT_MIN_SECONDS
         self._timeout_seconds: int = raw_timeout
@@ -9528,11 +9579,17 @@ class WatchoverEvaluator:
     def _get_llm(self, *, for_snapshot: bool = False):
         """Lazy-construct the watcher LLM (one-time, cached per path).
 
-        Two independent caches so the eval model and snapshot model can
-        differ when ``llm_model`` and ``snapshot_llm_model`` resolve to
-        different names in meta.json. The cache key is the (path,
-        model-name) tuple — both the eval call and snapshot regen
-        cache their LLM instance for the lifetime of the evaluator.
+        Two independent caches keyed by call site (path): the eval call
+        and the snapshot-regen call each cache their LLM instance for
+        the lifetime of the evaluator. The cache does NOT key on the
+        resolved model name — if you change ``model_override`` or
+        ``snapshot_model_override`` after the first call, the cached
+        instance is reused (the pre-fix bug at the heart of the 2026-
+        09-17 v0.13.1 incident). Both overrides are expected to be
+        resolved once at factory time
+        (see :func:`create_watchover_check_node`) and stay stable for
+        the evaluator's lifetime, which is the only contract the
+        factory guarantees.
 
         Args:
             for_snapshot: ``True`` for the snapshot-regeneration call
@@ -9542,10 +9599,14 @@ class WatchoverEvaluator:
 
         Returns:
             The cached :class:`ThinkingChatOpenAI` for the requested
-            path. The instance is constructed on first call via
-            :func:`clean_llm_config` + ``self._llm_config.copy()``
-            (the model override is applied before the ChatOpenAI build
-            so the override wins over the session LLM's model).
+            path. On first call for a given path, the instance is
+            constructed via :func:`clean_llm_config` and then the
+            resolved model override (when present) is written into
+            ``config["model"]`` before the ``ThinkingChatOpenAI``
+            kwargs are unpacked — so the override wins over the
+            session LLM's model. Subsequent calls return the cached
+            instance directly; the model field is NEVER re-applied
+            after construction.
         """
         if for_snapshot:
             target_override = self._snapshot_model_override
@@ -10237,10 +10298,14 @@ def create_watchover_check_node(
     # watched instance's session model (often the heavyweight default),
     # pushing every eval + snapshot-regen past the 10s timeout and
     # triggering LD-2 fail-open for every tool batch (2026-09-17
-    # v0.13.1 incident). The factory resolves at build time so a missing
-    # ``config.llm.model_keywords`` mirror or an unrecognised
-    # ``llm_model`` is logged once at graph build instead of on every
-    # tool call.
+    # v0.13.1 incident). The factory resolves at build time so the
+    # WARN-on-unrecognised branch (resolver branch 3) fires once at
+    # graph build instead of on every tool call; the "no key" /
+    # "quick with no operator mirror" branches (resolver branches
+    # 1+2) intentionally return ``""`` so the factory passes ``None``
+    # downstream and the watched instance's own ``llm_config["model"]``
+    # (its spawn-time model) flows through unmodified — those branches
+    # do NOT log.
     cfg_for_resolution = watcher_config or {}
     manager_config = getattr(manager, "config", None)
     eval_model_override = _resolve_watcher_model(
@@ -10256,6 +10321,10 @@ def create_watchover_check_node(
         llm_config=llm_config,
         instance_id="",  # patched on every call below
         watcher_config=watcher_config,
+        # ``or None`` collapses the resolver's ``""`` sentinel (returned
+        # by branches 1+2 — the "preserve instance model" contract)
+        # into ``None`` so :class:`WatchoverEvaluator`'s ``_get_llm``
+        # skips the override entirely. See W1 in the commit message.
         model_override=eval_model_override or None,
         snapshot_model_override=snapshot_model_override or None,
     )

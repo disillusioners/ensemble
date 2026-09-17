@@ -62,6 +62,27 @@ class _FakeLLMResult:
     content: Any = ""
 
 
+def _bypass_first_call_seed(evaluator: "WatchoverEvaluator") -> None:
+    """Mark the evaluator's first-call seed as already done.
+
+    2026-09-17 fix: the evaluator's ``evaluate()`` seeds ``_last_seen_count``
+    to ``len(messages)`` on the very first call so the entire conversation
+    history is NOT absorbed into the initial delta (the pre-fix
+    deterministic-timeout bug for long conversations). Tests written
+    against the pre-fix behavior — where the first call DOES absorb
+    ``messages[0:]`` — call this helper to opt out of the seed and
+    exercise the original "absorb everything on first call" semantics.
+    New tests for the seed behavior itself should NOT call this helper.
+
+    Mirrors the identical helper in ``tests/unit/test_watchover_decision.py``
+    (defined as a module-level free function there). Re-defined here so
+    this test file is self-contained and does not rely on a sibling
+    test file's internals.
+    """
+    evaluator._initial_delta_seeded = True  # noqa: SLF001 — test-only opt-out
+
+
+
 def _make_fake_llm_class(responses: list[Any] | None = None):
     """Build a ``ThinkingChatOpenAI`` factory mock with a queued response list.
 
@@ -302,6 +323,91 @@ class TestTimeoutFloor:
         )
         assert evaluator._timeout_seconds == WATCHOVER_TIMEOUT_MIN_SECONDS
 
+    async def test_wait_for_timeout_argument_reaches_call_site(
+        self, monkeypatch
+    ):
+        """W2 fix: ``asyncio.wait_for(..., timeout=self._timeout_seconds)``
+        is the actual LD-2 fail-open enforcement mechanism.
+
+        The pre-existing LD-2 fail-open tests in
+        ``test_watchover_decision.py::test_infra_error_timeout_fails_open``
+        raise ``asyncio.TimeoutError`` directly from a mock
+        ``side_effect`` — so nothing in those tests pins the fact that
+        the watcher actually wraps the LLM call in
+        ``asyncio.wait_for(timeout=self._timeout_seconds, ...)`` at
+        graph.py:9929-9934. If the ``wait_for`` wrapper were removed
+        tomorrow, every LD-2 test would still pass — meaning the entire
+        fail-open safety net is one typo away from going silently
+        inert. This test pins the wrapper directly.
+
+        Implementation: we patch ``daemon.graph.asyncio.wait_for`` with
+        ``wraps=asyncio.wait_for`` so the real function still runs (no
+        behavior change for the eval), but we capture every
+        ``timeout=`` keyword so we can assert the configured value
+        reached the call site.
+
+        The assertion is conservative: ``configured_timeout`` is in the
+        observed set. If someone changes
+        ``asyncio.wait_for(coro, timeout=self._timeout_seconds)`` to
+        ``asyncio.wait_for(coro, timeout=None)`` (or removes the wrapper
+        entirely), this test fails because the observed set no longer
+        contains the configured value.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        configured_timeout = 42  # any value above the 15s floor
+        factory, _llm = _make_fake_llm_class(["Allowed"])
+        manager = _make_manager_with_config()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid",
+                watcher_config={"timeout_seconds": configured_timeout},
+            )
+            assert evaluator._timeout_seconds == configured_timeout
+
+            # Spy on ``asyncio.wait_for`` in the graph module's
+            # namespace — the watcher's wrapper call (graph.py:9990)
+            # is the one we want to pin. ``wraps=`` delegates to the
+            # real function (so the eval path still works normally
+            # with no spurious "coroutine never awaited" warnings)
+            # and exposes ``call_args_list`` for inspection.
+            with patch(
+                "daemon.graph.asyncio.wait_for",
+                wraps=asyncio.wait_for,
+            ) as wait_for_spy:
+                await evaluator.evaluate(
+                    tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                    messages=[HumanMessage(content="m0")],
+                    watchover_context="ctx",
+                )
+
+        # Extract every timeout the watcher's wait_for calls were
+        # invoked with — supports both positional and keyword forms so
+        # a future refactor of the call signature doesn't silently
+        # break the pin.
+        observed_timeouts: list[int | None] = []
+        for call in wait_for_spy.call_args_list:
+            if "timeout" in call.kwargs:
+                observed_timeouts.append(call.kwargs["timeout"])
+            elif len(call.args) >= 2:
+                # ``asyncio.wait_for(fut, timeout)`` — positional
+                # timeout is the second arg.
+                observed_timeouts.append(call.args[1])
+            else:
+                observed_timeouts.append(None)
+
+        # The configured timeout MUST reach the call site. If the
+        # ``asyncio.wait_for(...)`` wrapper is removed or its timeout
+        # argument is changed away from ``self._timeout_seconds``, this
+        # assertion fails.
+        assert configured_timeout in observed_timeouts, (
+            f"asyncio.wait_for was not called with the configured "
+            f"timeout={configured_timeout}; observed={observed_timeouts}. "
+            f"The LD-2 fail-open enforcement is unpinned — check "
+            f"graph.py:9929-9934."
+        )
+
 
 # =============================================================================
 # Root cause 3 — first-call delta seed
@@ -429,6 +535,139 @@ class TestFirstCallSeed:
         # absorbed + regen had fired + regen had failed).
         assert _llm.invoke.call_count == 1
 
+    async def test_first_call_empty_messages_list(self, monkeypatch):
+        """#9(i) — Empty ``messages=[]`` on first call: the seed is a
+        no-op, delta stays empty, ``_last_seen_count`` stays 0.
+
+        Catches a regression where the seed accidentally wrote
+        ``_last_seen_count = -1`` or similar on an empty input.
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        factory, _llm = _make_fake_llm_class(["Allowed"] * 5)
+        manager = _make_manager_with_config()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid",
+            )
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[],
+                watchover_context="ctx",
+            )
+
+        # Seed is a no-op on empty input.
+        assert evaluator._delta_messages == []
+        assert evaluator._last_seen_count == 0
+        assert evaluator._snapshot == ""
+        assert evaluator._snapshot_turn == 0
+        assert evaluator._initial_delta_seeded is True
+
+    async def test_initial_delta_seeded_defaults_to_false(self):
+        """#9(ii) — Pre-call: ``_initial_delta_seeded == False``.
+
+        The 7 ``_bypass_first_call_seed`` sites in
+        ``test_watchover_decision.py`` (and any future test that wants
+        the pre-fix absorption path) would silently MASK a regression
+        where the constructor defaults ``_initial_delta_seeded`` to
+        ``True`` — every seed-affirming test would still pass because
+        the bypass flips it back to ``True``, and we'd ship a
+        no-op seed. This test pins the constructor default.
+        """
+        manager = _make_manager_with_config()
+        evaluator = WatchoverEvaluator(
+            manager=manager,
+            llm_config={"model": "agentic"},
+            instance_id="iid",
+        )
+        # The constructor MUST default the seed flag to False; the
+        # first ``evaluate()`` call is responsible for flipping it to
+        # True (the seed semantics).
+        assert evaluator._initial_delta_seeded is False, (
+            "constructor defaulted _initial_delta_seeded to True — "
+            "the first-call seed would be skipped, re-introducing the "
+            "pre-fix deterministic-timeout bug for long conversations."
+        )
+
+    async def test_default_delta_max_20_boundary_no_regen(self, monkeypatch):
+        """#9(iii-a) — At the production default (``delta_max_messages=20``),
+        ``len(_delta_messages) == 20`` does NOT trigger regeneration.
+        The trigger is strict-greater (``len > _delta_max``).
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        # Generous LLM response queue: one call per evaluate.
+        factory, _llm = _make_fake_llm_class(["Allowed"] * 5)
+        manager = _make_manager_with_config()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            # No ``delta_max_messages`` override → uses the production
+            # default ``WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT == 20``.
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid",
+            )
+            # Bypass the seed so the 20-message batch lands in the
+            # delta on the first call (the seed would suppress it).
+            _bypass_first_call_seed(evaluator)
+
+            # 20 messages — exactly at the boundary, NOT over.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[HumanMessage(content=f"m{i}") for i in range(20)],
+                watchover_context="ctx",
+            )
+
+        # The trigger is strict-greater — len == delta_max → NO regen.
+        assert len(evaluator._delta_messages) == 20
+        assert evaluator._snapshot == ""
+        assert evaluator._snapshot_turn == 0
+        # LLM was called ONCE (the eval), not twice (eval + regen).
+        assert _llm.invoke.call_count == 1
+
+    async def test_default_delta_max_20_boundary_plus_one_regen(
+        self, monkeypatch
+    ):
+        """#9(iii-b) — ``len == 21`` (one over the production default
+        ``delta_max_messages=20``) DOES trigger regeneration.
+        The trigger is strict-greater (``len > _delta_max``).
+        """
+        monkeypatch.setenv("WATCHOVER_ENABLED", "true")
+        # Generous queue: one call for the eval + one call for the
+        # snapshot regen (which uses the same mock and returns
+        # "Allowed" — the regen treats any LLM response as the new
+        # snapshot text).
+        factory, _llm = _make_fake_llm_class(["Allowed"] * 10)
+        manager = _make_manager_with_config()
+        with patch("daemon.graph.ThinkingChatOpenAI", factory):
+            # No ``delta_max_messages`` override → uses the production
+            # default ``WATCHOVER_DELTA_MAX_MESSAGES_DEFAULT == 20``.
+            evaluator = WatchoverEvaluator(
+                manager=manager,
+                llm_config={"model": "agentic"},
+                instance_id="iid",
+            )
+            _bypass_first_call_seed(evaluator)
+
+            # 21 messages — exactly one over the boundary.
+            await evaluator.evaluate(
+                tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
+                messages=[HumanMessage(content=f"m{i}") for i in range(21)],
+                watchover_context="ctx",
+            )
+
+        # 21 > 20 → regen fires; the snapshot is populated with the
+        # mock LLM's response ("Allowed").
+        assert evaluator._snapshot == "Allowed"
+        assert evaluator._snapshot_turn == 1
+        # Delta is bounded to the last ``delta_max`` messages — the
+        # sliding-window tail (messages[1:] keeps the last 20).
+        assert len(evaluator._delta_messages) == 20
+        assert evaluator._delta_messages[0].content == "m1"
+        assert evaluator._delta_messages[-1].content == "m20"
+        # LLM was called TWICE: once for the eval, once for the regen.
+        assert _llm.invoke.call_count == 2
+
 
 # =============================================================================
 # Root cause 2 — quick-model wiring
@@ -440,27 +679,47 @@ class TestResolveWatcherModelHelper:
 
     Resolution precedence (mirrors ``resolve_judge_model`` /
     ``extract_keywords`` for the purpose-bound ``model_keywords``
-    pattern):
+    pattern; W1 hardened the no-op branches to preserve the watched
+    instance's spawn-time model):
 
-      * ``requested`` empty / None → ``config.llm.model`` (session)
+      * ``requested`` empty / None / whitespace → ``""`` (W1: was
+        ``config.llm.model`` pre-W1; now a no-op so the watched
+        instance's own ``llm_config["model"]`` flows through
+        unmodified).
       * ``requested == "quick"`` (case-insensitive) → ``config.llm.model_keywords``
-        when set, else ``config.llm.model``
+        when set; ``""`` (W1: was ``config.llm.model`` pre-W1) when
+        unset — same no-op contract as above.
       * other string → honor verbatim if in ``config.llm.allowed_models``,
-        else WARN + fallback to ``config.llm.model``
+        else WARN + fallback to ``config.llm.model`` (this branch is
+        unchanged from pre-W1 — the reviewer scoped the fix to the
+        two no-op branches only; branch 3 is the "operator asked for
+        X, X is unavailable" path and stays a daemon-global override
+        with WARNING).
     """
 
-    def test_empty_requested_returns_session_model(self):
-        """``requested=None`` → ``config.llm.model``."""
+    def test_empty_requested_returns_empty_string_for_no_op(self):
+        """W1: ``requested=None`` / ``""`` / whitespace → ``""``.
+
+        The factory (``create_watchover_check_node``) treats ``""``
+        the same as ``None`` — no model override is applied, and the
+        watched instance's own ``llm_config["model"]`` (its spawn-time
+        model) flows through unmodified. This is the W1 contract:
+        the resolver is purely a *purpose-bound* quick-mirror wiring;
+        when there is nothing to wire (no key, or the key is ``"quick"``
+        with no operator-pinned mirror), we MUST NOT silently override
+        the instance model with the daemon-global ``config.llm.model``.
+
+        Pre-W1 this branch fell back to ``config.llm.model`` (the
+        daemon-global session model). The reviewer flagged that as a
+        behavior change vs. pre-fix on deployments where
+        ``OPENAI_MODEL_KEYWORDS`` was unset — it overrode the watched
+        instance's spawn-time model with the daemon-global default.
+        W1 fixes that.
+        """
         manager = _make_manager_with_config(session_model="agentic")
-        assert (
-            graph_mod._resolve_watcher_model(manager.config, None) == "agentic"
-        )
-        assert (
-            graph_mod._resolve_watcher_model(manager.config, "") == "agentic"
-        )
-        assert (
-            graph_mod._resolve_watcher_model(manager.config, "   ") == "agentic"
-        )
+        assert graph_mod._resolve_watcher_model(manager.config, None) == ""
+        assert graph_mod._resolve_watcher_model(manager.config, "") == ""
+        assert graph_mod._resolve_watcher_model(manager.config, "   ") == ""
 
     def test_quick_sentinel_resolves_to_model_keywords(self):
         """``requested="quick"`` → ``config.llm.model_keywords``."""
@@ -484,15 +743,26 @@ class TestResolveWatcherModelHelper:
             == "quick-mirror"
         )
 
-    def test_quick_with_no_model_keywords_falls_back_to_session(self):
-        """``requested="quick"`` + ``model_keywords=""`` → session model."""
+    def test_quick_with_no_model_keywords_returns_empty_string(self):
+        """W1: ``requested="quick"`` + ``model_keywords=""`` → ``""``.
+
+        The W1 contract: a watcher meta key of ``"quick"`` with no
+        operator-pinned ``OPENAI_MODEL_KEYWORDS`` mirror MUST NOT
+        silently override the watched instance's spawn-time model
+        with the daemon-global ``config.llm.model``. The factory
+        passes ``None`` to ``WatchoverEvaluator`` and the instance's
+        own ``llm_config["model"]`` flows through unmodified.
+
+        Pre-W1 this branch fell back to ``config.llm.model`` (the
+        daemon-global session model). The reviewer flagged that as
+        the same behavior-change vs. pre-fix issue as
+        ``test_empty_requested_returns_empty_string_for_no_op`` — both
+        branches are now no-op rather than daemon-global-override.
+        """
         manager = _make_manager_with_config(
             session_model="agentic", model_keywords=""
         )
-        assert (
-            graph_mod._resolve_watcher_model(manager.config, "quick")
-            == "agentic"
-        )
+        assert graph_mod._resolve_watcher_model(manager.config, "quick") == ""
 
     def test_specific_model_name_honored_when_in_allowed(self):
         """Specific model name in ``allowed_models`` → returned verbatim."""
@@ -899,7 +1169,7 @@ class TestMetaCacheIsolation:
     built before the change.
     """
 
-    def test_factory_uses_passed_watcher_config_not_cache(self, monkeypatch):
+    async def test_factory_uses_passed_watcher_config_not_cache(self, monkeypatch):
         """Factory built with explicit ``watcher_config={"llm_model": "x"}``
         + a polluted ``_WATCHER_META_CACHE={"llm_model": "y"}`` uses
         ``"x"`` — the explicit argument wins.
@@ -928,34 +1198,29 @@ class TestMetaCacheIsolation:
             # The model_override baked into the evaluator should be
             # "x" (resolved from the explicit arg).
             # We can't easily inspect the evaluator without triggering
-            # an eval, so we trigger a minimal one:
-            import asyncio
-
+            # an eval, so we trigger a minimal one.
             from langchain_core.messages import AIMessage
 
-            async def _run():
-                state = {
-                    "messages": [
-                        AIMessage(
-                            content="ok",
-                            tool_calls=[
-                                {
-                                    "id": "tc-1",
-                                    "name": "bash",
-                                    "args": {"command": "ls"},
-                                }
-                            ],
-                        )
-                    ],
-                }
-                from langchain_core.runnables import RunnableConfig
+            state = {
+                "messages": [
+                    AIMessage(
+                        content="ok",
+                        tool_calls=[
+                            {
+                                "id": "tc-1",
+                                "name": "bash",
+                                "args": {"command": "ls"},
+                            }
+                        ],
+                    )
+                ],
+            }
+            from langchain_core.runnables import RunnableConfig
 
-                config: RunnableConfig = {
-                    "configurable": {"thread_id": "iid"}
-                }
-                return await node(state, config)
-
-            asyncio.get_event_loop().run_until_complete(_run())
+            config: RunnableConfig = {
+                "configurable": {"thread_id": "iid"}
+            }
+            await node(state, config)
 
         captured = factory.captured_kwargs  # type: ignore[attr-defined]
         assert captured[0].get("model") == "x", (
@@ -963,11 +1228,21 @@ class TestMetaCacheIsolation:
             f"instead of explicit watcher_config 'x'"
         )
 
-    def test_meta_cache_default_value_is_none(self):
-        """The cache starts as ``None`` (read-once sentinel)."""
-        # Use a fresh module-level copy to avoid cross-test pollution.
-        import importlib
+    def test_meta_cache_starts_as_none_after_explicit_reset(self, monkeypatch):
+        """#7 fix: ``_WATCHER_META_CACHE`` is ``None`` immediately
+        after a clean reset (the read-once sentinel value).
 
-        # Reload is heavy-handed; instead just verify the docstring
-        # contract by checking the constant exists.
-        assert hasattr(graph_mod, "_WATCHER_META_CACHE")
+        Pre-#7 the test was tautological (``assert hasattr(...)``)
+        — it proved the constant EXISTS but not that it STARTS at
+        ``None``. This test pins the sentinel value so a future
+        refactor that changes the cache initial state (e.g.
+        ``_WATCHER_META_CACHE: dict = {}`` to silence a "may be
+        referenced before assignment" lint) is caught at the test
+        layer instead of silently breaking the read-once contract.
+        """
+        monkeypatch.setattr(graph_mod, "_WATCHER_META_CACHE", None)
+        assert graph_mod._WATCHER_META_CACHE is None, (
+            "monkeypatch reset to None did not stick — the cache "
+            "may not be a module-level mutable global, or the "
+            "sentinel has been changed from None"
+        )
