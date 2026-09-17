@@ -2468,9 +2468,12 @@ Provide a concise summary:"""
                 # fallbacks at ``child_reports.py:863`` / ``:2058`` /
                 # ``error_reporting.py:270`` are gated behind bus-active
                 # early-returns and are dead code in production). The
-                # ``pending_count`` now uses the shared positive-polarity
-                # predicate ``message_queue_counts_as_pending`` — see
-                # ``daemon/repositories/message_queue/predicates.py``.
+                # ``pending_count`` uses the hardened finalizer variant
+                # ``finalizer_counts_as_pending`` (see
+                # ``daemon/repositories/message_queue/predicates.py``); the
+                # base predicate ``message_queue_counts_as_pending`` only
+                # lives in the dead-code fallbacks below (bus-active
+                # early-return gated).
                 # The base status filter (READY/PROCESSING/RETRYING) is
                 # unchanged; the predicate handles the terminal/live
                 # decision per row using ``work_id`` as the identity

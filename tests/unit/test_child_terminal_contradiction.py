@@ -45,9 +45,11 @@ Test surface (per the spec's test plan):
       turn picks up BOTH the report message AND the note message
       in the standard drain order
 
-Stable id format: ``child_report_check:{parent_id}:{child_id}``
-(matches the canonical ``_stable_id_for`` table at
-:mod:`daemon.services.context_messages`).
+Stable id format: ``child_report_check:{child_instance_id}:{report_message_id}``
+(matches the canonical mint at ``daemon/services/child_reports.py``
+Stage-0 child-completion note enqueue path; the older
+``_stable_id_for`` table at :mod:`daemon.services.context_messages`
+uses a separate ``child_report_check:{instance_id}:{agent_id}`` shape).
 """
 from __future__ import annotations
 
