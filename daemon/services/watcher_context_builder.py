@@ -52,10 +52,18 @@ DEFAULT_BUILDER_MESSAGE_WINDOW = 40
 # Default timeout for the builder LLM call. Set to 300 seconds because
 # the builder summarizes potentially long devops/ops conversations
 # (the watcher context is a structured markdown document, not a
-# single-line verdict). This INDEPENDENT of the watcher's own per-call
-# ``timeout_seconds`` (10s) — the watcher evaluates individual tool
-# calls quickly, while the builder builds the security profile once
-# per activation and may iterate over thousands of messages.
+# single-line verdict). This is INDEPENDENT of the watcher's own
+# per-call evaluator ``timeout_seconds`` (the 90s
+# :data:`daemon.graph.WATCHOVER_TIMEOUT_SECONDS_DEFAULT` per-call cap,
+# with a 15s sanity floor at
+# :data:`daemon.graph.WATCHOVER_TIMEOUT_MIN_SECONDS`) — the watcher
+# evaluates individual tool calls quickly while the builder builds the
+# security profile once per activation and may iterate over thousands
+# of messages. Pre-2026-09-17 the watcher per-call timeout was 10s
+# (a meta.json override that went 100% inert in prod — see the locked
+# critical note "Fix watchover per-tool-call security gate being
+# 100% inert" for the diagnosis); this comment reflects the
+# post-fix default.
 DEFAULT_BUILDER_TIMEOUT_SECONDS = 300
 
 # Fallback prefix applied when the builder LLM call fails or times out.
