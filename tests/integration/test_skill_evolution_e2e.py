@@ -687,7 +687,7 @@ class TestSkillCaptureE2E:
         capture_response = json.dumps({
             "name": "auto-captured-skill",
             "description": "extracted from a successful task",
-            "content": "## Steps\n1. do X\n2. do Y",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
         evolution_service._call_llm = AsyncMock(return_value=capture_response)
 
@@ -726,8 +726,16 @@ class TestSkillCaptureE2E:
     async def test_capture_handles_llm_failure_gracefully(
         self, app, repos, evolution_service,
     ):
-        # LLM returns garbage — capture should still create a row, just with
-        # a derived name from the response body.
+        """LLM returns garbage → capture is SKIPPED, no junk row.
+
+        CONTRACT FLIP (2026-09-17, skill 7ae063c4 class): the old
+        Layer-5 prose fallback committed a derived-from-garbage row
+        ("still creates a skill, name derived from raw text"). That
+        fallback is precisely how the hallucinated meta-skill incident
+        was born (un-parsed JSON captured by regex fallback). The
+        at-birth content gate now rejects the candidate — the skip
+        envelope is the graceful outcome; nothing is inserted.
+        """
         evolution_service._call_llm = AsyncMock(return_value="Some unparseable response text.")
 
         result = await evolution_service.capture_skill(
@@ -740,12 +748,11 @@ class TestSkillCaptureE2E:
                 "project_id": "p-c2",
             },
         )
-        # Layer 5 fallback: still creates a skill, name derived from raw text.
-        assert result["skipped"] is False
-        skill = repos.skill.get(result["new_skill_id"])
-        assert skill is not None
-        # Body of the skill is the raw LLM text.
-        assert "unparseable" in skill.content
+        # Graceful = clean skip envelope with a machine-readable
+        # reason, NOT a committed junk row.
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "content_too_short"
+        assert result["new_skill_id"] is None
 
 
 class TestSkillLineage:

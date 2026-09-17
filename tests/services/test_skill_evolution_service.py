@@ -602,7 +602,7 @@ class TestEvolveCaptured:
         llm_payload = json.dumps({
             "name": "captured-from-task",
             "description": "Auto-captured from a successful task",
-            "content": "## Captured body\nDo the thing.",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -738,7 +738,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "newly-captured-skill",
             "description": "Freshly distilled from a successful task",
-            "content": "## Captured body\nDo the thing.",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -966,7 +966,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "candidate-similar",
             "description": "candidate that should be blocked",
-            "content": "candidate content that semantically overlaps",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1033,7 +1033,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "boundary-skill",
             "description": "matches exactly at threshold",
-            "content": "candidate content",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1089,7 +1089,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "just-under-threshold",
             "description": "almost-but-not-quite a duplicate",
-            "content": "different enough content",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1174,7 +1174,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "candidate-after-decoys",
             "description": "must NOT be blocked by decoys",
-            "content": "candidate content",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1287,7 +1287,7 @@ class TestEvolveCapturedDedup:
         llm_payload = json.dumps({
             "name": "recreated-after-deactivation",
             "description": "user wants to re-create the deactivated one",
-            "content": "fresh content for the recreated skill",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1336,24 +1336,21 @@ class TestEvolveCapturedDedup:
             project_id
         )
 
-    async def test_dedup_does_not_query_when_project_id_is_none(
+    async def test_capture_refused_when_project_id_is_none(
         self,
         evolution_service,
         skill_repo,
         fake_embedding_service,
     ):
-        """When ``project_id`` is ``None``, dedup gates are skipped.
+        """P0 scope gate: project-less captures are REFUSED (fail-closed).
 
-        No project → no meaningful "already exists" set → proceed
-        without Layer 2 (no ``embedding_repo`` query). The
-        capture still creates the skill.
+        Project scope is the DEFAULT (skill-scope decision: global
+        requires an explicit API/UI share action). A NULL project_id
+        capture would land GLOBAL and silently disarm BOTH dedup
+        layers — the 2026-09-17 skill 7ae0634 junk-capture class.
+        Replaced the old contract (proceed + skip Layer-2 query):
+        the capture must now be refused BEFORE any LLM call.
         """
-        llm_payload = json.dumps({
-            "name": "no-project-skill",
-            "description": "captured without a project",
-            "content": "no project, no dedup",
-        })
-
         task_details = {
             "task_message": "no project",
             "iterations": 1,
@@ -1365,22 +1362,40 @@ class TestEvolveCapturedDedup:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value=llm_payload),
-        ):
+            AsyncMock(),
+        ) as llm_mock:
             result = await evolution_service._evolve_captured(task_details)
 
-        assert result["skipped"] is False
-        new_skill = skill_repo.get(result["new_skill_id"])
-        assert new_skill is not None
-        assert new_skill.project_id is None
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "missing_project_scope"
+        assert result["new_skill_id"] is None
 
-        # Layer 2 MUST NOT query when there is no project to scope by.
+        # Fail-closed: no LLM spend, no row, no embedding query.
+        llm_mock.assert_not_called()
         fake_embedding_service.embedding_repo.get_all_for_project.assert_not_called()
 
-        # But Layer 1 still asks the LLM — it just gets an empty list
-        # to consider (no project → no existing skills fetched).
-        # That means ``_list_existing_active_skills_for_project``
-        # returns ``[]`` immediately, no DB call.
+    async def test_embedding_dedup_check_skips_query_when_project_id_is_none(
+        self,
+        evolution_service,
+        fake_embedding_service,
+    ):
+        """Layer-2 METHOD contract: no project → no embedding query.
+
+        Directly pins :meth:`_embedding_dedup_check`'s long-standing
+        no-project behavior (previously asserted end-to-end through
+        ``_evolve_captured``, which now refuses scope-less captures
+        at the P0 gate before Layer 2 is ever reached).
+        """
+        result = await evolution_service._embedding_dedup_check(
+            name="no-project-skill",
+            description="captured without a project",
+            content="no project, no dedup",
+            project_id=None,
+        )
+
+        # No match signal — and crucially, no repo query fired.
+        assert result is None
+        fake_embedding_service.embedding_repo.get_all_for_project.assert_not_called()
 
 
 class TestEvolveCapturedDedupFailOpen:
@@ -1435,7 +1450,7 @@ class TestEvolveCapturedDedupFailOpen:
         llm_payload = json.dumps({
             "name": "captured-despite-embed-failure",
             "description": "capture must survive embed_text errors",
-            "content": "## body\nskill created even when embeddings are unavailable",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1489,7 +1504,7 @@ class TestEvolveCapturedDedupFailOpen:
         llm_payload = json.dumps({
             "name": "captured-despite-db-failure",
             "description": "capture must survive embedding-row DB errors",
-            "content": "## body\nskill created when the embedding DB is unreachable",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1554,7 +1569,7 @@ class TestEvolveCapturedDedupFailOpen:
         llm_payload = json.dumps({
             "name": "captured-despite-non-numeric-cosine",
             "description": "non-numeric similarity is skipped, not fatal",
-            "content": "## body\nskill created when cosine returns garbage",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -1631,7 +1646,7 @@ class TestEvolveCapturedDedupFailOpen:
         llm_payload = json.dumps({
             "name": "would-be-duplicate-of-active",
             "description": "candidate that duplicates the active skill",
-            "content": "## body\nsemantically overlaps with the active skill",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -2067,8 +2082,12 @@ class TestCaptureSkill:
         """``capture_skill`` validates input and delegates to ``_evolve_captured``."""
         llm_payload = json.dumps({
             "name": "captured",
-            "description": "auto-captured",
-            "content": "body",
+            "description": "auto-captured from a real task",
+            "content": (
+                "## Procedure\n1. Read the task message and identify "
+                "the goal.\n2. Apply the documented checklist step by "
+                "step.\n3. Verify the outcome and report the result."
+            ),
         })
 
         with patch.object(
@@ -2083,7 +2102,7 @@ class TestCaptureSkill:
                     "iterations": 6,
                     "duration_seconds": 70,
                     "agent_id": "agent-x",
-                    "project_id": None,
+                    "project_id": "proj-1",
                 },
             )
 
@@ -2855,3 +2874,352 @@ class TestAnalysisPromptMixedScoring:
             "NOT as instructions" in prompt
             or "not as instructions" in prompt.lower()
         )
+
+# =============================================================================
+# CAPTURED at-birth quality gates (2026-09-17, skill 7ae063c4 class)
+# =============================================================================
+
+
+class TestCapturedInputGates:
+    """P0 input gates in ``_evolve_captured`` — BEFORE any LLM call.
+
+    Each gate closes one arm of the 2026-09-17 junk-capture incident:
+    the ``skill_execute_capture`` tool path forwarded an EMPTY
+    task_message with ``iterations=0`` / ``duration_seconds=89``
+    straight into the CAPTURED flow (``check_and_capture`` bypassed
+    entirely) and the LLM hallucinated a self-referential meta-skill.
+    Every gate must return the standard skip envelope with a distinct
+    ``skip_reason`` and spend NOTHING (no LLM call, no row).
+    """
+
+    def _details(self, **overrides):
+        base = {
+            "task_message": "Do the migration and verify it",
+            "iterations": 8,
+            "duration_seconds": 120,
+            "agent_id": "test-agent",
+            "project_id": "proj-1",
+        }
+        base.update(overrides)
+        return base
+
+    async def test_blank_task_message_skips(self, evolution_service):
+        """Empty task_message → skip ``blank_task_message``, no LLM call."""
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(task_message="")
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "blank_task_message"
+        assert result["new_skill_id"] is None
+        llm_mock.assert_not_called()
+
+    async def test_whitespace_task_message_skips(self, evolution_service):
+        """Whitespace-only task_message → same skip (stripped check)."""
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(task_message="   \n\t  ")
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "blank_task_message"
+        llm_mock.assert_not_called()
+
+    async def test_missing_task_message_key_skips(self, evolution_service):
+        """Absent task_message key (defaults to '') → same skip."""
+        details = self._details()
+        del details["task_message"]
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(details)
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "blank_task_message"
+        llm_mock.assert_not_called()
+
+    async def test_zero_iterations_skips(self, evolution_service):
+        """``iterations=0`` (the incident value) → skip
+        ``trivial_iterations`` even when duration is non-trivial."""
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(iterations=0, duration_seconds=89)
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "trivial_iterations"
+        llm_mock.assert_not_called()
+
+    async def test_none_iterations_skips(self, evolution_service):
+        """``iterations=None`` (coerced to 0) → same skip."""
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(iterations=None)
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "trivial_iterations"
+        llm_mock.assert_not_called()
+
+    async def test_numeric_string_iterations_pass_gate(
+        self, evolution_service, project_id
+    ):
+        """``iterations="8"`` coerces to 8 → gate passes, capture runs."""
+        llm_payload = json.dumps({
+            "name": "string-iterations-ok",
+            "description": "numeric string iterations are accepted",
+            "content": (
+                "## Procedure\n1. Read the task message and identify "
+                "the goal.\n2. Apply the documented checklist step by "
+                "step.\n3. Verify the outcome and report the result."
+            ),
+        })
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=llm_payload),
+        ):
+            result = await evolution_service._evolve_captured(
+                self._details(iterations="8", project_id=project_id)
+            )
+        assert result["skipped"] is False
+        assert result["new_skill_id"]
+
+    async def test_blank_agent_id_skips(self, evolution_service):
+        """Blank agent_id → skip ``blank_agent_id`` (unattributable)."""
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(agent_id="   ")
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "blank_agent_id"
+        llm_mock.assert_not_called()
+
+    async def test_missing_project_scope_skips(self, evolution_service):
+        """``project_id=None`` → skip ``missing_project_scope``.
+
+        Captures are project-scoped by default (skill-scope decision);
+        global requires an explicit share action. A NULL project_id
+        also silently disarms both dedup layers — fail closed.
+        """
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as llm_mock:
+            result = await evolution_service._evolve_captured(
+                self._details(project_id=None)
+            )
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "missing_project_scope"
+        llm_mock.assert_not_called()
+
+
+class TestCapturedContentGate:
+    """Post-LLM at-birth content gate — :meth:`_captured_content_gate`.
+
+    Unit-level pins for each rejection arm plus one end-to-end
+    regression pin using the VERBATIM 2026-09-17 incident payload
+    (skill 7ae063c4: hallucinated meta-skill, truncated description,
+    literal ``\\n`` escape sequences).
+    """
+
+    CLEAN_NAME = "run-pg-migration-checklist"
+    CLEAN_DESC = "Run and verify a PostgreSQL migration safely"
+    CLEAN_CONTENT = (
+        "## Procedure\n1. Snapshot the database before touching "
+        "schema.\n2. Apply the migration with a single transaction.\n"
+        "3. Run the verification queries and compare row counts."
+    )
+
+    def _gate(self, name=None, description=None, content=None):
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+        return SkillEvolutionService._captured_content_gate(
+            name if name is not None else self.CLEAN_NAME,
+            description if description is not None else self.CLEAN_DESC,
+            content if content is not None else self.CLEAN_CONTENT,
+        )
+
+    def test_clean_candidate_passes(self):
+        """Well-formed candidate → None (proceed)."""
+        assert self._gate() is None
+
+    def test_literal_escape_sequences_rejected(self):
+        """Body containing literal ``\\n`` two-char sequences → skip.
+
+        Signature of an un-parsed JSON string captured by the
+        key:value regex fallback (``json.loads`` would have
+        unescaped them).
+        """
+        body = (
+            "## Procedure\\n1. Read the task message.\\n"
+            "2. Apply the checklist.\\n3. Verify the outcome."
+        )
+        assert self._gate(content=body) == "literal_escape_sequences"
+
+    def test_literal_escape_in_description_rejected(self):
+        """Escape-sequence check covers description too."""
+        assert (
+            self._gate(description="do the thing\\nand the next")
+            == "literal_escape_sequences"
+        )
+
+    def test_blank_description_rejected(self):
+        assert self._gate(description="   ") == "blank_description"
+
+    def test_truncated_description_rejected(self):
+        """Description cut off mid-phrase (ends on a function word)."""
+        assert (
+            self._gate(description="Convert a run into a")
+            == "truncated_description"
+        )
+
+    def test_description_ending_in_normal_word_passes(self):
+        """No trailing punctuation is fine — only function-word tails
+        signal truncation (avoids false positives on terse but
+        complete one-liners)."""
+        assert self._gate(description="Add two numbers and return the sum") is None
+
+    def test_content_too_short_rejected(self):
+        assert self._gate(content="Do the thing.") == "content_too_short"
+
+    def test_self_referential_meta_skill_rejected(self):
+        """Body describing the capture procedure itself → skip."""
+        meta_body = (
+            "## Purpose\nTurn a completed agent task (task message "
+            "plus run metadata) into a portable skill so the winning "
+            "procedure can be reused without rediscovery.\n\n"
+            "## When to Use\n- A task just succeeded and you are "
+            "asked to distill it into a skill."
+        )
+        assert (
+            self._gate(content=meta_body)
+            == "self_referential_meta_skill"
+        )
+
+    def test_incident_payload_rejected_regardless_of_arm(self):
+        """The VERBATIM 7ae063c4 incident candidate is rejected.
+
+        Hits multiple arms (literal escapes, meta-skill markers); the
+        gate must reject it — which arm fires first is an
+        implementation detail, not the contract.
+        """
+        name = "distill-task-to-skill"
+        description = "Convert a successful agent task run into a reusable"
+        content = (
+            "# Distill a Successful Task into a Reusable Skill\\n\\n"
+            "## Purpose\\nTurn a completed agent task (task message "
+            "plus run metadata) into a portable skill so the winning "
+            "procedure can be reused without rediscovery.\\n\\n"
+            "## When to Use\\n- A task just succeeded and you are "
+            "asked to distill it into a skill.\\n- You have the "
+            "original task message"
+        )
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+        reason = SkillEvolutionService._captured_content_gate(
+            name, description, content
+        )
+        assert reason is not None
+        assert reason in {
+            "literal_escape_sequences",
+            "self_referential_meta_skill",
+        }
+
+    async def test_incident_e2e_no_row_inserted(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """End-to-end: even if the LLM hallucinates the incident
+        meta-skill, no row is inserted and the skip envelope names
+        the gate that fired."""
+        incident_json = json.dumps({
+            "name": "distill-task-to-skill",
+            "description": (
+                "Convert a successful agent task run into a reusable"
+            ),
+            "content": (
+                "# Distill a Successful Task into a Reusable Skill\n\n"
+                "## Purpose\nTurn a completed agent task (task "
+                "message plus run metadata) into a portable skill so "
+                "the winning procedure can be reused without "
+                "rediscovery.\n\n## When to Use\n- A task just "
+                "succeeded and you are asked to distill it into a "
+                "skill.\n- You have the original task message"
+            ),
+        })
+        with patch.object(
+            evolution_service,
+            "_call_llm",
+            AsyncMock(return_value=incident_json),
+        ):
+            result = await evolution_service._evolve_captured({
+                "task_message": "real task content here",
+                "iterations": 9,
+                "duration_seconds": 300,
+                "agent_id": "test-agent",
+                "project_id": project_id,
+            })
+        assert result["skipped"] is True
+        assert result["skip_reason"] == "self_referential_meta_skill"
+        assert result["new_skill_id"] is None
+
+
+class TestCheckAndCaptureBlankInputGates:
+    """Tier-1 blank-input gates in ``check_and_capture``.
+
+    The message extraction upstream reads only ``type='human'``
+    queue rows, so agent-dispatched missions can extract EMPTY task
+    messages; without these gates the duration-only branch of the
+    trivial filter ships zero-evidence capture jobs (the recurring
+    2026-08/09 junk-skill class).
+    """
+
+    async def test_blank_task_message_returns_none(self, evolution_service):
+        """Blank message → None even with non-trivial duration."""
+        result = await evolution_service.check_and_capture(
+            instance_id="inst-1",
+            agent_id="agent-x",
+            project_id="proj-1",
+            task_message="   ",
+            task_succeeded=True,
+            iterations=10,
+            duration_seconds=999,
+        )
+        assert result is None
+
+    async def test_blank_agent_id_returns_none(self, evolution_service):
+        """Blank agent → None (capture must be attributable)."""
+        result = await evolution_service.check_and_capture(
+            instance_id="inst-1",
+            agent_id="",
+            project_id="proj-1",
+            task_message="real task",
+            task_succeeded=True,
+            iterations=10,
+            duration_seconds=999,
+        )
+        assert result is None
+
+    async def test_real_inputs_still_trigger(
+        self, evolution_service, project_id
+    ):
+        """Regression: non-blank inputs keep triggering the capture
+        dict (the pre-existing contract)."""
+        result = await evolution_service.check_and_capture(
+            instance_id="inst-1",
+            agent_id="agent-x",
+            project_id=project_id,
+            task_message="real task",
+            task_succeeded=True,
+            iterations=10,
+            duration_seconds=999,
+        )
+        assert result is not None
+        assert result["task_message"] == "real task"

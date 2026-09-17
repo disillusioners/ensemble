@@ -173,6 +173,56 @@ _SKIP_DUPLICATE_RE = re.compile(
 )
 _CAPTURED_DEDUP_THRESHOLD = 0.85
 
+# ---------------------------------------------------------------------------
+# At-birth quality gates (CAPTURED flow only).
+#
+# Observed 2026-09-17 (skill 7ae063c4, instance d935d7de): the
+# ``skill_execute_capture`` tool path forwarded an EMPTY task_message
+# with ``iterations=0`` / ``duration_seconds=89`` straight into
+# ``_evolve_captured`` — ``check_and_capture`` was bypassed entirely —
+# and the evolution LLM, given no task content, hallucinated a
+# self-referential meta-skill ABOUT the capture procedure itself
+# ("Distill a Successful Task into a Reusable Skill"), with a
+# description cut off mid-sentence and a body containing literal
+# ``\n`` escape sequences (un-parsed JSON captured by the key:value
+# regex fallback). The constants below back the P0 input gates and
+# the post-LLM content gate that reject that entire class BEFORE any
+# LLM spend / row insert.
+# ---------------------------------------------------------------------------
+
+# Minimum plausible length for a captured skill body. Real distilled
+# procedures are multi-paragraph; failed parses produce stubs.
+_CAPTURED_MIN_CONTENT_CHARS = 120
+
+# Function words that signal a description was cut off mid-phrase
+# ("...convert a successful agent task run into a" style token-limit
+# truncation). A description ending on one of these is not a
+# complete sentence.
+_TRUNCATION_TAIL_WORDS = frozenset(
+    {
+        "a", "an", "the", "and", "or", "of", "to", "into", "with",
+        "for", "from", "by", "on", "in", "as", "at", "is", "are",
+        "that", "which", "when", "how", "so", "its", "their", "your",
+        "be", "was", "this",
+    }
+)
+
+# Marker phrases identifying a SELF-REFERENTIAL meta-skill: a body
+# that documents the capture/distillation PROCEDURE itself instead of
+# the task's knowledge. Several are verbatim from the capture prompt
+# header — exactly what an LLM parrots when it has no task content
+# to write about.
+_META_SKILL_MARKER_PHRASES = (
+    "distill a successful task",
+    "distill it into a reusable skill",
+    "distill the task into a skill",
+    "convert a successful agent task",
+    "turn a completed agent task",
+    "task message plus run metadata",
+    "so the winning procedure can be reused",
+    "capture a successful task",
+)
+
 # Cap the number of "existing skills" handed to the capture prompt.
 # Beyond ~20 entries the prompt bloat dominates the model's context
 # budget; the rest of dedup is covered by Layer 2 (embedding scan)
@@ -701,6 +751,21 @@ class SkillEvolutionService:
         response as the content body and derives ``name`` /
         ``description`` from its first 5 words / first sentence.
 
+        Input gates (P0 — BEFORE the LLM call; 2026-09-17 junk-capture
+        class): a blank/whitespace ``task_message``, ``iterations <= 0``,
+        a blank ``agent_id``, or a missing ``project_id`` each skip
+        creation immediately (standard skip envelope, distinct
+        ``skip_reason``; no LLM spend, no row). Captures are
+        project-scoped by default — global scope requires an explicit
+        share action, never a capture.
+
+        Post-LLM content gate: after parsing, the candidate is checked
+        by :meth:`_captured_content_gate` — self-referential meta-skills
+        (bodies describing the capture procedure itself), truncated
+        descriptions, stub-length bodies, and un-parsed bodies
+        containing literal ``\\n`` / ``\\t`` sequences are rejected
+        before the embedding call and row insert.
+
         Two-layer deduplication gate
         ----------------------------
 
@@ -753,6 +818,66 @@ class SkillEvolutionService:
         agent_id = task_details.get("agent_id", "")
         project_id = task_details.get("project_id")
         existing_skill = task_details.get("skill")
+
+        # ------------------------------------------------------------
+        # P0 input gates — BEFORE any LLM call. These close the
+        # 2026-09-17 junk-capture class: the agent-tool path can
+        # bypass ``check_and_capture`` entirely, so the service seam
+        # must validate its own inputs. Every gate returns the
+        # standard skip envelope (no LLM spend, no row).
+        # ------------------------------------------------------------
+        if not task_message or not str(task_message).strip():
+            logger.warning(
+                "[SkillEvolution] CAPTURED P0 gate: blank task_message "
+                "— nothing to distill; skipping capture."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": "blank_task_message",
+            }
+        try:
+            iterations_int = int(iterations or 0)
+        except (TypeError, ValueError):
+            iterations_int = 0
+        if iterations_int <= 0:
+            logger.warning(
+                "[SkillEvolution] CAPTURED P0 gate: iterations<=0 "
+                f"({iterations!r}) — no loop procedure to distill; "
+                "skipping capture."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": "trivial_iterations",
+            }
+        if not agent_id or not str(agent_id).strip():
+            logger.warning(
+                "[SkillEvolution] CAPTURED P0 gate: blank agent_id — "
+                "capture not attributable; skipping."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": "blank_agent_id",
+            }
+        if project_id is None or not str(project_id).strip():
+            # Project scope is the DEFAULT (skill-scope decision:
+            # "default project scope, global via explicit API/UI
+            # share action"). A NULL project_id capture lands GLOBAL
+            # and silently disarms BOTH dedup layers — refusing here
+            # fails closed. Global scope requires the explicit
+            # share action, never a capture.
+            logger.warning(
+                "[SkillEvolution] CAPTURED P0 gate: missing project_id "
+                "— captures are project-scoped by default (global "
+                "requires an explicit share action); skipping."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": "missing_project_scope",
+            }
 
         # ------------------------------------------------------------
         # Layer 1 prep: fetch other active project skills (excluding
@@ -840,6 +965,28 @@ class SkillEvolutionService:
             }
 
         name, description, content = self._parse_capture_response(raw)
+
+        # ------------------------------------------------------------
+        # At-birth content gate — reject hallucinated / malformed
+        # candidates BEFORE the embedding call and row insert.
+        # Catches the 2026-09-17 meta-skill class even when the P0
+        # input gates pass (e.g. a real task_message but the LLM
+        # still wrote about the procedure instead of the task).
+        # ------------------------------------------------------------
+        quality_skip = self._captured_content_gate(
+            name, description, content
+        )
+        if quality_skip is not None:
+            logger.warning(
+                f"[SkillEvolution] CAPTURED content gate hit "
+                f"({quality_skip}) — rejecting candidate "
+                f"name={name!r}; no row inserted."
+            )
+            return {
+                "new_skill_id": None,
+                "skipped": True,
+                "skip_reason": quality_skip,
+            }
 
         # ------------------------------------------------------------
         # Layer 2 gate: embedding-similarity backstop.
@@ -1404,6 +1551,14 @@ class SkillEvolutionService:
         Validation rules (cheap — no LLM call yet):
 
         * ``task_succeeded`` must be true.
+        * ``task_message`` must be non-blank — an empty message means
+          there is nothing to distill (upstream message extraction
+          reads only ``type='human'`` queue rows, so agent-dispatched
+          missions can extract EMPTY here; the duration-only branch
+          would otherwise ship zero-evidence capture jobs — the
+          2026-08/09 junk-skill class).
+        * ``agent_id`` must be non-blank — a capture must be
+          attributable to the agent that executed.
         * Either ``iterations > capture_min_iterations`` OR
           ``duration_seconds > capture_min_duration_seconds`` —
           we don't want to capture trivial / instant successes.
@@ -1432,6 +1587,19 @@ class SkillEvolutionService:
             :meth:`capture_skill` if all gates pass, else ``None``.
         """
         if not task_succeeded:
+            return None
+
+        # Blank task message → nothing to distill. Without this gate
+        # the duration-only branch of the trivial filter ships
+        # zero-evidence capture jobs (the 2026-08/09 junk-skill
+        # class); the service-seam P0 gate in ``_evolve_captured``
+        # is the backstop, but rejecting HERE avoids enqueuing the
+        # job at all.
+        if not task_message or not str(task_message).strip():
+            return None
+
+        # Blank agent → capture not attributable.
+        if not agent_id or not str(agent_id).strip():
             return None
 
         min_iter = (
@@ -2015,6 +2183,74 @@ class SkillEvolutionService:
             "direction": "",
             "analysis_summary": (raw or "")[:500],
         }
+
+    @staticmethod
+    def _captured_content_gate(
+        name: str, description: str, content: str
+    ) -> Optional[str]:
+        """At-birth quality gate for CAPTURED-flow candidates.
+
+        Returns the ``skip_reason`` string when the candidate is
+        malformed or self-referential, else ``None`` (proceed with
+        creation). Checks, cheapest-first:
+
+        1. ``literal_escape_sequences`` — name/description/content
+           still contains literal ``\\n`` / ``\\t`` two-character
+           sequences. That is the signature of an un-parsed JSON
+           string captured by the key:value regex fallback
+           (observed 2026-09-17): a successful ``json.loads`` would
+           have unescaped them into real newlines.
+        2. ``blank_description`` / ``truncated_description`` — an
+           empty description, or one ending on a function word
+           (token-limit cutoff mid-phrase; see
+           ``_TRUNCATION_TAIL_WORDS``).
+        3. ``content_too_short`` — under
+           ``_CAPTURED_MIN_CONTENT_CHARS``; failed parses produce
+           stubs, real distilled procedures are multi-paragraph.
+        4. ``self_referential_meta_skill`` — the candidate documents
+           the capture/distillation PROCEDURE itself rather than the
+           task's knowledge (``_META_SKILL_MARKER_PHRASES``). With no
+           task content available, the LLM parrots the prompt header
+           — the 2026-09-17 hallucination mode.
+
+        Scope note: deliberately CAPTURED-only. FIX/DERIVED bodies
+        anchor on a parent skill and are A/B tested, so they carry
+        a different (lower) malformation risk profile.
+
+        Args:
+            name: Candidate name from the LLM.
+            description: Candidate description.
+            content: Candidate body.
+
+        Returns:
+            Skip reason string, or ``None`` to proceed with creation.
+        """
+        # 1. Literal escape sequences — un-parsed JSON body.
+        for field_value in (name, description, content):
+            if "\\n" in field_value or "\\t" in field_value:
+                return "literal_escape_sequences"
+
+        # 2. Blank / truncated description.
+        desc_words = (description or "").strip().split()
+        if not desc_words:
+            return "blank_description"
+        if (
+            desc_words[-1].lower().strip(".,;:!?)\"'")
+            in _TRUNCATION_TAIL_WORDS
+        ):
+            return "truncated_description"
+
+        # 3. Stub-length body.
+        if len((content or "").strip()) < _CAPTURED_MIN_CONTENT_CHARS:
+            return "content_too_short"
+
+        # 4. Self-referential meta-skill.
+        haystack = f"{name} {description} {(content or '')[:600]}".lower()
+        for phrase in _META_SKILL_MARKER_PHRASES:
+            if phrase in haystack:
+                return "self_referential_meta_skill"
+
+        return None
 
     def _parse_capture_response(self, raw: str) -> tuple[str, str, str]:
         """Parse the CAPTURED JSON into ``(name, description, content)``.

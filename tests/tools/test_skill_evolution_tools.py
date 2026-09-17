@@ -355,6 +355,7 @@ class TestStubWhenServiceAvailable:
         its args and calls
         ``service.capture_skill(current_instance_id, task_details)``.
         """
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
         from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
 
@@ -365,6 +366,11 @@ class TestStubWhenServiceAvailable:
         })
         manager = MagicMock()
         manager._skill_evolution_service = service
+        # Originating instance row — its agent_id / project_id must
+        # be stamped into task_details (2026-09-17 scope fix).
+        manager._instance_repository.get.return_value = SimpleNamespace(
+            agent_id="worker-1", project_id="proj-9"
+        )
         tools = {t.name: t for t in create_skill_evolution_tools(manager, "inst-closure-id")}
 
         result = await tools["skill_execute_capture"].ainvoke({
@@ -381,6 +387,8 @@ class TestStubWhenServiceAvailable:
                 "task_message": "Capture a skill-cap record",
                 "iterations": 5,
                 "duration_seconds": 60,
+                "agent_id": "worker-1",
+                "project_id": "proj-9",
             },
         )
         decoded = json.loads(result)
@@ -495,6 +503,7 @@ class TestPhase5Dispatch:
 
     @pytest.mark.asyncio
     async def test_skill_execute_capture_calls_capture_skill(self):
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
         from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
 
@@ -505,6 +514,9 @@ class TestPhase5Dispatch:
         })
         manager = MagicMock()
         manager._skill_evolution_service = service
+        manager._instance_repository.get.return_value = SimpleNamespace(
+            agent_id="worker-2", project_id="proj-8"
+        )
         tools = {t.name: t for t in create_skill_evolution_tools(
             manager, "closure-inst-id"
         )}
@@ -523,6 +535,8 @@ class TestPhase5Dispatch:
                 "task_message": "msg",
                 "iterations": 7,
                 "duration_seconds": 80,
+                "agent_id": "worker-2",
+                "project_id": "proj-8",
             },
         )
 
@@ -537,6 +551,7 @@ class TestPhase5Dispatch:
         ``_evolve_captured`` on a real :class:`SkillEvolutionService`
         instance and assert the dict shape survives the chain.
         """
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
         from daemon.services.skill_evolution_service import SkillEvolutionService
         from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
@@ -558,6 +573,9 @@ class TestPhase5Dispatch:
 
         manager = MagicMock()
         manager._skill_evolution_service = service
+        manager._instance_repository.get.return_value = SimpleNamespace(
+            agent_id="worker-3", project_id="proj-7"
+        )
         tools = {t.name: t for t in create_skill_evolution_tools(
             manager, "closure-inst"
         )}
@@ -569,7 +587,8 @@ class TestPhase5Dispatch:
             "duration_seconds": 99,
         })
 
-        # _evolve_captured was called once with the dict the tool built.
+        # _evolve_captured was called once with the dict the tool
+        # built — including the scope stamped from the instance row.
         service._evolve_captured.assert_awaited_once()
         passed_dict = service._evolve_captured.await_args.args[0]
         assert passed_dict == {
@@ -577,6 +596,8 @@ class TestPhase5Dispatch:
             "task_message": "do the thing",
             "iterations": 11,
             "duration_seconds": 99,
+            "agent_id": "worker-3",
+            "project_id": "proj-7",
         }
 
 

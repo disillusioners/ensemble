@@ -770,6 +770,12 @@ class TestSkillExecuteCaptureToolKillSwitch:
         monkeypatch.setenv(SKILL_CAPTURE_KILL_SWITCH_ENV, "1")
         from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
         manager, service = ks_manager_with_service
+        # Originating instance row — the tool must stamp its
+        # agent_id / project_id into task_details (2026-09-17
+        # scope-stamping fix; tool captures were landing GLOBAL).
+        manager._instance_repository.get.return_value = SimpleNamespace(
+            agent_id="worker-1", project_id="proj-9"
+        )
         tools = {t.name: t for t in create_skill_evolution_tools(
             manager, "closure-inst-ks-on"
         )}
@@ -780,7 +786,8 @@ class TestSkillExecuteCaptureToolKillSwitch:
             "iterations": 5,
             "duration_seconds": 60,
         })
-        # Service was invoked exactly once with the expected args.
+        # Service was invoked exactly once with the expected args —
+        # including the scope stamped from the instance row.
         service.capture_skill.assert_awaited_once_with(
             "closure-inst-ks-on",
             {
@@ -788,11 +795,51 @@ class TestSkillExecuteCaptureToolKillSwitch:
                 "task_message": "Capture a skill-cap record",
                 "iterations": 5,
                 "duration_seconds": 60,
+                "agent_id": "worker-1",
+                "project_id": "proj-9",
             },
         )
         # Result is the JSON-serialized service response.
         decoded = json.loads(result)
         assert decoded["new_skill_id"] == "skill-ks-captured"
+        assert decoded["skipped"] is False
+
+    @pytest.mark.asyncio
+    async def test_on_instance_row_unreadable_leaves_scope_unset(
+        self, ks_manager_with_service, monkeypatch
+    ):
+        """Instance-row read failure → agent_id/project_id stay unset.
+
+        The tool does NOT fabricate scope; the service-seam P0 gate
+        then refuses the scope-less capture (fail-closed) instead of
+        inserting a global row. This test pins the tool-side half:
+        lookup exception is contained and task_details carries only
+        the four caller-supplied keys.
+        """
+        monkeypatch.setenv(SKILL_CAPTURE_KILL_SWITCH_ENV, "1")
+        from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
+        manager, service = ks_manager_with_service
+        manager._instance_repository.get.side_effect = RuntimeError("db down")
+        tools = {t.name: t for t in create_skill_evolution_tools(
+            manager, "closure-inst-ks-cope"
+        )}
+
+        result = await tools["skill_execute_capture"].ainvoke({
+            "instance_id": "arg-inst-ks-cope",
+            "task_message": "Capture a skill-cap record",
+            "iterations": 5,
+            "duration_seconds": 60,
+        })
+        service.capture_skill.assert_awaited_once_with(
+            "closure-inst-ks-cope",
+            {
+                "instance_id": "arg-inst-ks-cope",
+                "task_message": "Capture a skill-cap record",
+                "iterations": 5,
+                "duration_seconds": 60,
+            },
+        )
+        decoded = json.loads(result)
         assert decoded["skipped"] is False
 
     @pytest.mark.asyncio
