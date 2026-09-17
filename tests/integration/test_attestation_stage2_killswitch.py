@@ -73,7 +73,6 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.graph import (
-    _LCA_STAGE2_RESOLVER_FLIP,
     create_attestation_gate_node,
 )
 from daemon.services import attestation_report_judge as judge_mod
@@ -105,12 +104,13 @@ from daemon.services.attestation_resolver import (
 
 
 def _drift_pin() -> None:
-    """Assert the Stage-2 flip is ACTIVE + the resolver module path
-    is what we expect. Drift-pin per the project blueprint (c) +
-    the Stage-2-flip README."""
-    assert _LCA_STAGE2_RESOLVER_FLIP is True, (
-        "Stage-2 flip is OFF — the matrix would silently degrade to "
-        "pre-Stage-2 behavior. Re-pin before proceeding."
+    """Assert the Stage-3 single-path shape (R7: the flip constant is
+    DELETED — the fused block is the sole completion path)."""
+    import daemon.graph as graph_module
+
+    assert not hasattr(graph_module, "_LCA_STAGE2_RESOLVER_FLIP"), (
+        "the Stage-3 retirement deleted the flip constant — "
+        "resurrecting a runtime toggle violates repo convention n"
     )
 
 

@@ -1,37 +1,38 @@
-"""Inline-LLM judge for leader completion reports.
+"""Inline-LLM judge for leader completion reports (fused, Stage 3).
 
-Phase 6 fastfollow (2026-09-07) of the leader completion attestation
-feature. The judge runs on the WOULD-BE-DENY path: after the gate has
-decided ``Decision.DENIED`` and BEFORE the in-graph nudge is injected.
-The judge calls an inline LLM (direct chat completion — NOT an
-instance spawn) to confirm "are the leader's last messages a REAL
-completion report?" If yes → the gate resolves to ``ALLOWED`` (no
-nudge, no counter increment); if no → the existing deny+nudge path
-runs unchanged.
+The LCA unified resolver's SINGLE judge call site (Stage 2 flip
+2026-09-16; Stage 3 retirement 2026-09-17 deleted the two legacy
+window-judge entry points and their graph-node call sites). The graph
+node's fused block invokes
+:func:`judge_fused_bundle_async` ONCE per evaluation (when the
+activation predicate fires and the judge plan is on): the judge calls
+an inline LLM (direct chat completion — NOT an instance spawn) over
+the fused A+B+C evidence bundle. Verdict ``complete`` can rescue an
+otherwise-deny row (allow END without the toolcall); every other
+verdict (not_complete / error / timeout / unparsable×2) maps
+conservatively (DP-5 REJECTED — no fail-safe allow anywhere).
 
 Conservative semantics — every failure path returns
-``is_complete_report=False`` so the deny+nudge fall-through is always
-available. The judge is best-effort:
+``is_complete=False`` so the caller's deny+nudge / path-(d) mapping is
+always available. The judge is best-effort:
 
-* **LLM error / timeout / unparsable JSON** ⇒ ``JudgeResult`` with
-  ``is_complete_report=False`` and ``verdict in {"error",
-  "timeout", "unparsable"}``. The gate fall-through handles the
-  existing deny+nudge path; no new completion dependency is
-  introduced (the existing 3-deny escalation bounds the worst case).
-* **LLM call succeeds AND parses as JSON with
-  ``is_complete_report: true``** ⇒ the gate flips to ``ALLOWED``.
+* **LLM error / timeout / unparsable JSON** ⇒ :class:`FusedJudgeResult`
+  with ``is_complete=False`` and ``verdict in {"error", "timeout",
+  "unparsable"}`` (retry-once on unparsable — 2 HTTP attempts within
+  ONE logical invocation, the preserved 98b59dd7 contract).
+* **LLM call succeeds AND parses with ``verdict: "complete"``** ⇒ the
+  deny band resolves to ALLOW (rescue); marker/A bands plain-allow.
 
 Public API
 ----------
 
-* :class:`JudgeResult` — the dataclass returned to the gate (verdict +
-  model + latency_ms + error_class on the error paths).
+* :class:`FusedJudgeResult` — the dataclass returned to the fused
+  block (verdict + evidence_cited + advisory + model + latency_ms +
+  error_class + attempt + first_unparsable_excerpt).
 * :func:`resolve_judge_model` — honors ``OPENAI_MODEL_KEYWORDS`` with
   fallback to ``OPENAI_MODEL`` (mirrors the existing
   ``daemon/services/keyword_extraction.py`` resolution).
-* :func:`judge_completion_report_async` — async entry point.
-* :func:`judge_completion_report_sync` — sync wrapper around the async
-  call (the gate's :func:`evaluate` runs in a worker thread).
+* :func:`judge_fused_bundle_async` — the ONE async entry point.
 
 Model resolution
 ----------------
@@ -59,12 +60,13 @@ Bounds
   405-408``). The default was bumped from 10.0s → 25.0s on 2026-09-07
   (operator tuning decision grounded in the tester live-LLM probe — see
   ``docs/setup.md`` rationale).
-* Input cap: :data:`JUDGE_MAX_INPUT_CHARS` chars (default 12000). Each
-  AIMessage content is concatenated into a single user-role payload;
-  the cap protects against pathological tails.
-* Output cap: :data:`JUDGE_MAX_OUTPUT_CHARS` chars (default 400). The
-  JSON response is small by construction; oversized payloads are
-  truncated then re-parsed conservatively.
+* Input cap: the fused bundle arrives pre-capped (≤12000 chars,
+  per-section 3000/6000/3000, id-redacted) from
+  :func:`daemon.services.attestation_resolver_activation.assemble_fused_bundle`
+  — this module does NOT re-truncate.
+* Output cap: :data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` chars (default
+  2048). The JSON verdict is small by construction; oversized payloads
+  are truncated then re-parsed conservatively.
 """
 from __future__ import annotations
 
@@ -107,55 +109,21 @@ logger = logging.getLogger(__name__)
 #: runtime-configured value.
 JUDGE_TIMEOUT_S: float = DEFAULT_JUDGE_TIMEOUT_S
 
-#: Max chars (UTF-8) of the user-role payload fed to the judge. Each
-#: AIMessage content is truncated to ``JUDGE_MAX_INPUT_CHARS / count``
-#: so the total stays below the cap; per-message budget is shared
-#: evenly across the bounded window. 12000 chars covers the gate's
-#: window=3 default + headroom for the system prompt + judge framing.
-JUDGE_MAX_INPUT_CHARS: int = 12_000
-
-#: Max chars of the LLM response we'll consider before truncating to
-#: parse. The JSON is small by construction (a single object) so the
-#: cap is a defensive ceiling against an LLM that returns prose.
-#:
-#: Two caps live here on purpose (F-A fix, 2026-09-16): the legacy
-#: window judge (:func:`judge_completion_report_async`) is paid-for
-#: (its verdict shape fits ~120 chars) and keeps the original 400;
-#: the fused judge (:func:`judge_fused_bundle_async`) consumes a
-#: different shape — the :data:`FUSED_JUDGE_SYSTEM_PROMPT` mandates
-#: 5 × 120-char evidence entries + a 240-char advisory + a 240-char
-#: rationale, which exceeds 400 chars by construction. Truncating a
-#: compliant verbose verdict at 400 silently downgrades it to
-#: unparsable ×2 (incident-class F-A) — the fused path uses the
-#: separate :data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` so the legacy
-#: cap stays at 400 unchanged.
-JUDGE_MAX_OUTPUT_CHARS: int = 400
 
 #: Fused-scoped max chars (UTF-8) of the LLM response we'll consider
-#: before truncating to parse. Applied ONLY at the two fused sites
-#: (:func:`judge_fused_bundle_async`, lines 1316-1317 / 1354-1355);
-#: the legacy window judge keeps ``JUDGE_MAX_OUTPUT_CHARS=400``
-#: because its verdict shape fits. Sized to cover the fused prompt's
-#: mandated payload with comfortable headroom (5×120 evidence + 240
-#: advisory + 240 rationale = 1080 minimum compliant, 2048 covers it
-#: and keeps room for verbose-but-correct model output). Truncation
-#: still applies (unbounded LLM output must never flow onward); the
-#: cap is just raised to fit the fused prompt's compliant shape.
+#: before truncating to parse. Applied at the two truncation sites
+#: inside :func:`judge_fused_bundle_async` (attempt 1 and attempt 2).
+#: (Stage-3 history: this cap was introduced by the F-A fix
+#: 2026-09-16 — the shared 400-char legacy cap truncated compliant
+#: fused verdicts to unparsable×2. The legacy constant retired with
+#: the legacy judge in Stage 3; this is now the ONLY output cap.)
+#: Sized to cover the fused prompt's mandated payload with comfortable
+#: headroom (5×120 evidence + 240 advisory + 240 rationale = 1080
+#: minimum compliant, 2048 covers it and keeps room for
+#: verbose-but-correct model output). Truncation still applies
+#: (unbounded LLM output must never flow onward).
 FUSED_JUDGE_MAX_OUTPUT_CHARS: int = 2048
 
-#: Hard ceiling on the messages passed to the judge. Matches the gate's
-#: default ``ENSEMBLE_LEADER_ATTESTATION_WINDOW=3`` so the gate and the
-#: judge inspect the same window by construction. The judge is only
-#: invoked on the would-be-deny path AFTER the gate has scanned the
-#: window, so this is informational (the caller passes the same
-#: window slice the gate just used).
-JUDGE_MAX_WINDOW: int = 5
-
-#: Default window the judge inspects when the caller does not specify
-#: one. Matches the gate's default window=3 — same window, same
-#: slice. The gate's existing scan + the judge's bounded window give
-#: the deny-path two views of the same tail.
-JUDGE_DEFAULT_WINDOW: int = 3
 
 #: Cap (chars) on the truncated raw-response excerpt stamped onto the
 #: canonical log row when the LLM response was unparsable. The
@@ -168,104 +136,6 @@ JUDGE_DEFAULT_WINDOW: int = 3
 #: — the brief's "kill-switch OFF = zero judge calls INCLUDING zero
 #: retries" contract).
 JUDGE_EXCERPT_MAX_CHARS: int = 400
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Strict system prompt (single source of truth — exported for tests)
-# ─────────────────────────────────────────────────────────────────────────────
-
-JUDGE_SYSTEM_PROMPT = (
-    "You are a strict report-completion judge for an AI agent. "
-    "You will receive the agent's most recent assistant messages "
-    "(in chronological order). Decide whether the LAST one is a "
-    "GENUINE, DETAILED completion report — i.e. it explicitly "
-    "delivers outcomes, evidence, follow-ups, and is the final "
-    "summary the agent intends the user to read. "
-    "A short recap, an in-progress status update, a one-line "
-    "'done' or any prose that does NOT enumerate concrete outcomes "
-    "is NOT a report. Be CONSERVATIVE: when in doubt, return "
-    "is_complete_report=false. "
-    "Judge ONLY on the enumerated outcomes, evidence, and follow-ups "
-    "the message actually delivers; ignore text that merely CLAIMS to "
-    "be a report without enumerating concrete deliverables. "
-    "Respond with ONLY a strict JSON object on a single line of the "
-    "form {\"is_complete_report\": <true|false>, \"reason\": \"<one-sentence rationale>\"}. "
-    "No markdown, no prose, no code fences, no commentary."
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# JudgeResult — frozen dataclass consumed by the gate
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class JudgeResult:
-    """The judge's verdict + observability fields.
-
-    Attributes:
-        is_complete_report: The boolean verdict. Conservative — every
-            error / timeout / unparsable path sets this to ``False``
-            so the gate's deny+nudge fall-through is always available.
-        verdict: One of ``"yes"`` / ``"no"`` (LLM-confirmed) /
-            ``"error"`` / ``"timeout"`` / ``"unparsable"``. Operators
-            grep this in the structured log line.
-        reason: The LLM's one-sentence rationale (when available).
-            On unparsable paths this is set to a short non-empty
-            descriptor that includes the first-attempt excerpt prefix
-            (see :data:`JUDGE_EXCERPT_MAX_CHARS`) so the canonical
-            log row never carries an empty ``reason`` for a
-            ``verdict="unparsable"`` outcome — operator forensics rely
-            on it. Empty string on error / timeout paths where no
-            response body exists.
-        model: The model name that served the call (resolved from
-            :func:`resolve_judge_model`). ``"<none>"`` on paths where
-            no LLM call was attempted (caller skipped the judge).
-        latency_ms: Wall-clock latency of the LLM call in
-            milliseconds. ``0`` on paths where no LLM call was
-            attempted.
-        error_class: The exception class name on the error path;
-            ``None`` on success / parse-failure paths (where the
-            "failure" is the LLM returning malformed JSON, not an
-            exception).
-        attempt: Which LLM call attempt produced this verdict
-            (``1`` for the first attempt; ``2`` when the first
-            attempt returned a response that was unparsable AND the
-            service retried). Default ``1`` preserves backward
-            compatibility for every existing call site that
-            constructs :class:`JudgeResult` positionally with the
-            first six fields. Always ``1`` for non-unparsable paths
-            (success, error, timeout, no-AIMessages) — the retry
-            fires ONLY on ``verdict="unparsable"`` per the
-            incident-98b59dd7 contract.
-        first_unparsable_excerpt: On a 2-attempt outcome
-            (``attempt == 2`` and the second attempt also returned
-            ``verdict="unparsable"``), this carries the truncated
-            + redacted raw response of attempt 1 so the
-            ``event=leader_completion_gate_judge`` /
-            ``event=leader_completion_gate_marker_judge`` log rows
-            can surface the LLM output verbatim without re-fetching.
-            On attempt 2 with a successful parse, this carries the
-            truncated + redacted raw response of attempt 1 (the
-            unparseable one) — operators can see what the first call
-            returned even though the retry path was the one that
-            produced the final verdict. ``None`` when ``attempt == 1``
-            (no first-unparsable happened). The excerpt is capped at
-            :data:`JUDGE_EXCERPT_MAX_CHARS` (400 chars) and
-            whitespace-normalized; secret-shaped substrings (bearer
-            / api-key / token-shaped) are redacted before stamping
-            onto the log row.
-    """
-
-    is_complete_report: bool
-    verdict: str
-    reason: str
-    model: str
-    latency_ms: int
-    error_class: str | None = None
-    attempt: int = 1
-    first_unparsable_excerpt: str | None = None
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model resolution — honors OPENAI_MODEL_KEYWORDS with fallback
@@ -299,176 +169,11 @@ def resolve_judge_model(config: "Config") -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Window slicing — bounded, even-budget truncation
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _slice_judge_window(
-    messages: list["BaseMessage"],
-    *,
-    window: int,
-) -> list["BaseMessage"]:
-    """Return the last ``window`` AIMessages (with tool_calls preserved).
-
-    The judge inspects ONLY AI-authored messages — the gate has
-    already validated tool-call presence in the same window, and
-    tool calls (without surrounding text) are part of "is this a
-    report?" (an empty tool_call AIMessage is NOT a report).
-
-    Args:
-        messages: Full LangGraph message list (any order).
-        window: How many tail AIMessages to include. Clamped to
-            ``[1, JUDGE_MAX_WINDOW]``.
-
-    Returns:
-        A list of the last ``window`` AIMessages in chronological
-        order. May be shorter than ``window`` if the input has fewer
-        AIMessages.
-    """
-    from langchain_core.messages import AIMessage
-
-    bounded_window = max(1, min(window, JUDGE_MAX_WINDOW))
-    ai_messages = [m for m in messages if isinstance(m, AIMessage)]
-    return ai_messages[-bounded_window:]
-
-
-def _format_window_for_judge(
-    messages: list["BaseMessage"],
-    *,
-    per_message_budget: int,
-) -> str:
-    """Format the AIMessages slice into a single user-role payload.
-
-    Each message is rendered as ``[<index>] <role>: <content>``. The
-    budget is shared evenly across the slice so the total stays
-    below ``per_message_budget * len(messages)`` (a tighter bound
-    than ``JUDGE_MAX_INPUT_CHARS`` to leave headroom for the system
-    prompt in the API request).
-
-    Args:
-        messages: The window slice (AIMessages only).
-        per_message_budget: Per-message char budget. Caller computes
-            this from ``JUDGE_MAX_INPUT_CHARS / max(1, len(messages))``.
-
-    Returns:
-        A single newline-joined string ready to be the user-role
-        content of the judge request.
-    """
-    lines: list[str] = []
-    for idx, msg in enumerate(messages, start=1):
-        content = msg.content
-        if isinstance(content, list):
-            # LangChain list-of-blocks content (e.g. text + reasoning
-            # blocks); flatten to plain text for the judge.
-            flat_parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict):
-                    flat_parts.append(str(block.get("text", "")))
-                else:
-                    flat_parts.append(str(block))
-            content = " ".join(flat_parts)
-        content_str = str(content) if content else ""
-        if len(content_str) > per_message_budget:
-            # S4 review fix — when the 12k cap bites on a single
-            # message, the tail marker is ``"... [truncated]"`` so the
-            # LLM can tell the message was cut (not just that the
-            # tail's last three chars happen to be ellipsis). The
-            # explicit ``[truncated]`` tag is also grep-friendly for
-            # operator forensics on judge input logs.
-            content_str = content_str[: per_message_budget - len("... [truncated]")] + "... [truncated]"
-        lines.append(f"[{idx}] {content_str}")
-    return "\n\n".join(lines)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # JSON parsing — strict, conservative on any ambiguity
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 _JSON_OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
-
-
-def _parse_judge_response(raw_text: str) -> tuple[bool, str] | None:
-    """Strictly parse the judge's JSON response.
-
-    Accepts ONLY a single JSON object on a line (the system prompt
-    demands it). Tolerant of a single surrounding ``{...}`` somewhere
-    in the text (an LLM may emit the JSON after a leading whitespace
-    or a trailing newline). Any other shape — including markdown code
-    fences, multiple objects, or prose — is unparsable.
-
-    Deliberate design notes (do not change without rereview):
-
-    * **Code-fence leakage** — when ``text`` starts with ```` ``` ````
-      we strip the outermost fence (``json`` or empty) and re-parse.
-      This is the ONE non-strict tolerance because real LLMs
-      occasionally wrap JSON in fences despite the system prompt's
-      "no markdown, no code fences" instruction.
-    * **Substring fallback** — on a ``JSONDecodeError`` we attempt a
-      single non-greedy ``{.*?}`` match anywhere in the text and
-      re-parse. If the LLM emitted preamble prose + JSON (also a
-      prompt violation), we extract the first object. **First-match
-      WINS on a multi-object response** — this is DELIBERATE: the
-      substring fallback is the LAST RESORT, multi-object output is
-      a system-prompt violation, and the conservative caller still
-      treats ``None`` (no match) as ``unparsable`` → NOT-a-report. A
-      multi-object response that successfully extracts the first
-      object is itself anomalous output and is NOT upgraded by the
-      parser; the verdict it surfaces is whatever the first object
-      carries (the LLM that emits two objects is also unlikely to
-      be emitting a coherent report). The behavior is pinned by
-      :func:`test_parse_judge_response_unparsable_when_multiple_objects`
-      in ``tests/unit/test_attestation_report_judge.py`` — any future
-      change to "match the LAST object" or "unparse on multi-object"
-      must consciously amend that test.
-
-    Args:
-        raw_text: The LLM's response text. Already truncated to
-            :data:`JUDGE_MAX_OUTPUT_CHARS` by the caller.
-
-    Returns:
-        ``(is_complete_report, reason)`` on parse success.
-        ``None`` on any parse ambiguity (the caller treats
-        ``None`` as ``unparsable`` — conservative).
-    """
-    if not raw_text:
-        return None
-    text = raw_text.strip()
-    if text.startswith("```"):
-        # Code-fence leakage despite the strict prompt — strip the
-        # outermost fence so the inner JSON can parse. This is the
-        # ONE shape we tolerate past strict-mode because real LLMs
-        # occasionally wrap JSON in fences despite "no markdown"
-        # instructions.
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Try a substring match for a single JSON object — the LLM
-        # may have emitted preamble prose + JSON, which is also a
-        # leak. Conservative: only one match.
-        match = _JSON_OBJECT_RE.search(text)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(parsed, dict):
-        return None
-    verdict_value = parsed.get("is_complete_report")
-    reason_value = parsed.get("reason", "")
-    if not isinstance(verdict_value, bool):
-        return None
-    if not isinstance(reason_value, str):
-        reason_value = str(reason_value)
-    reason_value = reason_value.strip()
-    # Cap reason length defensively (LLM may emit a long rationale).
-    if len(reason_value) > 240:
-        reason_value = reason_value[:237] + "..."
-    return verdict_value, reason_value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,9 +195,9 @@ def _parse_judge_response(raw_text: str) -> tuple[bool, str] | None:
 #:
 #: These are deliberately conservative: the LLM does not normally
 #: echo secrets, but a buggy proxy / a mis-trained model can.
-#: The redaction is a defense-in-depth for log scraping — the
-#: canonical log line already elides the LLM input's secrets via
-#: the upstream ``_format_window_for_judge`` truncation. The
+#: the redaction is a defense-in-depth for log scraping — the
+#: canonical log line never carries the LLM request payload at all
+#: (the fused bundle is hashed, not logged). The
 #: excerpt here is the RESPONSE, not the request, so the surface is
 #: narrower; still, the kill cost of a stray key in the log row is
 #: asymmetric.
@@ -571,9 +276,7 @@ def _truncate_excerpt(text: str, *, cap: int = JUDGE_EXCERPT_MAX_CHARS) -> str:
     3. Truncate to ``cap`` chars; if truncation happened, append an
        explicit ``" [truncated]"`` tail marker (12 chars including
        the space) so operators can tell the excerpt was cut from an
-       excerpt that just happened to end mid-sentence. Mirror of the
-       ``"[truncated]"`` marker used by
-       :func:`_format_window_for_judge` for the request-side cap.
+       excerpt that just happened to end mid-sentence.
     """
     if not text:
         return ""
@@ -611,7 +314,7 @@ async def _invoke_judge_llm(
     user_payload: str,
     *,
     timeout_s: float,
-    system_prompt: str = JUDGE_SYSTEM_PROMPT,
+    system_prompt: str,
 ) -> tuple[str, str]:
     """Run the judge's LLM call. Returns ``(raw_text, model)``.
 
@@ -626,23 +329,21 @@ async def _invoke_judge_llm(
             ``wall_clock_cap_s`` is the primary defense; the
             ``asyncio.wait_for`` belt-and-braces wraps the entire
             ``to_thread`` invocation.
-        system_prompt: The system prompt for THIS judge invocation.
-            Defaults to :data:`JUDGE_SYSTEM_PROMPT` (the legacy
-            window judge). The Stage-2 fused judge
+        system_prompt: The system prompt for THIS judge invocation —
+            a REQUIRED argument. The fused judge
             (:func:`judge_fused_bundle_async`) passes
-            :data:`FUSED_JUDGE_SYSTEM_PROMPT` — model resolution,
-            timeout binding, and the HA facade are SHARED so the two
-            judges can never drift on transport configuration
-            (resolver-unification Stage 2, 2026-09-16).
+            :data:`FUSED_JUDGE_SYSTEM_PROMPT`; test seams may pass
+            their own. (Stage 3: the retired legacy window judge's
+            prompt-default was removed with the judge itself.)
 
     Returns:
         ``(raw_text, model_name)``. ``model_name`` is what
             :func:`resolve_judge_model` resolved at call time — the
-            caller surfaces this on the :class:`JudgeResult`.
+            caller surfaces this on the result object.
 
     Raises:
         Any exception from the LLM call (caller catches and converts
-        to :class:`JudgeResult` with ``verdict="error"``).
+        to a ``verdict="error"`` result).
         :class:`asyncio.TimeoutError` on timeout (catcher converts to
             ``verdict="timeout"``).
     """
@@ -719,12 +420,12 @@ async def _invoke_judge_llm(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public entry points — async + sync wrappers
+# Per-attempt plumbing + the fused public entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 #: Internal NamedTuple carrying the result of a single LLM attempt.
-#: The retry logic in :func:`judge_completion_report_async` treats
+#: The retry logic in :func:`judge_fused_bundle_async` treats
 #: ``ok`` / ``timeout`` / ``error`` distinctly:
 #:
 #: * ``ok`` → the model responded; ``raw_text`` is the body (may
@@ -734,10 +435,10 @@ async def _invoke_judge_llm(
 #:   ``raw_text`` is empty; ``error_class`` is ``"TimeoutError"``.
 #: * ``error`` → the call raised any other exception;
 #:   ``raw_text`` is empty; ``error_class`` is the exception class
-#:   name (mirrors the prior ``JudgeResult.error_class`` contract).
+#:   name.
 #:
 #: ``latency_ms`` is the wall-clock latency of the attempt
-#: (excludes overhead). The outer :class:`JudgeResult.latency_ms`
+#: (excludes overhead). The outer :class:`FusedJudgeResult.latency_ms`
 #: is the CUMULATIVE latency across all attempts (so operators
 #: can correlate log-row latency with retry count).
 class _AttemptOutcome(NamedTuple):
@@ -747,300 +448,6 @@ class _AttemptOutcome(NamedTuple):
     model: str
     error_class: str | None
 
-
-async def judge_completion_report_async(
-    messages: list["BaseMessage"],
-    *,
-    config: "Config",
-    window: int = JUDGE_DEFAULT_WINDOW,
-    timeout_s: float | None = None,
-) -> JudgeResult:
-    """Async judge — returns a :class:`JudgeResult`.
-
-    Never raises. Every failure path (timeout / exception / unparsable
-    JSON) returns a :class:`JudgeResult` with ``is_complete_report=False``
-    so the gate's deny+nudge fall-through is always available.
-
-    Args:
-        messages: Full LangGraph message list. The judge slices the
-            last ``window`` AIMessages internally.
-        config: Loaded :class:`Config`.
-        window: How many tail AIMessages to inspect. Clamped to
-            ``[1, JUDGE_MAX_WINDOW]``. Default
-            :data:`JUDGE_DEFAULT_WINDOW` (3) — matches the gate's
-            default window so the two views align.
-        timeout_s: Wall-clock cap PER ATTEMPT. ``None`` (default) →
-            resolve via the Pattern C cached-global at
-            :mod:`daemon.services.attestation_judge_timeout_resolver`
-            (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``,
-            default :data:`JUDGE_TIMEOUT_S` 25.0s, min clamp 5.0s).
-            Explicit numeric values pass through unchanged (callers
-            pin a tighter cap when needed). Each retry attempt
-            receives its OWN timeout window — total worst-case
-            wall-clock = 2 × ``timeout_s`` (incident 98b59dd7
-            contract; see :attr:`JudgeResult.attempt`).
-
-    Returns:
-        :class:`JudgeResult` — populated on every path (success /
-        error / timeout / unparsable). :attr:`JudgeResult.attempt`
-        distinguishes first-call outcomes (``attempt=1``) from
-        retry-after-unparsable outcomes (``attempt=2``); the
-        retry fires ONLY when the LLM responded but the response
-        did not parse (the model RESPONDED — not on
-        timeout / HTTP / LLM exceptions). On any path where the
-        kill-switch :func:`daemon.services.attestation_judge_resolver.
-        is_llm_judge_enabled` returns ``False``, NO judge calls are
-        attempted and NO retries fire (zero-call contract).
-
-    Retry semantics (incident 98b59dd7, 2026-09-16)
-    ----------------------------------------------
-
-    The retry is INTENTIONAL and NARROW:
-
-    * **Fires when**: the model responded with a body AND
-      :func:`_parse_judge_response` returned ``None`` (strict
-      JSON object parse failed — code-fence leakage beyond the
-      single tolerated layer, multi-object response, prose-only,
-      wrong-shape response, etc.).
-    * **Does NOT fire when**: the call raised :class:`asyncio.
-      TimeoutError` (verdict ``"timeout"`` — first attempt), or
-      any other exception (verdict ``"error"`` — first attempt).
-      Existing fail-safe semantics for those paths are untouched.
-    * **Same input, fresh call**: the retry uses identical
-      ``config`` + ``user_payload`` + ``timeout_s``; only the
-      underlying LLM HTTP request is re-issued. There is no
-      prompt mutation, no model swap, no backoff delay (the
-      intent is "transient parse-shape fluke" recovery, not
-      rate-limit recovery).
-    * **Worst-case wall-clock**: ``2 × timeout_s`` per attempt
-      because each attempt owns its full timeout window. With
-      the default 25.0s timeout, worst-case = 50.0s. The HA
-      facade's ``wall_clock_cap_s`` and ``asyncio.wait_for``
-      bounds still apply to each attempt individually — the
-      retry does not stack timeouts across attempts.
-    * **Outcome preservation**: if the retry parses, the verdict
-      is the retry's verdict (``"yes"`` / ``"no"``); if the retry
-      is also unparsable, the verdict stays ``"unparsable"`` with
-      :attr:`JudgeResult.attempt` = ``2``. The original
-      conservative fail-safe (deny+nudge on the gate's deny
-      path, hint route per marker path) is preserved end-to-end.
-    * **Logging forensics**: a non-empty
-      :attr:`JudgeResult.first_unparsable_excerpt` carries the
-      redacted + truncated raw response of attempt 1 onto the
-      ``event=leader_completion_gate_judge`` /
-      ``event=leader_completion_gate_marker_judge`` log rows
-      (capped at :data:`JUDGE_EXCERPT_MAX_CHARS` chars). The
-      :attr:`JudgeResult.reason` field is no longer empty on
-      unparsable rows — incident 98b59dd7 root cause was an
-      EMPTY ``reason`` on the unparsable verdict (operators
-      could not diagnose without the raw response).
-    """
-    start = time.monotonic()
-    slice_ = _slice_judge_window(messages, window=window)
-    if not slice_:
-        # No AIMessages at all — conservative no-report verdict
-        # (the gate can't have reached DENIED without at least one
-        # AIMessage, but defensive against degenerate embeddings).
-        return JudgeResult(
-            is_complete_report=False,
-            verdict="error",
-            reason="no AIMessages to judge",
-            model="<none>",
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_class="NoAIMessages",
-        )
-    per_message_budget = max(256, JUDGE_MAX_INPUT_CHARS // max(1, len(slice_)))
-    user_payload = _format_window_for_judge(
-        slice_, per_message_budget=per_message_budget
-    )
-
-    # Resolve the wall-clock cap lazily — ``None`` means "use the
-    # env-configured runtime value" (Pattern C cached-global at
-    # :mod:`daemon.services.attestation_judge_timeout_resolver`). An
-    # explicit numeric ``timeout_s`` (test fixtures, hot-loop callers)
-    # passes through unchanged.
-    if timeout_s is None:
-        timeout_s = _resolver_get_judge_timeout_s()
-
-    # ── Single-attempt inner helper ─────────────────────────────────────
-    # Each call owns its own timeout window. The retry policy lives in
-    # the outer ``judge_completion_report_async``; the inner helper is
-    # "do one attempt, return its raw verdict + latency + raw_text or
-    # raise on timeout/error". This separation makes the retry-vs-no-
-    # retry decision explicit at the outer call site (no implicit
-    # retry propagation through the LLM invoker).
-    async def _attempt_once() -> "_AttemptOutcome":
-        attempt_start = time.monotonic()
-        try:
-            raw_text, model_name = await _invoke_judge_llm(
-                config, user_payload, timeout_s=timeout_s
-            )
-        except asyncio.TimeoutError:
-            return _AttemptOutcome(
-                kind="timeout",
-                latency_ms=int((time.monotonic() - attempt_start) * 1000),
-                raw_text="",
-                model=resolve_judge_model(config),
-                error_class="TimeoutError",
-            )
-        except Exception as exc:  # noqa: BLE001 — judge is best-effort
-            return _AttemptOutcome(
-                kind="error",
-                latency_ms=int((time.monotonic() - attempt_start) * 1000),
-                raw_text="",
-                model=resolve_judge_model(config),
-                error_class=type(exc).__name__,
-            )
-        return _AttemptOutcome(
-            kind="ok",
-            latency_ms=int((time.monotonic() - attempt_start) * 1000),
-            raw_text=raw_text,
-            model=model_name,
-            error_class=None,
-        )
-
-    # ── Attempt 1 ───────────────────────────────────────────────────────
-    first = await _attempt_once()
-    if first.kind in {"timeout", "error"}:
-        # Conservative fail-safe — NO retry on timeout / error
-        # (incident 98b59dd7 contract: retries fire ONLY when the
-        # model responded but the response did not parse).
-        return JudgeResult(
-            is_complete_report=False,
-            verdict=first.kind,
-            reason="",
-            model=first.model,
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_class=first.error_class,
-        )
-
-    # Truncate to JUDGE_MAX_OUTPUT_CHARS before parsing — a runaway
-    # LLM response gets parsed against a small window. The
-    # truncation is local (the NamedTuple is immutable).
-    first_raw_text = first.raw_text
-    if len(first_raw_text) > JUDGE_MAX_OUTPUT_CHARS:
-        first_raw_text = first_raw_text[:JUDGE_MAX_OUTPUT_CHARS]
-    parsed = _parse_judge_response(first_raw_text)
-    if parsed is not None:
-        is_complete, reason = parsed
-        return JudgeResult(
-            is_complete_report=is_complete,
-            verdict="yes" if is_complete else "no",
-            reason=reason,
-            model=first.model,
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_class=None,
-        )
-
-    # ── Unparsable on attempt 1 → RETRY (attempt 2) ─────────────────────
-    # The model RESPONDED but the JSON did not parse. Same input,
-    # fresh call. Retry outcome becomes the final verdict; the
-    # first-attempt excerpt is preserved for forensic logging.
-    first_unparsable_excerpt = _shape_unparsable_excerpt(first.raw_text)
-    second = await _attempt_once()
-    if second.kind in {"timeout", "error"}:
-        # Retry itself timed out / errored → existing conservative
-        # fail-safe; the FIRST attempt was unparsable (logged via
-        # ``first_unparsable_excerpt``); the SECOND attempt was a
-        # transport failure. Surface the transport error verdict —
-        # the reason carries the unparsable surface so operators can
-        # see both shapes in the canonical log row.
-        return JudgeResult(
-            is_complete_report=False,
-            verdict=second.kind,
-            reason=(
-                "judge_response_unparsable (attempt 1); "
-                f"{second.kind} on attempt 2"
-            ),
-            model=second.model,
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_class=second.error_class,
-            attempt=2,
-            first_unparsable_excerpt=first_unparsable_excerpt,
-        )
-
-    second_raw_text = second.raw_text
-    if len(second_raw_text) > JUDGE_MAX_OUTPUT_CHARS:
-        second_raw_text = second_raw_text[:JUDGE_MAX_OUTPUT_CHARS]
-    parsed_second = _parse_judge_response(second_raw_text)
-    if parsed_second is None:
-        # Retry also unparsable → existing conservative fail-safe.
-        # The reason is no longer empty on this path (incident
-        # 98b59dd7 contract); it carries a short descriptor that
-        # names the failure shape + the first-attempt excerpt as a
-        # head prefix so the log row can be cross-correlated with
-        # the structured ``first_unparsable_excerpt`` field.
-        return JudgeResult(
-            is_complete_report=False,
-            verdict="unparsable",
-            reason=(
-                "judge_response_unparsable on both attempts: "
-                f"{first_unparsable_excerpt[:120]}"
-            ),
-            model=second.model,
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_class=None,
-            attempt=2,
-            first_unparsable_excerpt=first_unparsable_excerpt,
-        )
-
-    # Retry parsed successfully → final verdict is the retry's
-    # verdict. The first attempt's excerpt is STILL preserved on
-    # the result for forensics (operators can see what failed
-    # even though the gate is flipping to ALLOWED).
-    is_complete, reason = parsed_second
-    return JudgeResult(
-        is_complete_report=is_complete,
-        verdict="yes" if is_complete else "no",
-        reason=reason,
-        model=second.model,
-        latency_ms=int((time.monotonic() - start) * 1000),
-        error_class=None,
-        attempt=2,
-        first_unparsable_excerpt=first_unparsable_excerpt,
-    )
-
-
-def judge_completion_report_sync(
-    messages: list["BaseMessage"],
-    *,
-    config: "Config",
-    window: int = JUDGE_DEFAULT_WINDOW,
-    timeout_s: float | None = None,
-) -> JudgeResult:
-    """Sync entry point — drives the async judge from a sync caller.
-
-    The gate node is an async function and calls the async entry point
-    directly via :func:`judge_completion_report_async`. This sync
-    wrapper exists for callers that run OUTSIDE an event loop
-    (worker threads spawned via :func:`asyncio.to_thread`, scripts,
-    and unit tests using a fresh event loop). It uses
-    :func:`asyncio.run` and therefore cannot be called from inside a
-    running event loop — callers in that shape must use the async
-    entry point instead.
-
-    Never raises. Returns the same :class:`JudgeResult` as the async
-    entry point.
-
-    Args:
-        messages: Full LangGraph message list.
-        config: Loaded :class:`Config`.
-        window: How many tail AIMessages to inspect.
-        timeout_s: Wall-clock cap. ``None`` (default) → resolve via the
-            Pattern C cached-global (env ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``).
-            Explicit numeric values pass through unchanged.
-
-    Returns:
-        :class:`JudgeResult` — populated on every path.
-    """
-    return asyncio.run(
-        judge_completion_report_async(
-            messages,
-            config=config,
-            window=window,
-            timeout_s=timeout_s,
-        )
-    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage-2 fused judge (resolver-unification, 2026-09-16) — ONE judge call site
@@ -1057,20 +464,19 @@ def judge_completion_report_sync(
 #      "advisory_note_text": "<one sentence>",
 #      "rationale": "<one sentence>"}
 #
-# Transport invariants (SHARED with the legacy window judge —
-# :func:`_invoke_judge_llm` is the single LLM seam, so the two judges can
-# never drift): model resolution via :func:`resolve_judge_model`
+# Transport invariants (:func:`_invoke_judge_llm` is the single LLM
+# seam): model resolution via :func:`resolve_judge_model`
 # (``model_keywords`` fallback), per-attempt ``request_timeout`` binding
 # ``min(resolved_timeout, config.llm.request_timeout or resolved_timeout)``,
 # the Pattern C timeout resolver
 # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``, default 25.0s, min
 # clamp 5.0s), and the HA failover facade. The kill-switch
 # (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED``) is resolved at the
-# CALL SITE (the graph-node fused block) exactly like the two legacy sites
-# it replaces — before this function is ever called.
+# CALL SITE (the graph-node fused block) — before this function is ever
+# called.
 #
-# Retry-once-on-unparsable (incident 98b59dd7 semantics,
-# :func:`judge_completion_report_async` mirror): the retry fires ONLY when
+# Retry-once-on-unparsable (incident 98b59dd7 semantics, carried over from
+# the retired legacy judge): the retry fires ONLY when
 # the model responded but the verdict JSON did not parse — never on
 # timeout / exception. Worst case = 2 HTTP attempts within ONE logical
 # invocation (the Stage-2 budget sentinel pins the INVOCATION level; the
@@ -1168,10 +574,11 @@ def _parse_fused_judge_response(
 ) -> tuple[bool, tuple[str, ...], str, str] | None:
     """Strictly parse the fused judge's verdict JSON.
 
-    Mirrors :func:`_parse_judge_response`'s tolerance shape exactly (the
-    single tolerated code-fence layer, the conservative single
-    substring-fallback, first-match-wins) so the retry-on-unparsable
-    trigger conditions are IDENTICAL between the two judges. The
+    Tolerance shape (carried over verbatim from the retired legacy
+    judge's parser — the single tolerated code-fence layer, the
+    conservative single substring-fallback, first-match-wins) so the
+    retry-on-unparsable trigger conditions are IDENTICAL to the
+    historical contract. The
     load-bearing field is ``verdict`` — it must be exactly
     ``"complete"`` or ``"not_complete"`` (a string); anything else is
     unparsable. ``evidence_cited`` / ``advisory_note_text`` /
@@ -1258,8 +665,8 @@ async def judge_fused_bundle_async(
             payload verbatim).
         config: Loaded :class:`Config`.
         timeout_s: Wall-clock cap PER ATTEMPT. ``None`` (default) →
-            resolve via the Pattern C cached-global (same resolver as
-            the legacy judge — ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
+            resolve via the Pattern C cached-global
+            (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_
             TIMEOUT_S``, default 25.0s, min clamp 5.0s). Each retry
             attempt receives its OWN timeout window; worst-case
             wall-clock = 2 × ``timeout_s``.
@@ -1270,8 +677,8 @@ async def judge_fused_bundle_async(
         outcomes (``attempt=1``) from retry-after-unparsable outcomes
         (``attempt=2``); the retry fires ONLY when the model responded
         but the verdict JSON did not parse — never on timeout /
-        exception (incident 98b59dd7 contract, mirrored from
-        :func:`judge_completion_report_async`).
+        exception (incident 98b59dd7 contract, carried over from the
+        retired legacy judge).
     """
     start = time.monotonic()
     if not bundle_text or not bundle_text.strip():

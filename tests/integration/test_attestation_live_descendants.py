@@ -1275,7 +1275,8 @@ class TestCanonicalLogSchema:
         # attestation_required (17th, 2026-09-06 fastfollow — conditional
         # gate flag) + user_answer_pending (18th, 2026-09-16 incident
         # 6a0d60c9 FIX-2 — the FIFTH legitimate-pending input).
-        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 18
+        # Stage 3 (R1): the outside-window diagnostic retired → 17.
+        assert len(CANONICAL_LOG_SCHEMA_FIELDS) == 17
 
     def test_canonical_schema_includes_live_descendants(self):
         assert "live_descendants" in CANONICAL_LOG_SCHEMA_FIELDS
@@ -1433,9 +1434,6 @@ class TestDecideLiveDescendantsMatrix:
             live_descendants=live_descendants,
             denied_count=2,
             bound=3,
-            scope_applicable=True,
-            mode="enforce",
-            attestation_enabled=True,
         )
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         # RULING 1: third-input allow is the same non-reset as the
@@ -1452,9 +1450,6 @@ class TestDecideLiveDescendantsMatrix:
             live_descendants=3,
             denied_count=2,
             bound=3,
-            scope_applicable=True,
-            mode="enforce",
-            attestation_enabled=True,
         )
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         assert result.next_denied_count == 2
@@ -1470,9 +1465,6 @@ class TestDecideLiveDescendantsMatrix:
             live_descendants=3,
             denied_count=2,
             bound=3,
-            scope_applicable=True,
-            mode="enforce",
-            attestation_enabled=True,
         )
         assert result.decision is Decision.ALLOWED
         assert result.next_denied_count == 0  # reset trigger 1

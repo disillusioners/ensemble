@@ -86,7 +86,6 @@ from langchain_core.messages import BaseMessage
 from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
     DEFAULT_DELEGATION_TOOL_NAME,
-    attestation_seen_outside_window,
     scan_delegation_after_last_user,
     scan_for_attestation_detailed,
 )
@@ -291,7 +290,6 @@ class GateDecision:
     # ——— scanner diagnostics (canonical schema fields) ———
     scanner_window_truncated: bool = False
     scanner_summary_seen: bool = False
-    attest_seen_outside_window: bool = False
     attestation_present: bool = False
     messages_scanned: int = 0
     scanned_window_size: int = 0
@@ -331,86 +329,43 @@ class GateDecision:
     first_delegation_after_last_user_index: int = -1
     delegation_tool_call_total: int = 0
     # ——— Mid-work marker scanner diagnostics (2026-09-11, incident
-    # b08f40fe; additive to the canonical 17-field tuple). The marker
-    # scan is the TRIGGER half of a two-stage disambiguator that runs
-    # on the gate's ALLOW paths (cheap substring match across the
-    # tail). Markers fire → existing inline-LLM judge runs (VERDICT
-    # half); judge verdict drives the (a)/(b)/(c)/(d) routing logged
-    #: below. Logged alongside the canonical tuple — same shape as the
-    #: supplementary conditional-attestation fields.
+    # b08f40fe; additive to the canonical schema tuple). Stage 3
+    # (2026-09-17, resolver-unification R6): the scanners are
+    # ACTIVATION-SIGNAL producers for the unified predicate — the
+    # (a)/(b)/(c)/(d) route enum, the trigger-source derivation, and
+    # the busy-suppression bookkeeping retired with the legacy judge
+    # plumbing; these fields carry the raw scan results the predicate's
+    #: ``b_fires`` term consumes.
     marker_hit: bool = False
     marker_terms: tuple[str, ...] = ()
-    #: Enum string the gate decided for on the marker path. Empty when
-    #: no markers fired (the cheap path; no judge call). ``"a"`` =
-    #: markers + judge-not-complete + nothing pending → CONVERT TO
-    #: DENY via the existing nudge machinery. ``"b"`` = markers +
-    #: judge-not-complete + real pending work → ALLOW + checkpoint-
-    #: durable hint injection (no counter, no deny). ``"c"`` = markers
-    #: + judge-confirmed-complete → ALLOW normally. ``"d"`` = judge
-    #: error/timeout/unparsable on the marker path → (a)-behavior if
-    #: nothing pending, (b)-behavior otherwise.
-    marker_path: str = ""
-    #: Informational verdict string from the marker-path judge call.
-    #: Mirrors the existing would-be-deny judge's
-    #: ``JudgeResult.verdict`` (``"yes"`` / ``"no"`` / ``"error"`` /
-    #: ``"timeout"`` / ``"unparsable"`` / ``"<skipped>"``). Empty when
-    #: no markers fired (no judge call attempted).
-    marker_judge_verdict: str = ""
-    #: Informational latency (ms) of the marker-path judge call. ``0``
-    #: when no judge call was attempted. Mirrors the would-be-deny
-    #: judge's ``JudgeResult.latency_ms``.
-    marker_judge_latency_ms: int = 0
-    #: Informational error class from the marker-path judge call on
-    #: the error path. ``None`` otherwise. Mirrors the would-be-deny
-    #: judge's ``JudgeResult.error_class``.
-    marker_judge_error_class: str | None = None
     #: Checkpoint-durable hint HumanMessage the graph node should
-    #: inject on marker path (b) (markers + judge-not-complete + real
-    #: pending work). ``None`` on every other path. The construction-
-    #: time ``id`` invariant is upheld (the ``_make_context_message``
-    #: factory mints a fresh ``uuid4`` when no explicit id is passed).
+    #: inject when the fused judge maps a not-complete verdict with
+    #: real pending work to allow+hint. ``None`` on every other path.
+    #: The construction-time ``id`` invariant is upheld (the
+    #: ``_make_context_message`` factory mints a fresh ``uuid4`` when
+    #: no explicit id is passed).
     marker_hint_message: "BaseMessage | None" = None
     #: 2026-09-12 length trigger — True when the LAST AIMessage word
     #: count is strictly less than :data:`SHORT_REPORT_WORD_THRESHOLD`
     #: (i.e. brevity-class). Logged alongside the marker fields;
-    #: additive to the canonical 17-field tuple.
+    #: additive to the canonical schema tuple.
     length_trigger: bool = False
     #: 2026-09-12 length trigger — word count of the flattened LAST
     #: AIMessage content. ``0`` on degenerate empty message lists or
     #: when the last AIMessage has empty content. Logged alongside the
-    #: marker fields; additive to the canonical 17-field tuple.
+    #: marker fields; additive to the canonical schema tuple.
     final_word_count: int = 0
-    #: 2026-09-12 trigger_source derivation — ``"markers"`` when only
-    #: the marker substring scan fired, ``"length"`` when only the
-    #: word-count threshold fired, ``"markers+length"`` when both
-    #: fired, and the empty string ``""`` when neither fired (the
-    #: cheap allow path with no trigger). Logged alongside the
-    #: marker fields; additive to the canonical 17-field tuple.
-    trigger_source: str = ""
-    #: 2026-09-12 LCA busy trigger suppression — the count of
-    #: descendants in the unconditional-busy subset
-    #: ``{RUNNING, WAITING, WAITING_CHILDREN}`` ONLY (PAUSED is NOT
-    #: busy — see ``InstanceManager.count_busy_descendants``). Always
-    #: surfaces the count in the schema; 0 means either no
+    #: 2026-09-12 LCA busy count — the count of descendants in the
+    #: unconditional-busy subset ``{RUNNING, WAITING, WAITING_CHILDREN}``
+    #: ONLY (PAUSED is NOT busy — see
+    #: ``InstanceManager.count_busy_descendants``). Stage 3 (R5): the
+    #: busy-suppression SEMANTICS live in the predicate's ``b_fires``
+    #: term (``(marker_hit ∨ length_trigger) ∧ busy_descendants == 0``
+    #: — Source B is busy-muted, Source A deliberately is NOT, approved
+    #: Δ2); this field carries the raw count for the predicate input
+    #: and log forensics. Always surfaces the count; 0 means either no
     #: descendants or every descendant terminal/PAUSED/dormant.
-    #: The gate reads ``busy_descendants > 0`` as the trigger
-    #: suppression signal (suspect-pending shapes PAUSED,
-    #: en-route-only work etc. keep the trigger armed — see
-    #: :func:`evaluate`). Default 0 so a never-evaluated path never
-    #: accidentally suppresses. Additive to the canonical 17-field
-    #: tuple.
     busy_descendants: int = 0
-    #: 2026-09-12 LCA busy trigger suppression — name of the
-    #: suppressor that disarmed the marker/length trigger on this
-    #: evaluation, or ``""`` when the trigger was not suppressed.
-    #: Currently only ``"busy_descendants"`` is defined (the
-    #: descendants-BFS found at least one busy child ⇒ a healthy
-    #: wait, not a stuck leader; suppress the route-(b) hint that
-    #: would otherwise inject on essentially every awaiting
-    #: turn-end). Empty string on every other path. Logged
-    #: alongside the marker fields; additive to the canonical
-    #: 17-field tuple.
-    trigger_suppressed_by: str = ""
     #: 2026-09-16 answer-gate blindness fix (incident 6a0d60c9,
     #: FIX-2) — True when the leader has an OPEN awaiting-answer
     #: suspension handle at gate time (the FIFTH legitimate-pending
@@ -433,16 +388,6 @@ class GateDecision:
     resolver: "Any | None" = None
 
 
-#: Marker-path enum constants — the canonical strings the gate emits on
-#: the ``marker_path`` diagnostic field. Single source of truth (the
-#: log-row format string + the wiring tests reference these literals).
-MARKER_PATH_NONE = ""           # no markers → no judge → no path
-MARKER_PATH_A = "a"             # markers + judge-no + nothing pending → DENY
-MARKER_PATH_B = "b"             # markers + judge-no + real pending → ALLOW+hint
-MARKER_PATH_C = "c"             # markers + judge-yes → ALLOW
-MARKER_PATH_D = "d"             # markers + judge-error/timeout/unparsable
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 2.2 — the pure decision function
 # ─────────────────────────────────────────────────────────────────────────────
@@ -463,14 +408,17 @@ def deny_bound_exceeded(denied_count: int, bound: int) -> bool:
     This predicate is the SINGLE shared definition of "this deny is
     the one that trips the bound" — extracted verbatim from the
     former inline ``denied_count + 1 > bound`` check in ``decide()``
-    step (6). ALL THREE deny producers consult it:
+    step (6). ALL deny producers consult it:
 
       1. ``decide()`` step (6) — the canonical path (unchanged
          semantics, now via this helper);
-      2. ``daemon/graph.py`` marker-path (a) conversion (judge
-         verdict=no, nothing pending);
-      3. ``daemon/graph.py`` marker-path (d) conversion (judge
-         timeout/error/unparsable, nothing pending).
+      2. the fused block's belt-and-braces marker/A-band
+         nothing-pending deny-flip in ``daemon/graph.py`` (Stage 3:
+         the sole survivor of the legacy (a)/(d) conversions — the
+         two legacy judge sites retired with R7);
+      3. :func:`daemon.services.attestation_resolver_activation.
+         compute_would_be_outcome` (the would-terminal reference
+         mapping — imported, never re-implemented).
 
     When it returns True the caller MUST produce the canonical
     terminal outcome — mirroring ``decide()`` step (6) EXACTLY:
@@ -498,76 +446,55 @@ def decide(
     live_descendants: int,
     denied_count: int,
     bound: int,
-    scope_applicable: bool,
-    mode: str,
-    attestation_enabled: bool,
     *,
     attestation_required: bool,
     user_answer_pending: bool = False,
 ) -> GateDecision:
-    """Pure gate decision over the R2 inputs (plan 2.2 logic tree).
+    """Pure ENFORCE-tree decision over the R2 inputs (Stage 3 shape).
 
-    Logic tree (plan 2.2, with leader ruling 1 counter semantics +
-    2026-09-06 conditional-attestation requirement — FR-3 conditionality):
+    Stage 3 (2026-09-17, resolver-unification R2/R3/R4): the
+    meta-condition branches retired out of this function — the
+    outermost activation terms now live in the unified predicate
+    (``daemon.services.attestation_resolver_activation.activation_
+    predicate``, Term 0 and Term 1) with :func:`evaluate` as the
+    composition layer that mirrors them. ``decide()`` itself is the
+    pure enforce decision tree:
 
-    1. Meta-conditions — ``attestation_enabled=False`` (C2 bypass),
-       ``scope_applicable=False`` (D3 non-leader), or ``mode="off"``
-       → :attr:`Decision.ALLOWED` with the counter UNCHANGED (the gate
-       did not run; a non-run is NOT one of the four reset triggers).
-       ``attestation_required=False`` on this branch (no scan ran).
-    2. ``mode="dry"`` → :attr:`Decision.DRY_LOG` — evaluation recorded,
-       ZERO side effects, counter unchanged. ``attestation_required``
-       surfaces the scanned value (so dry-mode soak can observe the
-       conditional gate at work) but the decision is still DRY_LOG.
-    3. enforce + ``attestation_required=False`` (NEW, 2026-09-06,
-       FR-3 conditionality) → :attr:`Decision.ALLOWED` with the counter
-       UNCHANGED and ``should_inject_nudge=False``. The leader did not
-       dispatch a child since the last real user message — the gate is
-       OFF for this turn-end; a quick follow-up / chart request / plain
-       answer may complete without ``attest_completion``. This is the
-       core conditional-attestation branch (the user-spec'd "not
-       required → ALLOW without the toolcall" rule).
-    4. enforce + attested → :attr:`Decision.ALLOWED` with
+    1. ``user_answer_pending`` (2026-09-16, incident 6a0d60c9, FIX-2)
+       → :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
+       counter UNCHANGED and zero nudge/hint. The pending party is the
+       USER; the leader cannot progress alone, so the awaiting answer
+       is the FIFTH legitimate-pending input. Fires BEFORE the
+       attested check deliberately: the plain-allow contract is ZERO
+       counter movement — an attested-allow reset (trigger 1) does not
+       run while an answer is pending.
+    2. attested → :attr:`Decision.ALLOWED` with
        ``next_denied_count = 0`` (reset trigger 1).
-    5. enforce + not attested + any pending wakeup input > 0
-       (THREE-input R2 — ``pending_children``,
-       ``queued_or_expected_wakeups``, OR ``live_descendants``) →
+    3. not attested + any pending wakeup input > 0 (THREE-input R2 —
+       ``pending_children``, ``queued_or_expected_wakeups``, OR
+       ``live_descendants``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
        protection). The ``live_descendants`` arm closes the 809e2a59
        waiting_children false-deny incident class: deferral fires the
        parent's watcher (so ``pending_children`` drops to 0) while a
        deeper grandchild still runs, AND deferral emits no report/task
-       row (so ``queued_or_expected_wakeups`` stays 0). Without the
-       third input the gate sees 0/0 as TRUE facts and escalates to
-       ``terminal_after_bound`` while the descendant is alive.
-    6. enforce + not attested + no pending wakeups +
+       row (so ``queued_or_expected_wakeups`` stays 0).
+    4. not attested + no pending wakeups +
        ``denied_count + 1 > bound`` → :attr:`Decision.TERMINAL_AFTER_BOUND`
        with ``next_denied_count = 0`` (reset trigger 2; the same reset
        clears the escalated flag per ruling 2 — persistence is Phase 3).
-    7. otherwise → :attr:`Decision.DENIED` with
+    5. otherwise → :attr:`Decision.DENIED` with
        ``next_denied_count = denied_count + 1`` and
        ``should_inject_nudge = True``.
 
-    2026-09-16 amendment (incident 6a0d60c9, FIX-2 — answer-gate
-    blindness): a NEW arm (3.b) sits between the conditional gate
-    check and the attested check — ``user_answer_pending=True`` (the
-    leader has an OPEN awaiting-answer suspension handle at gate time)
-    → :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
-    counter UNCHANGED and zero nudge/hint. The pending party is the
-    USER; the leader cannot progress alone, so the awaiting answer is
-    the FIFTH legitimate-pending input (after ``pending_children``,
-    ``queued_or_expected_wakeups``, ``live_descendants``, and the
-    trigger-suppression input ``busy_descendants``). The arm fires
-    BEFORE the attested check deliberately: the plain-allow contract
-    is ZERO counter movement — an attested-allow reset (trigger 1)
-    does not run while an answer is pending. The gate's ``evaluate``
-    glue additionally skips the marker/length trigger entirely on
-    this arm (no marker scan, no judge, no nudge, no hint).
-
-    An unrecognized ``mode`` fails OPEN to :attr:`Decision.ALLOWED`
-    (mirrors the resolver's fail-open ruling); the resolver's one-shot
-    WARN is the typo safety net.
+    The retired branches (for the record — behavior preserved at the
+    composition layer, see :func:`evaluate`): the meta-condition
+    bypass (master flag / leader scope / off mode), the dry-mode
+    mapping (DRY_LOG — now the mode layer in :func:`evaluate`), the
+    unknown-mode fail-open, and the no-delegation arm (now the
+    predicate's Term 1, mirrored by the composition layer's
+    meta-bypass).
 
     Args:
         attested: Scanner verdict — attestation tool call in window.
@@ -581,19 +508,13 @@ def decide(
             unconditionally; dormant IDLE/QUEUED only with an
             unprocessed message row or an unsettled QUEUED/ACTIVE job;
             terminal excluded). Closes the watcher-fire-on-defer gap.
-        denied_count: Current ``attestation_denied_count`` (Phase 2
-            stand-in: the caller passes 0; Phase 3 threads the ledger).
+        denied_count: Current ``attestation_denied_count``.
         bound: Deny bound (D5, default 3).
-        scope_applicable: D3 scope — leader-only.
-        mode: "off" | "dry" | "enforce" (validated upstream).
-        attestation_enabled: C2 master flag from graph assembly.
         attestation_required: Conditional-attestation gate flag (keyword
             only — mandatory input from the wiring layer so an omitted
-            kwarg is a loud failure). ``True`` means a child was
-            dispatched since the last real user message — the gate is
-            ON. ``False`` means no delegation happened — the gate is
-            OFF for this turn-end and the leader does not need to
-            ``attest_completion``.
+            kwarg is a loud failure). STAMP-ONLY at this layer (the
+            17th canonical log schema field); the delegation gate
+            itself is the predicate's Term 1.
         user_answer_pending: Keyword-only, default False (2026-09-16,
             incident 6a0d60c9 FIX-2). True when the leader has an OPEN
             awaiting-answer suspension handle at gate time (DB-backed:
@@ -601,64 +522,22 @@ def decide(
             ``resume_target_turn_id IS NOT NULL`` + ``status='paused'``
             + freshness guard, read via
             ``InstanceManager.has_open_user_answer``). Arms the plain
-            allow (arm 3.b) with ZERO counter movement.
+            allow (step 1) with ZERO counter movement.
 
     Returns:
         :class:`GateDecision` — the decision core.
     """
-    # (1) meta-conditions — gate not applied; counter untouched.
-    if (not attestation_enabled) or (not scope_applicable) or mode == "off":
-        return GateDecision(
-            decision=Decision.ALLOWED,
-            next_denied_count=denied_count,
-            should_inject_nudge=False,
-            attestation_required=False,
-        )
+    # ——— enforce tree (Stage 3: meta terms live in the predicate) ———
 
-    # (2) dry — evaluate + log only; zero side effects.
-    if mode == "dry":
-        return GateDecision(
-            decision=Decision.DRY_LOG,
-            next_denied_count=denied_count,
-            should_inject_nudge=False,
-            attestation_required=attestation_required,
-        )
-
-    if mode != "enforce":
-        # Unknown mode — fail OPEN (resolver already WARNed).
-        return GateDecision(
-            decision=Decision.ALLOWED,
-            next_denied_count=denied_count,
-            should_inject_nudge=False,
-            attestation_required=attestation_required,
-        )
-
-    # ——— enforce ———
-
-    # (3) conditional gate OFF — the leader did not delegate since the
-    # last real user message, so attestation is not required. ALLOW
-    # without demanding the toolcall (FR-3 conditionality, 2026-09-06).
-    # This is the user-spec'd core branch: a quick follow-up question
-    # or a chart request (no ``send_message`` tool call) completes
-    # without the gate firing. Counter untouched (a non-fire is not a
-    # reset trigger per ruling 1).
-    if not attestation_required:
-        return GateDecision(
-            decision=Decision.ALLOWED,
-            next_denied_count=denied_count,
-            should_inject_nudge=False,
-            attestation_required=False,
-        )
-
-    # (3.b) user answer pending — the FIFTH legitimate-pending input
+    # (1) user answer pending — the FIFTH legitimate-pending input
     # (2026-09-16, incident 6a0d60c9, FIX-2 answer-gate blindness).
     # The leader has an OPEN awaiting-answer suspension handle: the
     # pending party is the USER and the leader cannot progress alone.
     # PLAIN ALLOW with the counter UNCHANGED (zero counter movement —
     # deliberately BEFORE the attested check so even an attested-allow
     # reset does not run while an answer is pending). The evaluate()
-    # glue additionally skips the marker/length trigger entirely on
-    # this input (no marker scan, no judge, no nudge, no hint).
+    # glue additionally skips the marker/length scan entirely on this
+    # input (no scan, no judge, no nudge, no hint).
     if user_answer_pending:
         return GateDecision(
             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
@@ -667,7 +546,7 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (4) attested allow — reset trigger 1.
+    # (2) attested allow — reset trigger 1.
     if attested:
         return GateDecision(
             decision=Decision.ALLOWED,
@@ -676,7 +555,7 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (5) R2 allow — legitimate pending wakeup (THREE-input predicate:
+    # (3) R2 allow — legitimate pending wakeup (THREE-input predicate:
     # pending_children OR queued_or_expected_wakeups OR live_descendants);
     # counter unchanged (ruling 1: the R2 non-reset IS the loop
     # protection).
@@ -692,11 +571,11 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (6) bound exceeded — escalation; counter reset (trigger 2).
+    # (4) bound exceeded — escalation; counter reset (trigger 2).
     # FIX-1 (2026-09-16, incident 6a0d60c9): the bound predicate is
-    # the SHARED helper ``deny_bound_exceeded`` — the marker-path
-    # allow→deny conversions in graph.py consult the SAME predicate so
-    # the bound backstop can no longer be bypassed on the marker path.
+    # the SHARED helper ``deny_bound_exceeded`` — the fused path's
+    # allow→deny conversion in graph.py consults the SAME predicate so
+    # the bound backstop can never be bypassed.
     if deny_bound_exceeded(denied_count, bound):
         return GateDecision(
             decision=Decision.TERMINAL_AFTER_BOUND,
@@ -705,7 +584,7 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (7) deny — increment + nudge.
+    # (5) deny — increment + nudge.
     return GateDecision(
         decision=Decision.DENIED,
         next_denied_count=denied_count + 1,
@@ -728,8 +607,6 @@ GATE_CONFIG_KEYS = (
     "window",
     "deny_bound",
     "mode",
-    "attestation_enabled",
-    "scope_applicable",
     "leader_prompt_version",
     "gate_location",
     # Phase 6 fastfollow (2026-09-07): inline-LLM completion-report
@@ -753,6 +630,12 @@ GATE_LOCATION_GRAPH_END_CANDIDATE = "graph_end_candidate"
 #: definition — Phase 2/3/4/5 tasks reference this tuple, not a
 #: paraphrase. Fields in display order (matches the format string in
 #: :func:`evaluate`).
+#:
+#: Stage 3 (2026-09-17, resolver-unification R1): the outside-window
+#: stale-attestation diagnostic field retired — it was a
+#: log-only surface with no decision weight anywhere (the gate
+#: consumes only the in-window attestation scan result). The schema
+#: drops from 18 to 17 canonical fields.
 CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
     "event",
     "decision",
@@ -764,15 +647,14 @@ CANONICAL_LOG_SCHEMA_FIELDS: tuple[str, ...] = (
     "pending_children",
     "queued_or_expected_wakeups",
     "live_descendants",  # 2026-09-06 third R2 input (option-a fix)
-    "attestation_required",  # 2026-09-06 conditional-attestation flag (17th)
-    "attest_seen_outside_window",
+    "attestation_required",  # 2026-09-06 conditional-attestation flag
     "messages_scanned",
     "scanned_window_size",
     "mode",
     "scanner_window_truncated",
     "scanner_summary_seen",
     # 2026-09-16 answer-gate blindness fix (incident 6a0d60c9, FIX-2)
-    # — the FIFTH legitimate-pending input; 18th canonical field.
+    # — the FIFTH legitimate-pending input; canonical field.
     "user_answer_pending",
 )
 
@@ -782,8 +664,6 @@ def build_gate_config(
     settings: GateSettings,
     *,
     tool_name: str = DEFAULT_ATTESTATION_TOOL_NAME,
-    attestation_enabled: bool = True,
-    scope_applicable: bool = True,
     leader_prompt_version: str = "",
     llm_judge_enabled: bool = True,
 ) -> dict[str, Any]:
@@ -794,12 +674,20 @@ def build_gate_config(
     ``state["messages"]`` only. ``tests/unit/test_attestation_gate.py``
     pins this via :data:`GATE_CONFIG_KEYS` and a direct key assertion.
 
+    Stage 3 (2026-09-17, resolver-unification R2): the
+    ``attestation_enabled`` / ``scope_applicable`` keys retired — the
+    C2 master flag and the D3 leader-scope check are enforced at
+    GRAPH-BUILD time (``build_instance_graph`` wires the gate node
+    only for leaders with the feature master on; the wrapper is not
+    even applied otherwise) and re-encoded as the predicate's Term 0.
+    Carrying them inside the gate config duplicated that decision one
+    layer down for no behavioral effect (production values were always
+    ``True``).
+
     Args:
         instance_id: The leader instance id (for log fields).
         settings: :class:`GateSettings` (window/bound/mode).
         tool_name: Attestation tool name.
-        attestation_enabled: C2 master flag (False bypasses everything).
-        scope_applicable: D3 flag (False bypasses everything).
         leader_prompt_version: ``agents/leader/meta.json`` version for
             the canonical log schema.
         llm_judge_enabled: Phase 6 fastfollow (2026-09-07) — whether
@@ -818,8 +706,6 @@ def build_gate_config(
         "window": settings.window,
         "deny_bound": settings.deny_bound,
         "mode": settings.mode,
-        "attestation_enabled": attestation_enabled,
-        "scope_applicable": scope_applicable,
         "leader_prompt_version": leader_prompt_version,
         "gate_location": GATE_LOCATION_GRAPH_END_CANDIDATE,
         "llm_judge_enabled": llm_judge_enabled,
@@ -880,8 +766,13 @@ def evaluate(
             wakeups`` / ``count_live_descendants``). May be ``None``
             ONLY in degenerate embeddings — the response is fail-open
             allow (R2 inputs unreadable).
-        attestation_enabled: C2 flag (False bypasses everything).
-        scope_applicable: D3 flag (False bypasses everything).
+        attestation_enabled: C2 flag — Term-0 input to the unified
+            activation predicate (mirrored by the early return below;
+            enforced primarily at graph-build time — the gate node is
+            only wired when the master flag is on).
+        scope_applicable: D3 flag — Term-0 input to the unified
+            activation predicate (same mirroring; leader-scope is
+            enforced primarily at graph-build time).
         tool_name: Attestation tool name.
         leader_prompt_version: ``agents/leader/meta.json`` version for
             the canonical log schema.
@@ -905,7 +796,13 @@ def evaluate(
 
     # A meta-condition bypass is not a gate evaluation.  In particular,
     # off-mode must not even enter the scanner/facade path or emit a
-    # decision entry; this is the byte-equivalent OFF baseline.
+    # decision entry; this is the byte-equivalent OFF baseline. Stage 3
+    # (R2): this early return is the composition-layer MIRROR of the
+    # unified predicate's Term 0 (``¬attestation_enabled ∨
+    # ¬scope_applicable ∨ mode="off"``) — decide() no longer carries
+    # its own copy of the check, and production callers never reach it
+    # with a False value (graph-build-time enforcement wires the gate
+    # only for in-scope leaders with the master flag on).
     if not attestation_enabled or not scope_applicable or mode_resolver.mode == "off":
         return GateDecision(
             decision=Decision.ALLOWED,
@@ -937,11 +834,6 @@ def evaluate(
     try:
         # (i) scanner — bounded in-window scan (AC-2.5).
         scan = scan_for_attestation_detailed(messages, mode_resolver.window, tool_name)
-
-        # (v) O3 diagnostic — stale attestation outside the window.
-        seen_outside = attestation_seen_outside_window(
-            messages, mode_resolver.window, tool_name
-        )
 
         # (v.b) Conditional-attestation scanner (2026-09-06, FR-3
         # conditionality) — pure walk of the messages list that
@@ -1002,7 +894,7 @@ def evaluate(
                 if callable(_answer_reader)
                 else False
             )
-        except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam
+        except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam (whole-eval C-read failure ⇒ plain allow; the predicate's §4.2 C-read branch mirrors this)
             error_class = type(db_exc).__name__
             logger.error(
                 "event=leader_completion_gate_db_error "
@@ -1017,7 +909,6 @@ def evaluate(
                 "queued_or_expected_wakeups=-1 "
                 "live_descendants=-1 "
                 "busy_descendants=-1 "
-                "attest_seen_outside_window=%s "
                 "messages_scanned=%s "
                 "scanned_window_size=%s "
                 "scanner_window_truncated=%s "
@@ -1031,7 +922,6 @@ def evaluate(
                 leader_prompt_version,
                 scan.attested,
                 denied_count,
-                seen_outside,
                 scan.messages_scanned,
                 mode_resolver.window,
                 scan.window_truncated,
@@ -1077,7 +967,6 @@ def evaluate(
                 should_inject_nudge=False,
                 scanner_window_truncated=scan.window_truncated,
                 scanner_summary_seen=scan.summary_seen,
-                attest_seen_outside_window=seen_outside,
                 attestation_present=scan.attested,
                 messages_scanned=scan.messages_scanned,
                 scanned_window_size=mode_resolver.window,
@@ -1093,34 +982,79 @@ def evaluate(
                 gate_exception_seen=True,
             )
 
-        # (iii) the pure decision.
-        result = decide(
-            attested=scan.attested,
-            pending_children=pending_children,
-            queued_or_expected_wakeups=queued_or_expected_wakeups,
-            live_descendants=live_descendants,
-            denied_count=denied_count,
-            bound=mode_resolver.deny_bound,
-            scope_applicable=scope_applicable,
-            mode=mode_resolver.mode,
-            attestation_enabled=attestation_enabled,
-            attestation_required=attestation_required,
-            user_answer_pending=user_answer_pending,
-        )
+        # (iii) the decision — Stage 3 composition (2026-09-17,
+        # resolver-unification R2/R3/R4). decide() is the PURE enforce
+        # tree; the retired meta branches live HERE, at the layer that
+        # owns the mode resolver and mirrors the unified predicate's
+        # outermost terms:
+        #   * unknown mode (typo'd resolver value) → fail OPEN
+        #     (the resolver already WARNed once at boot);
+        #   * ¬attestation_required (predicate Term 1, the R4 fold):
+        #     no delegation since the last real user message ⇒ the
+        #     gate is OFF for this turn-end — plain ALLOW, counter
+        #     untouched (a non-fire is not one of the four reset
+        #     triggers per ruling 1), no nudge. The D10 mirror: the
+        #     marker/length scan below is SKIPPED on this branch
+        #     (suspicion signals are not even evaluated on
+        #     non-delegated missions — same exclusion the predicate's
+        #     Term-1 short-circuit applies to its A/B providers);
+        #   * dry mode (the R3 fold): the enforce-tree decision is
+        #     computed with FULL diagnostics, then mapped to DRY_LOG
+        #     with the counter frozen at its input value — zero side
+        #     effects, same observable contract and log-row shape as
+        #     the retired decide()-level branch.
+        if mode_resolver.mode not in ("dry", "enforce"):
+            # Unknown mode (off is caught by the early return above) —
+            # fail OPEN (resolver already WARNed).
+            result = GateDecision(
+                decision=Decision.ALLOWED,
+                next_denied_count=denied_count,
+                should_inject_nudge=False,
+                attestation_required=attestation_required,
+            )
+        elif not attestation_required:
+            # Delegation gate OFF — predicate Term 1 mirror (FR-3
+            # conditionality, 2026-09-06; R4 fold 2026-09-17).
+            result = GateDecision(
+                decision=Decision.ALLOWED,
+                next_denied_count=denied_count,
+                should_inject_nudge=False,
+                attestation_required=False,
+            )
+        else:
+            result = decide(
+                attested=scan.attested,
+                pending_children=pending_children,
+                queued_or_expected_wakeups=queued_or_expected_wakeups,
+                live_descendants=live_descendants,
+                denied_count=denied_count,
+                bound=mode_resolver.deny_bound,
+                attestation_required=attestation_required,
+                user_answer_pending=user_answer_pending,
+            )
+        if mode_resolver.mode == "dry":
+            # R3 fold: dry is a property of the resolver/mode layer —
+            # predicate + decision computed & logged, node skipped,
+            # zero effects. The counter is frozen at its input value
+            # and the nudge disarmed; every other diagnostic field
+            # (delegation scan, would-be outcome inputs) stays intact
+            # for the dry-mode soak.
+            result = replace(
+                result,
+                decision=Decision.DRY_LOG,
+                next_denied_count=denied_count,
+                should_inject_nudge=False,
+            )
 
         # Attach diagnostics + R2 inputs → log-ready object.
-        # ``busy_descendants`` (2026-09-12) is stamped on EVERY
-        # evaluation — the trigger-suppression input is meaningful
-        # even when the marker/length trigger doesn't fire (the
-        # log row carries the count for forensics). The
-        # ``trigger_suppressed_by`` field defaults to ``""`` (set
-        # in the trigger block below only when the trigger fires
-        # AND busy > 0).
+        # ``busy_descendants`` is stamped on EVERY evaluation — the
+        # predicate's ``b_fires`` term consumes it (R5: Source B is
+        # busy-muted; Source A deliberately is NOT — approved Δ2) and
+        # the log row carries the count for forensics.
         result = replace(
             result,
             scanner_window_truncated=scan.window_truncated,
             scanner_summary_seen=scan.summary_seen,
-            attest_seen_outside_window=seen_outside,
             attestation_present=scan.attested,
             messages_scanned=scan.messages_scanned,
             scanned_window_size=mode_resolver.window,
@@ -1137,48 +1071,32 @@ def evaluate(
             delegation_tool_call_total=delegation_scan.delegation_tool_call_total,
         )
 
-        # (iii.b) Mid-work marker scan (2026-09-11, incident b08f40fe).
-        # The marker scan is the TRIGGER half of a two-stage
-        # disambiguator on the gate's ALLOW paths. It runs ONLY when
-        # the gate is otherwise about to allow (not on DENIED — the
-        # existing judge path on the would-be-deny branch already
-        # handles that family) AND when the allow is NOT an attested
-        # contract (attested_allow is an explicit success path; the
-        # conditional_attestation_required=False branch is scanned —
-        # the brief's "a quick answer ending '...Ending turn, will
-        # continue after your reply' must reach the judge" example
-        # depends on the conditional-off branch also being scanned).
-        # The scan covers BOTH Decision.ALLOWED (attestation_required
-        # is False OR meta-conditions bypassed) AND
-        # Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP (real wakeup is
-        # en route — the b08f40fe incident's natural decision).
+        # (iii.b) Source-B activation-signal scans (2026-09-11,
+        # incident b08f40fe; Stage-3 R6 shape). The marker scan and the
+        # length trigger are ACTIVATION-SIGNAL producers for the
+        # unified predicate's ``b_fires`` term — the legacy
+        # trigger→judge plumbing retired with R6/R7 (the fused judge
+        # owns the verdict; the predicate owns the busy-muting).
+        # The scans run ONLY when the decision is in the allow family
+        # (NOT on DENIED — the deny band fires on the C term alone and
+        # leader-prose markers are moot there) AND the allow is NOT an
+        # attested contract (attested_allow is an explicit success
+        # path) AND no answer is pending (FIX-2: the awaiting answer is
+        # the whole turn's purpose — no suspicion work) AND the
+        # delegation gate is ON.
         #
-        # The marker scan NEVER runs on:
-        #   * ``Decision.DENIED`` — handled by the existing judge on
-        #     the would-be-deny branch (Phase 6 fastfollow, 2026-09-07).
-        #   * ``Decision.TERMINAL_AFTER_BOUND`` — escalation already
-        #     fired; the leader has hit the bound and the gate has
-        #     decided to allow terminal. A marker scan would be moot.
-        #   * meta-condition bypass (mode=off / scope not applicable /
-        #     attestation_enabled=False) — the gate is byte-equivalent
-        #     OFF; no scan.
+        # Stage-3 D10 mirror (R4 guard): when
+        # ``attestation_required=False`` (no delegation since the last
+        # real user message), the scans are SKIPPED — suspicion
+        # signals are not even evaluated on non-delegated missions,
+        # mirroring the predicate's Term-1 short-circuit of its A/B
+        # providers (pinned by the Stage-3 census + marker-wiring
+        # tests).
         #
-        # NOTE — DRY_LOG is INCLUDED (2026-09-12, review W1 fix). The
-        # marker scan is a side-effect-free cheap check; in dry mode
-        # it populates ``marker_hit`` / ``marker_terms`` / ``marker_path``
-        # on the canonical log row so operators see the signal in
-        # ``decision=dry_log`` soak rows (the documented bake-time
-        # observability — see decisions.md D-ENTRY 2026-09-11 / W1
-        # amendment 2026-09-12). The marker path's judge wiring
-        # (daemon/graph.py) early-outs for DRY_LOG before any
-        # judge/hint/deny/counter side effect — the marker scan here
-        # is pure LOG-ONLY on the dry branch (zero side effects per
-        # the dry-mode contract; the existing dry-mode
-        # ``allow unconditionally`` posture is preserved end-to-end).
-        #
-        # Cost control (decision tree e): NO marker hit ⇒ NO judge
-        # call (the judge is best-effort + costly; the cheap scan is
-        # the gate). NO judge call ⇒ no behavioral change vs baseline.
+        # Cost control (decision tree e): NEITHER signal fires ⇒ the
+        # predicate's ``b_fires`` term is False ⇒ NO judge call (the
+        # judge is best-effort + costly; the cheap scans are the
+        # gate). NO judge call ⇒ no behavioral change vs baseline.
         if (
             result.decision
             in (
@@ -1190,159 +1108,66 @@ def evaluate(
             # FIX-2 (2026-09-16, incident 6a0d60c9) — answer-gate
             # blindness: an OPEN awaiting-answer handle means the
             # pending party is the USER. PLAIN ALLOW before ANY
-            # trigger/judge work: NO marker scan, NO length trigger,
+            # scan/judge work: NO marker scan, NO length trigger,
             # NO judge, NO nudge, NO hint, NO counter movement. The
             # awaiting answer is the whole turn's purpose.
             and not result.user_answer_pending
+            # D10 mirror (R4): the delegation gate is the predicate's
+            # outermost term — non-delegated missions skip suspicion
+            # evaluation entirely.
+            and result.attestation_required
         ):
             # (iii.c.1) — Mid-work marker scan (2026-09-11, incident
-            # b08f40fe). The marker scan is the TRIGGER half of a
-            # two-stage disambiguator on the gate's ALLOW paths.
+            # b08f40fe): cheap substring match over the tail
+            # AIMessages.
             #
-            # (iii.c.2) — Length trigger (2026-09-12, user request).
-            # Word-count signal on the LAST AIMessage; orthogonal to
+            # (iii.c.2) — Length trigger (2026-09-12, user request):
+            # word-count signal on the LAST AIMessage; orthogonal to
             # the marker scan (markers catch phrasing, length catches
-            # brevity). The two halves compose via ``OR`` — either
-            # half firing flips the would-be allow into a judge call.
-            #
-            # Cost control (decision tree e): NEITHER trigger ⇒ NO
-            # judge call (the judge is best-effort + costly; the
-            # cheap scan is the gate). NO judge call ⇒ no behavioral
-            # change vs baseline.
+            # brevity). The predicate composes the two halves via OR
+            # inside ``b_fires`` — either signal arming (with
+            # busy_descendants == 0) fires the marker band.
             marker_result = scan_for_mid_work_markers(
                 messages, mode_resolver.window
             )
             length_result = scan_for_short_final_ai(
                 messages, mode_resolver.window
             )
-            # Derive trigger_source from the two halves. The empty
-            # string ``""`` means neither fired (cheap allow path).
-            # Both halves firing ⇒ "markers+length"; one firing ⇒
-            # its single name; neither ⇒ "".
-            #
-            # 2026-09-12 LCA busy trigger suppression — when
-            # ``busy_descendants > 0`` AND at least one trigger
-            # half fires, the WHOLE trigger is suppressed
-            # ENTIRELY: NO judge call, NO route-(b) hint, plain
-            # allow. The marker/length signal STAYS RECORDED on
-            # the log row for observability
-            # (``marker_hit``/``length_trigger`` keep their
-            # computed values; ``trigger_source`` is force-cleared
-            # to ``""`` and ``trigger_suppressed_by`` is set to the
-            # suppressor name ``"busy_descendants"``). The
-            # graph-node judge-firing check reads
-            # ``decision.trigger_suppressed_by == ""`` and skips
-            # the judge block on a non-empty value. PAUSED is NOT
-            # busy (suspect, not healthy) — the trigger stays
-            # armed on PAUSED so a stuck child is caught. Dormant
-            # IDLE/QUEUED is NOT busy (no execution) — also keeps
-            # the trigger armed so en-route-only work is caught.
-            marker_hit_computed = marker_result.marker_hit
-            length_trigger_computed = length_result.length_trigger
-            trigger_fires = bool(
-                marker_hit_computed or length_trigger_computed
+            result = replace(
+                result,
+                marker_hit=marker_result.marker_hit,
+                marker_terms=marker_result.marker_terms,
+                length_trigger=length_result.length_trigger,
+                final_word_count=length_result.final_word_count,
             )
-            trigger_suppressed_by = ""
-            trigger_source = ""
-            if marker_hit_computed and length_trigger_computed:
-                trigger_source = "markers+length"
-            elif marker_hit_computed:
-                trigger_source = "markers"
-            elif length_trigger_computed:
-                trigger_source = "length"
-            if trigger_fires and busy_descendants > 0:
-                # Busy descendant ⇒ healthy wait. Suppress the
-                # trigger ENTIRELY: clear ``trigger_source`` (the
-                # cheap-allow signal), stamp
-                # ``trigger_suppressed_by`` for log forensics. The
-                # marker/length fields keep their computed values
-                # so operators can see in the log row that the
-                # trigger WOULD have fired but for the busy
-                # suppression. ``marker_path`` is force-cleared to
-                # ``""`` since no judge fires — the
-                # route-(a)/(b)/(c)/(d) enum is moot on this
-                # branch.
-                trigger_source = ""
-                trigger_suppressed_by = "busy_descendants"
-            if trigger_fires:
-                # The trigger scan is a TRIGGER only. The judge is the
-                # VERDICT. The actual (a)/(b)/(c)/(d) routing happens
-                # in the graph node (async context — the judge is an
-                # async LLM call). ``evaluate()`` marks the gate
-                # decision with marker_hit + marker_terms + a sentinel
-                # marker_path="<pending>" so the canonical log row
-                # carries the diagnostic fields. The graph node reads
-                # these, calls the judge, and re-emits the final
-                # marker_path value (a/b/c/d). On DRY_LOG the graph
-                # node early-outs before any judge/hint/deny/counter
-                # side effect — the sentinel stays as the final
-                # marker_path on the dry-log row (log-only).
-                #
-                # 2026-09-12 busy-suppression branch — when the
-                # trigger is suppressed (trigger_source cleared +
-                # trigger_suppressed_by set), ``marker_path`` stays
-                # at ``""`` (no judge fires — no path to record).
-                # ``marker_judge_verdict`` is stamped to ``"<pending>"``
-                # sentinel (same as the non-suppressed branch — the
-                # gate always emits the pending sentinel on the
-                # canonical log row; the graph node re-stamps the
-                # final a/b/c/d value on the judge path and the
-                # ``<pending>`` value is what stays on the dry-log
-                # row when no judge runs. The log-row formatter maps
-                # empty ``marker_path`` to ``<none>`` and non-empty
-                # ``marker_judge_verdict`` to its literal — so the
-                # suppressed branch logs as ``marker_path=<none>
-                # marker_judge_verdict=<pending>``, while the dry-log
-                # branch logs as ``marker_path=<pending>
-                # marker_judge_verdict=<pending>``, and the
-                # marker-suppression-vs-trigger signal is observable
-                # in the canonical log row via ``marker_hit`` /
-                # ``length_trigger`` keeping their computed values.
-                marker_path_stamp = (
-                    "<pending>" if not trigger_suppressed_by else ""
-                )
-                result = replace(
-                    result,
-                    marker_hit=marker_result.marker_hit,
-                    marker_terms=marker_result.marker_terms,
-                    marker_path=marker_path_stamp,
-                    marker_judge_verdict="<pending>",
-                    marker_judge_latency_ms=0,
-                    marker_judge_error_class=None,
-                    length_trigger=length_result.length_trigger,
-                    final_word_count=length_result.final_word_count,
-                    trigger_source=trigger_source,
-                    busy_descendants=busy_descendants,
-                    trigger_suppressed_by=trigger_suppressed_by,
-                )
+
 
         # (iv) canonical structured log entry (Phase 4 task 4.5 schema —
         # every canonical field; the conditional-attestation
         # supplementary fields are emitted alongside for dry-mode soak
-        # and the FR-3 conditionality audit log; the mid-work marker
+        # and the FR-3 conditionality audit log; the Source-B signal
         # fields (2026-09-11, incident b08f40fe) ride alongside in the
-        # same additive shape — marker_hit / marker_terms / marker_path
-        # are NOT in the canonical 17-field tuple but the format
-        # string is the single log source of truth so dry-mode soak
-        # data is grep-able).
+        # same additive shape — marker_hit / marker_terms are NOT in
+        # the canonical tuple but the format string is the single log
+        # source of truth so dry-mode soak data is grep-able. Stage 3
+        # (2026-09-17): the outside-window diagnostic, the marker
+        # route enum, the judge-verdict stamp fields, and the
+        # trigger-derivation fields retired with R1/R5/R6/R7).
         logger.info(
             "event=leader_completion_gate decision=%s instance_id=%s "
             "gate_location=%s leader_prompt_version=%s mode=%s "
             "attestation_present=%s denied_count=%s next_denied_count=%s "
             "pending_children=%s queued_or_expected_wakeups=%s "
             "live_descendants=%s busy_descendants=%s "
-            "trigger_suppressed_by=%s "
             "attestation_required=%s "
             "last_real_user_found=%s last_real_user_index=%s "
             "first_delegation_after_last_user_index=%s "
             "delegation_tool_call_total=%s "
-            "attest_seen_outside_window=%s messages_scanned=%s "
+            "messages_scanned=%s "
             "scanned_window_size=%s scanner_window_truncated=%s "
             "scanner_summary_seen=%s should_inject_nudge=%s "
-            "marker_hit=%s marker_terms=%s marker_path=%s "
-            "marker_judge_verdict=%s marker_judge_latency_ms=%s "
-            "marker_judge_error_class=%s "
-            "length_trigger=%s final_word_count=%s trigger_source=%s "
+            "marker_hit=%s marker_terms=%s "
+            "length_trigger=%s final_word_count=%s "
             "user_answer_pending=%s",
             result.decision.value,
             instance_id,
@@ -1356,13 +1181,11 @@ def evaluate(
             result.queued_or_expected_wakeups,
             result.live_descendants,
             result.busy_descendants,
-            result.trigger_suppressed_by or "<none>",
             result.attestation_required,
             result.last_real_user_found,
             result.last_real_user_index,
             result.first_delegation_after_last_user_index,
             result.delegation_tool_call_total,
-            result.attest_seen_outside_window,
             result.messages_scanned,
             result.scanned_window_size,
             result.scanner_window_truncated,
@@ -1370,13 +1193,8 @@ def evaluate(
             result.should_inject_nudge,
             result.marker_hit,
             ",".join(result.marker_terms) if result.marker_terms else "<none>",
-            result.marker_path or "<none>",
-            result.marker_judge_verdict or "<none>",
-            result.marker_judge_latency_ms,
-            result.marker_judge_error_class if result.marker_judge_error_class is not None else "<none>",
             result.length_trigger,
             result.final_word_count,
-            result.trigger_source or "<none>",
             result.user_answer_pending,
             extra=meta,
         )

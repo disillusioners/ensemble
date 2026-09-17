@@ -416,9 +416,6 @@ def test_shared_helper_matches_decide_step_6_semantics():
         live_descendants=0,
         denied_count=3,
         bound=3,
-        scope_applicable=True,
-        mode="enforce",
-        attestation_enabled=True,
         attestation_required=True,
     )
     assert terminal.decision is decision.TERMINAL_AFTER_BOUND
@@ -432,9 +429,6 @@ def test_shared_helper_matches_decide_step_6_semantics():
         live_descendants=0,
         denied_count=2,
         bound=3,
-        scope_applicable=True,
-        mode="enforce",
-        attestation_enabled=True,
         attestation_required=True,
     )
     assert denied.decision is decision.DENIED

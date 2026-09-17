@@ -58,7 +58,6 @@ from daemon.services.attestation_resolver import (
 )
 from daemon.graph import (
     COMPLETION_CHECK_NOTE_TEXT,
-    _LCA_STAGE2_RESOLVER_FLIP,
     create_attestation_gate_node,
 )
 
@@ -694,29 +693,31 @@ class TestJudgeInvokedDerivation:
         assert eval_rows and "judge_invoked=False" in eval_rows[0]
 
 
-class TestOldSitesDeadButPresent:
-    def test_flip_constant_is_on(self):
-        assert _LCA_STAGE2_RESOLVER_FLIP is True
+class TestLegacySitesDeleted:
+    """Stage 3 (2026-09-17, R7): the two legacy judge sites are not
+    dead-but-present anymore — they are DELETED. The flip constant is
+    gone (no runtime toggle by design; revert = redeploy an earlier
+    build), the legacy judge service entry points no longer exist, and
+    the legacy event family can never fire because no code path can
+    reach it. Complementary structural pins live in
+    ``tests/unit/test_attestation_stage3_census.py``; these behavioral
+    pins exercise the live node."""
 
-    def test_legacy_judge_entries_never_called(self, monkeypatch, caplog):
-        """Both legacy entry points are unreachable while the flip is
-        active: the old marker-path judge and the would-be-deny judge
-        would call ``judge_completion_report_async`` — it MUST stay at
-        zero calls across a full fused evaluation (including the deny
-        band, which used to be the would-be-deny site's row)."""
-        legacy_calls = []
+    def test_flip_constant_deleted_from_graph_module(self):
+        import daemon.graph as graph_module
 
-        async def _legacy_never(messages, *, config, window=3, timeout_s=None):
-            legacy_calls.append(messages)
-            from daemon.services.attestation_report_judge import JudgeResult
+        assert not hasattr(graph_module, "_LCA_STAGE2_RESOLVER_FLIP")
 
-            return JudgeResult(
-                is_complete_report=True, verdict="yes", reason="x", model="m", latency_ms=0
-            )
+    def test_legacy_judge_symbols_deleted(self):
+        assert not hasattr(judge_mod, "judge_completion_report_async")
+        assert not hasattr(judge_mod, "judge_completion_report_sync")
+        assert not hasattr(judge_mod, "JudgeResult")
 
-        monkeypatch.setattr(
-            judge_mod, "judge_completion_report_async", _legacy_never
-        )
+    def test_fused_judge_serves_both_legacy_families(self, monkeypatch, caplog):
+        """The deny band (the would-be-deny site's family) and the
+        marker band (the marker site's family) both route through the
+        ONE fused judge — two evaluations, two fused invocations, zero
+        legacy rows."""
         spy = _JudgeSpy([_not_complete_json()])
         monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
 
@@ -735,11 +736,9 @@ class TestOldSitesDeadButPresent:
                 "dead-marker",
             )
 
-        assert legacy_calls == [], (
-            "old judge sites must be dead-but-present (routing removed only)"
-        )
         # The fused judge IS the one that ran (twice — once per eval).
         assert len(spy.attempts) == 2
+        assert _rows(caplog, "event=leader_completion_gate_fused_judge ")
 
     def test_legacy_marker_log_rows_silent(self, monkeypatch, caplog):
         """The legacy marker-judge event family does not fire."""

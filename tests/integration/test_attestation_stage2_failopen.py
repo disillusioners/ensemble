@@ -105,7 +105,6 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.graph import (
-    _LCA_STAGE2_RESOLVER_FLIP,
     create_attestation_gate_node,
 )
 from daemon.services import attestation_report_judge as judge_mod
@@ -132,17 +131,23 @@ from daemon.services.attestation_resolver import (
 
 
 def _drift_pin() -> None:
-    """Assert the Stage-2 flip is ACTIVE.
+    """Assert the Stage-3 single-path shape is ACTIVE.
 
-    Drift-pin per the project blueprint (c) — the relaxed guard
-    accepting only test/packs + tests + .agents/tester path
-    deltas is applied at the WORKTREE level (see Job 5 brief)."""
-    assert _LCA_STAGE2_RESOLVER_FLIP is True, (
-        "Stage-2 flip is OFF — the matrix would silently degrade "
-        "to pre-Stage-2 behavior (no fused block, no resolver "
-        "snapshot, no per-fault attribution). Re-pin before "
-        "proceeding."
+    Stage 3 (2026-09-17, R7): the flip constant is DELETED — the
+    fused block is the sole completion path (unconditionally guarded
+    only by ``resolver_snapshot is not None``). If a future change
+    re-introduces a toggle or drops the fused guard, this pin fires
+    before the matrix silently degrades."""
+    import daemon.graph as graph_module
+
+    assert not hasattr(graph_module, "_LCA_STAGE2_RESOLVER_FLIP"), (
+        "the Stage-3 retirement deleted the flip constant — "
+        "resurrecting a runtime toggle violates repo convention n"
     )
+    import inspect
+
+    node_src = inspect.getsource(create_attestation_gate_node)
+    assert "if resolver_snapshot is not None:" in node_src
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1503,3 +1508,106 @@ class TestGateExceptionSeenStampFC:
             "gate_location=fused_block" in r
             for r in _rows(caplog, "event=leader_completion_gate_error ")
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage-3 ledger item (b) — NAMED invariant: the F2 fail-open TARGET pin.
+# The kill-switch-off MIRROR semantics on resolver-compute faults.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF2FailOpenTargetPin:
+    """NAMED invariant (Stage-3 ledger item (b), 2026-09-17): on a
+    RESOLVER-COMPUTE fault (seams i/ii — activation predicate /
+    bundle assembly raising) the per-band outcomes MIRROR the
+    kill-switch-off mapping EXACTLY:
+
+    * deny band  → deny+nudge WITHOUT a judge (Q1 parity — the
+      rescue-judge opportunity is FORFEITED, never fail-safe-allowed;
+      conservative rescue-judge-forfeit documented in decisions.md
+      D-RES4 ledger (d));
+    * marker / A bands → PLAIN ALLOW (suspicion signals are too weak
+      to deny without the judge; zero counter movement, zero nudge,
+      zero hint).
+
+    This pin is the named seam-i/ii aggregate of the per-fault rows
+    above — implementing "fault → allow everywhere" or "fault →
+    deny everywhere" anywhere on this seam fails it loudly.
+    """
+
+    def test_f2_fail_open_target_mirrors_kill_switch_off(
+        self, monkeypatch, caplog
+    ):
+        _drift_pin()
+        # Make the resolver compute raise on EVERY evaluation (seam i).
+        monkeypatch.setattr(
+            resolver_activation_mod,
+            "activation_predicate",
+            _ActivationPredicateBoom(),
+        )
+        spy = _JudgeSpy(
+            ['{"verdict": "complete", "rationale": "unused"}']
+        )
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+        # ── deny band (un-attested ∧ quiet): deny+nudge, NO judge ──
+        node_deny, _m1, ledger_deny = _make_node(instance_id="f2p-deny")
+        with _capture(caplog).at_level(logging.INFO):
+            result_deny = _run(
+                node_deny, _delegated_state("All done."), "f2p-deny"
+            )
+        assert "messages" in result_deny, (
+            "F2 target pin — deny band: resolver-compute fault keeps "
+            "deny+nudge (the kill-switch-off mirror), NEVER a "
+            "fail-safe allow"
+        )
+        assert result_deny["attestation_route"] == "agent"
+        ledger_deny.increment.assert_called_once()
+        assert _rows(
+            caplog, "event=leader_completion_resolver_eval_error"
+        ), "resolver-compute fault row MUST fire"
+
+        # ── marker band (b_fires ∧ ¬quiet): plain allow, NO judge ──
+        caplog.clear()
+        node_m, _m2, ledger_m = _make_node(
+            instance_id="f2p-marker",
+            pending_children=1,
+            live_descendants=1,
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result_m = _run(
+                node_m,
+                _delegated_state("Awaiting child. Ending turn."),
+                "f2p-marker",
+            )
+        assert result_m.get("attestation_route") is None
+        assert "messages" not in result_m, (
+            "F2 target pin — marker band: resolver-compute fault "
+            "plain-allows (kill-switch-off mirror) — no hint, no nudge"
+        )
+        ledger_m.increment.assert_not_called()
+        ledger_m.reset.assert_not_called()
+
+        # ── A band (a_suspicion alone, ¬quiet): plain allow ──
+        caplog.clear()
+        node_a, _m3, ledger_a = _make_node(
+            instance_id="f2p-a",
+            pending_children=1,
+            live_descendants=1,
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result_a = _run(
+                node_a,
+                _delegated_state(
+                    "All shipped.",
+                    extra_messages=(_child_report_check_note(),),
+                ),
+                "f2p-a",
+            )
+        assert result_a.get("attestation_route") is None
+        assert "messages" not in result_a
+        ledger_a.increment.assert_not_called()
+
+        # ZERO judge HTTP attempts across ALL three bands — the
+        # rescue-judge is forfeited on every band on this seam.
+        assert spy.attempts == []

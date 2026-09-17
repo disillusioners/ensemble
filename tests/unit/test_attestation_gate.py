@@ -43,8 +43,18 @@ from daemon.services.attestation_scanner import DEFAULT_ATTESTATION_TOOL_NAME
 # helper defaults ``attestation_required=True``. Tests that exercise
 # the new conditional-gate-OFF branch import the bare ``decide`` and
 # pass ``attestation_required=False`` explicitly.
+#
+# Stage 3 (2026-09-17, resolver-unification R2/R3): decide() lost its
+# meta params (scope_applicable / mode / attestation_enabled) — those
+# branches moved to evaluate()'s composition layer (predicate Term 0 /
+# Term 1 mirrors + the mode-layer dry mapping). The matrix tests below
+# still PASS those kwargs (historical shape); the helper drops them so
+# the assertions pin the pure enforce tree unchanged.
 def decide(*args, **kwargs):
     kwargs.setdefault("attestation_required", True)
+    kwargs.pop("scope_applicable", None)
+    kwargs.pop("mode", None)
+    kwargs.pop("attestation_enabled", None)
     return _decide_impl(*args, **kwargs)
 
 
@@ -108,12 +118,21 @@ def make_manager(pending_children=0, wakeups=0, live_descendants=0):
 # =============================================================================
 
 
-class TestDecideMetaConditions:
+class TestMetaConditionsAtCompositionLayer:
+    """Stage 3 (R2): decide() lost its meta-condition branch — the
+    master-flag / leader-scope / off-mode checks live at evaluate()'s
+    composition layer (mirroring the unified predicate's Term 0).
+    Production enforces them at GRAPH-BUILD time (the gate node is
+    only wired for in-scope leaders with the master flag on); these
+    pins hold the evaluate()-level defensive mirror."""
+
+    def _deny_row_messages(self):
+        return plain_messages()
+
     def test_disabled_gate_allows_regardless(self):
-        result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
-            denied_count=2, bound=3, scope_applicable=True, mode="enforce",
-            attestation_enabled=False,
+        result = evaluate(
+            "meta-disabled", 2, self._deny_row_messages(), DEFAULT_GATE_SETTINGS,
+            make_manager(), attestation_enabled=False,
         )
         assert result.decision is Decision.ALLOWED
         assert result.should_inject_nudge is False
@@ -121,44 +140,46 @@ class TestDecideMetaConditions:
         assert result.next_denied_count == 2
 
     def test_scope_inapplicable_allows(self):
-        result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
-            denied_count=1, bound=3, scope_applicable=False, mode="enforce",
-            attestation_enabled=True,
+        result = evaluate(
+            "meta-scope", 1, self._deny_row_messages(), DEFAULT_GATE_SETTINGS,
+            make_manager(), scope_applicable=False,
         )
         assert result.decision is Decision.ALLOWED
         assert result.next_denied_count == 1
 
     def test_mode_off_allows_regardless(self):
-        result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
-            denied_count=3, bound=3, scope_applicable=True, mode="off",
-            attestation_enabled=True,
+        settings = GateSettings(mode="off", window=3, deny_bound=3)
+        result = evaluate(
+            "meta-off", 3, self._deny_row_messages(), settings, make_manager(),
         )
         assert result.decision is Decision.ALLOWED
         assert result.next_denied_count == 3
 
 
-class TestDecideDryMode:
+class TestDryModeAtCompositionLayer:
+    """Stage 3 (R3): the DRY_LOG mapping moved from decide()'s branch
+    to evaluate()'s mode layer — the enforce-tree decision is computed
+    with full diagnostics, then mapped to DRY_LOG with the counter
+    frozen at its input value. Same observable contract as the retired
+    branch: decision=dry_log, zero side effects, counter unchanged."""
+
     def test_dry_is_dry_log_with_zero_side_effects(self):
         # Dry + missing attestation + R2-deny-predicate satisfied:
         # evaluation recorded (dry_log) but allow + no counter change.
-        result = decide(
-            attested=False, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
-            denied_count=1, bound=3, scope_applicable=True, mode="dry",
-            attestation_enabled=True,
+        settings = GateSettings(mode="dry", window=3, deny_bound=3)
+        result = evaluate(
+            "dry-mapping", 1, plain_messages(), settings, make_manager(),
         )
         assert result.decision is Decision.DRY_LOG
         assert result.should_inject_nudge is False
-        assert result.next_denied_count == 1  # zero side effects
+        assert result.next_denied_count == 1  # zero side effects (frozen)
 
     def test_dry_with_attestation_still_dry_log(self):
-        # Plan logic-tree order: dry short-circuits BEFORE the attested
-        # check — so no reset fires in dry (zero side effects, always).
-        result = decide(
-            attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
-            denied_count=2, bound=3, scope_applicable=True, mode="dry",
-            attestation_enabled=True,
+        # The mode-layer mapping disarms the reset: no counter movement
+        # in dry even when the enforce tree would have reset (attested).
+        settings = GateSettings(mode="dry", window=3, deny_bound=3)
+        result = evaluate(
+            "dry-attested", 2, attest_messages(), settings, make_manager(),
         )
         assert result.decision is Decision.DRY_LOG
         assert result.next_denied_count == 2
@@ -369,11 +390,13 @@ class TestEvaluateComposition:
         assert result.queued_or_expected_wakeups == 1
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP  # R2-allow (DEFAULT=enforce; pending=3, wakeups=1)
 
-    def test_attest_seen_outside_window_populated(self):
-        # 2026-09-06 amendment: the conditional gate only fires for
-        # DELEGATED missions. Add a HumanMessage (real user) and a
-        # send_message tool call to represent the delegated-mission
-        # branch the test exercises.
+    def test_stale_outside_window_attestation_still_denies(self, caplog):
+        """Stage 3 (R1) re-contract: the outside-window diagnostic
+        FIELD is retired (log-only, no decision weight); the behavior
+        it observed — a STALE attestation aged out of the window does
+        NOT satisfy the gate — is pinned here on the decision itself."""
+        import logging as _logging
+
         messages = [
             HumanMessage(content="go"),
             ai("dispatching child", tool_calls=[
@@ -385,14 +408,21 @@ class TestEvaluateComposition:
         for i in range(4):
             messages.append(ai(f"filler {i}"))
         manager = make_manager()
-        result = evaluate(
-            "inst-1", 0, messages, DEFAULT_GATE_SETTINGS, manager,
-        )
-        assert result.attest_seen_outside_window is True
+        with caplog.at_level(_logging.INFO, logger="daemon.services.attestation_gate"):
+            result = evaluate(
+                "inst-1", 0, messages, DEFAULT_GATE_SETTINGS, manager,
+            )
         assert result.attestation_present is False
         # DEFAULT=enforce (operator override 2026-09-06); no in-window
         # attestation + R2-deny predicate satisfied (0/0) → DENIED + nudge.
         assert result.decision is Decision.DENIED
+        # The retired diagnostic key is absent from the canonical row.
+        log_line = next(
+            record.message
+            for record in caplog.records
+            if "event=leader_completion_gate" in record.message
+        )
+        assert "attest_seen_outside_window=" not in log_line
 
     def test_enforce_deny_full_flow(self):
         manager = make_manager(0, 0)
@@ -657,18 +687,17 @@ class TestDeniedRowsHaveDefaultMarkerFields:
             "the gate logic regressed or the field was set elsewhere."
         )
 
-    def test_denied_rows_have_default_marker_path_empty_string(self):
-        """Bonus pin: ``marker_path`` stays empty on DENIED rows
-        (the scanner never runs, so no path can be recorded)."""
+    def test_denied_rows_have_no_marker_path_field(self):
+        """Stage 3 (R6/R7) re-contract: the marker route enum
+        (``marker_path`` / a-b-c-d) retired with the legacy judge
+        plumbing — the field no longer EXISTS on the decision."""
+        import dataclasses as _dc
+
         manager = make_manager(pending_children=0, wakeups=0)
         settings = GateSettings(mode="enforce", window=3, deny_bound=3)
         result = evaluate(
             "inst-denied-path", 0, plain_messages(), settings, manager,
         )
         assert result.decision is Decision.DENIED
-        assert result.marker_path == "", (
-            "marker_path on a DENIED row MUST stay empty — the scanner "
-            "does not run on the deny path, so no a/b/c/d route can "
-            "be recorded. A non-empty value here would indicate the "
-            "trigger ran on the deny path (a regression)."
-        )
+        field_names = {f.name for f in _dc.fields(result)}
+        assert "marker_path" not in field_names

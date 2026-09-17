@@ -239,38 +239,6 @@ def scan_for_attestation(
     return result.attested, result.diagnostics
 
 
-def attestation_seen_outside_window(
-    messages: list[BaseMessage],
-    window: int,
-    tool_name: str = DEFAULT_ATTESTATION_TOOL_NAME,
-) -> bool:
-    """O3 diagnostic — attestation present in history but stale (outside window).
-
-    A ``True`` here means the leader DID attest at some point, but the
-    attestation has aged out of the window (e.g. a stale pre-revive
-    attestation carried across a revive boundary — the exact bug class
-    the window scan exists to defeat). This is diagnostic-only output
-    for the canonical gate log; it is NEVER a deny trigger and it is
-    NOT part of the ``attested`` decision path (which stays bounded to
-    the window per AC-2.5 / AC-3.4).
-    """
-    if window < 1:
-        window = 1
-
-    seen_in_window = 0
-    for _index, message, is_summary in _backward_scan_entries(messages):
-        if is_summary:
-            continue
-        seen_in_window += 1
-        if seen_in_window <= window:
-            # Inside the window — the attested scan already accounted
-            # for these; only OLDER AIMessages are diagnostic-relevant.
-            continue
-        if tool_name in _tool_call_names(message):
-            return True
-    return False
-
-
 # ════════════════════════════════════════════════════════════════════════════════
 # Conditional-attestation scanner — Phase 6 fastfollow (2026-09-06)
 #
