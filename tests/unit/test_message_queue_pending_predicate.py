@@ -58,6 +58,7 @@ from daemon.repositories.message_queue.models import (
     MessageType,
 )
 from daemon.repositories.message_queue.predicates import (
+    finalizer_counts_as_pending,
     message_queue_counts_as_pending,
 )
 from daemon.repositories.task.models import Task, TaskStatus
@@ -644,3 +645,202 @@ def test_audit_documented_sites_match_plan_classification() -> None:
         f"child_reports.py references the predicate {refs} times; "
         f"expected 3-10 (matches plan's 1+2+1 layout)"
     )
+
+
+# ═══ Stage-0 advisory-note finalizer guard (2026-09-17 wedge fix) ════════════
+
+
+class TestFinalizerCountsAsPendingAdvisoryGuard:
+    """``finalizer_counts_as_pending`` — the root-finalizer hardened
+    variant (Stage-0 ``child_report_check`` strand wedge fix).
+
+    Contract on top of the base predicate:
+
+      * task-less ``child_report_check:`` advisory row → NEVER counts
+        (delivery is task-driven only; the note was minted without a
+        carrier and can never be delivered — it must never defer a
+        parent-completion flip).
+      * task-CARRYING ``child_report_check:`` advisory row → counts
+        via the base predicate (unchanged).
+      * task-less READY row of ANY OTHER source → still counts
+        conservatively + emits a WARNING (different bug class, needs
+        visibility — semantics unchanged for unknown producers).
+      * the ``system:watchdog`` wedge-notice shape (READY + correlated
+        Task) keeps counting exactly as before.
+    """
+
+    def _seed_note_row(
+        self,
+        engine: Engine,
+        *,
+        instance_id: str,
+        message_id: str,
+        source: str,
+        status: str = MessageStatus.READY.value,
+    ) -> None:
+        """Insert a MessageQueue row with an explicit source string."""
+        now = datetime.now(timezone.utc)
+        with Session(engine) as s:
+            s.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content="[SYSTEM CONTEXT: Child Report Check]",
+                    type=MessageType.SYSTEM.value,
+                    source=source,
+                    status=status,
+                    priority=0,
+                    enqueued_at=now,
+                    last_activity_at=now,
+                )
+            )
+            s.commit()
+
+    def test_taskless_child_report_check_note_excluded(
+        self, engine: Engine
+    ) -> None:
+        """Legacy stranded note (READY, ``child_report_check:`` source,
+        NO Task) — the base predicate counts it, the finalizer variant
+        EXCLUDES it. This delta is the wedge fix.
+        """
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"note-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source=f"child_report_check:child-1:report-1",
+        )
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        # Base predicate: READY → always counts (the pre-fix wedge).
+        assert message_queue_counts_as_pending(row, engine) is True
+        # Finalizer variant: task-less advisory → excluded.
+        assert finalizer_counts_as_pending(row, engine) is False
+
+    def test_task_carrying_child_report_check_note_counts(
+        self, engine: Engine
+    ) -> None:
+        """A note WITH a correlated Task (the post-fix mint shape)
+        still counts — the exclusion is scoped to task-less rows.
+        """
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"note-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source=f"child_report_check:child-1:report-1",
+        )
+        _seed_task(engine, instance_id=instance_id, message_id=mid)
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        assert finalizer_counts_as_pending(row, engine) is True
+
+    def test_taskless_advisory_processing_row_excluded(
+        self, engine: Engine
+    ) -> None:
+        """A task-less PROCESSING advisory row is also excluded — the
+        advisory carve-out keys on source + carrier absence, not on
+        status.
+        """
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"note-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source=f"child_report_check:child-1:report-1",
+            status=MessageStatus.PROCESSING.value,
+        )
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        assert finalizer_counts_as_pending(row, engine) is False
+
+    def test_unknown_taskless_ready_row_counts_with_warning(
+        self, engine: Engine, caplog
+    ) -> None:
+        """Task-less READY row of an UNKNOWN source: counts
+        conservatively (semantics unchanged) + WARNING log.
+        """
+        import logging as _logging
+
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"msg-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source="api",
+        )
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        with caplog.at_level(
+            _logging.WARNING,
+            logger="daemon.repositories.message_queue.predicates",
+        ):
+            assert finalizer_counts_as_pending(row, engine) is True
+
+        assert any(
+            "task-less READY row" in rec.message for rec in caplog.records
+        ), f"expected the task-less-READY WARNING; got {caplog.records}"
+
+    def test_watchdog_notice_with_task_counts(self, engine: Engine) -> None:
+        """(e) The ``system:watchdog`` wedge-notice shape (READY +
+        correlated Task) still counts as pending — unchanged.
+        """
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"wd-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source="system:watchdog",
+        )
+        _seed_task(engine, instance_id=instance_id, message_id=mid)
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        # Both the base and the finalizer variant keep counting it.
+        assert message_queue_counts_as_pending(row, engine) is True
+        assert finalizer_counts_as_pending(row, engine) is True
+
+    def test_watchdog_taskless_ready_still_counts_with_warning(
+        self, engine: Engine, caplog
+    ) -> None:
+        """A task-less READY ``system:watchdog`` row is NOT in the
+        advisory carve-out — it counts conservatively with the
+        WARNING (never silently dropped).
+        """
+        import logging as _logging
+
+        instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+        mid = f"wd-{uuid.uuid4().hex[:12]}"
+        self._seed_note_row(
+            engine,
+            instance_id=instance_id,
+            message_id=mid,
+            source="system:watchdog",
+        )
+
+        with Session(engine) as s:
+            row = s.get(MessageQueue, mid)
+
+        with caplog.at_level(
+            _logging.WARNING,
+            logger="daemon.repositories.message_queue.predicates",
+        ):
+            assert finalizer_counts_as_pending(row, engine) is True
+
+        assert any(
+            "task-less READY row" in rec.message for rec in caplog.records
+        )

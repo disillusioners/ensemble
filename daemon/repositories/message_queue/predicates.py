@@ -56,6 +56,7 @@ Reference: ``.agents/shared/planning/fix-pause-report-turn-orphan/phase2-plan.md
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 from sqlalchemy.engine import Engine
@@ -63,6 +64,16 @@ from sqlmodel import Session, select
 
 from ..task.models import Task, TaskStatus
 from .models import MessageQueue, MessageStatus
+
+logger = logging.getLogger(__name__)
+
+# Source prefix stamped on the LCA Stage-0 ``child_report_check``
+# advisory note rows minted by
+# ``daemon/services/child_reports.py::_process_child_completion_db_sync``.
+# Single source of truth for the finalizer count guard below — change
+# the mint prefix and this constant TOGETHER or the guard silently
+# stops matching (drift hazard class).
+CHILD_REPORT_CHECK_SOURCE_PREFIX = "child_report_check:"
 
 
 # Task statuses that count as "live" (any non-terminal work attempt).
@@ -285,3 +296,92 @@ def message_queue_counts_as_pending(
 
     # Some correlated work_id is live — counts.
     return True
+
+
+def _row_has_any_task(engine: Engine, *, message_id: str) -> bool:
+    """Return ``True`` iff ANY ``Task`` row correlates to the given
+    ``message_id`` via ``Task.message_id`` (existence check — ANY
+    status, live or terminal).
+
+    This is the "does this queue row have a delivery carrier?"
+    probe. A MessageQueue row with a Task in ANY status went through
+    (or is going through) the durable enqueue-shaped path; a row
+    with NO Task at all was minted task-less and can never be
+    delivered by the task-driven pipeline
+    (``message_processing_pipeline.py`` claims by Task).
+    """
+    with Session(engine) as s:
+        found = s.exec(
+            select(Task.id).where(Task.message_id == message_id)
+        ).first()
+    return found is not None
+
+
+def finalizer_counts_as_pending(
+    row: MessageQueue,
+    engine: Engine,
+) -> bool:
+    """Root-finalizer hardened variant of
+    :func:`message_queue_counts_as_pending` (defense-in-depth for the
+    Stage-0 ``child_report_check`` stranding bug, 2026-09-17).
+
+    Contract = the base predicate PLUS two advisory-row refinements:
+
+      1. A task-less advisory note row (``source`` prefix
+         ``child_report_check:`` with NO correlated Task) NEVER
+         counts. The note was minted without a delivery carrier; the
+         task-driven pipeline can never deliver it, so it must never
+         defer a parent-completion flip (the permanent
+         WAITING_CHILDREN re-park wedge class). An advisory row WITH
+         a correlated Task falls through to the base predicate and
+         counts normally.
+      2. Any OTHER task-less READY row (unknown source, no
+         correlated Task) STILL counts conservatively — semantics
+         unchanged for unknown producers — but logs a WARNING: a
+         task-less READY row is a different bug class (delivery can
+         never happen) and needs operator visibility.
+
+    Rows with a correlated Task (any status) behave EXACTLY like the
+    base predicate.
+
+    Scope: called from the root turn-end finalizer
+    (``child_reports.py`` root carve-out pending-count) only. The
+    dead-code fallback parent-completion guards still use the base
+    predicate — porting there is deliberately NOT done to keep this
+    completion-path behavior change minimal.
+    """
+    source = str(row.source or "")
+    is_advisory_note = source.startswith(CHILD_REPORT_CHECK_SOURCE_PREFIX)
+
+    # Task-existence probe: required for the advisory exclusion and
+    # for the task-less-READY WARNING. One small indexed SELECT per
+    # READY/advisory candidate row — the root finalizer is a rare
+    # (turn-end) event, so the cost is proportional.
+    row_has_task: bool | None = None
+    if is_advisory_note or row.status == MessageStatus.READY.value:
+        row_has_task = _row_has_any_task(engine, message_id=row.message_id)
+
+    # Refinement 1 — task-less advisory note: undeliverable, never
+    # blocks a terminal flip.
+    if is_advisory_note and not row_has_task:
+        return False
+
+    counts = message_queue_counts_as_pending(row, engine)
+
+    # Refinement 2 — unknown task-less READY row: different bug
+    # class. Keep the conservative count (do NOT silently change
+    # semantics for unknown sources) but make it visible.
+    if (
+        counts
+        and row.status == MessageStatus.READY.value
+        and not row_has_task
+    ):
+        logger.warning(
+            "message_queue finalizer: task-less READY row counts as "
+            "pending conservatively (unknown task-less source — "
+            "delivery can never happen; different bug class, needs "
+            f"visibility): message_id={row.message_id} "
+            f"source={source!r} instance_id={row.instance_id}"
+        )
+
+    return counts

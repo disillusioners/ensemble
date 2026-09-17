@@ -1242,3 +1242,253 @@ def test_this_module_compiles():
         inspect.getfile(inspect.currentframe()),
         doraise=True,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage-0 mint-with-delivery + terminal-parent suppression + finalizer
+# count-guard (2026-09-17 strand wedge fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestChildReportCheckMintWithDelivery:
+    """The Stage-0 note must mint WITH its delivery carrier.
+
+    Root cause being pinned: the note was minted as a RAW MessageQueue
+    row (READY, no Task, no notify). Delivery is task-driven only
+    (``message_processing_pipeline.py`` claims by Task) and the root
+    turn-end finalizer counted the undeliverable READY row as pending
+    → permanent WAITING_CHILDREN re-park. The fix:
+
+      1. mint-with-delivery — note row + PENDING PROCESS_MESSAGE Task
+         in the SAME SAVEPOINT, worker pool woken after commit;
+      2. terminal-parent mint suppression — a parent in ANY terminal
+         state (completed/terminated/error/failed) never receives the
+         note;
+      3. finalizer count-guard — task-less advisory rows never count
+         (predicate-level pins live in
+         ``test_message_queue_pending_predicate.py``).
+    """
+
+    def test_mint_creates_note_row_and_pending_delivery_task(
+        self, service, engine, bus
+    ):
+        """(a) Mint seam — the note row gets a MATCHING PENDING
+        ``process_message`` Task (same ``message_id``, parent's
+        ``instance_id``) in the same transaction, and the result
+        carries the post-commit wake flag.
+        """
+        parent_id = "parent-mint"
+        child_id = "child-mint"
+        _seed_instance(engine, instance_id=parent_id)
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        result = service._process_child_completion_db_sync(
+            child_id,
+            completed_message_id="msg-mint",
+            last_content="will write RESULTS. Ending turn.",
+        )
+
+        assert result.outcome == "regular_child_completed"
+
+        with Session(engine) as s:
+            note = (
+                s.query(MessageQueue)
+                .filter(
+                    MessageQueue.instance_id == parent_id,
+                    MessageQueue.type == MessageType.SYSTEM.value,
+                )
+                .one()
+            )
+            task = (
+                s.query(Task)
+                .filter(Task.message_id == note.message_id)
+                .one()
+            )
+
+        # The note keeps its source-shape contract.
+        assert note.source.startswith("child_report_check:")
+        assert note.status == MessageStatus.READY.value
+        assert note.type == MessageType.SYSTEM.value
+
+        # The delivery carrier: PENDING process_message Task keyed on
+        # the note's message_id, bound to the PARENT.
+        assert task.task_type == TaskType.PROCESS_MESSAGE.value
+        assert task.status == TaskStatus.PENDING.value
+        assert task.instance_id == parent_id
+        assert task.message_id == note.message_id
+        assert task.work_id is not None
+
+        # The async caller must wake the worker pool after commit.
+        assert result.notify_worker_pool is True
+
+    def test_terminal_completed_parent_suppresses_note_mint(
+        self, service, engine, bus, caplog
+    ):
+        """(b) Terminal-parent mint suppression — a COMPLETED parent
+        receives NO note and NO note delivery Task. The REPORT path is
+        untouched (report row + PROCESS_REPORT task still mint — that
+        is the pre-existing sanctioned enqueue shape).
+        """
+        import logging as _logging
+
+        parent_id = "parent-terminal"
+        child_id = "child-terminal"
+        _seed_instance(
+            engine,
+            instance_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        with caplog.at_level(_logging.INFO):
+            result = service._process_child_completion_db_sync(
+                child_id,
+                completed_message_id="msg-terminal",
+                last_content="will write the next report. Ending turn.",
+            )
+
+        assert result.outcome == "regular_child_completed"
+        assert result.notify_worker_pool is False
+
+        with Session(engine) as s:
+            rows = (
+                s.query(MessageQueue)
+                .filter(MessageQueue.instance_id == parent_id)
+                .all()
+            )
+            tasks = (
+                s.query(Task)
+                .filter(Task.instance_id == parent_id)
+                .all()
+            )
+
+        # NO SYSTEM note row; the note delivery Task is absent too.
+        assert all(
+            r.type != MessageType.SYSTEM.value for r in rows
+        ), f"terminal parent must not receive the note; got {rows}"
+        note_task_ids = {
+            r.message_id
+            for r in rows
+            if r.source.startswith("child_report_check:")
+        }
+        assert not note_task_ids
+        assert all(
+            t.task_type != TaskType.PROCESS_MESSAGE.value for t in tasks
+        ), f"no process_message Task may be minted for the note; got {tasks}"
+
+        # Report path unchanged: report row READY + PROCESS_REPORT task.
+        report = next(
+            r for r in rows if r.type == MessageType.COMPLETION_REPORT.value
+        )
+        assert report.status == MessageStatus.READY.value
+        assert any(
+            t.task_type == TaskType.PROCESS_REPORT.value
+            and t.message_id == report.message_id
+            for t in tasks
+        )
+
+        # Observability: the skip is logged with the terminal reason
+        # (captured via the at_level(INFO) scope around the call).
+        assert any(
+            "reason=terminal_parent" in rec.message
+            for rec in caplog.records
+        ), "terminal-parent skip must be observable in the log"
+
+    async def test_worker_pool_woken_after_commit(
+        self, service, engine, bus, monkeypatch
+    ):
+        """(a) Notify seam — the async caller wakes the worker pool
+        AFTER ``asyncio.to_thread`` returns (commit durable), mirroring
+        the ``enqueue_message`` commit-then-notify ordering. Without
+        this wake the PENDING note Task sits unclaimed under a quiet
+        pool — the note would strand again by another route.
+        """
+        from unittest.mock import Mock
+        from types import SimpleNamespace
+
+        parent_id = "parent-notify"
+        child_id = "child-notify"
+        _seed_instance(engine, instance_id=parent_id)
+        _seed_instance(engine, instance_id=child_id, parent_id=parent_id)
+
+        pool = Mock()
+        service._manager._worker_pool = pool
+        service._manager._live_hub = None
+        service._manager._instance_repository = SimpleNamespace(
+            get=lambda iid: SimpleNamespace(agent_id="worker")
+        )
+
+        async def _fake_last_content(instance_id, agent_id):
+            return "will write RESULTS. Ending turn."
+
+        async def _noop_side_effects(result, lc, cmid):
+            return None
+
+        monkeypatch.setattr(
+            service, "_get_last_assistant_message", _fake_last_content
+        )
+        monkeypatch.setattr(
+            service, "_dispatch_post_commit_side_effects", _noop_side_effects
+        )
+
+        await service._process_child_completion_and_notify_parent(
+            child_id, "msg-notify"
+        )
+
+        pool.notify_work.assert_called_once()
+
+    def test_legacy_stranded_note_does_not_block_root_completion(
+        self, service, engine, bus
+    ):
+        """(d) Regression — a root whose own queue holds a LEGACY
+        stranded READY note (no Task) COMPLETES; pending_count == 0.
+        Before the count-guard this exact shape re-parked the root at
+        WAITING_CHILDREN forever (the 421c6a3d wedge signature).
+        """
+        root_id = "root-legacy"
+        child_id = "child-legacy"
+        _seed_instance(engine, instance_id=root_id, parent_id=None)
+
+        # The LEGACY stranded note: minted pre-fix — READY row, no
+        # Task, no notify. It sits on the root's OWN queue.
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        with Session(engine) as s:
+            s.add(MessageQueue(
+                message_id="legacy-note-1",
+                instance_id=root_id,
+                content="[SYSTEM CONTEXT: Child Report Check]",
+                type=MessageType.SYSTEM.value,
+                source=f"child_report_check:{child_id}:legacy-report-1",
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=now,
+                last_activity_at=now,
+                message_metadata={
+                    "context_kind": CONTEXT_KIND_CHILD_REPORT_CHECK,
+                    "injected_message": True,
+                    "child_report_check": True,
+                },
+            ))
+            s.commit()
+
+        result = service._process_child_completion_db_sync(
+            root_id,
+            completed_message_id="msg-root-final",
+            last_content="",
+        )
+
+        assert result.outcome == "root_completed", (
+            f"legacy stranded note must NOT block root completion; "
+            f"got {result.outcome}"
+        )
+
+        with Session(engine) as s:
+            root = s.get(Instance, root_id)
+            note = s.get(MessageQueue, "legacy-note-1")
+
+        assert root.status == InstanceStatus.COMPLETED.value
+        # The stranded row is retained (audit), just not counted.
+        assert note is not None
+        assert note.status == MessageStatus.READY.value
