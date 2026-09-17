@@ -547,7 +547,7 @@ class TestStep3SkillKeeperPerformsCapture:
         llm_payload = json.dumps({
             "name": "auto-captured-flow-c",
             "description": "Auto-extracted from a complex successful task",
-            "content": "## Captured body\nDo the thing systematically.",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
 
         task_details = {
@@ -585,7 +585,7 @@ class TestStep3SkillKeeperPerformsCapture:
         assert new_skill.description == (
             "Auto-extracted from a complex successful task"
         )
-        assert "Captured body" in new_skill.content
+        assert "Apply the documented checklist" in new_skill.content
 
     async def test_evolve_captured_has_no_parent_lineage(
         self,
@@ -596,7 +596,7 @@ class TestStep3SkillKeeperPerformsCapture:
         llm_payload = json.dumps({
             "name": "standalone-capture",
             "description": "no parent",
-            "content": "body",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
         task_details = {
             "task_message": "standalone",
@@ -632,7 +632,7 @@ class TestStep3SkillKeeperPerformsCapture:
         llm_payload = json.dumps({
             "name": "captured-from-source",
             "description": "uses source as prompt seed",
-            "content": "body",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
         task_details = {
             "skill": source_skill,
@@ -681,7 +681,7 @@ class TestStep3SkillKeeperPerformsCapture:
         llm_payload = json.dumps({
             "name": "embed-fail-capture",
             "description": "embed failed",
-            "content": "body",
+            "content": "## Procedure\n1. Read the task message and identify the goal.\n2. Apply the documented checklist step by step.\n3. Verify the outcome and report the result.",
         })
         task_details = {
             "task_message": "embed test",
@@ -770,7 +770,10 @@ class TestStep4MetricsAndCaptureAgree:
             "content": (
                 "## Captured body\n"
                 "Auto-extracted from a complex successful task "
-                "that didn't apply an existing skill."
+                "that didn't apply an existing skill.\n"
+                "1. Read the task message.\n"
+                "2. Apply the checklist.\n"
+                "3. Verify the outcome and report."
             ),
         })
 

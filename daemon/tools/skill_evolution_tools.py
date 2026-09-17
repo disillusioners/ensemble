@@ -386,6 +386,19 @@ the returned payload is a JSON metrics document.
         metrics-service path enforces more gates, but the tool path
         does not). When the kill-switch is ON (``=1``/``true``/etc.)
         the tool behavior is byte-identical to the pre-flag codebase.
+
+        Quality gates (2026-09-17, skill 7ae063c4 class): even with
+        the kill-switch ON, the service seam now rejects captures
+        with a blank/whitespace ``task_message``, ``iterations <= 0``,
+        a blank ``agent_id``, or a missing ``project_id`` — the
+        originating instance's ``agent_id`` / ``project_id`` are
+        resolved from the instance row and stamped into
+        ``task_details`` (captures are project-scoped by default;
+        global requires an explicit share action). A post-LLM content
+        gate additionally rejects self-referential meta-skills,
+        truncated descriptions, and un-parsed bodies. Refusals return
+        the standard envelope with ``skipped: true`` and a
+        machine-readable ``skip_reason``; nothing is inserted.
         """
         # ── Kill-switch gate ─────────────────────────────────────
         # Closes the bypass path around ``check_and_capture``: the
@@ -419,6 +432,34 @@ the returned payload is a JSON metrics document.
             "iterations": iterations,
             "duration_seconds": duration_seconds,
         }
+
+        # Stamp ownership scope from the ORIGINATING instance row.
+        # Historically this tool dropped ``agent_id`` / ``project_id``
+        # from task_details, so every tool-driven capture landed
+        # GLOBAL (project_id NULL) with BOTH dedup layers disarmed —
+        # violating the project-scope-default decision (observed
+        # 2026-09-17, skill 7ae063c4). The service-side P0 gate now
+        # refuses scope-less captures, so a failed lookup here fails
+        # CLOSED (skipped capture) rather than inserting a global
+        # row. Same instance-row metadata read pattern as
+        # ``daemon/tools/instance.py::_get_instance_project_id``.
+        try:
+            origin_row = manager._instance_repository.get(instance_id)
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolution] skill_execute_capture could not read "
+                f"instance row for {instance_id!r} ({exc!s}); leaving "
+                "agent_id/project_id unset — the service P0 gate will "
+                "refuse a scope-less capture."
+            )
+            origin_row = None
+        if origin_row is not None:
+            origin_agent_id = getattr(origin_row, "agent_id", None)
+            origin_project_id = getattr(origin_row, "project_id", None)
+            if origin_agent_id:
+                task_details["agent_id"] = origin_agent_id
+            if origin_project_id:
+                task_details["project_id"] = origin_project_id
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
@@ -430,12 +471,19 @@ the returned payload is a JSON metrics document.
     skill_execute_capture._full_doc_ = """\
 Execute the CAPTURED flow for a task.
 
-Constructs a ``task_details`` dict from the tool arguments and
-delegates to ``SkillEvolutionService.capture_skill(
-current_instance_id, task_details)``. The capture flow wraps
-the task into a runnable skill-cap unit: it identifies the
-responsible skill, captures the runtime trace, and persists
-the record for later analysis.
+Constructs a ``task_details`` dict from the tool arguments (plus
+``agent_id`` / ``project_id`` resolved from the originating instance
+row — captures are project-scoped by default) and delegates to
+``SkillEvolutionService.capture_skill(
+current_instance_id, task_details)``. The capture flow distills the
+task into a reusable skill body with ``lineage_origin='captured'``.
+
+Input gates (no LLM spend): blank ``task_message``, ``iterations <=
+0``, blank ``agent_id``, or missing ``project_id`` →
+``{"skipped": true, "skip_reason": ...}``, nothing inserted. A
+post-LLM content gate likewise rejects self-referential meta-skills
+(bodies describing the capture procedure itself), truncated
+descriptions, and bodies containing literal escape sequences.
 
 Args:
     instance_id: The originating instance ID (the agent that ran
@@ -445,20 +493,15 @@ Args:
         argument to ``capture_skill``.
     task_message: Free-form description of the task to capture —
         natural-language intent that the LLM will distill into a
-        reusable skill body.
+        reusable skill body. Blank/whitespace-only is rejected
+        before any LLM call.
     iterations: Loop iterations the agent took on this task.
-        Used to filter out trivial successes before invoking the
-        LLM.
-    duration_seconds: Wall-clock runtime in seconds. Also used
-        to filter out trivial successes before invoking the LLM.
+        ``<= 0`` is rejected before any LLM call.
+    duration_seconds: Wall-clock runtime in seconds.
 
 Returns:
-    JSON document with ``new_skill_id`` and ``skipped``.
-
-While the underlying service is not yet wired up, this tool
-returns the stub message containing ``"⏳"``. Once connected,
-the returned payload is the captured record id and a brief
-summary.
+    JSON document with ``new_skill_id`` and ``skipped`` (plus
+    ``skip_reason`` on refusals).
 """
 
     return [
