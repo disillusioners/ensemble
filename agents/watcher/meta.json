@@ -24,7 +24,6 @@
   "team_members": [],
   "watchover": {
     "llm_model": "quick",
-    "timeout_seconds": 10,
     "max_denials_per_turn": 3,
     "delta_max_messages": 20,
     "snapshot_refresh_interval": 20,

@@ -62,6 +62,21 @@ class _FakeLLMResult:
     content: Any = ""
 
 
+def _bypass_first_call_seed(evaluator: "WatchoverEvaluator") -> None:
+    """Mark the evaluator's first-call seed as already done.
+
+    2026-09-17 fix: the evaluator's ``evaluate()`` seeds ``_last_seen_count``
+    to ``len(messages)`` on the very first call so the entire conversation
+    history is NOT absorbed into the initial delta (the pre-fix
+    deterministic-timeout bug for long conversations). Tests written
+    against the pre-fix behavior — where the first call DOES absorb
+    ``messages[0:]`` — call this helper to opt out of the seed and
+    exercise the original "absorb everything on first call" semantics.
+    New tests for the seed behavior itself should NOT call this helper.
+    """
+    evaluator._initial_delta_seeded = True  # noqa: SLF001 — test-only opt-out
+
+
 def _config(instance_id: str = "iid", turn_id: str | None = None) -> dict:
     """LangGraph config dict with thread_id = instance_id."""
     cfg: dict = {"configurable": {"thread_id": instance_id}}
@@ -1001,6 +1016,12 @@ class TestWatchoverMessageStructure:
                 llm_config={"model": "test"},
                 instance_id="iid",
             )
+            # Opt out of the first-call seed — this test verifies the
+            # "absorb on first call" message-payload structure, which
+            # is exactly the path the seed suppresses in production
+            # (see test_first_call_seed_skips_initial_absorption for
+            # the seed fix itself).
+            _bypass_first_call_seed(evaluator)
             await evaluator.evaluate(
                 tool_calls=[
                     {"id": "tc-1", "name": "bash", "args": {"command": "ls"}}
@@ -1052,6 +1073,12 @@ class TestWatchoverMessageStructure:
         """``_delta_messages`` grows across ``evaluate()`` calls as new
         messages arrive — only the tail beyond ``_last_seen_count`` is
         absorbed.
+
+        2026-09-17 fix: the first call after graph build no longer
+        absorbs the initial conversation history (see
+        ``test_first_call_seed_skips_initial_absorption``); the test
+        uses the first call to seed the baseline and the subsequent
+        calls to verify the sliding-window tail absorption works.
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
@@ -1065,7 +1092,8 @@ class TestWatchoverMessageStructure:
                 watcher_config={"delta_max_messages": 100},
             )
 
-            # First call: 2 messages in conversation → delta gets 2 messages.
+            # First call (SEED): 2 messages → consumed as the baseline,
+            # delta stays empty (the first-call seed).
             await evaluator.evaluate(
                 tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
                 messages=[
@@ -1074,12 +1102,13 @@ class TestWatchoverMessageStructure:
                 ],
                 watchover_context="ctx",
             )
-            assert len(evaluator._delta_messages) == 2
+            assert len(evaluator._delta_messages) == 0
             assert evaluator._last_seen_count == 2
             assert evaluator._snapshot == ""
 
-            # Second call: same messages → no new messages absorbed, delta
-            # stays at 2 (this verifies the _last_seen_count tracking).
+            # Second call: same messages → no new messages absorbed,
+            # delta still empty (this verifies the _last_seen_count
+            # tracking — the seed advanced past these messages).
             await evaluator.evaluate(
                 tool_calls=[{"id": "tc-2", "name": "bash", "args": {}}],
                 messages=[
@@ -1088,10 +1117,10 @@ class TestWatchoverMessageStructure:
                 ],
                 watchover_context="ctx",
             )
-            assert len(evaluator._delta_messages) == 2
+            assert len(evaluator._delta_messages) == 0
             assert evaluator._last_seen_count == 2
 
-            # Third call: 2 NEW messages appended → delta grows to 4.
+            # Third call: 2 NEW messages appended → delta grows to 2.
             await evaluator.evaluate(
                 tool_calls=[{"id": "tc-3", "name": "bash", "args": {}}],
                 messages=[
@@ -1102,12 +1131,20 @@ class TestWatchoverMessageStructure:
                 ],
                 watchover_context="ctx",
             )
-            assert len(evaluator._delta_messages) == 4
+            assert len(evaluator._delta_messages) == 2
             assert evaluator._last_seen_count == 4
+            assert evaluator._delta_messages[0].content == "what's in dir1?"
+            assert evaluator._delta_messages[1].content == "listing..."
 
     async def test_snapshot_regeneration_at_delta_max(self, monkeypatch):
         """When ``_delta_messages`` exceeds ``_delta_max``, snapshot
         regeneration fires and the delta buffer resets.
+
+        2026-09-17 fix: the first-call seed suppresses the initial
+        absorption; we use ``_bypass_first_call_seed`` to exercise
+        the regeneration trigger with a known-bursty first call
+        (the canonical overflow pattern that the seed is designed to
+        suppress in production).
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
@@ -1121,6 +1158,7 @@ class TestWatchoverMessageStructure:
                 instance_id="iid",
                 watcher_config={"delta_max_messages": 2},
             )
+            _bypass_first_call_seed(evaluator)
 
             # 3 messages → delta would be 3 > 2 → regeneration fires.
             await evaluator.evaluate(
@@ -1151,6 +1189,11 @@ class TestWatchoverMessageStructure:
         overflow). Regression guard for the unbounded-delta bug where the
         delta kept ALL new messages and triggered regeneration on every
         subsequent call.
+
+        2026-09-17 fix: same ``_bypass_first_call_seed`` rationale as
+        ``test_snapshot_regeneration_at_delta_max`` — we test the
+        regeneration overflow path that the seed suppresses in
+        production.
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
@@ -1162,6 +1205,7 @@ class TestWatchoverMessageStructure:
                 instance_id="iid",
                 watcher_config={"delta_max_messages": 3},
             )
+            _bypass_first_call_seed(evaluator)
 
             # 5 messages on the first call → 5 > 3 → regeneration fires.
             input_messages = [
@@ -1195,6 +1239,11 @@ class TestWatchoverMessageStructure:
         trigger regeneration. The trigger condition is ``len > _delta_max``
         (strict), so the snapshot stays empty and the delta holds the full
         batch.
+
+        2026-09-17 fix: bypass the seed for the same reason as
+        ``test_delta_bounded_after_oversized_initial`` — we test the
+        boundary condition ``len == _delta_max`` that is unreachable
+        under the seed (first-call seed always yields ``len == 0``).
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, _captured = self._capture_llm_factory()
@@ -1206,6 +1255,7 @@ class TestWatchoverMessageStructure:
                 instance_id="iid",
                 watcher_config={"delta_max_messages": 3},
             )
+            _bypass_first_call_seed(evaluator)
 
             # Exactly 3 messages on first call — at the boundary, NOT over.
             await evaluator.evaluate(
@@ -1233,6 +1283,11 @@ class TestWatchoverMessageStructure:
         Regression guard for the unbounded-delta bug: previously the delta
         retained ALL overflow messages, so the next call would immediately
         regenerate again — forever.
+
+        2026-09-17 fix: bypass the seed for the regeneration trigger.
+        The "second call with no new messages" assertion still works
+        because the seed bypass leaves ``_last_seen_count`` at the
+        post-regeneration count.
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, _captured = self._capture_llm_factory()
@@ -1244,6 +1299,7 @@ class TestWatchoverMessageStructure:
                 instance_id="iid",
                 watcher_config={"delta_max_messages": 2},
             )
+            _bypass_first_call_seed(evaluator)
 
             # First call: 5 messages with _delta_max=2 → regeneration fires,
             # delta bounded to the last 2.
@@ -1295,6 +1351,7 @@ class TestWatchoverMessageStructure:
                 llm_config={"model": "test"},
                 instance_id="iid",
             )
+            _bypass_first_call_seed(evaluator)
             await evaluator.evaluate(
                 tool_calls=[{"id": "tc-1", "name": "bash", "args": {}}],
                 messages=[
@@ -1331,6 +1388,13 @@ class TestWatchoverMessageStructure:
         Mirrors the old optimisation: the provider's prefix cache hits on
         the stable prefix layers, so only the per-call
         ``[WATCHOVER CHECK]`` is fully uncached.
+
+        2026-09-17 fix: bypass the first-call seed for this test so
+        the 2-message conversation is absorbed as the delta on the
+        first call (the prefix-cache reuse optimisation is meaningful
+        only when there ARE delta messages to share across calls —
+        see ``test_first_call_seed_skips_initial_absorption`` for the
+        empty-delta-on-first-call test).
         """
         monkeypatch.setenv("WATCHOVER_ENABLED", "true")
         factory, _llm, captured = self._capture_llm_factory()
@@ -1341,6 +1405,7 @@ class TestWatchoverMessageStructure:
                 llm_config={"model": "test"},
                 instance_id="iid",
             )
+            _bypass_first_call_seed(evaluator)
             await evaluator.evaluate(
                 tool_calls=[
                     {"id": "tc-1", "name": "bash", "args": {"command": "ls"}},
