@@ -1181,8 +1181,33 @@ class LongToolNudgeScanner:
         # the enqueue path already notified once internally; this
         # second direct pulse survives a lost-wake race. Idempotent on
         # the pool side (a condition-variable signal).
-        worker_pool = getattr(self._manager, "_worker_pool", None)
-        if worker_pool is not None:
+        #
+        # Phase 2 / chat-source-worker-lane (D5): route through the
+        # manager helper — both default + chat pools receive the wake
+        # so the freshly-eligible row surfaces in the next claim
+        # cycle. Fall back to the singleton-attribute reach for
+        # legacy test fixtures (pre-Phase-2 manager shape).
+        #
+        # ``__dict__``-check on the manager avoids the Mock
+        # auto-attribute hazard (see child_reports.py / D5 site #9
+        # for the rationale).
+        manager_dict = getattr(self._manager, "__dict__", {})
+        notify_pools = manager_dict.get("_notify_all_pools")
+        if notify_pools is not None:
+            try:
+                notify_pools()
+            except Exception as notify_err:
+                logger.warning(
+                    "[LongToolNudge] direct _notify_all_pools raised %r "
+                    "for parent %s... — relying on enqueue_message's "
+                    "internal notify",
+                    notify_err,
+                    (parent_id or "")[:8],
+                )
+        elif getattr(self._manager, "_worker_pool", None) is not None:
+            # Pre-Phase-2 manager shape — fall through to the
+            # singleton-attribute reach.
+            worker_pool = self._manager._worker_pool
             try:
                 notify_result = worker_pool.notify_work()
                 if inspect.iscoroutine(notify_result):

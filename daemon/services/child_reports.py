@@ -4195,10 +4195,40 @@ Provide a concise summary:"""
             # completion. The worker pool's ``notify_work()`` is
             # thread-safe and best-effort: a missing pool is tolerated
             # (tests may build a bare InstanceManager without one).
-            worker_pool = getattr(self._manager, "_worker_pool", None)
-            if worker_pool is not None:
+            #
+            # Phase 2 / chat-source-worker-lane (D5): route through
+            # the manager helper — both default + chat pools receive
+            # the wake so a registry-minted chat row (or any chat-origin
+            # carrier enqueued by this seam) is picked up by the chat
+            # pool even when the default pool is saturated. The helper
+            # None-guards every pool and per-pool exceptions are
+            # swallowed so a transient blip does NOT abort the report
+            # flow.
+            #
+            # ``__dict__``-check on the manager avoids the Mock
+            # auto-attribute hazard: tests that build a Mock manager
+            # without setting ``_notify_all_pools`` would otherwise
+            # see a Mock and enter the helper branch — the real
+            # ``__dict__`` only contains attributes actually set, so
+            # a Mock manager falls through to the legacy singleton
+            # reach (the pre-Phase-2 default-pool wake) — keeps the
+            # existing test fixtures (which assert on
+            # ``_worker_pool.notify_work``) green.
+            manager_dict = getattr(self._manager, "__dict__", {})
+            notify_pools = manager_dict.get("_notify_all_pools")
+            if notify_pools is not None:
                 try:
-                    worker_pool.notify_work()
+                    notify_pools()
+                except Exception as notify_err:
+                    logger.warning(
+                        f"child_reports: _notify_all_pools() "
+                        f"failed for report Task (non-fatal): {notify_err}"
+                    )
+            elif getattr(self._manager, "_worker_pool", None) is not None:
+                # Pre-Phase-2 manager shape OR legacy test fixture —
+                # fall through to the singleton-attribute reach.
+                try:
+                    self._manager._worker_pool.notify_work()
                 except Exception as notify_err:
                     logger.warning(
                         f"child_reports: worker_pool.notify_work() "

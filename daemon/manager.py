@@ -57,7 +57,10 @@ from .repositories import (
     InstanceUiPrefsRepository,
     ServiceRepo,
 )
-from .repositories.task.repository import TaskRepository
+from .repositories.task.repository import (
+    TaskRepository,
+    set_chat_lane_active,
+)
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool
@@ -712,7 +715,7 @@ class InstanceManager:
             # gives the operator the exact job-id audit trail.
             task_repo = TaskRepository(
                 engine=self._engine,
-                on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
+                on_pending_task=lambda: self._notify_all_pools()
             )
             try:
                 stranded_work_ids = (
@@ -1136,6 +1139,37 @@ class InstanceManager:
         self._worker_pool: WorkerPool | None = None
         self._task_processor: TaskProcessor | None = None
         self._stale_recovery: StaleTaskRecovery | None = None
+
+        # Chat-source worker lane (chat-source-worker-lane, Phase 2).
+        # The chat WorkerPool is constructed in ``setup_worker_pool``
+        # INSIDE the USE_WORKER_POOL-gated body — the kill-switch
+        # disables both pools together. ``_pools`` is initialized
+        # eagerly as ``[]`` (E3 — boot-window guard) so any early
+        # wake/wiring that touches ``_pools`` before
+        # ``setup_worker_pool`` runs cannot crash on a missing
+        # attribute. The list is populated in ``setup_worker_pool``
+        # AFTER both pools construct; ``_notify_all_pools`` iterates
+        # it with per-entry None-checks so a future third lane is a
+        # one-list-entry change.
+        self._chat_worker_pool: WorkerPool | None = None
+        self._pools: list[WorkerPool] = []
+        # Phase 2 / D5 fan-out seam — bound-method instance attribute
+        # (adjudication fix, 2026-09-19). Service modules detect the
+        # helper via ``manager.__dict__.get("_notify_all_pools")`` —
+        # the dict lookup is the production-honest check (Mock
+        # managers do NOT auto-populate ``__dict__``, so the lookup
+        # differentiates real InstanceManager from test Mocks).
+        # Storing the bound method as an instance attribute makes
+        # the lookup find it on real managers while still None on
+        # Mock managers. Without this assignment the helper is a
+        # class-level method (in ``InstanceManager.__dict__``, NOT
+        # ``manager.__dict__``) and the service-site guard silently
+        # returns None — every service site would fall through to
+        # the legacy ``_worker_pool.notify_work()`` path and the
+        # chat pool would NEVER wake from the 11 service sites,
+        # including CRITICAL site #12 (instance_messaging.py) which
+        # every registry-minted chat row traverses.
+        self._notify_all_pools = self._notify_all_pools
 
         # Execution Gate: the single owner of graph.astream per
         # thread_id. Now a per-process asyncio.Lock (see
@@ -6430,6 +6464,7 @@ class InstanceManager:
         from .services.worker_pool import WorkerPool
         from .services.task_processor import TaskProcessor
         from .services.stale_task_recovery import StaleTaskRecovery
+        from .constants import CHAT_WORKER_POOL_SIZE, CHAT_SOURCE_PREFIXES
         
         # Set the main loop reference for thread-safe async calls
         if self._loop is not None:
@@ -6441,7 +6476,7 @@ class InstanceManager:
 
         task_repo = TaskRepository(
             engine=self._engine,
-            on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
+            on_pending_task=lambda: self._notify_all_pools()
         )
         # Expose on the manager so cross-dispatcher handlers
         # (``MessageJobHandler._find_running_task_for_instance``)
@@ -6704,17 +6739,189 @@ class InstanceManager:
             ),
         )
         self._worker_pool.start()
-        
-        # NEW: Expose pool size for CompletionRegistry invoke semaphore
-        self._worker_pool_size = num_workers
-        logger.info(f"Worker pool started with {num_workers} workers (timeout={svc.task_timeout_minutes}min)")
+
+        # Chat-source worker lane (chat-source-worker-lane, Phase 2
+        # Task #2): construct the dedicated chat ``WorkerPool`` AFTER
+        # the default pool starts (D10.3 boot ordering — default
+        # workers are alive and stable before any chat worker can
+        # race for shared task rows). The chat pool shares the same
+        # ``TaskProcessor`` singleton (``self._task_processor``) and
+        # the same engine (``self._engine``) — TaskProcessor is the
+        # single seam to ``TaskRepository.claim_pending_task`` and
+        # the lane flows as a per-claim argument (Worker → processor
+        # → repository), never processor state.
+        #
+        # Worker-id prefix ``"chat-worker-"`` distinguishes the
+        # chat lane in ``task.worker_id`` lineage (D10.5).
+        #
+        # B1 — flip strictness ON immediately after start: the
+        # ``set_chat_lane_active(True)`` call writes the
+        # ``_chat_lane_active`` module flag in
+        # ``daemon/repositories/task/repository.py``. From this
+        # point, default-lane claims consult the flag and exclude
+        # chat-prefix rows (strict two-way per D2). The flag is
+        # read PER-CLAIM (E2 — single shared source of truth) so
+        # the value is live, not a snapshot. Teardown flips it
+        # back to False BEFORE the default pool stops so the
+        # default pool resumes claiming chat rows during its own
+        # stop window (= fail-open restored, no stranding).
+        self._chat_worker_pool = WorkerPool(
+            task_processor=self._task_processor,
+            num_workers=CHAT_WORKER_POOL_SIZE,
+            timeout_minutes=svc.task_timeout_minutes,
+            max_retries=svc.max_task_retries,
+            retry_backoff_base=svc.task_retry_backoff_base,
+            retry_backoff_max=svc.task_retry_backoff_max,
+            heartbeat_interval_seconds=svc.task_heartbeat_interval_seconds,
+            usage_limit_window_seconds=svc.usage_limit_window_seconds,
+            usage_limit_retry_delays_seconds=(
+                svc.usage_limit_retry_delays_seconds
+            ),
+            usage_limit_retry_jitter_fraction=(
+                svc.usage_limit_retry_jitter_fraction
+            ),
+            worker_id_prefix="chat-worker-",
+            lane="chat",
+        )
+        self._chat_worker_pool.start()
+        # Populate the wake-fan-out list AFTER both pools construct
+        # (D5 list-shape — future third lane is one list entry).
+        # ``_pools`` was initialized to ``[]`` in ``__init__`` (E3).
+        self._pools = [
+            p for p in (self._worker_pool, self._chat_worker_pool)
+            if p is not None
+        ]
+        # B1 — flip strictness ON. Must come AFTER start so a chat
+        # pool construction failure (e.g. port-in-use) leaves the
+        # flag False (fail-open). And must come AFTER ``_pools``
+        # populate so the very next notify uses the new helper.
+        set_chat_lane_active(True)
+        # Boot-line (Phase 2 Task #6 — substring-pinned by tests).
+        logger.info(
+            f"ChatSourceWorkerPool started: workers={CHAT_WORKER_POOL_SIZE}, "
+            f"prefixes={','.join(CHAT_SOURCE_PREFIXES)}"
+        )
+
+    def _notify_all_pools(self) -> None:
+        """Fan-out wake pulse to every live worker pool.
+
+        Chat-source-worker-lane, D5 — replaces the singleton-attribute
+        reach ``self._worker_pool.notify_work() if self._worker_pool else None``
+        at all 19 canonical wake sites. Iterates ``self._pools`` (list,
+        not inline 2-tuple) so a future third lane (priority, per-
+        tenant) is a one-list-entry change. Per-entry ``None``-check
+        satisfies the Wake-site None-guard mandate (each widened wake
+        site is protected even if the helper is reached before a
+        second pool is constructed — the helper is a no-op).
+
+        The list is populated in ``setup_worker_pool`` AFTER both
+        pools construct; ``_pools`` was initialized to ``[]`` in
+        ``__init__`` (E3 — boot-window guard). ``shutdown_worker_pool``
+        clears the list (and the slots) so post-teardown notifies
+        are a no-op rather than reaching a stopped pool.
+        """
+        for pool in self._pools:
+            if pool is not None:
+                try:
+                    pool.notify_work()
+                except Exception as notify_err:
+                    # Transient pool-side blip — log + skip. The
+                    # wake-site None-guard mandate also covers the
+                    # ``notify_work``-side error path: a single
+                    # pool's exception must NOT abort the fan-out
+                    # to the remaining pool(s). Mirrors the
+                    # site-local try/excepts in child_reports /
+                    # waiting_children_watchdog etc.
+                    logger.warning(
+                        f"_notify_all_pools: pool.notify_work() "
+                        f"raised {notify_err!r} — continuing fan-out"
+                    )
 
     def shutdown_worker_pool(self) -> None:
-        """Shut down the worker pool gracefully."""
-        if self._worker_pool is not None:
-            self._worker_pool.stop()
-            self._worker_pool = None
-            logger.info("Worker pool stopped")
+        """Shut down the worker pool gracefully (chat-source-worker-lane).
+
+        Teardown ordering (Phase 2 / Task #5 — D10.4 + B2 + B1 + E1):
+
+        1. **B2 — snapshot pools BEFORE any stop/None.** Take
+           ``pools_snapshot = [p for p in (self._chat_worker_pool,
+           self._worker_pool) if p is not None]`` FIRST so the
+           hung-worker WARNING loop iterates LIVE worker refs
+           even after the slots are None'd.
+
+        2. **E1 — chat pool FIRST so ``_chat_lane_active`` flips
+           False BEFORE the default pool stops.** The snapshot is
+           iterated in chat-first order so the B1 fail-open flag
+           flips BEFORE the default pool's stop window opens
+           (default pool claims chat rows again during its own
+           stop window = fail-open restored, no stranding).
+
+        3. **Hung-worker WARNING loop (architect A5.1, reviewer
+           N4).** Iterate the snapshot AFTER both pools stop and
+           for each worker still ``is_alive()`` after the
+           ``stop(30)`` budget, emit a WARNING naming the
+           ``worker_id`` so the operator can identify which pool
+           hung (default vs chat). **N4 choice: option (i) —
+           document the private-attr access.** The WARNING loop
+           accesses the private ``_workers`` list on each pool.
+           This is encapsulated per pool lifecycle — the manager
+           owns the pools and is the only caller — and the
+           observability gain outweighs the public-surface bloat
+           that option (ii) (``is_any_worker_alive()`` accessor)
+           would introduce. Documented here so the next reader
+           knows the exception is deliberate, not accidental.
+
+        4. **Clear ``_pools`` post-teardown** so the
+           ``_notify_all_pools()`` helper is a no-op for any
+           late notify (e.g., a watchdog tick that fires between
+           the pool stop and the daemon thread dying). The helper
+           iterates ``_pools`` with a None-guard; an empty list
+           makes the helper safely a no-op.
+        """
+        # Step 1 — B2 snapshot BEFORE any stop/None. The chat pool
+        # is listed first so the iteration visits the chat pool
+        # BEFORE the default pool (E1).
+        pools_snapshot = [
+            p for p in (self._chat_worker_pool, self._worker_pool)
+            if p is not None
+        ]
+
+        # Step 2 + 3 — chat-FIRST iteration: flip the B1 fail-open
+        # flag BEFORE the default pool stops so the default pool
+        # resumes claiming chat rows during its own stop window.
+        for pool in pools_snapshot:
+            if pool is self._chat_worker_pool:
+                # B1 — flip fail-open BEFORE stop(). Order matters:
+                # the default pool must see the False flag from the
+                # moment it begins its own stop window (no
+                # stranding — chat rows surface via the default
+                # lane if the chat workers cannot drain them).
+                set_chat_lane_active(False)
+            pool.stop(timeout=30.0)
+            if pool is self._chat_worker_pool:
+                self._chat_worker_pool = None
+                logger.info("Chat worker pool stopped")
+            elif pool is self._worker_pool:
+                self._worker_pool = None
+                logger.info("Worker pool stopped")
+
+        # Step 4 — clear the wake-fan-out list. The helper is a
+        # safe no-op on empty ``_pools``.
+        self._pools = []
+
+        # Step 5 — hung-worker WARNING (N4 option (i) — accesses
+        # private ``_workers``; see method docstring for the
+        # deliberate-trade-off rationale). Iterate the SNAPSHOT
+        # (B2), not the slots — the slots are already None.
+        for pool in pools_snapshot:
+            for worker in pool._workers:
+                if worker.is_alive():
+                    logger.warning(
+                        f"Worker {worker.worker_id} still alive after "
+                        f"stop(30) — likely blocked in "
+                        f"invoke_agent_and_wait (mid-invoke stop not "
+                        f"interruptible, see "
+                        f"daemon/services/worker_pool.py:1339-1340)"
+                    )
 
         if self._stale_recovery is not None:
             self._stale_recovery.stop()
@@ -7925,8 +8132,7 @@ class InstanceManager:
                     # manager.py:7247-7255. Council warning W3:
                     # without this notify the re-created carrier
                     # waits for the next poll (delay, not wedge).
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -7989,8 +8195,7 @@ class InstanceManager:
                     # the c_revival shape at manager.py:7312-7313.
                     # Backlog row 5: without this notify, delivery
                     # waits for the next poll (delay, not wedge).
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -8056,8 +8261,7 @@ class InstanceManager:
                     # the commit is durable before the pool wakes a
                     # worker (avoids a race where a worker claims a
                     # row that hasn't been committed yet).
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "c_revival",
                         "report_message_id": report_message_id,
@@ -8579,8 +8783,7 @@ class InstanceManager:
                     # manager.py:7890-7898. Council warning W3:
                     # without this notify the re-created carrier
                     # waits for the next poll (delay, not wedge).
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "message_only_recreate",
                         "report_message_id": report_message_id,
@@ -8643,8 +8846,7 @@ class InstanceManager:
                     # the c_revival shape at manager.py:7936-7937.
                     # Backlog row 5: without this notify, delivery
                     # waits for the next poll (delay, not wedge).
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "task_only_create",
                         "report_message_id": report_message_id,
@@ -8700,8 +8902,7 @@ class InstanceManager:
                     # Wake the worker pool OUTSIDE the transaction so
                     # the commit is durable before the pool wakes a
                     # worker.
-                    if self._worker_pool is not None:
-                        self._worker_pool.notify_work()
+                    self._notify_all_pools()
                     return {
                         "shape": "c_revival",
                         "report_message_id": report_message_id,

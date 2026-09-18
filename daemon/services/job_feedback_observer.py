@@ -3397,12 +3397,36 @@ class JobFeedbackObserver:
                     f"notify_work() and proceeding (A4 "
                     f"orphan-detection — pure-orphan branch)"
                 )
-                worker_pool = getattr(
-                    self._instance_manager, "_worker_pool", None
+                # Phase 2 / chat-source-worker-lane (D5): route
+                # through the manager helper — both default + chat
+                # pools receive the wake so orphans on either lane
+                # surface in the next claim cycle.
+                #
+                # ``__dict__``-check on the manager avoids the Mock
+                # auto-attribute hazard (see child_reports.py / D5
+                # site #9 for the rationale).
+                manager_dict = getattr(
+                    self._instance_manager, "__dict__", {}
                 )
-                if worker_pool is not None:
+                notify_pools = manager_dict.get("_notify_all_pools")
+                if notify_pools is not None:
                     try:
-                        worker_pool.notify_work()
+                        notify_pools()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"Observer: F14 early gate _notify_all_pools "
+                            f"raised {notify_err!r} for instance "
+                            f"{instance_id[:8]}... — orphans heal "
+                            f"on the next A3 sweep tick"
+                        )
+                elif getattr(
+                    self._instance_manager, "_worker_pool", None
+                ) is not None:
+                    # Pre-Phase-2 manager shape — fall through to
+                    # the singleton-attribute reach (legacy test
+                    # fixture / pre-wiring lifespan).
+                    try:
+                        self._instance_manager._worker_pool.notify_work()
                     except Exception as notify_err:
                         logger.warning(
                             f"Observer: F14 early gate notify_work "
@@ -3677,15 +3701,41 @@ class JobFeedbackObserver:
                         f"the pool will surface the orphans before "
                         f"the next completion attempt)"
                     )
-                    worker_pool = getattr(
-                        self._instance_manager, "_worker_pool", None
+                    # Phase 2 / chat-source-worker-lane (D5):
+                    # route through the manager helper — both
+                    # default + chat pools receive the wake so
+                    # orphans on either lane surface in the next
+                    # claim cycle.
+                    #
+                    # ``__dict__``-check on the manager avoids the
+                    # Mock auto-attribute hazard (see child_reports.py
+                    # / D5 site #9 for the rationale).
+                    manager_dict = getattr(
+                        self._instance_manager, "__dict__", {}
                     )
-                    if worker_pool is not None:
+                    notify_pools = manager_dict.get("_notify_all_pools")
+                    if notify_pools is not None:
                         try:
-                            worker_pool.notify_work()
+                            notify_pools()
                         except Exception as notify_err:
                             # Transient pool-side blip — the A3
                             # sweep is the systemic backstop.
+                            logger.warning(
+                                f"Observer: F14 orphan-detection "
+                                f"_notify_all_pools() raised "
+                                f"{notify_err!r} for instance "
+                                f"{instance_id[:8]}... — orphans "
+                                f"heal on the next A3 sweep tick"
+                            )
+                    elif getattr(
+                        self._instance_manager, "_worker_pool", None
+                    ) is not None:
+                        # Pre-Phase-2 manager shape — fall through
+                        # to the singleton-attribute reach (legacy
+                        # test fixture / pre-wiring lifespan).
+                        try:
+                            self._instance_manager._worker_pool.notify_work()
+                        except Exception as notify_err:
                             logger.warning(
                                 f"Observer: F14 orphan-detection "
                                 f"notify_work() raised "
@@ -4276,11 +4326,32 @@ class JobFeedbackObserver:
                         f"missed on this code path; proceeding with "
                         f"notify_work() — see B11/B12"
                     )
-                worker_pool = getattr(
-                    self._instance_manager, "_worker_pool", None
+                # Phase 2 / chat-source-worker-lane (D5): route
+                # through the manager helper — both default + chat
+                # pools receive the wake so a freshly-claimed row
+                # on either lane surfaces in the next claim cycle.
+                #
+                # ``__dict__``-check on the manager avoids the Mock
+                # auto-attribute hazard (see child_reports.py / D5
+                # site #9 for the rationale).
+                manager_dict = getattr(
+                    self._instance_manager, "__dict__", {}
                 )
-                if worker_pool is not None:
-                    worker_pool.notify_work()
+                notify_pools = manager_dict.get("_notify_all_pools")
+                if notify_pools is not None:
+                    try:
+                        notify_pools()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"Observer (message branch): _notify_all_pools "
+                            f"raised {notify_err!r} for message job "
+                            f"{started_job.job_id[:8]}... — Task will "
+                            f"surface on the next worker-poll tick"
+                        )
+                elif getattr(
+                    self._instance_manager, "_worker_pool", None
+                ) is not None:
+                    self._instance_manager._worker_pool.notify_work()
                 else:
                     logger.warning(
                         f"Observer (message branch): worker_pool is None "
