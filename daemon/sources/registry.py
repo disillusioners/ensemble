@@ -129,7 +129,7 @@ class SourceRegistry:
             autostart_task.cancel()
             logger.debug(f"Cancelled pending autostart task for: {source_id}")
         
-        del self._adapters[source_id]
+        self._adapters.pop(source_id, None)
         self._running.pop(source_id, None)
         logger.info(f"Unregistered adapter: source_id={source_id}")
         return True
@@ -561,52 +561,25 @@ class SourceRegistry:
         adapter._status = SourceStatus.STOPPED
         if persist_status:
             await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STOPPED.value)
-        
+
+        # Invariant: any start of a source must build from the LATEST persisted
+        # config (fixes the source-config-edit-reload bug). Adapters capture
+        # construction-time fields (SlackAdapter._default_agent,
+        # DiscordAdapter._default_agent = cfg["agent"], TelegramAdapter.
+        # _default_agent, SchedulerAdapter._agent, plus other keys) at
+        # __init__, so retaining the adapter object across stop→start would
+        # silently revert to the pre-edit values. Evict here so the next
+        # start_adapter (router path: daemon/routers/sources.py:379-422) takes
+        # the existing adapter-is-None branch and rebuilds from the fresh DB
+        # read. Production read paths that consult ``get(source_id)`` for a
+        # stopped source already handle None (webhooks.py:88 → 503;
+        # schedules.py:147/218 → silent skip); GET /sources list/status reads
+        # from DB, not from the registry, so this is safe.
+        self._adapters.pop(source_id, None)
+
         logger.info(f"Stopped adapter: {source_id}")
         return True
-    
-    async def reload_adapter(self, source_id: str) -> bool:
-        """Reload configuration and restart an adapter.
-        
-        Args:
-            source_id: The source_id of the adapter to reload.
-            
-        Returns:
-            True if reloaded successfully, False if adapter not found or reload failed.
-        """
-        adapter = self.get(source_id)
-        if adapter is None:
-            logger.error(f"Adapter not found: {source_id}")
-            return False
-        
-        # Reload config from database
-        config_dict = await asyncio.to_thread(self._source_repo.get_source_config, source_id)
-        if config_dict is None:
-            logger.error(f"Config not found in database: {source_id}")
-            return False
-        
-        # Stop the adapter first
-        await self.stop_adapter(source_id)
-        
-        # Create new config
-        new_config = SourceConfig(
-            source_id=config_dict["source_id"],
-            source_type=config_dict["source_type"],
-            name=config_dict["name"],
-            config=config_dict.get("config", {}),
-            credentials=config_dict.get("credentials", {}),
-            enabled=config_dict.get("enabled", True),
-        )
-        
-        # Update adapter config
-        adapter.config = new_config
-        
-        # Start again
-        await self.start_adapter(source_id)
-        
-        logger.info(f"Reloaded adapter: {source_id}")
-        return True
-    
+
     async def _run_adapter_safe(self, adapter: MessageSourceAdapter) -> None:
         """Supervisor loop for an adapter with exponential backoff.
         
