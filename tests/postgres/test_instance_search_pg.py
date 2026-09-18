@@ -454,3 +454,142 @@ class TestSearchWithIncludeDescendants:
         assert "root" in ids
         assert "child-hit" in ids
         assert "child-miss" not in ids
+
+
+class TestProjectScopeWithIncludeDescendants:
+    """PG mirror of ``tests/test_instance_search.py::TestProjectScopeWithIncludeDescendants``.
+
+    ``project_id`` must apply to the root query only (NOT mid-BFS). On
+    PG, the iterative BFS emits a separate ``SELECT ... WHERE parent_id
+    IN (...) AND project_id = :project_id`` per depth level when the
+    bug is present — which orphans cross-project descendants. These
+    tests pin that PG-emitted SQL specifically: if a regression
+    reintroduces the mid-BFS project filter on the PG path, the
+    scoped-to-proj-A assertion below fails (no cross-project child or
+    grandchild in the result), while the SQLite sibling test catches
+    the SQLite branch separately.
+    """
+
+    def _seed_cross_project_tree(self, repo):
+        """Seed a 3-node tree: root (proj-A) → child (proj-B) → grandchild (proj-B)."""
+        _make(repo, "root", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-A",
+              metadata={"title": "Cross-project Root"})
+        _make(repo, "child", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root", project_id="proj-B",
+              metadata={"title": "Cross-project Child"})
+        _make(repo, "grandchild", agent_id="dev", agent_dir="agents/coder",
+              parent_id="child", project_id="proj-B",
+              metadata={"title": "Cross-project Grandchild"})
+
+    def test_cross_project_descendants_load_under_scoped_root_on_pg(self, repo):
+        """Scoped to ``proj-A``, the cross-project child AND grandchild
+        must both appear on PG. Pins the bug class the old mid-BFS
+        ``project_id = :project_id`` filter was masking."""
+        self._seed_cross_project_tree(repo)
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True,
+        )
+        ids = _ids(instances)
+        assert total == 1
+        assert ids == ["child", "grandchild", "root"]
+
+    def test_unscoped_descendants_load_full_subtree_on_pg(self, repo):
+        """Sanity assertion on PG: include_descendants=True returns the
+        whole subtree when no project filter is provided."""
+        self._seed_cross_project_tree(repo)
+
+        instances, total, _ = repo.list(include_descendants=True)
+        ids = _ids(instances)
+        assert total == 1
+        assert ids == ["child", "grandchild", "root"]
+
+    def test_cross_project_descendants_absent_via_own_project_on_pg(self, repo):
+        """Negative pin on PG: scoped to ``proj-B`` (the child's own
+        project), the cross-project child and grandchild are absent —
+        they are descendants only of a ``proj-A`` root, and no
+        ``proj-B`` root exists in the seed."""
+        self._seed_cross_project_tree(repo)
+
+        instances, total, _ = repo.list(
+            project_id="proj-B", include_descendants=True,
+        )
+        ids = _ids(instances)
+        assert total == 0
+        assert "child" not in ids
+        assert "grandchild" not in ids
+        assert "root" not in ids
+
+    def test_foreign_root_subtree_does_not_leak_into_proj_a_on_pg(self, repo):
+        """PG mirror of the SQLite foreign-root-leak pin. BFS cannot
+        descend into a foreign root's subtree even when its ``project_id``
+        would technically be visible. Layout:
+
+            root            (proj-A) ← in-scope root
+              child         (proj-A)
+            root-other      (proj-C) ← foreign root + subtree
+              child-of-other (proj-D)
+
+        Scoped to ``proj-A`` with ``include_descendants=True``, only
+        ``root`` + ``child`` appear. Pins the PG emit specifically:
+        if a regression reintroduced a mid-BFS ``project_id`` filter
+        OR accidentally rewrote ``parent_id`` to ``project_id`` in the
+        JOIN predicate, ``root-other`` or ``child-of-other`` could
+        leak."""
+        _make(repo, "root", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-A",
+              metadata={"title": "Scoped Root"})
+        _make(repo, "child", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root", project_id="proj-A",
+              metadata={"title": "Scoped Child"})
+        _make(repo, "root-other", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-C",
+              metadata={"title": "Foreign Root"})
+        _make(repo, "child-of-other", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root-other", project_id="proj-D",
+              metadata={"title": "Foreign Grandchild"})
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True,
+        )
+        ids = _ids(instances)
+        assert total == 1
+        assert ids == ["child", "root"]
+        assert "root-other" not in ids
+        assert "child-of-other" not in ids
+
+    def test_exclude_kb_traverses_through_kb_parent_to_strip_seam_on_pg(self, repo):
+        """PG mirror of the SQLite ``exclude_kb × cross-project`` pin.
+        ``exclude_kb=True`` must NOT orphan a non-KB grandchild whose
+        parent is a KB agent — BFS walks THROUGH the KB parent, then
+        the post-filter seam strips it. Layout:
+
+            root            (proj-A, agent=developer)  ← in-scope root
+              kb-child      (proj-B, agent=experiencer) ← KB mid-parent
+                grandchild  (proj-B, agent=developer)  ← non-KB grandchild
+
+        With ``exclude_kb=True``: ``grandchild`` MUST be present;
+        ``kb-child`` MUST be absent. Pins the PG emit of the post-filter
+        at ``daemon/repositories/instance/repository.py:1122-1125`` —
+        if the BFS path ever inlines ``exclude_kb`` into the per-level
+        WHERE clause, the grandchild disappears."""
+        _make(repo, "root", agent_id="developer", agent_dir="agents/developer",
+              project_id="proj-A",
+              metadata={"title": "Traverse Root"})
+        _make(repo, "kb-child", agent_id="experiencer", agent_dir="agents/kb",
+              parent_id="root", project_id="proj-B",
+              metadata={"title": "KB Mid-Parent"})
+        _make(repo, "grandchild", agent_id="developer",
+              agent_dir="agents/developer",
+              parent_id="kb-child", project_id="proj-B",
+              metadata={"title": "Non-KB Grandchild"})
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True, exclude_kb=True,
+        )
+        ids = _ids(instances)
+        assert total == 1
+        assert "root" in ids
+        assert "grandchild" in ids
+        assert "kb-child" not in ids

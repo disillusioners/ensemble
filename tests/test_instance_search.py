@@ -326,3 +326,155 @@ class TestSearchWithIncludeDescendants:
         # No filter: 4 roots + 1 child = 5 instances.
         assert total == 4
         assert len(instances) == 5
+
+
+class TestProjectScopeWithIncludeDescendants:
+    """``project_id`` must apply to the root query only (NOT mid-BFS).
+
+    Lineage is defined by ``parent_id``, not by ``project_id``. Once a root
+    is in the page, ALL of its descendants must be loaded regardless of
+    their own ``project_id`` — owners can spawn a cross-project delegation
+    whose worker belongs to a different project, and the FE tree panel
+    must show the full subtree under the root.
+
+    These tests pin the bug class the old "defense-in-depth" mid-BFS filter
+    was masking: a child whose ``parent_id`` points at an in-scope root but
+    whose own ``project_id`` differs would silently disappear from the
+    response (real prod case observed 2026-09-18: child project 33382f56
+    under parent project dadc814a — scoped to dadc814a returned 11/12
+    children; unscoped returned 12/12).
+    """
+
+    def _seed_cross_project_tree(self, repo):
+        """Seed a 3-node tree: root (proj-A) → child (proj-B) → grandchild (proj-B)."""
+        _make(repo, "root", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-A",
+              metadata={"title": "Cross-project Root"})
+        _make(repo, "child", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root", project_id="proj-B",
+              metadata={"title": "Cross-project Child"})
+        _make(repo, "grandchild", agent_id="dev", agent_dir="agents/coder",
+              parent_id="child", project_id="proj-B",
+              metadata={"title": "Cross-project Grandchild"})
+
+    def test_cross_project_descendants_load_under_scoped_root(self, repo):
+        """Scoped to ``proj-A``, the cross-project child AND grandchild
+        must both appear (their lineage is by ``parent_id``, which is in
+        scope)."""
+        self._seed_cross_project_tree(repo)
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True,
+        )
+        ids = _ids(instances)
+        # Root count is 1 (only "root" is a proj-A root).
+        assert total == 1
+        # Full lineage — root, child, grandchild — all present.
+        assert ids == ["child", "grandchild", "root"]
+
+    def test_unscoped_descendants_load_full_subtree(self, repo):
+        """Without a project filter, include_descendants=True still returns
+        the whole subtree (sanity assertion; the cross-project children
+        must not be filtered by some residual default)."""
+        self._seed_cross_project_tree(repo)
+
+        instances, total, _ = repo.list(include_descendants=True)
+        ids = _ids(instances)
+        # Only 1 root total; full lineage still loads.
+        assert total == 1
+        assert ids == ["child", "grandchild", "root"]
+
+    def test_cross_project_descendants_absent_via_own_project(self, repo):
+        """Negative pin: scoped to ``proj-B`` (the child's own project),
+        the cross-project child and grandchild must be absent — they are
+        descendants only of a ``proj-A`` root, and there is no ``proj-B``
+        root in the seed. Root-unreachable is the correct behavior."""
+        self._seed_cross_project_tree(repo)
+        # Sanity: there IS no proj-B root in the seed.
+        assert not any(
+            r.instance_id == "child" and r.parent_id is None
+            for r in repo.list(include_descendants=False, project_id="proj-B")[0]
+        )
+
+        instances, total, _ = repo.list(
+            project_id="proj-B", include_descendants=True,
+        )
+        ids = _ids(instances)
+        # No proj-B root → no descendants reachable.
+        assert total == 0
+        assert "child" not in ids
+        assert "grandchild" not in ids
+        assert "root" not in ids
+
+    def test_foreign_root_subtree_does_not_leak_into_proj_a(self, repo):
+        """Safety pin: BFS cannot leak a foreign-root subtree into a scoped
+        page. Layout:
+
+            root          (proj-A, parent NULL)   ← in-scope root
+              child       (proj-A, parent=root)
+            root-other    (proj-C, parent NULL)   ← foreign root + subtree
+              child-of-other (proj-D, parent=root-other)
+
+        Scoped to ``proj-A`` with ``include_descendants=True``, only the
+        ``root`` + ``child`` lineage must appear. ``root-other`` and
+        ``child-of-other`` are unreachable: a foreign root has no
+        ``parent_id`` to walk through, so BFS cannot descend into its
+        subtree even though the subtree's ``project_id`` would technically
+        be visible. The repo's docstring promises this — pin it."""
+        _make(repo, "root", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-A",
+              metadata={"title": "Scoped Root"})
+        _make(repo, "child", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root", project_id="proj-A",
+              metadata={"title": "Scoped Child"})
+        _make(repo, "root-other", agent_id="dev", agent_dir="agents/coder",
+              project_id="proj-C",
+              metadata={"title": "Foreign Root"})
+        _make(repo, "child-of-other", agent_id="dev", agent_dir="agents/coder",
+              parent_id="root-other", project_id="proj-D",
+              metadata={"title": "Foreign Grandchild"})
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True,
+        )
+        ids = _ids(instances)
+        assert total == 1  # only the in-scope root
+        assert ids == ["child", "root"]
+        assert "root-other" not in ids
+        assert "child-of-other" not in ids
+
+    def test_exclude_kb_traverses_through_kb_parent_to_strip_seam(self, repo):
+        """Safety pin: ``exclude_kb=True`` must NOT orphan a non-KB
+        grandchild whose parent is a KB agent. Layout:
+
+            root            (proj-A, agent=developer)  ← in-scope root
+              kb-child      (proj-B, agent=experiencer) ← KB parent traversed
+                grandchild  (proj-B, agent=developer)  ← non-KB grandchild
+
+        With ``exclude_kb=True``: BFS walks THROUGH ``kb-child`` to find
+        ``grandchild``, then strips ``kb-child`` from the final list. The
+        grandchild MUST be present in the result.
+
+        Models the seam at ``daemon/repositories/instance/repository.py:1122-1125``
+        (post-filter KB strip on the assembled descendant list, NOT a
+        mid-BFS exclusion)."""
+        _make(repo, "root", agent_id="developer", agent_dir="agents/developer",
+              project_id="proj-A",
+              metadata={"title": "Traverse Root"})
+        _make(repo, "kb-child", agent_id="experiencer", agent_dir="agents/kb",
+              parent_id="root", project_id="proj-B",
+              metadata={"title": "KB Mid-Parent"})
+        _make(repo, "grandchild", agent_id="developer",
+              agent_dir="agents/developer",
+              parent_id="kb-child", project_id="proj-B",
+              metadata={"title": "Non-KB Grandchild"})
+
+        instances, total, _ = repo.list(
+            project_id="proj-A", include_descendants=True, exclude_kb=True,
+        )
+        ids = _ids(instances)
+        # Only the proj-A root counts; KB mid-parent is stripped post-filter.
+        assert total == 1
+        assert "root" in ids
+        assert "grandchild" in ids
+        assert "kb-child" not in ids
