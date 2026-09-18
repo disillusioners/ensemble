@@ -39,13 +39,14 @@ from .report_integrity_guard import (
     enforce_declared_waiting_violations,
     log_declared_waiting_violations,
 )
+from .context_messages import _resolve_tree_root_id
 # Stage-0 mint-with-delivery was REMOVED 2026-09-18 (user decision --
 # the LCA "Child Report Check" advisory note was killed: high-FP UX
 # legacy predating the fused judge, its task-less mint caused the
 # strand-wedge class; the LLM judge now subsumes the gate role). The
 # 17-pattern catalog (:data:`CHILD_TERMINAL_PROMISE_MARKERS`) and the
 # scanner function are kept for tests + future re-attachment;
-# ``_resolve_tree_root_id`` is still used by an unrelated path.
+# ``_resolve_tree_root_id`` remains used by ``_dispatch_post_commit_side_effects`` for lifecycle-hook context_key resolution.
 from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
 from .job_queue_service import TERMINAL_STATUSES
