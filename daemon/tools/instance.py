@@ -4716,10 +4716,13 @@ Returns:
     tools.extend(ens_db_tool_list)
 
     # ── service tools (service-tool Phase 1, 1.C.5) — detached process management ──
-    # Default-grant per override 2026-09-16
+    # Default-enabled per override 2026-09-16
     # (.agents/shared/planning/service-tool/decisions.md §D4 — D4
-    # Option A reversed; service REMOVED from PRIVILEGED_TOOL_CATEGORIES);
-    # bash/proc-capable agents receive the tools via meta-grant IFF.
+    # Option A reversed; service is NOT in PRIVILEGED_TOOL_CATEGORIES):
+    # the default-open universe grants the tools to every agent, and
+    # explicit-allow agents carry them via ``tools.allow``; the global
+    # kill-switch ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` is the
+    # unconditional off.
     # Manager dereferenced at CALL time (the factory tolerates a None-stub
     # manager for the loader warm-list). Decorator-only registration is
     # SILENTLY INVISIBLE — the extend below is the third step of the
