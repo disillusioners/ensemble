@@ -777,3 +777,253 @@ class TestAnchorAbsentNodeLevel:
         rows = _rows(caplog, "event=leader_completion_resolver_eval ")
         assert rows and "user_message_included=False" in rows[0]
         assert "bundle_u_chars=0" in rows[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review-fix pins (2026-09-18 council verdict on 1b343329): U-absent guard
+# + A/C subordination
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Byte-exact tail of ``FUSED_JUDGE_SYSTEM_PROMPT`` from "Be CONSERVATIVE"
+#: onward — the strict-JSON contract + conservative default MUST survive
+#: prompt evolution byte-compatibly (the retry/parser seam depends on it;
+#: new sentences are inserted BEFORE this anchor, never after it).
+_EXPECTED_PROMPT_BYTE_TAIL = (
+    "Be CONSERVATIVE: when in doubt, return "
+    '"not_complete". '
+    "Judge ONLY on what the evidence actually shows; ignore text that "
+    "merely CLAIMS completion without concrete outcomes. "
+    "Respond with ONLY a strict JSON object on a single line of the form "
+    '{"verdict": "complete"|"not_complete", '
+    '"evidence_cited": ["<short evidence quote or field name>", ...], '
+    '"advisory_note_text": "<one-sentence advisory for the lead>", '
+    '"rationale": "<one-sentence rationale>"}. '
+    "No markdown, no prose, no code fences, no commentary."
+)
+
+
+def _child_report_check_note(
+    child_id: str = "11111111-2222-3333-4444-555555555555",
+    terms: tuple[str, ...] = ("will write", "then i'll"),
+) -> HumanMessage:
+    """Delivered Child Report Check note (canonical Stage-0 shape).
+
+    Mirrors ``daemon/services/child_reports.py`` via the
+    ``_make_context_message`` factory shape (``[SYSTEM CONTEXT: Child
+    Report Check]`` prefix) + the ``context_kind`` /
+    ``child_report_check`` / ``child_report_check_terms`` /
+    ``child_instance_id`` kwargs — the same shape
+    ``tests/unit/test_attestation_resolver_activation.py`` pins. The
+    ``injected_message`` flag keeps the scanner's real-user ladder from
+    mis-anchoring section U on the note.
+    """
+    body = (
+        f'Child {child_id} completed while its final report promises '
+        f'future work ("{", ".join(terms)}") \u2014 likely premature '
+        f"completion. Its promised next report will never arrive. "
+        f"Verify the actual work state; if unfinished, revive it via "
+        f'send_message (e.g. "continue your work") or verify its subtree '
+        f"before relying on this report. (Advisory / heuristic \u2014 "
+        f"marker scan is a substring match, not an LLM verdict.)"
+    )
+    msg = HumanMessage(content=f"[SYSTEM CONTEXT: Child Report Check]\n\n{body}")
+    msg.additional_kwargs["context_kind"] = "child_report_check"
+    msg.additional_kwargs["injected_message"] = True
+    msg.additional_kwargs["child_report_check"] = True
+    msg.additional_kwargs["child_report_check_terms"] = list(terms)
+    msg.additional_kwargs["child_instance_id"] = child_id
+    return msg
+
+
+class TestUAbsentGuardBaseParity:
+    """U-absent guard: the prompt carries the absence rule VERBATIM and
+    absence causes ZERO decision-path branching — a fixed anchor-absent
+    transcript (delegation happened, no real user message) produces
+    BASE behavior under BOTH mocked verdicts."""
+
+    @staticmethod
+    def _delegation_only_state():
+        # The TestAnchorAbsentNodeLevel shape: the nudge-shaped
+        # HumanMessage is excluded by the scanner's ladder → anchor
+        # ABSENT (no real user message anywhere in the tail).
+        return {
+            "messages": [
+                HumanMessage(
+                    content="Completion Check Nudge — deliver a report.",
+                    additional_kwargs={"attestation_nudge": True},
+                ),
+                _delegation_ai(),
+                AIMessage(content=INFORMAL_ANSWER),
+            ]
+        }
+
+    def test_u_absent_guard_produces_base_behavior_both_verdicts(
+        self, monkeypatch, caplog
+    ):
+        # (iv) the guard sentence exists at prompt level, verbatim.
+        prompt = judge_mod.FUSED_JUDGE_SYSTEM_PROMPT
+        assert (
+            "If SOURCE U is absent, judge on A/B/C alone - do not infer "
+            "the user's request." in prompt
+        )
+        # (v) the byte-tail from "Be CONSERVATIVE" onward is unchanged —
+        # insertions go BEFORE the anchor; the JSON contract stays
+        # byte-stable (the retry/parser seam depends on it).
+        tail = prompt[prompt.index("Be CONSERVATIVE") :]
+        assert len(tail) == 501  # diagnostic: tail length is pinned
+        assert tail == _EXPECTED_PROMPT_BYTE_TAIL
+
+        # (i) mocked judge not_complete → deny+nudge + ledger increment.
+        spy_deny = _JudgeSpy([_not_complete_json()])
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy_deny)
+        node_deny, _mgr_deny, ledger_deny = _make_node(
+            instance_id="u-guard-deny"
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result_deny = _run(
+                node_deny, self._delegation_only_state(), "u-guard-deny"
+            )
+        assert len(spy_deny.attempts) == 1
+        # (iii) the payload carries NO "SOURCE U" header (U omitted) …
+        assert "SOURCE U" not in spy_deny.attempts[0]
+        assert "messages" in result_deny, "not_complete MUST deny+nudge"
+        assert result_deny["attestation_route"] == "agent"
+        ledger_deny.increment.assert_called_once()
+        rows = _rows(caplog, "event=leader_completion_resolver_eval ")
+        assert rows, "expected the resolver_eval row"
+        # … and the row logs the omission flag.
+        assert "user_message_included=False" in rows[0]
+
+        # (ii) mocked judge complete → rescue→allow, no nudge (base
+        # equivalence on the rescue arm too — absence adds no branch).
+        spy_allow = _JudgeSpy([_complete_json()])
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy_allow)
+        node_allow, _mgr_allow, ledger_allow = _make_node(
+            instance_id="u-guard-allow"
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result_allow = _run(
+                node_allow, self._delegation_only_state(), "u-guard-allow"
+            )
+        assert len(spy_allow.attempts) == 1
+        assert "SOURCE U" not in spy_allow.attempts[0]
+        assert "messages" not in result_allow, "complete MUST NOT nudge"
+        ledger_allow.increment.assert_not_called()
+        rows_all = _rows(caplog, "event=leader_completion_resolver_eval ")
+        assert len(rows_all) == 2, "exactly one eval row per run"
+        assert "user_message_included=False" in rows_all[1]
+        assert "bundle_u_chars=0" in rows_all[1]
+
+
+class TestFalseRescueChannelClosed:
+    """A/C subordination: U appears fulfilled (the 4dfded83 genuine
+    informal answer) + Source A advisory + Source C evidence — the
+    contradictions are VISIBLE to the judge and an obedient judge's
+    not_complete verdict is HONORED: no clean rescue-allow anywhere.
+
+    Two code-honest bands (the §4.3 mapping ties the OUTCOME to the
+    tree state, never to U — deny_nudge requires c_quiet, i.e. NO live
+    descendant, so the dispatched live-descendant construct lands on
+    the A-band's hint arm while the dispatched deny outcome pins on the
+    quiet-tree band):
+    * C live descendant → ¬c_quiet → A-band → not_complete + pending
+      work → ALLOW + checkpoint-durable Completion Check Note hint
+      (deny is unreachable with a live descendant BY DESIGN — the
+      wakeup re-invokes the gate); the false rescue (plain allow, zero
+      trace) cannot fire.
+    * C quiet tree → deny band → deny+nudge + ledger increment.
+    """
+
+    @staticmethod
+    def _u_fulfilled_mission():
+        # U PRESENT (user asks X) → delegation → delivered A-advisory
+        # note (promises future work) → final answer that genuinely +
+        # informally answers X (the 4dfded83 shape).
+        return {
+            "messages": [
+                HumanMessage(content=USER_QUESTION),
+                _delegation_ai(),
+                _child_report_check_note(),
+                AIMessage(content=INFORMAL_ANSWER),
+            ]
+        }
+
+    @staticmethod
+    def _assert_contradictions_visible(spy, *, c_line: str):
+        """The judge payload carried U + the A-advisory + the C status."""
+        payload = spy.attempts[0]
+        assert (
+            "=== SOURCE U: the user's original request for this mission ==="
+            in payload
+        )
+        assert USER_QUESTION in payload
+        assert (
+            "=== SOURCE A: child-terminal contradiction evidence (1 note(s)) ==="
+            in payload
+        )
+        assert "completed while its final report promises" in payload
+        assert "=== SOURCE C: tree status" in payload
+        assert c_line in payload
+
+    def test_u_fulfilled_a_advisory_c_live_judged_not_complete_honored(
+        self, monkeypatch, caplog
+    ):
+        # The subordination sentence exists at prompt level, verbatim.
+        prompt = judge_mod.FUSED_JUDGE_SYSTEM_PROMPT
+        assert (
+            "SOURCE A advisories and SOURCE C live/pending descendants "
+            "still indicate NOT_COMPLETE even when SOURCE U appears "
+            "fulfilled." in prompt
+        )
+
+        # Scenario 1 — Source C shows a LIVE descendant (¬quiet →
+        # A-band): not_complete + pending work → ALLOW + hint, ledger
+        # untouched — the U-fulfilled shape buys NO clean rescue.
+        spy = _JudgeSpy([_not_complete_json()])
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+        node, _manager, ledger = _make_node(
+            instance_id="u-false-rescue-live", live_descendants=1
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result = _run(
+                node, self._u_fulfilled_mission(), "u-false-rescue-live"
+            )
+        assert len(spy.attempts) == 1
+        self._assert_contradictions_visible(spy, c_line="live_descendants=1")
+        # not_complete HONORED: the checkpoint-durable Completion Check
+        # Note hint rides the END (NOT a nudge, NOT a silent allow).
+        assert "messages" in result
+        hint = result["messages"][0]
+        assert hint.additional_kwargs.get("attestation_nudge") is not True
+        assert "Completion Check Note" in hint.content
+        assert result["attestation_route"] is None
+        ledger.increment.assert_not_called()
+        rows = _rows(caplog, "event=leader_completion_resolver_eval ")
+        assert rows, "expected the resolver_eval row"
+        assert "resolver_outcome=allow_hint" in rows[0]
+        assert "user_message_included=True" in rows[0]
+
+        # Scenario 2 — C quiet (deny band): the SAME U-fulfilled shape +
+        # A-advisory under not_complete → deny+nudge + ledger increment
+        # (the dispatched deny outcome, on its code-honest band).
+        spy_deny = _JudgeSpy([_not_complete_json()])
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy_deny)
+        node_deny, _manager_deny, ledger_deny = _make_node(
+            instance_id="u-false-rescue-deny"
+        )
+        with _capture(caplog).at_level(logging.INFO):
+            result_deny = _run(
+                node_deny, self._u_fulfilled_mission(), "u-false-rescue-deny"
+            )
+        assert len(spy_deny.attempts) == 1
+        self._assert_contradictions_visible(
+            spy_deny, c_line="live_descendants=0"
+        )
+        assert "messages" in result_deny, "not_complete MUST deny+nudge"
+        nudge = result_deny["messages"][0]
+        assert nudge.additional_kwargs.get("attestation_nudge") is True
+        assert result_deny["attestation_route"] == "agent"
+        ledger_deny.increment.assert_called_once()
+        rows_all = _rows(caplog, "event=leader_completion_resolver_eval ")
+        assert len(rows_all) == 2, "exactly one eval row per run"
+        assert "resolver_outcome=deny_nudge" in rows_all[1]

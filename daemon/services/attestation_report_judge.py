@@ -506,6 +506,10 @@ FUSED_JUDGE_SYSTEM_PROMPT = (
     "FULFILLS the user's request IS a completion report regardless of its "
     "formality, formatting, or shape; a formal-looking report that does NOT "
     "address the user's request is NOT complete. "
+    "If SOURCE U is absent, judge on A/B/C alone - do not infer the user's "
+    "request. "
+    "SOURCE A advisories and SOURCE C live/pending descendants still "
+    "indicate NOT_COMPLETE even when SOURCE U appears fulfilled. "
     "Be CONSERVATIVE: when in doubt, return "
     '"not_complete". '
     "Judge ONLY on what the evidence actually shows; ignore text that "
