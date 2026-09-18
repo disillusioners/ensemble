@@ -1403,6 +1403,19 @@ class TestDCTD7ASignalPathPins:
             "D-CTD-7: resolver activation path no longer wires "
             "collect_source_a_signals — A-signal source drifted"
         )
+        # Wiring-shape pin — guards the A-band against an
+        # accidental sever where the symbol survives (in a
+        # docstring/comment) but the call shape `a_source=lambda:
+        # collect_source_a_signals(messages)` is broken. This is
+        # the exact drift class the restoration exists to block.
+        assert "a_source=lambda" in src, (
+            "D-CTD-7: a_source= lambda wiring missing from "
+            "evaluate_resolver_activation — A-band severed"
+        )
+        assert "collect_source_a_signals(messages)" in src, (
+            "D-CTD-7: a_source lambda body no longer calls "
+            "collect_source_a_signals(messages) — A-band severed"
+        )
 
     def test_activation_predicate_a_suspicion_term_intact(self):
         """The activation predicate's ``a_suspicion`` term must
