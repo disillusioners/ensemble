@@ -60,8 +60,8 @@ Bounds
   405-408``). The default was bumped from 10.0s → 25.0s on 2026-09-07
   (operator tuning decision grounded in the tester live-LLM probe — see
   ``docs/setup.md`` rationale).
-* Input cap: the fused bundle arrives pre-capped (≤12000 chars,
-  per-section 3000/6000/3000, id-redacted) from
+* Input cap: the fused bundle arrives pre-capped (≤14000 chars,
+  per-section 3000/6000/3000/2000 (U), id-redacted) from
   :func:`daemon.services.attestation_resolver_activation.assemble_fused_bundle`
   — this module does NOT re-truncate.
 * Output cap: :data:`FUSED_JUDGE_MAX_OUTPUT_CHARS` chars (default
@@ -456,7 +456,7 @@ class _AttemptOutcome(NamedTuple):
 # seam (spec ``resolver-unification.md`` §4/§4.3 + user-locked deltas
 # Δ1–Δ4, DP-5 REJECTED). The fused judge consumes the Stage-1 assembled
 # evidence bundle (``attestation_resolver_activation.assemble_fused_bundle``
-# — A ≤3000 + B ≤6000 + C ≤3000, total ≤12000, id-redacted) as its ENTIRE
+# — A ≤3000 + B ≤6000 + C ≤3000 + U ≤2000, total ≤14000, id-redacted) as its ENTIRE
 # user payload and returns the §4.1 verdict JSON:
 #
 #     {"verdict": "complete"|"not_complete",
@@ -484,11 +484,16 @@ class _AttemptOutcome(NamedTuple):
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: Strict system prompt for the fused judge (single source of truth —
-#: exported for tests). The prompt names the three bundle sections so the
-#: verdict's ``evidence_cited`` entries can reference them.
+#: exported for tests). The prompt names the four bundle sections so the
+#: verdict's ``evidence_cited`` entries can reference them. SOURCE U
+#: carries the user's original request + the intent-fulfillment
+#: instruction (incident 4dfded83, 2026-09-18 — the judge was
+#: intent-blind: it scored report-shape/tree-status while the user's
+#: ask went unanswered by the bundle itself).
 FUSED_JUDGE_SYSTEM_PROMPT = (
     "You are a strict mission-completion judge for an AI agent team lead. "
-    "You will receive a fused evidence bundle with three sections: "
+    "You will receive a fused evidence bundle with four sections: "
+    "SOURCE U (the user's original request for this mission), "
     "SOURCE A (child-report advisories — notes that a child's final report "
     "promised future work, i.e. a contradiction with 'done'), "
     "SOURCE B (the lead's own recent messages), and "
@@ -496,7 +501,16 @@ FUSED_JUDGE_SYSTEM_PROMPT = (
     "Decide whether the lead's mission is genuinely COMPLETE — the work is "
     "actually finished and accounted for — or NOT_COMPLETE — evidence shows "
     "promised-but-undelivered work, mid-work status, or live descendants "
-    "still working. Be CONSERVATIVE: when in doubt, return "
+    "still working. "
+    "INTENT FULFILLMENT (SOURCE U): a message that genuinely ANSWERS or "
+    "FULFILLS the user's request IS a completion report regardless of its "
+    "formality, formatting, or shape; a formal-looking report that does NOT "
+    "address the user's request is NOT complete. "
+    "If SOURCE U is absent, judge on A/B/C alone - do not infer the user's "
+    "request. "
+    "SOURCE A advisories and SOURCE C live/pending descendants still "
+    "indicate NOT_COMPLETE even when SOURCE U appears fulfilled. "
+    "Be CONSERVATIVE: when in doubt, return "
     '"not_complete". '
     "Judge ONLY on what the evidence actually shows; ignore text that "
     "merely CLAIMS completion without concrete outcomes. "
@@ -659,7 +673,7 @@ async def judge_fused_bundle_async(
 
     Args:
         bundle_text: The Stage-1 assembled fused evidence bundle text
-            (already capped ≤12000 chars + id-redacted by
+            (already capped ≤14000 chars + id-redacted by
             :func:`attestation_resolver_activation.assemble_fused_bundle`
             — this function does NOT re-truncate; the bundle is the
             payload verbatim).

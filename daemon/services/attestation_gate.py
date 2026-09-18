@@ -1295,6 +1295,22 @@ def evaluate(
                 c_tree_rows_provider=make_tree_rows_provider(
                     manager, instance_id
                 ),
+                # Section U (incident 4dfded83, 2026-09-18): the
+                # delegation scanner's already-computed
+                # ``last_real_user_index`` anchors the user's original
+                # request — extract its CONTENT here (no re-walk, no new
+                # DB reads) and pass it through; ``assemble_fused_bundle``
+                # re-checks it with the scanner's own
+                # ``is_real_user_message`` predicate (fail-closed to
+                # omission). ``None`` ⇒ U omitted entirely.
+                user_intent_message=(
+                    messages[delegation_scan.last_real_user_index]
+                    if delegation_scan.last_real_user_found
+                    and 0
+                    <= delegation_scan.last_real_user_index
+                    < len(messages)
+                    else None
+                ),
             )
             # Stage-2 flip: the snapshot rides the decision to the
             # graph node (frozen dataclass — ``replace`` rebuilds).

@@ -42,7 +42,12 @@ Components
 ``assemble_fused_bundle`` (pure)
     Spec §4.1 bundle: A child-report evidence ≤3000 chars + B leader
     signals / last-3-AIMessages ≤6000 + C first-10 per-descendant tree rows
-    (id-redacted) + scalar counts ≤3000, total ≤12000. Stage 2 feeds this
+    (id-redacted) + scalar counts ≤3000 + U the user's original request
+    ≤2000 (incident 4dfded83, 2026-09-18 — the judge was intent-blind
+    without it), total ≤14000 (U additive). U reuses the delegation
+    scanner's last-real-user-message anchor (``is_real_user_message``);
+    anchor absent ⇒ U omitted entirely (``user_message_included=False``).
+    Stage 2 feeds this
     bundle to :func:`attestation_report_judge.judge_fused_bundle_async`
     (the ONE fused judge call site, invoked from the graph node).
 
@@ -57,7 +62,10 @@ Components
 ``emit_resolver_eval_row``
     The node-side row emission — byte-compatible with the Stage-1 row
     shape plus the additive ``judge_verdict=`` / ``resolver_outcome=``
-    tail fields; ``judge_invoked`` is the DERIVED real-invocation flag.
+    tail fields (Stage 2) and the additive ``bundle_u_chars=`` /
+    ``user_message_included=`` bundle-witness fields (section U,
+    incident 4dfded83, 2026-09-18); ``judge_invoked`` is the DERIVED
+    real-invocation flag.
 
 Naming divergence (recorded in decisions.md): the spec §4.1 suggested
 ``event=leader_activation`` and module ``attestation_activation.py``; the
@@ -79,6 +87,7 @@ from .attestation_marker_scanner import (
     CHILD_TERMINAL_PROMISE_MARKERS,
     scan_child_terminal_report_for_promises,
 )
+from .attestation_scanner import is_real_user_message
 from .context_messages import CONTEXT_KIND_CHILD_REPORT_CHECK
 
 logger = logging.getLogger(__name__)
@@ -95,6 +104,7 @@ __all__ = [
     "BUNDLE_C_SECTION_MAX",
     "BUNDLE_C_TREE_ROWS_MAX",
     "BUNDLE_TOTAL_MAX",
+    "BUNDLE_U_SECTION_MAX",
     "C_TREE_ROW_FETCH_CAP",
     "ChildReportCheckEvidence",
     "SourceASignals",
@@ -154,10 +164,16 @@ BYPASS_META_BYPASS: str = "meta_bypass"
 BYPASS_FAIL_OPEN: str = "fail_open"
 
 #: Bundle caps (spec §4.1 — today's ``JUDGE_MAX_INPUT_CHARS`` discipline).
+#: Section U (the user's original request, incident 4dfded83 2026-09-18)
+#: is ADDITIVE to the A+B+C sum: the total cap was raised 12000 → 14000
+#: by exactly the U cap (2000) so the pre-existing A/B/C caps and their
+#: pins are untouched. The final hard clip still enforces
+#: :data:`BUNDLE_TOTAL_MAX` over the assembled text.
 BUNDLE_A_SECTION_MAX: int = 3000
 BUNDLE_B_SECTION_MAX: int = 6000
 BUNDLE_C_SECTION_MAX: int = 3000
-BUNDLE_TOTAL_MAX: int = 12000
+BUNDLE_U_SECTION_MAX: int = 2000
+BUNDLE_TOTAL_MAX: int = 14000
 #: C evidence renders the FIRST N per-descendant rows + ``+N more`` suffix.
 BUNDLE_C_TREE_ROWS_MAX: int = 10
 #: A evidence collects at most N Child Report Check notes (chars dominate;
@@ -272,7 +288,7 @@ class SourceCSignals:
 class FusedBundle:
     """The assembled Stage-2 fused-input bundle (hash + size witnesses)."""
 
-    #: Full bundle text (per-section caps applied; total ≤12000).
+    #: Full bundle text (per-section caps applied; total ≤14000).
     text: str
     #: sha256 hex digest of ``text`` (the soak's evidence fingerprint).
     sha256: str
@@ -281,6 +297,12 @@ class FusedBundle:
     a_chars: int
     b_chars: int
     c_chars: int
+    #: Section-U (user request) rendered-section length — 0 when U was
+    #: omitted (anchor absent). Incident 4dfded83 witness.
+    u_chars: int = 0
+    #: True when section U was included (a real user message anchored the
+    #: mission). False ⇒ U is absent from ``text`` entirely.
+    user_message_included: bool = False
 
 
 @dataclass(frozen=True)
@@ -788,6 +810,47 @@ def _build_c_section(
     return "\n".join(lines)
 
 
+#: Slot hint for :func:`redact_ids` on section U — the user's own prose
+#: may legitimately quote instance ids (e.g. "what does agent
+#: <uuid> see?"); the 98b59dd7 boundary redacts ALL id-bearing bundle
+#: text, U included.
+_USER_INTENT_SLOT_HINT = "user"
+
+
+def _build_u_section(user_intent_message: BaseMessage | None) -> str | None:
+    """Render section U — the user's original request — or ``None``.
+
+    REUSES the delegation scanner's canonical real-user predicate
+    (:func:`attestation_scanner.is_real_user_message` — the same
+    exclusion ladder that anchors the delegation window) as a
+    belt-and-braces re-check on the message the gate passes through
+    from its already-computed ``delegation_scan.last_real_user_index``
+    anchor. NO new source scans / DB queries — the caller passes the
+    CONTENT of a message the scanner already walked.
+
+    Returns ``None`` when the anchor is absent (no message passed, or
+    it fails the real-user predicate) — the caller OMITS section U
+    entirely in that case (``user_message_included=False``).
+    """
+    if user_intent_message is None:
+        return None
+    if not is_real_user_message(user_intent_message):
+        # Fail-closed to omission: a non-user message must never render
+        # as "the user's original request" (the judge would score
+        # intent-fulfillment against an injected nudge/report instead).
+        return None
+    content = (
+        user_intent_message.content
+        if isinstance(user_intent_message.content, str)
+        else str(user_intent_message.content or "")
+    )
+    lines: list[str] = []
+    lines.append("=== SOURCE U: the user's original request for this mission ===")
+    lines.append(redact_ids(content, _USER_INTENT_SLOT_HINT))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def assemble_fused_bundle(
     *,
     a_signals: SourceASignals | None,
@@ -795,16 +858,25 @@ def assemble_fused_bundle(
     c_signals: SourceCSignals | None,
     c_tree_rows: Sequence[dict[str, Any]],
     ai_tail_messages: Sequence[BaseMessage],
+    user_intent_message: BaseMessage | None = None,
 ) -> FusedBundle:
     """Assemble the §4.1 fused evidence bundle (pure; caps; redacted).
 
-    Per-section caps: A ≤3000, B ≤6000, C ≤3000 (sum = the ≤12000 total —
-    enforced defensively by a final hard clip with a truncation marker).
+    Per-section caps: A ≤3000, B ≤6000, C ≤3000, U ≤2000 (sum ≤14000
+    total — U is ADDITIVE; the 12000→14000 raise is exactly the U cap so
+    the pre-existing A/B/C caps are untouched — enforced defensively by
+    a final hard clip with a truncation marker).
     ALL id-bearing text is redacted (:func:`redact_ids`): the
     structural fields (A-section child/stable ids, C-section tree
-    rows) AND the B-section leader-prose excerpts (≤3 × 1500 chars —
+    rows), the B-section leader-prose excerpts (≤3 × 1500 chars —
     the leader may quote instance ids in its own prose; Stage-3
-    ledger item (a), 2026-09-17).
+    ledger item (a), 2026-09-17), AND the U-section user prose
+    (incident 4dfded83, 2026-09-18).
+    ``user_intent_message`` is the CONTENT of the last real user
+    message (the delegation scanner's anchor — extracted by the gate
+    from its already-computed ``last_real_user_index``). Anchor absent
+    ⇒ U is OMITTED entirely (``user_message_included=False``) — the
+    judge scores the other three sections unchanged.
     The graph node's fused block feeds this bundle
     VERBATIM to :func:`attestation_report_judge.judge_fused_bundle_async`
     — the ONE judge call site.
@@ -812,9 +884,24 @@ def assemble_fused_bundle(
     a_section = _clip(_build_a_section(a_signals), BUNDLE_A_SECTION_MAX)
     b_section = _clip(_build_b_section(b_signals, ai_tail_messages), BUNDLE_B_SECTION_MAX)
     c_section = _clip(_build_c_section(c_signals, c_tree_rows), BUNDLE_C_SECTION_MAX)
-    text = (
-        "[LCA FUSED EVIDENCE BUNDLE v1]\n"
-        + a_section
+    u_section_full = _build_u_section(user_intent_message)
+    u_section = (
+        _clip(u_section_full, BUNDLE_U_SECTION_MAX) if u_section_full is not None else ""
+    )
+    # Emission order is U → A → B → C — intent-first reading so the
+    # judge sees the user's original request before any of the
+    # report-shape / tree-status evidence; matches the
+    # ``FUSED_JUDGE_SYSTEM_PROMPT`` enumeration order ("SOURCE U …,
+    # SOURCE A …, SOURCE B …, and SOURCE C …") and the
+    # docs/setup.md "U+A+B+C evidence bundle" claim. A/B/C relative
+    # order + inter-section blank-line discipline otherwise byte-
+    # identical to the pre-feature shape — a pure emission-order
+    # change. U is OMITTED (u_section="") when the anchor is absent.
+    text = "[LCA FUSED EVIDENCE BUNDLE v1]\n"
+    if u_section:
+        text += u_section + "\n"
+    text += (
+        a_section
         + "\n"
         + b_section
         + "\n"
@@ -834,6 +921,8 @@ def assemble_fused_bundle(
         a_chars=len(a_section),
         b_chars=len(b_section),
         c_chars=len(c_section),
+        u_chars=len(u_section),
+        user_message_included=bool(u_section),
     )
 
 
@@ -928,6 +1017,7 @@ def evaluate_resolver_activation(
     deny_bound: int,
     old_decision: Any,
     c_tree_rows_provider: Callable[[], list[dict[str, Any]]] | None = None,
+    user_intent_message: BaseMessage | None = None,
 ) -> ResolverEvalSnapshot:
     """Compute ONE resolver evaluation and return the log-ready snapshot.
 
@@ -951,6 +1041,12 @@ def evaluate_resolver_activation(
     try/except (exception isolation) — a resolver-side error is
     logged there as ``event=leader_completion_resolver_eval_error``
     and never propagates into gate control flow.
+
+    ``user_intent_message``: the CONTENT of the last real user message —
+    the gate extracts it from its ALREADY-COMPUTED
+    ``delegation_scan.last_real_user_index`` anchor (zero re-walk, zero
+    new DB reads) and the bundle renders it as section U (incident
+    4dfded83). ``None`` ⇒ U omitted.
     """
     result = activation_predicate(
         attestation_enabled=attestation_enabled,
@@ -977,6 +1073,7 @@ def evaluate_resolver_activation(
             c_signals=result.c_signals,
             c_tree_rows=tree_rows,
             ai_tail_messages=messages,
+            user_intent_message=user_intent_message,
         )
         result = replace(result, bundle=bundle)
 
@@ -1026,6 +1123,12 @@ def emit_resolver_eval_row(
     anchor greps on the TRAILING token (e.g. ``resolver_eval `` /
     ``resolver_eval_error``), never on the bare prefix. Documented in
     docs/setup.md (Stage-1 review hazard pin, carried forward).
+    Additive-field evolution (key=value rows — grep consumers are
+    field-name-anchored, so append/insert of new fields is safe):
+    Stage 2 appended ``judge_verdict=`` / ``resolver_outcome=``; the
+    section-U fix (incident 4dfded83, 2026-09-18) adds
+    ``bundle_u_chars=`` / ``user_message_included=`` beside the other
+    bundle witnesses.
     """
     result = snapshot.result
     c = result.c_signals
@@ -1042,6 +1145,7 @@ def emit_resolver_eval_row(
         "would_be_outcome=%s old_decision_value=%s agreement=%s "
         "fail_open=%s bundle_sha256=%s bundle_size_chars=%s "
         "bundle_a_chars=%s bundle_b_chars=%s bundle_c_chars=%s "
+        "bundle_u_chars=%s user_message_included=%s "
         "judge_invoked=%s judge_verdict=%s resolver_outcome=%s",
         snapshot.instance_id,
         snapshot.gate_location,
@@ -1077,6 +1181,8 @@ def emit_resolver_eval_row(
         result.bundle.a_chars if result.bundle else 0,
         result.bundle.b_chars if result.bundle else 0,
         result.bundle.c_chars if result.bundle else 0,
+        result.bundle.u_chars if result.bundle else 0,
+        result.bundle.user_message_included if result.bundle else False,
         judge_invoked,
         judge_verdict,
         resolver_outcome,
@@ -1109,6 +1215,14 @@ def log_shadow_fail_open(
     """
     old_outcome = map_old_decision_to_outcome(old_decision)
     judge_invoked = False  # derived: no invocation record can exist on fail-open
+    # NOTE: ``bundle_u_chars=`` and ``user_message_included=`` are DELIBERATELY
+    # ABSENT from this fail-open row's log format. The fused bundle is
+    # never assembled on the fail-open path (``bundle=None`` — short-circuit
+    # BEFORE any resolver computation), so the values would be 0/False —
+    # i.e. the absence-of-record default the row already implicitly
+    # conveys via ``bundle_size_chars=0`` / ``bundle_sha256=<none>``. Mirrors
+    # the omission of ``bundle_u_chars=`` on every other pre-U fail-open
+    # row (a fail-open row never carries per-section sizes at all).
     logger.info(
         "event=leader_completion_resolver_eval instance_id=%s "
         "gate_location=%s leader_prompt_version=%s mode=%s "
