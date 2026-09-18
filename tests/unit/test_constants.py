@@ -130,6 +130,18 @@ class TestConstants:
         """WORKER_WAIT_TIMEOUT should be 3.0."""
         assert constants.WORKER_WAIT_TIMEOUT == 3.0
 
+    def test_chat_worker_pool_size(self):
+        """CHAT_WORKER_POOL_SIZE should be 2 (chat-source-worker-lane,
+        D7 — hardcoded, no env flag)."""
+        assert constants.CHAT_WORKER_POOL_SIZE == 2
+
+    def test_chat_source_prefixes(self):
+        """CHAT_SOURCE_PREFIXES should be exactly the three interactive-chat
+        prefixes (telegram/slack/discord) — exact-equality pin (Pin 5 cross-ref;
+        full membership pin lives in ``tests/unit/routers/test_source_reservation.py::
+        TestChatSourcePrefixesConstant``)."""
+        assert constants.CHAT_SOURCE_PREFIXES == ("telegram:", "slack:", "discord:")
+
     # ── Compaction ──────────────────────────────────────────────────────────────
 
     def test_compaction_threshold(self):
