@@ -808,10 +808,20 @@ class SQLModelInstanceRepository:
         * ``status`` is applied to the **root query only**. Once a root is
           selected for the current page, ALL of its descendants are loaded —
           regardless of status. This keeps descendant sets complete.
-        * ``project_id`` is applied to both the root query and the BFS child
-          queries (defense-in-depth; descendants should inherit project from
-          their root, but the BFS filter prevents leakage in case of corrupt
-          ``parent_id`` references).
+        * ``project_id`` is applied to the **root query only**. Once a root
+          is in the page, ALL of its descendants are loaded regardless of
+          their own ``project_id``. Lineage is defined by ``parent_id``
+          (the parent's record), not by ``project_id``; descendants of an
+          in-scope root are always part of the response even when they
+          belong to a different project. Roots have already passed the
+          ``project_id`` filter before BFS starts, so no foreign-root
+          subtree can leak in — the worst case is a corrupt ``parent_id``
+          surfacing one extra node under an in-scope root (a
+          data-quality display artefact, not a scoping leak). The shared
+          ``MAX_DESCENDANTS_PER_PAGE=1000`` cap spans the cross-project
+          subtree too, so a wide foreign fan-out under one in-scope root
+          can displace deep in-project descendants; ``truncated=True`` on
+          the response surfaces this so callers can react.
         * ``exclude_kb`` is applied to the **root query** for pagination and
           then **post-filtered** in Python on the assembled descendant list.
           The BFS itself does NOT exclude KB agents mid-traversal — that would
@@ -820,15 +830,17 @@ class SQLModelInstanceRepository:
           non-KB children are reachable) and then stripped from the final
           result.
         * ``search`` is applied to the root count, root query, and the BFS
-          child query (defense-in-depth, mirroring ``project_id``). Like
-          ``%`` / ``_`` wildcards in user input are escaped to literals.
+          child query (defense-in-depth, mirroring ``project_id``'s *root
+          only* rule for the same lineage reason). Like ``%`` / ``_``
+          wildcards in user input are escaped to literals.
 
         Args:
             status: Optional status filter. For ``include_descendants=True``,
                 applied to root selection only; descendants are returned
                 regardless of status. For flat pagination, applied to all rows.
-            project_id: Optional project ID filter (applied to both roots and
-                descendants when ``include_descendants=True``).
+            project_id: Optional project ID filter (applied to roots only
+                when ``include_descendants=True``; descendants are returned
+                regardless of their own ``project_id``).
             limit: Maximum number of root instances to return.
             offset: Number of root instances to skip.
             exclude_kb: Exclude KB-related instances (experiencer, kb-importer, kb-writer)
@@ -1023,13 +1035,18 @@ class SQLModelInstanceRepository:
                 if not current_level_ids:
                     break
 
-                # Only project_id and search are applied mid-traversal (defense-in-depth).
-                # exclude_kb and status are handled outside the loop.
+                # Only ``search`` is applied mid-traversal (defense-in-depth —
+                # search narrows the visible tree; pinned by existing
+                # ``test_search_filters_descendants``). ``exclude_kb`` and
+                # ``status`` are handled outside the loop. ``project_id`` is
+                # intentionally NOT applied here: once a root is in the page,
+                # ALL of its descendants are loaded regardless of their own
+                # project_id. Lineage is defined by ``parent_id``, not by
+                # ``project_id``; roots have already passed the project filter,
+                # so no foreign-root subtree can leak in via mid-BFS filtering.
                 child_stmt = select(Instance).where(
                     col(Instance.parent_id).in_(current_level_ids)
                 )
-                if project_id is not None:
-                    child_stmt = child_stmt.where(Instance.project_id == project_id)
                 if search_cond is not None:
                     child_stmt = child_stmt.where(search_cond)
 

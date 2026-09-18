@@ -386,7 +386,17 @@ async def list_instances(
     request: Request,
     limit: int = DEFAULT_PAGE_LIMIT,
     offset: int = 0,
-    project_id: str | None = Query(None, description="Filter instances by project ID"),
+    project_id: str | None = Query(
+        None,
+        description=(
+            "Filter instances by project ID. With ``include_descendants=true`` "
+            "(default), the filter applies to ROOT instances only; descendants "
+            "of in-scope roots are returned regardless of their own project_id "
+            "(lineage is by parent_id, not by project_id — owners can spawn "
+            "cross-project delegations). With ``include_descendants=false``, "
+            "the filter applies to every row."
+        ),
+    ),
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
     include_descendants: bool = Query(
         True,

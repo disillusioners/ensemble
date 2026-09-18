@@ -6,7 +6,7 @@ Covers:
 - exclude_kb=True excludes KB agent descendants
 - Pagination: limit=1 returns 1 root + its descendants; offset=1 returns the next root
 - Empty result: no root instances → returns ([], 0)
-- project_id filter applies to both roots and descendants
+- project_id filter applies to roots only (descendants resolve by parent_id)
 - Dedup via seen_ids guards against circular parent_id references
 - Depth limit logs a warning when hit
 - include_descendants=False preserves original flat pagination behavior
@@ -176,8 +176,21 @@ class TestListIncludeDescendantsBFS:
         assert instances == []
         assert total == 0
 
-    def test_project_id_filter_applies_to_descendants(self, repo):
-        """project_id filter applies to BOTH roots and descendants (defense-in-depth)."""
+    def test_project_id_filter_applies_to_roots_only(self, repo):
+        """project_id filter scopes the ROOT query only; descendants resolve
+        by ``parent_id`` (lineage), NOT by their own ``project_id``.
+
+        Layout (per the 4db1bd2e contract change):
+            root-p1               (proj-1)   ← root passes the project filter
+            child-p1              (proj-1)   ← same-project descendant
+            child-other-project   (proj-2)   ← cross-project descendant
+                                              (must still appear; lineage
+                                               is parent_id, not project_id)
+
+        Scoped to proj-1, the response must include all three: the proj-2
+        child is NOT scoped out by mid-BFS project filtering (that was
+        the bug class 4db1bd2e closed).
+        """
         _make_instance(repo, "root-p1", project_id="proj-1")
         _make_instance(repo, "child-p1", parent_id="root-p1", project_id="proj-1")
         _make_instance(
@@ -188,9 +201,10 @@ class TestListIncludeDescendantsBFS:
             include_descendants=True, project_id="proj-1"
         )
         assert total == 1
-        assert len(instances) == 2
-        assert {i.instance_id for i in instances} == {"root-p1", "child-p1"}
-        assert all(i.project_id == "proj-1" for i in instances)
+        assert len(instances) == 3
+        assert {i.instance_id for i in instances} == {
+            "root-p1", "child-p1", "child-other-project",
+        }
 
 
 class TestListIncludeDescendantsDedup:
