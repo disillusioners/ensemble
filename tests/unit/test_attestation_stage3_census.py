@@ -297,27 +297,23 @@ class TestR5R6CensusTriggerPlumbingDeleted:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ledger (c) — the child-report marker-write seam
+# Ledger (c) — the child-report marker-write seam (RETIRED D-CTD-7)
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# 2026-09-18 (D-CTD-7, user decision): the LCA ``Child Report Check``
+# advisory note mint was removed entirely. The two pin tests that
+# survived the Stage-3 retirement of the mint block
+# (``test_scanner_import_hoisted_out_of_hot_path`` /
+# ``test_marker_write_catch_splits_import_error``) are now obsolete:
+# the scanner is no longer imported into ``child_reports`` (no callers
+# after the mint deletion), and the SAVEPOINT-catch-import-error seam
+# does not exist (the mint block is gone). The catalog lives in
+# ``daemon/services/attestation_marker_scanner.py`` and is pinned
+# positively by ``tests/unit/test_attestation_marker_scanner.py`` +
+# ``tests/unit/test_child_terminal_contradiction.py::TestSourcePins
+# ::test_catalog_lives_in_marker_scanner``; the note-mint removal is
+# pinned negatively by ``TestSourcePins
+# ::test_note_mint_site_is_gone_from_child_reports``. The ledger (c)
+# row in the Stage-3 retirement record references D-CTD-7.
 
-
-class TestLedgerCMarkerWriteSeam:
-    def test_scanner_import_hoisted_out_of_hot_path(self) -> None:
-        # The lazy import no longer lives inside the completion
-        # transaction body — it is a module-top import.
-        import daemon.services.child_reports as cr_mod
-
-        assert hasattr(cr_mod, "scan_child_terminal_report_for_promises")
-        src = inspect.getsource(
-            cr_mod.ChildReportsService._process_child_completion_db_sync
-        )
-        assert "from .attestation_marker_scanner import" not in src
-
-    def test_marker_write_catch_splits_import_error(self) -> None:
-        import daemon.services.child_reports as cr_mod
-
-        src = inspect.getsource(
-            cr_mod.ChildReportsService._process_child_completion_db_sync
-        )
-        assert "except ImportError as" in src
-        assert "deploy_bug=true" in src
+# (Ledger (c) tests removed 2026-09-18 — see comment above.)

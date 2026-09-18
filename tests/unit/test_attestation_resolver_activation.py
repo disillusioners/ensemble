@@ -1172,3 +1172,103 @@ class TestSourcePins:
                         and isinstance(node.func.value, ast.Name)
                         and node.func.value.id == "os"
                     ), "no os.environ/os.getenv reads in the Stage-1 module"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D-CTD-7 (2026-09-18) — A-signal path preservation pin
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# User decision: the LCA ``[SYSTEM CONTEXT: Child Report Check]``
+# advisory note mint was REMOVED, but the A-band activation trigger
+# path (Source A → activation predicate) must stay UNTOUCHED. These
+# pins verify the A-signal surface is preserved verbatim — the
+# resolver still consumes ``collect_source_a_signals`` (note-shape
+# detector), the activation predicate still feeds ``a_suspicion``
+# through the Source-A channel, and the bundle assembly still has
+# an A-section renderer. Catalog bytes are pinned positively by
+# ``tests/unit/test_attestation_marker_scanner.py`` +
+# ``tests/unit/test_child_terminal_contradiction.py
+# ::TestSourcePins::test_catalog_lives_in_marker_scanner``.
+
+
+class TestDCTD7ASignalPathPins:
+    """Positive pins — the A-signal path is preserved verbatim
+    (D-CTD-7, 2026-09-18 user decision)."""
+
+    def test_resolver_consumes_collect_source_a_signals(self):
+        """The activation predicate still wires through
+        ``collect_source_a_signals`` — the A-signal source the
+        resolver reads. Untouched by D-CTD-7.
+        """
+        import daemon.services.attestation_resolver_activation as ara2
+        from daemon.services.attestation_resolver_activation import (
+            collect_source_a_signals,
+        )
+        assert hasattr(ara2, "collect_source_a_signals")
+        assert callable(collect_source_a_signals)
+        # Identity pin — same symbol the resolver wires into the
+        # predicate (attestation_resolver_activation.py:1058).
+        from daemon.services.attestation_resolver_activation import (
+            evaluate_resolver_activation,
+        )
+        import inspect
+        src = inspect.getsource(evaluate_resolver_activation)
+        assert "collect_source_a_signals" in src, (
+            "D-CTD-7: resolver activation path no longer wires "
+            "collect_source_a_signals — A-signal source drifted"
+        )
+
+    def test_activation_predicate_a_suspicion_term_intact(self):
+        """The activation predicate's ``a_suspicion`` term must
+        still consult Source A signals (advisory_present OR
+        contradiction_flag OR phrase_match OR word_count_below_
+        threshold). D2 (NOT busy-suppressed) preserved verbatim.
+        """
+        from daemon.services.attestation_resolver_activation import (
+            activation_predicate,
+        )
+        import inspect
+        src = inspect.getsource(activation_predicate)
+        # The four OR'd fields of the A-suspicion term — if any
+        # gets renamed/removed, the A-band trigger semantics drift.
+        assert "a_signals.advisory_present" in src
+        assert "a_signals.contradiction_flag" in src
+        assert "a_signals.phrase_match" in src
+        assert "a_signals.word_count_below_threshold" in src
+        assert "a_suspicion = bool(" in src, (
+            "D-CTD-7: activation_predicate a_suspicion term shape "
+            "drifted from spec §4.2"
+        )
+
+    def test_fused_bundle_a_section_cap_unchanged(self):
+        """The A-section cap (3000 chars) and the A-section
+        renderer must remain byte-identical. Negative-resurrection
+        of any per-A-section cap change is the test.
+        """
+        from daemon.services.attestation_resolver_activation import (
+            BUNDLE_A_SECTION_MAX,
+            _build_a_section,
+        )
+        assert BUNDLE_A_SECTION_MAX == 3000, (
+            "D-CTD-7: BUNDLE_A_SECTION_MAX changed from 3000 — "
+            "fused bundle A-section cap drift"
+        )
+        assert callable(_build_a_section)
+
+    def test_catalog_byte_identical_after_removal(self):
+        """The 17-pattern catalog survives D-CTD-7 byte-identical.
+        The user explicitly declined tightening; the catalog stays.
+        Identity pin (same module reference).
+        """
+        from daemon.services.attestation_marker_scanner import (
+            CHILD_TERMINAL_PROMISE_MARKERS as BEFORE,
+        )
+        from daemon.services.attestation_marker_scanner import (
+            CHILD_TERMINAL_PROMISE_MARKERS as AFTER,
+        )
+        assert BEFORE is AFTER
+        # 17 entries per D-CTD-1 (decision catalog size pinned).
+        assert len(CHILD_TERMINAL_PROMISE_MARKERS) == 17, (
+            f"D-CTD-7: catalog size drifted from 17 to "
+            f"{len(CHILD_TERMINAL_PROMISE_MARKERS)}"
+        )
