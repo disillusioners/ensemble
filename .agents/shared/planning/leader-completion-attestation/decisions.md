@@ -1737,3 +1737,61 @@ Baseline 940 collected / 64 files → post-retirement: unit 671 green (incl. +22
   * No new env flag introduced (per fix/flag policy 7d5285aa). The detector shipped always-on with the catalog; the catalog stays always-on for the gate's scanner surface and any future re-attach point.
 
 **Acceptance criteria changes** (see ``requirements.md`` — note-specific ACs marked SUPERSEDED 2026-09-18, pointer to this D-entry).
+
+---
+
+## D-CTD-8 — A-band RESTORED via evaluation-time transcript scan (2026-09-18, user standing decision Q2 + leader shape)
+
+**Context.** D-CTD-7 (above) removed the Stage-0 mint-with-delivery note machinery and left the A-band **DORMANT** (the catalog + scanner + `_is_child_report_check_note` + `collect_source_a_signals` wiring were all preserved but unfed by an empty note stream). The user's standing decision (Q2, 2026-09-18): **A-band stays ACTIVE with the catalog UNCHANGED** — restore the signal WITHOUT resurrecting the note.
+
+**Restoration shape (leader-decided, binding; APPROVED 2026-09-18).** The A-band now scans the leader's in-context child-report ``HumanMessage`` rows (the ``internal_report:<child_iid>`` stamp emitted by the report-injection drain at ``daemon/graph.py:6950-6967`` and the fallback ``_stamped_additional_kwargs`` path at ``daemon/services/instance_messaging.py:525``) for the 17-pattern catalog **at gate-evaluation time**, in the SAME window the A/B/C reads already use. The delivery-time machinery is gone FOREVER — no note, no SAVEPOINT, no ``PROCESS_MESSAGE`` Task mint, no notify, no mint-side log row.
+
+**Catalog deliberately unchanged.** User ruling (Q2): the catalog is preserved BYTE-IDENTICAL (17 entries; the existing ``test_catalog_byte_identical_after_removal`` pin at ``tests/unit/test_attestation_resolver_activation.py::TestDCTD7ASignalPathPins`` stays green — no entries added, none removed). The judge filters FPs at one quick call per gate-eval-fires-A; the user's call is **coverage over a tighter catalog**.
+
+**Closure FP specimens (2026-09-18, runtime corroboration).** The still-live advisory fired on both removal-task children's completion reports — coder ``bd5f7b2d`` and reviewer ``9abfcb33`` — because each report quoted the 17-marker catalog VERBATIM as preservation evidence ("the catalog includes 'awaiting' and 'ending turn' … …"). Self-referential FP class: catalog preservation language triggers the catalog. The user's preservation-by-quote decision is exactly what made those reports FP-positive. Direct runtime corroboration of the removal rationale; cited here as the empirical anchor for "judge filters FPs at the cost of one quick call".
+
+**Field mapping (old note-stamped → new scan-derived).** The 4-field Source-A OR shape (``advisory_present ∨ contradiction_flag ∨ phrase_match ∨ word_count_below_threshold`` → ``a_suspicion = bool(...)``) is preserved verbatim — D2 SEMANTICS STAY (A-band not busy-suppressed, activates alone). Each field is re-derived from the evaluation-time scan:
+
+  +---------------------------+----------------------------------------------------+
+  | Field (SourceASignals)    | New meaning (evaluation-time scan of transcript)   |
+  +===========================+====================================================+
+  | ``advisory_present``      | True iff at least one catalog-hit child-report     |
+  |                           | message in the window (preserves old ≡ phrase      |
+  |                           | semantic).                                         |
+  +---------------------------+----------------------------------------------------+
+  | ``phrase_match``          | True iff at least one catalog-hit child-report     |
+  |                           | has a non-empty ``matched_terms`` set (primary    |
+  |                           | trigger; old semantic preserved).                 |
+  +---------------------------+----------------------------------------------------+
+  | ``contradiction_flag``    | True iff any catalog-hit's ``matched_terms``       |
+  |                           | include an explicit-contradiction marker          |
+  |                           | (``still pending`` / ``not yet complete`` /        |
+  |                           | ``interim``). Raises the strongest "claimed-      |
+  |                           | done-but-isn't" sub-signal. Was always False in   |
+  |                           | the deleted producer; now live (forward-          |
+  |                           | compatible — predicate was already OR'ing it).   |
+  +---------------------------+----------------------------------------------------+
+  | ``word_count_below_       | True iff any catalog-hit child-report's raw word  |
+  | threshold``               | count is < 150 (Source B's ``length_trigger``     |
+  |                           | mirror). The 150-word threshold matches the        |
+  |                           | Source B short-completion heuristic exactly.      |
+  +---------------------------+----------------------------------------------------+
+
+**Compaction question (the file:line-verified outcome).** The drained child-report ``HumanMessage`` rows carry the standard live stamp ``additional_kwargs={"injected_message": True, "source": f"internal_report:{child_iid}"}`` — bare-flag ``injected_message`` with NO ``context_kind`` (per ``daemon/services/compaction.py:130-148``). Behavior: protected UNTIL answered, then absorbable. At gate-evaluation time, the just-delivered report is FRESH (drain → LLM answer → gate eval, all in this turn, no compaction cycle between); older reports MAY be absorbed by compaction in subsequent turns — but those reports were captured by their own turn's gate-eval call at the time. The semantic contract is "turn-cycle-relative contradiction suspicion", not "lifetime ledger", and the A-band correctly catches new lies this turn. Verdict: NOT a blocker; bare-flag absorbable is the correct steady-state for a turn-relative signal.
+
+**Legacy-note detector kept as defense-in-depth.** :func:`daemon.services.attestation_resolver_activation._is_child_report_check_note` (the prefix-fallback detector) is RETAINED — old notes may still ride in long-running checkpoints that survived the upgrade (they're ``context_kind=child_report_check`` permanently hoisted). The live A-signal source is the transcript scan; the note-path adds no new evidence rows in production. The legacy detector is the resurrection insurance, not the live producer.
+
+**Do-NOT-touch list.** Judge service, ``MID_WORK_MARKERS`` / Source B, tree-status / Source C, bound / escalation, nudge / hint texts, U-section, count-guard predicates (``daemon/repositories/message_queue/predicates.py``). The change is STRICTLY: ``collect_source_a_signals`` + the two new helpers (``_is_child_report_message``, ``_build_evidence_from_report_message``) + three constants (``_INTERNAL_REPORT_SOURCE_PREFIX``, ``_CONTRADICTION_MARKERS``, ``_SHORT_REPORT_WORD_THRESHOLD``).
+
+**Pins added (D-CTD-8 restoration-loud).**
+
+  * **Functional pin** — ``tests/unit/test_attestation_resolver_activation.py::TestDCTD7ASignalPathPins::test_functional_pin_internal_report_message_produces_a_signal``: an ``internal_report:``-stamped ``HumanMessage`` containing a catalog phrase MUST produce ``advisory_present=True`` through the real ``collect_source_a_signals`` code path. The literal-must-pass assertion re-anchors on the evaluation-time scan, replacing the deleted mint-time ``notify_worker_pool`` flag as the structural witness of A-band liveness.
+  * **Live-path source-A collection tests** — ``TestSourceACollection``: 7 new tests (``test_internal_report_with_catalog_phrase_fires`` — the FP-positive canonical seed, ``test_internal_report_without_catalog_phrase_does_not_fire`` — clean completions do not raise the band, ``test_user_injected_note_does_not_match_internal_report_path`` — disambiguation from user-injected notes, ``test_a_system_message_with_internal_report_source_does_not_match`` — type guard, ``test_contradiction_flag_raised_on_explicit_marker``, ``test_word_count_below_threshold_raised_on_short_report``, ``test_legacy_note_and_live_report_paths_coexist`` — both paths bounded by ``A_EVIDENCE_NOTES_CAP``).
+  * **Negative mint-resurrection pin stays green** — ``tests/unit/test_child_terminal_contradiction.py::TestSourcePins::test_note_mint_site_is_gone_from_child_reports``: the 10-needle production-code grep stays untouched. Verification: no production-code shape from the deleted mint block re-appears in ``daemon/services/child_reports.py``.
+  * **No-new-env-flag pin stays green** — ``test_no_new_env_flag_added``: zero new ``os.environ``/``os.getenv`` reads referencing ``CHILD_REPORT_CHECK``. The A-band ships always-on per fix/flag policy 7d5285aa.
+
+**Requirements.md changes.** A-band acceptance criteria SUPERSEDED 2026-09-18 with pointer to this D-entry; the supersession pattern matches the D-CTD-7 note-specific AC supersession (no silent deletion).
+
+**Activation contract (no behavior drift outside the A-band).** ``activation_predicate`` is BYTE-IDENTICAL on the wire (same 4-field OR, same D2 semantics). ``_build_a_section`` is BYTE-IDENTICAL (same renderer, same cap ``BUNDLE_A_SECTION_MAX = 3000``). The fused bundle's A-section can now render scan-derived ``ChildReportCheckEvidence`` rows (with ``child_instance_id`` extracted from the ``source`` stamp's uuid substring) instead of note-body-parsed ids — visual surface unchanged.
+
+**Out of scope (deferred).** Repairing the legacy note-path detector to prefer the stamped kwargs surface when both old notes and new internal_report messages exist on the same conversation (rare cross-upgrade scenario). The double-evidence-row case is bounded by ``A_EVIDENCE_NOTES_CAP = 5`` and produces one row + a stable_id dedup; the budget stays correct.

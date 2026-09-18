@@ -243,13 +243,35 @@ class SourceASignals:
 
     Spec §4.1 anticipated ``{advisory_present, contradiction_flag,
     phrase_promise_while_stopping, word_count_below_threshold,
-    child_instance_id, report_excerpt}``. The LANDED Stage-0 producer
-    contract is NARROWER: a promise-phrase substring scan whose only
-    output is the advisory note (advisory_present ≡ phrase match; no
-    contradiction flag, no word-count signal, no raw report excerpt).
-    The two unlanded booleans stay on the struct (default False) so the
-    predicate is forward-compatible with a richer producer; the delta is
-    recorded in decisions.md.
+    child_instance_id, report_excerpt}``.
+
+    **Stage-0 landed producer** (deleted by D-CTD-7, 2026-09-18):
+    ``advisory_present ≡ phrase_match`` (the mint-only producer
+    contract); ``contradiction_flag`` and
+    ``word_count_below_threshold`` were structurally dead (default
+    False) — preserved on the struct for forward-compatibility with
+    the spec's wider surface.
+
+    **2026-09-18 evaluation-time transcript scan** (this commit):
+    ALL four booleans are now live re-derivations from the gate's
+    scan of the leader's in-context ``internal_report:``-stamped
+    child-report messages:
+
+    * ``advisory_present`` — at least one catalog-hit child-report.
+    * ``phrase_match`` — at least one catalog-hit has matched terms
+      (≡ ``advisory_present`` on the live producer; see the
+      field-mapping table on :func:`collect_source_a_signals`).
+    * ``contradiction_flag`` — at least one matched_terms set
+      contains an explicit-contradiction marker
+      (see :data:`_CONTRADICTION_MARKERS`).
+    * ``word_count_below_threshold`` — at least one matched
+      child-report's raw word count is below 150 (Source B's
+      ``length_trigger`` mirror).
+
+    The 4-field OR shape feeding :func:`activation_predicate`'s
+    ``a_suspicion`` term is preserved (the predicate wire contract
+    is unchanged — D2 SEMANTICS STAY, A-band not busy-suppressed,
+    activates alone).
     """
 
     advisory_present: bool
@@ -384,8 +406,75 @@ class ResolverEvalSnapshot:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+#: Live child-report source prefix (set on
+#: ``additional_kwargs["source"]`` by the report-injection drain at
+#: ``daemon/graph.py:6950-6967`` and the fallback enqueue lane at
+#: ``daemon/services/instance_messaging.py:525``). The A-scan uses
+#: this prefix to disambiguate child-report messages from
+#: user-injected notes (which carry the same bare-flag
+#: ``injected_message=True``).
+_INTERNAL_REPORT_SOURCE_PREFIX: str = "internal_report:"
+
+#: Regex extracting the child instance id from a stamped ``source``
+#: attribute on a drained child-report ``HumanMessage`` (live path).
+#: The shape is ``internal_report:<uuid>:<completed_message_id>``
+#: (``daemon/graph.py:6960`` / ``daemon/services/instance_messaging.py:525``
+#: predecessor); only the leading uuid prefix is needed.
+_INTERNAL_REPORT_ID_FROM_SOURCE_RE: re.Pattern[str] = re.compile(
+    rf"^{_INTERNAL_REPORT_SOURCE_PREFIX}"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?::|$)"
+)
+
+#: Markers that explicitly signal a "claimed-done-but-isn't" contradiction
+#: in the child-terminal-report content. When ANY matched_terms item from
+#: a scanned child-report falls in this set, ``contradiction_flag`` is
+#: raised on :class:`SourceASignals` (the 4-field OR's most pointed
+#: sub-signal — strongest A-band suspicion).
+_CONTRADICTION_MARKERS: frozenset[str] = frozenset(
+    {"still pending", "not yet complete", "interim"}
+)
+
+#: Word-count threshold mirroring Source B's ``length_trigger`` (the
+#: 17-pattern catalog is the siblings of the 16-pattern marker catalog;
+#: the same short-completion heuristic applies). A scanned child-report
+#: whose raw word count is BELOW this threshold raises
+#: ``word_count_below_threshold`` on :class:`SourceASignals`.
+_SHORT_REPORT_WORD_THRESHOLD: int = 150
+
+
+def _word_count(text: str) -> int:
+    """Return the whitespace-separated word count of ``text``.
+
+    Cheap approximation used by the A-scan's word-count threshold. Empty
+    text returns 0 (defensive floor — matches the catalog scanner's
+    floor on empty input). Mirrors the :func:`attestation_scanner.
+    final_word_count` approximation discipline.
+    """
+    if not text:
+        return 0
+    return len(text.split())
+
+
 def _is_child_report_check_note(message: BaseMessage) -> bool:
-    """Dual-surface detection of a delivered Child Report Check note."""
+    """Detect a delivered Child Report Check note (Stage-0 producer).
+
+    DEFENSE-IN-DEPTH ONLY (post-D-CTD-7, 2026-09-18 restoration): the
+    note mint site is DELETED (graph-resident only — see
+    ``daemon/services/child_reports.py`` ``Stage-0 mint-with-delivery``
+    block), so no NEW notes carry this shape. The detector survives for
+    any historical checkpoint state — long-running leaders whose
+    mid-flight checkpoint still contains a note minted before the
+    6a695b8f removal, surviving compaction due to its
+    ``context_kind=child_report_check`` permanent-hoist flag
+    (``daemon/services/compaction.py:130-148``). The LIVE A-signal
+    source is :func:`_is_child_report_message`.
+
+    Dual-surface: structured kwargs (``context_kind=child_report_check``
+    on the canonical :func:`_make_context_message` output) OR the
+    always-present ``[SYSTEM CONTEXT: Child Report Check]`` content
+    prefix.
+    """
     if not isinstance(message, HumanMessage):
         return False
     kwargs = getattr(message, "additional_kwargs", None) or {}
@@ -395,29 +484,146 @@ def _is_child_report_check_note(message: BaseMessage) -> bool:
     return content.startswith(_CHILD_REPORT_CHECK_PREFIX)
 
 
+def _is_child_report_message(message: BaseMessage) -> bool:
+    """Detect a LIVE child completion-report ``HumanMessage``.
+
+    Post-D-CTD-7 restoration (2026-09-18): the live A-signal source is
+    the same stamped ``HumanMessage`` rows the A-section already
+    consumes — the report-injection drain at :file:`daemon/graph.py`
+    line ~6950 (``report_extra_kwargs = {"injected_message": True,
+    "source": f"internal_report:{report_child_iid}"}``) and the
+    fallback ``PROCESS_REPORT`` task's enqueue-lane stamping via
+    :func:`_stamped_additional_kwargs` at
+    ``daemon/services/instance_messaging.py:525``. The
+    ``source``-prefix disambiguates child-report messages from
+    user-injected notes (which carry the same bare-flag
+    ``injected_message=True``).
+    """
+    if not isinstance(message, HumanMessage):
+        return False
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    source = kwargs.get("source")
+    return isinstance(source, str) and source.startswith(
+        _INTERNAL_REPORT_SOURCE_PREFIX
+    )
+
+
+def _extract_child_id_from_source(source: str) -> str | None:
+    """Pull the child instance uuid from an ``internal_report:`` source.
+
+    Returns ``None`` when the regex doesn't match — the source prefix
+    is preserved (the scan still runs); only the child-id annotation on
+    the evidence is empty.
+    """
+    match = _INTERNAL_REPORT_ID_FROM_SOURCE_RE.match(source or "")
+    return match.group(1) if match else None
+
+
 def _excerpt(text: str, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
 
 
+def _build_evidence_from_report_message(
+    message: BaseMessage,
+) -> tuple[ChildReportCheckEvidence, int] | None:
+    """Build a :class:`ChildReportCheckEvidence` from a child-report
+    ``HumanMessage``, OR ``None`` when the catalog scan finds nothing.
+
+    Returns a ``(evidence, raw_word_count)`` tuple — the raw word count
+    is captured BEFORE the excerpt truncation so the
+    ``word_count_below_threshold`` flag on :class:`SourceASignals`
+    answers the catalogue-shot heuristic on the original text (not the
+    400-char excerpt). When the scan finds no promise marker, returns
+    ``None`` and the message is skipped (no evidence row, no signal).
+    """
+    if not isinstance(message, HumanMessage):
+        return None
+    content = message.content if isinstance(message.content, str) else ""
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    scan = scan_child_terminal_report_for_promises(content)
+    if not scan.promise_hit:
+        return None
+    source = kwargs.get("source")
+    child_id = (
+        _extract_child_id_from_source(source)
+        if isinstance(source, str)
+        else None
+    )
+    stable_id = getattr(message, "id", None)
+    return (
+        ChildReportCheckEvidence(
+            child_instance_id=child_id,
+            matched_terms=scan.matched_terms,
+            note_excerpt=_excerpt(content),
+            stable_id=stable_id if isinstance(stable_id, str) else None,
+            kwargs_surface_seen=isinstance(source, str)
+            and source.startswith("internal_report:"),
+        ),
+        _word_count(content),
+    )
+
+
 def collect_source_a_signals(
     messages: Sequence[BaseMessage],
 ) -> SourceASignals:
-    """Scan the leader's message history for Child Report Check notes.
+    """Scan the leader's message history for Source-A triggers.
 
-    Pure function; no I/O, no LLM, no DB. Detection uses BOTH surfaces
-    of the landed Stage-0 contract: the structured kwargs
-    (``context_kind=child_report_check``) when the delivery drain
-    preserved them, and the canonical ``[SYSTEM CONTEXT: Child Report
-    Check]`` content prefix otherwise (always present — the note body is
-    built by the ``_make_context_message`` factory). Terms and the child
-    id are recovered from kwargs first; on the prefix-fallback path the
-    terms are re-derived by re-scanning the note body (it quotes the
-    matched terms verbatim) and the child id is parsed from the body's
-    opening sentence.
+    Post-D-CTD-7 (2026-09-18, restoration 2026-09-18): scans the
+    leader's in-context child-report ``HumanMessage`` rows (the
+    ``internal_report:<child_iid>`` stamp emitted by
+    ``daemon/graph.py:6950-6967`` and the fallback
+    ``_stamped_additional_kwargs`` path at
+    ``daemon/services/instance_messaging.py:525``) for the 17-pattern
+    catalog at gate-evaluation time. The 17-entry catalog is BYTE-
+    IDENTICAL to the deleted Stage-0 producer contract (existing
+    ``test_catalog_byte_identical`` identity pin stays green).
+
+    Field mapping (old note-stamped → new scan-derived) — preserved
+    4-field OR shape on :class:`SourceASignals` (the predicate wire
+    contract is unchanged; D2 semantics STAY — A-band not
+    busy-suppressed, activates alone):
+
+    +---------------------------+----------------------------------------------------+
+    | Field (SourceASignals)    | New meaning (evaluation-time scan of transcript)   |
+    +===========================+====================================================+
+    | ``advisory_present``      | True iff at least one catalog-hit child-report     |
+    |                           | message in the window (preserves old ≡ phrase      |
+    |                           | semantic).                                         |
+    +---------------------------+----------------------------------------------------+
+    | ``phrase_match``          | True iff at least one catalog-hit child-report     |
+    |                           | has a non-empty ``matched_terms`` set (primary     |
+    |                           | trigger; old semantic preserved).                  |
+    +---------------------------+----------------------------------------------------+
+    | ``contradiction_flag``    | True iff any catalog-hit's ``matched_terms``       |
+    |                           | include an explicit-contradiction marker           |
+    |                           | (:data:`_CONTRADICTION_MARKERS`). Raises the       |
+    |                           | strongest "claimed-done-but-isn't" sub-signal.     |
+    |                           | Was always False in the deleted producer; now     |
+    |                           | live (forward-compatible — predicate was already   |
+    |                           | OR'ing it).                                        |
+    +---------------------------+----------------------------------------------------+
+    | ``word_count_below_       | True iff any catalog-hit child-report's raw word   |
+    | threshold``               | count is < :data:`_SHORT_REPORT_WORD_THRESHOLD`    |
+    |                           | (150). Mirror of Source B's ``length_trigger`` —  |
+    |                           | a "suspiciously short + contradiction" signal.     |
+    +---------------------------+----------------------------------------------------+
+
+    Defense-in-depth: the legacy note path (:func:`_is_child_report_check_note`)
+    is RETAINED — old notes may still ride in long-running checkpoints
+    that survived the removal upgrade (they're ``context_kind``-
+    hoisted above compaction). The LIVE A-signal source is the
+    transcript scan; the note-path adds no new evidence rows in
+    production.
+
+    Pure function; no I/O, no LLM, no DB. Reads the
+    ``state["messages"]`` projection the gate already walks.
     """
     evidence: list[ChildReportCheckEvidence] = []
+    raw_word_counts: list[int] = []
+
+    # ── Pass 1 — legacy note detection (defense-in-depth only) ───────
     for message in messages:
         if len(evidence) >= A_EVIDENCE_NOTES_CAP:
             break
@@ -452,14 +658,52 @@ def collect_source_a_signals(
                 kwargs_surface_seen=bool(kwargs_seen),
             )
         )
+        # Note-body word count is informational only on the legacy path
+        # (the standard template is well above the threshold); the flag
+        # below is honest if it ever trips on an unusual note body.
+        raw_word_counts.append(_word_count(body))
+
+    # ── Pass 2 — live child-report scan (the 2026-09-18 source) ──────
+    for message in messages:
+        if len(evidence) >= A_EVIDENCE_NOTES_CAP:
+            break
+        if not _is_child_report_message(message):
+            continue
+        # Skip duplicates on stable_id when a note-path entry already
+        # recorded the same row (rare — a parent that survived the
+        # upgrade carries both shapes) — defense-in-depth bookkeeping.
+        stable_attr = getattr(message, "id", None)
+        if isinstance(stable_attr, str) and any(
+            ev.stable_id == stable_attr for ev in evidence
+        ):
+            continue
+        built = _build_evidence_from_report_message(message)
+        if built is None:
+            continue
+        ev, raw_word_count = built
+        evidence.append(ev)
+        raw_word_counts.append(raw_word_count)
+
     if not evidence:
         return SourceASignals(
             advisory_present=False,
             phrase_match=False,
         )
+
+    has_match = any(bool(ev.matched_terms) for ev in evidence)
+    has_explicit_contradiction = has_match and any(
+        any(t in _CONTRADICTION_MARKERS for t in ev.matched_terms)
+        for ev in evidence
+    )
+    has_short_word_count = has_match and any(
+        wc < _SHORT_REPORT_WORD_THRESHOLD for wc in raw_word_counts
+    )
+
     return SourceASignals(
-        advisory_present=True,
-        phrase_match=True,  # landed producer: the note fires iff a promise phrase matched
+        advisory_present=has_match,
+        phrase_match=has_match,  # landed producer: catalog hit ≡ advisory
+        contradiction_flag=has_explicit_contradiction,
+        word_count_below_threshold=has_short_word_count,
         promise_terms_total=sum(len(ev.matched_terms) for ev in evidence),
         evidence=tuple(evidence),
     )
