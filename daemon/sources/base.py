@@ -106,10 +106,10 @@ class MessageSourceAdapter(ABC):
     @classmethod
     async def test_connection(cls, config: SourceConfig) -> Tuple[bool, str]:
         """Test connection to external service without full initialization.
-        
+
         Args:
             config: Source configuration to test
-            
+
         Returns:
             Tuple of (success: bool, message: str)
             - success: True if connection test passed
@@ -117,14 +117,7 @@ class MessageSourceAdapter(ABC):
         """
         # Default implementation - subclasses should override
         return True, "Test not implemented for this source type"
-    
-    async def reload(self, new_config: SourceConfig) -> None:
-        """Reload configuration (restart if needed)."""
-        if self.config != new_config:
-            await self.stop()
-            self.config = new_config
-            await self.start()
-    
+
     async def _emit_message(self, msg: IncomingMessage) -> None:
         """Internal: call the message handler."""
         await self._on_message(msg)

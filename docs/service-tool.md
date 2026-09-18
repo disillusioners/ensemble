@@ -12,8 +12,9 @@
 
 ## 1. What this feature is
 
-The `service` tool category lets an agent start long-lived processes
-(dev servers, databases, watchers) that:
+The `service` tool category lets an agent start long-running services
+the user **explicitly asked to keep running long-term** — processes
+that:
 
 1. **live outside instance lifecycle** — instance termination, cancellation,
    pause, cleanup, and GC never kill or reap them;
@@ -22,6 +23,21 @@ The `service` tool category lets an agent start long-lived processes
 3. **are NOT OS services** — never registered with launchd/systemd/launchctl;
    purely daemon-managed detached processes (`start_new_session=True`, the
    `upgrade_journal.spawn_executor` precedent).
+
+### When to use — preference steering (user directive 2026-09-18)
+
+`service_*` tools are **RARE, EXPLICIT-use**: ONLY when the user wants
+to start a long-running service that must outlive BOTH the agent and
+the daemon. They are **NOT** for starting dev servers. The DEFAULT for
+everything else:
+
+* `bash` — normal commands;
+* `proc` — instance-scoped background work tied to the agent's task
+  (killed on instance cleanup).
+
+Do NOT use `service_*` to background dev servers, watchers, or task
+conveniences: if the process only needs to live as long as the agent's
+work, use `proc` (or `bash`).
 
 Tool surface (5 tools, name-keyed, documented per-tool via `tool_help` /
 `_full_doc_`): `service_start`, `service_stop`, `service_status`,

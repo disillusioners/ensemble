@@ -592,6 +592,155 @@ def test_module_has_category_name_and_doc() -> None:
     assert len(service_tools.CATEGORY_DOC) > 50
 
 
+def test_category_doc_carries_bash_proc_preference_steering() -> None:
+    """User directive 2026-09-18: CATEGORY_DOC steers agents to PREFER
+    bash/proc; ``service_*`` is RARE/EXPLICIT/user-requested long-run only.
+
+    Negative pins assert the removed positive-example framing is gone
+    (mirrors the ``test_stop_docs_never_promise_running_return``
+    negative-pin style).
+    """
+    from daemon.tools import service_tools
+
+    doc = service_tools.CATEGORY_DOC.lower()
+    # Preference steering present.
+    assert "explicitly" in doc, (
+        "service_tools.CATEGORY_DOC must carry the rare/explicit "
+        "steering (user directive 2026-09-18)"
+    )
+    assert "bash" in doc and "proc" in doc, (
+        "service_tools.CATEGORY_DOC must point agents at bash/proc as "
+        "the default for everything else"
+    )
+    assert "dev servers" in doc, (
+        "service_tools.CATEGORY_DOC must carry the explicit negative: "
+        "do NOT background dev servers via service_*"
+    )
+    # Removed positive-example framing stays gone.
+    assert "(dev servers, databases, watchers)" not in doc, (
+        "service_tools.CATEGORY_DOC still advertises the removed "
+        "'dev servers, databases, watchers' example framing — the "
+        "2026-09-18 user directive replaced it"
+    )
+    assert "long-lived detached processes (dev servers" not in doc, (
+        "service_tools.CATEGORY_DOC still opens with the removed "
+        "'Long-lived detached processes (dev servers...)' framing"
+    )
+    assert "survive instance lifecycle" not in doc, (
+        "service_tools.CATEGORY_DOC still carries the removed "
+        "'survive instance lifecycle' framing"
+    )
+
+
+def test_service_start_first_line_carries_rare_explicit_steering(
+    manager_stub: SimpleNamespace,
+) -> None:
+    """``service_start`` listing first line carries the preference.
+
+    The first docstring line is what agents see in tool listings —
+    the steering (user directive 2026-09-18) must live there, with
+    the tool_help pointer intact.
+    """
+    from daemon.tools.service_tools import create_service_tools
+
+    tools = create_service_tools(
+        manager=manager_stub,
+        current_instance_id="inst-test",
+        agent_id="worker",
+    )
+    start_tool = next(
+        t for t in tools if getattr(t, "name", None) == "service_start"
+    )
+    # The listing-visible surface on a langchain-wrapped tool is the
+    # ``description`` attribute (``inspect.getdoc`` returns the
+    # BaseTool CLASS docstring, not the tool's).
+    doc = getattr(start_tool, "description", "") or ""
+    first_line = doc.splitlines()[0].lower()
+    assert "rare" in first_line, (
+        "service_start listing first line must carry the RARE/"
+        "explicit-use steering (user directive 2026-09-18)"
+    )
+    assert "prefer bash/proc" in first_line, (
+        "service_start listing first line must steer to bash/proc "
+        "as the default"
+    )
+    assert "tool_help('service_start')" in doc, (
+        "service_start docstring must keep the tool_help pointer"
+    )
+
+
+def test_service_start_full_doc_has_when_to_use_block(
+    manager_stub: SimpleNamespace,
+) -> None:
+    """``service_start._full_doc_`` mirrors the directive in a
+    when-to-use / when-NOT-to-use block near the top.
+    """
+    from daemon.tools.service_tools import create_service_tools
+
+    tools = create_service_tools(
+        manager=manager_stub,
+        current_instance_id="inst-test",
+        agent_id="worker",
+    )
+    start_tool = next(
+        t for t in tools if getattr(t, "name", None) == "service_start"
+    )
+    full_doc = getattr(start_tool, "_full_doc_", "")
+    head = full_doc[:1200].lower()
+    assert "when to use" in head and "not to use" in head, (
+        "service_start._full_doc_ must open with a When to use / "
+        "when NOT to use block (user directive 2026-09-18)"
+    )
+    assert "dev servers" in head, (
+        "service_start._full_doc_ must carry the explicit negative: "
+        "do NOT background dev servers via service_start"
+    )
+    assert "proc" in head and "bash" in head, (
+        "service_start._full_doc_ must point at proc/bash for "
+        "task-scoped background work"
+    )
+
+
+def test_service_stop_full_doc_post_override_privilege_model(
+    manager_stub: SimpleNamespace,
+) -> None:
+    """``service_stop._full_doc_`` states the post-override truth:
+    ``service`` is default-enabled (default-open universe;
+    explicit-allow agents carry it via ``tools.allow``); the
+    kill-switch is the unconditional off. The pre-override
+    'meta-grant IFF' sentence must stay gone.
+    """
+    from daemon.tools.service_tools import create_service_tools
+
+    tools = create_service_tools(
+        manager=manager_stub,
+        current_instance_id="inst-test",
+        agent_id="worker",
+    )
+    stop_tool = next(
+        t for t in tools if getattr(t, "name", None) == "service_stop"
+    )
+    full_doc = getattr(stop_tool, "_full_doc_", "")
+    text = full_doc.lower()
+    assert "default-enabled" in text, (
+        "service_stop._full_doc_ must state the post-override truth: "
+        "service is default-enabled (override 2026-09-16)"
+    )
+    assert "tools.allow" in text, (
+        "service_stop._full_doc_ must document the explicit-allow "
+        "path (tools.allow)"
+    )
+    assert "ensemble_service_tool_enabled=0" in text, (
+        "service_stop._full_doc_ must keep the kill-switch as the "
+        "unconditional off"
+    )
+    assert "meta-grant iff" not in text, (
+        "service_stop._full_doc_ still carries the pre-override "
+        "'meta-grant IFF' privilege sentence — superseded by the "
+        "2026-09-16 default-open override"
+    )
+
+
 # ── live tool behavior (smoke) ──────────────────────────────────────
 
 

@@ -998,3 +998,18 @@ Deviations are documented **in-code and in commit messages** (each commit messag
 ### Packaging note
 
 This file was **untracked** at the time the docs track ran. The docs-track commit stages **exactly this path** (`git add .agents/shared/planning/service-tool/decisions.md`) and nothing else under the plan directory — the remaining plan-package files (plan-overview, phase1/2-plan, research-\*, architecture-recommendation, technical-analysis) stay untracked for the separate plan-package commit owned by another session. `phase3-plan.md` was committed separately by that session (commit `b9d642f0`) while this track was in flight.
+
+---
+
+## 2026-09-18 — User directive: prefer bash/proc; `service_*` RARE / explicit / user-requested long-run only (NOT dev servers)
+
+User directive (2026-09-18): agents should PREFER `bash` and `proc`;
+the `service_*` tools are for RARE, EXPLICIT cases ONLY — specifically
+when the user wants to start a long-running service (one that must
+outlive both the agent and the daemon). They are NOT for starting dev
+servers. Doc-text steering landed in `daemon/tools/service_tools.py`
+(CATEGORY_DOC rewrite, `service_start` listing first line + `_full_doc_`
+when-to-use block, `service_stop._full_doc_` pre-override meta-grant-IFF
+sentence corrected to post-override truth) and `docs/service-tool.md` §1
+(when-to-use steering). Behavior, schema, and logic unchanged; doc-pin
+tests updated/added in `tests/unit/tools/test_service_tools.py`.

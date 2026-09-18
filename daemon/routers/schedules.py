@@ -278,14 +278,56 @@ async def start_schedule(schedule_id: str, request: Request):
     
     # Start the scheduler adapter
     try:
-        await manager.source_registry.start_adapter(schedule_id)
+        # Round-2 fix: scheduler adapters are constructed ONLY at boot
+        # (registry.start_all at daemon/sources/registry.py:208-215). The
+        # /sources/{id}/start route rejects schedulers (sources.py:364/:465),
+        # so there is no other register site. After stop_adapter evicts
+        # (seam-2 invariant, registry.py:578), the registry has no adapter
+        # for this id. We must rebuild from the fresh DB row before calling
+        # start_adapter — otherwise start_adapter returns False, the route
+        # falls through to ``status = adapter.status if adapter else None``,
+        # SourceActionResponse(status=None, ...) is rejected by pydantic
+        # (source.py:181-183), and EVERY same-session pause→resume returns
+        # HTTP 500. The same rebuild branch heals resume-after-restart for
+        # schedulers that were persisted as 'stopped' at boot (boot-skip at
+        # registry.py:201-203) — pre-existing breakage, fixed here for free.
+        if manager.source_registry:
+            existing_adapter = manager.source_registry.get(schedule_id)
+            if existing_adapter is None:
+                # Re-load the persisted config (already validated above;
+                # re-use the `source` row we fetched at :259).
+                adapter = await manager.source_registry._create_adapter_from_config(source)
+                if adapter is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=ErrorResponse(
+                            code=ErrorCodes.INTERNAL_ERROR,
+                            message=f"Failed to build scheduler adapter for: {schedule_id} (unsupported type)"
+                        ).model_dump()
+                    )
+                manager.source_registry.register(adapter)
+
+        started = await manager.source_registry.start_adapter(schedule_id)
+        if not started:
+            # Surface the registry-level failure instead of constructing
+            # SourceActionResponse(status=None, ...) which pydantic would
+            # reject — that was the round-2 500-on-resume regression.
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=f"Failed to start scheduler adapter: {schedule_id}"
+                ).model_dump()
+            )
         adapter = manager.source_registry.get(schedule_id)
-        status = adapter.status if adapter else None
+        status = adapter.status if adapter else SourceStatus.running
         return SourceActionResponse(
             source_id=schedule_id,
             status=status,
             message=f"Scheduler {schedule_id} started successfully"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to start scheduler {schedule_id}: {e}")
         raise HTTPException(
