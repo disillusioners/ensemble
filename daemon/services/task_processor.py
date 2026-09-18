@@ -1265,18 +1265,29 @@ class TaskProcessor:
             ),
         }
 
-    def claim_task(self, worker_id: str) -> "Task | None":
+    def claim_task(self, worker_id: str, lane: str = "default") -> "Task | None":
         """Atomically claim the next pending task.
 
         This is called from the worker thread (synchronous).
 
+        ``lane`` is the calling pool's routing-INTENT signal
+        (``"default"`` or ``"chat"`` — chat-source-worker-lane,
+        Task #8 / reviewer F3), forwarded to
+        ``TaskRepository.claim_pending_task`` as a CLAIM ARGUMENT.
+        The TaskProcessor remains the SHARED SINGLETON across pools —
+        the lane is never processor state. Row-level enforcement
+        lives in the source-prefix predicate inside
+        ``claim_pending_task``; the default value preserves the
+        pre-lane behavior byte-for-byte for every existing caller.
+
         Args:
             worker_id: The worker claiming the task.
+            lane: Routing-intent signal from the calling pool.
 
         Returns:
             The claimed task, or None if no tasks available.
         """
-        return self._task_repo.claim_pending_task(worker_id)
+        return self._task_repo.claim_pending_task(worker_id, lane=lane)
 
     def run_task(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> None:
         """Run a task asynchronously via the main event loop.
