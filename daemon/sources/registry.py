@@ -560,7 +560,17 @@ class SourceRegistry:
         # runnable across restarts; only explicit user stops persist 'stopped')
         adapter._status = SourceStatus.STOPPED
         if persist_status:
+            # Evict from _adapters BEFORE awaiting the status persist. A
+            # concurrent /sources/{id}/start in the (now-zero) window
+            # between the persist await and the pop would otherwise see
+            # the stale adapter and start it (the exact bug class seam-2
+            # is meant to close). The local ``adapter`` reference keeps
+            # the supervisor / adapter.stop() flows safe — no code below
+            # the pop re-looks-up ``self._adapters[source_id]``.
+            self._adapters.pop(source_id, None)
             await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STOPPED.value)
+        else:
+            self._adapters.pop(source_id, None)
 
         # Invariant: any start of a source must build from the LATEST persisted
         # config (fixes the source-config-edit-reload bug). Adapters capture
@@ -569,13 +579,20 @@ class SourceRegistry:
         # _default_agent, SchedulerAdapter._agent, plus other keys) at
         # __init__, so retaining the adapter object across stop→start would
         # silently revert to the pre-edit values. Evict here so the next
-        # start_adapter (router path: daemon/routers/sources.py:379-422) takes
-        # the existing adapter-is-None branch and rebuilds from the fresh DB
-        # read. Production read paths that consult ``get(source_id)`` for a
-        # stopped source already handle None (webhooks.py:88 → 503;
-        # schedules.py:147/218 → silent skip); GET /sources list/status reads
-        # from DB, not from the registry, so this is safe.
-        self._adapters.pop(source_id, None)
+        # start_adapter (router path: daemon/routers/sources.py:379-422)
+        # takes the existing adapter-is-None branch and rebuilds from the
+        # fresh DB read. Production read paths that consult
+        # ``get(source_id)`` for a stopped source already handle None:
+        # webhooks.py:88 → HTTPException 503;
+        # schedules.py:53/147 (silent skip / no-op); schedules.py:218 →
+        # HTTPException 503; schedules.py:295/322 (start_schedule rebuild
+        # branch + post-start fallback to SourceStatus.running). Every
+        # ``get()`` caller already branches on None, so the eviction is
+        # safe. GET /sources list/status reads from DB, not from the
+        # registry, so this is safe. (Round-2 fix: pause→resume via
+        # /schedules/{id}/start was given its own rebuild branch — the
+        # route now constructs the adapter from the fresh DB row when
+        # ``registry.get(id) is None``; see daemon/routers/schedules.py.)
 
         logger.info(f"Stopped adapter: {source_id}")
         return True

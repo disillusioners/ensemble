@@ -330,7 +330,7 @@ async def delete_source(source_id: str, request: Request):
         if adapter:
             await manager.source_registry.stop_adapter(source_id)
             # stop_adapter evicts from registry; unregister redundant post-eviction
-            logger.info(f"Stopped and unregistered adapter: {source_id}")
+            logger.info(f"Stopped and evicted adapter: {source_id}")
     except Exception as e:
         logger.warning(f"Failed to stop adapter during delete {source_id}: {e}")
 
