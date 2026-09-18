@@ -22,6 +22,7 @@ from daemon.models import (
     SourceUpdate,
 )
 from daemon.constants import MAX_CREDENTIALS_SIZE
+from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,51 @@ async def create_source(source_create: SourceCreate, request: Request):
                 message=f"Source type not supported: {source_create.source_type}. Supported: {supported_types}"
             ).model_dump()
         )
+    
+    # Chat-source registration validator (chat-source-worker-lane,
+    # D10.1 architect amendment A7.2 — closes the OPERATOR vector the
+    # HTTP /jobs gate cannot reach).
+    #
+    # ``registry.py:857`` mints ``f"{source_id}:{external_user_id}"``
+    # — the registered ``source_id`` BECOMES the row's source prefix.
+    # For an interactive-chat adapter type, a free-form ``source_id``
+    # (e.g. ``"tg-prod"``) silently mints NON-chat-prefixed rows that
+    # ride the default worker lane with ZERO runtime signal; a
+    # cross-type misconfig (``source_type="discord"`` +
+    # ``source_id="telegram"``) mints into the WRONG lane. Requiring
+    # ``source_id.lower() == source_type`` pins the minted prefix into
+    # ``CHAT_SOURCE_PREFIXES`` so the lane predicate routes the
+    # adapter's rows correctly.
+    #
+    # Deliberate scope decision (A7.2): operators needing custom
+    # source_ids use a non-chat adapter type. Forward-looking gate
+    # only — pre-existing misconfigured sources pass silently until
+    # re-registered (audit WARNING is a P3 follow-up). Envelope: the
+    # SAME ``JobValidationError`` shape the /api/jobs forged-source
+    # gates use (jobs_crud.py) so validation failures look identical
+    # to operators across both surfaces.
+    if source_create.source_type.value in {"telegram", "slack", "discord"}:
+        if source_create.source_id.lower() != source_create.source_type.value:
+            raise HTTPException(
+                status_code=422,
+                detail=JobValidationError(
+                    error="Validation Error",
+                    details=[
+                        {
+                            "field": "source_id",
+                            "message": (
+                                f"For source_type '{source_create.source_type.value}' "
+                                "the source_id must equal the type name "
+                                "(case-insensitive) so adapter messages "
+                                "mint into the chat lane "
+                                f"(got '{source_create.source_id}'). "
+                                "Operators needing a custom source_id "
+                                "must use a non-chat adapter type."
+                            ),
+                        }
+                    ],
+                ).model_dump(),
+            )
     
     # For scheduler sources, validate instance_mode in config
     instance_mode = source_create.config.get("instance_mode")

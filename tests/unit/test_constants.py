@@ -191,6 +191,9 @@ class TestConstantsCompleteness:
             "RECENT_WINDOW_SIZE",
             # Worker Pool
             "WORKER_POOL_SIZE",
+            # Chat lane (chat-source-worker-lane, D7/D10.1 Pin 5)
+            "CHAT_WORKER_POOL_SIZE",
+            "CHAT_SOURCE_PREFIXES",
             # Compaction
             "COMPACTION_THRESHOLD",
             "COMPACTION_TARGET_RATIO",
