@@ -42,7 +42,11 @@ from daemon.config import load_config
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bundle authors (mirror assemble_fused_bundle layout exactly so the model
-# sees the same shape the gate ships). Caps: A≤3000, B≤6000, C≤3000, total≤12000.
+# sees the same shape the gate ships). Caps: A≤3000, B≤6000, C≤3000, U≤2000
+# (additive, incident 4dfded83 2026-09-18), total≤14000. Emission order is
+# U → A → B → C (intent-first reading — matches
+# ``FUSED_JUDGE_SYSTEM_PROMPT`` enumeration and the docs/setup.md
+# "U+A+B+C evidence bundle" claim; review pass 2026-09-18 reconciled).
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -51,8 +55,21 @@ def _bundle_genuine() -> str:
 
     No contradiction notes (A empty), leader prose enumerates concrete
     per-child outcomes + cited evidence + per-child attestations; C shows
-    zero pending work, zero live descendants.
+    zero pending work, zero live descendants. U carries the user's
+    original request — leader's final report GENUINELY answers it.
     """
+    u_section = (
+        "=== SOURCE U: the user's original request for this mission ===\n"
+        "ship Stage-2 LCA resolver flip end-to-end: wire the fused judge at "
+        "its natural home in the graph node, retire the legacy window judge "
+        "and its route machinery, and get full verification (tester + "
+        "governor approval with no follow-ups). Mission is complete when "
+        "the flip is merged, the live-LLM probe returns PASS on both the "
+        "GENUINE and CHILD-LIE payloads, and the post-merge daemon v0.13.3 "
+        "serves clean traffic with zero regressions.\n"
+        "\n"
+    )
+
     a_section = (
         "=== SOURCE A: child-terminal contradiction evidence (0 note(s)) ===\n"
         "(no Child Report Check notes delivered)\n"
@@ -128,6 +145,7 @@ def _bundle_genuine() -> str:
 
     return (
         "[LCA FUSED EVIDENCE BUNDLE v1]\n"
+        + u_section
         + a_section
         + b_section
         + c_section
@@ -140,8 +158,20 @@ def _bundle_child_lie() -> str:
 
     Source A surfaces a contradiction note; Source C shows the child in
     a terminal-but-undelivered state; leader prose incorrectly claims
-    completion.
+    completion. U carries the user's original request, which the leader
+    INCORRECTLY claims to have fulfilled.
     """
+    u_section = (
+        "=== SOURCE U: the user's original request for this mission ===\n"
+        "ship Stage-2 LCA resolver flip end-to-end: wire the fused judge at "
+        "its natural home in the graph node, retire the legacy window judge "
+        "and its route machinery, and get full verification (tester + "
+        "governor approval with no follow-ups). The retry-loss closure MUST "
+        "land in the same commit per the coder child's prior commitment — "
+        "the flip is not acceptable while that closure remains open.\n"
+        "\n"
+    )
+
     a_section = (
         "=== SOURCE A: child-terminal contradiction evidence (1 note(s)) ===\n"
         "- note 1: child=<redacted-child-4> "
@@ -202,6 +232,7 @@ def _bundle_child_lie() -> str:
 
     return (
         "[LCA FUSED EVIDENCE BUNDLE v1]\n"
+        + u_section
         + a_section
         + b_section
         + c_section
@@ -247,7 +278,7 @@ async def _run_payload(
 ) -> tuple[dict[str, Any], FusedJudgeResult]:
     print(f"\n=== Probe payload: {label} ===")
     print(f"bundle_len={len(bundle_text)} chars "
-          f"(cap=12000, within limits)")
+          f"(cap=14000, within limits)")
     wall_start = time.monotonic()
     try:
         result = await judge_fused_bundle_async(

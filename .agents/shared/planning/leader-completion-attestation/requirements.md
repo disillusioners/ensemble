@@ -1188,3 +1188,15 @@ The Stage-3 retirement (resolver-unification §7 R1–R8, user-approved Appendix
 ### FR-3 wording amendment (Stage 3, per R4)
 
 The FR-3 conditionality amendment (2026-09-06) text "the gate ALLOWS without demanding `attest_completion`" remains the CONTRACT; the mechanism note is updated: the `attestation_required` computation is the unified activation predicate's Term 1 (outermost), mirrored at `evaluate()`'s composition layer — it is no longer a separate arm inside `decide()`, and the marker/length suspicion scans are skipped entirely on non-delegated missions (the D10 mirror invariant, now literal).
+
+---
+
+## R-U1 — Fused-judge user-intent section (section U, incident 4dfded83, 2026-09-18)
+
+The fused bundle MUST carry the user's original request so the completion judge can score INTENT-FULFILLMENT, not report-shape (incident: leader answered the user's Q1 completely and informally at step 297; the judge — shown no user request — judged not_complete and the gate nudged; epoch 7e8a6323).
+
+* **FR-U1-1 (section U)**: `assemble_fused_bundle` renders the last real user message's CONTENT under `=== SOURCE U: the user's original request for this mission ===`; capped `BUNDLE_U_SECTION_MAX=2000`, id-redacted (`slot_hint="user"`). Anchor = the delegation scanner's already-computed `last_real_user_index` (gate passes the message CONTENT through `evaluate_resolver_activation` — no re-walk, no new DB reads); the builder re-checks with `is_real_user_message` and fails closed to omission.
+* **FR-U1-2 (fallback)**: no real user message → U omitted entirely; `FusedBundle.user_message_included=False`/`u_chars=0`; eval row logs `user_message_included=False bundle_u_chars=0` (Python-bool row convention).
+* **FR-U1-3 (budget)**: `BUNDLE_TOTAL_MAX` 12000→14000 with U additive (raise = exactly the U cap; A/B/C caps + pins untouched; final hard clip unchanged).
+* **FR-U1-4 (prompt)**: `FUSED_JUDGE_SYSTEM_PROMPT` enumerates four sections (U first) + the intent-fulfillment instruction (genuine answer ⇒ completion report regardless of formality; formal report ignoring the ask ⇒ NOT complete). Conservative default, single-line strict-JSON contract, retry-once-on-unparsable, `FUSED_JUDGE_MAX_OUTPUT_CHARS=2048` unchanged; ≤1 logical judge invocation per evaluation (U = input enrichment at the single call site).
+* **Pinned by** `tests/unit/test_attestation_resolver_user_intent.py` (intent-match / intent-mismatch / anchor-absent / caps+redaction / witnesses / row fields / prompt+cap identity).
