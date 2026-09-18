@@ -21,7 +21,7 @@ from daemon.models import (
     SourceType,
     SourceUpdate,
 )
-from daemon.constants import MAX_CREDENTIALS_SIZE
+from daemon.constants import CHAT_SOURCE_PREFIXES, MAX_CREDENTIALS_SIZE
 from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 
@@ -140,14 +140,23 @@ async def create_source(source_create: SourceCreate, request: Request):
     # ``CHAT_SOURCE_PREFIXES`` so the lane predicate routes the
     # adapter's rows correctly.
     #
+    # The chat TYPE-name set is DERIVED from ``CHAT_SOURCE_PREFIXES``
+    # (colon stripped) — a literal ``{"telegram", "slack", "discord"}``
+    # here would fork the membership the 5-pin pattern exists to
+    # prevent. String membership via ``.value`` (approver note (n)):
+    # ``SourceType`` is a ``str`` Enum, but ``.value`` comparison is
+    # the safe form regardless of Pydantic coercion semantics.
+    #
     # Deliberate scope decision (A7.2): operators needing custom
     # source_ids use a non-chat adapter type. Forward-looking gate
     # only — pre-existing misconfigured sources pass silently until
     # re-registered (audit WARNING is a P3 follow-up). Envelope: the
     # SAME ``JobValidationError`` shape the /api/jobs forged-source
-    # gates use (jobs_crud.py) so validation failures look identical
+    # gates use (jobs_crud.py ``is_reserved_source`` /
+    # ``is_chat_source`` gates) so validation failures look identical
     # to operators across both surfaces.
-    if source_create.source_type.value in {"telegram", "slack", "discord"}:
+    chat_source_types = {prefix.rstrip(":") for prefix in CHAT_SOURCE_PREFIXES}
+    if source_create.source_type.value in chat_source_types:
         if source_create.source_id.lower() != source_create.source_type.value:
             raise HTTPException(
                 status_code=422,
