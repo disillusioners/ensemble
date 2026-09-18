@@ -119,24 +119,33 @@ def _get_manager_unavailable_text() -> str:
 
 #: Human-readable category name (the precedent at
 #: ``daemon/tools/proc_tools.py:66`` uses ``"Background Processes"``).
-#: The ``service`` category is "Service" — long-lived detached
-#: processes (dev servers, databases, watchers).
+#: The ``service`` category is "Service" — RARE, user-requested
+#: long-running services that must outlive both the agent AND the
+#: daemon (user directive 2026-09-18: prefer bash/proc otherwise).
 CATEGORY_NAME: str = "Service"
 
 #: One-paragraph category doc for ``tool_help(category=...)`` and
 #: ``list_tools_by_category()`` projections.
 CATEGORY_DOC: str = """\
-Long-lived detached processes (dev servers, databases, watchers) that
-survive instance lifecycle and daemon restart. NOT an OS service —
-no launchd / systemd / launchctl integration; the daemon simply
-tracks the process and reaps it on explicit ``service_stop``.
+Long-running services the user EXPLICITLY asked to keep running
+long-term — processes that must outlive BOTH the agent AND the
+daemon. ``service_*`` is RARE + EXPLICIT by policy (user directive
+2026-09-18): it is NOT the default way to run things. NOT an OS
+service — no launchd / systemd / launchctl integration; the daemon
+simply tracks the process and reaps it on explicit ``service_stop``.
 
-**When to use ``service_*`` vs ``proc_*``**:
-- ``proc_*``: instance-scoped background processes (killed on
-  instance cleanup); tracked in-memory; per-instance cap of 10.
-- ``service_*``: daemon-scoped detached processes (survive instance
-  termination AND daemon restart); tracked in the
-  ``service_tracking`` DB table; daemon-global cap of 10.
+**Preference steering — DEFAULT for everything else**:
+- ``bash``: normal commands.
+- ``proc_*``: instance-scoped background work tied to the agent's
+  task (killed on instance cleanup); tracked in-memory;
+  per-instance cap of 10.
+- ``service_*``: ONLY when the user explicitly requests a
+  long-running service that must outlive the agent AND survive
+  daemon restart; tracked in the ``service_tracking`` DB table;
+  daemon-global cap of 10.
+- Do NOT use ``service_*`` to background dev servers, watchers, or
+  task conveniences: if the process only needs to live as long as
+  the agent's work, use ``proc`` (or ``bash``).
 """
 
 
@@ -223,7 +232,7 @@ def create_service_tools(
             ),
         ] = None,
     ) -> dict:
-        """Start a long-lived service. Survives instance + daemon restart. Use tool_help('service_start') for details.
+        """RARE — only when the user explicitly requests a long-running service that outlives the agent; prefer bash/proc otherwise. Starts a detached process surviving instance + daemon restart. Use tool_help('service_start') for details.
 
         Args:
             name: Unique service name (``^[a-zA-Z0-9_-]+$``, 1-64 chars).
@@ -259,6 +268,16 @@ service survives both instance termination AND daemon restart; the
 daemon does NOT reap it on stop. The service's stdio is written to
 ``data/services/<name>.log`` (configurable via
 ``ENSEMBLE_SERVICE_LOG_DIR``).
+
+When to use / when NOT to use (user directive 2026-09-18):
+* USE ``service_start`` ONLY for RARE, EXPLICIT, user-requested
+  long-running services — a service the user explicitly asked to
+  keep running long-term, that must outlive the agent's turn AND
+  daemon restarts.
+* Do NOT use it to background dev servers, watchers, or task
+  conveniences: if the process only needs to live as long as the
+  agent's work, use ``proc`` (instance-scoped background work) or a
+  plain ``bash`` command instead.
 
 Args:
     name: Unique service name (``^[a-zA-Z0-9_-]+$``, 1-64 chars). The
@@ -404,9 +423,10 @@ Cross-instance stop semantics (name-keyed, daemon-global):
 * There is NO ``started_by`` gate: any agent that knows the name can
   stop the service. This is the OQ#4 resolution — name-keyed +
   daemon-global is the only sensible semantics for an LLM-driven
-  orchestration tool, and the privilege is gated via the
-  per-agent meta-grant IFF (bash OR proc in effective toolset →
-  service in tools.allow); the global kill-switch
+  orchestration tool. Privilege model (override 2026-09-16):
+  ``service`` is default-enabled — the default-open universe grants
+  it to every agent, and explicit-allow agents carry it via
+  ``tools.allow``; the global kill-switch
   ``ENSEMBLE_SERVICE_TOOL_ENABLED=0`` is the unconditional off.
 
 Grandchild-setsid killpg ESCAPE limitation (F15):
