@@ -1156,55 +1156,54 @@ Three fixes shipped always-on (fix/flag policy — no new `ENSEMBLE_*` flags; re
 - `.agents/shared/planning/leader-completion-attestation/requirements.md` — AC-6A0D-1..AC-6A0D-14 (incident 6a0d60c9 acceptance)
 
 
-## LCA child-terminal contradiction detection (2026-09-16, child-side advisory)
+## LCA child-terminal contradiction catalog (2026-09-16, advisory REMOVED 2026-09-18)
 
-The LCA stack closes the *leader-side* hallucination bug (an LLM that emits a final assistant message without doing the actual work — gate denies the END, judge disambiguates, marker/length triggers + busy suppression keep FPs tolerable). The complementary *child-side* bug class — a child instance that emits a final report promising future work ("Then I aggregate and write RESULTS. Ending turn.") and then transitions to terminal — is closed by a separate, ADVISORY subsystem: the **child-terminal contradiction detector**.
+The LCA stack closes the *leader-side* hallucination bug (an LLM that emits a final assistant message without doing the actual work — gate denies the END, judge disambiguates, marker/length triggers + busy suppression keep FPs tolerable). The complementary *child-side* bug class — a child instance that emits a final report promising future work ("Then I aggregate and write RESULTS. Ending turn.") and then transitions to terminal — was historically caught at the SOURCE by an ADVISORY note attached to the parent's queue. **The advisory note mint was REMOVED 2026-09-18 (D-CTD-7, user decision)** because it was high-FP UX legacy predating the fused judge and its task-less mint caused the strand-wedge class (the only fix for that wedge is the now-also-removed mint-with-delivery seam). The 17-pattern catalog and the scanner function are KEPT — the LLM judge (fused-judge at the resolver) now subsumes the gate role at the cost of one extra quick judge call, and the broader catalog coverage catches more real child-lie cases per the user's explicit decline to tighten.
 
-The detector is a **pure substring scan** (zero LLM involvement) at the child→parent terminal-report delivery seam (`daemon/services/child_reports.py::_process_child_completion_db_sync`). It fires AFTER the existing `PROCESS_REPORT` task INSERT and BEFORE the `report_injections` queue INSERT — same transaction, four-row crash-consistency. There is **no deny**, no delay, no gate; the detector only ATTACHES a `[SYSTEM CONTEXT: Child Report Check]` note to the parent's queue as a SEPARATE `MessageQueue` row. The parent's existing deny-path judge / nudge machinery is UNTOUCHED.
+### What's KEPT (the catalog + scanner, unchanged)
 
-### Note semantics
+The pure-function catalog and the substring scan function live in `daemon/services/attestation_marker_scanner.py`:
 
-* **Header:** `[SYSTEM CONTEXT: Child Report Check]` — reuses the canonical context-message prefix so `is_real_user_message` and the compaction three-bucket seam recognize it as the same `[SYSTEM CONTEXT: ...]` family.
-* **Body (server-authored constant):** "Child {child_id} completed while its final report promises future work ({matched_terms}) — likely premature completion. Its promised next report will never arrive. Verify the actual work state; if unfinished, revive it via send_message (e.g. 'continue your work') or verify its subtree before relying on this report. (Advisory / heuristic — marker scan is a substring match, not an LLM verdict.)"
-* **Stable id:** `child_report_check:{parent_id}:{child_id}` — keyed on the (parent, child) pair so two distinct parents receiving reports from the same child do NOT collide; two distinct children reporting to the same parent do NOT collide. New row in the canonical `_stable_id_for` id-format table (`daemon/services/context_messages.py`), mirroring the `completion_check_note:{instance_id}` F1 Shape A precedent. LangGraph's `add_messages` reducer SUPERSEDES repeats in place — exactly ONE note block per (parent, child) pair regardless of how many times the child fires its promise-while-stopping terminal report.
-* **Marker kwargs:** `additional_kwargs.child_report_check=True` + `child_report_check_terms=[...]` (the matched catalog substrings, surfaced as structured data so observability / compaction hooks can pin them without reparsing the prose body).
+- **`CHILD_TERMINAL_PROMISE_MARKERS`** — 17 entries, FP-tight range 10–18 per the 2026-09-16 spec. The catalog has 17 entries vs. the leader-path `MID_WORK_MARKERS` (16 entries); the extra entry is the explicit `"awaiting"` seed the spec mandates despite its known FP cost. TIGHTER is a PER-ENTRY property, not a COUNT property — each entry is a more specific substring (e.g. `"will write"`, `"will aggregate"`) than the leader-path equivalents, so per-match FP rate is lower even though the catalog carries one more entry overall.
+- **`scan_child_terminal_report_for_promises`** — pure substring scan over the catalog. Zero LLM involvement. Returns a `ChildTerminalPromiseScanResult` NamedTuple (`promise_hit`, `matched_terms`).
+- **No LLM gating** — the catalog + scanner are independent of the LCA leader gate (decide(), judge service, marker/length triggers, busy suppression, deny-bound escalation). LCA kill-switches do not affect this catalog; it ships always-on (no new `ENSEMBLE_*` env flag).
 
-### Catalog
+### What's GONE (the note mint, 2026-09-18)
 
-`CHILD_TERMINAL_PROMISE_MARKERS` (17 entries, FP-tight range 10–18 per the 2026-09-16 spec). The catalog has 17 entries vs. the leader-path `MID_WORK_MARKERS` (16 entries); the extra entry is the explicit `"awaiting"` seed the spec mandates despite its known FP cost. TIGHTER is a PER-ENTRY property, not a COUNT property — each entry is a more specific substring (e.g. `"will write"`, `"will aggregate"`) than the leader-path equivalents, so per-match FP rate is lower even though the catalog carries one more entry overall. The detector has NO LLM judge to disambiguate FPs — markers are BOTH the trigger AND the verdict. The FP cost is borne by an explicitly advisory note text; the near-FP case "completed X, awaiting your merge decision" DOES fire (note attached) and the parent LLM judges the heuristic framing before acting.
+The advisory note mint site in `daemon/services/child_reports.py::_process_child_completion_db_sync` is REMOVED. The following are no longer present in production code:
 
-### Scope guards
+- The `[SYSTEM CONTEXT: Child Report Check]` ``HumanMessage`` minted as a SECOND `MessageQueue` row on the parent's queue.
+- The server-authored constant note body ("Child {child_id} completed while its final report promises future work (...) — likely premature completion. ...").
+- The `child_report_check:{parent_id}:{child_id}` stable id format AND its `_stable_id_for` branch in `daemon/services/context_messages.py` (no remaining callers after the mint deletion). The `CONTEXT_KIND_CHILD_REPORT_CHECK` enum constant is KEPT — the resolver-side detector (``_is_child_report_check_note`` in `daemon/services/attestation_resolver_activation.py`) still uses it to recognize note-shaped messages that older agents may have preserved through compaction. The A-signal path stays untouched (D-CTD-7 (ii)).
+- The `additional_kwargs.child_report_check=True` + `child_report_check_terms=[...]` marker kwargs.
+- The SAVEPOINT-scope, the `PROCESS_MESSAGE` delivery `Task` mint, and the `notify_worker_pool` wake flag.
+- The structured log events `event=leader_completion_gate_child_report_check_fired` / `event=leader_completion_gate_child_report_check_failed`. Operators who `grep` for either will see zero hits post-activation.
 
-* Advisory ONLY — does NOT modify the child's report content; does NOT block / delay the child's terminal transition; does NOT block / delay the report delivery to the parent.
-* Agent-agnostic — fires for ANY agent's terminal report. Tested depth-agnostic via a grandchild-to-child case in `test_e_grandchild_to_child_case_fires`.
-* The note INSERT is suppressed on `marker_paused` / `db_paused` / `db_dead_parent` (the same branches that suppress the `PROCESS_REPORT` task creation) — a stranded note to a dead parent would feed Lane-3/4's `find_pending_past_age` past the 10-min bound and inflate `recovered` metric.
+### Why the LLM judge subsumes the gate role
 
-### Observability
-
-Structured log line emitted inside `_process_child_completion_db_sync` at the time the note INSERT succeeds:
-
-```
-event=leader_completion_gate_child_report_check_fired parent_id={short} child_id={short} matched_terms={csv} note_message_id={uuid} stable_id={id} enqueued_at={iso}
-```
-
-Operators `grep event=leader_completion_gate_child_report_check_fired` to count firings; `grep matched_terms=awaiting` to compute the FP rate on the most common promise-while-stopping phrasing the leader-side incident family produces.
+The advisory note was a UX-layer signal meant for the parent LLM to manually verify the child's work state. The fused LLM judge (Stage 2+, `attestation_report_judge.py::judge_fused_bundle_async`) is now the verdict for the same bug class — it sees the child's terminal report inline (via the A/B/C bundle) and can directly assess whether the report is a real completion or a promise-while-stopping artifact. Cost: one extra quick judge call per fire. Benefit: no false-positive note text spammed into the parent's queue, no advisory-only UX noise, no strand-wedge risk from the task-less mint.
 
 ### What does NOT change
 
-The detector does NOT touch the leader gate, the LCA judge service, the marker/length trigger logic, the busy-suppression logic, the deny-bound escalation predicate, the `_ChildCompletionDbResult` NamedTuple, the `report_injections` INSERT, or any of the LCA kill-switches (`ENSEMBLE_LEADER_ATTESTATION_MODE`, `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED`, `ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND`). The two subsystems share the `leader_completion_gate_*` event-namespace prefix (operability) but the runtime contract is independent.
+The catalog/scanner removal does NOT touch the leader gate, the LCA judge service, the marker/length trigger logic, the busy-suppression logic, the deny-bound escalation predicate, the A-band activation trigger (the `a_suspicion` term in `activation_predicate`), the bundle assembly (`_build_a_section` with `BUNDLE_A_SECTION_MAX = 3000`), or any of the LCA kill-switches. The A-signal path through `collect_source_a_signals` is preserved verbatim — note-shaped messages that older agents may have preserved through compaction still feed the resolver detector. The catalog stays as the durable byte-identical substrate for any future re-attach point.
 
-**No new `ENSEMBLE_*` env flag** — the detector ships always-on (fix/flag policy 7d5285aa: bugfixes/improvements are not user-togglable). Operators wanting to disable the LCA subsystem as a whole can flip `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (the existing LCA kill-switch); this does NOT disable the child-terminal contradiction detector (intentional separation — the two subsystems cover different bug classes). Restart required after upgrading, code change only.
+### Observability
+
+The `event=leader_completion_gate_child_report_check_fired` log row no longer fires. Operators who relied on it for FP-rate tracking should grep `event=leader_completion_resolver_eval band=a_suspicion a_advisory_present=True` instead — the resolver's Source-A signal row captures the same signal at the gate-evaluation seam (the row also includes the bundle sha256 + size witnesses + per-section sizes, so a re-attach point can verify the A-section is empty / rendering `(no Child Report Check notes delivered)` as expected).
+
+**No new `ENSEMBLE_*` env flag** — the catalog + scanner stay always-on (fix/flag policy 7d5285aa: bugfixes/improvements are not user-togglable). Operators wanting to disable the LCA subsystem as a whole can flip `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (the existing LCA kill-switch). Restart required after upgrading, code change only.
 
 **Related files:**
-- `daemon/services/attestation_marker_scanner.py` — `CHILD_TERMINAL_PROMISE_MARKERS` catalog (17 entries), `ChildTerminalPromiseScanResult` NamedTuple, `scan_child_terminal_report_for_promises` pure function.
-- `daemon/services/context_messages.py` — `CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"` enum constant; new row in the canonical `_stable_id_for` id-format table.
-- `daemon/services/child_reports.py` — `_process_child_completion_db_sync` hook + structured log line + scope guards.
+- `daemon/services/attestation_marker_scanner.py` — `CHILD_TERMINAL_PROMISE_MARKERS` catalog (17 entries, byte-identical), `ChildTerminalPromiseScanResult` NamedTuple, `scan_child_terminal_report_for_promises` pure function.
+- `daemon/services/context_messages.py` — `CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"` enum constant KEPT (resolver detector); `_stable_id_for` child_report_check branch REMOVED.
+- `daemon/services/attestation_resolver_activation.py` — `_is_child_report_check_note` detector KEPT (A-signal path untouched per D-CTD-7 (ii)); the Source A surface is dormant in production today (no notes to read) but the wiring stays as a future re-attach point.
+- `daemon/services/child_reports.py` — mint block REMOVED; finalizer count-guard predicate hardening KEPT (defense-in-depth for any future task-less row producer).
 
-**Tests:** `tests/unit/test_child_terminal_contradiction.py` (30 — pure-function matrix, stable-id format, hook surface (a)/(b)/(c)/(d)/(e)/(f)/(g), source-level pins for catalog lives in scanner / kind lives in context_messages / hook lives in child_reports / no new env flag).
+**Tests:** `tests/unit/test_child_terminal_contradiction.py` (14 — pure-function matrix + source-level pins; hook + stable-id + mint+delivery tests deleted with the mint). `tests/unit/test_attestation_resolver_activation.py::TestDCTD7ASignalPathPins` (4 — A-signal path preservation pins; resurrection-loud companion).
 
 **References:**
-- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-CTD-1..D-CTD-6 (2026-09-16 child-terminal contradiction detection entry)
-- `.agents/shared/planning/leader-completion-attestation/requirements.md` — CTD-1..CTD-12 (2026-09-16 child-terminal contradiction detection acceptance criteria)
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-CTD-1..D-CTD-6 (2026-09-16 child-terminal contradiction detection entry); D-CTD-7 (2026-09-18 advisory note REMOVED — the entry that supersedes D-CTD-1..6 mint-related parts).
+- `.agents/shared/planning/leader-completion-attestation/requirements.md` — CTD-1..CTD-12 (CTD-2/3/6/7/9/10 marked SUPERSEDED 2026-09-18, pointer to D-CTD-7).
 
 ## LCA unified resolver — Stage 1 parallel-dry shadow (2026-09-16, additive)
 

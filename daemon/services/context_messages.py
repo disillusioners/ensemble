@@ -103,15 +103,19 @@ CONTEXT_KIND_SHARED_META_KV = "shared_meta_kv"
 # later compaction verbatim (mirrors how compaction docs and system
 # context blocks are treated) instead of being summarizable history.
 CONTEXT_KIND_SYMPTOM_REPAIR = "symptom_repair"
-# Child-terminal contradiction detection (2026-09-16). Attached to the
-# PARENT alongside the child's terminal report when the child is going
-# terminal but its final outgoing report contains promise-while-stopping
-# markers (see
-# :data:`daemon.services.attestation_marker_scanner.CHILD_TERMINAL_PROMISE_MARKERS`).
-# The note is delivered as a SEPARATE HumanMessage — it MUST NOT modify
-# the child's report content. Marker kwargs carry
-# ``child_report_check=True`` so downstream consumers can identify and
-# filter these notes (e.g. compaction three-bucket partition).
+# Child-terminal contradiction detection CONTEXT_KIND retained (2026-09-18
+# user decision, D-CTD-7): the ``child_report_check`` note MESSAGE is
+# removed at the mint site, but the context_kind string stays as a
+# stable enum value because
+# ``daemon/services/attestation_resolver_activation.py::_is_child_report_check_note``
+# uses it to detect note-shaped messages that older agents may have
+# preserved through compaction (the resolver's A-signal surface is
+# untouched — only the producer side is gone). The mint site's
+# ``_stable_id_for('child_report_check', ...)`` call is the only
+# production caller of the corresponding stable-id branch and is
+# deleted with the note, so the branch is removed too (no remaining
+# callers; tests for the branch are deleted in
+# ``tests/unit/test_child_terminal_contradiction.py``).
 CONTEXT_KIND_CHILD_REPORT_CHECK = "child_report_check"
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
@@ -181,7 +185,6 @@ def _stable_id_for(
     ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
     ``completion_check_note`` ``completion_check_note:{instance_id}``         ``instance_id``
     ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
-    ``child_report_check``    ``child_report_check:{parent_id}:{child_id}``  ``parent_id`` and ``child_id``
     ========================  =============================================  =========================
 
     ``context_key`` is the FULL resolved tree-root partition key — the
@@ -201,34 +204,6 @@ def _stable_id_for(
     (``INJECTIONS_DOMINATE`` skip). The id is what collapses the
     unbounded hint accumulation the original F1 backlog flagged.
 
-    ``child_report_check`` (2026-09-16, child-terminal contradiction
-    detection, decisions.md D-CTD-2) mints a stable id keyed on the
-    (parent, child) pair so repeated terminal reports from the same
-    child to the same parent SUPERSEDE in place via LangGraph's
-    ``add_messages`` reducer — the resulting state carries EXACTLY
-    ONE Child Report Check block per (parent, child) pair regardless
-    of how many times the child fires its promise-while-stopping
-    terminal report. Without the stable id, the note would compound
-    as a permanently-hoisted ``context_kind=child_report_check`` tail
-    under three-bucket compaction (same failure mode as the F1
-    backlog that drove the ``completion_check_note`` Shape A). The
-    id is keyed on the pair (not just child) so two distinct parents
-    receiving reports from the same child do NOT collide — each
-    pair has its own supersede slot. The note is delivered via
-    :func:`_make_context_message` factory (same as the rest) with
-    ``additional_kwargs.child_report_check=True`` so downstream
-    consumers can filter and the compaction seam can keep the note
-    in the non-selectable / permanently-hoisted bucket.
-
-    C0 scope: the ``project``, ``shared_meta_kv``, ``completion_check_note``,
-    ``attestation_nudge``, and ``child_report_check`` kinds all mint ids
-    via this helper (S16 + 2026-09-12 attestation completion-check +
-    2026-09-16 incident 6a0d60c9 nudge + 2026-09-16 child-terminal
-    contradiction detection). Any other kind — including the existing
-    auto-load / synthetic precedents, which have their own stable-id
-    helpers — raises: this helper is not a universal mint and must not
-    silently grow kinds without a decision.
-
     ``attestation_nudge`` (2026-09-16, incident 6a0d60c9 fix cycle
     FIX-3) mints a stable id per ``instance_id`` for the
     attestation-gate deny nudge so CONSECUTIVE denies on the same
@@ -238,6 +213,16 @@ def _stable_id_for(
     the marker-path (a)/(d) allow-to-deny conversions — funnel through
     the single nudge construction site in ``daemon/graph.py``, so all
     three mint the SAME id and supersede each other.
+
+    ``child_report_check`` kind REMOVED 2026-09-18 (D-CTD-7): the
+    producer mint site in ``daemon/services/child_reports.py`` was
+    deleted, so this branch has no remaining callers in production
+    (tests deleted in ``tests/unit/test_child_terminal_contradiction.py``).
+    The ``CONTEXT_KIND_CHILD_REPORT_CHECK`` enum constant is KEPT so
+    the resolver-side ``_is_child_report_check_note`` detector can
+    still recognize note-shaped messages that older agents may have
+    preserved through compaction; that surface is the
+    A-signal path the user pinned as untouched.
 
     Args:
         kind: The block kind (see table above).
@@ -282,29 +267,10 @@ def _stable_id_for(
                 "instance_id"
             )
         return f"attestation_nudge:{instance_id}"
-    if kind == "child_report_check":
-        if not instance_id:
-            raise ValueError(
-                "_stable_id_for('child_report_check') requires "
-                "instance_id (the parent_id \u2014 caller is on the "
-                "parent-side hook, so the parent id MUST be in scope). "
-                "The (parent, child) pair id is keyed on BOTH parts so "
-                "two distinct parents receiving reports from the same "
-                "child do NOT collide; child_id is passed via the "
-                "agent_id slot (see kind='child_report_check' branch)."
-            )
-        if not agent_id:
-            raise ValueError(
-                "_stable_id_for('child_report_check') requires "
-                "agent_id (the child_id) \u2014 the (parent, child) pair "
-                "id is keyed on BOTH parts; see docstring entry for "
-                "kind=child_report_check"
-            )
-        return f"child_report_check:{instance_id}:{agent_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'completion_check_note', "
-        "'attestation_nudge', and 'child_report_check' blocks"
+        "and 'attestation_nudge' blocks"
     )
 
 

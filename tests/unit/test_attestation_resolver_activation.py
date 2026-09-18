@@ -201,6 +201,47 @@ def _child_report_check_note(
     return msg
 
 
+#: A representative valid UUID for the live-path fixtures (the regex
+#: pattern in :data:`_INTERNAL_REPORT_ID_FROM_SOURCE_RE` enforces the
+#: canonical 8-4-4-4-12 shape).
+_INTERNAL_REPORT_FIXTURE_CHILD_ID = (
+    "11111111-2222-3333-4444-555555555555"
+)
+
+
+def _internal_report_message(
+    content: str = "Awaiting the final four. Ending turn.",
+    child_id: str = _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+    completed_message_id: str | None = None,
+    extra_kwargs: dict | None = None,
+) -> HumanMessage:
+    """Build a LIVE child completion-report ``HumanMessage``.
+
+    Mirrors the stamp emitted by the report-injection drain at
+    :file:`daemon/graph.py` line ~6950
+    (``additional_kwargs={"injected_message": True, "source":
+    f"internal_report:{report_child_iid}"}``) and the fallback
+    ``PROCESS_REPORT`` task's enqueue-lane stamping via
+    :func:`_stamped_additional_kwargs` at
+    :file:`daemon/services/instance_messaging.py` line ~525.
+    ``completed_message_id`` defaults to a deterministic UUID so the
+    fixture is reproducible across test runs.
+    """
+    completed = completed_message_id or str(uuid.uuid4())
+    source = f"internal_report:{child_id}:{completed}"
+    msg = HumanMessage(
+        content=content,
+        id=str(uuid.uuid4()),
+        additional_kwargs={
+            "injected_message": True,
+            "source": source,
+        },
+    )
+    if extra_kwargs:
+        msg.additional_kwargs.update(extra_kwargs)
+    return msg
+
+
 def _delegated_mission_state(final_text: str = "Done. All shipped.") -> list:
     delegation_ai = AIMessage(
         content="",
@@ -638,6 +679,140 @@ class TestSourceACollection:
         ]
         signals = collect_source_a_signals(_delegated_mission_state() + notes)
         assert len(signals.evidence) == ara.A_EVIDENCE_NOTES_CAP
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Live child-report scan path (2026-09-18 restoration, post-D-CTD-7).
+    #
+    # The LCA "Child Report Check" advisory note mint was REMOVED in
+    # commit 6a695b8f; the A-band signal now lives in the live
+    # child-report ``HumanMessage`` rows the report-injection drain
+    # emits (graph.py:6950-6967 stamp) and the fallback PROCESS_REPORT
+    # task's enqueue-lane stamping (instance_messaging.py:525). These
+    # tests verify the new scan path re-derives the 4-field Source-A OR
+    # signal set from the transcript scan.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def test_internal_report_with_catalog_phrase_fires(self):
+        """The live child-report path: a ``source=internal_report:…``
+        ``HumanMessage`` whose content matches the 17-pattern catalog
+        must produce an ``advisory_present=True`` A-signal through the
+        real code path.
+
+        FUNCTIONAL PIN — re-anchored from the deleted mint-time
+        signature to the evaluation-time scan.
+        """
+        messages = _delegated_mission_state() + [
+            _internal_report_message(
+                content="Awaiting the final report. Ending turn."
+            )
+        ]
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is True
+        assert signals.phrase_match is True
+        assert len(signals.evidence) == 1
+        ev = signals.evidence[0]
+        assert ev.child_instance_id == _INTERNAL_REPORT_FIXTURE_CHILD_ID
+        assert "ending turn" in ev.matched_terms
+        assert ev.kwargs_surface_seen is True
+
+    def test_internal_report_without_catalog_phrase_does_not_fire(self):
+        """Clean completion-report content (no catalog phrases)
+        must NOT raise the A-band. The 17-pattern catalog is preserved
+        byte-identical; the scan maps verbatim from
+        ``scan_child_terminal_report_for_promises``.
+        """
+        messages = _delegated_mission_state() + [
+            _internal_report_message(
+                content=(
+                    "Done. 5/5 tests pass. Merged abc123. "
+                    "All shipped, no follow-ups."
+                )
+            )
+        ]
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is False
+        assert signals.phrase_match is False
+        assert signals.evidence == ()
+
+    def test_user_injected_note_does_not_match_internal_report_path(self):
+        """A user-injected note (``injected_message=True`` with NO
+        ``source=internal_report:`` stamp) must NOT be detected by the
+        live scan — the ``source``-prefix is the disambiguator. User
+        notes are NOT A-band evidence.
+        """
+        user_note = HumanMessage(
+            content="Awaiting the final four. Ending turn.",
+            additional_kwargs={"injected_message": True},
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [user_note]
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_a_system_message_with_internal_report_source_does_not_match(self):
+        """Defense — the live scan requires an ``HumanMessage`` (the
+        live delivery shape). An ``AIMessage`` even with the source
+        stamp cannot be confused for a child-report delivery.
+        """
+        ai_with_stamp = AIMessage(
+            content="Awaiting the final report. Ending turn.",
+        )
+        ai_with_stamp.additional_kwargs["source"] = (
+            f"internal_report:{_INTERNAL_REPORT_FIXTURE_CHILD_ID}:msg"
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [ai_with_stamp]
+        )
+        assert signals.advisory_present is False
+
+    def test_contradiction_flag_raised_on_explicit_marker(self):
+        """A matched_terms item in :data:`_CONTRADICTION_MARKERS`
+        raises the ``contradiction_flag`` sub-signal. Verifies the
+        4-field OR's most-pointed branch has live semantics.
+        """
+        messages = _delegated_mission_state() + [
+            _internal_report_message(
+                content="Work is still pending — awaiting more input."
+            )
+        ]
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is True
+        assert signals.contradiction_flag is True
+
+    def test_word_count_below_threshold_raised_on_short_report(self):
+        """A matched child-report whose raw word count is below
+        :data:`ara._SHORT_REPORT_WORD_THRESHOLD` (150) raises
+        ``word_count_below_threshold`` — Source B's ``length_trigger``
+        mirror.
+        """
+        # Build a short report (~20 words) with a single promise marker.
+        short_content = (
+            "I will continue the writeup later. Ending turn."
+        )
+        assert len(short_content.split()) < 150
+        messages = _delegated_mission_state() + [
+            _internal_report_message(content=short_content)
+        ]
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is True
+        assert signals.word_count_below_threshold is True
+
+    def test_legacy_note_and_live_report_paths_coexist(self):
+        """Both the legacy note path (defense-in-depth for historical
+        checkpoints) AND the live child-report path (the new live
+        source) produce evidence rows when both are present in the
+        conversation. Each path runs independently and is bounded by
+        :data:`ara.A_EVIDENCE_NOTES_CAP`.
+        """
+        messages = (
+            _delegated_mission_state()
+            + [_child_report_check_note(child_id=str(uuid.uuid4()))]
+            + [_internal_report_message(child_id=str(uuid.uuid4()))]
+        )
+        signals = collect_source_a_signals(messages)
+        assert signals.advisory_present is True
+        assert len(signals.evidence) == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1172,3 +1347,196 @@ class TestSourcePins:
                         and isinstance(node.func.value, ast.Name)
                         and node.func.value.id == "os"
                     ), "no os.environ/os.getenv reads in the Stage-1 module"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A-band restoration (2026-09-18) — evaluation-time transcript scan pins
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# User standing decision (Q2, 2026-09-18): A-band stays ACTIVE with the
+# catalog UNCHANGED. The restoration shape (leader-decided, binding) is
+# an evaluation-time transcript scan over the leader's in-context
+# child-report ``HumanMessage`` rows (the ``internal_report:`` stamp
+# from the report-injection drain at ``daemon/graph.py:6950-6967`` and
+# the fallback ``_stamped_additional_kwargs`` path at
+# ``daemon/services/instance_messaging.py:525``). The 17-pattern catalog
+# stays byte-identical (existing identity pin). The mint-time machinery
+# (D-CTD-7, commit 6a695b8f) stays gone — no note, no delivery Task, no
+# SAVEPOINT, no notification.
+#
+# These pins anchor the restoration shape against future drift:
+#   * Wiring — resolver still wires through ``collect_source_a_signals``
+#     and the activation predicate still feeds ``a_suspicion``.
+#   * Functional — an ``internal_report:``-stamped ``HumanMessage``
+#     containing a catalog phrase MUST produce an A-signal through the
+#     real code path (the live-source re-anchor).
+#   * Catalog — 17-pattern catalog byte-identical (the user's deliberate
+#     decision; judge filters FPs, catalog stays).
+#   * Bundle cap — :data:`BUNDLE_A_SECTION_MAX` still 3000 (the A-section
+#     renderer still feeds the fused judge).
+
+
+class TestDCTD7ASignalPathPins:
+    """Positive pins — the A-signal path is preserved verbatim
+    (D-CTD-7, 2026-09-18 user decision; A-band restoration pins,
+    2026-09-18 follow-on)."""
+
+    def test_resolver_consumes_collect_source_a_signals(self):
+        """The activation predicate still wires through
+        ``collect_source_a_signals`` — the A-signal source the
+        resolver reads. Untouched by D-CTD-7.
+        """
+        import daemon.services.attestation_resolver_activation as ara2
+        from daemon.services.attestation_resolver_activation import (
+            collect_source_a_signals,
+        )
+        assert hasattr(ara2, "collect_source_a_signals")
+        assert callable(collect_source_a_signals)
+        # Identity pin — same symbol the resolver wires into the
+        # predicate (attestation_resolver_activation.py:1058).
+        from daemon.services.attestation_resolver_activation import (
+            evaluate_resolver_activation,
+        )
+        import inspect
+        src = inspect.getsource(evaluate_resolver_activation)
+        assert "collect_source_a_signals" in src, (
+            "D-CTD-7: resolver activation path no longer wires "
+            "collect_source_a_signals — A-signal source drifted"
+        )
+        # Wiring-shape pin — guards the A-band against an
+        # accidental sever where the symbol survives (in a
+        # docstring/comment) but the call shape `a_source=lambda:
+        # collect_source_a_signals(messages)` is broken. This is
+        # the exact drift class the restoration exists to block.
+        assert "a_source=lambda" in src, (
+            "D-CTD-7: a_source= lambda wiring missing from "
+            "evaluate_resolver_activation — A-band severed"
+        )
+        assert "collect_source_a_signals(messages)" in src, (
+            "D-CTD-7: a_source lambda body no longer calls "
+            "collect_source_a_signals(messages) — A-band severed"
+        )
+
+    def test_activation_predicate_a_suspicion_term_intact(self):
+        """The activation predicate's ``a_suspicion`` term must
+        still consult Source A signals (advisory_present OR
+        contradiction_flag OR phrase_match OR word_count_below_
+        threshold). D2 (NOT busy-suppressed) preserved verbatim.
+        """
+        from daemon.services.attestation_resolver_activation import (
+            activation_predicate,
+        )
+        import inspect
+        src = inspect.getsource(activation_predicate)
+        # The four OR'd fields of the A-suspicion term — if any
+        # gets renamed/removed, the A-band trigger semantics drift.
+        assert "a_signals.advisory_present" in src
+        assert "a_signals.contradiction_flag" in src
+        assert "a_signals.phrase_match" in src
+        assert "a_signals.word_count_below_threshold" in src
+        assert "a_suspicion = bool(" in src, (
+            "D-CTD-7: activation_predicate a_suspicion term shape "
+            "drifted from spec §4.2"
+        )
+
+    def test_fused_bundle_a_section_cap_unchanged(self):
+        """The A-section cap (3000 chars) and the A-section
+        renderer must remain byte-identical. Negative-resurrection
+        of any per-A-section cap change is the test.
+        """
+        from daemon.services.attestation_resolver_activation import (
+            BUNDLE_A_SECTION_MAX,
+            _build_a_section,
+        )
+        assert BUNDLE_A_SECTION_MAX == 3000, (
+            "D-CTD-7: BUNDLE_A_SECTION_MAX changed from 3000 — "
+            "fused bundle A-section cap drift"
+        )
+        assert callable(_build_a_section)
+
+    def test_catalog_byte_identical_after_removal(self):
+        """The 17-pattern catalog survives D-CTD-7 byte-identical.
+        The user explicitly declined tightening; the catalog stays.
+        Identity pin (same module reference).
+        """
+        from daemon.services.attestation_marker_scanner import (
+            CHILD_TERMINAL_PROMISE_MARKERS as BEFORE,
+        )
+        from daemon.services.attestation_marker_scanner import (
+            CHILD_TERMINAL_PROMISE_MARKERS as AFTER,
+        )
+        assert BEFORE is AFTER
+        # 17 entries per D-CTD-1 (decision catalog size pinned).
+        assert len(CHILD_TERMINAL_PROMISE_MARKERS) == 17, (
+            f"D-CTD-7: catalog size drifted from 17 to "
+            f"{len(CHILD_TERMINAL_PROMISE_MARKERS)}"
+        )
+
+    def test_functional_pin_internal_report_message_produces_a_signal(
+        self,
+    ):
+        """FUNCTIONAL PIN (A-band restoration, 2026-09-18).
+
+        An ``internal_report:``-stamped ``HumanMessage`` whose content
+        contains a catalog phrase MUST produce an
+        ``advisory_present=True`` A-signal through the real
+        ``collect_source_a_signals`` code path (NOT a re-anchored
+        mint-time signal — the mint site is deleted per D-CTD-7).
+
+        This is the authoritative re-anchor for the deletion-derailment
+        class: any future regression that breaks the live transcript
+        scan (e.g. drifting to a different stamp shape, or accidentally
+        tightening the catalog) fails this test loud. ``test_evidence``
+        is structurally equivalent to the deleted mint-time
+        ``notify_worker_pool`` flag on a fresh D-CTD-7 producer — the
+        shape change from "stamp at child-terminal time" to "scan at
+        gate-evaluation time" is what this pin captures.
+        """
+        # Build the LIVE child-report stamp exactly as the
+        # report-injection drain + fallback PROCESS_REPORT task
+        # emit it:
+        #   additional_kwargs = {"injected_message": True,
+        #                        "source": f"internal_report:{child}:{msg}"}
+        child_id = "11111111-2222-3333-4444-555555555555"
+        content = (
+            "Awaiting the final four: C12a/b/c + blame-worker. "
+            "Then I will write the aggregation. Ending turn."
+        )
+        report_msg = HumanMessage(
+            content=content,
+            id="report-msg-uuid",
+            additional_kwargs={
+                "injected_message": True,
+                "source": f"internal_report:{child_id}:cmpl-uuid",
+            },
+        )
+        delegation = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "send_message",
+                    "args": {"target": "child-id"},
+                    "id": "c1",
+                }
+            ],
+        )
+        messages = [
+            HumanMessage(content="please do it"),
+            delegation,
+            report_msg,
+            AIMessage(content="Awaiting the final four. Ending turn."),
+        ]
+        signals = collect_source_a_signals(messages)
+        # Literal-must-pass gate — the A-band restoration is anchored
+        # on this assertion. If this fails, A-band is dormant again.
+        assert signals.advisory_present is True, (
+            "A-band restoration pin: an internal_report-stamped message "
+            "with a catalog phrase must produce advisory_present=True"
+        )
+        assert signals.phrase_match is True
+        assert any(
+            "ending turn" in ev.matched_terms for ev in signals.evidence
+        ), "scan must surface the catalog phrase in matched_terms"
+        assert any(
+            ev.child_instance_id == child_id for ev in signals.evidence
+        ), "scan must surface the child instance id from the source stamp"
