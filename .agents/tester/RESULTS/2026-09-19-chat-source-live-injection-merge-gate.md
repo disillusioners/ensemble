@@ -107,3 +107,30 @@ recon e6cf5bdd · audit+extension f175cb91 · newfiles 63eddf6c · adjacent 9b35
 - Companion e2e: ✅ PASS (flake adjudicated pre-existing, base-verified)
 - ensure.md Core: ✅ PASS (4/4 critical in scope)
 - **Testing Complete: ✅ READY — cleared for merge (include 5b54fde5)**
+
+
+---
+
+# RE-GATE @ synced tip `6c2de0f4` — VERDICT: **PASSED** (merge authorized)
+
+**Trigger:** `latest` moved under the original gate (concurrent LCA feature `b2371a9b` merged); branch synced — evidence docs commit re-landed as `72a16b2d` (+141, 3 tester-doc files), clean sync-merge `6c2de0f4` (parents 72a16b2d + b2371a9b verified). Original PASS was pinned @ 5b54fde5 / base 306468f8.
+
+**Specific risk covered — graph.py injection-drain seam (semantic read, read-only worker):**
+- Lineage verified: 6c2de0f4 parents = 72a16b2d + b2371a9b; 5b54fde5 (test extension, +620/−0) is 72a16b2d's parent; the 2 feature test files diff **5b54fde5..6c2de0f4 = 0 lines** (byte-identical across sync).
+- `git diff 5b54fde5..6c2de0f4 -- daemon/graph.py` = 2 hunks, both inside `create_attestation_gate_node` (≈line 5221+ and 5663+ — ~5,400 lines downstream of the drain region): (1) docstring/comment budget-invariant text only; (2) one added `nudge_inject_ts=%s` format arg to an existing `logger.info` deny-nudge line (lazy `now_utc_iso` import). No control-flow change, no queue interaction.
+- **Drain seam byte-identity proof (md5 @ both SHAs):** `InjectionQueueManager` wrapper (graph.py:204-227) identical; `set_injection`/`get_injection`/`get_injection_count`/`clear_injection` (manager.py:2734-2862) identical; `daemon/manager.py` whole-file diff ZERO lines; consumer sequence peek→consume→clear (instance_messaging.py:3825/3947) zero-line diff; all producer sites (routers/messages.py, tools/instance.py, tools/job_queue.py, sources/registry.py:1029) + lifecycle cleanup zero-line diff; `_pending_injections` init (manager.py:780) untouched.
+- Drain invariants re-verified: peek non-destructive, pop destructive+idempotent, FIFO order, drain timing vs LLM call unchanged (LCA changes live in the attestation-gate node, not the agent_node drain path), no duplicate/skip drains (only new executable line is a log arg).
+
+**Re-pins @ 6c2de0f4 (all rev-parse-pinned at run time):**
+| Suite | Result |
+|---|---|
+| Feature files (unit+e2e, marker override) | **47/47 PASS** (1.88s) |
+| Adjacent 4 unit files | **105/105 PASS** (0.75s; 38+32+29+6 exact) |
+| Chat pack `regression_chat_source_integration_test.sh` | **59/59 PASS** (22.94s; known-dispositioned saturation node GREEN first try — flake clause not triggered) |
+| Incoming LCA tests in combined tree (`test_attestation_fused_judge.py` + `test_attestation_resolver_stage2.py`) | **56/56 PASS** (0.27s; zero cross-feature interference) |
+
+Saturation A/B intentionally NOT re-run (previously dispositioned pre-existing; not re-litigated per instruction).
+
+**Re-gate workers:** graph-read 0a0e142e · newfiles 31640812 · adjacent a5ff777d · attest 51ea5163 · chatpack f899bd70. All read-only or dual-layer-timeout wrapped; zero modifications, zero commits at 6c2de0f4.
+
+**Re-gate verdict: ✅ PASSED — `--no-ff` merge of `6c2de0f4` to `latest` + push is authorized.**
