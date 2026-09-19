@@ -6332,16 +6332,20 @@ class InstanceManager:
         ``tmpimg://<32hex>``), move the ref entries to ``image_refs``
         and remove them from ``images``.
 
-        Failure semantics: like the rest of ``_ensure_postgres_columns``,
-        this method does NOT catch exceptions — if the sweep SQL fails
-        (permissions, syntax, table missing), startup aborts. Better to
-        fail loudly at startup than to silently ship the migration in a
-        half-done state.
+        Failure semantics: fail-loud is DELIBERATE — this method does
+        NOT catch exceptions: a failed sweep leaves the C2 bug
+        silently persisting (refs still overloaded onto ``images``),
+        so aborting boot is the safer failure mode, consistent with
+        the host ``_ensure_postgres_columns`` convention
+        (``manager.py:_ensure_postgres_columns``). Do NOT add a
+        try/except here.
         """
         from sqlalchemy import text
 
-        # Only run on PostgreSQL. SQLite companion lives in the
-        # migration runner (SQLite-only).
+        # Only PostgreSQL. No SQLite sweep exists — by design; SQLite
+        # fresh-boot gets the column via create_all; pre-existing
+        # SQLite rows with overloaded images are an acknowledged
+        # residual (R2).
         if not (
             self._ensemble_config is not None
             and self._ensemble_config.is_postgres

@@ -135,7 +135,7 @@ def _make_paused_manager(
     # the facade accepts ``image_refs=`` as a keyword-only kwarg.
     # The AsyncMock below accepts ANY kwargs — a positional kwarg
     # drop would be masked by AsyncMock. We add a signature-shape
-    # assertion in test_paused_target_resume_image_refs_kwarg_accepted
+    # assertion in test_resume_facade_signature_accepts_image_refs_keyword_only
     # below to close the mask class.
     if resume_processing_return is None:
         manager.resume_processing_job = AsyncMock(return_value=None)
@@ -184,12 +184,17 @@ def client_and_state():
 
     app = FastAPI()
     app.include_router(router)
-    state: dict = {"manager": None, "live_hub": None}
+    state: dict = {"manager": None, "live_hub": None, "tmp_image_store": None}
 
     @app.middleware("http")
     async def _inject_state(request, call_next):
         request.app.state.manager = state["manager"]
         request.app.state.live_hub = state["live_hub"]
+        # Inject tmp_image_store so the router's image_refs conversion
+        # hook (``getattr(request.app.state, "tmp_image_store", None)``)
+        # resolves on ref-send tests; ``None`` keeps non-ref tests on
+        # the no-hook path (mirrors the ref-path router test harness).
+        request.app.state.tmp_image_store = state["tmp_image_store"]
         return await call_next(request)
 
     client = TestClient(app)
@@ -428,10 +433,11 @@ class TestResumeFacadeKwargAcceptance:
             f"(C1 facade discipline); got kind={image_refs_param.kind!r}"
         )
 
-    def test_resume_router_forwards_image_refs_kwarg(self, client_and_state):
+    def test_resume_router_forwards_images_kwarg(self, client_and_state):
         """The router calls ``resume_processing_job`` with
-        ``image_refs=message.image_refs`` (matches the pre-fix
-        AsyncMock; pin the router passes the kwarg)."""
+        ``images=message.images`` on the PAUSED-branch resume call
+        (legacy data-URI channel — the request carries a data-URI
+        ``images`` payload, so THAT is the kwarg this test pins)."""
         client, state = client_and_state
         manager = _make_paused_manager(
             instance_id="inst-paused",
@@ -464,3 +470,42 @@ class TestResumeFacadeKwargAcceptance:
         # call would still succeed via the mock's permissive
         # signature; the actual facade would TypeError).
         assert "images" in call.kwargs
+
+    def test_resume_router_forwards_image_refs_kwarg(self, client_and_state):
+        """PAUSED-branch resume call forwards ``image_refs`` — the
+        router's real wiring (``daemon/routers/messages.py`` PAUSED
+        branch) passes ``image_refs=message.image_refs`` for the
+        target instance (phase-2 clipboard channel). The request goes
+        through the REAL ``pre_dispatch_image_hook`` conversion seam
+        (canonical refs normalize to themselves), and the captured
+        ``resume_processing_job`` call must carry the refs."""
+        client, state = client_and_state
+        manager = _make_paused_manager(
+            instance_id="inst-paused",
+            resume_processing_return={
+                "status": "ok",
+                "message_id": "msg-resumed-1",
+            },
+            with_vision=True,
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+        # The conversion hook requires an in-process tmp-image store
+        # (else the router 503s before reaching the PAUSED branch).
+        store = MagicMock()
+        store.get_image_bytes = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nfake")
+        state["tmp_image_store"] = store
+
+        refs = ["/api/tmp_images/" + "a" * 32]
+        resp = client.post(
+            "/instances/inst-paused/messages",
+            json={"content": "look", "image_refs": refs},
+        )
+
+        assert resp.status_code == 200, resp.text
+        manager.resume_processing_job.assert_awaited()
+        call = manager.resume_processing_job.call_args
+        # The REAL wiring: target instance keeps the request's
+        # (hook-normalized) refs — non-target cascade children get
+        # None.
+        assert call.kwargs["image_refs"] == refs

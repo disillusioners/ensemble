@@ -8,22 +8,27 @@ modules:
     ``InstanceMessagingService`` → real ``_prepare_enqueued_message``
     → real ``MessageQueue`` row INSERT (refs land on the dedicated
     ``image_refs`` JSONB column).
-  * The TaskProcessor claim path is driven via a synchronous
-    ``process_task`` call (no LLM turn; just the row → ProcessingContext
-    → message_processing_pipeline → ``_build_graph_input`` shape).
-  * We assert the kwargs-stamp reach: ``HumanMessage.content`` is a
-    plain ``str`` (NO ``image_url`` content-block list) and
-    ``additional_kwargs["image_refs"]`` carries the canonical URLs.
+  * The claim path is driven through the REAL
+    ``ProcessMessageProcessor.process(task)`` — the entry the worker
+    pool invokes after ``TaskRepository.claim_pending_task`` — with a
+    REAL ``TaskRepository`` + REAL ``MessageQueueRepository`` over the
+    shared engine. ONLY the manager's ``_process_message_with_tracking``
+    is spied: that is the honest graph-turn boundary (below it is
+    graph/LLM territory, out of unit-test scope). Every kwarg the spy
+    captures is what PRODUCTION passed — the row's column values that
+    ``task_processor`` loaded via the production repo read — never a
+    test-local reconstruction.
+  * We assert the kwargs-stamp reach: the captured ``image_refs``
+    equals the ROW's column value (fresh DB read), and the
+    ``_build_graph_input`` result built from those captured kwargs
+    carries ``HumanMessage.content`` as a plain ``str`` (NO
+    ``image_url`` content-block list) with
+    ``additional_kwargs["image_refs"]`` holding the canonical URLs.
   * The vision-routing predicate (extracted by
     ``test_routing_predicate_image_refs_no_vision.py``) is RE-RUN
-    here against the actual claim-path ``HumanMessage`` shape:
+    against the production-claim-fed ``HumanMessage`` shape:
     ``has_images = False`` → ``use_vision_model = False`` →
     ``call_type = "STANDARD"``.
-
-Replaces ``tests/integration/test_messages_ref_path_e2e.py`` which
-called ``_build_graph_input`` directly with a string-content shape
-production never produces (the human message comes out of
-``_build_message_content`` on the enqueue path, not from raw input).
 
 What this file proves (council Option A — dedicated ``image_refs``
 column + signature-separation on the worker-claim seam):
@@ -32,18 +37,18 @@ column + signature-separation on the worker-claim seam):
      column (NOT on the legacy ``images`` column).
   2. The legacy ``images`` column stays ``None`` for ref-sends
      (data-URI channel is byte-identical untouched).
-  3. The worker-claim path produces a ``HumanMessage`` with:
-       - content: ``str`` (not a multimodal block list)
-       - additional_kwargs: ``{"image_refs": [<refs>]}`` (stamped
-         on the checkpoint kwargs surface)
+  3. The production claim path (``ProcessMessageProcessor.process``)
+     threads the ROW's ``image_refs`` column through
+     ``ProcessingContext`` → pipeline → the manager-boundary kwargs.
   4. The vision-routing predicate at ``daemon/graph.py:7049-7058``
      does NOT fire for ref-sends (``has_images=False``,
      ``use_vision_model=False``, ``call_type="STANDARD"``).
 
-What is deliberately NOT real: the LLM turn. This test pins the
-durable-leg checkpoint kwargs stamp end-to-end through the
-worker-claim seam; a real LLM turn would need a scripted LLM and
-falls outside the unit-test scope.
+What is deliberately NOT real: the LLM turn (the manager-boundary spy
+returns a canned ``MessageResult``). This test pins the durable-leg
+kwargs threading end-to-end through the production claim entry; a
+real LLM turn would need a scripted LLM and falls outside the
+unit-test scope.
 """
 
 from __future__ import annotations
@@ -218,49 +223,6 @@ async def facade_manager(engine: Engine, tmp_path):
     return manager
 
 
-def _build_processing_context_from_row(message_row, task, *, image_refs):
-    """Build the ProcessingContext the worker would build on claim,
-    using the SAME field-loading code path task_processor uses.
-
-    Returns the ProcessingContext + the constructed graph_input (so
-    the test can assert the kwargs stamp surface).
-    """
-    from daemon.services.message_processing_pipeline import ProcessingContext
-    from daemon.services.instance_messaging import _build_graph_input
-
-    # Mirror the task_processor field-loading discipline (the
-    # ``getattr(message, 'images', None)`` shape is what production
-    # uses — see ``task_processor.py:_process_task``).
-    message_images = getattr(message_row, "images", None)
-    message_image_refs = getattr(message_row, "image_refs", None) or image_refs
-
-    context = ProcessingContext(
-        instance_id=task.instance_id,
-        message_id=task.message_id,
-        message=message_row.content,
-        retry_count=task.retry_count,
-        message_source=message_row.source,
-        silent=False,
-        images=message_images,
-        image_refs=message_image_refs,
-        resume_mode=False,
-        cancellation_token=None,
-        task_context=None,
-    )
-
-    # The kwargs-stamp call the pipeline makes
-    # (``_do_process`` -> ``_build_graph_input`` with the thread-through
-    # image_refs kwarg).
-    content = message_row.content  # legacy data-URI path: content is a str
-    graph_input = _build_graph_input(
-        content,
-        task.message_id,
-        message_source=message_row.source,
-        image_refs=message_image_refs,
-    )
-    return context, graph_input
-
-
 def _assert_vision_predicate_off(graph_input: dict) -> None:
     """RE-RUN the production vision-routing predicate on the actual
     claim-path HumanMessage. Asserts ``has_images=False``,
@@ -332,14 +294,122 @@ def _assert_vision_predicate_off(graph_input: dict) -> None:
     )
 
 
+async def _drive_real_claim_path(facade_manager, engine, *, message, refs):
+    """Drive the REAL production claim entry end-to-end.
+
+    1. Enqueue via the real facade chain (row lands on MessageQueue;
+       the enqueue path also inserts the production Task row).
+    2. Claim that Task via the production claim primitive
+       (``TaskRepository.claim_pending_task`` — the exact entry
+       ``TaskProcessor.claim_task`` delegates to; PENDING → RUNNING).
+    3. Run the REAL ``ProcessMessageProcessor.process(task)`` with
+       ONLY the manager's ``_process_message_with_tracking`` spied at
+       the manager boundary (the honest graph-turn boundary — below
+       it is graph/LLM territory, out of scope).
+
+    Returns ``(captured_kwargs, row_image_refs)`` where
+    ``row_image_refs`` is the row's column value loaded FRESH from
+    the DB AFTER the drive. The spy captures what PRODUCTION passed —
+    the values ``task_processor`` loaded from the row via the
+    production repo read — never the test's own ``refs`` variable.
+    """
+    from daemon import constants
+    from daemon.manager import MessageResult
+    from daemon.repositories.message_queue.models import MessageQueue
+    from daemon.repositories.message_queue.repository import (
+        SQLModelMessageQueueRepository as MessageQueueRepository,
+    )
+    from daemon.repositories.task.repository import TaskRepository
+    from daemon.services.task_processor import ProcessMessageProcessor
+    from sqlmodel import Session, select
+
+    inst = _seed_instance(
+        engine,
+        instance_id=str(uuid.uuid4()),
+        project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
+    )
+
+    # Leg 1 (genuine): real facade enqueue → real row INSERT. The
+    # enqueue path ALSO inserts the production Task row
+    # (``instance_messaging.py`` task insert leg).
+    await facade_manager.enqueue_message(
+        instance_id=inst.instance_id,
+        message=message,
+        source="api",
+        image_refs=refs,
+    )
+
+    task_repo = TaskRepository(engine)
+    message_repo = MessageQueueRepository(engine)
+
+    with Session(engine) as session:
+        row = session.exec(
+            select(MessageQueue).where(
+                MessageQueue.instance_id == inst.instance_id
+            )
+        ).first()
+    assert row is not None, "enqueue did not produce a MessageQueue row"
+
+    # Production claim primitive (PENDING → RUNNING) — the exact repo
+    # entry the worker pool's ``TaskProcessor.claim_task`` delegates
+    # to. The claimed Task is the ENQUEUE-CREATED production row (the
+    # only pending task in this fresh per-test DB), not a test-built
+    # object.
+    claimed = await asyncio.to_thread(
+        task_repo.claim_pending_task, "test-worker"
+    )
+    assert claimed is not None, "production claim returned no task"
+    assert claimed.message_id == row.message_id, (
+        "claimed task does not point at the enqueued message"
+    )
+
+    # REAL processor — the pipeline auto-constructs from the manager's
+    # execution_gate + the real queue repository.
+    processor = ProcessMessageProcessor(
+        instance_manager=facade_manager,
+        task_repo=task_repo,
+        event_repo=None,
+        message_repository=message_repo,
+        source_dispatcher=None,
+    )
+
+    captured: dict = {}
+
+    async def _spy(**kwargs):
+        captured.update(kwargs)
+        return MessageResult(content="spy-turn-ok")
+
+    with patch.object(
+        facade_manager, "_process_message_with_tracking", _spy
+    ):
+        result = await processor.process(claimed)
+
+    # The production run must reach the happy path — otherwise the
+    # captured kwargs are not the claim-path threading we mean to pin.
+    assert result.get("success") is True, result
+
+    # Row column value loaded FRESH from the DB (production
+    # persistence path), AFTER the drive.
+    with Session(engine) as session:
+        fresh = session.exec(
+            select(MessageQueue).where(
+                MessageQueue.message_id == row.message_id
+            )
+        ).first()
+    assert fresh is not None
+    return captured, fresh.image_refs
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 class TestClaimPathImageRefs:
-    """End-to-end worker-claim path: row → ProcessingContext →
-    graph_input → kwargs stamp + vision predicate OFF."""
+    """End-to-end worker-claim path driven through the REAL
+    ``ProcessMessageProcessor.process``: row → repo.get →
+    ProcessingContext → pipeline → manager-boundary kwargs →
+    graph_input stamp + vision predicate OFF."""
 
     async def test_refs_persist_on_dedicated_column(self, facade_manager, engine):
         """Refs land on the dedicated ``MessageQueue.image_refs``
@@ -388,70 +458,52 @@ class TestClaimPathImageRefs:
     async def test_refs_claim_path_produces_str_content_kwargs_stamp(
         self, facade_manager, engine
     ):
-        """The worker-claim seam builds a ``HumanMessage`` with
-        content as a plain ``str`` and ``additional_kwargs`` carrying
-        ``image_refs`` (kwargs stamp from ``_build_graph_input``).
-        NO image_url block list (vision gate cannot reach it)."""
-        from daemon import constants
-        from sqlmodel import Session, select
-        from daemon.repositories.message_queue.models import MessageQueue
-
-        inst = _seed_instance(
+        """The PRODUCTION claim path (``ProcessMessageProcessor.process``)
+        threads the ROW's ``image_refs`` column through to the
+        manager-boundary kwargs, and the ``_build_graph_input``
+        surface built from those captured kwargs stamps
+        ``additional_kwargs`` with ``image_refs`` while ``content``
+        stays a plain ``str``. NO image_url block list (vision gate
+        cannot reach it)."""
+        captured, row_image_refs = await _drive_real_claim_path(
+            facade_manager,
             engine,
-            instance_id=str(uuid.uuid4()),
-            project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
-        )
-
-        refs = [_CANONICAL_REF_A]
-
-        # Enqueue via the real facade chain.
-        await facade_manager.enqueue_message(
-            instance_id=inst.instance_id,
             message="claim this",
-            source="api",
-            image_refs=refs,
+            refs=[_CANONICAL_REF_A],
         )
 
-        # Load the row + a synthetic Task (we don't actually run the
-        # worker pool — the claim path is driven manually to pin the
-        # ProcessingContext kwargs stamp).
-        with Session(engine) as session:
-            row = session.exec(
-                select(MessageQueue).where(
-                    MessageQueue.instance_id == inst.instance_id
-                )
-            ).first()
+        # Enqueue leg (genuine, kept): the dedicated column carries
+        # the refs sent.
+        assert row_image_refs == [_CANONICAL_REF_A]
 
-        # Build the ProcessingContext the real worker would build
-        # (mirrors task_processor._process_task lines ~:419-462).
-        from daemon.repositories.task.models import Task
+        # PRIMARY M1 assertion: the kwargs PRODUCTION passed to the
+        # manager boundary carry the ROW's column value (fresh DB
+        # read). If task_processor's row getattr load OR the
+        # pipeline's ``image_refs=context.image_refs`` threading
+        # regresses, ``captured`` diverges from the row and this
+        # fails — no test-local fallback masks it.
+        assert captured["image_refs"] == row_image_refs
+        # Ref-sends never enter the legacy data-URI channel.
+        assert captured["images"] is None
 
-        task = Task(
-            id=1,
-            instance_id=inst.instance_id,
-            message_id=row.message_id,
-            type="PROCESS_MESSAGE",
-            status="pending",
-            retry_count=0,
-            work_id=str(uuid.uuid4()),
+        # The kwargs-stamp surface: feed the CAPTURED (production-
+        # sourced) kwargs through the REAL ``_build_graph_input`` the
+        # messaging path uses, and assert the stamp.
+        from daemon.services.instance_messaging import _build_graph_input
+
+        graph_input = _build_graph_input(
+            captured["message"],
+            captured["message_id"],
+            message_source=captured["message_source"],
+            image_refs=captured["image_refs"],
         )
-        context, graph_input = _build_processing_context_from_row(
-            row, task, image_refs=refs
-        )
-
-        # ProcessingContext fields:
-        assert context.image_refs == refs
-        # ``images`` is None — ref-sends do NOT write to it.
-        assert context.images is None
-
-        # Kwargs stamp on the HumanMessage:
         user_msg = graph_input["messages"][-1]
         assert isinstance(user_msg, HumanMessage)
         # A1's STRUCTURAL GUARANTEE: content is str, not a block list.
         assert isinstance(user_msg.content, str)
         assert user_msg.content == "claim this"
         # Refs survive into additional_kwargs (kwargs stamp).
-        assert user_msg.additional_kwargs == {"image_refs": refs}
+        assert user_msg.additional_kwargs == {"image_refs": row_image_refs}
 
     async def test_refs_claim_path_vision_predicate_does_not_fire(
         self, facade_manager, engine
@@ -460,51 +512,31 @@ class TestClaimPathImageRefs:
         evaluate ``has_images=False`` for ref-sends → ``call_type=
         "STANDARD"`` / ``use_vision_model=False``. The vision
         provider never sees a relative ``/api/tmp_images/<32hex>``
-        URL — the A1 violation class is CLOSED."""
-        from daemon import constants
-        from sqlmodel import Session, select
-        from daemon.repositories.message_queue.models import MessageQueue
-
-        inst = _seed_instance(
+        URL — the A1 violation class is CLOSED. The predicate runs
+        against the ``HumanMessage`` built from the PRODUCTION
+        claim's captured kwargs (not a test-local reconstruction)."""
+        captured, row_image_refs = await _drive_real_claim_path(
+            facade_manager,
             engine,
-            instance_id=str(uuid.uuid4()),
-            project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
-        )
-
-        refs = [_CANONICAL_REF_A]
-
-        await facade_manager.enqueue_message(
-            instance_id=inst.instance_id,
             message="please look",
-            source="api",
-            image_refs=refs,
+            refs=[_CANONICAL_REF_A],
         )
 
-        with Session(engine) as session:
-            row = session.exec(
-                select(MessageQueue).where(
-                    MessageQueue.instance_id == inst.instance_id
-                )
-            ).first()
-
-        from daemon.repositories.task.models import Task
-
-        task = Task(
-            id=1,
-            instance_id=inst.instance_id,
-            message_id=row.message_id,
-            type="PROCESS_MESSAGE",
-            status="pending",
-            retry_count=0,
-            work_id=str(uuid.uuid4()),
-        )
-        _context, graph_input = _build_processing_context_from_row(
-            row, task, image_refs=refs
-        )
+        # The production claim threaded the row's column value.
+        assert captured["image_refs"] == row_image_refs
 
         # The vision predicate runs against the kwargs-stamped
-        # HumanMessage; production code at daemon/graph.py walks
-        # ``msg.content`` for ``{"type": "image_url"}`` blocks.
-        # Refs NEVER produce such blocks — they live in
-        # ``additional_kwargs["image_refs"]`` instead.
+        # HumanMessage that production's captured kwargs produce;
+        # production code at daemon/graph.py walks ``msg.content``
+        # for ``{"type": "image_url"}`` blocks. Refs NEVER produce
+        # such blocks — they live in ``additional_kwargs["image_refs"]``
+        # instead.
+        from daemon.services.instance_messaging import _build_graph_input
+
+        graph_input = _build_graph_input(
+            captured["message"],
+            captured["message_id"],
+            message_source=captured["message_source"],
+            image_refs=captured["image_refs"],
+        )
         _assert_vision_predicate_off(graph_input)
