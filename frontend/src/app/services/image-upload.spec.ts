@@ -324,6 +324,15 @@ describe('ImageUploadService', () => {
       // NOT carry the literal ``data:image/`` substring.
       expect(PROD_SOURCE).not.toMatch(/data:image\/.*:.*data:image\//);
     });
+
+    it('contains the literal 422 detail-array predicates (b1fce2b3)', () => {
+      // b1fce2b3 added the FastAPI/pydantic 422 detail-array branch to
+      // the mirror (`Array.isArray(detail)` → join each item's `msg`
+      // with `'; '`). Identity-grep pin: if production drops or rewrites
+      // the array branch, the mirror silently drifts.
+      expect(PROD_SOURCE).toContain('Array.isArray(detail)');
+      expect(PROD_SOURCE).toContain("msgs.join('; ')");
+    });
   });
 
   describe('upload happy-path', () => {
