@@ -299,8 +299,8 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 # send path does NOT depend on per-message metadata that only the
 # durable path carries):
 #
-#   * ``slack``  — adapter.py:813-825 (mint); reply path at
-#     adapter.py:380-449 routes via ``external_user_id`` format
+#   * ``slack``  — slack/adapter.py:813-825 (mint); reply path at
+#     slack/adapter.py:380-449 routes via ``external_user_id`` format
 #     ``{workspace}:{channel_or_user_id}[:{thread_ts}]`` (:401) +
 #     mapping-side ``mapping.mapping_metadata.get("slack_thread_ts")``
 #     fallback (:439-440). Per-message metadata is NOT required for
@@ -311,8 +311,8 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 #     is always a valid Telegram chat_id (``user_id`` for private chats,
 #     ``chat_id`` for groups), so the fallback always routes correctly.
 #     Per-message metadata is NOT required. ✓
-#   * ``discord`` — adapter.py:1024-1038 / :1170-1196 (mint); reply
-#     path at adapter.py:1589-1627 routes via ``_resolve_send_target``
+#   * ``discord`` — discord/adapter.py:1024-1038 / :1170-1196 (mint); reply
+#     path at discord/adapter.py:1589-1627 routes via ``_resolve_send_target``
 #     (:1363-1437) which reads mapping.metadata (Discord does NOT
 #     populate ``reply_chat_id`` in message metadata — channel/thread
 #     routing lives on the mapping, set at first-message time via
@@ -321,8 +321,8 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 #
 # Sources (each entry cited from the adapter's metadata construction
 # site):
-#   * slack      — adapter.py:813-825 (+ /new at :829-830)
-#   * discord    — adapter.py:1092-1099 (text) and :1204-1209 (slash)
+#   * slack      — slack/adapter.py:813-825 (+ /new at :829-830)
+#   * discord    — discord/adapter.py:1092-1099 (text) and :1204-1209 (slash)
 #   * telegram   — telegram.py:558-573 (+ /new at :579-580)
 ROUTING_ENVELOPE_KEYS: dict[str, frozenset[str]] = {
     "slack": frozenset({

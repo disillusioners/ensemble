@@ -55,10 +55,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daemon.manager import InstanceManager
 from daemon.sources.base import IncomingMessage
 from daemon.sources.registry import SourceRegistry
 
@@ -146,7 +149,7 @@ def _stub_manager(
     return manager
 
 
-def _stub_mapper(instance_id: str = "instance-123"):
+def _stub_mapper(instance_id: str = "instance-123") -> MagicMock:
     """Patch ``InstanceMapper.get_or_create_instance`` to return ``instance_id``."""
     mock_mapper_instance = MagicMock()
     mock_mapper_instance.get_or_create_instance = AsyncMock(
@@ -172,8 +175,6 @@ class TestFacadeSignaturePin:
         """``manager.set_injection`` is a SYNC method accepting
         ``(instance_id, content, source=None, echo_id=None)``.
         """
-        from daemon.manager import InstanceManager
-
         sig = inspect.signature(InstanceManager.set_injection)
         params = list(sig.parameters.keys())
         # First two are positional (self, instance_id); the next three
@@ -199,8 +200,6 @@ class TestFacadeSignaturePin:
 
     def test_has_live_graph_task_real_signature_matches_mock_assumption(self):
         """``manager.has_live_graph_task`` is SYNC and takes ``instance_id``."""
-        from daemon.manager import InstanceManager
-
         sig = inspect.signature(InstanceManager.has_live_graph_task)
         params = list(sig.parameters.keys())
         assert params[:2] == ["self", "instance_id"], (
@@ -215,8 +214,6 @@ class TestFacadeSignaturePin:
 
     def test_get_instance_info_real_signature_matches_mock_assumption(self):
         """``manager.get_instance_info`` is SYNC and returns a ``dict``."""
-        from daemon.manager import InstanceManager
-
         sig = inspect.signature(InstanceManager.get_instance_info)
         params = list(sig.parameters.keys())
         assert params[:2] == ["self", "instance_id"], (
@@ -321,9 +318,7 @@ class TestRunningLiveGraphInjection:
         echo_id = kwargs["echo_id"]
         assert isinstance(echo_id, str), f"echo_id not a str: {type(echo_id)}"
         # uuid4 string parseable back to UUID
-        import uuid as _uuid
-
-        parsed = _uuid.UUID(echo_id)
+        parsed = uuid.UUID(echo_id)
         assert str(parsed) == echo_id, "echo_id not a valid uuid4 string"
 
     @pytest.mark.asyncio
@@ -761,7 +756,7 @@ class TestRichPayloadDurableFallback:
 # ---------------------------------------------------------------------------
 
 
-def _slack_metadata() -> dict:
+def _slack_metadata() -> dict[str, Any]:
     """Realistic slack envelope read directly from
     ``slack/adapter.py:813-825`` — channel/thread/workspace/user keys
     are nested under ``slack``; ``agent`` + ``reply_chat_id`` are
@@ -782,7 +777,7 @@ def _slack_metadata() -> dict:
     }
 
 
-def _telegram_metadata() -> dict:
+def _telegram_metadata() -> dict[str, Any]:
     """Realistic telegram envelope read directly from
     ``telegram.py:558-573`` — chat/from/date nested under ``telegram``;
     ``agent`` + ``reply_chat_id`` top-level.
@@ -804,7 +799,7 @@ def _telegram_metadata() -> dict:
     }
 
 
-def _discord_metadata() -> dict:
+def _discord_metadata() -> dict[str, Any]:
     """Realistic discord envelope read directly from
     ``discord/adapter.py:1024-1038`` — guild/channel/thread nested under
     ``discord``; ``agent`` is the only top-level non-cmd key

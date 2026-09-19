@@ -1,4 +1,13 @@
-"""Source registry for managing message source adapters."""
+"""Source registry for managing message source adapters.
+
+Module size rationale (M7, tidier pass 2026-09-19): this file
+owns the cross-source routing surface — adapter registration,
+``_handle_message`` ingest routing (live-injection + durable
+fallthrough), and per-provider mapping-metadata construction.
+Routing logic is interleaved with mapping-metadata construction
+so a naive split would scatter state — the seam is the
+three-clause invariant helper, not a file boundary.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +44,7 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # live-injection gate (see ``_is_text_only_payload_for_chat_injection``
 # below) imports it from there. Each entry cites the adapter's
 # metadata construction site (slack/adapter.py:813-825,
-# discord/adapter.py:1092-1099 + :1204-1209, telegram/adapter.py:558-573);
+# discord/adapter.py:1092-1099 + :1204-1209, telegram.py:558-573);
 # per-provider reply-path verdicts (verified that outbound routing
 # does NOT depend on per-message metadata that only the durable path
 # carries) are documented at the constant's definition site.
@@ -932,14 +941,11 @@ class SourceRegistry:
             source = f"{source_id}:{msg.external_user_id}"
 
             # ── Chat-source live-turn message injection (Phase 6) ────────
-            # Mirrors the web ``routers/messages.py`` injection branch
-            # (~:436-458) and the agent-tool ``tools/instance.py`` path
-            # (:3066-3128). When a chat-source message arrives for a
-            # target instance that is RUNNING with a live graph consumer
-            # AND the message is text-only (no images, no metadata
-            # payload), deliver via the RAM-FIFO injection lane
-            # (``manager.set_injection``) so it lands in the agent's
-            # CURRENT turn — exactly like ``POST /messages``.
+            # See ``_is_text_only_payload_for_chat_injection`` above for
+            # the three-clause invariant (round-3, 2026-09-19) that
+            # gates this branch. This header is the routing-overview
+            # comment — keep it aligned with that helper, do NOT
+            # restate a stale version of the gate.
             #
             # DEFECT-A stranding guard (``daemon/constants.py:279-289``):
             # ``status == "running"`` is necessary but NOT sufficient for
@@ -952,23 +958,13 @@ class SourceRegistry:
             # verifier; a ``False`` result routes through the durable
             # ``enqueue_message_job`` pipeline below.
             #
-            # Rich payloads (images / unknown metadata keys) ALWAYS
-            # take the durable enqueue fallthrough. ``set_injection`` is
-            # text-only (its signature accepts ``content``, ``source``,
-            # ``echo_id`` and nothing else; wiring image-bearing
-            # injections would require extending the FIFO schema + drain
-            # site, which is out of scope here). Metadata keys NOT in the
-            # per-provider ``ROUTING_ENVELOPE_KEYS`` allowlist
-            # (top-of-module definition; each entry cited from the
-            # adapter's metadata construction site) also fall through —
-            # a narrow allowlist degrades to durable, which is the safe
-            # direction (an unknown key never strands an injection).
-            #
-            # Empty / whitespace-only content also falls through — the
-            # chat-source path does not validate ``message.content`` like
-            # HTTP does (S4), but a blank injection would still produce a
-            # wasted turn; routing it through durable enqueue keeps the
-            # behavior uniform with the existing pipeline.
+            # Rich payloads (images only — the metadata-shape clause
+            # already lives in the helper) ALWAYS take the durable
+            # enqueue fallthrough. ``set_injection`` is text-only (its
+            # signature accepts ``content``, ``source``, ``echo_id``
+            # and nothing else; wiring image-bearing injections would
+            # require extending the FIFO schema + drain site, which is
+            # out of scope here).
             is_text_only_payload = _is_text_only_payload_for_chat_injection(
                 msg, source_type
             )
