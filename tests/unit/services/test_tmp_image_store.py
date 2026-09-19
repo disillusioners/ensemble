@@ -391,3 +391,65 @@ class TestTmpImageStoreSidecarAtomicity:
         assert dst.endswith(".json"), (
             f"os.replace destination should be the real sidecar, got {dst}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — full-write loop (phase-1+3 review S2)
+# ---------------------------------------------------------------------------
+
+
+class TestTmpImageStoreFullWriteLoop:
+    def test_short_write_is_completed_by_loop(self, tmp_path, monkeypatch):
+        """A short ``os.write`` must not silently truncate the blob.
+
+        Simulates a kernel-style short write: the first ``os.write``
+        accepts only half the offered payload and reports that count;
+        the store must loop and drain the remainder (S2).
+        """
+        import os as _os
+
+        import daemon.services.tmp_image_store as store_module
+
+        real_write = _os.write
+        offered: list[int] = []
+
+        def short_then_full(fd, data):
+            offered.append(len(data))
+            if len(offered) == 1 and len(data) > 1:
+                # Physically write + report only the first half.
+                return real_write(fd, data[: len(data) // 2])
+            return real_write(fd, data)
+
+        monkeypatch.setattr(store_module.os, "write", short_then_full)
+
+        store = TmpImageStore(tmp_path, max_bytes=1024 * 1024)
+        store.init()
+        payload = b"x" * 1000
+        store.save(_VALID_HEX_ID_32, payload, "image/png")
+
+        assert offered[0] == 1000, "first call must offer the full payload"
+        assert offered[1] == 500, "loop must re-offer only the unwritten tail"
+        assert (store.dir / _VALID_HEX_ID_32).read_bytes() == payload, (
+            "blob on disk must be byte-identical to the payload — a short "
+            "write must never truncate"
+        )
+
+    def test_zero_progress_write_raises_oserror(self, tmp_path, monkeypatch):
+        """A stalled ``os.write`` (returns 0) must raise, not spin forever."""
+        import daemon.services.tmp_image_store as store_module
+
+        def stalled_write(fd, data):  # noqa: ARG001 — signature match
+            return 0
+
+        monkeypatch.setattr(store_module.os, "write", stalled_write)
+
+        store = TmpImageStore(tmp_path, max_bytes=1024 * 1024)
+        store.init()
+        with pytest.raises(OSError):
+            store.save(_VALID_HEX_ID_32, b"payload", "image/png")
+        # The blob file exists (created O_CREAT|O_EXCL before the write
+        # failed) but without a sidecar the entry is un-readable — the
+        # documented mid-save failure shape (the next sweep reaps it).
+        assert (store.dir / _VALID_HEX_ID_32).exists()
+        with pytest.raises(TmpImageNotFound):
+            store.open(_VALID_HEX_ID_32)

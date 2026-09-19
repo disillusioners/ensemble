@@ -156,3 +156,58 @@ class TestReapLogLine:
             assert "retention=30d" in msg
         finally:
             await svc.stop()
+
+
+class TestReapTickSummaryLine:
+    """Phase-1+3 review S6 — compact per-reaping-tick summary line.
+
+    A tick that reaps something emits ONE additional self-contained
+    summary line (deleted / freed_bytes / duration_s) after the
+    existing reap line. No-op ticks stay silent — the log-noise
+    discipline pinned by ``TestReapLogLine`` above is preserved, so
+    the hourly cadence cannot spam the log.
+    """
+
+    async def test_summary_line_on_reaping_tick(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        store = _make_store(tmp_path)
+        ids = [format(i, "032x") for i in range(1, 4)]  # 3 old entries
+        for image_id in ids:
+            _seed_old(store, image_id)
+
+        svc = TmpImageCleanupService(store, retention_days=30)
+        monkeypatch.setattr(cleanup_module, "now_utc", lambda: _FROZEN_NOW)
+        with caplog.at_level(logging.INFO, logger=cleanup_module.__name__):
+            deleted = await svc.sweep_once()
+
+        assert deleted == 3
+        summaries = [
+            r
+            for r in caplog.records
+            if "[TmpImages] reap tick summary:" in r.getMessage()
+        ]
+        assert len(summaries) == 1, "exactly one summary line per reaping tick"
+        msg = summaries[0].getMessage()
+        assert summaries[0].levelno == logging.INFO
+        assert "deleted=3" in msg
+        assert "freed_bytes=" in msg
+        assert "duration_s=" in msg
+        # The blob+sidecar pairs were 1-byte blobs + ~120B sidecars —
+        # the freed total must reflect the real disk footprint.
+        freed = int(msg.split("freed_bytes=")[1].split()[0])
+        assert freed > 0
+
+    async def test_no_summary_line_when_nothing_reaped(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        store = _make_store(tmp_path)
+        svc = TmpImageCleanupService(store, retention_days=30)
+        monkeypatch.setattr(cleanup_module, "now_utc", lambda: _FROZEN_NOW)
+        with caplog.at_level(logging.INFO, logger=cleanup_module.__name__):
+            await svc.sweep_once()
+        assert not [
+            r
+            for r in caplog.records
+            if "[TmpImages] reap tick summary:" in r.getMessage()
+        ], "a no-op tick must not emit a summary line (log-noise discipline)"

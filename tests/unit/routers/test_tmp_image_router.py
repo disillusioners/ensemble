@@ -185,6 +185,13 @@ class TestPostRejections:
         resp = _post(client, [_payload("a.png", "image/png", jpeg_b64)])
         assert resp.status_code == 422
 
+    def test_filename_over_255_returns_422(self, client: TestClient):
+        # Phase-1+3 review S4 — the filename field is capped at 255
+        # chars (pydantic max_length); overflow is a validation error,
+        # so it takes the 422 envelope path, not a 400.
+        resp = _post(client, [_payload("a" * 256)])
+        assert resp.status_code == 422
+
 
 # ===========================================================================
 # Group 3 — GET path-traversal rejection matrix
@@ -370,6 +377,14 @@ class TestGetETag304:
         assert second.status_code == 304
         # 304 has empty body.
         assert second.content == b""
+        # Phase-1+3 review S1 — the 304 carries the same hardening
+        # headers as the 200 path (minus Content-Length, no body).
+        assert second.headers.get("etag") == etag
+        assert second.headers.get("cache-control") == "private, max-age=3600"
+        assert second.headers.get("x-content-type-options") == "nosniff"
+        cd = second.headers.get("content-disposition", "")
+        assert cd.startswith("inline;")
+        assert f'filename="{image_id}"' in cd
 
     def test_non_matching_if_none_match_returns_200(self, client: TestClient):
         resp = _post(client, [_payload()])

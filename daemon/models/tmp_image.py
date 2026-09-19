@@ -32,7 +32,7 @@ import binascii
 from datetime import datetime
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 
 # Magic-byte sniff table. Each entry maps the canonical stored content_type
@@ -102,12 +102,28 @@ class TmpImageUpload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    filename: str = Field(..., description="Original filename (hint only, not used for storage)")
+    filename: str = Field(
+        ...,
+        max_length=255,
+        description=(
+            "Original filename (hint only, not used for storage; "
+            "capped at 255 chars — phase-1+3 review S4)"
+        ),
+    )
     content_type: str = Field(..., description="Declared MIME; must be in the 4-type allowlist")
     data_base64: str = Field(..., description="Base64-encoded bytes (raw, NOT a data URI)")
 
     _MAX_IMAGE_BYTES: ClassVar[int] = 10 * 1024 * 1024  # 10MB per architect amendment
     _MAX_IMAGES_PER_REQUEST: ClassVar[int] = 3
+
+    # Decoded-payload cache (phase-1+3 review S3). The batch-level
+    # validator decodes ONCE via :meth:`decoded_bytes` and stashes the
+    # bytes here; the router's save path then reuses them instead of
+    # re-decoding. The per-field base64 validator below still decodes
+    # independently — it is the contract-bearing per-field error gate
+    # (its 422 ``loc`` points at ``data_base64``, which the frozen API
+    # contract pins).
+    _decoded_cache: bytes | None = PrivateAttr(default=None)
 
     @field_validator("content_type")
     @classmethod
@@ -148,6 +164,21 @@ class TmpImageUpload(BaseModel):
             raise ValueError(f"data_base64 is not valid base64: {exc}") from exc
         return v
 
+    def decoded_bytes(self) -> bytes:
+        """Return the decoded payload, decoding at most once per instance.
+
+        Phase-1+3 review S3 (decode-once): the batch-level validator
+        on ``TmpImageUploadRequest`` calls this during validation,
+        populating ``_decoded_cache``; the router's upload handler
+        then gets a cache hit instead of issuing a third base64
+        decode. Well-formedness is guaranteed by the per-field
+        validator above before any instance reaches this method, so
+        the cached decode cannot fail on a validated model.
+        """
+        if self._decoded_cache is None:
+            self._decoded_cache = base64.b64decode(self.data_base64, validate=True)
+        return self._decoded_cache
+
 
 class TmpImageUploadRequest(BaseModel):
     """Batch upload request (≤3 images per architect amendment + count cap)."""
@@ -172,7 +203,7 @@ class TmpImageUploadRequest(BaseModel):
             )
         for idx, img in enumerate(v):
             try:
-                decoded = base64.b64decode(img.data_base64, validate=True)
+                decoded = img.decoded_bytes()
             except (binascii.Error, ValueError) as exc:  # pragma: no cover — validator chain
                 raise ValueError(f"image[{idx}]: base64 decode failed: {exc}") from exc
             if len(decoded) > TmpImageUpload._MAX_IMAGE_BYTES:

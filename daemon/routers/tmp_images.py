@@ -60,7 +60,10 @@ GET /api/tmp_images/{image_id_or_ref}
         X-Content-Type-Options: nosniff        (architect amendment #1)
         Content-Disposition: inline; filename="<image_id>"
     Errors:
-        304 NOT_MODIFIED — If-None-Match matches stored ETag
+        304 NOT_MODIFIED — If-None-Match matches stored ETag (no body;
+                          carries ETag / Cache-Control / nosniff /
+                          Content-Disposition — the 200 header set
+                          minus Content-Length)
         404 NOT_FOUND    — id not in store / malformed id
 
 DELETE /api/tmp_images/{image_id}
@@ -81,6 +84,8 @@ GET /api/tmp_images
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import re
@@ -231,15 +236,17 @@ async def upload_images(
             ).model_dump(),
         )
 
-    import base64
-    import binascii
-
     accepted_ids: list[str] = []
     responses: list[TmpImageUploadResponse] = []
     try:
         for img in payload.images:
             try:
-                decoded = base64.b64decode(img.data_base64, validate=True)
+                # Decode-once (phase-1+3 review S3): the batch-level
+                # validator already decoded and cached the payload, so
+                # this is a cache hit on the validated path. The
+                # defensive except stays as a belt-and-braces 400 for
+                # any shape that could ever bypass the validators.
+                decoded = img.decoded_bytes()
             except (binascii.Error, ValueError) as exc:
                 raise HTTPException(
                     status_code=400,
@@ -356,6 +363,12 @@ async def serve_image(image_id_or_ref: str, request: Request) -> Response:
     weak_etag = f"W/{_ETAG_QUOTE}{sha256_hex[:16]}{_ETAG_QUOTE}" if sha256_hex else None
     if weak_etag is not None:
         if_none_match = request.headers.get("if-none-match")
+        # Exact single-value compare is DELIBERATE (phase-1+3 review
+        # S5): this endpoint issues exactly ONE weak ETag per resource
+        # and the frozen contract above defines a single-value
+        # If-None-Match. RFC 7232 list / ``*`` forms are out of
+        # contract; a non-matching form falls through to a 200, which
+        # is the safe direction (re-serve, never wrongly-304).
         if if_none_match is not None and if_none_match.strip() == weak_etag:
             return Response(
                 status_code=304,
@@ -363,6 +376,9 @@ async def serve_image(image_id_or_ref: str, request: Request) -> Response:
                     "ETag": weak_etag,
                     "Cache-Control": "private, max-age=3600",
                     "X-Content-Type-Options": "nosniff",
+                    # Content-Disposition matches the 200 path for
+                    # header consistency (phase-1+3 review S1).
+                    "Content-Disposition": f'inline; filename="{normalized}"',
                 },
             )
 

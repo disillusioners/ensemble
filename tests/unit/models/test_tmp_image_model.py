@@ -295,3 +295,28 @@ class TestTmpImageModelConfig:
                 images=[_upload()],
                 extra_field="x",
             )
+
+
+# ---------------------------------------------------------------------------
+# Group 5 — filename cap (phase-1+3 review S4)
+# ---------------------------------------------------------------------------
+
+
+class TestTmpImageFilenameCap:
+    def test_filename_at_255_chars_accepted(self):
+        # The cap boundary itself is valid.
+        img = TmpImageUpload(
+            filename="a" * 255,
+            content_type="image/png",
+            data_base64=VALID_1X1_PNG_B64,
+        )
+        assert len(img.filename) == 255
+
+    def test_filename_over_255_chars_rejected(self):
+        with pytest.raises(ValidationError) as ei:
+            TmpImageUpload(
+                filename="a" * 256,
+                content_type="image/png",
+                data_base64=VALID_1X1_PNG_B64,
+            )
+        assert "255" in str(ei.value)

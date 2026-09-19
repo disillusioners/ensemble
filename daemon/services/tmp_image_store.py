@@ -256,7 +256,9 @@ class TmpImageStore:
            directory, not just blob bytes.
         2. Open the blob with ``O_CREAT|O_EXCL|O_WRONLY`` — a collision
            on the uuid4 hex raises ``FileExistsError`` (router → HTTP 409).
-           The blob write itself is POSIX-atomic.
+           The blob creation is POSIX-atomic and the payload is drained
+           by a full-write loop, so a short ``os.write`` can never
+           silently truncate the stored bytes (phase-1+3 review S2).
         3. Write the sidecar AFTER the blob. The sidecar write is its
            own atomic step (tmp-file + ``os.replace`` — see below). On
            any failure between steps 2 and 3, the blob stays on disk
@@ -303,10 +305,23 @@ class TmpImageStore:
 
         # O_CREAT|O_EXCL gives POSIX atomic create-or-fail — a retry
         # with the same id surfaces as FileExistsError, not silent
-        # overwrite.
+        # overwrite. The payload itself is drained by a full-write
+        # loop (phase-1+3 review S2): a short ``os.write`` must never
+        # silently truncate the blob.
         fd = os.open(str(blob_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            os.write(fd, content_bytes)
+            view = memoryview(content_bytes)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    # Zero-progress write — raise rather than spin.
+                    # For regular files os.write either completes or
+                    # raises; this guard covers the pathological case.
+                    raise OSError(
+                        f"tmp-image blob write made no progress "
+                        f"({len(view)} bytes remaining)"
+                    )
+                view = view[written:]
         finally:
             os.close(fd)
 

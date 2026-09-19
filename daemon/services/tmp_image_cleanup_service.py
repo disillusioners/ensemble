@@ -55,10 +55,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc, now_utc_iso
+from daemon.services.tmp_image_store import _METADATA_SUFFIX
 
 if TYPE_CHECKING:
     from daemon.services.tmp_image_store import TmpImageStore
@@ -147,6 +149,10 @@ class TmpImageCleanupService:
         # + potential future diagnostics). Populated by each
         # ``_sweep_store_dir`` pass.
         self._last_reap_sample_ids: list[str] = []
+        # Byte total freed by the most recent tick (S6 summary line).
+        # Populated by each ``_sweep_store_dir`` pass; 0 when the
+        # tick reaped nothing or failed.
+        self._last_reap_freed_bytes: int = 0
 
     # ------------------------------------------------------------------
     # Introspection
@@ -259,7 +265,9 @@ class TmpImageCleanupService:
         tick retries.
         """
         try:
+            sweep_started = time.monotonic()
             deleted = self._sweep_store_dir()
+            sweep_duration_s = time.monotonic() - sweep_started
         except FileNotFoundError:
             # Missing store dir — the sweep has nothing to walk.
             # WARNING + 0 (not a crash; the store ``init()``s at
@@ -298,6 +306,15 @@ class TmpImageCleanupService:
             logger.info(
                 f"[TmpImages] reaped {deleted} image(s) older than "
                 f"{self._retention_days}d: {sample_ids}"
+            )
+            # Phase-1+3 review S6 — one compact, self-contained summary
+            # line per REAPING tick (count + freed bytes + duration).
+            # No-op ticks stay silent (pinned log-noise discipline), so
+            # the hourly cadence cannot spam the log.
+            logger.info(
+                f"[TmpImages] reap tick summary: deleted={deleted} "
+                f"freed_bytes={self._last_reap_freed_bytes} "
+                f"duration_s={sweep_duration_s:.3f}"
             )
         return deleted
 
@@ -342,9 +359,11 @@ class TmpImageCleanupService:
         ``TmpImageStore.list_ids_with_mtime`` surfaces it via the
         ``exists()`` guard — this explicit check keeps the semantics
         obvious and covers the removed-mid-call window).
-        """
-        from daemon.services.tmp_image_store import _METADATA_SUFFIX
 
+        Side effects (mirrors ``_last_reap_sample_ids``): resets and
+        repopulates ``_last_reap_freed_bytes`` — the byte total of
+        everything actually reaped this tick (S6 summary line).
+        """
         store_dir = self._store.dir
         if not store_dir.exists():
             raise FileNotFoundError(str(store_dir))
@@ -359,7 +378,9 @@ class TmpImageCleanupService:
             n for n in names_mtime if not n.endswith(_METADATA_SUFFIX)
         ]
         deleted = 0
+        freed = 0
         self._last_reap_sample_ids: list[str] = []
+        self._last_reap_freed_bytes = 0
 
         # Pass 1 — blobs (each with its sidecar pair, present or not).
         for blob_name in blob_names:
@@ -376,8 +397,12 @@ class TmpImageCleanupService:
             )
             if age_ts is None or age_ts >= cutoff:
                 continue
+            pair_bytes = self._stat_entry_bytes(
+                image_id
+            ) + self._stat_entry_bytes(f"{image_id}{_METADATA_SUFFIX}")
             if self._reap_pair(image_id):
                 deleted += 1
+                freed += pair_bytes
                 if len(self._last_reap_sample_ids) < _REAP_SAMPLE_IDS_MAX:
                     self._last_reap_sample_ids.append(image_id)
 
@@ -399,11 +424,26 @@ class TmpImageCleanupService:
             )
             if age_ts is None or age_ts >= cutoff:
                 continue
+            orphan_bytes = self._stat_entry_bytes(sidecar_name)
             if self._unlink_quietly(store_dir / sidecar_name):
                 deleted += 1
+                freed += orphan_bytes
                 if len(self._last_reap_sample_ids) < _REAP_SAMPLE_IDS_MAX:
                     self._last_reap_sample_ids.append(image_id)
+        self._last_reap_freed_bytes = freed
         return deleted
+
+    def _stat_entry_bytes(self, name: str) -> int:
+        """Best-effort byte size of one store entry (0 on race/IO error).
+
+        Feeds the S6 summary line. A file that vanishes between the
+        mtime walk and this stat (FE DELETE ∥ sweep race = expected
+        traffic) contributes 0 rather than aborting the tick.
+        """
+        try:
+            return (self._store.dir / name).stat().st_size
+        except OSError:
+            return 0
 
     def _resolve_age_seconds(
         self,
@@ -451,8 +491,6 @@ class TmpImageCleanupService:
         (``coerce_to_aware_utc``) — no naive/aware comparison ever
         happens.
         """
-        from daemon.services.tmp_image_store import _METADATA_SUFFIX
-
         image_id = sidecar_name[: -len(_METADATA_SUFFIX)]
         meta_path = self._store.dir / sidecar_name
         try:
