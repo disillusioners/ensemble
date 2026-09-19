@@ -25,6 +25,7 @@ import { ApiService, extractUnknownCommandError, parseCommandAck } from '../../s
 import { SseService } from '../../services/sse.service';
 import { CommandRegistryService } from '../../services/command-registry.service';
 import { CommandStateService } from '../../services/command-state.service';
+import { isTmpImageRef } from '../../constants/image-ref';
 import {
   mergeMessagesById,
   makeProvisionalMessage,
@@ -1851,7 +1852,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // accepts the retry without validator-mismatch 422s.
     const bubbleImages = target.images ?? [];
     const looksLikeRefUrl = bubbleImages.length > 0
-      && bubbleImages[0].startsWith('/api/tmp_images/');
+      && isTmpImageRef(bubbleImages[0]);
     this.onSendMessage({
       content: retryContent,
       images: looksLikeRefUrl ? undefined : bubbleImages,
