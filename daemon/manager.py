@@ -2737,6 +2737,7 @@ class InstanceManager:
         content: str,
         source: str | None = None,
         echo_id: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> dict[str, str]:
         """Append a pending user message to the RAM injection queue.
 
@@ -2755,6 +2756,19 @@ class InstanceManager:
         shape — no ``"source"`` key is added, and the downstream
         ``HumanMessage.additional_kwargs`` is unchanged.
 
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #31, h4-S1): keyword-only display-channel list of
+        refs that the drain site stamps onto
+        ``HumanMessage.additional_kwargs["image_refs"]`` for
+        checkpoint persistence + the serializer union reads on
+        GET /messages. Conditional add (mirror ``source`` /
+        ``echo_id``) — byte-identical entry dict when ``image_refs``
+        is ``None`` (the tool-path back-compat contract). The drain
+        site is documented to NEVER build content blocks from
+        ``image_refs`` (the AGENT channel stays text-only — refs are
+        display metadata only, langchain_openai does not serialize
+        additional_kwargs to the wire).
+
         Args:
             instance_id: Target instance.
             content: The user message text to inject on the next LLM call.
@@ -2772,12 +2786,20 @@ class InstanceManager:
                 — required by the tool-path back-compat contract
                 (agent-tool ``instance.py`` / ``job_inject``
                 ``job_queue.py`` call sites pass no ``echo_id``).
+            image_refs: Optional display-channel list (Phase 2
+                clipboard-image-chat). The drain site
+                (``daemon/graph.py:6647-6673``) stamps this onto
+                ``HumanMessage.additional_kwargs["image_refs"]``.
+                ``None`` (default) preserves byte-identical entry
+                shape — the agent-tool / job_inject call sites do
+                not pass ``image_refs`` today.
 
         Returns:
             The newly appended entry as ``{"content": str, "timestamp": str}``,
-            plus ``"source"`` when provided, plus ``"echo_id"`` when provided.
+            plus ``"source"`` when provided, plus ``"echo_id"`` when
+            provided, plus ``"image_refs"`` when provided.
         """
-        entry: dict[str, str] = {
+        entry: dict[str, Any] = {
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -2795,6 +2817,18 @@ class InstanceManager:
             # (agent-tool ``instance.py``, ``job_inject``
             # ``job_queue.py``) must keep today's exact behavior.
             entry["echo_id"] = echo_id
+        if image_refs is not None:
+            # Phase 2 / clipboard-image-chat (round-2 amendment #31):
+            # display-channel refs. Same conditional-add pattern as
+            # ``source`` / ``echo_id`` — entry stays byte-identical to
+            # pre-feature shape when image_refs is None. ``list(...)``
+            # defensive copy so the caller's list mutation cannot
+            # affect the stored entry. Tool-path call sites (the four
+            # ``set_injection`` consumers in ``tools/instance.py`` /
+            # ``tools/job_queue.py`` / ``sources/registry.py`` /
+            # ``routers/messages.py``) DO NOT pass image_refs today —
+            # they stay byte-identical.
+            entry["image_refs"] = list(image_refs)
         queue = self._pending_injections.get(instance_id)
         if queue is None:
             queue = []
