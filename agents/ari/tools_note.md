@@ -27,6 +27,15 @@ flowchart TD
   other (heavier; reads LangGraph checkpoints).
 - **`job_inject`** — write. Use it to nudge a running agent with new context.
 
+**Mission vocabulary — wait on MISSIONS, not receipts.** These tools answer
+transport/visibility questions. To wait on the WORK: `await_mission(mission_id)`
+in-turn (timeout returns a SNAPSHOT, not an error — check `liveness` and decide),
+or `watch_mission(job_id_or_mission_id)` to yield and be revived at
+mission-terminal — the receipt `job_create` returned is a valid handle, and it
+covers every receipt that exists at call time (re-call it after `job_continue`).
+The FIRST `[JOB_EVENT]` after the watch is the signal; later events on the same
+mission's other receipts are echoes — act once.
+
 ---
 
 ## Tool Boundaries: bash & filesystem

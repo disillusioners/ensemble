@@ -225,7 +225,7 @@ from .inner_soul import create_inner_soul_tool
 from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
-from .job_queue import create_job_tools
+from .job_queue import create_job_tools, create_mission_watch_tools
 from .missions import create_mission_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
@@ -1767,6 +1767,48 @@ def create_mission_tools_if_available(manager) -> list:
     if resolver is None:
         return []
     return create_mission_tools(resolver)
+
+
+def create_mission_watch_tools_if_available(manager, current_instance_id: str) -> list:
+    """Create the mission-watch tool if the mission resolver AND the job
+    service are wired on the manager.
+
+    Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``) —
+    ``watch_mission`` is the durable mission watch (resolver front-end +
+    registration-time receipt fan-out over ``job_watchers`` rows). It
+    needs BOTH the read-model resolver (mission resolution + terminal
+    detection) and the job service (work resolution + immediate
+    terminal notification), plus the watcher/task repositories for row
+    minting and receipt enumeration.
+
+    Same wiring-check posture as the sibling ``*_if_available`` factories:
+    when the services are NOT yet wired (test doubles / partial init)
+    this returns an EMPTY tool list instead of raising — instance boot
+    never blocks on the wiring check. Scope note: that guarantee covers
+    the wiring lookup only; an exception raised INSIDE the underlying
+    ``create_mission_watch_tools`` construction still propagates.
+
+    Args:
+        manager: The :class:`InstanceManager` instance; only
+            ``getattr(manager, '_job_queue_service'/'_mission_resolver'/
+            '_task_repo'/'_watcher_repo', None)`` are touched.
+        current_instance_id: The watching instance's ID.
+
+    Returns:
+        A list with the single ``watch_mission`` tool (empty when the
+        services are not yet wired).
+    """
+    job_service = getattr(manager, '_job_queue_service', None)
+    resolver = getattr(manager, '_mission_resolver', None)
+    if job_service is None or resolver is None:
+        return []
+    return create_mission_watch_tools(
+        job_service=job_service,
+        mission_resolver=resolver,
+        task_repo=getattr(manager, '_task_repo', None),
+        watcher_repo=getattr(manager, '_watcher_repo', None),
+        current_instance_id=current_instance_id,
+    )
 
 
 class SpawnInstanceInput(BaseModel):
@@ -4529,6 +4571,17 @@ Returns:
     # boot.
     mission_tools = create_mission_tools_if_available(manager)
     tools.extend(mission_tools)
+
+    # Mission-watch tool (toolset reshape 2026-09-19,
+    # ``feature/mission-watch-toolset``) — ``watch_mission`` is the
+    # durable mission watch: resolver front-end + ONE job_watchers row
+    # per receipt that exists at call time (events=["mission_terminal"],
+    # HOLD semantics). Appended AFTER the mission tools so the
+    # ``create_job_tools`` return-list indices (watch_job = tools[17],
+    # watch_jobs = tools[20]) stay stable. Empty list when the services
+    # are not yet wired (partial-init / test stubs).
+    mission_watch_tools = create_mission_watch_tools_if_available(manager, current_instance_id)
+    tools.extend(mission_watch_tools)
     
     # Add mother tools if this is the _mother agent
     if agent_id == "_mother":

@@ -2,6 +2,19 @@
 
 My primary skill is orchestrating jobs — creating, watching, reacting, and reporting.
 
+> **You wait on MISSIONS, not receipts.** Create work with `job_create` — you
+> hold a receipt (job_id). To wait on the WORK: `await_mission(mission_id)`
+> in-turn, or `watch_mission(mission_id_or_job_ref)` to yield and be revived
+> at mission-terminal. `watch_mission` accepts the receipt you created or the
+> mission_id, and watches every receipt that exists at call time. After
+> `job_continue`, call `watch_mission` again — new receipts are not
+> auto-watched. The FIRST `[JOB_EVENT]` after your watch is the signal; later
+> events on the same mission's other receipts are echoes — act once. Receipts
+> answer transport questions only (`job_get`); never watch a receipt for a
+> work question. A revived mission needs a fresh `watch_mission`; the event
+> carries no epoch — `get_mission` for details. `await_mission` timeout
+> returns a SNAPSHOT, not an error — check `liveness` and decide.
+
 ---
 
 ## Orchestration Patterns
@@ -14,7 +27,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 1. Receive request
 2. Analyze: Identify target agent
 3. job_create(agent_id=[target], message=[description], watch=True)
-4. watch_job(job_id)  # if not using watch=True
+4. watch_mission(job_id)  # if not using watch=True — the receipt is a valid handle
 5. Wait for [JOB_EVENT] notification
 6. Parse the body for status, Agent line, and Result/Error
 7. Emit your result as your response (the system delivers it to your parent)
@@ -36,7 +49,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 3. For each task:
    job_create(agent_id=[target], message=[description], watch=True)
    record job_id
-4. watch_jobs([all job_ids])  # ensure all watched
+4. watch_mission(job_id) for each  # every receipt becomes a watched row
 5. Wait for all [JOB_EVENT] notifications
 6. For each notification:
    Parse the body for job_id, status, Agent line, and Result/Error
@@ -82,7 +95,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 2. For each unit of work:
    job_create(agent_id=[worker], message=[unit_task], watch=True)
    record job_id
-3. watch_jobs([all worker job_ids])
+3. watch_mission(worker_job_id) for each  # the receipt is a valid handle
 4. Wait for all [JOB_EVENT] notifications
 5. Collect all results
 6. job_create(agent_id=[aggregator], message=[collect_results], watch=True)
@@ -104,7 +117,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
    - FAILED (transient) → increment retry_count
      - if retry_count < 3:
        job_retry(job_id)
-       watch_job(job_id)
+       watch_mission(new_job_id)  # re-watch: the retry receipt is new
        → goto step 2
      - else:
        report persistent failure
@@ -193,19 +206,20 @@ Extract from the notification text:
 
 ## Edge Cases
 
-### Watching an Already-Terminal Job
+### Watching an Already-Terminal Mission
 
-If I call `watch_job()` on a job that's already in a terminal state (completed, failed, etc.):
+If I call `watch_mission()` on a mission that's already in a terminal state (completed, failed, etc.):
 
-**I receive an immediate notification** with the current status.
+**I receive an immediate notification** with the current status — one per watched receipt.
 
-This is expected behavior. Parse and handle just like any other notification.
+This is expected behavior. The FIRST notification is the signal; later events on the same mission's other receipts are echoes. Parse and handle once, just like any other notification.
 
-### Multiple Notifications for Same Job
+### Multiple Notifications for Same Mission
 
-A job should only send ONE terminal notification. If I receive multiple:
-- First terminal notification is authoritative
-- Ignore subsequent notifications for the same job
+A mission-terminal watch produces N `[JOB_EVENT]`s for N watched receipts — they are all echoes of ONE mission terminal. If I receive multiple:
+- The FIRST terminal notification after my watch is the signal — it is authoritative
+- Subsequent notifications for the same mission's other receipts are echoes — act once
+- (A single job still sends only ONE terminal notification)
 
 ### Job Stuck in Non-Terminal State
 
@@ -232,7 +246,7 @@ summary as my response, and the system routes it to my parent automatically.
 
 ### Handle Semantics: Jobs and Continued-Instance Work
 
-The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_job`, `job_get`, and `job_continue` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_job` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed. `job_continue` resolves both task and job work_ids (Phase 5 P-B, 2026-06-27), so continuing from the task `work_id` returned by a prior `job_continue` works without manual handle translation. `job_list` shows root-instance work by default (Phase 5 P-A, 2026-06-27) — child-instance turns/reports are filtered out by the resolver so the management view is not drowned in noise.
+The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_mission`, `job_get`, and `job_continue` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_mission` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed. `job_continue` resolves both task and job work_ids (Phase 5 P-B, 2026-06-27), so continuing from the task `work_id` returned by a prior `job_continue` works without manual handle translation. `job_list` shows root-instance work by default (Phase 5 P-A, 2026-06-27) — child-instance turns/reports are filtered out by the resolver so the management view is not drowned in noise. `watch_mission` accepts the receipt handle OR the mission_id, and covers every receipt that exists at call time — after `job_continue`, call `watch_mission` again, because new receipts are not auto-watched.
 
 ---
 

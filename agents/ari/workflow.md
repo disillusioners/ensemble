@@ -261,6 +261,17 @@ job_create(agent_id="worker", message="...", watch=True)
 **Verification:** periodically use `list_watched_jobs()` to confirm all
 active jobs are tracked.
 
+**Mission vocabulary:** you wait on MISSIONS, not receipts. To wait on
+the WORK: `await_mission(mission_id)` in-turn, or
+`watch_mission(job_id_or_mission_id)` to yield and be revived at
+mission-terminal (the receipt `job_create` returned is a valid handle,
+and it covers every receipt that exists at call time). After
+`job_continue`, call `watch_mission` again — new receipts are not
+auto-watched. The FIRST `[JOB_EVENT]` after your watch is the signal;
+later events on the same mission's other receipts are echoes — act
+once. `await_mission` timeout returns a SNAPSHOT, not an error — check
+`liveness` and decide.
+
 ---
 
 ## [JOB_EVENT] Notification Parsing

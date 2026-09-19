@@ -787,6 +787,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "upgrade_status",
     "watch_job",
     "watch_jobs",
+    "watch_mission",
     "write_file",
 })
 
