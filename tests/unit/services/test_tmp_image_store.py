@@ -394,7 +394,7 @@ class TestTmpImageStoreSidecarAtomicity:
 
 
 # ---------------------------------------------------------------------------
-# Group 6 — full-write loop (phase-1+3 review S2)
+# Group 8 — full-write loop (phase-1+3 review S2)
 # ---------------------------------------------------------------------------
 
 

@@ -149,9 +149,6 @@ class TmpImageCleanupService:
         # + potential future diagnostics). Populated by each
         # ``_sweep_store_dir`` pass.
         self._last_reap_sample_ids: list[str] = []
-        # Byte total freed by the most recent tick (S6 summary line).
-        # Populated by each ``_sweep_store_dir`` pass; 0 when the
-        # tick reaped nothing or failed.
         self._last_reap_freed_bytes: int = 0
 
     # ------------------------------------------------------------------

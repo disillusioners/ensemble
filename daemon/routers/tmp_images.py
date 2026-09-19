@@ -63,7 +63,8 @@ GET /api/tmp_images/{image_id_or_ref}
         304 NOT_MODIFIED — If-None-Match matches stored ETag (no body;
                           carries ETag / Cache-Control / nosniff /
                           Content-Disposition — the 200 header set
-                          minus Content-Length)
+                          minus Content-Length and Content-Type
+                          (no body ⇒ no entity headers))
         404 NOT_FOUND    — id not in store / malformed id
 
 DELETE /api/tmp_images/{image_id}
@@ -84,7 +85,6 @@ GET /api/tmp_images
 
 from __future__ import annotations
 
-import base64
 import binascii
 import logging
 import os
