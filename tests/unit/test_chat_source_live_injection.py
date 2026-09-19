@@ -1464,6 +1464,113 @@ class TestProbeFailureDurableFallback:
 
 
 # ---------------------------------------------------------------------------
+# Probe-return shape — ``get_instance_info`` returns None / missing status
+# ---------------------------------------------------------------------------
+
+
+class TestProbeNoneStatusDurableFallback:
+    """Safe-direction pin: the ``current_status`` extraction at
+    ``daemon/sources/registry.py:981-984`` runs
+    ``instance_info.get("status") if instance_info else None``. Two
+    miss-shapes exist and BOTH must take the durable path:
+
+      (i)   ``get_instance_info`` returns ``None`` (DB miss — the
+            lifecycle service could not resolve the row).
+      (ii)  ``get_instance_info`` returns a dict WITHOUT a
+            ``"status"`` key (race / partial write — the row
+            exists but the status column is unset).
+
+    Both shapes resolve ``current_status = None``, which is NOT in
+    ``INJECTION_ELIGIBLE_STATUSES`` (``{"running"}``), so the
+    injection branch MUST be skipped and the durable
+    ``enqueue_message_job`` MUST run.
+
+    This is the safe-direction audit gap (audit finding 1.b /
+    Section 3 row "``get_instance_info`` returns None"): the
+    existing ``_stub_manager`` always returns ``{"status": ...}``
+    when status is non-None, so these two miss-shapes were never
+    pinned. A future regression that treated ``None`` as
+    "running" (e.g., by removing the ``is None`` short-circuit)
+    would silently strand messages on orphaned rows — this pin
+    catches the regression at the unit-test layer.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_instance_info_returns_none_falls_through(self):
+        """``get_instance_info`` returns ``None`` (lifecycle service
+        miss) — current_status resolves to ``None`` → durable
+        fallthrough; ``set_injection`` MUST NOT be called.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(return_value=None)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_instance_info_missing_status_key_falls_through(self):
+        """``get_instance_info`` returns a dict WITHOUT a ``"status"``
+        key — current_status resolves to ``None`` → durable
+        fallthrough; ``set_injection`` MUST NOT be called.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(
+            return_value={"other_field": "irrelevant"}
+        )
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Durable path still threads the full kwargs unchanged
 # ---------------------------------------------------------------------------
 
