@@ -23,13 +23,18 @@ This hook is the seam that enforces the signature separation:
   ``messages.py:222-231`` then naturally skips because
   ``message.images`` is ``None``.
 
-* ``image_refs`` kwarg — display channel. RETAINED on the request so
+* ``image_refs`` kwarg — display channel. NORMALIZED to the
+  canonical URL form (``/api/tmp_images/<32hex>``) at this seam
+  via :func:`daemon.models.message.normalize_image_ref_to_canonical_url`.
+  Both the bare ``<32hex>`` and the ``tmpimg://<32hex>`` ACCEPTED-INPUT
+  aliases become ``/api/tmp_images/<32hex>`` here — round-2 amendment
+  #26 / §2 enforcement. RETAINED on the (now-normalized) request so
   the router can pass it to ``manager.enqueue_message_job(
   images=message.images, image_refs=message.image_refs, ...)``. The
-  refs reach the ``MessageQueue.images`` JSONB column (audit) AND the
-  ``HumanMessage.additional_kwargs["image_refs"]`` checkpoint sidecar
-  (display). The agent channel stays text-only — the conversion
-  prepended plain-text descriptions to the content.
+  canonical URL refs reach the ``MessageQueue.images`` JSONB column
+  (audit) AND the ``HumanMessage.additional_kwargs["image_refs"]``
+  checkpoint sidecar (display). The agent channel stays text-only —
+  the conversion prepended plain-text descriptions to the content.
 
 Fail-fast (architect amendment #7 — must land BEFORE tests are written)
 ----------------------------------------------------------------------
@@ -108,8 +113,22 @@ async def pre_dispatch_image_hook(
            * ``content`` = prefix + original content
            * ``images`` = ``None`` (cleared — legacy vision gate
              naturally skips)
-           * ``image_refs`` = ORIGINAL list (unchanged — display
-             channel retains refs for row audit + checkpoint stamp)
+           * ``image_refs`` = NORMALIZED to the canonical URL form
+             (``/api/tmp_images/<32hex>``) for every entry — this is
+             the single seam where the round-2 amendment #26 / §2
+             contract (``tmpimg://<32hex>`` and bare ``<32hex>`` are
+             ACCEPTED-INPUT aliases only) is enforced. Both the
+             ``MessageQueue.images`` row column (audit, written via
+             ``enqueue_message_job(images=..., image_refs=...)`` in
+             the router seam) and the
+             ``HumanMessage.additional_kwargs["image_refs"]``
+             checkpoint sidecar inherit the canonical form because
+             the router rebinds ``message = await
+             pre_dispatch_image_hook(...)`` and threads the
+             post-hook ``message.image_refs`` through every leg
+             (202 injection FIFO, durable enqueue, PAUSED
+             auto-resume, fallback enqueue). See
+             ``daemon/models/message.py:33`` for the helper.
 
     Returns the request unchanged when ``image_refs`` is empty so the
     no-ref path is zero-cost byte-identical to pre-phase-2.
@@ -180,19 +199,35 @@ async def pre_dispatch_image_hook(
     # frozen-shape (the existing content field is a string; no
     # list-typed content here — the converter's output is always text).
     # ``images`` is CLEARED so the legacy vision gate at
-    # ``messages.py:222-231`` naturally skips; ``image_refs`` is
-    # RETAINED so the router seam can thread it to the durable channel
-    # (row + checkpoint kwargs stamp) — round-2 amendment #26 / C1.
+    # ``messages.py:222-231`` naturally skips.
+    #
+    # ``image_refs`` is NORMALIZED to the canonical URL form
+    # (``/api/tmp_images/<32hex>``) — round-2 amendment #26 / §2
+    # contract. The :func:`normalize_image_ref_to_canonical_url`
+    # helper (imported above) is idempotent: a canonical URL passes
+    # through unchanged, a ``tmpimg://<32hex>`` alias gets the
+    # ``/api/tmp_images/`` prefix, and a bare ``<32hex>`` id is also
+    # given the canonical prefix. This single seam covers every leg:
+    # the router rebinds ``message = await pre_dispatch_image_hook(...)``
+    # at ``daemon/routers/messages.py:269`` and threads the
+    # post-hook ``message.image_refs`` through (a) the durable row
+    # column via ``enqueue_message_job(image_refs=...)``, (b) the
+    # checkpoint kwargs stamp via
+    # ``HumanMessage.additional_kwargs["image_refs"]``, (c) the 202
+    # injection FIFO entry, and (d) the POST-time echo
+    # ``additional_kwargs``. All four channels therefore receive
+    # canonical form — bare-hex and ``tmpimg://`` aliases NEVER
+    # persist or emit. Without this normalization, the alias forms
+    # propagate through every consumer and violate the §2 contract
+    # end-to-end (round-2 review MAJOR #1 finding).
     return request.model_copy(
         update={
             "content": new_content,
             "images": None,
-            # ``image_refs`` is intentionally NOT in the update dict —
-            # Pydantic v2's model_copy(update=...) REPLACES fields not
-            # mentioned, but here we want the value preserved.
-            # However, model_copy preserves omitted fields by default
-            # (only the listed fields are mutated). So we don't need to
-            # pass image_refs at all. Documented above.
+            "image_refs": [
+                normalize_image_ref_to_canonical_url(r)
+                for r in (request.image_refs or [])
+            ],
         },
     )
 

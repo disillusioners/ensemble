@@ -6,7 +6,12 @@ Validates:
 * Prefix construction (success / failure mix).
 * Original content preserved (prepended).
 * ``images`` cleared on the returned request.
-* ``image_refs`` RETAINED on the returned request (display channel).
+* ``image_refs`` RETAINED on the returned request (display channel) AND
+  NORMALIZED to the canonical URL form (round-2 review MAJOR #1) — all
+  three accepted-input forms (bare 32-hex, ``tmpimg://<32hex>``,
+  ``/api/tmp_images/<32hex>``) collapse to ``/api/tmp_images/<32hex>``
+  at this single seam so the canonical-form contract (decisions.md §2)
+  holds end-to-end through every router leg.
 * Disconnect mitigation (architect amendment #11) — placeholders for
   remaining refs after a synthetic disconnect.
 * Defensive OSError catch on the converter's read path.
@@ -212,6 +217,157 @@ class TestPreDispatchChannelInvariants:
 
         result = await pre_dispatch_image_hook(msg, _mgr_for_convert_results([]), _store_with_converter_results([]))
         assert result.image_refs == refs
+
+
+# ---------------------------------------------------------------------------
+# Group 3.5 — canonical-form normalization (round-2 review MAJOR #1)
+# ---------------------------------------------------------------------------
+
+
+class TestPreDispatchCanonicalFormNormalization:
+    """All three accepted-input alias forms collapse to
+    ``/api/tmp_images/<32hex>`` at this seam so the canonical-form
+    contract (decisions.md §2) holds end-to-end.
+
+    The hook is the SINGLE seam that enforces §2 — both the
+    durable ``MessageQueue.images`` row column (audit) and the
+    ``HumanMessage.additional_kwargs["image_refs"]`` checkpoint
+    sidecar inherit the canonical form because the router rebinds
+    ``message = await pre_dispatch_image_hook(...)`` at
+    ``messages.py:269`` and threads the post-hook
+    ``message.image_refs`` through every leg (202 injection FIFO,
+    durable enqueue, PAUSED auto-resume, fallback enqueue).
+
+    The bare ``<32hex>`` and ``tmpimg://<32hex>`` aliases are
+    ACCEPTED-INPUT forms only — they must NEVER persist or emit.
+    """
+
+    async def test_bare_hex_ref_normalized_to_canonical_url(
+        self, patch_converter, monkeypatch
+    ):
+        """Bare 32-hex input form becomes canonical URL on return."""
+        bare_hex = "a" * 32
+        canonical_form = "/api/tmp_images/" + bare_hex
+        patch_converter([
+            ConvertedImage(ref=canonical_form, description="flower", ok=True),
+        ])
+
+        # Pre-condition: MessageCreate validator accepts bare hex.
+        msg = MessageCreate(content="look", image_refs=[bare_hex])
+
+        result = await pre_dispatch_image_hook(
+            msg, _mgr_for_convert_results([]), _store_with_converter_results([]),
+        )
+
+        assert result.image_refs == [canonical_form]
+        assert all(
+            r.startswith("/api/tmp_images/") for r in result.image_refs
+        )
+
+    async def test_tmpimg_scheme_ref_normalized_to_canonical_url(
+        self, patch_converter
+    ):
+        """``tmpimg://<32hex>`` alias form becomes canonical URL on
+        return."""
+        image_id = "b" * 32
+        alias_form = f"tmpimg://{image_id}"
+        canonical_form = f"/api/tmp_images/{image_id}"
+        patch_converter([
+            ConvertedImage(ref=canonical_form, description="tree", ok=True),
+        ])
+
+        msg = MessageCreate(content="look", image_refs=[alias_form])
+
+        result = await pre_dispatch_image_hook(
+            msg, _mgr_for_convert_results([]), _store_with_converter_results([]),
+        )
+
+        assert result.image_refs == [canonical_form]
+        # No alias form leaks through.
+        assert all(
+            not r.startswith("tmpimg://") for r in result.image_refs
+        )
+
+    async def test_canonical_url_ref_passes_through_unchanged(
+        self, patch_converter
+    ):
+        """Canonical URL form is idempotent — normalize is a no-op."""
+        patch_converter([
+            ConvertedImage(ref=_VALID_REF_A, description="flower", ok=True),
+        ])
+
+        msg = MessageCreate(content="look", image_refs=[_VALID_REF_A])
+
+        result = await pre_dispatch_image_hook(
+            msg, _mgr_for_convert_results([]), _store_with_converter_results([]),
+        )
+
+        assert result.image_refs == [_VALID_REF_A]
+
+    async def test_mixed_alias_forms_all_normalize_to_canonical(
+        self, patch_converter
+    ):
+        """All 3 accepted-input forms in ONE request — every entry
+        leaves the hook in canonical form, regardless of input shape.
+
+        The hook is the single normalization seam — if a future refactor
+        moves it (or omits normalization for a given leg), every entry
+        on this row trips the assertion. Mirrors the round-2 review
+        MAJOR #1 reproduction recipe.
+        """
+        from daemon.models.message import normalize_image_ref_to_canonical_url
+
+        image_id_a = "a" * 32
+        image_id_b = "b" * 32
+        image_id_c = "c" * 32
+        bare_hex = image_id_a
+        alias_form = f"tmpimg://{image_id_b}"
+        canonical_form = f"/api/tmp_images/{image_id_c}"
+
+        # Three canonical refs back to the converter (one per input).
+        patch_converter([
+            ConvertedImage(
+                ref=normalize_image_ref_to_canonical_url(bare_hex),
+                description="flower",
+                ok=True,
+            ),
+            ConvertedImage(
+                ref=normalize_image_ref_to_canonical_url(alias_form),
+                description="tree",
+                ok=True,
+            ),
+            ConvertedImage(
+                ref=normalize_image_ref_to_canonical_url(canonical_form),
+                description="rock",
+                ok=True,
+            ),
+        ])
+
+        # Validator accepts all 3 input forms (C3 round-2 regex).
+        msg = MessageCreate(
+            content="look",
+            image_refs=[bare_hex, alias_form, canonical_form],
+        )
+
+        result = await pre_dispatch_image_hook(
+            msg, _mgr_for_convert_results([]), _store_with_converter_results([]),
+        )
+
+        # Every entry in canonical form, in input order. If any input
+        # form leaks through (bare hex or tmpimg:// alias), one of the
+        # assertions below fires.
+        assert result.image_refs == [
+            normalize_image_ref_to_canonical_url(bare_hex),
+            normalize_image_ref_to_canonical_url(alias_form),
+            normalize_image_ref_to_canonical_url(canonical_form),
+        ]
+        # Direct invariant: zero non-canonical entries.
+        canonical_prefix = "/api/tmp_images/"
+        for r in result.image_refs:
+            assert r.startswith(canonical_prefix), (
+                f"ref {r!r} is NOT canonical — bare/tmpimg aliases "
+                f"must NEVER persist or emit (§2 contract violation)."
+            )
 
 
 # ---------------------------------------------------------------------------

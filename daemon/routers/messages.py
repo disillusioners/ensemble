@@ -309,6 +309,19 @@ async def send_message(
     # ~3ms post-ack, unseen by the client, card stuck waiting) cases
     # are handled BEFORE any ExecutionGate acquisition. The status
     # read at :207 doubles as the gate's input — no extra DB hit.
+    #
+    # NOTE (Phase 2 / round-2 review MINOR #4): ``image_refs`` + a
+    # leading ``/`` slash-command in the same request is NOT
+    # supported. The conversion hook above (:269) prepends a
+    # ``[Image N: <desc>]\n...`` prefix to ``content`` BEFORE this
+    # intercept runs, so the first whitespace-separated token the
+    # command dispatcher sees is ``[Image`` (or ``[`` if the
+    # conversion failed) — NEVER the user's slash. The user's slash
+    # appears AFTER the prefix and never triggers the command path;
+    # this is by design (the human-readable image descriptions are
+    # part of the agent turn; a slash-command in the user bubble
+    # would race the dispatch decision). Callers that need both
+    # features must split into two separate POSTs.
     command_outcome = await manager.command_dispatcher.dispatch(
         instance_id=instance_id,
         text=message.content,
