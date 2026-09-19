@@ -9,6 +9,8 @@ Phase 1 / clipboard-image-chat. Validators pin the FULL contract:
   Content-Disposition: inline; filename="<id>" + Cache-Control +
   ETag weak sha256[:16]).
 * GET → 304 on If-None-Match.
+* GET input-alias: ``tmpimg://<32hex>`` (raw + URL-encoded ``://``)
+  resolves; traversal shapes after the scheme strip still 404.
 * DELETE idempotent (204 + repeat 204) + 404 on malformed id.
 * Gated debug listing (default 404; ENSEMBLE_TMP_IMAGE_DEBUG_LISTING=1
   → 200 with count + oldest_mtime; no id leak).
@@ -283,6 +285,67 @@ class TestGetHappyAndHeaders:
         inner = etag[len('W/"'):-1]
         assert len(inner) == 16
         assert all(c in "0123456789abcdef" for c in inner)
+
+
+# ===========================================================================
+# Group 4b — GET accepts the tmpimg:// input-alias (phase1 Task 7)
+# ===========================================================================
+
+
+class TestGetTmpimgSchemeAlias:
+    """GET accepts ``tmpimg://<32hex>`` and its URL-encoded form.
+
+    Phase-1 Task 7 acceptance: "GET accepts both ``tmpimg://abc`` and
+    ``abc`` paths; unit test covers both". The wire form is always the
+    bare id (POST never emits the scheme) — the alias exists so callers
+    passing the ref through without stripping it still resolve
+    (frozen contract docstring + architect amendment #5).
+    ``_normalize_image_id`` strips the scheme BEFORE the
+    ``^[a-f0-9]{32}$`` gate, so the regex safety net holds on the
+    aliased form too.
+    """
+
+    def _upload_one(self, client: TestClient) -> dict:
+        resp = _post(client, [_payload()])
+        assert resp.status_code == 200
+        return resp.json()["uploads"][0]
+
+    def test_get_accepts_tmpimg_scheme_alias(self, client: TestClient):
+        upload = self._upload_one(client)
+        image_id = upload["image_id"]
+        resp = client.get(f"/api/tmp_images/tmpimg://{image_id}")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("image/png")
+        # Body is byte-identical to the decoded payload.
+        assert resp.content == base64.b64decode(VALID_1X1_PNG_B64)
+        # Hardening headers present on the alias path too.
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        cd = resp.headers.get("content-disposition", "")
+        assert cd.startswith("inline;")
+        assert f'filename="{image_id}"' in cd
+        assert resp.headers.get("cache-control") == "private, max-age=3600"
+        assert resp.headers.get("etag", "").startswith('W/"')
+
+    def test_get_url_encoded_tmpimg_scheme_alias(self, client: TestClient):
+        # %3A%2F%2F = "://" — Starlette decodes the path BEFORE the
+        # handler runs, so the handler receives ``tmpimg://<id>`` and
+        # the scheme strip still applies (decode-then-normalize order).
+        upload = self._upload_one(client)
+        image_id = upload["image_id"]
+        resp = client.get(f"/api/tmp_images/tmpimg%3A%2F%2F{image_id}")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("image/png")
+        assert resp.content == base64.b64decode(VALID_1X1_PNG_B64)
+
+    def test_get_alias_traversal_shapes_return_404(self, client: TestClient):
+        # The regex gate must hold AFTER the scheme strip — the alias
+        # must not open a traversal or a non-hex-id bypass.
+        for shape in (
+            "tmpimg://../../etc/passwd",
+            "tmpimg://not-a-valid-id",
+        ):
+            resp = client.get(f"/api/tmp_images/{shape}")
+            assert resp.status_code == 404, f"{shape} must 404"
 
 
 # ===========================================================================
