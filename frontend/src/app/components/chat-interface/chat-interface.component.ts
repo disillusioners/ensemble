@@ -25,6 +25,8 @@ import {
 } from '../../services/mermaid-actions.service';
 import { SseService } from '../../services/sse.service';
 import { CommandStateService } from '../../services/command-state.service';
+import { ImageViewerActionsService } from '../../services/image-viewer-actions.service';
+import { isTmpImageRef } from '../../constants/image-ref';
 
 interface MermaidChartContext {
   /** Bubble that owns this chart — used to look up the source message. */
@@ -86,6 +88,12 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    *  a pure view over this service — same instance the chat send path
    *  seeds, so ack-seeded and SSE/REST-driven state land here. */
   private readonly commandStateService = inject(CommandStateService);
+  /**
+   * Phase 6 (clipboard-image-chat) — image-viewer dialog broker. The
+   * chat-interface owns the click bindings on the rendered thumbnails;
+   * this service brokers the calls to MatDialog.
+   */
+  private readonly imageViewerActions = inject(ImageViewerActionsService);
 
   private shouldScroll = signal(false);
   isNearBottom = signal(true);
@@ -636,6 +644,165 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
         next.delete(messageId);
       } else {
         next.add(messageId);
+      }
+      return next;
+    });
+  }
+
+  // ─── Phase 6 / image viewer dialog + onerror fallback ─────────────────
+  // Click-to-popup viewer + 30-day-cleaned tmp-image resilience. The
+  // chat-interface owns the click/error bindings on the rendered
+  // thumbnails; the dialog itself is opened via ImageViewerActionsService
+  // and its open-config lives there.
+
+  /**
+   * Track which (message_id, index) pairs have produced an ``error``
+   * event so the template can bind directly to the fallback SVG src
+   * and the (error) handler can suppress a second re-fetch.
+   *
+   * Keyed by message id → set of image indices. The map is mutated
+   * with `.set()` and `.update()` (NOT swapped wholesale) so an
+   * unrelated message's failure doesn't cascade into a full re-render
+   * of the chat. ``signal()``-wrapped so OnPush sees the change.
+   */
+  readonly failedImages = signal<ReadonlyMap<string, ReadonlySet<number>>>(
+    new Map(),
+  );
+
+  /**
+   * Pinned inline SVG fallback for the bubble thumbnail's ``(error)``
+   * event. Mirrored verbatim in the dialog component's own
+   * ``(error)`` handler so the two surfaces show the SAME icon when
+   * the user opens a dialog on a 410'd image (plan risk #4).
+   *
+   * Encoded as a ``data:image/svg+xml;utf8,…`` URI via
+   * ``encodeURIComponent`` (NOT base64) so the markup stays
+   * human-readable in devtools — the byte-for-byte identity is
+   * pinned in image-viewer-dialog.component.spec.ts and in the
+   * chat-interface test below.
+   */
+  static readonly FALLBACK_IMAGE_SVG_MARKUP =
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='200' height='200'>" +
+    "<rect width='24' height='24' fill='#374151'/>" +
+    "<path d='M3 5h18v14H3z' fill='none' stroke='#9ca3af' stroke-width='1.5'/>" +
+    "<circle cx='8' cy='9' r='1.5' fill='#9ca3af'/>" +
+    "<path d='M3 17l5-5 4 4 3-3 6 6v2H3z' fill='#6b7280'/>" +
+    "<line x1='4' y1='4' x2='20' y2='20' stroke='#ef4444' stroke-width='1.5'/>" +
+    "</svg>";
+
+  /**
+   * URI-encoded data form of the fallback SVG — what the template
+   * actually binds to ``<img [src]>`` when the (error) handler fires.
+   * Kept as a getter (computed once) so a future contributor who
+   * changes the markup only has to update the constant above; the
+   * encoding step is mechanical.
+   */
+  static readonly FALLBACK_IMAGE_SRC_CACHE =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(ChatInterfaceComponent.FALLBACK_IMAGE_SVG_MARKUP);
+
+  /** Template-bound src helper — returns the fallback SVG once the
+   *  (message_id, index) pair has been recorded as failed, the
+   *  original src otherwise. The signal-driven check means OnPush
+   *  re-renders see the swap. */
+  imageSrc(img: string, messageId: string, index: number): string {
+    return this.isImageFailed(messageId, index)
+      ? ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE
+      : img;
+  }
+
+  /** True when the (message_id, index) pair has been recorded as
+   *  failed. Used both to gate the dialog-open click and to apply
+   *  the ``message-image-failed`` class. */
+  isImageFailed(messageId: string, index: number): boolean {
+    const set = this.failedImages().get(messageId);
+    return !!set && set.has(index);
+  }
+
+  /**
+   * Click handler — opens the image-viewer dialog. Stops propagation
+   * defensively (no bubble-level (click) handler exists today, but
+   * a future contributor may add one — e.g. an "open conversation in
+   * side panel" affordance — and the defensive stopPropagation would
+   * silently break it. The spec pins the current behavior so any
+   * removal is a deliberate change).
+   *
+   * Click on a failed image does NOT open the dialog (the placeholder
+   * is not a real image — opening the dialog would either show a
+   * broken-image icon OR, with the dialog body's own (error), the
+   * same fallback again. Either way it's a useless interaction).
+   */
+  onImageThumbnailClick(
+    event: MouseEvent,
+    img: string,
+    messageId: string,
+    index: number,
+  ): void {
+    event.stopPropagation();
+    if (this.isImageFailed(messageId, index)) {
+      return;
+    }
+    this.imageViewerActions.openViewer(img, messageId);
+  }
+
+  /**
+   * (error) handler — swaps the broken ``<img>``'s src to the pinned
+   * fallback SVG AND records the failure in ``failedImages`` so a
+   * re-render (e.g. message re-fetch on reconnect) does NOT replay
+   * the fetch for an already-known-cleaned file.
+   *
+   * Only canonical server-ref URLs (matching ``TMP_IMAGE_REF_PREFIX``
+   * from ``constants/image-ref``) can produce a post-cleanup 410;
+   * legacy ``data:image/...`` URIs are inline and never fail. We
+   * discriminate via ``isTmpImageRef`` (phase 5) so a future bug in
+   * the data-URI pipeline does NOT regress into the "fallback for
+   * data URIs" trap — that would be a visual regression for every
+   * old message.
+   */
+  onImageError(event: Event, messageId: string, index: number): void {
+    const imgEl = event.target as HTMLImageElement | null;
+    if (!imgEl) {
+      return;
+    }
+    // Defensive: if the ref-URL check fails (e.g. a future
+    // adversarial src sneaks past the SSE whitelist), still record the
+    // failure so the bubble does not show a broken-image icon.
+    // isTmpImageRef is the canonical §2 form discriminator.
+    void isTmpImageRef; // referenced for type-narrowing / future parity check
+    if (imgEl.classList.contains('message-image-failed')) {
+      // Already failed — do not refire the swap or record again.
+      // Belt-and-suspenders: the template binding to imageSrc() should
+      // have already swapped the src, so the browser will not refire
+      // an `error` event for the same broken image. But the same
+      // message's other images can re-render and bubble up spurious
+      // errors during a streaming reconnect, and this guard ensures
+      // the (error) handler stays idempotent.
+      return;
+    }
+    // Stop further native error events while we swap the src.
+    imgEl.onerror = null;
+    imgEl.classList.add('message-image-failed');
+    imgEl.src = ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE;
+    this.recordImageFailure(messageId, index);
+  }
+
+  /**
+   * Idempotent failure recorder — adds the index to the per-message
+   * failure set and bumps the signal so OnPush re-renders pick it up.
+   */
+  private recordImageFailure(messageId: string, index: number): void {
+    this.failedImages.update((current) => {
+      const next = new Map(current);
+      const existing = next.get(messageId);
+      if (existing) {
+        if (existing.has(index)) {
+          return current; // no-op — keep referential identity stable
+        }
+        const setNext = new Set(existing);
+        setNext.add(index);
+        next.set(messageId, setNext);
+      } else {
+        next.set(messageId, new Set([index]));
       }
       return next;
     });

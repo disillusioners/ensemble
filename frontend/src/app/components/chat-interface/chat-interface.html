@@ -189,11 +189,28 @@
                 </div>
               }
 
-              <!-- Images in user messages -->
+              <!-- Images in user messages (phase 6 — click-to-popup viewer +
+                   onerror fallback for 30-day-cleaned tmp image refs).
+                   `(click)` opens the dialog via ImageViewerActionsService;
+                   `(error)` swaps the src to a pinned inline SVG fallback
+                   and records the failure so a re-render does NOT re-fetch
+                   (see failedImages signal in chat-interface.component.ts).
+                   `failedImages` lookup gates the click handler — a click
+                   on the fallback does NOT re-open the dialog. -->
               @if (message.role === 'user' && message.images?.length) {
                 <div class="message-images">
                   @for (img of message.images; track $index) {
-                    <img [src]="img" class="message-image" alt="Attached image" loading="lazy" />
+                    <img
+                      [src]="imageSrc(img, message.message_id, $index)"
+                      class="message-image"
+                      [class.message-image-failed]="isImageFailed(message.message_id, $index)"
+                      alt="Attached image"
+                      loading="lazy"
+                      data-testid="message-image"
+                      [attr.data-image-index]="$index"
+                      (click)="onImageThumbnailClick($event, img, message.message_id, $index)"
+                      (error)="onImageError($event, message.message_id, $index)"
+                    />
                   }
                 </div>
               }

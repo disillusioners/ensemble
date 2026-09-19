@@ -1,0 +1,121 @@
+// Image-viewer dialog — matches the project's dark theme.
+//
+// The dark theme color tokens below are duplicated verbatim from
+// `mermaid-fullscreen-dialog.scss:5-13` so both dialogs read as the
+// same family. We deliberately do NOT depend on a shared SCSS partial
+// here (the project does not currently have a tokens file) — keeping
+// the tokens in the file means a future contributor reading this
+// stylesheet sees the values inline.
+//
+// The dialog drops Mermaid-specific rules (`.chart-stage`,
+// `.status-banner`, `.source-block`, `.source-pre`, the `::ng-deep`
+// SVG overrides) — none of them apply to a plain image.
+
+$bg-primary: #0f172a;
+$bg-secondary: #1e293b;
+$bg-tertiary: #334155;
+$text-primary: #ececf1;
+$text-secondary: #9ca3af;
+$text-muted: #6b7280;
+$border-color: #374151;
+$accent-cyan: #10a7f7;
+$accent-rose: #f43f5e;
+
+:host {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: $bg-primary;
+  color: $text-primary;
+  // Match the Mermaid dialog's chrome so the two read as siblings
+  // rather than two unrelated surfaces.
+  border: 1px solid $border-color;
+  border-radius: 12px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.fullscreen-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.fullscreen-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid $border-color;
+  background-color: $bg-secondary;
+  flex-shrink: 0;
+}
+
+.fullscreen-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+  color: $text-primary;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 80%;
+}
+
+.fullscreen-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.close-btn {
+  color: $text-secondary;
+
+  &:hover {
+    color: $text-primary;
+    background-color: rgba($accent-rose, 0.12);
+  }
+
+  mat-icon {
+    font-size: 1.25rem;
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+}
+
+.fullscreen-body {
+  flex: 1;
+  min-height: 0;
+  // Center the image; let it overflow if larger than the body so the
+  // user can scroll. CSS-only — no JS interaction.
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background-color: $bg-primary;
+  overflow: auto;
+}
+
+.viewer-image {
+  // `max-width: 100%` lets the image shrink to fit the body; the
+  // intrinsic width governs the natural size when smaller than the
+  // dialog. `height: auto` preserves aspect ratio.
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  // Slight border so a transparent PNG reads against the dark
+  // backdrop without an invisible ghost.
+  border: 1px solid $border-color;
+}
+
+// Mirror of the bubble-level fallback styling — same visual cue so
+// the user sees the same "this image is gone" treatment whether they
+// click the thumbnail or open the dialog directly.
+.viewer-image-failed {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
