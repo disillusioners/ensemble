@@ -129,6 +129,7 @@ from daemon.routers import (
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
+    tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -245,6 +246,32 @@ async def lifespan(app: FastAPI):
 
     # Load config first
     config = load_config()
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 1 / clipboard-image-chat / Task 3 + Task 8 — wire the
+    # transient image store BEFORE the routers are mounted, so the
+    # routers see a non-None ``app.state.tmp_image_store``. The store
+    # is filesystem-only (no DB, no manager dependency) — safe to
+    # construct this early. Boot log shape mirrors
+    # ``JobLockSweepService`` (see ``daemon/api.py:797-801``):
+    # a single ``[TmpImages] ready: dir=… count=… max_bytes=…`` line
+    # the merge-gate tester greps for.
+    #
+    # The factory helper ``build_tmp_image_store`` is the same one
+    # the boot integration test calls directly to verify the wiring
+    # shape — keeps the lifespan code symmetric with the test fixture.
+    from daemon.services.tmp_image_store import build_tmp_image_store
+    tmp_image_store_max_bytes = config.services.tmp_image_store_max_bytes
+    tmp_image_store = build_tmp_image_store(
+        data_dir=data_dir,
+        max_bytes=tmp_image_store_max_bytes,
+    )
+    app.state.tmp_image_store = tmp_image_store
+    daemon_logger.info(
+        f"[TmpImages] ready: dir={tmp_image_store.dir} "
+        f"count={tmp_image_store.count()} "
+        f"max_bytes={tmp_image_store_max_bytes}"
+    )
 
     # Apply LLM-specific class-level config that must be set before any
     # ThinkingChatOpenAI instance is created. Mirrors what __main__.py does
@@ -2518,6 +2545,13 @@ def create_app() -> FastAPI:
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
     api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    # Phase 1 / clipboard-image-chat — /api/tmp_images. Registered
+    # here (inside ``api_router`` which is mounted via
+    # ``app.include_router(api_router)`` BEFORE the SPA catch-all
+    # at daemon/api.py:2612). Starlette first-match-wins would
+    # otherwise send ``GET /api/tmp_images/<id>`` to the
+    # index.html fallback (architect phase1-plan.md risk #1).
+    api_router.include_router(tmp_images_router)       # /api/tmp_images
 
     app.include_router(api_router)
 

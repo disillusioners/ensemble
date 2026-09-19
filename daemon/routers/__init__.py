@@ -24,6 +24,7 @@ from .workspace import router as workspace_router
 from .blueprints import router as blueprints_router
 from .recovery import router as recovery_router
 from .missions import router as missions_router
+from .tmp_images import router as tmp_images_router  # Phase 1: clipboard-image-chat
 
 __all__ = [
     "agents_router",
@@ -50,4 +51,5 @@ __all__ = [
     "blueprints_router",
     "recovery_router",
     "missions_router",
+    "tmp_images_router",
 ]

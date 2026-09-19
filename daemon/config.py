@@ -1566,6 +1566,32 @@ class ServicesConfig(BaseSettings):
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
         ),
     )
+    # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
+    # hard cap on the tmp-image store's total disk usage. The store
+    # performs a walkdir sum BEFORE each write and raises
+    # ``TmpImageStoreFull`` if ``current + new_size > max_bytes``;
+    # the router turns that into HTTP 507. This is the ONLY safeguard
+    # against unbounded fill while phase 3's sweep service is
+    # pending — per architect ruling the store is the choke point
+    # (no kill-switch, no per-upload override). Default 1 GiB is
+    # generous enough for ~10k typical clipboard pastes; raise via
+    # SERVICES_TMP_IMAGE_STORE_MAX_BYTES. Floor 1 MiB — out-of-range
+    # values FAIL FAST AT BOOT via pydantic ValidationError.
+    tmp_image_store_max_bytes: int = Field(
+        default=1024 ** 3,
+        ge=1024 ** 2,
+        description=(
+            "clipboard-image-chat Phase 1 (Task 2b, architect "
+            "amendment #3): hard cap on the tmp-image store's total "
+            "disk usage in bytes. The store walks the directory "
+            "before each write and refuses the write (HTTP 507) if "
+            "``current_total + new_size > max_bytes``. Default 1 GiB; "
+            "override via SERVICES_TMP_IMAGE_STORE_MAX_BYTES. Floor "
+            "1 MiB — out-of-range values FAIL FAST AT BOOT. NO "
+            "kill-switch — the cap is the safety net until phase 3 "
+            "ships the retention sweep."
+        ),
+    )
     # service-tool Phase 1 (A8): reconciliation cadence for
     # ``ServiceReconciliationService`` — the D6 boot sweep +
     # periodic PID-liveness / start-time-match reconcile that marks
