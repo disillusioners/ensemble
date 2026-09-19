@@ -528,9 +528,14 @@ class TestBudgetGuardSentinel:
     TWO call sites existed; post-flip there is ONE) is structurally
     impossible. READING (documented explicitly): the invocation level
     is the FUSED-JUDGE ENTRY (``judge_fused_bundle_async`` call), NOT
-    the HTTP attempt count — the retry-once-on-unparsable may issue 2
-    HTTP attempts WITHIN one logical invocation (the preserved
-    98b59dd7 contract; pinned in test_attestation_fused_judge.py)."""
+    the HTTP attempt count — the retry-once-on-unparsable (incident
+    98b59dd7) AND the retry-once-on-timeout (incident bc145c7e R1,
+    2026-09-19) may each issue 2 HTTP attempts WITHIN one logical
+    invocation; both retries fit the same ``entries == 1`` sentinel
+    (no per-evaluation expansion). The unparsable retry is pinned in
+    ``test_unparsable_retry_is_attempts_within_one_invocation``; the
+    timeout retry is pinned in
+    ``test_timeout_retry_is_attempts_within_one_invocation``."""
 
     @pytest.mark.parametrize(
         "fixture",
@@ -613,6 +618,57 @@ class TestBudgetGuardSentinel:
 
         assert entries["n"] == 1, "ONE logical invocation"
         assert len(spy.attempts) == 2, "…containing 2 HTTP attempts (retry)"
+
+    def test_timeout_retry_is_attempts_within_one_invocation(
+        self, monkeypatch, caplog
+    ):
+        """Incident bc145c7e R1 (2026-09-19): timeout retry mirrors the
+        unparsable retry at the budget-sentinel level — 2 HTTP attempts
+        within ONE logical invocation (``entries == 1`` AND
+        ``len(spy.attempts) == 2``). Pinning this here CLOSES the spec
+        spec-item-2 sentinel-level gap: the timeout-retry path MUST fit
+        the existing budget sentinel exactly like the unparsable retry
+        (no per-evaluation expansion, only a re-distribution across
+        attempt-1 and attempt-2 on the rescuer path)."""
+
+        class _TimeoutThenOkSpy(_JudgeSpy):
+            async def __call__(
+                self, config, user_payload, *, timeout_s, system_prompt=None
+            ):
+                self.attempts.append(user_payload)
+                self.payloads.append(user_payload)
+                self.prompts.append(system_prompt)
+                if len(self.attempts) == 1:
+                    raise asyncio.TimeoutError()
+                return (_complete_json(), "fake-quick")
+
+        entries = {"n": 0}
+        real_async = judge_mod.judge_fused_bundle_async
+
+        async def _counting_entry(bundle_text, *, config, timeout_s=None):
+            entries["n"] += 1
+            return await real_async(bundle_text, config=config, timeout_s=timeout_s)
+
+        monkeypatch.setattr(judge_mod, "judge_fused_bundle_async", _counting_entry)
+        spy = _TimeoutThenOkSpy([])
+        monkeypatch.setattr(judge_mod, "_invoke_judge_llm", spy)
+
+        node, _m, _l = _make_node(instance_id="budget-timeout-retry")
+        with _capture(caplog).at_level(logging.INFO):
+            _run(
+                node,
+                _delegated_mission("All done."),
+                "budget-timeout-retry",
+            )
+
+        assert entries["n"] == 1, (
+            "BUDGET SENTINEL: timeout retry MUST stay within ONE "
+            "logical invocation"
+        )
+        assert len(spy.attempts) == 2, (
+            "BUDGET SENTINEL: timeout retry MUST issue exactly 2 HTTP "
+            "attempts within the single invocation"
+        )
 
     def test_meta_bypass_rows_never_invoke(self, monkeypatch, caplog):
         """Non-delegated (D10-exempt), attested, answer-pending, and

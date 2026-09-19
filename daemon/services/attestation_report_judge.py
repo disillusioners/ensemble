@@ -18,8 +18,9 @@ always available. The judge is best-effort:
 
 * **LLM error / timeout / unparsable JSON** ⇒ :class:`FusedJudgeResult`
   with ``is_complete=False`` and ``verdict in {"error", "timeout",
-  "unparsable"}`` (retry-once on unparsable — 2 HTTP attempts within
-  ONE logical invocation, the preserved 98b59dd7 contract).
+  "unparsable"}`` (retry-once on unparsable OR timeout — 2 HTTP
+  attempts within ONE logical invocation, the preserved 98b59dd7
+  contract + the bc145c7e R1 supersession for the rescuer path).
 * **LLM call succeeds AND parses with ``verdict: "complete"``** ⇒ the
   deny band resolves to ALLOW (rescue); marker/A bands plain-allow.
 
@@ -476,11 +477,20 @@ class _AttemptOutcome(NamedTuple):
 # called.
 #
 # Retry-once-on-unparsable (incident 98b59dd7 semantics, carried over from
-# the retired legacy judge): the retry fires ONLY when
-# the model responded but the verdict JSON did not parse — never on
-# timeout / exception. Worst case = 2 HTTP attempts within ONE logical
-# invocation (the Stage-2 budget sentinel pins the INVOCATION level; the
-# mechanical retry within the single invocation is the preserved contract).
+# the retired legacy judge) + retry-once-on-timeout (incident bc145c7e R1,
+# 2026-09-19, supersedes the prior no-timeout-retry decision for the
+# rescuer path — suppression rule makes judge reliability load-bearing
+# + quick-model tail latency makes the class recurring): the retry fires
+# on EITHER ``verdict="unparsable"`` (model responded, body did not
+# parse) OR attempt-1 ``timeout``. SAME per-attempt timeout window for
+# the retry; attempt accounting (``JudgeResult.attempt`` 1→2); DISTINCT
+# log discrimination (``event=fused_judge_first_attempt_timeout``,
+# ``event=fused_judge_timeout_retry``, ``event=fused_judge_timeout_post_retry``).
+# HTTP/API errors keep NO retry (unchanged). Post-retry timeout still
+# → conservative fail-safe deny (DP-5 posture unchanged). The retry
+# fits the existing budget sentinel (``entries==1 && attempts<=2``)
+# exactly like the unparsable retry. Worst-case wall-clock = 2 ×
+# ``timeout_s`` (e.g., 50.0s with the default 25.0s cap).
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: Strict system prompt for the fused judge (single source of truth —
@@ -562,12 +572,22 @@ class FusedJudgeResult:
         latency_ms: Cumulative wall-clock latency across attempts.
         error_class: Exception class name on error paths; ``None``
             otherwise.
-        attempt: Which attempt produced the verdict (``2`` when the
-            retry-after-unparsable fired). Always ``1`` on non-unparsable
-            paths.
+        attempt: Which attempt produced the verdict (``2`` whenever
+            the retry fires — on EITHER the unparsable retry path
+            (incident 98b59dd7) OR the timeout retry path (incident
+            bc145c7e R1, 2026-09-19)). Always ``1`` on non-retry
+            paths (HTTP/API error first-attempt, single-call success,
+            single-call unparsable — wait, single-call unparsable
+            IS a retry path; the only ``attempt=1`` paths are
+            HTTP/API error first-attempt and single-call success).
         first_unparsable_excerpt: Truncated + redacted raw response of
-            attempt 1 when ``attempt == 2`` (incident 98b59dd7 forensic
-            contract). ``None`` when ``attempt == 1``.
+            attempt 1 when the retry fired AND attempt 1 was an
+            unparsable row (incident 98b59dd7 forensic contract).
+            ``None`` otherwise — specifically ``None`` whenever
+            ``attempt == 1`` AND whenever the retry fired on a
+            timeout (attempt 1 left no body to redact/excerpt). The
+            invariant is: ``first_unparsable_excerpt is not None iff
+            attempt == 2 AND attempt 1 returned ok but did not parse``.
     """
 
     invoked: bool
@@ -688,11 +708,12 @@ async def judge_fused_bundle_async(
     Returns:
         :class:`FusedJudgeResult` — populated on every path.
         :attr:`FusedJudgeResult.attempt` distinguishes first-call
-        outcomes (``attempt=1``) from retry-after-unparsable outcomes
-        (``attempt=2``); the retry fires ONLY when the model responded
-        but the verdict JSON did not parse — never on timeout /
-        exception (incident 98b59dd7 contract, carried over from the
-        retired legacy judge).
+        outcomes (``attempt=1``) from retry outcomes (``attempt=2``);
+        the retry fires when attempt 1 either timed out
+        (``asyncio.TimeoutError``, incident bc145c7e R1, 2026-09-19)
+        OR returned a verdict JSON that did not parse (incident
+        98b59dd7, carried over from the retired legacy judge). HTTP /
+        API errors keep NO retry (unchanged).
     """
     start = time.monotonic()
     if not bundle_text or not bundle_text.strip():
@@ -746,12 +767,115 @@ async def judge_fused_bundle_async(
 
     # Attempt 1.
     first = await _attempt_once()
-    if first.kind in {"timeout", "error"}:
-        # Conservative fail-safe — NO retry on timeout / error.
+    if first.kind == "timeout":
+        # Retry-once-on-timeout (incident bc145c7e R1, 2026-09-19):
+        # the suppression rule makes the deny-band rescuer judge
+        # load-bearing for EVERY delegated completion; quick-model tail
+        # latency (documented 2.6–22s live, 25s cap) makes the class
+        # recurring. Retry mirrors the unparsable-retry pattern: same
+        # per-attempt timeout window, ``attempt=2`` on the result.
+        # HTTP/API errors keep NO retry (unchanged).
+        logger.info(
+            "event=fused_judge_first_attempt_timeout "
+            "timeout_s=%s latency_ms=%s will_retry=true",
+            timeout_s,
+            first.latency_ms,
+        )
+        retry_start = time.monotonic()
+        second = await _attempt_once()
+        logger.info(
+            "event=fused_judge_timeout_retry "
+            "timeout_s=%s attempt=%s",
+            timeout_s,
+            2,
+        )
+        if second.kind == "ok":
+            second_raw_text = second.raw_text
+            if len(second_raw_text) > FUSED_JUDGE_MAX_OUTPUT_CHARS:
+                second_raw_text = second_raw_text[:FUSED_JUDGE_MAX_OUTPUT_CHARS]
+            parsed_second = _parse_fused_judge_response(second_raw_text)
+            if parsed_second is not None:
+                is_complete, evidence, advisory, rationale = parsed_second
+                return FusedJudgeResult(
+                    invoked=True,
+                    is_complete=is_complete,
+                    verdict="complete" if is_complete else "not_complete",
+                    evidence_cited=evidence,
+                    advisory_note_text=advisory if not is_complete else "",
+                    rationale=rationale,
+                    model=second.model,
+                    latency_ms=int((time.monotonic() - start) * 1000),
+                    error_class=None,
+                    attempt=2,
+                    first_unparsable_excerpt=None,
+                )
+            # Attempt 2 returned ok but the verdict JSON did not parse.
+            # Treat as conservative deny with ``unparsable`` verdict —
+            # the model RESPONDED on retry, the body just did not parse.
+            # ``first_unparsable_excerpt`` stays ``None``: the field is
+            # reserved for unparsable-on-attempt-1 forensics, and a
+            # timeout leaves no body to redact/excerpt.
+            return FusedJudgeResult(
+                invoked=True,
+                is_complete=False,
+                verdict="unparsable",
+                rationale=(
+                    "fused_judge_response_unparsable after timeout retry: "
+                    "attempt 1 timed out, attempt 2 body did not parse"
+                ),
+                model=second.model,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error_class=None,
+                attempt=2,
+                first_unparsable_excerpt=None,
+            )
+        if second.kind == "timeout":
+            # Post-retry timeout: BOTH attempts timed out. Conservative
+            # fail-safe deny (DP-5 posture unchanged) — the attempt-2
+            # row carries the ``verdict=timeout attempt=2`` surface.
+            # ``retry_latency_ms`` measures the retry-attempt-only wall
+            # clock (from ``retry_start``); the cumulative wall clock
+            # across BOTH attempts is on ``FusedJudgeResult.latency_ms``.
+            logger.info(
+                "event=fused_judge_timeout_post_retry "
+                "timeout_s=%s retry_latency_ms=%s",
+                timeout_s,
+                int((time.monotonic() - retry_start) * 1000),
+            )
+            return FusedJudgeResult(
+                invoked=True,
+                is_complete=False,
+                verdict="timeout",
+                model=second.model,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error_class="TimeoutError",
+                attempt=2,
+                first_unparsable_excerpt=None,
+            )
+        # second.kind == "error" (HTTP/API fault on retry): also
+        # conservative fail-safe deny; attempt=2, error_class=set.
+        # No retry beyond attempt 2 (same budget sentinel as the
+        # unparsable retry).
         return FusedJudgeResult(
             invoked=True,
             is_complete=False,
-            verdict=first.kind,
+            verdict="error",
+            rationale=(
+                "fused_judge_attempt_timeout (attempt 1); "
+                "error on attempt 2"
+            ),
+            model=second.model,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_class=second.error_class,
+            attempt=2,
+            first_unparsable_excerpt=None,
+        )
+    if first.kind == "error":
+        # Conservative fail-safe — NO retry on non-timeout error.
+        return FusedJudgeResult(
+            invoked=True,
+            is_complete=False,
+            verdict="error",
             model=first.model,
             latency_ms=int((time.monotonic() - start) * 1000),
             error_class=first.error_class,
