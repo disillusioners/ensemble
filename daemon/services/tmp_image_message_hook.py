@@ -123,10 +123,11 @@ async def pre_dispatch_image_hook(
              (``/api/tmp_images/<32hex>``) for every entry — this is
              the single seam where the round-2 amendment #26 / §2
              contract (``tmpimg://<32hex>`` and bare ``<32hex>`` are
-             ACCEPTED-INPUT aliases only) is enforced. Both the
-             ``MessageQueue.images`` row column (audit, written via
-             ``enqueue_message_job(images=..., image_refs=...)`` in
-             the router seam) and the
+             ACCEPTED-INPUT aliases only) is enforced. Both the DEDICATED
+             ``MessageQueue.image_refs`` row column (audit, post-C2-f
+             migration — refs MUST NEVER land on ``MessageQueue.images``,
+             written via ``enqueue_message_job(images=...,
+             image_refs=...)`` in the router seam) and the
              ``HumanMessage.additional_kwargs["image_refs"]``
              checkpoint sidecar inherit the canonical form because
              the router rebinds ``message = await
