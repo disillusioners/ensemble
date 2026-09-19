@@ -212,11 +212,50 @@ class TmpImageUploadBatchResponse(BaseModel):
     uploads: list[TmpImageUploadResponse] = Field(..., description="One entry per uploaded image")
 
 
+class TmpImageCleanupStatus(BaseModel):
+    """Retention-sweep status block (clipboard-image-chat phase 3).
+
+    Surfaced inside the GATED debug listing (``cleanup`` field) for
+    the R10 activation checklist (record the oldest mtime BEFORE the
+    sweep goes live) and general retention observability. There is
+    deliberately NO ``enabled`` key — the sweep is ALWAYS-ON
+    infrastructure (architect amendment #15); the only operator
+    surface is interval + retention.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    interval_seconds: int = Field(
+        ...,
+        description="Sweep cadence in seconds (default 3600 — pinned hourly)",
+    )
+    retention_days: int = Field(
+        ...,
+        description="Age threshold in days beyond which entries are reaped",
+    )
+    last_sweep_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 UTC timestamp of the last completed sweep tick; "
+            "null before the first tick"
+        ),
+    )
+    last_sweep_deleted: int = Field(
+        default=0,
+        description="Entries reaped by the last completed sweep tick",
+    )
+    last_sweep_error: str | None = Field(
+        default=None,
+        description="Error text from the last failed tick; null when healthy",
+    )
+
+
 class TmpImageDebugListingResponse(BaseModel):
     """GATED debug listing shape (ENSEMBLE_TMP_IMAGE_DEBUG_LISTING=1).
 
-    Returns ONLY count + oldest mtime — no id leak, no metadata about
-    individual entries. Recon-only exposure per architect amendment #4.
+    Returns ONLY count + oldest mtime + the phase-3 cleanup block —
+    no id leak, no metadata about individual entries. Recon-only
+    exposure per architect amendment #4.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -225,6 +264,14 @@ class TmpImageDebugListingResponse(BaseModel):
     oldest_mtime: datetime | None = Field(
         default=None,
         description="mtime of the oldest entry (ISO-8601 with offset); null when store is empty",
+    )
+    cleanup: TmpImageCleanupStatus | None = Field(
+        default=None,
+        description=(
+            "Retention-sweep status (phase 3); null when the cleanup "
+            "service is not wired into app.state. Carries NO 'enabled' "
+            "key — the sweep is always-on (architect amendment #15)"
+        ),
     )
 
 
@@ -236,6 +283,7 @@ __all__ = [
     "TmpImageUploadRequest",
     "TmpImageUploadResponse",
     "TmpImageUploadBatchResponse",
+    "TmpImageCleanupStatus",
     "TmpImageDebugListingResponse",
     "_normalize_content_type",
 ]

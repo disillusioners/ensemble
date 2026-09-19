@@ -828,6 +828,40 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
+    # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
+    # the project owner's HARD POLICY on Batch A, architect amendment
+    # #15); the ONLY knobs are the hourly cadence + the 30-day
+    # retention window, both read from ``config.services`` and
+    # FAIL-FAST at boot via pydantic ``Field(ge=1)``. ``enabled=True``
+    # is HARDCODED here — the constructor kwarg is an internal test
+    # seam, never a production toggle. Wired AFTER the
+    # ``JobLockSweepService`` boot block and AFTER the phase-1
+    # ``TmpImageStore`` wiring (the sweep consumes that store's dir).
+    # The first tick runs IMMEDIATELY inside ``_run`` (sweep before
+    # the first sleep), so the boot-time sweep needs no separate
+    # synchronous pre-tick.
+    from daemon.services.tmp_image_cleanup_service import (
+        TmpImageCleanupService,
+    )
+    tmp_image_cleanup = TmpImageCleanupService(
+        tmp_image_store,
+        enabled=True,
+        interval_seconds=(
+            config.services.tmp_image_cleanup_interval_seconds
+        ),
+        retention_days=config.services.tmp_image_cleanup_retention_days,
+    )
+    tmp_image_cleanup.start()
+    app.state.tmp_image_cleanup = tmp_image_cleanup
+    daemon_logger.info(
+        f"[TmpImages] cleanup service started: interval="
+        f"{config.services.tmp_image_cleanup_interval_seconds}s "
+        f"retention="
+        f"{config.services.tmp_image_cleanup_retention_days}d"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
     # loop that detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the
@@ -1692,6 +1726,23 @@ async def lifespan(app: FastAPI):
                 f"OrphanWatcherSweepService shutdown error: {e}"
             )
         app.state.orphan_watcher_sweep = None
+
+    # --- TmpImageCleanupService shutdown (clipboard-image-chat phase 3) ---
+    # Stop the retention sweep BEFORE the JobLockSweepService
+    # shutdown — the cleanup stops touching the filesystem first,
+    # then the DB-side sweeps wind down. getattr-guarded so a
+    # partial startup failure (service never stored) is a silent
+    # no-op; WARNING on stop failure (mirrors the
+    # JobLockSweepService shutdown shape).
+    tmp_image_cleanup = getattr(app.state, "tmp_image_cleanup", None)
+    if tmp_image_cleanup is not None:
+        try:
+            await tmp_image_cleanup.stop()
+        except Exception as e:
+            logger.warning(
+                f"TmpImageCleanupService shutdown error: {e}"
+            )
+        app.state.tmp_image_cleanup = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down

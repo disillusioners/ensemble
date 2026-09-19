@@ -77,6 +77,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from daemon.models.tmp_image import (
+    TmpImageCleanupStatus,
     TmpImageDebugListingResponse,
     TmpImageUploadBatchResponse,
     TmpImageUploadRequest,
@@ -440,7 +441,24 @@ async def debug_listing(request: Request) -> TmpImageDebugListingResponse:
     oldest_iso: datetime | None = None
     if oldest is not None:
         oldest_iso = datetime.fromtimestamp(oldest, tz=timezone.utc)
-    return TmpImageDebugListingResponse(count=count, oldest_mtime=oldest_iso)
+    # Phase-3 cleanup block — getattr-guarded so the endpoint keeps
+    # working on boot shapes where the service was never wired
+    # (cleanup: null). The service is ALWAYS-ON; the status block
+    # carries NO 'enabled' key by construction (architect amendment
+    # #15) — the shape is pinned by tests.
+    cleanup_service = getattr(request.app.state, "tmp_image_cleanup", None)
+    cleanup: TmpImageCleanupStatus | None = None
+    if cleanup_service is not None:
+        cleanup = TmpImageCleanupStatus(
+            interval_seconds=cleanup_service.interval_seconds,
+            retention_days=cleanup_service.retention_days,
+            last_sweep_at=cleanup_service.last_sweep_at,
+            last_sweep_deleted=cleanup_service.last_sweep_deleted,
+            last_sweep_error=cleanup_service.last_sweep_error,
+        )
+    return TmpImageDebugListingResponse(
+        count=count, oldest_mtime=oldest_iso, cleanup=cleanup
+    )
 
 
 # ===========================================================================
