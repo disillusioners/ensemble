@@ -1,0 +1,78 @@
+{
+  "id_a": "7b011705-4ca0-4f3e-a84a-33d2c6a07e21",
+  "injection_http_status": 202,
+  "injected_while_running": true,
+  "final_status": "completed",
+  "transcript": [
+    {
+      "label": "2. POST long-story message",
+      "http_status": 200,
+      "body": {
+        "message_id": "1d044bf1-3492-49bc-a04f-8eef8e6c2fea",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:05:41.225779Z",
+        "job_id": "6dcb3fa5-f65c-41b8-a077-507ebb167a24",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    },
+    {
+      "label": "3a. upload legA1.png (batch-of-1)",
+      "http_status": 200,
+      "body": {
+        "uploads": [
+          {
+            "image_id": "9300b03a8e7a48bd88e6c4b5751d95dc",
+            "ref_url": "/api/tmp_images/9300b03a8e7a48bd88e6c4b5751d95dc",
+            "content_type": "image/png",
+            "size_bytes": 4505,
+            "uploaded_at": "2026-09-19T23:05:41.232850Z"
+          }
+        ]
+      }
+    },
+    {
+      "label": "3a. upload legA2.png (batch-of-1)",
+      "http_status": 200,
+      "body": {
+        "uploads": [
+          {
+            "image_id": "3e6745203df040f48085024b693cbbf7",
+            "ref_url": "/api/tmp_images/3e6745203df040f48085024b693cbbf7",
+            "content_type": "image/png",
+            "size_bytes": 4980,
+            "uploaded_at": "2026-09-19T23:05:41.234450Z"
+          }
+        ]
+      }
+    },
+    {
+      "label": "3b. POST injection message (image_refs) \u2014 EXPECT 202",
+      "http_status": 202,
+      "body": {
+        "status": "injected",
+        "instance_id": "7b011705-4ca0-4f3e-a84a-33d2c6a07e21",
+        "content": "[Image 1: Image Reader agent (id=59c783a8-47ac-45e6-bffa-83d5a3b440ea) has done, below is the response:\n## Answer\nThe image displays the text **\"SMOKE LGA-111\"** in white capital letters on a solid pink/magenta background.\n\n## Description\n\n**Composition:** A simple, minimalist graphic with a uniform solid-color background filling the entire frame. The text is positioned in the lower-left area of the image, horizontally oriented and left-aligned.\n\n**Key Elements:**\n- **Background color:** A flat, saturated pink/raspberry-magenta (appears to be approximately #C04B6B or similar), with no gradients, textures, or patterns.\n- **Text:** \"SMOKE LGA-111\" rendered in white, uppercase, sans-serif typography. The font appears to be a modern geometric sans-serif (similar to Futura, Avenir, or Montserrat).\n- **Position:** The text is placed in the lower-left quadrant, with comfortable padding from the left edge and the bottom edge.\n\n**Notable Details:**\n- The hyphen between \"LGA\" and \"111\" is a standard ASCII hyphen-minus.\n- \"LGA-111\" appears to be an identifier or code (LGA could refer to \"LaGuardia\" airport code, \"Local Government Area,\" or a similar classification code, followed by a numeric designation).\n- The design resembles a label, sign, slide, or simple title card format often used for categorization, shipping labels, or content section headers.\n- No other elements, borders, icons, logos, or decorative features are present.\n\n## Confidence: HIGH\nThe image is clear, high-contrast, and contains only solid color and legible text \u2014 no ambiguity in the content.\n\n[REPORT SANITY: zero tool-call evidence in source history]]\n[Image 2: Image Reader agent (id=195a8042-149c-4297-8f96-a4b1fa5f0131) has done, below is the response:\n## Answer\nThe image is a simple graphic with a solid pink/magenta (crimson-toned) background displaying the white text \"SMOKE LGA-222\" in a sans-serif typeface.\n\n## Description\n**Composition:**\n- A horizontal rectangle with a uniform, solid pink/crimson background fill\n- Single line of white text placed in the left-center area of the image\n- The text is vertically centered but horizontally offset to the left, leaving empty pink space to the right\n\n**Key Elements:**\n- Text: \"SMOKE LGA-222\" \u2014 rendered in clean, white, sans-serif capital letters\n- Background: flat, untextured pink/magenta color (no gradient, pattern, or imagery)\n- No other graphical elements, icons, borders, or decorations are present\n\n**Notable Details:**\n- The text appears to be a label or identifier (possibly a color/swatch name, product code, or graphic series title, given the format \"LGA-###\")\n- Font weight looks medium to regular, with even letter spacing\n- Contrast between white text and pink background is strong and highly legible\n\n## Confidence: HIGH\nThe image content is unambiguous \u2014 solid color background with clearly readable text, no ambiguity or obscured elements.\n\n[REPORT SANITY: zero tool-call evidence in source history]]\nalso consider this image",
+        "timestamp": "2026-09-19T23:05:48.744244+00:00",
+        "created_at": "2026-09-19T23:05:48.744244+00:00",
+        "pending_count": 1,
+        "message_id": "9560402f-df3b-4ed8-9420-43673c3c9560"
+      },
+      "injected_while_running": true,
+      "seconds_after_running_observed": 0.0
+    },
+    {
+      "label": "5. GET /messages",
+      "http_status": 200,
+      "body": {
+        "count": 4
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "id_a": "7b011705-4ca0-4f3e-a84a-33d2c6a07e21",
+  "revive_http": 200,
+  "final_status": "completed",
+  "lga_delivered": true,
+  "lga_in_images": false,
+  "reply_refs": true,
+  "injection_after": {
+    "instance_id": "7b011705-4ca0-4f3e-a84a-33d2c6a07e21",
+    "pending": false,
+    "pending_count": 0,
+    "content": null,
+    "timestamp": null
+  },
+  "transcript": [
+    {
+      "step": "revive_post",
+      "http": 200,
+      "body": {
+        "message_id": "968ea837-5461-4283-bfaa-cc631fbe5c7c",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:33:54.271084Z",
+        "job_id": "97618843-a66e-4aea-96a5-e851304665f3",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    }
+  ]
+}

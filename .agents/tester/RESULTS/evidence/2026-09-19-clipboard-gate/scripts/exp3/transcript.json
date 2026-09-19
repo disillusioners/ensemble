@@ -1,0 +1,30 @@
+{
+  "id_e": "4bd474c3-4bfa-401d-a968-f9e13dd93a0d",
+  "injection_http": 202,
+  "final_status": "completed",
+  "delivered": true,
+  "in_images": true,
+  "injection_after": {
+    "instance_id": "4bd474c3-4bfa-401d-a968-f9e13dd93a0d",
+    "pending": false,
+    "pending_count": 0,
+    "content": null,
+    "timestamp": null
+  },
+  "transcript": [
+    {
+      "step": "injection",
+      "http": 202,
+      "body": {
+        "status": "injected",
+        "instance_id": "4bd474c3-4bfa-401d-a968-f9e13dd93a0d",
+        "content": "[Image 1: Image Reader agent (id=1b47214b-23c6-4a21-906a-f3573ee0bd70) has done, below is the response:\n## Answer\nThe image displays the text \"SMOKE LGE-991\" in white sans-serif capital letters on a solid blue background.\n\n## Description\n**Composition:** A simple, minimalist graphic consisting of text overlaid on a uniform color field. The text is positioned in the center-left portion of the image.\n\n**Key Elements:**\n- **Background:** Solid medium blue (appears similar to a royal/cobalt blue, approximately #1E6FD9 or similar)\n- **Text:** \"SMOKE LGE-991\" rendered in white, uppercase, sans-serif font\n- **Text color:** Pure white, providing high contrast against the blue background\n- **Layout:** Single line of text, horizontally oriented\n\n**Notable Details:**\n- A very subtle vignette effect is visible \u2014 the corners appear marginally darker than the center of the image\n- The \"LGE-991\" portion appears to be an alphanumeric code or model designation\n- No other graphical elements, borders, icons, or decorative features are present\n- The image has a clean, utilitarian appearance \u2014 consistent with a test card, placeholder banner, label, or reference graphic\n\n## Confidence: HIGH\nThe image content is unambiguous \u2014 simple high-contrast text on a solid color background with no visual noise or ambiguity.\n\n[REPORT SANITY: zero tool-call evidence in source history]]\nalso consider this image SMOKE-LGE-991",
+        "timestamp": "2026-09-19T23:35:02.265303+00:00",
+        "created_at": "2026-09-19T23:35:02.265303+00:00",
+        "pending_count": 1,
+        "message_id": "04efd64f-8738-456a-9720-1d12177f9e9d"
+      },
+      "ref": "/api/tmp_images/33d3918836654b94a4ad146123b62276"
+    }
+  ]
+}

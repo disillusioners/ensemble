@@ -1,0 +1,90 @@
+{
+  "id_b": "0621b9f8-cab8-4945-80d6-23e4c7fcd85b",
+  "enqueue_http_status": 200,
+  "final_status": "completed",
+  "transitions": [
+    [
+      "running",
+      8.9
+    ],
+    [
+      "completed",
+      64.2
+    ]
+  ],
+  "union_ok": true,
+  "transcript": [
+    {
+      "label": "1. create instance ID_B (experiencer)",
+      "http_status": 201,
+      "body": {
+        "instance_id": "0621b9f8-cab8-4945-80d6-23e4c7fcd85b",
+        "agent_id": "experiencer",
+        "project_id": "71931ae0-0f25-5fbf-853b-2a78cc978d7e",
+        "agent_dir": "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble-clipboard-img/agents/experiencer",
+        "status": "idle",
+        "title": null,
+        "initiative_message": null,
+        "parent_id": null,
+        "children": [],
+        "mcp_tool_names": [
+          "mcp_context7_resolve-library-id",
+          "mcp_context7_query-docs"
+        ],
+        "created_at": "2026-09-19T23:09:54.594754Z",
+        "updated_at": "2026-09-19T23:09:54.594754Z",
+        "pending_count": 0,
+        "pinned": null,
+        "color_tag": null,
+        "icon_tag": null,
+        "pinned_at": null,
+        "agent_tag": null,
+        "model": null,
+        "watchover_enabled": false,
+        "watchover_context": null,
+        "watchover_denial_count": 0
+      }
+    },
+    {
+      "label": "2. upload legB.png (batch-of-1)",
+      "http_status": 200,
+      "body": {
+        "uploads": [
+          {
+            "image_id": "97a8d81ee32442f4ac0b3380e1b3bf00",
+            "ref_url": "/api/tmp_images/97a8d81ee32442f4ac0b3380e1b3bf00",
+            "content_type": "image/png",
+            "size_bytes": 4906,
+            "uploaded_at": "2026-09-19T23:09:54.601904Z"
+          }
+        ]
+      }
+    },
+    {
+      "label": "3. POST image_refs message to IDLE instance (expect 200/202)",
+      "http_status": 200,
+      "body": {
+        "message_id": "fec0a20b-4bb1-441a-a54e-14b24fe7f663",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:10:01.680169Z",
+        "job_id": "56c891cf-f52f-4060-a465-8137c7028501",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      },
+      "ref": "/api/tmp_images/97a8d81ee32442f4ac0b3380e1b3bf00"
+    },
+    {
+      "label": "5. GET /messages",
+      "http_status": 200,
+      "body": {
+        "count": 7
+      }
+    }
+  ]
+}

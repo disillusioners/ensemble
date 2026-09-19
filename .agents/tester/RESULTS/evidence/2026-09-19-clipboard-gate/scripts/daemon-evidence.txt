@@ -1,0 +1,97 @@
+=== Clipboard Image Chat E2E — Daemon-side Evidence (Scenario B4) ===
+MAIN_ID: 2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c
+Scenario window (log timestamps +07): 05:58:48 → 05:59:15
+
+=== Tmp_images blob presence ===
+total 80
+drwxr-xr-x   6 nguyenminhkha  staff    192 Sep 20 05:58 .
+drwxr-xr-x  10 nguyenminhkha  staff    320 Sep 20 05:55 ..
+-rw-------   1 nguyenminhkha  staff  14192 Sep 20 05:57 34022f5fd2724d4aa294d3e21df7036d
+-rw-r--r--   1 nguyenminhkha  staff    183 Sep 20 05:57 34022f5fd2724d4aa294d3e21df7036d.json
+-rw-------   1 nguyenminhkha  staff  14192 Sep 20 05:58 61c2a260686d4c0c8b436b26fce60718
+-rw-r--r--   1 nguyenminhkha  staff    183 Sep 20 05:58 61c2a260686d4c0c8b436b26fce60718.json
+
+=== JSON sidecar (61c2a260) ===
+{"content_type": "image/png", "size_bytes": 14192, "uploaded_at": "2026-09-19T22:58:51.553587+00:00", "sha256_hex": "cc0839ffe3c616e6d83a1ba7f7ec8a8067e94de2736bfb0c159dd2cfe994604f"}
+
+=== Time-bracketed scenario log ===
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50109[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c [92m200[0m
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50115[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/todos [92m200[0m
+05:58:49 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2bf16de7 latency_ms=1 bytes=0 deleted=0
+05:58:49 - daemon.checkpoint_perf - INFO - [/Messages] instance=2bf16de7 duration_ms=2 messages=3 bytes=4572 alist_count=0
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50114[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/messages [92m200[0m
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50125[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/injection [92m200[0m
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50126[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/question [92m200[0m
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50127[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/commands/active [92m200[0m
+05:58:49 - daemon.api - INFO - [1m127.0.0.1:50131[0m [92mGET[0m /api/tmp_images/34022f5fd2724d4aa294d3e21df7036d [92m200[0m
+05:58:51 - daemon.api - INFO - [1m127.0.0.1:50144[0m [96mPOST[0m /api/tmp_images [92m200[0m
+05:58:53 - daemon.services.mcp_service - INFO - Lazy-loaded 2 MCP tool schemas from 2 server(s) for instance 2ea3cc9b
+05:58:53 - daemon.tools.instance - INFO - Loaded 2 MCP tools for instance 2ea3cc9b: ['mcp_context7_resolve-library-id', 'mcp_context7_query-docs']...
+05:58:53 - daemon.services.instance_lifecycle - INFO - Spawning instance 2ea3cc9b-efc4-42cf-84ea-5d7108a9b552 (agent=image-reader, parent=None, name=None)
+05:58:53 - daemon.services.task_processor - INFO - Processing message task 4: message=4c09cd83..., instance=2ea3cc9b...
+05:58:53 - daemon.services.instance_messaging - INFO - Project context injection: using stored project_id '71931ae0-0f25-5fbf-853b-2a78cc978d7e' for instance 2ea3cc9b...
+05:58:53 - daemon.services.instance_messaging - INFO - [Hybrid] Prepended 1 persistent context message(s) (incl. skills since 2026-07-29 refactor) to graph_input for 2ea3cc9b... (project_injected=False)
+05:58:53 - daemon.services._compaction_persist_seam - INFO - [Compaction seam] stamp-only anti-refire for instance=2ea3cc9b compacted_at=2026-09-19T22:58:53.348242+00:00 (mid_turn=False)
+05:58:53 - daemon.graph - INFO - [LLM][2ea3cc9b] Invoking LLM (VISION) with 3 messages (model=vision, transient_attempts=10, timeout_attempts=3, vision=vision)
+05:58:54 - daemon.api - INFO - [1m127.0.0.1:50167[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c [92m200[0m
+05:58:54 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2bf16de7 latency_ms=0 bytes=0 deleted=0
+05:58:54 - daemon.checkpoint_perf - INFO - [/Messages] instance=2bf16de7 duration_ms=2 messages=3 bytes=4572 alist_count=0
+05:58:54 - daemon.api - INFO - [1m127.0.0.1:50167[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/messages [92m200[0m
+05:58:54 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2bf16de7 latency_ms=0 bytes=0 deleted=0
+05:58:54 - daemon.checkpoint_perf - INFO - [/Messages] instance=2bf16de7 duration_ms=2 messages=3 bytes=4572 alist_count=0
+05:58:54 - daemon.api - INFO - [1m127.0.0.1:50167[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/messages [92m200[0m
+05:58:55 - daemon.manager - INFO - Generated title for instance 2ea3cc9b-efc4-42cf-84ea-5d7108a9b552: Detailed Image Description Request
+05:58:56 - daemon.api - INFO - [1m127.0.0.1:50130[0m [92mGET[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/events [92m200[0m
+05:58:56 - daemon.services.child_reports - INFO - _process_child_completion_and_notify_parent called: instance=2ea3cc9b..., message_id=4c09cd83
+05:58:56 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2ea3cc9b latency_ms=1 bytes=0 deleted=0
+05:58:56 - daemon.persistence - WARNING - get_instance_messages: manager_missing for 2ea3cc9b — all timestamps fall back to state.ts
+05:58:56 - daemon.checkpoint_perf - INFO - [/Messages] instance=2ea3cc9b duration_ms=2 messages=3 bytes=3203 alist_count=0
+05:58:56 - daemon.services.report_integrity_metrics - INFO - report_integrity_junk_report_total=7 instance_id=2ea3cc9b agent_id=image-reader
+05:58:56 - daemon.services.child_reports - INFO - Instance 2ea3cc9b... parent_id=None, status=running
+05:58:56 - daemon.services.child_reports - INFO - Instance 2ea3cc9b... no parent, skipping notification
+05:58:56 - daemon.services.child_reports - INFO - Instance 2ea3cc9b... completed (no parent, no children), status=COMPLETED
+05:58:56 - daemon.services.instance_messaging - INFO - Reactivating terminal instance 2bf16de7... (was completed) for new message
+05:58:56 - daemon.services.instance_messaging - INFO - Attestation ledger reset on fresh-episode revive: instance=2bf16de7... (was completed) cleared attestation_denied_count and completion_gate_escalated
+05:58:56 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2ea3cc9b latency_ms=2 bytes=0 deleted=0
+05:58:56 - daemon.persistence - WARNING - get_instance_messages: manager_missing for 2ea3cc9b — all timestamps fall back to state.ts
+05:58:56 - daemon.checkpoint_perf - INFO - [/Messages] instance=2ea3cc9b duration_ms=3 messages=3 bytes=3203 alist_count=0
+05:58:56 - daemon.services.report_integrity_metrics - INFO - report_integrity_junk_report_total=8 instance_id=2ea3cc9b agent_id=-
+05:58:56 - daemon.services.job_feedback_observer - INFO - Observer: finalized job no_job... status=completed for instance 2ea3cc9b... (released 0 lock(s), instance_was_terminal=True)
+05:58:56 - daemon.api - INFO - [1m127.0.0.1:50146[0m [96mPOST[0m /api/instances/2bf16de7-71a9-4097-b9e4-2ad7fcd17f4c/messages [92m200[0m
+05:58:56 - daemon.services.job_processor - INFO - [TRACE] _process_next_job: found PENDING job 0c38791c... job_type=message instance=2bf16de7...
+05:58:56 - daemon.services.job_feedback_observer - INFO - Observer: finalized job no_job... status=completed for instance 2ea3cc9b... (released 0 lock(s))
+05:58:56 - daemon.services.job_queue_service - INFO - [TRACE] start_job: using instance_id=2bf16de7... for job=0c38791c... (job_type=message)
+05:58:56 - daemon.services.job_processor - INFO - JobProcessor (message branch): woke worker pools for pre-existing Task on job 0c38791c... / instance 2bf16de7...
+05:58:56 - daemon.services.task_processor - INFO - Processing message task 5: message=b44678b0..., instance=2bf16de7...
+05:58:56 - daemon.services._compaction_persist_seam - INFO - [Compaction seam] stamp-only anti-refire for instance=2bf16de7 compacted_at=2026-09-19T22:58:56.662620+00:00 (mid_turn=False)
+05:58:56 - daemon.graph - INFO - [LLM][2bf16de7] Invoking LLM (STANDARD) with 5 messages (model=quick, transient_attempts=10, timeout_attempts=3)
+05:59:12 - daemon.services.child_reports - INFO - _process_child_completion_and_notify_parent called: instance=2bf16de7..., message_id=b44678b0
+05:59:12 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2bf16de7 latency_ms=0 bytes=0 deleted=0
+05:59:12 - daemon.persistence - WARNING - get_instance_messages: manager_missing for 2bf16de7 — all timestamps fall back to state.ts
+05:59:12 - daemon.checkpoint_perf - INFO - [/Messages] instance=2bf16de7 duration_ms=0 messages=5 bytes=8037 alist_count=0
+05:59:12 - daemon.services.child_reports - INFO - Instance 2bf16de7... parent_id=None, status=running
+05:59:12 - daemon.services.child_reports - INFO - Instance 2bf16de7... no parent, skipping notification
+05:59:12 - daemon.services.child_reports - INFO - Instance 2bf16de7... completed (no parent, no children), status=COMPLETED
+05:59:12 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=aget thread=2bf16de7 latency_ms=0 bytes=0 deleted=0
+05:59:12 - daemon.persistence - WARNING - get_instance_messages: manager_missing for 2bf16de7 — all timestamps fall back to state.ts
+05:59:12 - daemon.checkpoint_perf - INFO - [/Messages] instance=2bf16de7 duration_ms=0 messages=5 bytes=8037 alist_count=0
+
+=== KEY ASSERTION counters ===
+MAIN_ID 2bf16de7 VISION calls in entire log: 0
+MAIN_ID 2bf16de7 STANDARD calls in entire log: 2
+All instances VISION calls: 2
+All instances STANDARD calls: 3
+
+=== Security headers on GET /api/tmp_images/{id} ===
+HTTP/1.1 405 Method Not Allowed
+date: Sat, 19 Sep 2026 23:00:49 GMT
+server: uvicorn
+allow: GET
+content-length: 31
+content-type: application/json
+
+
+=== GET serves the image correctly ===
+HTTP 200 bytes=14192 content_type=image/png
+Original sha256: cc0839ffe3c616e6d83a1ba7f7ec8a8067e94de2736bfb0c159dd2cfe994604f
+Served  sha256: cc0839ffe3c616e6d83a1ba7f7ec8a8067e94de2736bfb0c159dd2cfe994604f
