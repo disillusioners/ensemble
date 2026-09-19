@@ -708,7 +708,8 @@ class PoolOrchestrator:
         post-teardown notifies are a no-op rather than reaching a
         stopped pool.
         """
-        for pool in self._pools:
+        # Snapshot iterate — cross-thread clear/extend during shutdown can race live iteration; list(...) preserves the no-rebind alias discipline.
+        for pool in list(self._pools):
             if pool is None:
                 continue
             try:
