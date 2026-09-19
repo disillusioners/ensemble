@@ -1,6 +1,6 @@
 import { signal, computed } from '@angular/core';
 import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
-import { buildInstanceNodes, buildInstanceTree, InstanceRow, InstanceNode } from '../../models/instance-node.model';
+import { buildInstanceNodes, buildInstanceTree, InstanceRow, InstanceNode, filterIdleInstanceRows } from '../../models/instance-node.model';
 import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
@@ -126,6 +126,13 @@ class MockJobQueueIndicatorComponent {
    *   panel open + ``_panelOpenInstancesPayload()`` empty
    *                → ``buildInstanceNodes(_instancesPayload())``
    *
+   * Hide-idle seam (production parity): both sources pass through
+   * ``filterIdleInstanceRows`` BEFORE ``buildInstanceNodes`` so the
+   * mirror faithfully reproduces the "Live conversations" tree's
+   * drop of ``status === 'idle'`` rows (roots + child instance
+   * nodes). Mirror MUST call the same helper the production
+   * component does — see the identity-grep pin below.
+   *
    * The swap is atomic (one computed, one source per state) so
    * there is no race window where the two signals blend.
    */
@@ -135,7 +142,7 @@ class MockJobQueueIndicatorComponent {
       this.panelOpen() && openPayload.length > 0
         ? openPayload
         : this._instancesPayload();
-    return buildInstanceNodes(source);
+    return buildInstanceNodes(filterIdleInstanceRows(source));
   });
 
   /** Cached project_id → project name. */
@@ -3076,6 +3083,82 @@ describe('JobQueueIndicatorComponent Logic', () => {
         componentTs.match(/this\.panelOpenInstancesPayload\.set\(/g) || []
       ).length;
       expect(writeCallCount).toBe(1);
+    });
+
+    // ── Hide-idle behavioral seam (WARNING item) ──────────────────────
+    //
+    // The mirror above pins the SINGLE filter call-site via identity-
+    // grep, but identity pins cannot prove the filter actually DROPS
+    // idle rows from the rendered tree (a no-op filter would still
+    // match the grep pin). These two behavioral pins drive mixed
+    // idle+non-idle rows through BOTH wire sources and assert the
+    // public ``instanceRoots`` computed contains ONLY the non-idle
+    // ids — closing the gap between "filter is called" and "filter
+    // does what it claims".
+    describe('hide-idle behavioral seam — instanceRoots drops idle rows from BOTH wire sources', () => {
+      it('(a) closed-panel source (setInstancesPayload, panelOpen=false): mixed idle+non-idle → only non-idle ids render', () => {
+        // Closed-panel (cheap 8s poll source) path. Mixed rows:
+        // one idle root, one idle child, one live root, one live
+        // child — every idle row must be dropped BEFORE the tree
+        // builder sees them. The non-idle descendants of the idle
+        // root degrade to roots via orphan-promotion; the live
+        // child's parent (live root) survives, so it nests
+        // normally.
+        component.setInstancesPayload(
+          MockJobQueueIndicatorComponent.buildInstanceRows([
+            { instance_id: 'idle-root', status: 'idle' },
+            { instance_id: 'idle-kid', parent_id: 'idle-root', status: 'idle' },
+            { instance_id: 'live-root', status: 'running' },
+            { instance_id: 'live-kid', parent_id: 'live-root', status: 'waiting' },
+          ])
+        );
+        expect(component.panelOpen()).toBe(false);
+        // Expected ids: live-root (root, survives); idle-kid filtered; live-kid nests under live-root.
+        const ids = component.instanceRoots().flatMap((n) => [
+          n.instance.instance_id,
+          ...n.children.map((c) => c.instance.instance_id),
+        ]);
+        expect(ids.sort()).toEqual(['live-kid', 'live-root']);
+        // Explicit anti-pin: neither idle id appears anywhere in the
+        // composed tree (no orphans from idle-kid because its parent
+        // idle-root is also gone — see the 3-level orphan-promotion
+        // test in instance-node.model.spec.ts for the transitive
+        // promotion case).
+        expect(
+          component.instanceRoots().some((n) =>
+            ['idle-root', 'idle-kid'].includes(n.instance.instance_id)
+          )
+        ).toBe(false);
+      });
+
+      it('(b) open-panel source (setPanelOpenInstancesPayload, panelOpen=true): mixed idle+non-idle → only non-idle ids render', () => {
+        // Open-panel (lazy full-tree refetch source) path. The swap
+        // in ``instanceRoots`` reads from
+        // ``_panelOpenInstancesPayload`` ONLY when panelOpen is
+        // true AND the open-state payload is non-empty. Same mixed
+        // shape as (a) — every idle row must drop on this code
+        // path too.
+        component.onPanelOpen();
+        expect(component.panelOpen()).toBe(true);
+        component.setPanelOpenInstancesPayload(
+          MockJobQueueIndicatorComponent.buildInstanceRows([
+            { instance_id: 'idle-root', status: 'idle' },
+            { instance_id: 'idle-kid', parent_id: 'idle-root', status: 'idle' },
+            { instance_id: 'live-root', status: 'running' },
+            { instance_id: 'live-kid', parent_id: 'live-root', status: 'waiting' },
+          ])
+        );
+        const ids = component.instanceRoots().flatMap((n) => [
+          n.instance.instance_id,
+          ...n.children.map((c) => c.instance.instance_id),
+        ]);
+        expect(ids.sort()).toEqual(['live-kid', 'live-root']);
+        expect(
+          component.instanceRoots().some((n) =>
+            ['idle-root', 'idle-kid'].includes(n.instance.instance_id)
+          )
+        ).toBe(false);
+      });
     });
   });
 });
