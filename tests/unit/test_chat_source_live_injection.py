@@ -1,28 +1,38 @@
 """Chat-source live-turn message injection routing (Phase 6).
 
-Pins the new ``daemon/sources/registry.py`` ``_handle_message`` routing
+Pins the ``daemon/sources/registry.py`` ``_handle_message`` routing
 branch — ``feature/chat-source-live-injection`` (2026-09-19). When a
 chat-source message (telegram:/slack:/discord:) arrives for a target
-instance that is ``running`` with a live graph consumer AND the payload
-is text-only, deliver via the RAM-FIFO injection lane
-(``manager.set_injection``) so it lands in the agent's CURRENT turn —
-exactly like HTTP ``POST /messages``.
+instance that is ``running`` with a live graph consumer AND the
+provider is in the per-provider routing-envelope allowlist, deliver
+via the RAM-FIFO injection lane (``manager.set_injection``) so it
+lands in the agent's CURRENT turn — exactly like HTTP
+``POST /messages``.
 
 Routing decisions pinned:
 
-  * **RUNNING + live graph + text-only** → ``set_injection`` called
-    (with provenance ``source`` + ``echo_id``); ``enqueue_message_job``
-    NOT called; typing indicator NOT fired.
+  * **RUNNING + live graph + KNOWN provider + (empty metadata OR
+    routing-envelope metadata)** → ``set_injection`` called (with
+    provenance ``source`` + ``echo_id``); ``enqueue_message_job``
+    NOT called; typing indicator FIRES on the injection branch
+    (round-2 leader decision: chat users have no 202/SSE echo like
+    web, so ``start_typing`` is their only "message received"
+    signal).
   * **RUNNING but graphless** → durable ``enqueue_message_job``
-    fallthrough (DEFECT-A stranding guard; never strand a RAM-FIFO entry
-    on a graphless target).
+    fallthrough (DEFECT-A stranding guard; never strand a RAM-FIFO
+    entry on a graphless target).
   * **IDLE / PAUSED / terminal (COMPLETED/ERROR/FAILED/TERMINATED)** →
     durable ``enqueue_message_job`` unchanged.
   * **Image-bearing** → durable enqueue even when RUNNING+live-graph
     (image-bearing FIFO entries are out of scope; the FIFO schema is
     text-only).
-  * **Metadata-bearing** (non-empty ``msg.metadata`` dict) → durable
-    enqueue even when RUNNING+live-graph.
+  * **UNKNOWN source type** (``None`` or any value NOT in
+    ``ROUTING_ENVELOPE_KEYS``) → durable fallthrough regardless of
+    metadata shape (round-3 three-clause invariant; the source_type
+    gate runs FIRST).
+  * **Non-empty metadata with at least one key OUTSIDE the provider's
+    ``ROUTING_ENVELOPE_KEYS`` allowlist** → durable fallthrough
+    (safe direction — the durable path always works).
 
 Mock discipline: ``manager.set_injection`` and
 ``manager.enqueue_message_job`` are mocked at the **facade** level —
@@ -235,7 +245,9 @@ class TestRunningLiveGraphInjection:
         called (no durable rows created).
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent = MagicMock()
@@ -270,7 +282,9 @@ class TestRunningLiveGraphInjection:
         (uuid4 str) into ``set_injection``.
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"slack": "slack"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -320,7 +334,9 @@ class TestRunningLiveGraphInjection:
         re-emit — collisions would collapse the FE bubble).
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -363,7 +379,9 @@ class TestRunningLiveGraphInjection:
         after the chat-source-worker-lane Phase 3 wiring).
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"discord": "discord"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -409,9 +427,19 @@ class TestRunningGraphlessDurableFallback:
         the durable ``enqueue_message_job`` path. ``set_injection``
         MUST NOT be called (injecting here would strand the FIFO entry
         forever).
+
+        Round-3 adjustment: telegram adapter registered so the
+        three-clause source_type gate passes; the
+        ``has_live_graph_task`` verifier THEN short-circuits to
+        durable. (With no adapter registered, the predicate would
+        short-circuit at clause (i) before exercising the
+        ``has_live_graph_task`` call — the DEFECT-A guard would
+        not be exercised.)
         """
         manager = _stub_manager(status="running", has_live_graph=False)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -636,6 +664,96 @@ class TestRichPayloadDurableFallback:
 
         manager.enqueue_message_job.assert_awaited_once()
         manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_type_with_empty_metadata_falls_through(self):
+        """Round-3 NEW pin (independent reviewer ruling on iteration
+        2): an UNKNOWN source type with EMPTY metadata MUST take
+        the durable path — the source_type gate (clause (i)) runs
+        FIRST and returns False regardless of metadata shape. The
+        prior blocklist order (``if not msg.metadata: return True``
+        before the source_type check) was a known unsafe direction:
+        an unknown provider with empty metadata would have slipped
+        through to the injection lane. This test is the regression
+        pin that closes that seam.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"scheduler": "scheduler"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="scheduler",
+            # Explicitly empty metadata — the canonical "no
+            # provider envelope" case.
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("scheduler", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        # Belt-and-suspenders: predicate short-circuits on clause
+        # (i) BEFORE the metadata check, so the status /
+        # has_live_graph probes are not even consulted. Confirming
+        # that pin here (any future regression that reorders the
+        # gate back would surface as ``has_live_graph_task not
+        # called``).
+        manager.has_live_graph_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_adapter_registered_with_empty_metadata_falls_through(self):
+        """Round-3 NEW pin (sister of the above): when NO adapter is
+        registered with the registry at all (``self.get(source_id)``
+        returns ``None``), ``source_type`` resolves to ``None`` and
+        clause (i) returns False — regardless of empty metadata.
+        Mirrors the production-shape path where a chat source
+        connects before its adapter has been registered (a real
+        edge case during adapter lifecycle races).
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(manager)
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+            # Empty metadata + no registered adapter → clause (i)
+            # returns False → durable fallthrough.
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        manager.has_live_graph_task.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1310,10 +1428,19 @@ class TestProbeFailureDurableFallback:
         """Transient ``KeyError`` from ``get_instance_info`` (e.g.,
         row deleted between mapping + status read) MUST route to
         durable enqueue — never a silent drop.
+
+        Round-3 adjustment: telegram adapter registered so the
+        three-clause source_type gate passes and the probe is
+        actually exercised. (Without the adapter, the predicate
+        short-circuits at clause (i) and the probe never fires —
+        the test would still assert durable fallthrough but not
+        pin the actual probe-exception path.)
         """
         manager = _stub_manager(status="running", has_live_graph=True)
         manager.get_instance_info = MagicMock(side_effect=KeyError("miss"))
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)

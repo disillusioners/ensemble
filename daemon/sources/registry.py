@@ -47,26 +47,37 @@ def _is_text_only_payload_for_chat_injection(
 ) -> bool:
     """Text-only predicate for the chat-source live-injection gate.
 
-    Returns ``True`` iff the message can safely take the RAM-FIFO
-    injection lane (``manager.set_injection``):
+    Three-clause invariant (round-3, 2026-09-19 — independent
+    reviewer ruling on iteration 2; required for the gate to be
+    safe-by-construction):
 
-      * No images (set_injection is text-only — its signature accepts
-        only ``content``, ``source``, ``echo_id``).
-      * Non-empty / non-whitespace content (defensive; the chat-source
-        path does NOT validate ``message.content`` like HTTP does, but
-        a blank injection is a wasted agent turn).
-      * Either empty metadata OR every metadata key is in the
-        per-provider allowlist (``ROUTING_ENVELOPE_KEYS``).
-      * Known chat source type (``slack`` / ``discord`` / ``telegram``).
-        Unknown / unconfigured source types default to False — the
-        durable path is the safe baseline for any adapter that hasn't
-        been individually allowlisted.
+      (i) ``source_type`` MUST be in ``ROUTING_ENVELOPE_KEYS`` —
+          None / unknown providers ALWAYS fall through to the
+          durable enqueue path, regardless of metadata shape. The
+          source-type gate runs BEFORE the metadata shape check so
+          a non-allowlisted provider cannot accidentally take the
+          injection lane on an empty-metadata message.
+      (ii) Empty metadata + KNOWN provider → inject. (A KNOWN
+           provider with no metadata is the canonical text-only
+           case the lane was built for.)
+      (iii) Non-empty metadata → every key MUST be in that
+            provider's ``ROUTING_ENVELOPE_KEYS`` allowlist; any
+            foreign / unknown key routes to durable fallthrough
+            (the safe direction — the durable path always works).
+
+    Plus the unconditional gates that run first:
+      * No images (set_injection is text-only — its signature
+        accepts only ``content``, ``source``, ``echo_id``).
+      * Non-empty / non-whitespace content (defensive; the
+        chat-source path does NOT validate ``message.content`` like
+        HTTP does, but a blank injection is a wasted agent turn).
 
     Args:
         msg: The incoming chat-source message.
         source_type: The chat-source's provider type (``slack`` /
-            ``discord`` / ``telegram``). May be ``None`` for adapters
-            that did not register a ``source_type``.
+            ``discord`` / ``telegram``). ``None`` or any value not
+            in ``ROUTING_ENVELOPE_KEYS`` causes the predicate to
+            return ``False`` (durable fallthrough).
 
     Returns:
         ``True`` iff all the above gates pass.
@@ -75,14 +86,18 @@ def _is_text_only_payload_for_chat_injection(
         return False
     if not msg.content or not msg.content.strip():
         return False
-    if not msg.metadata:
-        return True
+    # Clause (i): source_type gate runs FIRST — None / unknown
+    # providers fall through to durable regardless of metadata.
     if source_type is None:
         return False
     allowed = ROUTING_ENVELOPE_KEYS.get(source_type)
     if allowed is None:
         # Unknown source type — fall through to durable (safe default).
         return False
+    # Clauses (ii) and (iii): known provider — empty metadata OK,
+    # non-empty metadata must be a subset of the allowlist.
+    if not msg.metadata:
+        return True
     return set(msg.metadata.keys()) <= allowed
 
 
