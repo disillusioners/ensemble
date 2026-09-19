@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Generate the agents-ensemble icon raster set from the design.
 
-Design source-of-truth lives in `frontend/public/favicon.svg` (hand-authored
-SVG, served as the modern-browser favicon). This script renders the same
-design via PIL+numpy primitives, then exports:
+DESIGN DUAL-MAINTENANCE: `frontend/public/favicon.svg` (hand-authored SVG,
+served as the modern-browser favicon) and the constants block below are TWO
+parallel hand-maintained representations of the same design. They MUST be
+edited together — any geometry / palette change lands in BOTH atomically,
+or the SVG render and the script-rendered rasters will drift visually.
+Unifying them into a single source (e.g. SVG -> Pillow rasterizer at build
+time) is a known follow-up, deliberately deferred to keep this script
+self-contained and dependency-free.
+
+This script renders the design via PIL+numpy primitives, then exports:
 
   * apple-touch-icon.png (180x180)
   * favicon.ico (multi-size 16/32/48)
@@ -11,17 +18,15 @@ design via PIL+numpy primitives, then exports:
 
 Re-running is idempotent and deterministic. No external deps beyond PIL +
 numpy (both stdlib-adjacent and already on the dev box). No SVG rasterizer
-needed — the SVG and the Python here are two parallel hand-maintained
-representations of the same design (a triangular constellation of three
-outer "agent" nodes connected to one central "ensemble" hub).
+needed.
 
 Run from repo root:
 
     python3 frontend/scripts/build-icons.py
 
 Outputs are written under `frontend/public/` and `frontend/public/icons/`.
-The build script itself is intentionally small (~100 lines) and safe to
-re-run; the design is documented in the constants block below.
+The build script is intentionally straightforward and safe to re-run; the
+design is documented in the constants block below.
 """
 
 from __future__ import annotations
@@ -195,15 +200,24 @@ def render_master(size: int = 512) -> Image.Image:
 # ---------- Output writers ----------
 
 def write_ico(sources: dict[int, Image.Image], out: Path) -> None:
-    """Write a multi-size .ico. Pillow reads each frame's own size and packs
-    them all into the ICO container. The base image must be the largest."""
+    """Write a multi-size .ico.
+
+    Pillow's default ICO `sizes` list includes (24, 24). When the source set
+    does not contain a 24x24 image, Pillow thumbnails the smallest supplied
+    size (16x16 here) up to 24x24 and APPENDS it as an extra ICONDIR entry —
+    producing a duplicate 16x16 frame in the on-disk directory. Pass an
+    explicit `sizes=[(16, 16), (32, 32), (48, 48)]` to PIL so only the
+    intended three frames ship. The base image must be the largest.
+    """
     # Sort descending; the first frame is the base image.
     sizes = sorted(sources.keys(), reverse=True)
     base = sources[sizes[0]].convert("RGBA")
     append = [sources[s].convert("RGBA") for s in sizes[1:]]
+    explicit_sizes = [(s, s) for s in sizes]
     base.save(
         out,
         format="ICO",
+        sizes=explicit_sizes,
         append_images=append,
     )
 
@@ -240,8 +254,15 @@ def main() -> None:
         icons_dir / "favicon-32.png",
         icons_dir / "favicon-48.png",
     ]
+    # Hard fail on any missing output — silently printing "-1 bytes" and
+    # exiting 0 used to let a deleted-by-foreign-actor output slip past CI.
+    missing = [p for p in out_files if not p.exists()]
+    if missing:
+        for p in missing:
+            print(f"FATAL: expected output missing after regen: {p}", file=sys.stderr)
+        sys.exit(1)
     for p in out_files:
-        size = p.stat().st_size if p.exists() else -1
+        size = p.stat().st_size
         print(f"  {p.relative_to(repo_root)}  {size} bytes")
 
 
