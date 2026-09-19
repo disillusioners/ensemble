@@ -2100,12 +2100,24 @@ class InstanceMessagingService:
         manager_dict = getattr(self._manager, "__dict__", {})
         notify_pools = manager_dict.get("_notify_all_pools")
         if notify_pools is not None:
-            notify_pools()
+            try:
+                notify_pools()
+            except Exception as notify_err:
+                logger.warning(
+                    f"instance_messaging: _notify_all_pools() "
+                    f"failed for chat-source wake (non-fatal): {notify_err}"
+                )
         elif self._manager._worker_pool is not None:
             # Pre-Phase-2 manager shape (legacy test fixture /
             # pre-wiring lifespan) — fall through to the
             # singleton-attribute reach.
-            self._manager._worker_pool.notify_work()
+            try:
+                self._manager._worker_pool.notify_work()
+            except Exception as notify_err:
+                logger.warning(
+                    f"instance_messaging: worker_pool.notify_work() "
+                    f"failed for chat-source wake (non-fatal): {notify_err}"
+                )
 
         # ``job_id`` payload: ``task.work_id`` (UUID4) is the stable
         # cross-system handle minted by the Task model's

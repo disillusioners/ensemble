@@ -1,15 +1,18 @@
 """Shared harness helpers for the chat-source-worker-lane Phase 3 tests.
 
 Importable helpers for any ``tests/integration/test_chat_source_*.py``
-file. The test files in this module each own their own autouse lane-
-flag reset (per project test discipline — module-global state must
-not leak between tests).
+file. Lane-flag isolation is provided by the shared
+:func:`chat_lane_flag_reset_fixture` autouse fixture factory — each
+test module takes one module-level assignment (per project test
+discipline: module-global state must not leak between tests).
 
 The harness provides:
 
   * **Engine factory** — :func:`build_chat_source_engine` builds a
     file-backed SQLite with ``NullPool`` + WAL + busy_timeout=10000
-    + ``PRAGMA case_sensitive_like = ON`` (F7/F9 review pins).
+    + ``PRAGMA case_sensitive_like = ON`` (F7/F9 review pins; the
+    LIKE pragma is conditional on ``case_sensitive_like=True`` —
+    wiring-only harnesses pass ``False``).
 
   * **Manager factory** — :func:`build_live_pool_manager` constructs
     a real ``InstanceManager`` with BOTH pools running. The chat
@@ -48,6 +51,7 @@ simpler harness keeps the timing assertions deterministic.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -55,6 +59,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator
 
+import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
@@ -68,12 +73,17 @@ import daemon.repositories.project.models  # noqa: F401
 from daemon.constants import CHAT_WORKER_POOL_SIZE, WORKER_POOL_SIZE
 
 
+logger = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # Engine factory — file-backed SQLite, NullPool, WAL, case_sensitive_like
 # ---------------------------------------------------------------------------
 
 
-def build_chat_source_engine(db_path: str) -> Engine:
+def build_chat_source_engine(
+    db_path: str, *, case_sensitive_like: bool = True
+) -> Engine:
     """Build a file-backed SQLite engine for chat-source tests.
 
     ``NullPool`` + per-connection ``connect`` listener PRAGMA is the
@@ -82,7 +92,9 @@ def build_chat_source_engine(db_path: str) -> Engine:
     concurrency honest. ``PRAGMA case_sensitive_like = ON`` (F9)
     keeps the ``source LIKE 'telegram:%'`` predicate case-SENSITIVE
     for any test that exercises the claim seam — matching production
-    PG semantics.
+    PG semantics. Pass ``case_sensitive_like=False`` for wiring-only
+    harnesses that never exercise the LIKE claim predicate (parity
+    with the pre-consolidation inline engine fixtures).
     """
     eng = create_engine(
         f"sqlite:///{db_path}",
@@ -96,8 +108,9 @@ def build_chat_source_engine(db_path: str) -> Engine:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=10000")
-        # F9 — PG-parity for the lane predicate's LIKE semantics.
-        cursor.execute("PRAGMA case_sensitive_like = ON")
+        if case_sensitive_like:
+            # F9 — PG-parity for the lane predicate's LIKE semantics.
+            cursor.execute("PRAGMA case_sensitive_like = ON")
         cursor.close()
 
     SQLModel.metadata.create_all(eng)
@@ -221,6 +234,93 @@ def wait_default_pool_boot_claims_drained(
 
 
 @contextmanager
+def wire_manager_only(
+    engine: Engine, *, use_worker_pool: str | None = None
+) -> Iterator:
+    """Build a real ``InstanceManager`` WITHOUT starting any pool —
+    the wiring-only seam shared by the chat-source test files.
+
+    The LLM is irrelevant (wiring-only); ``build_instance_graph`` is
+    patched to a sentinel so the manager can be constructed without
+    the full graph stack. Pool construction is the CALLER's job:
+    tests that need explicit control call
+    ``manager.setup_worker_pool(...)`` inside the with-block, and
+    :func:`build_live_pool_manager` delegates here before running
+    its own ``setup_worker_pool`` + boot-claim drain.
+
+    Skip ``manager.initialize()`` (heavy async lifespan) and stub
+    the only seam ``setup_worker_pool`` touches on the manager's
+    pre-init state — ``self._maintenance_service`` is set by
+    ``initialize()`` but ``setup_worker_pool`` calls
+    ``self._maintenance_service.set_task_repository(...)`` at
+    manager.py:6473. Same recipe as
+    ``tests/integration/test_wc_wake_pure_hang.py:406-409``.
+
+    Args:
+        engine: The shared engine injected into every
+            ``create_engine_from_config`` call inside the manager.
+        use_worker_pool: ``"false"`` to set the kill-switch; ``None``
+            (default) clears it so both pools construct.
+    """
+    # Set/clear the USE_WORKER_POOL env flag WITHOUT polluting the
+    # process environment for other tests — teardown restores the
+    # default and other tests in this module use the same pattern.
+    if use_worker_pool is not None:
+        os.environ["USE_WORKER_POOL"] = use_worker_pool
+    else:
+        os.environ.pop("USE_WORKER_POOL", None)
+
+    try:
+        from unittest.mock import patch
+
+        from daemon.manager import InstanceManager
+        from daemon.services.maintenance import MaintenanceService
+
+        config = _build_config()
+
+        with (
+            patch(
+                "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
+                return_value=[],
+            ),
+            patch(
+                "daemon.manager.create_engine_from_config",
+                return_value=engine,
+            ),
+            patch(
+                "daemon.manager.build_instance_graph",
+                return_value=None,
+            ),
+        ):
+            manager = InstanceManager(config)
+            # Stub the maintenance service — ``initialize()`` is the
+            # production site but is heavy (async lifespan). The
+            # only seam ``setup_worker_pool`` touches is
+            # ``set_task_repository(...)``; a bare ``MaintenanceService``
+            # instance + a request-registry dict suffices. Mirror
+            # the wake_harness recipe at
+            # ``tests/integration/test_wc_wake_pure_hang.py:406-409``.
+            manager._maintenance_service = MaintenanceService()
+            manager._maintenance_service.set_request_registry({})
+            yield manager
+            # Safety net: ensure pools are torn down even if the
+            # caller forgets — prevents leaked worker threads across
+            # tests. Fail-LOUD: the broad except width is deliberate
+            # (teardown must never mask the test's own outcome), but
+            # the previous silence hid real shutdown failures.
+            try:
+                manager.shutdown_worker_pool()
+            except Exception:
+                logger.warning(
+                    "teardown safety-net swallowed "
+                    "shutdown_worker_pool exception",
+                    exc_info=True,
+                )
+    finally:
+        os.environ.pop("USE_WORKER_POOL", None)
+
+
+@contextmanager
 def build_live_pool_manager(
     engine: Engine,
     *,
@@ -254,68 +354,33 @@ def build_live_pool_manager(
         ``run_task``-free task processor; tests inject mocks via
         ``manager._task_processor.run_task = ...``).
     """
-    from unittest.mock import patch
+    with wire_manager_only(
+        engine, use_worker_pool=use_worker_pool
+    ) as manager:
+        manager.setup_worker_pool(num_workers=num_workers)
+        if use_worker_pool in ("false", "0", "no"):
+            # Kill-switch path: no pools exist, flag stays False
+            # (fail-open) — nothing to drain and the assert below
+            # MUST NOT hold (that is the kill-switch contract).
+            yield manager
+        else:
+            # Adjudication fix (2026-09-19): deterministically
+            # retire the default pool's gateless boot claims
+            # BEFORE yielding to the caller, so tests never seed
+            # into the B1 boot window. Belt: the flag must
+            # already be True here.
+            wait_default_pool_boot_claims_drained(
+                manager, num_workers=num_workers
+            )
+            from daemon.repositories.task.repository import (
+                is_chat_lane_active,
+            )
 
-    if use_worker_pool is not None:
-        os.environ["USE_WORKER_POOL"] = use_worker_pool
-    else:
-        os.environ.pop("USE_WORKER_POOL", None)
-
-    try:
-        from daemon.manager import InstanceManager
-        from daemon.services.maintenance import MaintenanceService
-
-        config = _build_config()
-
-        with (
-            patch(
-                "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
-                return_value=[],
-            ),
-            patch(
-                "daemon.manager.create_engine_from_config",
-                return_value=engine,
-            ),
-            patch(
-                "daemon.manager.build_instance_graph",
-                return_value=None,
-            ),
-        ):
-            manager = InstanceManager(config)
-            manager._maintenance_service = MaintenanceService()
-            manager._maintenance_service.set_request_registry({})
-            manager.setup_worker_pool(num_workers=num_workers)
-            if use_worker_pool in ("false", "0", "no"):
-                # Kill-switch path: no pools exist, flag stays False
-                # (fail-open) — nothing to drain and the assert below
-                # MUST NOT hold (that is the kill-switch contract).
-                yield manager
-            else:
-                # Adjudication fix (2026-09-19): deterministically
-                # retire the default pool's gateless boot claims
-                # BEFORE yielding to the caller, so tests never seed
-                # into the B1 boot window. Belt: the flag must
-                # already be True here.
-                wait_default_pool_boot_claims_drained(
-                    manager, num_workers=num_workers
-                )
-                from daemon.repositories.task.repository import (
-                    is_chat_lane_active,
-                )
-
-                assert is_chat_lane_active(), (
-                    "chat lane flag must be True after setup_worker_pool "
-                    "— kill-switch early-return or teardown raced the setup"
-                )
-                yield manager
-
-            # Safety net: tear down pools even if the caller forgets.
-            try:
-                manager.shutdown_worker_pool()
-            except Exception:
-                pass
-    finally:
-        os.environ.pop("USE_WORKER_POOL", None)
+            assert is_chat_lane_active(), (
+                "chat lane flag must be True after setup_worker_pool "
+                "— kill-switch early-return or teardown raced the setup"
+            )
+            yield manager
 
 
 # ---------------------------------------------------------------------------
@@ -557,22 +622,27 @@ def wait_until(predicate, *, timeout: float, interval: float = 0.02) -> bool:
     return predicate()
 
 
-# Lane-flag reset — used by every chat-source test file via an
-# autouse fixture inline (per project discipline: module-global state
-# must not leak between tests).
-def reset_chat_lane_flag_around_test():
-    """Return a fixture function that hard-resets the B1 module flag
+# Lane-flag reset — shared autouse fixture factory. Per project
+# discipline module-global state must not leak between tests; each
+# test module takes ONE module-level assignment instead of re-declaring
+# the same inline fixture.
+def chat_lane_flag_reset_fixture():
+    """Return an autouse fixture that hard-resets the B1 module flag
     around every test in the calling module.
 
-    Usage in test files::
+    The ``@pytest.fixture(autouse=True)`` decoration travels with the
+    returned function object, so a module-level alias is all the
+    wiring a test file needs::
 
         from tests.integration.chat_source_harness import (
             chat_lane_flag_reset_fixture,
         )
-        _reset_lane_flag = chat_lane_flag_reset_fixture()
+
+        chat_lane_flag_reset = chat_lane_flag_reset_fixture()
     """
     from daemon.repositories.task.repository import set_chat_lane_active
 
+    @pytest.fixture(autouse=True)
     def _reset_chat_lane_flag():
         set_chat_lane_active(False)
         yield
@@ -586,6 +656,7 @@ __all__ = [
     "WORKER_POOL_SIZE",
     "build_chat_source_engine",
     "build_live_pool_manager",
+    "chat_lane_flag_reset_fixture",
     "seed_chat_message",
     "fetch_task_by_work_id",
     "fetch_pending_tasks",
@@ -595,5 +666,5 @@ __all__ = [
     "make_short_run_task",
     "make_no_op_run_task",
     "wait_until",
-    "reset_chat_lane_flag_around_test",
+    "wire_manager_only",
 ]

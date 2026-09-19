@@ -18,17 +18,10 @@ integration tests. No LLM is invoked (wiring-only).
 
 from __future__ import annotations
 
-import logging
-import os
-from contextlib import contextmanager
-from typing import Iterator
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
 
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
@@ -36,9 +29,10 @@ import daemon.repositories.task.models  # noqa: F401
 import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.project.models  # noqa: F401
 from daemon.constants import WORKER_POOL_SIZE
-from daemon.repositories.task.repository import (
-    is_chat_lane_active,
-    set_chat_lane_active,
+from tests.integration.chat_source_harness import (
+    build_chat_source_engine,
+    chat_lane_flag_reset_fixture,
+    wire_manager_only,
 )
 
 
@@ -50,104 +44,21 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_lane_flag():
-    """Hard-reset the B1 module flag around EVERY test — shared
-    module state must not leak into other suites."""
-    set_chat_lane_active(False)
-    yield
-    set_chat_lane_active(False)
+# Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
+# decoration travels with the harness factory's returned object, so
+# this single module-level assignment wires it for every test here.
+chat_lane_flag_reset = chat_lane_flag_reset_fixture()
 
 
 @pytest.fixture
 def engine(tmp_path) -> Engine:
-    """File-backed SQLite with NullPool + WAL."""
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/chat_pool_late_wire.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+    """File-backed SQLite with NullPool + WAL (shared harness builder;
+    ``case_sensitive_like=False`` — wiring-only, no claim seam)."""
+    eng = build_chat_source_engine(
+        str(tmp_path / "chat_pool_late_wire.db"), case_sensitive_like=False
     )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record):
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
-    SQLModel.metadata.create_all(eng)
     yield eng
     eng.dispose()
-
-
-@contextmanager
-def _wire_manager(engine: Engine, *, use_worker_pool: str | None = None) -> Iterator:
-    """Build a real ``InstanceManager`` with both pools running — the
-    wiring-only seam used by the late-wire test."""
-    if use_worker_pool is not None:
-        os.environ["USE_WORKER_POOL"] = use_worker_pool
-    else:
-        os.environ.pop("USE_WORKER_POOL", None)
-
-    try:
-        from daemon.config import (
-            AgentsConfig,
-            Config,
-            DaemonConfig,
-            LLMConfig,
-            LimitsConfig,
-            PersistenceConfig,
-        )
-        from daemon.manager import InstanceManager
-        from daemon.services.maintenance import MaintenanceService
-
-        config = Config(
-            llm=LLMConfig(
-                base_url="https://api.openai.com/v1",
-                api_key="test-key",
-                model="gpt-4",
-                temperature=0.7,
-            ),
-            limits=LimitsConfig(
-                max_children_per_instance=3,
-                instance_timeout_minutes=60,
-            ),
-            persistence=PersistenceConfig(
-                db_path=":memory:",
-                checkpoint_interval=1,
-                checkpoint_ttl_hours=168,
-                checkpoint_cleanup_interval=24,
-                max_instance_history=300,
-            ),
-            daemon=DaemonConfig(host="127.0.0.1", port=8079),
-            agents=AgentsConfig(directory="./agents"),
-        )
-
-        with (
-            patch(
-                "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
-                return_value=[],
-            ),
-            patch(
-                "daemon.manager.create_engine_from_config",
-                return_value=engine,
-            ),
-            patch(
-                "daemon.manager.build_instance_graph",
-                return_value=None,
-            ),
-        ):
-            manager = InstanceManager(config)
-            manager._maintenance_service = MaintenanceService()
-            manager._maintenance_service.set_request_registry({})
-            yield manager
-            try:
-                manager.shutdown_worker_pool()
-            except Exception:
-                pass
-    finally:
-        os.environ.pop("USE_WORKER_POOL", None)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +73,7 @@ class TestLateWireBothPools:
         """``set_work_resolver`` updates ``_work_resolver`` on the
         default pool (the pre-Phase-2 behavior, pinned here so the
         widening doesn't regress it)."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             # Sentinel resolver — the late-wire set_work_resolver
@@ -187,7 +98,7 @@ class TestLateWireBothPools:
     def test_work_resolver_set_on_chat_pool(self, engine):
         """``set_work_resolver`` updates ``_work_resolver`` on the
         chat pool — the Phase 2 widening (Task #4)."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             sentinel_resolver = MagicMock(name="work_resolver")
@@ -209,7 +120,7 @@ class TestLateWireBothPools:
         Worker in the chat pool (the pool's setter fans out to
         live workers — the same fan-out mechanism the default pool
         has used since Phase 2 Batch 2)."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             sentinel_resolver = MagicMock(name="work_resolver")
@@ -233,7 +144,7 @@ class TestLateWireUseWorkerPoolFalseTolerated:
     loop's None-guard means the iteration is a clean no-op."""
 
     def test_no_pool_setter_calls_when_both_pools_none(self, engine):
-        with _wire_manager(engine, use_worker_pool="false") as manager:
+        with wire_manager_only(engine, use_worker_pool="false") as manager:
             # Use the kill-switch — both pools stay None.
             assert manager._worker_pool is None
             assert manager._chat_worker_pool is None

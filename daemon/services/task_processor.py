@@ -7,7 +7,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from .main_loop_bridge import MainLoopBridge
 from .message_processing_pipeline import (
@@ -1265,7 +1265,9 @@ class TaskProcessor:
             ),
         }
 
-    def claim_task(self, worker_id: str, lane: str = "default") -> "Task | None":
+    def claim_task(
+        self, worker_id: str, lane: Literal["default", "chat"] = "default"
+    ) -> "Task | None":
         """Atomically claim the next pending task.
 
         This is called from the worker thread (synchronous).

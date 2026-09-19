@@ -74,7 +74,7 @@ import pytest
 from tests.integration.chat_source_harness import (
     WORKER_POOL_SIZE,
     build_chat_source_engine,
-    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,    build_live_pool_manager,
     fetch_task_by_work_id,
     make_blocking_run_task,
     seed_chat_message,
@@ -90,15 +90,10 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_chat_lane_flag():
-    """Hard-reset the B1 module flag around EVERY test — shared
-    module state must not leak into other suites."""
-    from daemon.repositories.task.repository import set_chat_lane_active
-
-    set_chat_lane_active(False)
-    yield
-    set_chat_lane_active(False)
+# Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
+# decoration travels with the harness factory's returned object, so
+# this single module-level assignment wires it for every test here.
+chat_lane_flag_reset = chat_lane_flag_reset_fixture()
 
 
 # ---------------------------------------------------------------------------

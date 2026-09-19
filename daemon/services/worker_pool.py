@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
@@ -1224,7 +1224,7 @@ class WorkerPool:
             DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
         ),
         worker_id_prefix: str = "worker-",
-        lane: str = "default",
+        lane: Literal["default", "chat"] = "default",
     ):
         """Initialize the worker pool.
 

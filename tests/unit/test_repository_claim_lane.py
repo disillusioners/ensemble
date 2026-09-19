@@ -30,7 +30,7 @@ Fixtures (F1 review pin): realistic production-shaped mint values —
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -54,6 +54,9 @@ from daemon.repositories.task.repository import (
     set_chat_lane_active,
 )
 from daemon.services.timestamps import now_utc_naive
+from tests.integration.chat_source_harness import (
+    chat_lane_flag_reset_fixture,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +104,10 @@ def strict_lane():
     set_chat_lane_active(False)
 
 
-@pytest.fixture(autouse=True)
-def _reset_lane_flag():
-    """Hard reset after EVERY test in this module — the flag is shared
-    module state; leakage into other suites would misroute claims."""
-    yield
-    set_chat_lane_active(False)
+# Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
+# decoration travels with the harness factory's returned object, so
+# this single module-level assignment wires it for every test here.
+chat_lane_flag_reset = chat_lane_flag_reset_fixture()
 
 
 # ---------------------------------------------------------------------------

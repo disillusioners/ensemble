@@ -1278,11 +1278,26 @@ class JobProcessor:
                         )
                         notify_pools = manager_dict.get("_notify_all_pools")
                         if notify_pools is not None:
-                            notify_pools()
+                            try:
+                                notify_pools()
+                            except Exception as notify_err:
+                                logger.warning(
+                                    f"job_processor: _notify_all_pools() "
+                                    f"failed for chat-source wake "
+                                    f"(non-fatal): {notify_err}"
+                                )
                         elif getattr(
                             self._instance_manager, "_worker_pool", None
                         ) is not None:
-                            self._instance_manager._worker_pool.notify_work()
+                            try:
+                                self._instance_manager._worker_pool.notify_work()
+                            except Exception as notify_err:
+                                logger.warning(
+                                    f"job_processor: "
+                                    f"worker_pool.notify_work() failed "
+                                    f"for chat-source wake "
+                                    f"(non-fatal): {notify_err}"
+                                )
 
                         logger.info(
                             f"JobProcessor (message branch): woke "

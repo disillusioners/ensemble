@@ -6914,13 +6914,24 @@ class InstanceManager:
         # (B2), not the slots — the slots are already None.
         for pool in pools_snapshot:
             for worker in pool._workers:
-                if worker.is_alive():
+                # Per-worker guard: one raise (e.g. a torn-down worker
+                # object) must not erase the enumeration of the
+                # remaining workers — log-and-continue, same
+                # observability style as the WARNING below.
+                try:
+                    if worker.is_alive():
+                        logger.warning(
+                            f"Worker {worker.worker_id} still alive after "
+                            f"stop(30) — likely blocked in "
+                            f"invoke_agent_and_wait (mid-invoke stop not "
+                            f"interruptible, see "
+                            f"daemon/services/worker_pool.py:1339-1340)"
+                        )
+                except Exception as enum_err:
                     logger.warning(
-                        f"Worker {worker.worker_id} still alive after "
-                        f"stop(30) — likely blocked in "
-                        f"invoke_agent_and_wait (mid-invoke stop not "
-                        f"interruptible, see "
-                        f"daemon/services/worker_pool.py:1339-1340)"
+                        f"Hung-worker enumeration failed for one worker "
+                        f"(non-fatal — continuing with remaining "
+                        f"workers): {enum_err}"
                     )
 
         if self._stale_recovery is not None:

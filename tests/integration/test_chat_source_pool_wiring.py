@@ -43,19 +43,10 @@ manager unchanged.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Iterator
-from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
-from sqlmodel import Session, SQLModel
 
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
@@ -71,6 +62,11 @@ from daemon.repositories.task.repository import (
     is_chat_lane_active,
     set_chat_lane_active,
 )
+from tests.integration.chat_source_harness import (
+    build_chat_source_engine,
+    chat_lane_flag_reset_fixture,
+    wire_manager_only,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -81,15 +77,10 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_lane_flag():
-    """Hard-reset the B1 module flag around EVERY test — ``_chat_lane_active``
-    is shared module state; leakage into other suites would misroute
-    default-lane claims (mirrors the discipline in
-    ``tests/unit/test_repository_claim_lane.py``)."""
-    set_chat_lane_active(False)
-    yield
-    set_chat_lane_active(False)
+# Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
+# decoration travels with the harness factory's returned object, so
+# this single module-level assignment wires it for every test here.
+chat_lane_flag_reset = chat_lane_flag_reset_fixture()
 
 
 # ---------------------------------------------------------------------------
@@ -99,139 +90,21 @@ def _reset_lane_flag():
 
 @pytest.fixture
 def engine(tmp_path) -> Engine:
-    """Real SQLite FILE database with per-connection PRAGMAs.
-
-    ``NullPool`` + per-connection ``connect`` listener PRAGMA is the
-    convention for chat-source-worker-lane integration tests (F7 —
-    file-backed SQLite, not in-memory). WAL keeps multi-checkout
-    concurrency honest.
-    """
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/chat_pool_wiring.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+    """Real SQLite FILE database with per-connection PRAGMAs (shared
+    harness builder). ``case_sensitive_like=False`` — wiring-only, no
+    claim seam exercise, so no LIKE parity needed (this fixture never
+    issued the F9 pragma pre-consolidation)."""
+    eng = build_chat_source_engine(
+        str(tmp_path / "chat_pool_wiring.db"), case_sensitive_like=False
     )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record):
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
-    SQLModel.metadata.create_all(eng)
     yield eng
     eng.dispose()
 
 
 # ---------------------------------------------------------------------------
-# Harness builder — real InstanceManager, real worker pools, no LLM
+# Manager wiring — shared harness seam (real InstanceManager, real
+# worker pools once the test calls setup_worker_pool, no LLM)
 # ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _wire_manager(engine: Engine, *, use_worker_pool: str | None = None) -> Iterator:
-    """Build a real ``InstanceManager`` and run ``setup_worker_pool``.
-
-    The LLM is irrelevant (wiring-only); ``build_instance_graph`` is
-    patched to a sentinel so the manager can be constructed without
-    the full graph stack. The chat pool construction does NOT call
-    into the graph (only the default pool's TaskProcessor and the
-    claim seam would, both of which run with a stub TaskProcessor
-    because no claim happens during ``setup_worker_pool``).
-
-    Skip ``manager.initialize()`` (heavy async lifespan) and stub
-    the only seam ``setup_worker_pool`` touches on the manager's
-    pre-init state — ``self._maintenance_service`` is set by
-    ``initialize()`` but ``setup_worker_pool`` calls
-    ``self._maintenance_service.set_task_repository(...)`` at
-    manager.py:6473. Same recipe as
-    ``tests/integration/test_wc_wake_pure_hang.py:406-409``.
-
-    Args:
-        engine: The shared engine injected into every ``create_engine_from_config``
-            call inside the manager.
-        use_worker_pool: ``"false"`` to set the kill-switch; ``None``
-            (default) clears it so both pools construct.
-    """
-    # Set/clear the USE_WORKER_POOL env flag WITHOUT polluting the
-    # process environment for other tests — the fixture's autouse
-    # teardown restores the default and other tests in this module
-    # use the same pattern.
-    if use_worker_pool is not None:
-        os.environ["USE_WORKER_POOL"] = use_worker_pool
-    else:
-        os.environ.pop("USE_WORKER_POOL", None)
-
-    try:
-        from daemon.config import (
-            AgentsConfig,
-            Config,
-            DaemonConfig,
-            LLMConfig,
-            LimitsConfig,
-            PersistenceConfig,
-        )
-        from daemon.manager import InstanceManager
-        from daemon.services.maintenance import MaintenanceService
-
-        config = Config(
-            llm=LLMConfig(
-                base_url="https://api.openai.com/v1",
-                api_key="test-key",
-                model="gpt-4",
-                temperature=0.7,
-            ),
-            limits=LimitsConfig(
-                max_children_per_instance=3,
-                instance_timeout_minutes=60,
-            ),
-            persistence=PersistenceConfig(
-                db_path=":memory:",
-                checkpoint_interval=1,
-                checkpoint_ttl_hours=168,
-                checkpoint_cleanup_interval=24,
-                max_instance_history=300,
-            ),
-            daemon=DaemonConfig(host="127.0.0.1", port=8079),
-            agents=AgentsConfig(directory="./agents"),
-        )
-
-        with (
-            patch(
-                "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
-                return_value=[],
-            ),
-            patch(
-                "daemon.manager.create_engine_from_config",
-                return_value=engine,
-            ),
-            patch(
-                "daemon.manager.build_instance_graph",
-                return_value=None,
-            ),
-        ):
-            manager = InstanceManager(config)
-            # Stub the maintenance service — ``initialize()`` is the
-            # production site but is heavy (async lifespan). The
-            # only seam ``setup_worker_pool`` touches is
-            # ``set_task_repository(...)``; a bare ``MaintenanceService``
-            # instance + a request-registry dict suffices. Mirror
-            # the wake_harness recipe at
-            # ``tests/integration/test_wc_wake_pure_hang.py:406-409``.
-            manager._maintenance_service = MaintenanceService()
-            manager._maintenance_service.set_request_registry({})
-            yield manager
-            # Safety net: ensure pools are torn down even if the
-            # caller forgets — prevents leaked worker threads across
-            # tests.
-            try:
-                manager.shutdown_worker_pool()
-            except Exception:
-                pass
-    finally:
-        os.environ.pop("USE_WORKER_POOL", None)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +123,7 @@ class TestBothPoolsConstructed:
         ``num_workers=1``; production default size, NOT 1, NOT
         ``CHAT_WORKER_POOL_SIZE``)."""
         with caplog.at_level(logging.INFO):
-            with _wire_manager(engine) as manager:
+            with wire_manager_only(engine) as manager:
                 manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
                 assert manager._worker_pool is not None
@@ -271,7 +144,7 @@ class TestBothPoolsConstructed:
         ``CHAT_WORKER_POOL_SIZE=2`` workers named ``chat-worker-{i}``
         (D10.5 + Phase 2 Exit Criterion #1)."""
         with caplog.at_level(logging.INFO):
-            with _wire_manager(engine) as manager:
+            with wire_manager_only(engine) as manager:
                 manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
                 assert manager._chat_worker_pool is not None
@@ -290,7 +163,7 @@ class TestBothPoolsConstructed:
 
     def test_pools_list_populated_with_both(self, engine):
         """``_pools`` is populated AFTER both pools construct — D5 list-shape."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert len(manager._pools) == 2
@@ -301,7 +174,7 @@ class TestBothPoolsConstructed:
         """``is_chat_lane_active()`` returns True after
         ``setup_worker_pool`` (B1 — flag flipped ON immediately after
         chat-pool start)."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert is_chat_lane_active() is True
@@ -314,7 +187,7 @@ class TestBothPoolsConstructed:
         prefixes=telegram:,slack:,discord:`` is emitted via
         ``logger.info`` (caplog substring — NOT filesystem log)."""
         with caplog.at_level(logging.INFO):
-            with _wire_manager(engine) as manager:
+            with wire_manager_only(engine) as manager:
                 manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
         # Substring match against the SC#8 literal (Phase 2 Exit
@@ -333,7 +206,7 @@ class TestUseWorkerPoolFalseDisablesBoth:
         """``USE_WORKER_POOL=false`` short-circuits inside
         ``setup_worker_pool`` BEFORE any pool construct — both
         ``_worker_pool`` and ``_chat_worker_pool`` stay None."""
-        with _wire_manager(engine, use_worker_pool="false") as manager:
+        with wire_manager_only(engine, use_worker_pool="false") as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert manager._worker_pool is None
@@ -343,7 +216,7 @@ class TestUseWorkerPoolFalseDisablesBoth:
     def test_b1_flag_stays_false(self, engine):
         """``is_chat_lane_active()`` stays False when the kill-switch
         fires — the flag is never set in this path."""
-        with _wire_manager(engine, use_worker_pool="false") as manager:
+        with wire_manager_only(engine, use_worker_pool="false") as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert is_chat_lane_active() is False
@@ -353,7 +226,7 @@ class TestShutdownClearsBothSlots:
     """``shutdown_worker_pool`` clears both slots and resets B1 flag."""
 
     def test_both_slots_none_after_shutdown(self, engine):
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             # Sanity: both pools live before shutdown.
@@ -373,7 +246,7 @@ class TestShutdownClearsBothSlots:
     def test_b1_flag_flipped_false_after_shutdown(self, engine):
         """``is_chat_lane_active()`` returns False AFTER
         ``shutdown_worker_pool`` — fail-open restored (B1)."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
             assert is_chat_lane_active() is True
 
@@ -387,7 +260,7 @@ class TestShutdownIsIdempotent:
     early-return path (already-None slots) is exercised."""
 
     def test_double_shutdown_is_safe(self, engine):
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
             manager.shutdown_worker_pool()
 
@@ -449,7 +322,7 @@ class TestB1ConditionalFailOpen:
         assert is_chat_lane_active() is False
 
         # Phase (b) — chat pool constructed → flag flips True.
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert is_chat_lane_active() is True
@@ -466,8 +339,8 @@ class TestB1ConditionalFailOpen:
             assert is_chat_lane_active() is True
 
         # Phase (c) — chat pool torn down → flag False again
-        # (this happened inside ``_wire_manager``'s ``finally`` —
-        # the manager.shutdown_worker_pool() call ran).
+        # (this happened inside ``wire_manager_only``'s teardown
+        # safety-net — the manager.shutdown_worker_pool() call ran).
         assert is_chat_lane_active() is False
 
 
@@ -509,7 +382,7 @@ class TestNotifyAllPoolsFanOut:
     def test_real_manager_helper_in_instance_dict_and_callable(self, engine):
         """(b) — probe 1: ``'_notify_all_pools' in manager.__dict__`` and
         the value is a callable bound method on a REAL manager."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             assert "_notify_all_pools" in manager.__dict__, (
@@ -534,7 +407,7 @@ class TestNotifyAllPoolsFanOut:
         and only the default pool increments — pinned by the same
         mechanism that distinguishes real from Mock in production
         fan-out."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             default_before = manager._worker_pool._stats[
@@ -572,7 +445,7 @@ class TestNotifyAllPoolsFanOut:
         the helper on a real manager. This is the EXACT pattern
         CRITICAL site #12 uses to find the helper — without the
         instance-bound fix the lookup returns ``None``."""
-        with _wire_manager(engine) as manager:
+        with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
             # Verbatim service-site lookup.
