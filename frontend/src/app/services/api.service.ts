@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, of, throwError, firstValueFrom } from 'rxjs';
-import { catchError, map } from 'rxjs/operators';
+import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
+import { Observable, of, throwError, firstValueFrom, TimeoutError } from 'rxjs';
+import { catchError, map, timeout } from 'rxjs/operators';
 import type { TodoItem, TodoNode, SubTask } from './sse.service';
 import type { QuestionPack } from '../models/question.model';
 import type {
@@ -122,6 +122,29 @@ export function extractUnknownCommandError(err: unknown): UnknownCommandHttpErro
  *  null`` on rejected acks — nothing to correlate). */
 export function isAcceptedCommandAck(ack: CommandAck): ack is CommandAck & { command_id: string } {
   return ack.state === 'accepted' && typeof ack.command_id === 'string' && ack.command_id.length > 0;
+}
+
+/**
+ * Phase 4 (clipboard-image-chat) — typed timeout failure for the
+ * messages POST (architect amendment #16). Surfaces when the rxjs
+ * ``timeout(300_000)`` guard fires (300 s > 270 s worst-case
+ * per-image conversion ceiling). The server still completes the
+ * handler regardless of client disconnect (Starlette/uvicorn
+ * cancel-on-disconnect is off — see
+ * architecture-recommendation.md §5.4), so the failed bubble's
+ * retry button MUST be disabled (no auto-retry).
+ *
+ * Copy is rendered VERBATIM in the failed-bubble surface (Task 11
+ * acceptance — identity-grep pin asserts the literal appears in
+ * production source).
+ */
+export class MessageSendTimeoutError extends Error {
+  static readonly COPY =
+    'Request timed out — the message may still have been delivered; please check the transcript before retrying';
+  constructor(message = MessageSendTimeoutError.COPY) {
+    super(message);
+    this.name = 'MessageSendTimeoutError';
+  }
 }
 
 @Injectable({
@@ -304,19 +327,42 @@ export class ApiService {
   // ``UNKNOWN_COMMAND``. Discrimination happens in ``parseCommandAck``
   // (single parsing point — executable contract spec lives in
   // parse-command-ack.spec.ts), NOT here.
+  //
+  // Phase 4 (clipboard-image-chat): the new ``image_refs`` sibling
+  // parameter threads ref URLs (``/api/tmp_images/<32hex>``) for the
+  // upload-first send pipeline (decisions.md §2). XOR with the legacy
+  // ``images`` parameter — ref-sends carry ``image_refs`` and NEVER
+  // ``images``; legacy data-URI sends still carry ``images``.
+  //
+  // Phase 4 / Task 11 (amendment #16): the messages POST is wrapped in
+  // ``rxjs timeout(300_000)`` (300 s > 270 s worst-case conversion
+  // ceiling). On timeout, a typed ``MessageSendTimeoutError`` surfaces
+  // — NOT a generic ``TimeoutError``. Auto-retry is BANNED; the
+  // server completes the handler regardless of client disconnect.
+  static readonly SEND_MESSAGE_TIMEOUT_MS = 300_000;
   sendMessage(
     instanceId: string,
     content: string,
     images?: string[],
     queueId?: string | null,
+    imageRefs?: string[],
   ): Observable<MessageResponse | CommandAck> {
-    const body: { content: string; images?: string[]; queue_id?: string } = { content };
+    const body: { content: string; images?: string[]; image_refs?: string[]; queue_id?: string } = { content };
     if (images?.length) body.images = images;
+    if (imageRefs?.length) body.image_refs = imageRefs;
     if (queueId) body.queue_id = queueId;
     return this.http
       .post<MessageResponse | CommandAck>(`${this.API_BASE}/instances/${instanceId}/messages`, body)
       .pipe(
+        timeout(ApiService.SEND_MESSAGE_TIMEOUT_MS),
         catchError(err => {
+          // Phase 4 / Task 11 — typed timeout. The rxjs ``timeout``
+          // operator throws ``TimeoutError`` (a plain Error subclass)
+          // on expiry; map it to the typed failure so the failed-bubble
+          // retry affordance can branch on ``err.name``.
+          if (err instanceof TimeoutError) {
+            return throwError(() => new MessageSendTimeoutError());
+          }
           // Map HTTP 400 UNKNOWN_COMMAND to a typed error carrying
           // ``detail.available`` for the existing toast path. Every other
           // error rethrows UNCHANGED (normal-message path untouched).

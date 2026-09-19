@@ -99,8 +99,15 @@ class TestApiService {
     return this.http.post(`${this.API_BASE}/instances/${instanceId}/pause`, {});
   }
 
-  sendMessage(instanceId: string, content: string, images?: string[]): Observable<any> {
-    const body = images?.length ? { content, images } : { content };
+  sendMessage(instanceId: string, content: string, images?: string[], queueId?: string | null, imageRefs?: string[]): Observable<any> {
+    // Phase 4 (clipboard-image-chat) — XOR sibling: ref-sends carry
+    // ``image_refs`` and NEVER ``images``. The mirror pins the shape
+    // and the URL form so any drift in production source fails the
+    // identity-grep.
+    const body: { content: string; images?: string[]; image_refs?: string[]; queue_id?: string } = { content };
+    if (images?.length) body.images = images;
+    if (imageRefs?.length) body.image_refs = imageRefs;
+    if (queueId) body.queue_id = queueId;
     return this.http.post(`${this.API_BASE}/instances/${instanceId}/messages`, body);
   }
 
@@ -220,6 +227,66 @@ describe('ApiService', () => {
 
       const request = httpMock.getRequests()[0];
       expect(request.body).toEqual({ content: testContent, images: singleImage });
+    });
+
+    // Phase 4 (clipboard-image-chat) — image_refs sibling path.
+    // ref-sends carry `image_refs` and NEVER `images`. The body shape
+    // is the BE-side canonical wire contract from decisions.md §2.
+    it('should send image_refs when provided (Phase 4 ref-form path)', () => {
+      const testInstanceId = 'instance-abc';
+      const testContent = 'Here is one ref';
+      const refs = ['/api/tmp_images/abc123def456789012345678901234de'];
+
+      service.sendMessage(testInstanceId, testContent, undefined, undefined, refs);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.method).toBe('POST');
+      expect(request.url).toBe(`/api/instances/${testInstanceId}/messages`);
+      expect(request.body).toEqual({ content: testContent, image_refs: refs });
+      // XOR invariant: `images` MUST NOT be present on a ref-send.
+      expect(request.body).not.toHaveProperty('images');
+    });
+
+    it('should send image_refs without images (XOR sibling)', () => {
+      const testInstanceId = 'instance-abc';
+      const testContent = 'Ref-only send';
+      const refs = ['/api/tmp_images/abc123'];
+
+      service.sendMessage(testInstanceId, testContent, [], null, refs);
+
+      const request = httpMock.getRequests()[0];
+      // Both arrays empty/undefined for `images`; the body carries ONLY refs.
+      expect(request.body).not.toHaveProperty('images');
+      expect(request.body.image_refs).toEqual(refs);
+    });
+
+    it('should not include image_refs when empty', () => {
+      const testInstanceId = 'instance-abc';
+      const testContent = 'No refs';
+
+      service.sendMessage(testInstanceId, testContent, undefined, undefined, []);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent });
+      expect(request.body).not.toHaveProperty('image_refs');
+    });
+
+    it('should send both content + images + queue_id when all set (legacy data-URI path)', () => {
+      // Regression pin — the Phase 4 change must NOT break the
+      // existing data-URI path. Sending both images + queue_id
+      // (no image_refs) is the legacy Discord/web-FE pre-Phase-4 shape.
+      const testInstanceId = 'instance-abc';
+      const testContent = 'Legacy';
+      const legacyImages = ['data:image/png;base64,xyz'];
+
+      service.sendMessage(testInstanceId, testContent, legacyImages, 'q-1');
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({
+        content: testContent,
+        images: legacyImages,
+        queue_id: 'q-1',
+      });
     });
   });
 

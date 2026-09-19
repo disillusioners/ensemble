@@ -1369,7 +1369,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // same guard pattern the SSE mirror effect uses.
     const sentInstanceId = instance.instance_id;
 
-    this.api.sendMessage(instance.instance_id, effectiveContent, payload.images, payload.queue_id).subscribe({
+    this.api.sendMessage(instance.instance_id, effectiveContent, payload.images, payload.queue_id, payload.image_refs).subscribe({
       // Both 200 (PAUSED auto-resume / IDLE enqueue) and 202 (RUNNING /
       // WAITING_CHILDREN injection acceptance) are 2xx and fire `next` by
       // default in Angular's HttpClient. We treat both as success from the
@@ -1455,6 +1455,16 @@ export class ChatComponent implements OnInit, OnDestroy {
               // get evicted by ``evictPendingByAge`` on the next refetch).
               const provisionalStamp =
                 response.created_at ?? response.timestamp ?? new Date().toISOString();
+              // Phase 4 (clipboard-image-chat): the optimistic bubble
+              // renders the IMAGE refs IMMEDIATELY (decision S3 +
+              // round-2 C1 ruling (b) — ``images`` on the wire is a
+              // union of data URIs AND ref URLs; both are valid
+              // ``<img [src]>`` inputs). We thread ``image_refs``
+              // through the existing ``images`` param (XOR — ref-sends
+              // carry ``image_refs`` and NEVER ``images``). The merge
+              // util's ``makeProvisionalMessage`` signature is
+              // UNTOUCHED (phase-5 owns message-merge.util.ts).
+              const bubbleImages = payload.image_refs ?? payload.images;
               const provisional = makeProvisionalMessage({
                 messageId: newId,
                 // Phase 2: the DELIVERED content (``//x`` was rewritten to
@@ -1463,7 +1473,7 @@ export class ChatComponent implements OnInit, OnDestroy {
                 content: effectiveContent,
                 createdAt: provisionalStamp,
                 instanceId: instance.instance_id,
-                images: payload.images,
+                images: bubbleImages,
               });
               // MIN-5: TTL eviction runs ONLY in the SSE-mirror /
               // refetch passes — never here. A slow POST whose 202
@@ -1569,7 +1579,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // MIN-2 TOCTOU capture — same rationale as the message path (R2).
     const sentInstanceId = instanceId;
 
-    this.api.sendMessage(instanceId, payload.content, payload.images, payload.queue_id).subscribe({
+    this.api.sendMessage(instanceId, payload.content, payload.images, payload.queue_id, payload.image_refs).subscribe({
       next: (response) => {
         this.isSending.set(false);
         const parsed = parseCommandAck(response);
@@ -1830,9 +1840,22 @@ export class ChatComponent implements OnInit, OnDestroy {
     // to clear (id-keyed dedup means the bubble keeps its id on
     // success). The failure path re-marks via content-match in
     // ``markSendFailedForContent`` — no extra signal needed there.
+    //
+    // Phase 4 (clipboard-image-chat) — the retry rebuild preserves
+    // ``target.images`` as-is. After the round-trip the bubble's
+    // ``images`` field carries whatever the BE surfaced (data URI or
+    // ref URL); both are valid `<img [src]>` values. The retry sends
+    // under the ``images`` key (legacy data-URI path) ONLY if the
+    // target's images are data URIs (legacy rows); for ref-form rows
+    // we thread them through ``image_refs`` (XOR sibling) so the BE
+    // accepts the retry without validator-mismatch 422s.
+    const bubbleImages = target.images ?? [];
+    const looksLikeRefUrl = bubbleImages.length > 0
+      && bubbleImages[0].startsWith('/api/tmp_images/');
     this.onSendMessage({
       content: retryContent,
-      images: target.images,
+      images: looksLikeRefUrl ? undefined : bubbleImages,
+      image_refs: looksLikeRefUrl ? bubbleImages : undefined,
       queue_id: retryQueueId,
       retry_of_message_id: messageId,
     });
