@@ -333,6 +333,49 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
       expect(tree.recentFlat.map((j) => j.job_id)).toEqual(['jt']);
     });
 
+    // B4 composition pin — the two halves above each pin a single
+    // fallback (queued for non-terminal, recentFlat for terminal) when
+    // ``route()`` cannot resolve the grouping key. Neither covers the
+    // interaction with ``filterIdleInstanceRows``: an idle root is
+    // REMOVED before ``buildInstanceNodes`` sees the rows, so its id
+    // never enters the node map. A job bound to that idle root is
+    // therefore a real-world orphan and must still surface (NEVER
+    // hide) — the docblock at instance-node.model.ts:~185-194 promises
+    // exactly this composition.
+    it('composition: idle (filter-dropped) root — its NON-TERMINAL bound job surfaces via queued', () => {
+      const rows = [
+        mkRow({ instance_id: 'idle-root', status: 'idle' }),
+        mkRow({ instance_id: 'live-root', status: 'running' }),
+      ];
+      const roots = buildInstanceNodes(filterIdleInstanceRows(rows));
+      const tree = buildInstanceTree(
+        roots,
+        [createMockJob({ job_id: 'j-idle-bound', mission_id: 'idle-root', status: 'processing' })],
+        []
+      );
+      expect(tree.queued.map((j) => j.job_id)).toEqual(['j-idle-bound']);
+      expect(tree.liveRoots.map((n) => n.instance.instance_id)).toEqual(['live-root']);
+      expect(tree.recentRoots).toEqual([]);
+      expect(tree.recentFlat).toEqual([]);
+    });
+
+    it('composition: idle (filter-dropped) root — its TERMINAL bound job surfaces via recentFlat', () => {
+      const rows = [
+        mkRow({ instance_id: 'idle-root', status: 'idle' }),
+        mkRow({ instance_id: 'live-root', status: 'running' }),
+      ];
+      const roots = buildInstanceNodes(filterIdleInstanceRows(rows));
+      const tree = buildInstanceTree(
+        roots,
+        [],
+        [createMockJob({ job_id: 'j-idle-bound-term', mission_id: 'idle-root', status: 'settled' })]
+      );
+      expect(tree.recentFlat.map((j) => j.job_id)).toEqual(['j-idle-bound-term']);
+      expect(tree.liveRoots.map((n) => n.instance.instance_id)).toEqual(['live-root']);
+      expect(tree.recentRoots).toEqual([]);
+      expect(tree.queued).toEqual([]);
+    });
+
     it('a receipt with a terminal job status still ATTACHES when its node exists', () => {
       const roots = buildInstanceNodes([mkRow({ instance_id: 'r1' })]);
       const tree = buildInstanceTree(
