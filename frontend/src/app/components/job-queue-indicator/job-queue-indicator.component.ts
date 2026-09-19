@@ -23,7 +23,7 @@ import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
 import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
 import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
-import { InstanceNode, InstanceRow, buildInstanceNodes } from '../../models/instance-node.model';
+import { InstanceNode, InstanceRow, buildInstanceNodes, filterIdleInstanceRows } from '../../models/instance-node.model';
 import { DeferBlockedStatus, DeferBlockIndicator, DeferBlockSeverity, DeferBlockAction, deferBlockIndicator, deferBlockAction } from '../../models/defer-blocked.model';
 import { forkJoin, catchError, of, map } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
@@ -340,7 +340,17 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     const openPayload = this.panelOpenInstancesPayload();
     const source =
       this.panelOpen() && openPayload.length > 0 ? openPayload : this.instancesPayload();
-    return buildInstanceNodes(source);
+    // Hide-idle seam: drop ``status === 'idle'`` rows from BOTH the
+    // closed-panel poll source (``instancesPayload``, written every 8s
+    // by the cheap flat ``listInstanceTree``) and the open-panel lazy
+    // source (``panelOpenInstancesPayload``, written by ``onPanelOpen``
+    // via ``listInstanceTreeFull``) so the panel's "Live
+    // conversations" tree never renders idle instances — as roots or
+    // as child instance nodes. Non-idle descendants of an idle parent
+    // promote to roots via the existing orphan-degrades-to-root
+    // contract; receipts attach via the grouping key as usual. See
+    // ``filterIdleInstanceRows`` for the window caveat.
+    return buildInstanceNodes(filterIdleInstanceRows(source));
   });
 
   /**

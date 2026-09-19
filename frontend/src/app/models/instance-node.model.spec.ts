@@ -16,6 +16,7 @@ import {
   nextInstanceTreeItem,
   instanceTreeItemId,
   MAX_RECENT_INSTANCE_ROWS,
+  filterIdleInstanceRows,
 } from './instance-node.model';
 import { createMockJob } from '../testing/job-test-helpers';
 
@@ -873,6 +874,203 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
     });
   });
 
+  // Hide-idle pre-filter for the "Live conversations" tree.
+  // Idle instances (status === 'idle') must NOT render as ROOT
+  // instance rows NOR as child instance nodes; receipts and
+  // non-idle instances remain visible. Filtering at the wire-row
+  // level (before ``buildInstanceNodes``) lets the existing
+  // orphan-promotes-to-root branch naturally surface any non-idle
+  // descendant of a filtered idle parent (NEVER-hide preserved).
+  describe('filterIdleInstanceRows — hide-idle pre-filter', () => {
+    it('drops every row whose status is "idle"', () => {
+      const rows = [
+        mkRow({ instance_id: 'a', status: 'idle' }),
+        mkRow({ instance_id: 'b', status: 'running' }),
+        mkRow({ instance_id: 'c', status: 'idle' }),
+      ];
+      const out = filterIdleInstanceRows(rows);
+      expect(out.map((r) => r.instance_id)).toEqual(['b']);
+    });
+
+    it('preserves every non-idle status (running, waiting, paused, queued, waiting_children, completed, error, terminated, failed)', () => {
+      const nonIdle: Array<InstanceRow['status']> = [
+        'running',
+        'waiting',
+        'paused',
+        'queued',
+        'waiting_children',
+        'completed',
+        'error',
+        'terminated',
+        'failed',
+      ];
+      const rows = nonIdle.map((status, i) =>
+        mkRow({ instance_id: `r-${i}`, status })
+      );
+      const out = filterIdleInstanceRows(rows);
+      expect(out.map((r) => r.instance_id).sort()).toEqual(
+        nonIdle.map((_, i) => `r-${i}`).sort()
+      );
+    });
+
+    it('returns [] when every row is idle (empty-tree seed for the "No jobs" empty state)', () => {
+      const rows = [
+        mkRow({ instance_id: 'a', status: 'idle' }),
+        mkRow({ instance_id: 'b', status: 'idle' }),
+        mkRow({ instance_id: 'c', status: 'idle' }),
+      ];
+      expect(filterIdleInstanceRows(rows)).toEqual([]);
+    });
+
+    it('returns [] for an empty page (no-op, never throws)', () => {
+      expect(filterIdleInstanceRows([])).toEqual([]);
+    });
+
+    it('hides an idle ROOT so it does not appear in the nested tree', () => {
+      const rows = [
+        mkRow({ instance_id: 'idle-root', status: 'idle' }),
+        mkRow({ instance_id: 'live-root', status: 'running' }),
+      ];
+      const roots = buildInstanceNodes(filterIdleInstanceRows(rows));
+      expect(roots.map((n) => n.instance.instance_id)).toEqual(['live-root']);
+    });
+
+    it('hides an idle CHILD instance node but keeps its non-idle sibling', () => {
+      const rows = [
+        mkRow({ instance_id: 'root', children: ['idle-kid', 'live-kid'], status: 'running' }),
+        mkRow({ instance_id: 'idle-kid', parent_id: 'root', status: 'idle' }),
+        mkRow({ instance_id: 'live-kid', parent_id: 'root', status: 'running' }),
+      ];
+      const roots = buildInstanceNodes(filterIdleInstanceRows(rows));
+      expect(roots.length).toBe(1);
+      expect(roots[0].children.map((c) => c.instance.instance_id)).toEqual(['live-kid']);
+    });
+
+    it('preserves job receipts attached to a non-idle child beneath a filtered idle parent (orphan promotes to root)', () => {
+      // Parent is idle → filtered out. The non-idle child no longer
+      // has a parent in the page → buildInstanceNodes degrades it to
+      // a root (never-hide preserved) and the receipt attaches to
+      // it as usual. This is the load-bearing behaviour that keeps
+      // "all non-idle instances remain visible" true.
+      const rows = [
+        mkRow({ instance_id: 'idle-parent', status: 'idle', children: ['live-kid'] }),
+        mkRow({ instance_id: 'live-kid', parent_id: 'idle-parent', status: 'running' }),
+      ];
+      const filtered = filterIdleInstanceRows(rows);
+      expect(filtered.map((r) => r.instance_id)).toEqual(['live-kid']);
+      const roots = buildInstanceNodes(filtered);
+      // live-kid becomes a root (its idle parent is gone).
+      expect(roots.map((n) => n.instance.instance_id)).toEqual(['live-kid']);
+      // Receipt still attaches via the grouping key (mission_id === instance_id).
+      const tree = buildInstanceTree(
+        roots,
+        [createMockJob({ job_id: 'j-kid', mission_id: 'live-kid', status: 'processing' })],
+        []
+      );
+      expect(tree.liveRoots[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-kid']);
+      expect(tree.queued).toEqual([]);
+      expect(tree.recentFlat).toEqual([]);
+    });
+
+    it('idle terminal-style roots stay HIDDEN (idle is the only hidden status — terminal statuses still surface in Recent)', () => {
+      // Sanity pin: 'idle' is NON-terminal (per isLiveInstanceStatus),
+      // but the hide-idle filter removes it BEFORE the live/recent
+      // partition sees it. A terminal 'completed' root MUST survive
+      // the filter so it can flow to Recent (the user's "completed
+      // instance visible in the Recent section" contract).
+      const rows = [
+        mkRow({ instance_id: 'idle-a', status: 'idle' }),
+        mkRow({ instance_id: 'done', status: 'completed' }),
+      ];
+      const tree = buildInstanceTree(
+        buildInstanceNodes(filterIdleInstanceRows(rows)),
+        [],
+        []
+      );
+      // idle-a dropped entirely (no liveRoots entry, no recentRoots entry);
+      // done surfaces in recentRoots.
+      expect(tree.liveRoots.map((n) => n.instance.instance_id)).toEqual([]);
+      expect(tree.recentRoots.map((n) => n.instance.instance_id)).toEqual(['done']);
+      expect(tree.queued).toEqual([]);
+      expect(tree.recentFlat).toEqual([]);
+    });
+
+    it('does not mutate the input array (pure, like every other helper in this module)', () => {
+      const rows = [
+        mkRow({ instance_id: 'a', status: 'idle' }),
+        mkRow({ instance_id: 'b', status: 'running' }),
+      ];
+      const before = [...rows];
+      const out = filterIdleInstanceRows(rows);
+      expect(rows).toEqual(before);
+      expect(out).not.toBe(rows);
+    });
+
+    // SUGGESTION #1 — end-to-end empty-state pin. An all-idle
+    // page must NOT crash the full pipeline (buildInstanceNodes
+    // → buildInstanceTree) AND must yield ALL FOUR buckets empty
+    // so the panel renders its "No jobs" empty state cleanly
+    // (queued / recentFlat are also empty: an all-idle page has
+    // no node for any receipt to attach to and no live/terminal
+    // roots to partition).
+    it('empty-state: all-idle page → buildInstanceTree yields ALL FOUR buckets empty (no crash)', () => {
+      const rows = [
+        mkRow({ instance_id: 'a', status: 'idle' }),
+        mkRow({ instance_id: 'b', status: 'idle' }),
+        mkRow({ instance_id: 'c', status: 'idle' }),
+      ];
+      // No jobs at all — the empty-state collapse needs every
+      // bucket to be empty, not just liveRoots.
+      const tree = buildInstanceTree(
+        buildInstanceNodes(filterIdleInstanceRows(rows)),
+        [],
+        []
+      );
+      expect(tree.liveRoots).toEqual([]);
+      expect(tree.queued).toEqual([]);
+      expect(tree.recentRoots).toEqual([]);
+      expect(tree.recentFlat).toEqual([]);
+    });
+
+    // SUGGESTION #3 — 3-level orphan-promotion fixture. Idle
+    // grandparent → idle parent → live leaf. Both idle ancestors
+    // are filtered out, so the live leaf's parent_id resolves to
+    // a row NOT in the filtered page → buildInstanceNodes degrades
+    // it to a ROOT via the existing orphan-degrades-to-root branch
+    // (NEVER-hide preserved). The transitive promotion through
+    // buildInstanceTree is the load-bearing behaviour — a future
+    // refactor that filtered only the root (not the chain) would
+    // silently re-hide the leaf.
+    it('3-level orphan promotion: idle grandparent → idle parent → live leaf → leaf becomes a ROOT', () => {
+      const rows = [
+        mkRow({ instance_id: 'idle-gp', status: 'idle', children: ['idle-p'] }),
+        mkRow({ instance_id: 'idle-p', parent_id: 'idle-gp', status: 'idle', children: ['live-leaf'] }),
+        mkRow({ instance_id: 'live-leaf', parent_id: 'idle-p', status: 'running' }),
+      ];
+      const filtered = filterIdleInstanceRows(rows);
+      // Both idle ancestors filtered out — only the live leaf survives.
+      expect(filtered.map((r) => r.instance_id)).toEqual(['live-leaf']);
+      const roots = buildInstanceNodes(filtered);
+      // The live leaf becomes a ROOT (its parent_id 'idle-p' is NOT
+      // in the filtered page → orphan-degrades-to-root branch fires).
+      expect(roots.map((n) => n.instance.instance_id)).toEqual(['live-leaf']);
+      expect(roots[0].children).toEqual([]);
+      // Composed through buildInstanceTree: liveRoots carries the
+      // promoted leaf (and its attached receipt), every other bucket
+      // is empty (no terminals, no orphans).
+      const tree = buildInstanceTree(
+        roots,
+        [createMockJob({ job_id: 'j-leaf', mission_id: 'live-leaf', status: 'processing' })],
+        []
+      );
+      expect(tree.liveRoots.map((n) => n.instance.instance_id)).toEqual(['live-leaf']);
+      expect(tree.liveRoots[0].attachedJobs.map((j) => j.job_id)).toEqual(['j-leaf']);
+      expect(tree.queued).toEqual([]);
+      expect(tree.recentRoots).toEqual([]);
+      expect(tree.recentFlat).toEqual([]);
+    });
+  });
+
   // F1 source-drift pin (2026-09-08): the REAL production grouping
   // key must be the COALESCED ``job.mission_id ?? job.instance_id``.
   // The behavioural fixtures above run against buildInstanceTree, but
@@ -896,6 +1094,58 @@ describe('InstanceNode model (instances-primary tree, design V1)', () => {
 
     it('does NOT key attachments on the scalar mission_id alone', () => {
       expect(modelTs).not.toContain('job.mission_id ?? null');
+    });
+  });
+
+  // Hide-idle mirror-parity pins (project-mandatory): the filter
+  // helper must be DEFINED in the production model AND CALLED at the
+  // exact two seams in the indicator (poll-source + panel-open-source)
+  // so the "Live conversations" tree drops idle rows regardless of
+  // which wire payload drives ``instanceRoots``. The behavioural
+  // fixtures above would all still pass with a no-op filter (an
+  // empty rows array also produces an empty tree, the never-hide
+  // orphan-promote path is exercised by the existing W4 cycle tests)
+  // — these identity-grep pins are what closes the drift loop.
+  describe('hide-idle production source pins', () => {
+    let modelTs: string;
+    let indicatorTs: string;
+
+    beforeAll(() => {
+      const path = require('path');
+      const fs = require('fs');
+      modelTs = fs.readFileSync(path.join(__dirname, 'instance-node.model.ts'), 'utf-8');
+      indicatorTs = fs.readFileSync(
+        path.join(__dirname, '..', 'components', 'job-queue-indicator', 'job-queue-indicator.component.ts'),
+        'utf-8'
+      );
+    });
+
+    it('model exports filterIdleInstanceRows with an idle-status predicate', () => {
+      // Mirror-parity pin: the helper's filter predicate text MUST
+      // appear verbatim in production source so a silent predicate
+      // rewrite (e.g. ``status !== 'running'``) fails loudly. Any
+      // future change that drops idle also drops this pin — the
+      // author MUST update the spec and the test mirror in lockstep.
+      expect(modelTs).toContain("export function filterIdleInstanceRows");
+      expect(modelTs).toMatch(/r\.status\s*!==\s*'idle'/);
+    });
+
+    it('indicator calls filterIdleInstanceRows at the instanceRoots computed seam (single source of truth)', () => {
+      // The hide-idle contract is "drop idle rows regardless of
+      // which source feeds the panel" — poll (instancesPayload) and
+      // open-fetch (panelOpenInstancesPayload) BOTH flow through
+      // the SAME computed. We pin the SINGLE computed call site so
+      // a future split (e.g. one filter for poll, no filter for
+      // open-fetch) fails loudly: the swap contract would be
+      // silently broken for the open-state tree.
+      expect(indicatorTs).toContain('filterIdleInstanceRows(source)');
+      // Sanity: the computed that wraps ``buildInstanceNodes``
+      // (``instanceRoots``) is the only place the helper is
+      // applied — count must be exactly 1, not zero (filter
+      // removed) and not 2+ (filter applied elsewhere, possibly
+      // masking a duplicate call site).
+      const callSites = indicatorTs.match(/filterIdleInstanceRows\s*\(/g) ?? [];
+      expect(callSites.length).toBe(1);
     });
   });
 });
