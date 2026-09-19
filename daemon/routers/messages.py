@@ -686,9 +686,11 @@ async def send_message(
             # C1 two-channel design): the router seam threads BOTH
             # channels in parallel. The facade must forward both —
             # ``images`` reaches the agent channel (content blocks →
-            # vision routing) and ``image_refs`` reaches the display
-            # channel (checkpoint sidecar via additional_kwargs +
-            # MessageQueue.images audit column). XOR at the model
+            # vision routing, legacy data-URI vision path ONLY) and
+            # ``image_refs`` reaches the display channel (DEDICATED
+            # MessageQueue.image_refs audit column + checkpoint sidecar
+            # via additional_kwargs, post-C2-f migration — refs MUST
+            # NEVER land on MessageQueue.images). XOR at the model
             # layer guarantees at most one non-empty.
             image_refs=message.image_refs,
             queue_id=message.queue_id,

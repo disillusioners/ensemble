@@ -6987,12 +6987,14 @@ class InstanceManager:
         ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
         amendment #27): the new display channel — a list of refs
         (``/api/tmp_images/<32hex>`` URL form, canonical) that persists
-        into the ``MessageQueue.images`` JSONB column (audit) AND
-        stamps the ``HumanMessage.additional_kwargs["image_refs"]``
-        checkpoint sidecar (display). NEVER reaches the agent
-        channel — ``_build_message_content`` carries only ``images``.
-        Default ``None`` preserves byte-identical behavior for every
-        existing caller.
+        into the DEDICATED ``MessageQueue.image_refs`` JSONB column
+        (audit, post-C2-f migration — refs MUST NEVER land on
+        ``MessageQueue.images``) AND stamps the
+        ``HumanMessage.additional_kwargs["image_refs"]`` checkpoint
+        sidecar (display). NEVER reaches the agent channel —
+        ``_build_message_content`` carries only ``images`` (legacy
+        data-URI vision path only). Default ``None`` preserves
+        byte-identical behavior for every existing caller.
 
         Keyword-only on purpose — it is a forward-looking affordance
         and threading it positionally would silently re-route

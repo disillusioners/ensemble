@@ -31,9 +31,11 @@ This hook is the seam that enforces the signature separation:
   #26 / §2 enforcement. RETAINED on the (now-normalized) request so
   the router can pass it to ``manager.enqueue_message_job(
   images=message.images, image_refs=message.image_refs, ...)``. The
-  canonical URL refs reach the ``MessageQueue.images`` JSONB column
-  (audit) AND the ``HumanMessage.additional_kwargs["image_refs"]``
-  checkpoint sidecar (display). The agent channel stays text-only —
+  canonical URL refs reach the DEDICATED ``MessageQueue.image_refs``
+  JSONB column (audit, post-C2-f migration — refs MUST NEVER land on
+  ``MessageQueue.images``) AND the
+  ``HumanMessage.additional_kwargs["image_refs"]`` checkpoint sidecar
+  (display). The agent channel stays text-only —
   the conversion prepended plain-text descriptions to the content.
 
 Fail-fast (architect amendment #7 — must land BEFORE tests are written)
