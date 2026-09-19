@@ -3747,10 +3747,30 @@ class InstanceLifecycleService:
                         f"({type(rearm_err).__name__}: {rearm_err})"
                     )
 
-            worker_pool = getattr(self._manager, "_worker_pool", None)
-            if worker_pool is not None:
+            # Phase 2 / chat-source-worker-lane (D5): route through
+            # the manager helper — both default + chat pools receive
+            # the wake so a chat-prefixed row whose parent just
+            # resumed surfaces to the chat pool too.
+            #
+            # ``__dict__``-check on the manager avoids the Mock
+            # auto-attribute hazard (see child_reports.py / D5 site
+            # #9 for the rationale).
+            manager_dict = getattr(self._manager, "__dict__", {})
+            notify_pools = manager_dict.get("_notify_all_pools")
+            if notify_pools is not None:
                 try:
-                    worker_pool.notify_work()
+                    notify_pools()
+                except Exception as notify_err:
+                    logger.warning(
+                        f"resume_instance_cascade: _notify_all_pools() "
+                        f"failed (non-fatal): {notify_err}"
+                    )
+            elif getattr(self._manager, "_worker_pool", None) is not None:
+                # Pre-Phase-2 manager shape — fall through to the
+                # singleton-attribute reach (legacy test fixture /
+                # pre-wiring lifespan).
+                try:
+                    self._manager._worker_pool.notify_work()
                 except Exception as notify_err:
                     logger.warning(
                         f"resume_instance_cascade: worker_pool.notify_work() "

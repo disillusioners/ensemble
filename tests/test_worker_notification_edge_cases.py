@@ -31,6 +31,12 @@ class MockTaskProcessor:
         self.claim_count = 0
         self.run_count = 0
         self.claimed_tasks = []
+        # Per-claim (worker_id, lane) log — mirrors the Phase 1 18a31644
+        # contract widening: real ``TaskProcessor.claim_task`` now takes
+        # ``lane`` as a CLAIM ARGUMENT (default-pool workers pass
+        # ``"default"``). Tests assert this list to prove the worker
+        # threaded its ctor-configured lane through to the processor.
+        self.claim_lanes: list[tuple[str, str]] = []
         # Worker.__init__ constructs a TaskHeartbeat which calls
         # task_repo.update_heartbeat on the eager first beat, and
         # Worker.run calls task_repo.has_pending_tasks_blocked_by_busy_instance
@@ -44,8 +50,18 @@ class MockTaskProcessor:
         def update_heartbeat(self, task_id):
             return True
 
-    def claim_task(self, worker_id):
+    def claim_task(self, worker_id, lane="default"):
+        """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+        Phase 1 commit 18a31644 widened the production signature to
+        forward the worker's pool-configured ``lane`` as a CLAIM ARGUMENT
+        (``Worker.run`` → ``claim_task(worker_id, lane=self._lane)``);
+        the mock must accept it or ``Worker.run`` raises TypeError. We
+        record the tuple so tests can prove default-pool workers passed
+        their ctor-configured lane through every claim.
+        """
         self.claim_count += 1
+        self.claim_lanes.append((worker_id, lane))
         return None
 
     def run_task(self, task, cancellation_token=None):
@@ -604,6 +620,14 @@ class TestEmptyClaimAttemptsIncrement:
         assert pool._stats["empty_claim_attempts"] >= 1, \
             "Worker should increment empty_claim_attempts when no task found"
 
+        # Lane-routing proof: default-pool workers thread "default"
+        # through every claim (Worker.__init__ ctor lane="default").
+        assert len(mock_processor.claim_lanes) >= 1, \
+            "Worker should have called claim_task at least once"
+        assert all(lane == "default" for _, lane in mock_processor.claim_lanes), \
+            f"All claims should arrive with lane='default' for the default pool; " \
+            f"got lanes: {[lane for _, lane in mock_processor.claim_lanes]}"
+
         pool.stop(timeout=3.0)
 
     def test_empty_claim_attempts_tracked_in_stats(self):
@@ -642,6 +666,9 @@ class TestNotificationWithWorkersRunning:
                 # calls task_repo.update_heartbeat on the eager first
                 # beat. Both must return without raising.
                 self._task_repo = self._MockTaskRepoForMetrics()
+                # Per-claim (worker_id, lane) log — mirrors the Phase 1
+                # 18a31644 contract widening; tests assert this list.
+                self.claim_lanes: list[tuple[str, str]] = []
 
             class _MockTaskRepoForMetrics:
                 def has_pending_tasks_blocked_by_busy_instance(self):
@@ -650,8 +677,17 @@ class TestNotificationWithWorkersRunning:
                 def update_heartbeat(self, task_id):
                     return True
 
-            def claim_task(self, worker_id):
+            def claim_task(self, worker_id, lane="default"):
+                """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+                Phase 1 commit 18a31644 widened the production signature;
+                this mock MUST accept ``lane`` or ``Worker.run`` raises
+                TypeError at ``worker_pool.py:302``. Records the tuple
+                so the test can prove the default-pool worker threaded
+                its ctor-configured lane through every claim.
+                """
                 claim_count[0] += 1
+                self.claim_lanes.append((worker_id, lane))
                 if claim_count[0] == 1:
                     return claimed_task
                 return None
@@ -662,7 +698,8 @@ class TestNotificationWithWorkersRunning:
             def get_pending_count(self):
                 return 0
 
-        pool = WorkerPool(task_processor=OneTaskProcessor(), num_workers=1)
+        one_task_processor = OneTaskProcessor()
+        pool = WorkerPool(task_processor=one_task_processor, num_workers=1)
         pool.start()
 
         # Give worker time to claim
@@ -670,6 +707,14 @@ class TestNotificationWithWorkersRunning:
 
         # Worker should have claimed the task
         assert claim_count[0] >= 1
+
+        # Lane-routing proof: default-pool workers thread "default"
+        # through every claim (Worker.__init__ ctor lane="default").
+        assert len(one_task_processor.claim_lanes) >= 1, \
+            "Worker should have called claim_task at least once"
+        assert all(lane == "default" for _, lane in one_task_processor.claim_lanes), \
+            f"All claims should arrive with lane='default' for the default pool; " \
+            f"got lanes: {[lane for _, lane in one_task_processor.claim_lanes]}"
 
         pool.stop(timeout=3.0)
 

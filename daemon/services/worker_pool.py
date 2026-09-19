@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
@@ -205,6 +205,7 @@ class Worker(threading.Thread):
         usage_limit_retry_jitter_fraction: float = (
             DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
         ),
+        lane: str = "default",
     ):
         """Initialize a worker thread.
 
@@ -242,6 +243,12 @@ class Worker(threading.Thread):
                 schedule steps (3m/5m/10m/15m-cap default).
             usage_limit_retry_jitter_fraction: Per-wake jitter
                 fraction for the usage-limit schedule.
+            lane: Claim-lane routing intent for this worker, forwarded
+                per-claim to ``TaskProcessor.claim_task`` (default
+                ``"default"`` preserves today's behavior; the chat
+                pool's workers pass ``"chat"`` — chat-source-worker-
+                lane, D2/D10.5). A CLAIM ARGUMENT, not processor
+                state.
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
@@ -252,6 +259,8 @@ class Worker(threading.Thread):
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
+        # Claim-lane routing intent (chat-source-worker-lane, Task #8).
+        self._lane = lane
         # Dedicated usage-limit deferral path knobs (W4/W5).
         self._usage_limit_window_seconds = usage_limit_window_seconds
         self._usage_limit_retry_delays = tuple(usage_limit_retry_delays_seconds)
@@ -285,8 +294,14 @@ class Worker(threading.Thread):
             while not self._stop_event.is_set():
                 task = None
                 try:
-                    # Attempt to atomically claim a pending task
-                    task = self._task_processor.claim_task(self.worker_id)
+                    # Attempt to atomically claim a pending task.
+                    # ``lane`` is this worker's routing-intent signal
+                    # (chat-source-worker-lane, Task #8) — forwarded
+                    # per-claim to the shared TaskProcessor; the
+                    # default value preserves the pre-lane behavior.
+                    task = self._task_processor.claim_task(
+                        self.worker_id, lane=self._lane
+                    )
 
                     if task is not None:
                         self._tasks_claimed += 1
@@ -1208,6 +1223,8 @@ class WorkerPool:
         usage_limit_retry_jitter_fraction: float = (
             DEFAULT_USAGE_LIMIT_RETRY_JITTER_FRACTION
         ),
+        worker_id_prefix: str = "worker-",
+        lane: Literal["default", "chat"] = "default",
     ):
         """Initialize the worker pool.
 
@@ -1241,6 +1258,23 @@ class WorkerPool:
                 steps (3m/5m/10m/15m-cap default).
             usage_limit_retry_jitter_fraction: Per-wake jitter fraction
                 for the usage-limit schedule.
+            worker_id_prefix: Prefix for constructed worker ids —
+                worker ``i`` is named ``f"{worker_id_prefix}{i}"``.
+                Default ``"worker-"`` preserves today's shape
+                (``worker-0``, ``worker-1``, ...). The chat pool passes
+                ``"chat-worker-"`` so ``task.worker_id`` lineage
+                distinguishes the pools (chat-source-worker-lane,
+                D10.5).
+            lane: Claim-lane routing intent threaded to every Worker,
+                which forwards it per-claim to
+                ``TaskProcessor.claim_task`` →
+                ``TaskRepository.claim_pending_task``. Default
+                ``"default"`` preserves today's behavior byte-for-byte;
+                the chat pool passes ``"chat"`` (chat-source-worker-
+                lane, Task #8 / reviewer F3 — BOTH kwargs are one
+                seam). The lane is a CLAIM ARGUMENT, never
+                processor state: ``TaskProcessor`` stays the shared
+                singleton across pools.
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
@@ -1250,6 +1284,9 @@ class WorkerPool:
         self._retry_backoff_max = retry_backoff_max
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._timeout_grace_seconds = timeout_grace_seconds
+        # Chat-source worker lane (chat-source-worker-lane, F3/D10.5).
+        self._worker_id_prefix = worker_id_prefix
+        self._lane = lane
         # Dedicated usage-limit deferral path knobs (W4/W5/W7).
         self._usage_limit_window_seconds = usage_limit_window_seconds
         self._usage_limit_retry_delays_seconds = tuple(
@@ -1363,9 +1400,10 @@ class WorkerPool:
 
         for i in range(self._num_workers):
             worker = Worker(
-                worker_id=f"worker-{i}",
+                worker_id=f"{self._worker_id_prefix}{i}",
                 task_processor=self._task_processor,
                 worker_pool=self,
+                lane=self._lane,
                 timeout_minutes=self._timeout_minutes,
                 max_retries=self._max_retries,
                 retry_backoff_base=self._retry_backoff_base,

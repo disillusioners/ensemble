@@ -30,7 +30,7 @@ Exit codes:
   124 — internal timeout (signal.alarm)
 
 Spec: feature/security-boundary-hygiene branch, HEAD ac2c3091 (valid).
-      Gate: daemon/routers/jobs_crud.py:299-316 (is_reserved_source +
+      Gate: daemon/routers/jobs_crud.py:478-495 (is_reserved_source +
       JobValidationError envelope). Schema: daemon/routers/schemas.py:12-22
       (JobCreateRequest.source: str = Field(default="api", min_length=1)).
 """
@@ -255,6 +255,29 @@ PART1_CASES: list[tuple[str, dict[str, Any], str]] = [
         "gate_422",
     ),
 
+    # ── Chat-source prefixes (chat-source-worker-lane, D10.1 Pin 4) ────────
+    # NOT members of RESERVED_SOURCE_PREFIXES — NO census change (the
+    # PART-2 census BLOCKER logic only covers daemon-minted origins;
+    # chat prefixes are adapter-minted user-origin families). They are
+    # gated because they are the ROUTING keys of the dedicated chat
+    # worker lane (CHAT_SOURCE_PREFIXES) and a user-supplied chat
+    # prefix would forge that provenance.
+    (
+        "6h. source: telegram:fake (chat-source prefix — D10.1, NOT reserved)",
+        {"agent_id": "developer", "message": "probe", "source": "telegram:fake"},
+        "gate_422",
+    ),
+    (
+        "6i. source: slack:fake (chat-source prefix — D10.1, NOT reserved)",
+        {"agent_id": "developer", "message": "probe", "source": "slack:fake"},
+        "gate_422",
+    ),
+    (
+        "6j. source: discord:fake (chat-source prefix — D10.1, NOT reserved)",
+        {"agent_id": "developer", "message": "probe", "source": "discord:fake"},
+        "gate_422",
+    ),
+
     # ── MIXED-CASE — pinned deliberate behavior (case-sensitive) ────────────
     (
         "7a. source: System:evil (MIXED-CASE — should NOT gate 422)",
@@ -279,9 +302,9 @@ PART1_CASES: list[tuple[str, dict[str, Any], str]] = [
         "ok",
     ),
     (
-        "8b. source: telegram:123 (legitimate user-source prefix)",
+        "8b. source: telegram:123 (chat-source prefix — D10.1 gate + reviewer F2 FLIP)",
         {"agent_id": "developer", "message": "probe", "source": "telegram:123"},
-        "ok",
+        "gate_422",
     ),
     (
         "8c. source: webhook:x (legitimate user-source prefix)",

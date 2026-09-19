@@ -444,9 +444,21 @@ async def lifespan(app: FastAPI):
     # All three accept None at construction (deferred-wiring pattern)
     # and expose a setter that fans out to live workers, so this call
     # is safe whether the pool was started in between or not.
-    if manager._worker_pool is not None:
-        manager._worker_pool.set_work_resolver(work_resolver)
-        manager._worker_pool.set_watcher_repo(watcher_repo)
+    #
+    # Phase 2 / chat-source-worker-lane (Task #4): the chat
+    # WorkerPool is ALSO a late-wire consumer — chat workers claim
+    # tasks through the SAME TaskProcessor, and when a chat task
+    # completes the SAME notify path runs. Each pool gets the
+    # work_resolver + watcher_repo set independently (each pool owns
+    # its own ``_work_resolver`` / ``_watcher_repo`` attribute per
+    # ``WorkerPool.__init__``).
+    for pool in (
+        manager._worker_pool,
+        manager._chat_worker_pool,
+    ):
+        if pool is not None:
+            pool.set_work_resolver(work_resolver)
+            pool.set_watcher_repo(watcher_repo)
     if manager._task_processor is not None:
         manager._task_processor.set_work_resolver(work_resolver)
         manager._task_processor.set_watcher_repo(watcher_repo)
@@ -561,6 +573,13 @@ async def lifespan(app: FastAPI):
         # landed eligibility but scheduled nothing — see the P1
         # incident on ``feature/fix-wc-wake-resilience``.
         worker_pool=getattr(manager, "_worker_pool", None),
+        # Phase 2 / chat-source-worker-lane (D5 site #10): wire
+        # the manager so the wake fan-out routes through
+        # ``manager._notify_all_pools()`` — both default + chat
+        # pools receive the pulse. ``worker_pool=`` is retained
+        # as a fallback when the manager helper is unavailable
+        # (legacy test fixtures).
+        instance_manager=manager,
     )
     recovery_stats = await job_recovery.recover_on_startup()
     logger.info(f"Job recovery: {recovery_stats}")
@@ -660,6 +679,13 @@ async def lifespan(app: FastAPI):
         instance_repository=getattr(
             manager, "_instance_repository", None
         ),
+        # Phase 2 / chat-source-worker-lane (D5 site #13 ⭐
+        # ctor-widening): the sweep needs the manager reference so
+        # the wake can fan out across BOTH pools (default + chat).
+        # The legacy ``worker_pool=`` arg is retained for backward
+        # compat — the sweep falls back to it when ``manager`` is
+        # None (pre-Phase-2 fixtures).
+        manager=manager,
     )
     # Sanity: refuse to start when the canonical defaults
     # regress (defensive — the config Field constraints enforce

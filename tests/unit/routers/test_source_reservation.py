@@ -21,6 +21,11 @@ Coverage here:
        NOT a user-supplied source vector — its source is hardcoded.
        Documented here so future readers do not mistakenly add the
        same check to ``messages.py`` and double-validate.
+    4. Chat-lane family (chat-source-worker-lane, D10.1):
+       ``CHAT_SOURCE_PREFIXES`` exact-equality + helper-parity +
+       3-vs-5 asymmetry pins (``TestChatSourcePrefixesConstant``),
+       the parametrized gate-compose pin, and the former telegram
+       accept-side pin FLIPPED to rejection (reviewer F2 flip (ii)).
 
 Pre-existing tests still pass:
     * ``tests/integration/test_job_create.py`` — uses default
@@ -187,6 +192,89 @@ class TestReservedSourcePrefixesConstant:
         assert is_reserved_source("Agent:x") is False
         assert is_reserved_source("EXPLORE:inst-1") is False
         assert is_reserved_source("Admin-Endpoint") is False
+
+
+class TestChatSourcePrefixesConstant:
+    """Pin the chat-lane origin family (chat-source-worker-lane, D10.1
+    Pin 2 — exact-equality + helper-parity + asymmetry).
+
+    Mirrors ``TestReservedSourcePrefixesConstant`` above. The chat
+    prefixes are the THREE interactive-chat members of the broader
+    FIVE-member user-origin set (``_USER_ORIGIN_PREFIXES``,
+    ``daemon/tools/upgrade_journal.py``): ``webhook:`` /
+    ``whatsapp:`` are deliberately EXCLUDED (CI/automation vs
+    interactive chat). Any future member change MUST edit this pin
+    AND the ``is_chat_source`` helper consumers in the same commit —
+    a silent membership change would re-route lane traffic."""
+
+    def test_chat_source_prefixes_exist(self):
+        """The tuple MUST live in ``daemon.constants`` with the exact
+        three interactive-chat members (exact-equality pin — mirrors
+        ``test_reserved_source_prefixes_full_membership``)."""
+        from daemon.constants import CHAT_SOURCE_PREFIXES
+
+        assert CHAT_SOURCE_PREFIXES == ("telegram:", "slack:", "discord:")
+
+        # Zero overlap with the reserved INTERNAL set — chat prefixes
+        # are user-origin families, not daemon-minted internals (no
+        # e2e census change).
+        from daemon.constants import RESERVED_SOURCE_PREFIXES
+
+        assert not (set(CHAT_SOURCE_PREFIXES) & RESERVED_SOURCE_PREFIXES)
+
+    def test_chat_source_prefixes_not_in_reserved_set(self):
+        """Each chat prefix is NOT a ``RESERVED_SOURCE_PREFIXES``
+        member and does NOT collide with any reserved member — the
+        /api/jobs gates compose on disjoint families."""
+        from daemon.constants import (
+            CHAT_SOURCE_PREFIXES,
+            RESERVED_SOURCE_PREFIXES,
+        )
+
+        for prefix in CHAT_SOURCE_PREFIXES:
+            assert prefix not in RESERVED_SOURCE_PREFIXES
+
+    def test_helper_function_is_chat_source(self):
+        """The shared helper returns True for chat-prefixed values and
+        False for everything else (parity with the reserved helper's
+        edge-case contract: None/empty → False)."""
+        from daemon.constants import is_chat_source
+
+        # Chat families (prefix-matched — realistic production shapes,
+        # never the bare prefix).
+        assert is_chat_source("telegram:alice:1") is True
+        assert is_chat_source("slack:U123:thread") is True
+        assert is_chat_source("discord:guild-42:user-7") is True
+        assert is_chat_source("telegram:user:1") is True
+
+        # Non-chat values — must NOT be flagged.
+        assert is_chat_source("api") is False
+        assert is_chat_source("webhook:gh-hook") is False
+        assert is_chat_source("custom-app") is False
+
+        # 3-vs-5 asymmetry pin (A7.3): the excluded user-origin
+        # prefixes stay OUT of the chat lane.
+        assert is_chat_source("webhook:gh-hook") is False
+        assert is_chat_source("whatsapp:1234") is False
+
+        # Reserved INTERNAL values are not chat origins either.
+        assert is_chat_source("system:xyz") is False
+        assert is_chat_source("agent:developer") is False
+
+        # Edge cases — None and empty strings are NOT chat sources.
+        assert is_chat_source(None) is False
+        assert is_chat_source("") is False
+
+    def test_helper_is_chat_source_deliberately_case_sensitive(self):
+        """Case-variant spellings are NOT chat origins (pinned
+        invariant, mirrors the reserved helper's case-sensitivity
+        decision). The mint site stamps the exact lowercase literals;
+        a case-variant body value is inert free-form user input."""
+        from daemon.constants import is_chat_source
+
+        assert is_chat_source("TELEGRAM:foo") is False
+        assert is_chat_source("Slack:U123") is False
+        assert is_chat_source("DISCORD:guild:1") is False
 
 
 # ---------------------------------------------------------------------------
@@ -723,13 +811,24 @@ class TestCreateJobSourceBoundary:
         kwargs = stub.enqueue.call_args.kwargs
         assert kwargs["source"] == "api"
 
-    def test_create_job_accepts_legitimate_custom_user_source(
+    def test_create_job_rejects_chat_prefix_user_source(
         self, create_job_client
     ):
-        """A legitimate user-supplied source string that does NOT match
-        any reserved prefix must pass through unchanged. This is the
-        primary use case for the field (``telegram:user:1``,
-        ``webhook:gh-hook``, custom apps)."""
+        """``source='telegram:user:1'`` must be rejected with 422 +
+        the ``JobValidationError`` envelope (chat-source-worker-lane,
+        D10.1 + reviewer F2 flip (ii) — FORMER ACCEPT-SIDE PIN
+        FLIPPED; no accept-side expectation remains for chat
+        prefixes).
+
+        Telegram/Slack/Discord rows are minted ONLY by configured
+        source adapters (``daemon/sources/registry.py:857``) and are
+        the ROUTING keys of the dedicated chat worker lane
+        (``CHAT_SOURCE_PREFIXES``) — a user-supplied chat prefix in
+        the HTTP body would forge that provenance. The former
+        accept-side example value has been replaced by
+        ``test_create_job_accepts_non_chat_user_source_prefix``
+        (``webhook:gh-hook``) which keeps the legitimate-custom-user-
+        source coverage on a still-legitimate value."""
         from daemon.routers.jobs_crud import get_job_queue_service
 
         stub = _stub_enqueue_service()
@@ -744,10 +843,45 @@ class TestCreateJobSourceBoundary:
             },
         )
 
+        assert resp.status_code == 422, resp.text
+        # JobValidationError envelope — same shape as the
+        # reserved-source gate (detail.error == "Validation Error"
+        # with a per-field details list naming "source").
+        body = resp.json()
+        assert body["detail"]["error"] == "Validation Error"
+        assert any(
+            d.get("field") == "source" for d in body["detail"]["details"]
+        )
+        # Validation rejected — service was NEVER called.
+        stub.enqueue.assert_not_called()
+
+    def test_create_job_accepts_non_chat_user_source_prefix(
+        self, create_job_client
+    ):
+        """A legitimate user-supplied source prefix that is NOT in
+        ``CHAT_SOURCE_PREFIXES`` (nor reserved) must STILL pass
+        through unchanged — proves the chat gate is a narrow addition
+        and the free-form user-source contract survives for
+        ``webhook:gh-hook`` / custom apps (the replacement coverage
+        for the flipped telegram accept-side pin above)."""
+        from daemon.routers.jobs_crud import get_job_queue_service
+
+        stub = _stub_enqueue_service()
+        get_job_queue_service.set_service(stub)
+
+        resp = create_job_client.post(
+            "/jobs",
+            json={
+                "agent_id": "developer",
+                "message": "hi",
+                "source": "webhook:gh-hook",
+            },
+        )
+
         assert resp.status_code == 500, resp.text  # sentinel -> 500
         stub.enqueue.assert_called_once()
         kwargs = stub.enqueue.call_args.kwargs
-        assert kwargs["source"] == "telegram:user:1"
+        assert kwargs["source"] == "webhook:gh-hook"
 
     def test_create_job_rejects_scheduler_source(
         self, create_job_client
@@ -776,6 +910,58 @@ class TestCreateJobSourceBoundary:
         )
 
         assert resp.status_code == 422, resp.text
+        stub.enqueue.assert_not_called()
+
+    # --- Chat-prefix gate (chat-source-worker-lane, D10.1 Pin 3) -------
+
+    @pytest.mark.parametrize(
+        ("source_value", "family"),
+        [
+            # Chat-prefix family — the NEW gate (chat worker lane).
+            ("telegram:fake", "chat"),
+            ("slack:fake", "chat"),
+            ("discord:fake", "chat"),
+            # Reserved-prefix family — the EXISTING gate. Both
+            # parametrized together to prove the gates COMPOSE without
+            # regression: a value is rejected iff it matches either
+            # family, and neither gate disturbs the other.
+            ("agent:foo", "reserved"),
+            ("internal_agent:foo", "reserved"),
+            ("system:foo", "reserved"),
+        ],
+    )
+    def test_create_job_rejects_chat_prefix(
+        self, create_job_client, source_value, family
+    ):
+        """Parametrized gate-behavior pin: each chat prefix AND each
+        reserved prefix is rejected with 422 + the SAME
+        ``JobValidationError`` envelope (D10.1 Pin 3 — gates compose).
+
+        Chat values are fake on purpose: the mint site always appends
+        ``:<external_user_id>`` to a REAL registered source_id, but
+        the gate keys on the PREFIX only — ``telegram:fake`` matches
+        ``telegram:`` and is rejected at the boundary."""
+        from daemon.routers.jobs_crud import get_job_queue_service
+
+        stub = _stub_enqueue_service()
+        get_job_queue_service.set_service(stub)
+
+        resp = create_job_client.post(
+            "/jobs",
+            json={
+                "agent_id": "developer",
+                "message": "hi",
+                "source": source_value,
+            },
+        )
+
+        assert resp.status_code == 422, (family, source_value, resp.text)
+        body = resp.json()
+        assert body["detail"]["error"] == "Validation Error"
+        assert any(
+            d.get("field") == "source" for d in body["detail"]["details"]
+        )
+        # Validation rejected — service was NEVER called.
         stub.enqueue.assert_not_called()
 
 

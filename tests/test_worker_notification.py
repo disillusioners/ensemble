@@ -46,6 +46,12 @@ class MockTaskProcessor:
         self.claim_count = 0
         self.run_count = 0
         self.claimed_tasks = []
+        # Per-claim (worker_id, lane) log — mirrors the Phase 1 18a31644
+        # contract widening: real ``TaskProcessor.claim_task`` now takes
+        # ``lane`` as a CLAIM ARGUMENT (default-pool workers pass
+        # ``"default"``). Tests assert this list to prove the worker
+        # threaded its ctor-configured lane through to the processor.
+        self.claim_lanes: list[tuple[str, str]] = []
         # Worker.__init__ constructs a TaskHeartbeat which calls
         # task_repo.update_heartbeat on the eager first beat, and
         # Worker.run calls task_repo.has_pending_tasks_blocked_by_busy_instance
@@ -59,8 +65,18 @@ class MockTaskProcessor:
         def update_heartbeat(self, task_id):
             return True
 
-    def claim_task(self, worker_id):
+    def claim_task(self, worker_id, lane="default"):
+        """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+        Phase 1 commit 18a31644 widened the production signature to
+        forward the worker's pool-configured ``lane`` as a CLAIM ARGUMENT
+        (``Worker.run`` → ``claim_task(worker_id, lane=self._lane)``);
+        the mock must accept it or ``Worker.run`` raises TypeError. We
+        record the tuple so tests can prove default-pool workers passed
+        their ctor-configured lane through every claim.
+        """
         self.claim_count += 1
+        self.claim_lanes.append((worker_id, lane))
         return None  # Always signal no work available
 
     def run_task(self, task, cancellation_token=None):
@@ -264,7 +280,7 @@ class MockTask:
 
 class IntegrationTaskProcessor:
     """Task processor for integration tests that can simulate real behavior."""
-    
+
     def __init__(self, pool=None):
         self.claim_count = 0
         self.run_count = 0
@@ -273,22 +289,37 @@ class IntegrationTaskProcessor:
         self.run_exception = None  # Exception to throw on run_task
         self.run_called = threading.Event()
         self._run_count_at_last_set = 0  # Track run_count when event was last set
+        # Per-claim (worker_id, lane) log — mirrors the Phase 1 18a31644
+        # contract widening: real ``TaskProcessor.claim_task`` now takes
+        # ``lane`` as a CLAIM ARGUMENT. The default-pool WorkerPool
+        # constructs workers with ``lane="default"`` (see
+        # ``WorkerPool.__init__`` / ``Worker.__init__``); tests assert
+        # every recorded claim arrived with that lane.
+        self.claim_lanes: list[tuple[str, str]] = []
         # Use _task_repo to match what Worker code expects
         self._task_repo = MockTaskRepo(
             task_queue=self.tasks_to_return,
             notify_callback=pool.notify_work if pool else None
         )
-    
-    def claim_task(self, worker_id: str):
-        """Return next task from queue, or None if empty."""
+
+    def claim_task(self, worker_id, lane="default"):
+        """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+        Phase 1 commit 18a31644 widened the production signature; this
+        mock MUST accept ``lane`` or ``Worker.run`` raises TypeError at
+        ``worker_pool.py:302``. We record the tuple so tests can prove
+        every default-pool worker threaded its ctor-configured lane
+        through to the processor.
+        """
         self.claim_count += 1
+        self.claim_lanes.append((worker_id, lane))
         if self.tasks_to_return:
             task = self.tasks_to_return.pop(0)
             task.worker_id = worker_id
             self.claimed_tasks.append(task)
             return task
         return None
-    
+
     def run_task(self, task, cancellation_token=None):
         """Run the task (mock - just track it was called)."""
         self.run_count += 1
@@ -321,7 +352,7 @@ class IntegrationTaskProcessor:
 
 class TimeoutTriggeringProcessor:
     """Processor that triggers timeout cancellation on specific tasks."""
-    
+
     def __init__(self, pool=None):
         self.claim_count = 0
         self.run_count = 0
@@ -329,15 +360,28 @@ class TimeoutTriggeringProcessor:
         self.tasks_to_return = []
         self.tasks_to_timeout = set()  # Task IDs that should timeout
         self.run_called = threading.Event()
+        # Per-claim (worker_id, lane) log — mirrors the Phase 1 18a31644
+        # contract widening: real ``TaskProcessor.claim_task`` now takes
+        # ``lane`` as a CLAIM ARGUMENT (default-pool workers pass
+        # ``"default"``). Tests assert this list to prove the worker
+        # threaded its ctor-configured lane through to the processor.
+        self.claim_lanes: list[tuple[str, str]] = []
         self._task_repo = MockTaskRepo(
             task_queue=self.tasks_to_return,
             notify_callback=pool.notify_work if pool else None
         )
         self._monitor = None  # Set by worker when created
-    
-    def claim_task(self, worker_id: str):
-        """Return next task from queue, or None if empty."""
+
+    def claim_task(self, worker_id, lane="default"):
+        """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+        Phase 1 commit 18a31644 widened the production signature; this
+        mock MUST accept ``lane`` or ``Worker.run`` raises TypeError at
+        ``worker_pool.py:302``. Records the tuple so tests can prove
+        every default-pool worker threaded its ctor-configured lane.
+        """
         self.claim_count += 1
+        self.claim_lanes.append((worker_id, lane))
         if self.tasks_to_return:
             task = self.tasks_to_return.pop(0)
             task.worker_id = worker_id
@@ -475,10 +519,18 @@ class TestWorkerLifecycleIntegration:
                 f"run_task should be called once, got {processor.run_count}"
             assert len(processor.claimed_tasks) == 1, \
                 f"Worker should have claimed 1 task, got {len(processor.claimed_tasks)}"
-            
+
+            # Lane-routing proof: default-pool workers thread "default"
+            # through every claim (Worker.__init__ ctor lane="default").
+            assert len(processor.claim_lanes) >= 1, \
+                "Worker should have called claim_task at least once"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default' for the default pool; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)
-    
+
     def test_real_worker_goes_idle_when_no_tasks(self):
         """Real Worker should go idle (not claim) when no tasks available."""
         processor = IntegrationTaskProcessor()
@@ -512,7 +564,15 @@ class TestWorkerLifecycleIntegration:
                 f"Worker should wake and process task after notify (got {processor.run_count})"
             assert processor.run_count == 1, \
                 f"Should process 1 task after notify, got {processor.run_count}"
-            
+
+            # Lane-routing proof: every recorded claim was a "default" claim
+            # (default pool's Worker.__init__ ctor lane="default").
+            assert len(processor.claim_lanes) >= 1, \
+                "Worker should have called claim_task at least once"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default'; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)
     
@@ -559,14 +619,21 @@ class TestWorkerLifecycleIntegration:
             
             assert processor.run_count == 2, \
                 f"Both tasks should be attempted, got {processor.run_count}"
-            
+
             # Verify the worker was woken by notification, not timeout
             # If we had used a 0.5s sleep, the 1s timeout might have expired first,
             # causing the worker to loop and find task #2 without using notify
-            
+
             # Worker should still be alive (recovered)
             assert pool.is_running(), "Worker pool should still be running after error"
-            
+
+            # Lane-routing proof: every claim from the default pool used "default".
+            assert len(processor.claim_lanes) >= 2, \
+                "Worker should have called claim_task at least twice (both tasks)"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default'; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)
     
@@ -604,7 +671,14 @@ class TestWorkerLifecycleIntegration:
                 f"Both original and retry tasks should run, got {processor.run_count}"
             assert processor._task_repo.schedule_retry_count >= 1, \
                 "schedule_retry should be called at least once"
-            
+
+            # Lane-routing proof: every claim from the default pool used "default".
+            assert len(processor.claim_lanes) >= 2, \
+                "Worker should have called claim_task at least twice (initial + retry)"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default'; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)
     
@@ -649,7 +723,14 @@ class TestWorkerLifecycleIntegration:
                 f"Worker should process task after proper notification (got {processor.run_count})"
             assert processor.run_count == 1, \
                 f"Should process 1 task, got {processor.run_count}"
-            
+
+            # Lane-routing proof: every claim from the default pool used "default".
+            assert len(processor.claim_lanes) >= 1, \
+                "Worker should have called claim_task at least once"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default'; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)
     
@@ -694,6 +775,13 @@ class TestWorkerLifecycleIntegration:
             
             assert len(worker_ids) == 2, \
                 f"Two different workers should claim tasks, got {len(worker_ids)}: {worker_ids}"
-            
+
+            # Lane-routing proof: every claim from the default pool used "default".
+            assert len(processor.claim_lanes) >= 2, \
+                "Workers should have called claim_task at least twice (one per task)"
+            assert all(lane == "default" for _, lane in processor.claim_lanes), \
+                f"All claims should arrive with lane='default'; " \
+                f"got lanes: {[lane for _, lane in processor.claim_lanes]}"
+
         finally:
             pool.stop(timeout=5.0)

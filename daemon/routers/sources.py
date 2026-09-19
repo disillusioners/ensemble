@@ -21,7 +21,8 @@ from daemon.models import (
     SourceType,
     SourceUpdate,
 )
-from daemon.constants import MAX_CREDENTIALS_SIZE
+from daemon.constants import CHAT_SOURCE_PREFIXES, MAX_CREDENTIALS_SIZE
+from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,85 @@ async def create_source(source_create: SourceCreate, request: Request):
                 message=f"Source type not supported: {source_create.source_type}. Supported: {supported_types}"
             ).model_dump()
         )
+    
+    # Chat-source registration validator (chat-source-worker-lane,
+    # D10.1 architect amendment A7.2 — closes the OPERATOR vector the
+    # HTTP /jobs gate cannot reach).
+    #
+    # TRUE behavior (this validator does NOT normalize operator
+    # input — it only checks that the lowercased id matches the type
+    # name, then passes the RAW id downstream; an earlier comment
+    # block here claimed a normalization that does NOT happen):
+    #
+    #   * Validation (line below): case-INSENSITIVE equality —
+    #     ``source_id.lower() != source_type.value`` ⇒ 422.
+    #     ``source_id="Telegram"`` + ``source_type="telegram"``
+    #     PASSES (returns 201).
+    #   * Mint (``daemon/sources/registry.py:857``):
+    #     ``f"{source_id}:{external_user_id}"`` uses the RAW
+    #     ``source_id`` verbatim — there is NO normalization seam
+    #     between this validator and the mint.
+    #   * Consequence: a registered ``source_id="Telegram"`` mints
+    #     rows like ``Telegram:alice`` whose case-VARIANT prefix is
+    #     NEVER matched by the case-sensitive lane predicate
+    #     ``LIKE 'telegram:%'`` (``CHAT_SOURCE_PREFIXES`` carries
+    #     lowercase prefixes only — same constant the validator
+    #     derives ``chat_source_types`` from). The row therefore
+    #     rides the DEFAULT worker lane with ZERO runtime signal —
+    #     exactly the misconfig the validator is designed to catch,
+    #     except the case-blind comparison lets mixed-case input
+    #     slip past validation and manifest only at lane-routing
+    #     time. A cross-type misconfig (``source_type="discord"`` +
+    #     ``source_id="telegram"``) still 422s and is unaffected.
+    #
+    # NAMED OPERATOR FOLLOW-UP (deliberately NOT changed in this
+    # pass — surgical doc-accuracy only): tightening the comparison
+    # to case-SENSITIVE (``source_id != source_type.value`` ⇒ 422)
+    # would force operators to lowercase at registration, producing
+    # the canonical lowercase prefix at the mint and closing the
+    # silent-default-lane-routing footgun above. That is an
+    # operator-contract change (mixed-case pre-existing
+    # registrations would need a documented migration path) and
+    # belongs in a separate PR.
+    #
+    # The chat TYPE-name set is DERIVED from ``CHAT_SOURCE_PREFIXES``
+    # (colon stripped) — a literal ``{"telegram", "slack", "discord"}``
+    # here would fork the membership the 5-pin pattern exists to
+    # prevent. String membership via ``.value`` (approver note (n)):
+    # ``SourceType`` is a ``str`` Enum, but ``.value`` comparison is
+    # the safe form regardless of Pydantic coercion semantics.
+    #
+    # Deliberate scope decision (A7.2): operators needing custom
+    # source_ids use a non-chat adapter type. Forward-looking gate
+    # only — pre-existing misconfigured sources pass silently until
+    # re-registered (audit WARNING is a P3 follow-up). Envelope: the
+    # SAME ``JobValidationError`` shape the /api/jobs forged-source
+    # gates use (jobs_crud.py ``is_reserved_source`` /
+    # ``is_chat_source`` gates) so validation failures look identical
+    # to operators across both surfaces.
+    chat_source_types = {prefix.rstrip(":") for prefix in CHAT_SOURCE_PREFIXES}
+    if source_create.source_type.value in chat_source_types:
+        if source_create.source_id.lower() != source_create.source_type.value:
+            raise HTTPException(
+                status_code=422,
+                detail=JobValidationError(
+                    error="Validation Error",
+                    details=[
+                        {
+                            "field": "source_id",
+                            "message": (
+                                f"For source_type '{source_create.source_type.value}' "
+                                "the source_id must equal the type name "
+                                "(case-insensitive) so adapter messages "
+                                "mint into the chat lane "
+                                f"(got '{source_create.source_id}'). "
+                                "Operators needing a custom source_id "
+                                "must use a non-chat adapter type."
+                            ),
+                        }
+                    ],
+                ).model_dump(),
+            )
     
     # For scheduler sources, validate instance_mode in config
     instance_mode = source_create.config.get("instance_mode")

@@ -1589,10 +1589,36 @@ class WaitingChildrenWatchdog:
                 # benign). Wrapped in try/except so a transient
                 # pool-side blip does NOT abort the sweep (A3 sweep
                 # is the systemic backstop).
-                worker_pool = getattr(
+                # Phase 2 / chat-source-worker-lane (D5): route
+                # through the manager helper — both default + chat
+                # pools receive the wake so freshly-eligible rows on
+                # either lane surface in the next claim cycle. The
+                # helper None-guards every pool and per-pool
+                # exceptions are swallowed (A3 sweep is the systemic
+                # backstop).
+                #
+                # ``__dict__``-check on the manager avoids the Mock
+                # auto-attribute hazard (see child_reports.py / D5
+                # site #9 for the rationale).
+                manager_dict = getattr(self._manager, "__dict__", {})
+                notify_pools = manager_dict.get("_notify_all_pools")
+                if notify_pools is not None:
+                    try:
+                        notify_pools()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"[Watchdog] wedge-pass direct "
+                            f"_notify_all_pools() raised {notify_err!r} "
+                            f"for parent {parent_id[:8]}... — "
+                            f"the A3 sweep is the systemic backstop"
+                        )
+                elif getattr(
                     self._manager, "_worker_pool", None
-                )
-                if worker_pool is not None:
+                ) is not None:
+                    # Pre-Phase-2 manager shape — fall through to
+                    # the singleton-attribute reach (legacy test
+                    # fixture / pre-wiring lifespan).
+                    worker_pool = self._manager._worker_pool
                     try:
                         _notify_result = worker_pool.notify_work()
                         # Production ``WorkerPool.notify_work()`` is

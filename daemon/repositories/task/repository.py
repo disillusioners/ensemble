@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
+from daemon.constants import CHAT_SOURCE_PREFIXES
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.feature_flags import TURN_RECONCILER_DIRECT_WRITE_PARITY
 from daemon.services.timestamps import (
@@ -39,6 +40,96 @@ from ..job_queue.models import AdmissionState, JobItem, active_admission_states_
 from .models import SuspensionReason, Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
+
+
+# ── Chat-source lane (chat-source-worker-lane, D1/N7/E2) ─────────────────────
+#
+# Lane values for :meth:`TaskRepository.claim_pending_task`. The lane
+# is a routing-INTENT signal from the calling pool; the row-level
+# enforcement is the source-prefix predicate folded into the claim's
+# WHERE clause (below).
+TASK_LANE_DEFAULT: str = "default"
+TASK_LANE_CHAT: str = "chat"
+
+
+def _chat_source_exists_sql() -> str:
+    """Render the correlated chat-source EXISTS clause as literal SQL.
+
+    Chosen form (D1/approver N7 — stated in the docstring as
+    required): INLINE LITERALS. The claim seam composes raw
+    ``text()`` SQL, so the portable ``sqlalchemy.or_(...)`` shape from
+    the plan is the PORTABILITY SPEC, rendered here as plain SQL
+    text. ``CHAT_SOURCE_PREFIXES`` is a compile-time constant tuple
+    (``daemon/constants.py``), so the rendered SQL is deterministically
+    known at module load and NO user input ever flows through the
+    literal — interpolation is safe. The rendered clause is IDENTICAL
+    on PostgreSQL and SQLite::
+
+        EXISTS (SELECT 1 FROM message_queue
+                WHERE message_queue.message_id = task.message_id
+                  AND (message_queue.source LIKE 'telegram:%'
+                       OR message_queue.source LIKE 'slack:%'
+                       OR message_queue.source LIKE 'discord:%'))
+
+    Prefix semantics: the tuple members already carry the trailing
+    colon, so ``p + %`` is the wildcard form (D1 reviewer F1 — a bare
+    ``LIKE 'telegram:'`` would be exact-match and silently match
+    nothing). Correlated on the candidate row's ``message_id`` (a PK
+    probe into ``message_queue``; ``source`` is a residual filter on
+    the already-fetched row — NO index migration per D1/A1.3). LIKE
+    case-sensitivity: PG is case-sensitive by default; SQLite is
+    case-insensitive for ASCII unless ``PRAGMA case_sensitive_like =
+    ON`` is issued — the test harnesses issue the PRAGMA (F9) so
+    fixture behavior matches PG.
+    """
+    like_clauses = " OR ".join(
+        f"message_queue.source LIKE '{prefix}%'" for prefix in CHAT_SOURCE_PREFIXES
+    )
+    return (
+        "EXISTS ("
+        "SELECT 1 FROM message_queue "
+        "WHERE message_queue.message_id = task.message_id "
+        f"AND ({like_clauses}))"
+    )
+
+
+_CHAT_SOURCE_EXISTS_SQL = _chat_source_exists_sql()
+
+# ── B1 chat-lane-active flag (chat-source-worker-lane, B1/E2) ────────────────
+#
+# SINGLE shared source of truth for "is the chat worker pool live?".
+# Module-level state (NOT a per-repository-instance copy): every
+# TaskRepository instance — including the separate ones constructed by
+# the manager's ``discard_on_startup`` and ``on_pending_task`` lambdas
+# — reads the SAME value at claim time (per-claim read, never a
+# construction-time snapshot, per E2).
+#
+# Lifecycle (Phase 2 wiring; NEVER a one-way boot latch):
+#   * default False (fail-open) — Phase 1 alone behaves exactly like
+#     today: default-lane claims pick chat rows up, so nothing is
+#     stranded while the chat pool does not exist;
+#   * set True at chat-pool construction (strict two-way per D2);
+#   * set False at chat-pool teardown (fail-open restored).
+# Settable from tests via :func:`set_chat_lane_active`. Phase 2 wires
+# the setter from ``InstanceManager`` chat-pool construction/teardown.
+_chat_lane_active: bool = False
+
+
+def set_chat_lane_active(active: bool) -> None:
+    """Set the shared chat-lane-active flag (B1 transport seam).
+
+    Phase 2 calls ``set_chat_lane_active(True)`` when the chat worker
+    pool constructs and ``set_chat_lane_active(False)`` at teardown.
+    Idempotent; safe to call repeatedly.
+    """
+    global _chat_lane_active
+    _chat_lane_active = bool(active)
+
+
+def is_chat_lane_active() -> bool:
+    """Read the shared chat-lane-active flag (per-claim read)."""
+    return _chat_lane_active
+
 
 
 class DirectWriteError(RuntimeError):
@@ -1479,12 +1570,52 @@ class TaskRepository:
     def claim_pending_task(
         self,
         worker_id: str,
+        lane: str = "default",
     ) -> Task | None:
         """Atomically claim the next eligible pending task.
 
         Only claims tasks that are ready (no backoff delay remaining).
         Uses UPDATE-RETURNING pattern for SQLite compatibility.
         Only one worker can claim a task at a time.
+
+        Lane routing (chat-source-worker-lane, D1/D2 — note (d)):
+        ``lane`` is a routing-INTENT signal from the calling pool
+        (``"default"`` or ``"chat"`` — the pool declares which work
+        family it wants). The actual row-level enforcement lives in
+        the source-prefix predicate folded into the WHERE clause
+        below (a correlated EXISTS on ``message_queue.source``
+        against ``CHAT_SOURCE_PREFIXES``); without that predicate
+        the parameter has no effect on claimability. Enforcement
+        semantics:
+
+        * ``lane="chat"``: the candidate row MUST carry a
+          chat-prefixed source (EXISTS required — strict; the chat
+          pool is the chat-only consumer, D2).
+        * ``lane="default"``: the candidate row must NOT carry a
+          chat-prefixed source (NOT EXISTS) — BUT only when the B1
+          chat-lane-active flag (``is_chat_lane_active()``) is True.
+          When the flag is False (fail-open default), the NOT EXISTS
+          clause is OMITTED and default-lane claims pick chat rows up
+          exactly like the pre-lane code did — no telegram:/slack:/
+          discord: row can be stranded while the chat pool does not
+          exist. The flag is a SINGLE shared source of truth (module
+          state in this module — settable via
+          :func:`set_chat_lane_active`), read PER-CLAIM (never a
+          construction-time snapshot), flipped True at chat-pool
+          construction and False at chat-pool teardown (Phase 2
+          wiring) — NEVER a one-way boot latch.
+
+        Concurrency invariants (D1/A1.2 — PRE-EXISTING, unchanged by
+        the lane predicate, explicitly OUT OF SCOPE): the claim shape
+        is a scalar subquery with NO ``FOR UPDATE SKIP LOCKED``; two
+        concurrent claimers can project the same candidate id and
+        the outer UPDATE's row lock arbitrates (the loser gets 0
+        rows and returns None even when other eligible rows exist).
+        This property predates the lane change (single-pool code has
+        had it since the 2026-07 queue-awareness fix); the lane
+        predicate preserves it, and a second pool adds a second
+        concurrent claimer class but NO new failure mode. Do NOT
+        attempt to fix in this code path.
 
         Claim order (terminal-report wake, 2026-09-07): FIFO within
         tier — PROCESS_REPORT candidates rank FIRST (the wake lane,
@@ -1536,10 +1667,37 @@ class TaskRepository:
 
         Args:
             worker_id: ID of the worker claiming the task.
+            lane: Routing-intent signal from the calling pool
+                (``"default"`` or ``"chat"``). The row-level
+                enforcement lives in the source-prefix predicate
+                folded into the WHERE clause; without that predicate
+                this parameter has no effect on claimability (note
+                (d)). Unknown values raise ``ValueError`` — a typo'd
+                lane must fail loud, not silently claim like
+                ``"default"``.
 
         Returns:
             Claimed Task object or None if no pending tasks ready.
+
+        Raises:
+            ValueError: If ``lane`` is not ``"default"`` or ``"chat"``.
         """
+        if lane not in (TASK_LANE_DEFAULT, TASK_LANE_CHAT):
+            raise ValueError(
+                f"Unknown lane {lane!r} — expected "
+                f"'{TASK_LANE_DEFAULT}' or '{TASK_LANE_CHAT}'"
+            )
+        # B1 lane gate: composed PER-CLAIM (the flag is read here,
+        # not at construction time — E2). lane="chat" requires the
+        # EXISTS; lane="default" requires NOT EXISTS only when the
+        # chat lane is active (fail-open otherwise — the empty gate
+        # string renders as today's behavior).
+        if lane == TASK_LANE_CHAT:
+            lane_gate_sql = f"AND {_CHAT_SOURCE_EXISTS_SQL}"
+        elif is_chat_lane_active():
+            lane_gate_sql = f"AND NOT {_CHAT_SOURCE_EXISTS_SQL}"
+        else:
+            lane_gate_sql = ""
         now_aware = now_utc()
         # Naive-UTC digits for naive timestamp binds (DC-A fix —
         # unaware binds into naive cols are stored verbatim; aware
@@ -1689,6 +1847,22 @@ class TaskRepository:
                           AND _qi.admission_state = '{AdmissionState.QUEUED.value}'
                           AND _qi.deleted_at IS NULL
                     )
+                    -- Chat-source lane gate (chat-source-worker-lane,
+                    -- D1/D2/B1 — Tasks #6-7). Composed in Python per
+                    -- claim:
+                    --   * lane="chat"                    -> AND EXISTS (...chat-prefix...)
+                    --   * lane="default", flag active    -> AND NOT EXISTS (...chat-prefix...)
+                    --   * lane="default", flag inactive  -> renders EMPTY (fail-open,
+                    --     B1: default lane claims chat rows like the pre-lane code)
+                    -- Strict two-way isolation: neither lane ever
+                    -- overflows into the other (D2). No index on
+                    -- message_queue.source — the correlated subquery
+                    -- is driven by the message_id PK probe; source is
+                    -- a residual filter on the already-fetched row
+                    -- (D1/A1.3). Pre-existing claim-skew invariant
+                    -- (no SKIP LOCKED) unchanged — see the method
+                    -- docstring.
+                    {lane_gate_sql}
                     AND instance_id NOT IN (
                         -- Per-instance concurrency gate.
                         -- A pending task is claimable only if NO

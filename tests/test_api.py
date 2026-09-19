@@ -976,7 +976,7 @@ async def test_create_source_success(client, mock_manager):
     response = await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Telegram Bot",
             "config": {"polling_enabled": True},
@@ -987,7 +987,7 @@ async def test_create_source_success(client, mock_manager):
     
     assert response.status_code == 201
     data = response.json()
-    assert data["source_id"] == "telegram-test"
+    assert data["source_id"] == "telegram"
     assert data["source_type"] == "telegram"
     assert data["name"] == "Test Telegram Bot"
     assert data["status"] == "stopped"
@@ -1000,7 +1000,7 @@ async def test_create_source_duplicate(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1013,7 +1013,7 @@ async def test_create_source_duplicate(client, mock_manager):
     response = await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Another Bot",
             "config": {},
@@ -1034,7 +1034,7 @@ async def test_get_source_success(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1043,11 +1043,11 @@ async def test_get_source_success(client, mock_manager):
         }
     )
     
-    response = await client.get("/sources/telegram-test")
+    response = await client.get("/sources/telegram")
     
     assert response.status_code == 200
     data = response.json()
-    assert data["source_id"] == "telegram-test"
+    assert data["source_id"] == "telegram"
     assert data["source_type"] == "telegram"
 
 
@@ -1068,7 +1068,7 @@ async def test_update_source_success(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1078,7 +1078,7 @@ async def test_update_source_success(client, mock_manager):
     )
     
     response = await client.put(
-        "/sources/telegram-test",
+        "/sources/telegram",
         json={
             "name": "Updated Bot Name",
             "enabled": False
@@ -1098,7 +1098,7 @@ async def test_delete_source_success(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1107,14 +1107,14 @@ async def test_delete_source_success(client, mock_manager):
         }
     )
     
-    response = await client.delete("/sources/telegram-test")
+    response = await client.delete("/sources/telegram")
     
     assert response.status_code == 200
     data = response.json()
     assert data["deleted"] is True
     
     # Verify it's gone
-    get_response = await client.get("/sources/telegram-test")
+    get_response = await client.get("/sources/telegram")
     assert get_response.status_code == 404
 
 
@@ -1145,7 +1145,7 @@ async def test_delete_source_cascades_to_mappings(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1157,19 +1157,19 @@ async def test_delete_source_cascades_to_mappings(client, mock_manager):
     # Create a mapping directly in DB (since endpoint requires instance spawning)
     save_instance_mapping(
         conn=mock_manager.conn,
-        mapping_id="telegram-test:123456",
-        source_id="telegram-test",
+        mapping_id="telegram:123456",
+        source_id="telegram",
         external_user_id="123456",
         agent_instance_id="instance-abc",
         agent_dir="./agents/developer",
     )
     
     # Delete the source
-    response = await client.delete("/sources/telegram-test")
+    response = await client.delete("/sources/telegram")
     assert response.status_code == 200
     
     # Verify mappings are gone (source deleted, so 404)
-    get_response = await client.get("/sources/telegram-test/mappings")
+    get_response = await client.get("/sources/telegram/mappings")
     assert get_response.status_code == 404
 
 
@@ -1180,7 +1180,7 @@ async def test_list_mappings_empty(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1189,7 +1189,7 @@ async def test_list_mappings_empty(client, mock_manager):
         }
     )
     
-    response = await client.get("/sources/telegram-test/mappings")
+    response = await client.get("/sources/telegram/mappings")
     
     assert response.status_code == 200
     data = response.json()
@@ -1204,7 +1204,7 @@ async def test_start_source_no_registry(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1214,7 +1214,7 @@ async def test_start_source_no_registry(client, mock_manager):
     )
     
     # mock_manager.source_registry is None
-    response = await client.post("/sources/telegram-test/start")
+    response = await client.post("/sources/telegram/start")
     
     assert response.status_code == 200
     data = response.json()
@@ -1229,7 +1229,7 @@ async def test_stop_source_no_registry(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1238,7 +1238,7 @@ async def test_stop_source_no_registry(client, mock_manager):
         }
     )
     
-    response = await client.post("/sources/telegram-test/stop")
+    response = await client.post("/sources/telegram/stop")
     
     assert response.status_code == 200
     data = response.json()
@@ -1265,7 +1265,7 @@ async def test_webhook_registry_not_available(client, mock_manager):
     await client.post(
         "/sources",
         json={
-            "source_id": "telegram-test",
+            "source_id": "telegram",
             "source_type": "telegram",
             "name": "Test Bot",
             "config": {},
@@ -1275,7 +1275,7 @@ async def test_webhook_registry_not_available(client, mock_manager):
     )
     
     response = await client.post(
-        "/webhooks/telegram-test",
+        "/webhooks/telegram",
         json={"update_id": 1, "message": {"text": "hello"}}
     )
     

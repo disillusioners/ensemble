@@ -57,6 +57,36 @@ WORKER_STALE_CHECK_INTERVAL: int = 60  # Stale task recovery check interval (sec
 STALE_TASK_CANCEL_GRACE_S: int = 10  # Grace period before cancelling stale tasks
 ACTIVITY_UPDATE_INTERVAL: float = 5.0  # Activity callback update interval (seconds)
 
+# Chat-source worker lane (chat-source-worker-lane, D7 — hardcoded, NO
+# ENSEMBLE_* flags; activation = rebuild+restart, same as WORKER_POOL_SIZE).
+CHAT_WORKER_POOL_SIZE: int = 2  # Dedicated chat-lane worker threads (telegram/slack/discord)
+
+# Interactive-chat source prefixes (chat-source-worker-lane, D1/D10.1).
+#
+# Provenance (Pin 1 of the D10.1 5-pin pattern): the LEGITIMATE mint
+# site for every value starting with one of these prefixes is
+# ``daemon/sources/registry.py:857`` —
+# ``source = f"{source_id}:{msg.external_user_id}"`` — which formats
+# the adapter's registered ``source_id`` (from ``SourceCreate``) plus
+# the external user id. Minting a ``telegram:`` / ``slack:`` /
+# ``discord:``-prefixed source via ANY other path is a bug.
+#
+# Match semantics: PREFIX match (``startswith``), NOT exact-match —
+# mirrors the mint shape ``telegram:<user>`` so concrete rows
+# (e.g. ``telegram:alice:1``) are caught. Case-SENSITIVE — see the
+# ``is_chat_source`` docstring below.
+#
+# Interactive-chat prefixes ONLY. ``webhook:`` / ``whatsapp:`` are
+# explicitly EXCLUDED from this lane (deliberate scope decision:
+# webhook ≈ CI/automation, not interactive chat) — see
+# ``_USER_ORIGIN_PREFIXES`` in ``daemon/tools/upgrade_journal.py:1077-1079``
+# for the broader FIVE-member user-origin set; this tuple is the
+# THREE-member interactive-chat subset. The asymmetry is pinned by
+# ``tests/unit/routers/test_source_reservation.py::
+# TestChatSourcePrefixesConstant`` and the ``is_chat_source`` helper
+# pins (``webhook:gh-hook`` / ``whatsapp:1234`` → False).
+CHAT_SOURCE_PREFIXES: tuple[str, ...] = ("telegram:", "slack:", "discord:")
+
 # ── Rate Limits (messages_per_second, burst_size) ─────────────────────────────────
 TELEGRAM_RATE_LIMIT: tuple[int, int] = (30, 30)  # Telegram: 30 msg/sec
 WEBHOOK_RATE_LIMIT: tuple[int, int] = (100, 100)  # Webhook: 100 req/sec
@@ -549,6 +579,46 @@ def is_reserved_source(source: str | None) -> bool:
 #     ``tests/unit/routers/test_source_reservation.py::
 #     TestReservedSourcePrefixesConstant::
 #     test_helper_is_deliberately_case_sensitive``.
+
+
+def is_chat_source(source: str | None) -> bool:
+    """Return True if ``source`` matches an interactive-chat origin.
+
+    Match semantics: PREFIX match against
+    :data:`CHAT_SOURCE_PREFIXES` (``"telegram:"``, ``"slack:"``,
+    ``"discord:"``) — NOT exact-match. The mint site
+    (``daemon/sources/registry.py:857``) always appends
+    ``:<external_user_id>``, so concrete rows look like
+    ``telegram:alice:1``; prefix semantics catch every concrete row.
+    This mirrors the ``is_reserved_source`` colon-family shape and
+    differs from it in one way: ``CHAT_SOURCE_PREFIXES`` carries NO
+    non-colon exact members, so there is no exact-equality arm here.
+
+    ``None`` and the empty string return False — same boundary
+    contract as :func:`is_reserved_source` (the HTTP-boundary caller
+    treats them as "no user-supplied value").
+
+    Case-SENSITIVE (deliberate — do NOT casefold). Every mint site
+    stamps the exact lowercase literals in
+    :data:`CHAT_SOURCE_PREFIXES`; a case-variant body value (e.g.
+    ``"TELEGRAM:foo"``) is NOT system-recognized as a chat origin —
+    it flows as an inert free-form external source, same contract as
+    the reserved-source helper (pinned by
+    ``tests/unit/routers/test_source_reservation.py::
+    TestChatSourcePrefixesConstant::
+    test_helper_is_chat_source_deliberately_case_sensitive``).
+
+    Asymmetry pin: ``webhook:`` / ``whatsapp:`` are deliberately
+    EXCLUDED from the chat lane (CI/automation vs interactive chat) —
+    ``is_chat_source("webhook:gh-hook")`` and
+    ``is_chat_source("whatsapp:1234")`` return False. See the
+    :data:`CHAT_SOURCE_PREFIXES` provenance comment above and
+    ``_USER_ORIGIN_PREFIXES`` (``daemon/tools/upgrade_journal.py``)
+    for the broader user-origin set.
+    """
+    if not isinstance(source, str) or not source:
+        return False
+    return any(source.startswith(prefix) for prefix in CHAT_SOURCE_PREFIXES)
 
 
 # Exhaustion-severity marker (monitoring-followups). Stamped as an

@@ -1259,15 +1259,49 @@ class JobProcessor:
                         # The Task + MessageQueue rows were already
                         # written by ``enqueue_message_job``; this
                         # is a surface-only signal.
-                        worker_pool = getattr(
-                            self._instance_manager, "_worker_pool", None
+                        #
+                        # Phase 2 / chat-source-worker-lane (D5):
+                        # route through the manager helper — both
+                        # default + chat pools receive the wake so
+                        # the pre-existing PENDING Task on either
+                        # lane surfaces in the next claim cycle.
+                        # Fall back to the singleton-attribute reach
+                        # when the manager pre-dates Phase 2 (legacy
+                        # test fixtures / pre-wiring lifespan).
+                        #
+                        # ``__dict__``-check on the manager avoids
+                        # the Mock auto-attribute hazard (see
+                        # child_reports.py / D5 site #9 for the
+                        # rationale).
+                        manager_dict = getattr(
+                            self._instance_manager, "__dict__", {}
                         )
-                        if worker_pool is not None:
-                            worker_pool.notify_work()
+                        notify_pools = manager_dict.get("_notify_all_pools")
+                        if notify_pools is not None:
+                            try:
+                                notify_pools()
+                            except Exception as notify_err:
+                                logger.warning(
+                                    f"job_processor: _notify_all_pools() "
+                                    f"failed for chat-source wake "
+                                    f"(non-fatal): {notify_err}"
+                                )
+                        elif getattr(
+                            self._instance_manager, "_worker_pool", None
+                        ) is not None:
+                            try:
+                                self._instance_manager._worker_pool.notify_work()
+                            except Exception as notify_err:
+                                logger.warning(
+                                    f"job_processor: "
+                                    f"worker_pool.notify_work() failed "
+                                    f"for chat-source wake "
+                                    f"(non-fatal): {notify_err}"
+                                )
 
                         logger.info(
                             f"JobProcessor (message branch): woke "
-                            f"worker pool for pre-existing Task on "
+                            f"worker pools for pre-existing Task on "
                             f"job {job.job_id[:8]}... / instance "
                             f"{started_job.instance_id[:8] if started_job.instance_id else 'N/A'}..."
                         )

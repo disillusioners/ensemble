@@ -116,9 +116,22 @@ class EligiblePendingSweepService:
         interval_seconds: int = DEFAULT_SWEEP_INTERVAL_SECONDS,
         min_pending_age_seconds: int = DEFAULT_MIN_PENDING_AGE_SECONDS,
         instance_repository: Any | None = None,
+        # Phase 2 / chat-source-worker-lane (D5 site #13 ⭐
+        # ctor-widening): the sweep needs to fan out its wake across
+        # BOTH the default AND chat pools — the singleton-attribute
+        # reach via ``worker_pool=`` covers only the default pool.
+        # Accept a manager reference and route through
+        # ``manager._notify_all_pools()`` (which iterates the pool
+        # list). Pre-Phase-2 call sites that pass only ``worker_pool=``
+        # retain the legacy single-pool behavior (the worker_pool
+        # arg is preserved on ``self`` so the sweep still works
+        # without a manager).
+        manager: Any | None = None,
     ) -> None:
         self._task_repository = task_repository
         self._worker_pool = worker_pool
+        # Phase 2 — chat-source-worker-lane (D5 site #13 ⭐).
+        self._manager = manager
         self._interval_seconds = max(1, int(interval_seconds))
         self._min_pending_age_seconds = max(0, int(min_pending_age_seconds))
         # W-D liveness filter (feature/fix-wc-wake-resilience,
@@ -284,40 +297,73 @@ class EligiblePendingSweepService:
             eligible_count = len(eligible)
             self._eligible_total += eligible_count
 
-            if eligible_count > 0 and self._worker_pool is not None:
-                # One notify_work() call wakes the pool ONCE for
-                # ALL eligible candidates — the claim path picks
-                # them up as separate claim cycles. Multiple
-                # notifies on the same tick are wasted (the pool's
-                # condition variable already saw the wake).
-                try:
-                    self._worker_pool.notify_work()
-                    notified = 1
-                    self._notified_total += 1
-                except Exception as notify_err:
-                    # Transient pool error — log + record, do NOT
-                    # abort the sweep (next tick heals).
-                    logger.warning(
-                        f"EligiblePendingSweepService: notify_work() "
-                        f"raised {notify_err!r} on tick "
-                        f"{self._ticks_total}; eligible_count="
-                        f"{eligible_count} — the sweep continues "
-                        f"and the next tick will retry"
+            # Phase 2 / chat-source-worker-lane (D5 site #13 ⭐):
+            # route through the manager helper when available so BOTH
+            # pools receive the wake. Fall back to the singleton
+            # ``worker_pool`` reach for legacy fixtures that pre-date
+            # the chat pool (the ctor arg remains for backward compat).
+            #
+            # ``__dict__``-check on the manager avoids the Mock
+            # auto-attribute hazard (see child_reports.py / D5 site
+            # #9 for the rationale).
+            if eligible_count > 0:
+                notified = 0
+                # Prefer the manager helper — fan-out across default
+                # + chat pools. One notify call wakes the pool ONCE
+                # for ALL eligible candidates — the claim path picks
+                # them up as separate claim cycles. Multiple notifies
+                # on the same tick are wasted (the pool's condition
+                # variable already saw the wake).
+                manager_dict = getattr(self._manager, "__dict__", {})
+                notify_pools = manager_dict.get("_notify_all_pools")
+                if notify_pools is not None:
+                    try:
+                        notify_pools()
+                        notified = 1
+                        self._notified_total += 1
+                    except Exception as notify_err:
+                        # Transient pool-side blip — log + record,
+                        # do NOT abort the sweep (next tick heals).
+                        logger.warning(
+                            f"EligiblePendingSweepService: "
+                            f"_notify_all_pools() raised "
+                            f"{notify_err!r} on tick "
+                            f"{self._ticks_total}; eligible_count="
+                            f"{eligible_count} — the sweep continues "
+                            f"and the next tick will retry"
+                        )
+                        self._errors_total += 1
+                elif self._worker_pool is not None:
+                    # Pre-Phase-2 manager shape (legacy test fixture
+                    # / pre-wiring lifespan) — fall through to the
+                    # singleton-attribute reach.
+                    try:
+                        self._worker_pool.notify_work()
+                        notified = 1
+                        self._notified_total += 1
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"EligiblePendingSweepService: "
+                            f"notify_work() raised {notify_err!r} on "
+                            f"tick {self._ticks_total}; "
+                            f"eligible_count={eligible_count} — the "
+                            f"sweep continues and the next tick will "
+                            f"retry"
+                        )
+                        self._errors_total += 1
+                else:
+                    # No pool wired AND no manager helper — DEBUG log
+                    # so the operator sees the eligible rows. The A1
+                    # carve-out + A2 autopromote are the primary
+                    # fixes; the sweep is the secondary backstop.
+                    logger.debug(
+                        f"EligiblePendingSweepService: {eligible_count} "
+                        f"eligible PENDING row(s) found on tick "
+                        f"{self._ticks_total}, but worker_pool is not "
+                        f"wired (legacy test fixture / pre-wiring "
+                        f"lifespan) — relying on the A1/A2 primary "
+                        f"fixes to surface them"
                     )
-                    self._errors_total += 1
-            elif eligible_count > 0:
-                # No pool wired — DEBUG log so the operator sees the
-                # eligible rows. The A1 carve-out + A2 autopromote
-                # are the primary fixes; the sweep is the
-                # secondary backstop.
-                logger.debug(
-                    f"EligiblePendingSweepService: {eligible_count} "
-                    f"eligible PENDING row(s) found on tick "
-                    f"{self._ticks_total}, but worker_pool is not "
-                    f"wired (legacy test fixture / pre-wiring "
-                    f"lifespan) — relying on the A1/A2 primary "
-                    f"fixes to surface them"
-                )
         except Exception as tick_err:
             self._errors_total += 1
             logger.error(

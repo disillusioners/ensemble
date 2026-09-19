@@ -20,7 +20,9 @@ from daemon.repositories.job_queue.models import (
 )
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from daemon.constants import (
+    CHAT_SOURCE_PREFIXES,
     RESERVED_SOURCE_PREFIXES,
+    is_chat_source,
     is_reserved_source,
 )
 from daemon.utils import create_service_dependency, validate_agent_id
@@ -475,6 +477,11 @@ async def create_job(
     #     the same ``JobValidationError`` envelope as the
     #     ``ValidationError`` re-raise block below so the frontend
     #     treats it like any other validation failure.
+    #   * source is a chat-channel prefix (see ``is_chat_source`` +
+    #     ``CHAT_SOURCE_PREFIXES`` — chat-source-worker-lane, D10.1)
+    #     → 422 from THIS gate, SAME envelope. Chat rows are minted
+    #     only by source adapters; a user-supplied chat prefix would
+    #     forge the lane-routing provenance.
     if is_reserved_source(body.source):
         raise HTTPException(
             status_code=422,
@@ -488,6 +495,47 @@ async def create_job(
                             "internal callers and cannot be supplied "
                             f"via HTTP. Reserved origins: "
                             f"{sorted(RESERVED_SOURCE_PREFIXES)}."
+                        ),
+                    }
+                ],
+            ).model_dump(),
+        )
+
+    # Chat-source gate (chat-source-worker-lane, D10.1 — parallel to
+    # the reserved-source gate above, SAME envelope so /api/jobs
+    # validation failures stay operator-indistinguishable).
+    #
+    # ``telegram:`` / ``slack:`` / ``discord:`` are chat-lane ROUTING
+    # keys (CHAT_SOURCE_PREFIXES): rows carrying them are claimed
+    # exclusively by the dedicated chat worker pool. Chat rows are
+    # minted ONLY by configured source adapters via the registry
+    # (``daemon/sources/registry.py:857``) — a user-supplied chat
+    # prefix in the HTTP body would forge the routing provenance the
+    # lane predicate keys on, so it is rejected with the same 422
+    # JobValidationError envelope as the reserved gate above.
+    #
+    # Deliberate SUBSET only: this gate does NOT widen to the full
+    # RESERVED_SOURCE_PREFIXES surface beyond the chat prefixes — the
+    # backlog's 18-prefix gate-widen item is a separate coordinated
+    # change (phase1 Implementer Note (c)). Chat prefixes are NOT
+    # members of RESERVED_SOURCE_PREFIXES (no census change) — the
+    # gates COMPOSE: a value is rejected here iff it matches either
+    # family.
+    if is_chat_source(body.source):
+        raise HTTPException(
+            status_code=422,
+            detail=JobValidationError(
+                error="Validation Error",
+                details=[
+                    {
+                        "field": "source",
+                        "message": (
+                            f"Source '{body.source}' uses a chat-channel "
+                            "prefix reserved for the chat worker lane "
+                            "and cannot be supplied via HTTP. Chat "
+                            f"origins: {sorted(CHAT_SOURCE_PREFIXES)} "
+                            "are minted only by configured source "
+                            "adapters."
                         ),
                     }
                 ],

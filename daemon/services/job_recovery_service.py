@@ -421,6 +421,16 @@ class JobRecoveryService:
         task_repository: "TaskRepository | None" = None,
         stale_task_recovery: "StaleTaskRecovery | None" = None,
         worker_pool: Any = None,
+        # Phase 2 / chat-source-worker-lane (D5 site #10): the
+        # wake fan-out goes through the manager helper so BOTH
+        # pools (default + chat) receive the pulse. The legacy
+        # ``worker_pool=`` field is retained for backward-compat
+        # with existing test fixtures (and as a fallback when the
+        # manager is None). When ``instance_manager`` is set AND
+        # has ``_notify_all_pools`` in its ``__dict__`` (real
+        # manager, not a Mock), the helper is invoked; otherwise
+        # the singleton-attribute reach is used.
+        instance_manager: Any | None = None,
     ) -> None:
         """Initialize the recovery service.
 
@@ -465,11 +475,21 @@ class JobRecoveryService:
         # "skip drift correction" — production always wires both.
         self._task_repository = task_repository
         self._stale_task_recovery = stale_task_recovery
-        # Batch A — A2 (2026-09-11): the worker-pool seam is the
-        # SAME ``notify_work()`` used at task creation; Pattern (g)
-        # autopromote calls it after the flip so the pool's claim
-        # path actually sees the newly-eligible row.
+        # Phase 2 / chat-source-worker-lane (D5): the worker-pool
+        # seam is the SAME ``notify_work()`` used at task creation;
+        # Pattern (g) autopromote calls it after the flip so the
+        # pool's claim path actually sees the newly-eligible row.
+        #
+        # The field is stored for the legacy ``self._worker_pool``
+        # fallback path; the Phase 2 fan-out goes through
+        # ``self._instance_manager._notify_all_pools()`` when the
+        # manager is wired (production). The two paths are not
+        # mutually exclusive — the helper routes to BOTH pools when
+        # both exist, while the legacy reach only wakes the
+        # singleton pool. Future cleanup may drop the ctor kwarg
+        # once the manager is universally wired.
         self._worker_pool = worker_pool
+        self._instance_manager = instance_manager
 
     def _is_instance_alive(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates the instance is still alive.
@@ -3606,7 +3626,38 @@ class JobRecoveryService:
                 # in try/except so a transient pool-side blip does
                 # NOT abort the sweep (the periodic A3 sweep is the
                 # systemic backstop that catches the missed row).
-                if self._worker_pool is not None:
+                #
+                # Phase 2 / chat-source-worker-lane (D5 site #10):
+                # when the manager is wired AND has the helper in
+                # its ``__dict__`` (real manager, not a Mock), route
+                # through it so BOTH pools receive the wake. The
+                # ``__dict__``-check avoids the Mock auto-attribute
+                # hazard — ``getattr(Mock(), '_notify_all_pools',
+                # None)`` returns a Mock (truthy), so without the
+                # check legacy test fixtures would route through the
+                # Mock helper and never touch the
+                # ``worker_pool.notify_work`` Mock the tests assert
+                # on. Fall back to ``self._worker_pool.notify_work()``
+                # when the helper is not wired.
+                manager_dict = (
+                    getattr(self._instance_manager, "__dict__", {})
+                    if self._instance_manager is not None
+                    else {}
+                )
+                notify_pools = manager_dict.get("_notify_all_pools")
+                if notify_pools is not None:
+                    try:
+                        notify_pools()
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"reconcile_drift_states: Pattern (g) "
+                            f"_notify_all_pools() raised {notify_err!r} "
+                            f"for task {task.id} on instance "
+                            f"{target_instance_id[:8]}... — flip "
+                            f"already committed; the A3 sweep is "
+                            f"the systemic backstop"
+                        )
+                elif self._worker_pool is not None:
                     try:
                         self._worker_pool.notify_work()
                     except Exception as notify_err:
@@ -3619,16 +3670,17 @@ class JobRecoveryService:
                             f"the systemic backstop"
                         )
                 else:
-                    # No pool wired (legacy test fixture / pre-wiring
-                    # lifespan). The DEBUG log preserves forensic
-                    # traceability without polluting prod logs.
+                    # No pool wired AND no manager helper — DEBUG log
+                    # preserves forensic traceability without
+                    # polluting prod logs.
                     logger.debug(
                         f"reconcile_drift_states: Pattern (g) "
-                        f"notify_work() skipped — worker_pool not "
-                        f"wired (test fixture / pre-wiring lifespan); "
-                        f"task {task.id} on instance "
-                        f"{target_instance_id[:8]}... relies on the "
-                        f"A3 sweep to surface the eligible row"
+                        f"_notify_all_pools() skipped — manager "
+                        f"helper not available (test fixture / "
+                        f"pre-wiring lifespan); task {task.id} on "
+                        f"instance {target_instance_id[:8]}... "
+                        f"relies on the A3 sweep to surface the "
+                        f"eligible row"
                     )
 
             except Exception as row_err:
