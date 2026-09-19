@@ -205,14 +205,18 @@ export class ImageUploadService {
       : obs$;
     return stream$.pipe(
       retry({
+        // ``MAX_5XX_ATTEMPTS - 1`` = number of retries (1 retry →
+        // 2 total POSTs: initial + 1 retry). The rxjs ``count``
+        // parameter is the number of resubscribes, NOT total
+        // attempts. The delay function below short-circuits on 4xx
+        // so the typed-error surface preserves the validator
+        // message verbatim (Task 4 acceptance).
         count: ImageUploadService.MAX_5XX_ATTEMPTS - 1,
-        delay: (err: unknown, retryCount: number) => {
+        delay: (err: unknown) => {
           if (!(err instanceof HttpErrorResponse)) return throwError(() => err);
-          // Only retry on 5xx — 4xx is informative (validator message), no retry.
+          // Only retry on 5xx — 4xx is informative (validator
+          // message), no retry.
           if (err.status < 500 || err.status >= 600) {
-            return throwError(() => err);
-          }
-          if (retryCount >= ImageUploadService.MAX_5XX_ATTEMPTS - 1) {
             return throwError(() => err);
           }
           return timer(ImageUploadService.RETRY_BACKOFF_MS);
