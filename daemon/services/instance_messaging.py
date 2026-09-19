@@ -30,6 +30,7 @@ from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
+from .pool_orchestrator import safe_notify_all_pools
 from .messaging_types import AsyncMessageResult, LinkageContractError
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
@@ -2084,40 +2085,23 @@ class InstanceMessagingService:
         # MessageQueue row). No path-specific branch — the legacy
         # ``_job_queue_service.enqueue()`` call was eliminated in D13.
         #
-        # Phase 2 / chat-source-worker-lane (D5): route through the
-        # manager helper — both default + chat pools receive the wake
-        # so a chat-prefixed row enqueued by a registry mint
-        # (registry.py:857 → enqueue_message_job → instance_messaging.py)
-        # is picked up by the chat pool even when the default pool is
-        # saturated. Without this fan-out, the feature's headline
-        # guarantee rides the 3s poll fallback on the primary chat
-        # ingress path (CRITICAL site #12 in the D5 census — every
-        # chat row traverses this seam).
-        #
-        # ``__dict__``-check on the manager avoids the Mock
-        # auto-attribute hazard (see child_reports.py / D5 site #9
-        # for the rationale).
-        manager_dict = getattr(self._manager, "__dict__", {})
-        notify_pools = manager_dict.get("_notify_all_pools")
-        if notify_pools is not None:
-            try:
-                notify_pools()
-            except Exception as notify_err:
-                logger.warning(
-                    f"instance_messaging: _notify_all_pools() "
-                    f"failed for chat-source wake (non-fatal): {notify_err}"
-                )
-        elif self._manager._worker_pool is not None:
-            # Pre-Phase-2 manager shape (legacy test fixture /
-            # pre-wiring lifespan) — fall through to the
-            # singleton-attribute reach.
-            try:
-                self._manager._worker_pool.notify_work()
-            except Exception as notify_err:
-                logger.warning(
-                    f"instance_messaging: worker_pool.notify_work() "
-                    f"failed for chat-source wake (non-fatal): {notify_err}"
-                )
+        # Phase 2 / chat-source-worker-lane (D5 CRITICAL site #12):
+        # route through the manager helper — both default + chat
+        # pools receive the wake so a chat-prefixed row enqueued by
+        # a registry mint (``registry.py:857 → enqueue_message_job →
+        # instance_messaging.py``) is picked up by the chat pool even
+        # when the default pool is saturated. Without this fan-out,
+        # the feature's headline guarantee rides the 3s poll
+        # fallback on the primary chat ingress path — EVERY chat
+        # row traverses this seam. Consolidated via
+        # :func:`safe_notify_all_pools` (Phase B) — the per-site
+        # Mock-compat ``__dict__``-probe + try/except +
+        # legacy-fixture fallback blocks (12+ lines) collapse to
+        # one helper call.
+        safe_notify_all_pools(
+            self._manager,
+            site_label="instance_messaging",
+        )
 
         # ``job_id`` payload: ``task.work_id`` (UUID4) is the stable
         # cross-system handle minted by the Task model's

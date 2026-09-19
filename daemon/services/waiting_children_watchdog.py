@@ -158,6 +158,7 @@ from typing import Any
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.report_integrity_guard import parent_has_active_b_notice
+from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 logger = logging.getLogger(__name__)
 
@@ -1597,52 +1598,28 @@ class WaitingChildrenWatchdog:
                 # exceptions are swallowed (A3 sweep is the systemic
                 # backstop).
                 #
-                # ``__dict__``-check on the manager avoids the Mock
-                # auto-attribute hazard (see child_reports.py / D5
-                # site #9 for the rationale).
-                manager_dict = getattr(self._manager, "__dict__", {})
-                notify_pools = manager_dict.get("_notify_all_pools")
-                if notify_pools is not None:
-                    try:
-                        notify_pools()
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"[Watchdog] wedge-pass direct "
-                            f"_notify_all_pools() raised {notify_err!r} "
-                            f"for parent {parent_id[:8]}... — "
-                            f"the A3 sweep is the systemic backstop"
-                        )
-                elif getattr(
-                    self._manager, "_worker_pool", None
-                ) is not None:
-                    # Pre-Phase-2 manager shape — fall through to
-                    # the singleton-attribute reach (legacy test
-                    # fixture / pre-wiring lifespan).
-                    worker_pool = self._manager._worker_pool
-                    try:
-                        _notify_result = worker_pool.notify_work()
-                        # Production ``WorkerPool.notify_work()`` is
-                        # sync (returns ``None``). Some test fixtures
-                        # attach an ``AsyncMock`` whose ``notify_work``
-                        # returns a coroutine — handle that case so
-                        # the coroutine is awaited (no RuntimeWarning)
-                        # without breaking the production path.
-                        import inspect
-                        if inspect.iscoroutine(_notify_result):
-                            await _notify_result
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"[Watchdog] wedge-pass direct "
-                            f"notify_work() raised {notify_err!r} "
-                            f"for parent {parent_id[:8]}... — "
-                            f"the A3 sweep is the systemic backstop"
-                        )
-                else:
-                    logger.debug(
-                        f"[Watchdog] wedge-pass direct notify "
-                        f"skipped — worker_pool not wired (legacy "
-                        f"test fixture / pre-wiring lifespan)"
-                    )
+                # The wedge-pass wake site is async (this is inside
+                # a coroutine), so we await the helper's return
+                # value when it is a coroutine — preserves the
+                # pre-Phase-B ``inspect.iscoroutine`` handling for
+                # ``AsyncMock`` fixtures that return a coroutine on
+                # ``notify_work()`` (otherwise the un-awaited
+                # coroutine emits a ``RuntimeWarning`` and breaks
+                # ``assert_awaited_once`` tests).
+                #
+                # ``safe_notify_all_pools`` (Phase B) holds the
+                # Mock-compat ``__dict__``-probe + try/except +
+                # legacy-fixture fallback logic that used to be
+                # duplicated here. Consolidated here as a single
+                # helper call with sync/async dispatch.
+                import inspect
+
+                notify_result = safe_notify_all_pools(
+                    self._manager,
+                    site_label="[Watchdog] wedge-pass",
+                )
+                if inspect.iscoroutine(notify_result):
+                    await notify_result
                 self._wedge_notified.add(parent_id)
                 self._wedge_notices_enqueued_total += 1
                 logger.warning(

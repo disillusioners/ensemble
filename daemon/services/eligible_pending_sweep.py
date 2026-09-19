@@ -51,6 +51,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .pool_orchestrator import safe_notify_all_pools
+
 if TYPE_CHECKING:
     from daemon.repositories.task.repository import TaskRepository
 
@@ -303,54 +305,31 @@ class EligiblePendingSweepService:
             # ``worker_pool`` reach for legacy fixtures that pre-date
             # the chat pool (the ctor arg remains for backward compat).
             #
-            # ``__dict__``-check on the manager avoids the Mock
-            # auto-attribute hazard (see child_reports.py / D5 site
-            # #9 for the rationale).
+            # Consolidated via :func:`safe_notify_all_pools` (Phase B)
+            # — the per-site Mock-compat ``__dict__``-probe + try/except
+            # + legacy-fixture fallback blocks (~50 lines) collapse to
+            # one helper call. The sweep stores the legacy
+            # ``worker_pool=`` on the SERVICE itself (not on the
+            # manager), so we pass ``fallback_pool=self._worker_pool``
+            # to preserve the pre-Phase-2 reach.
+            #
+            # The helper returns the wake call's value: ``None`` for
+            # production sync ``WorkerPool.notify_work()``, a coroutine
+            # for ``AsyncMock`` fixtures, or a ``MagicMock`` value for
+            # legacy ``MagicMock`` fixtures. ``result is not None``
+            # mirrors the original ``if notified:`` semantics (a wake
+            # was dispatched iff the helper entered a dispatch branch
+            # — production returns None when no pool was reachable,
+            # MagicMock returns a truthy MagicMock when one was).
             if eligible_count > 0:
-                notified = 0
-                # Prefer the manager helper — fan-out across default
-                # + chat pools. One notify call wakes the pool ONCE
-                # for ALL eligible candidates — the claim path picks
-                # them up as separate claim cycles. Multiple notifies
-                # on the same tick are wasted (the pool's condition
-                # variable already saw the wake).
-                manager_dict = getattr(self._manager, "__dict__", {})
-                notify_pools = manager_dict.get("_notify_all_pools")
-                if notify_pools is not None:
-                    try:
-                        notify_pools()
-                        notified = 1
-                        self._notified_total += 1
-                    except Exception as notify_err:
-                        # Transient pool-side blip — log + record,
-                        # do NOT abort the sweep (next tick heals).
-                        logger.warning(
-                            f"EligiblePendingSweepService: "
-                            f"_notify_all_pools() raised "
-                            f"{notify_err!r} on tick "
-                            f"{self._ticks_total}; eligible_count="
-                            f"{eligible_count} — the sweep continues "
-                            f"and the next tick will retry"
-                        )
-                        self._errors_total += 1
-                elif self._worker_pool is not None:
-                    # Pre-Phase-2 manager shape (legacy test fixture
-                    # / pre-wiring lifespan) — fall through to the
-                    # singleton-attribute reach.
-                    try:
-                        self._worker_pool.notify_work()
-                        notified = 1
-                        self._notified_total += 1
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"EligiblePendingSweepService: "
-                            f"notify_work() raised {notify_err!r} on "
-                            f"tick {self._ticks_total}; "
-                            f"eligible_count={eligible_count} — the "
-                            f"sweep continues and the next tick will "
-                            f"retry"
-                        )
-                        self._errors_total += 1
+                notify_result = safe_notify_all_pools(
+                    self._manager,
+                    site_label="EligiblePendingSweep",
+                    fallback_pool=self._worker_pool,
+                )
+                notified = notify_result is not None
+                if notified:
+                    self._notified_total += 1
                 else:
                     # No pool wired AND no manager helper — DEBUG log
                     # so the operator sees the eligible rows. The A1

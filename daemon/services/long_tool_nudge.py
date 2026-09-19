@@ -127,6 +127,7 @@ from typing import Any, Awaitable, Callable, Optional, TypedDict, Union
 from langchain_core.runnables import RunnableConfig
 
 from daemon.constants import INSTANCE_STATUS_PAUSED, TERMINAL_INSTANCE_STATUSES
+from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 logger = logging.getLogger(__name__)
 
@@ -1185,46 +1186,21 @@ class LongToolNudgeScanner:
         # Phase 2 / chat-source-worker-lane (D5): route through the
         # manager helper — both default + chat pools receive the wake
         # so the freshly-eligible row surfaces in the next claim
-        # cycle. Fall back to the singleton-attribute reach for
-        # legacy test fixtures (pre-Phase-2 manager shape).
-        #
-        # ``__dict__``-check on the manager avoids the Mock
-        # auto-attribute hazard (see child_reports.py / D5 site #9
-        # for the rationale).
-        manager_dict = getattr(self._manager, "__dict__", {})
-        notify_pools = manager_dict.get("_notify_all_pools")
-        if notify_pools is not None:
-            try:
-                notify_pools()
-            except Exception as notify_err:
-                logger.warning(
-                    "[LongToolNudge] direct _notify_all_pools raised %r "
-                    "for parent %s... — relying on enqueue_message's "
-                    "internal notify",
-                    notify_err,
-                    (parent_id or "")[:8],
-                )
-        elif getattr(self._manager, "_worker_pool", None) is not None:
-            # Pre-Phase-2 manager shape — fall through to the
-            # singleton-attribute reach.
-            worker_pool = self._manager._worker_pool
-            try:
-                notify_result = worker_pool.notify_work()
-                if inspect.iscoroutine(notify_result):
-                    await notify_result
-            except Exception as notify_err:
-                logger.warning(
-                    "[LongToolNudge] direct notify_work raised %r for "
-                    "parent %s... — relying on enqueue_message's "
-                    "internal notify",
-                    notify_err,
-                    (parent_id or "")[:8],
-                )
-        else:
-            logger.debug(
-                "[LongToolNudge] direct notify skipped — worker_pool "
-                "not wired (legacy test fixture / pre-wiring lifespan)"
-            )
+        # cycle. Consolidated via :func:`safe_notify_all_pools`
+        # (Phase B) — the per-site Mock-compat ``__dict__``-probe +
+        # try/except + legacy-fixture fallback blocks collapse to
+        # one helper call. The helper returns the wake call's value
+        # (``None`` for sync production, a coroutine for ``AsyncMock``
+        # fixtures); this is async, so we await the coroutine to
+        # preserve the pre-Phase-B behavior on ``AsyncMock``
+        # ``notify_work`` fixtures (without the await the
+        # ``assert_awaited_once`` tests fail).
+        notify_result = safe_notify_all_pools(
+            self._manager,
+            site_label="LongToolNudge",
+        )
+        if inspect.iscoroutine(notify_result):
+            await notify_result
         # The episode opens AFTER the durable enqueue committed.
         # ``_episode_last_seen`` is the monotonic anchor the B4
         # orphan sweep keys on; refresh it here so a tick landing in
