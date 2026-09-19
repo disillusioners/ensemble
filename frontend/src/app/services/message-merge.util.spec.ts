@@ -315,6 +315,286 @@ describe('mergeMessagesById (union-by-id)', () => {
   });
 });
 
+/**
+ * Phase 5 / clipboard-image-chat — ``images`` merge pin
+ * (architect amendment #20, h4/h5). The pin closes the seam where an
+ * SSE echo or refetch carrying no ``images`` field (or a literal
+ * ``images: null`` from the unconditional ``serialize_message``
+ * emission at ``daemon/utils.py:213``) would clobber the optimistic
+ * bubble's ref array via the spread — leaving the bubble with no
+ * thumbnail after drain.
+ *
+ * Existing-wins whenever existing has ``images``:
+ *   (a) incoming lacks the field              → existing wins
+ *   (b) incoming has ``images: undefined``    → existing wins
+ *   (e) incoming has ``images: null``         → existing wins (round-2
+ *                                               amendment #20 regression
+ *                                               pin — the literal
+ *                                               ``serialize_message``
+ *                                               echo shape)
+ *   (d) both have ``images``                  → existing wins
+ *                                               (symmetric with
+ *                                               failed/queue_id/retry_content)
+ *   (c) existing lacks, incoming has          → incoming wins (new info)
+ *
+ * The pin is MANDATORY and LOAD-BEARING — a future contributor
+ * proposing to "simplify" the merge helper MUST add a replacement
+ * defense-in-depth before removing it (per
+ * ``architecture-recommendation.md`` §6.5/§6.6 h4/h5 cross-reference).
+ */
+describe('mergeMessagesById — mandatory merge pin (architect h4/h5)', () => {
+  const REF_A = '/api/tmp_images/abc123def456789012345678901234de'; // 32-hex lowercase
+  const REF_B = '/api/tmp_images/00000000000000000000000000000001';
+  const REF_C = '/api/tmp_images/00000000000000000000000000000002';
+  const REF_D = '/api/tmp_images/00000000000000000000000000000003';
+  const DATA_URI = 'data:image/png;base64,AAAA';
+
+  function withImages(...images: string[]): Partial<Message> {
+    return { images };
+  }
+
+  it('(a) existing has ``images`` + incoming lacks ``images`` field → existing wins', () => {
+    const existing = [
+      makeMessage({ message_id: 'p-a', images: [REF_A, REF_B] }),
+    ];
+    const incoming = [makeMessage({ message_id: 'p-a' /* no images field */ })];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(b) existing has ``images`` + incoming has ``images: undefined`` → existing wins', () => {
+    const existing = [
+      makeMessage({ message_id: 'p-b', images: [REF_A] }),
+    ];
+    const incoming = [
+      makeMessage({ message_id: 'p-b', images: undefined }),
+    ];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A]);
+  });
+
+  it('(c) existing lacks ``images`` + incoming has ``images`` → incoming wins (new info)', () => {
+    const existing = [makeMessage({ message_id: 'p-c' })];
+    const incoming = [
+      makeMessage({ message_id: 'p-c', images: [REF_A, REF_B] }),
+    ];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(d) both have ``images`` → existing wins (symmetric with failed/queue_id/retry_content)', () => {
+    const existing = [
+      makeMessage({ message_id: 'p-d', images: [REF_A, REF_B] }),
+    ];
+    const incoming = [
+      makeMessage({ message_id: 'p-d', images: [REF_C, REF_D] }),
+    ];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(e) round-2 #20 regression: ``images: null`` (literal ``serialize_message`` echo shape) → existing wins', () => {
+    // ``serialize_message`` at ``daemon/utils.py:213`` emits
+    // ``"images": null`` unconditionally when the input ``images``
+    // local is ``None`` (``:137`` reassigns the empty list to
+    // ``None``). The pin must catch this literal shape — not just
+    // ``undefined`` — or the 202 leg's null would clobber the
+    // optimistic bubble's ref array via the spread.
+    const existing = [
+      makeMessage({ message_id: 'p-e', images: [REF_A, REF_B] }),
+    ];
+    const incoming = [
+      makeMessage({ message_id: 'p-e', images: null as unknown as string[] }),
+    ];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('handles a 4-ref existing array (past the 3-image cap) — the pin retains ALL 4 entries', () => {
+    const existing = [
+      makeMessage({ message_id: 'p-cap', images: [REF_A, REF_B, REF_C, REF_D] }),
+    ];
+    const incoming = [makeMessage({ message_id: 'p-cap' /* no images */ })];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B, REF_C, REF_D]);
+  });
+
+  it('handles a mix of legacy data URI + canonical refs (post-union wire shape, round-2 #37 (a))', () => {
+    // The wire `images` field is now a union of legacy blocks and new
+    // refs (architect amendment #29). The pin must retain both forms.
+    const existing = [
+      makeMessage({
+        message_id: 'p-mix',
+        images: [DATA_URI, REF_A, REF_B],
+      }),
+    ];
+    const incoming = [makeMessage({ message_id: 'p-mix' /* no images */ })];
+    const merged = mergeMessagesById(existing, incoming);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([DATA_URI, REF_A, REF_B]);
+  });
+});
+
+/**
+ * Phase 5 / clipboard-image-chat — Task 4 identity-grep mirror-parity
+ * pin. The predicate ``result[idx].images !== undefined`` MUST appear
+ * verbatim in BOTH ``message-merge.util.ts`` AND this spec. CI / a
+ * future contributor who deletes the predicate from production will
+ * see the spec still pass on the spec side — but a manual side-by-side
+ * diff would surface the drift. The identity-grep makes the drift
+ * fail this spec rather than only surface in production.
+ */
+describe('mergeMessagesById — images pin identity-grep mirror-parity', () => {
+  it('the literal ``result[idx].images !== undefined`` appears in production AND spec', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const fs = require('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const path = require('path');
+    const PREDICATE = 'result[idx].images !== undefined';
+
+    const prodSrc = fs.readFileSync(
+      path.join(__dirname, 'message-merge.util.ts'),
+      'utf8',
+    ) as string;
+    const specSrc = fs.readFileSync(__filename, 'utf8') as string;
+
+    // Exactly one match in production (the pin) — drift would surface
+    // as zero or multiple.
+    const prodMatches = prodSrc.split(PREDICATE).length - 1;
+    expect(prodMatches).toBe(1);
+
+    // At least one match in the spec (this assertion + the
+    // documentation block referencing the same predicate). More than
+    // one is fine; we only pin production's count.
+    const specMatches = specSrc.split(PREDICATE).length - 1;
+    expect(specMatches).toBeGreaterThanOrEqual(1);
+  });
+});
+
+/**
+ * Phase 5 / clipboard-image-chat — Task 5 / 202-injection reload
+ * re-target (round-2 amendment #40).
+ *
+ * The LIVE reload smoke (tester-pass, playwright) drives a real
+ * daemon + reload-merge end-to-end. This spec block is the
+ * JEST-MOCKED equivalent: the §2 frozen wire shapes (canonical ref
+ * form, ``image_refs`` sibling field, the union ``images`` field on
+ * GET refetch) are exercised against the merge helper so the same
+ * assertion passes in unit as in e2e.
+ *
+ *   (i) 202 / injection leg — RUNNING target + POST ``image_refs=[r1, r2]``
+ *       (202 leg; the 202 response body may carry the echo stamps
+ *       post-h4-S1, but the reload reads GET /messages). Mocked
+ *       GET /messages wire shape shows BOTH refs in ``images``
+ *       (NOT null) after reload-merge.
+ *
+ *   (ii) idle / durable leg — same assertion: POST ``image_refs``
+ *        queues durably; the reload merge surfaces both refs via
+ *        the union.
+ *
+ *   (iii) legacy-bonus — a legacy data-URI send keeps its thumbnail
+ *        through the merge. Pre-existing-defect closure for the
+ *        legacy drop.
+ */
+describe('mergeMessagesById — 202-injection reload re-target (round-2 #40, mocked)', () => {
+  const REF_A = '/api/tmp_images/abc123def456789012345678901234de'; // 32-hex lowercase
+  const REF_B = '/api/tmp_images/00000000000000000000000000000001';
+  const DATA_URI = 'data:image/png;base64,AAAA';
+
+  it('(i) 202/injection leg — optimistic bubble with refs + SSE echo without images → merged.images = original refs', () => {
+    // The optimistic-bubble carries refs at send time (phase 4). The
+    // SSE echo / drain re-emit lands WITHOUT images (the pre-h4-S1
+    // shape, and still the shape for any future leg where the echo
+    // omits the field). The pin MUST keep the refs.
+    const optimisticBubble = makeMessage({
+      message_id: '202-bubble',
+      content: 'see attached',
+      created_at: '2026-09-19T12:00:00Z',
+      images: [REF_A, REF_B],
+      pending: true,
+    });
+    const echoWithoutImages = makeMessage({
+      message_id: '202-bubble',
+      content: 'see attached',
+      created_at: '2026-09-19T12:00:00Z',
+    });
+
+    const merged = mergeMessagesById([optimisticBubble], [echoWithoutImages]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(i+) 202 leg with literal ``images: null`` echo shape (round-2 #20) → merged.images = original refs', () => {
+    // The literal ``"images": null`` emission from
+    // ``daemon/utils.py:213`` must not clobber the optimistic bubble.
+    const optimisticBubble = makeMessage({
+      message_id: '202-bubble-null',
+      content: 'see attached',
+      created_at: '2026-09-19T12:00:00Z',
+      images: [REF_A, REF_B],
+      pending: true,
+    });
+    const echoWithNull = makeMessage({
+      message_id: '202-bubble-null',
+      content: 'see attached',
+      created_at: '2026-09-19T12:00:00Z',
+      images: null as unknown as string[],
+    });
+
+    const merged = mergeMessagesById([optimisticBubble], [echoWithNull]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(ii) idle/durable leg — local empty + GET /messages with refs in `images` → refs surface intact', () => {
+    // The durable leg: the user sends while the target is idle.
+    // POST ``image_refs=[r1, r2]`` queues durably. On reload the GET
+    // /messages returns the persisted message; the post-union
+    // ``images`` field carries BOTH refs (round-2 #37 (a) /
+    // amendment #29). The bubble is rendered with the refs.
+    const empty: Message[] = [];
+    const persistedMessage = makeMessage({
+      message_id: 'durable-bubble',
+      content: 'see attached',
+      created_at: '2026-09-19T12:00:00Z',
+      images: [REF_A, REF_B],
+    });
+
+    const merged = mergeMessagesById(empty, [persistedMessage]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([REF_A, REF_B]);
+  });
+
+  it('(iii) legacy-bonus — legacy data-URI send keeps thumbnail through SSE echo / refetch', () => {
+    // Pre-existing defect closure (architect C2 corollary):
+    // ``messages.py:458`` historically dropped ``message.images``
+    // from the 202 body. The pin closes the legacy drop too — the
+    // data-URI ref is retained through the merge.
+    const legacyBubble = makeMessage({
+      message_id: 'legacy-bubble',
+      content: 'legacy data-URI',
+      created_at: '2026-09-19T12:00:00Z',
+      images: [DATA_URI],
+      pending: true,
+    });
+    const echoWithoutImages = makeMessage({
+      message_id: 'legacy-bubble',
+      content: 'legacy data-URI',
+      created_at: '2026-09-19T12:00:00Z',
+    });
+
+    const merged = mergeMessagesById([legacyBubble], [echoWithoutImages]);
+    expect(merged.length).toBe(1);
+    expect(merged[0].images).toEqual([DATA_URI]);
+  });
+});
+
 describe('mergeMessagesById — single-document compaction doc (compaction-output-structure §10.9a)', () => {
   // The backend persists exactly ONE SystemMessage per compaction with
   // the stable id ``compaction-global-{instance_id}-{seq}``. Re-delivery

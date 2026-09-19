@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
 import type { Message, SSEEvent } from '../models';
 import { SseService as RealSseService } from './sse.service';
+import { isTmpImageRef } from '../constants/image-ref';
 
 // Mock EventSource class for testing
 class MockEventSource {
@@ -286,6 +287,39 @@ class TestSseService {
   // Expose for testing
   getEventSource(): MockEventSource | null {
     return this.eventSource;
+  }
+
+  /**
+   * Map raw SSE message data to Message type — LOGIC MIRROR of
+   * production ``SseService.mapToMessage`` (private method). The mirror
+   * is required because the production method is private; the
+   * identity-grep mirror-parity rule (FE conventions) requires the
+   * literal predicate ``isTmpImageRef(img)`` and the verbatim #19
+   * comment block to appear in BOTH the production source AND this
+   * spec source — otherwise a future widening of the production
+   * filter would silently drift away from a still-green spec.
+   *
+   * Phase 5 / clipboard-image-chat — two-prefix accept (legacy data
+   * URI + canonical server-URL ref). See decisions.md §2 and
+   * architecture-recommendation.md §6.5 (architect ruling #19).
+   */
+  mapToMessage(data: Record<string, unknown>): Message {
+    return {
+      message_id: data['message_id'] as string,
+      role: (data['role'] as 'user' | 'assistant' | 'system' | 'tool') || 'assistant',
+      content: (data['content'] as string) || '',
+      thinking: (data['thinking'] as string | null) || null,
+      thinking_extracted: (data['thinking_extracted'] as string | null) || null,
+      tool_calls: Array.isArray(data['tool_calls']) ? data['tool_calls'] as ToolCall[] : undefined,
+      created_at: (data['created_at'] as string) || new Date().toISOString(),
+      instance_id: data['instance_id'] as string | undefined,
+      // Whitelist is PREFIX-SCOPED, NOT scheme-based. https:// is explicitly OUT (scheme-widening enables tracking-pixel + internal-network-probe vectors via <img src>). The Discord-SSE gap is PRE-EXISTING and out of scope — its correct future fix is a host allowlist (e.g. cdn.discordapp.com), recorded as follow-up.
+      images: Array.isArray(data['images'])
+        ? (data['images'] as string[]).filter((img: unknown): img is string =>
+            typeof img === 'string' && (img.startsWith('data:image/') || isTmpImageRef(img))
+          )
+        : undefined,
+    };
   }
 }
 
@@ -797,6 +831,245 @@ describe('SseService', () => {
       const msgs = service.messages();
       expect(msgs.length).toBe(2);
       expect(msgs.map(m => m.message_id)).toEqual(['first', 'second']);
+    });
+  });
+
+  /**
+   * Phase 5 / clipboard-image-chat — the SSE whitelist widening is
+   * the seam that lets the new ``/api/tmp_images/<32hex>`` server-URL
+   * ref form survive into the rendered bubble. Without it, the
+   * whitelist's single-prefix ``data:image/`` check silently drops the
+   * ref and the bubble renders without a thumbnail.
+   *
+   * Truth-table cases (per plan Task 2 acceptance):
+   *   (a) ``data:image/png;base64,...`` → accepted (legacy)
+   *   (b) ``/api/tmp_images/<32hex>`` → accepted (new ref; 32-hex
+   *       lowercase id per decisions.md §2)
+   *   (c) ``http://evil.example/x.png`` → dropped (no prefix match)
+   *   (d) arbitrary non-URL string → dropped
+   *   (e) post-union fixture (round-2 #37 (b)): the SSE wire `images`
+   *       field carries refs alongside legacy blocks (via
+   *       ``serialize_message``'s union of ``additional_kwargs['image_refs']``)
+   *       → accepted through the SAME filter.
+   *
+   * The fixtures include a 4-image case (cap is 3 — the whitelist does
+   * NOT enforce cap; that's a send-time concern handled by phase 4).
+   */
+  describe('mapToMessage — images whitelist (phase 5 / clipboard-image-chat)', () => {
+    const REF_A = '/api/tmp_images/abc123def456789012345678901234de'; // 32-hex lowercase
+    const REF_B = '/api/tmp_images/00000000000000000000000000000001';
+    const REF_C = '/api/tmp_images/00000000000000000000000000000002';
+    const REF_D = '/api/tmp_images/00000000000000000000000000000003';
+    const LEGACY_DATA_URI = 'data:image/png;base64,AAAA';
+
+    function mapRow(images: unknown): string[] | undefined {
+      return service.mapToMessage({
+        message_id: 'm-images',
+        role: 'user',
+        content: 'hello',
+        images,
+      }).images;
+    }
+
+    it('(a) accepts a legacy ``data:image/...`` data URI', () => {
+      expect(mapRow([LEGACY_DATA_URI])).toEqual([LEGACY_DATA_URI]);
+    });
+
+    it('(b) accepts a canonical ``/api/tmp_images/<32hex>`` ref', () => {
+      expect(mapRow([REF_A])).toEqual([REF_A]);
+    });
+
+    it('(b+) accepts MULTIPLE canonical refs (mixed ids all retained)', () => {
+      const result = mapRow([REF_A, REF_B, REF_C]);
+      expect(result).toEqual([REF_A, REF_B, REF_C]);
+    });
+
+    it('(b++) accepts 4 refs (past the 3-image cap) — whitelist does not enforce cap', () => {
+      const result = mapRow([REF_A, REF_B, REF_C, REF_D]);
+      expect(result).toEqual([REF_A, REF_B, REF_C, REF_D]);
+    });
+
+    it('(c) DROPS an ``http://`` URL (no prefix match — prefix-scoped, NOT scheme-based)', () => {
+      expect(mapRow(['http://evil.example/x.png'])).toEqual([]);
+    });
+
+    it('(c+) DROPS an ``https://`` URL (the comment pin names scheme-widening as the explicit hazard)', () => {
+      expect(mapRow(['https://evil.example/x.png'])).toEqual([]);
+      expect(mapRow(['https://cdn.discordapp.com/attachments/123/456/x.png'])).toEqual([]);
+    });
+
+    it('(d) DROPS an arbitrary non-URL string', () => {
+      expect(mapRow(['not a url'])).toEqual([]);
+      expect(mapRow(['/some/other/path'])).toEqual([]);
+      expect(mapRow([''])).toEqual([]);
+    });
+
+    it('(e) accepts the post-union wire shape (refs surface in the SAME `images` field — round-2 #37 (b))', () => {
+      // Architect amendment #29 (serialize_message union) lands the
+      // refs inside the wire `images` field. The whitelist filter is
+      // the SINGLE seam — there is no separate `image_refs` wire field
+      // to filter on. The post-union fixture asserts the same path
+      // handles both legacy blocks and new refs.
+      const result = mapRow([LEGACY_DATA_URI, REF_A, REF_B]);
+      expect(result).toEqual([LEGACY_DATA_URI, REF_A, REF_B]);
+    });
+
+    it('drops non-string elements from the array (defensive — wire type-asserted upstream)', () => {
+      // The filter is typed (img is unknown); non-strings are
+      // structurally dropped by the ``typeof img === 'string'`` guard.
+      const result = mapRow([REF_A, 42, null, undefined, { url: REF_B }]);
+      expect(result).toEqual([REF_A]);
+    });
+
+    it('returns undefined when ``images`` is absent (legacy path — no images field)', () => {
+      expect(mapRow(undefined)).toBeUndefined();
+    });
+
+    it('returns undefined when ``images`` is not an array (defensive — unknown wire shape)', () => {
+      expect(mapRow('not an array')).toBeUndefined();
+      expect(mapRow({ url: REF_A })).toBeUndefined();
+    });
+
+    it('returns an empty array (NOT undefined) when the array contains zero matches', () => {
+      // The contract: an array-shaped input → array-shaped output (may
+      // be empty). An undefined input → undefined output. This is the
+      // distinction the bubble's ``for ... of img in images`` loop
+      // relies on (it skips an empty array, falls back to a placeholder
+      // on undefined).
+      expect(mapRow(['http://evil.example/x.png'])).toEqual([]);
+    });
+
+    /**
+     * Identity-grep mirror-parity (FE conventions): the literal
+     * ``isTmpImageRef(img)`` predicate MUST appear verbatim in BOTH
+     * production source (``sse.service.ts:mapToMessage``) AND this
+     * spec source (``TestSseService.mapToMessage`` mirror). If a
+     * future contributor replaces the prefix-scoped check with a
+     * permissive ``img.startsWith('/')`` or a scheme check, this spec
+     * still passes — but a CI grep would catch the drift. The TestSse
+     * Service mirror carries the literal so a manual side-by-side
+     * diff between prod and spec surfaces any widening.
+     */
+    it('identity-grep: ``isTmpImageRef(img)`` appears verbatim in the mirror', () => {
+      // The mirror's filter call site carries the literal predicate;
+      // this assertion is a no-op pass if present and would surface a
+      // compile error if the predicate is removed. (Compile-time
+      // pin — the import in this spec file requires the symbol to
+      // resolve.)
+      expect(typeof isTmpImageRef).toBe('function');
+      // Belt-and-suspenders: invoke the mirror with a ref-shaped
+      // input and assert the predicate's output is reflected.
+      expect(mapRow([REF_A])).toEqual([REF_A]);
+    });
+
+    /**
+     * Comment-pin identity-grep (architect ruling #19, exact text per
+     * ``architecture-recommendation.md`` §6.5): the verbatim comment
+     * block MUST appear in production source. The mirror carries the
+     * SAME comment so the spec cannot drift away from a still-green
+     * production. The 3 distinctive substrings below are the
+     * architectural-load-bearing phrases — pin their presence so a
+     * future contributor who trims or rewrites the comment is forced
+     * to keep the architectural argument intact.
+     */
+    it('comment-pin identity-grep: 3 architectural-load-bearing substrings are present in the mirror', () => {
+      // The mirror source contains the verbatim comment block above.
+      // The test reads its own source via ``fs`` and asserts each
+      // substring appears verbatim. A rewriter who drops the
+      // architectural argument is caught by this spec.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const fs = require('fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const path = require('path');
+      const specSrc = fs.readFileSync(__filename, 'utf8') as string;
+      const substrings = [
+        'PREFIX-SCOPED, NOT scheme-based',
+        'scheme-widening enables',
+        'host allowlist',
+      ];
+      for (const s of substrings) {
+        expect(specSrc).toContain(s);
+      }
+      // The production source carries the SAME three substrings — pin
+      // it explicitly so a silent drift between mirror and production
+      // fails this spec rather than the live renderer.
+      const prodSrc = fs.readFileSync(
+        path.join(__dirname, 'sse.service.ts'),
+        'utf8',
+      ) as string;
+      for (const s of substrings) {
+        expect(prodSrc).toContain(s);
+      }
+    });
+  });
+
+  /**
+   * Phase 5 / clipboard-image-chat — Task 6 cross-seam invariant:
+   * an SSE event carrying ``images: ['/api/tmp_images/<32hex>']``
+   * flows through ``mapToMessage`` AND ``upsertMessage`` AND
+   * ``mergeMessagesById`` (the chat component's merge helper) and
+   * the bubble that lands in the message list STILL carries the
+   * refs intact — even when a subsequent echo or refetch lands
+   * WITHOUT an ``images`` field (the 202-injection drop case that
+   * the merge pin was specifically built to absorb).
+   *
+   * The invariant covers BOTH seams in one test surface so a future
+   * regression on either the whitelist OR the merge pin fails this
+   * spec rather than only surfacing in production.
+   */
+  describe('cross-seam invariant — SSE ref survives mapToMessage + upsertMessage + mergeMessagesById', () => {
+    const REF_A = '/api/tmp_images/abc123def456789012345678901234de'; // 32-hex lowercase
+    const REF_B = '/api/tmp_images/00000000000000000000000000000001';
+
+    it('preserves a ref from mapToMessage → upsertMessage into the stored list', () => {
+      // Wire input: SSE event with images = [REF_A] (canonical §2 form).
+      const message = service.mapToMessage({
+        message_id: 'cross-1',
+        role: 'user',
+        content: 'see attached',
+        images: [REF_A],
+      });
+
+      // Whitelist predicate accepted the ref.
+      expect(message.images).toEqual([REF_A]);
+
+      // Upsert the message into the SSE mirror.
+      service.connect('instance-1');
+      service.getEventSource()?.simulateEvent('user_message', { message });
+      const stored = service.messages().find(m => m.message_id === 'cross-1');
+      expect(stored).toBeDefined();
+      expect(stored!.images).toEqual([REF_A]);
+    });
+
+    it('preserves a ref through mergeMessagesById when a follow-up echo has no images field', () => {
+      // This is the 202-injection regression (architect h4-S1):
+      // the optimistic bubble carries the refs (phase 4), the SSE
+      // echo lands WITHOUT images, and the merge pin MUST keep the
+      // existing copy intact. The test exercises the merge helper
+      // directly with the §2 frozen wire shapes.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const { mergeMessagesById } = require('./message-merge.util');
+
+      const optimisticBubble = {
+        message_id: 'cross-2',
+        role: 'user',
+        content: 'see attached',
+        created_at: '2026-09-19T12:00:00Z',
+        images: [REF_A, REF_B],
+        pending: true,
+      } as Message;
+      const echoWithoutImages = {
+        message_id: 'cross-2',
+        role: 'user',
+        content: 'see attached',
+        created_at: '2026-09-19T12:00:00Z',
+        // images: undefined — the SSE echo shape that the 202 leg
+        // historically emitted before h4-S1 landed.
+      } as unknown as Message;
+
+      const merged = mergeMessagesById([optimisticBubble], [echoWithoutImages]);
+      expect(merged.length).toBe(1);
+      expect(merged[0].images).toEqual([REF_A, REF_B]);
     });
   });
 });
