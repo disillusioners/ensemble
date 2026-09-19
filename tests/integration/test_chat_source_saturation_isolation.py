@@ -74,7 +74,8 @@ import pytest
 from tests.integration.chat_source_harness import (
     WORKER_POOL_SIZE,
     build_chat_source_engine,
-    chat_lane_flag_reset_fixture,    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,
+    build_live_pool_manager,
     fetch_task_by_work_id,
     make_blocking_run_task,
     seed_chat_message,
@@ -206,6 +207,16 @@ class TestSaturationIsolation:
             timeouts_after = chat_stats_after["workers_woken_by_timeout"]
 
             elapsed = claimed_at - enqueued_at
+            # Phase B hardening (chat-lane-followups, Item 4c):
+            # log ``elapsed`` on the green path too — the bound is
+            # asserted but operators reading the run log want to see
+            # the observed claim latency, not only the verdict.
+            # Mirrors the saturation-isolation two-read delta note.
+            print(
+                f"[chat-source] SC#1/SC#3 claim latency: "
+                f"{elapsed:.3f}s (bound ≤3.0s) on "
+                f"{chat_work_id}"
+            )
             assert elapsed <= 3.0, (
                 f"chat row claim latency {elapsed:.3f}s exceeds 3.0s "
                 f"SC#3 budget"

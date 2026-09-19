@@ -95,11 +95,14 @@ from sqlmodel import Session, select
 from daemon.repositories.task.models import Task, TaskStatus
 from tests.integration.chat_source_harness import (
     build_chat_source_engine,
-    chat_lane_flag_reset_fixture,    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,
+    build_live_pool_manager,
     fetch_task_by_work_id,
     seed_chat_message,
     wait_until,
 )
+
+from daemon.services.timestamps import now_utc_naive
 
 
 pytestmark = pytest.mark.integration
@@ -184,7 +187,7 @@ class TestTask4AFixtureValidation:
             time.sleep(SHORT_TASK_SLEEP_S)
             # Mark task COMPLETED in the DB (mirrors the production
             # ``_tasks_completed`` flow).
-            from daemon.services.timestamps import now_utc_naive
+
 
             with Session(engine) as s:
                 t = s.get(Task, task.id)
@@ -302,7 +305,7 @@ class TestChatLaneSaturationQueueing:
             with lock:
                 claimed_at[task.work_id] = time.monotonic()
             time.sleep(SHORT_TASK_SLEEP_S)
-            from daemon.services.timestamps import now_utc_naive
+
 
             with Session(engine) as s:
                 t = s.get(Task, task.id)
@@ -392,7 +395,7 @@ class TestChatLaneSaturationQueueing:
         interaction is wrong, this test surfaces the wedge."""
         def _run_task(task, cancellation_token=None):
             time.sleep(SHORT_TASK_SLEEP_S)
-            from daemon.services.timestamps import now_utc_naive
+
 
             with Session(engine) as s:
                 t = s.get(Task, task.id)

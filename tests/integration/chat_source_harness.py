@@ -326,6 +326,7 @@ def build_live_pool_manager(
     *,
     num_workers: int = WORKER_POOL_SIZE,
     use_worker_pool: str | None = None,
+    drain_boot_claims: bool = True,
 ) -> Iterator:
     """Build a real ``InstanceManager`` with both pools running.
 
@@ -348,6 +349,16 @@ def build_live_pool_manager(
             requires touching the constant — not supported here).
         use_worker_pool: ``"false"`` to set the kill-switch;
             ``None`` (default) clears it so both pools construct.
+        drain_boot_claims: When ``True`` (default), deterministically
+            retire the default pool's gateless boot claims
+            (B1 boot-window adjudication) before yielding to the
+            caller. Pass ``False`` to skip the drain — callers that
+            explicitly want the boot-window state preserved (e.g.,
+            tests probing the B1 fail-open / boot-window itself)
+            opt out. The kill-switch branch
+            (``use_worker_pool in ("false","0","no")``) already
+            skips the drain regardless of this flag — there are
+            no boot claims to drain when no pool constructs.
 
     Yields:
         The configured ``InstanceManager`` (real pools, stubbed
@@ -363,7 +374,7 @@ def build_live_pool_manager(
             # (fail-open) — nothing to drain and the assert below
             # MUST NOT hold (that is the kill-switch contract).
             yield manager
-        else:
+        elif drain_boot_claims:
             # Adjudication fix (2026-09-19): deterministically
             # retire the default pool's gateless boot claims
             # BEFORE yielding to the caller, so tests never seed
@@ -372,6 +383,21 @@ def build_live_pool_manager(
             wait_default_pool_boot_claims_drained(
                 manager, num_workers=num_workers
             )
+            from daemon.repositories.task.repository import (
+                is_chat_lane_active,
+            )
+
+            assert is_chat_lane_active(), (
+                "chat lane flag must be True after setup_worker_pool "
+                "— kill-switch early-return or teardown raced the setup"
+            )
+            yield manager
+        else:
+            # Caller opted out of the boot-claim drain (drain_boot_claims=False).
+            # The chat lane flag is flipped BEFORE setup_worker_pool
+            # returns (per ``set_chat_lane_active(True)`` at
+            # manager.py:6798), so the assertion below still holds;
+            # we just don't pay the boot-claim-wait cost.
             from daemon.repositories.task.repository import (
                 is_chat_lane_active,
             )
