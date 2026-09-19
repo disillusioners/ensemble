@@ -6291,6 +6291,118 @@ class InstanceManager:
                 else:
                     raise
 
+        # Phase 2 / clipboard-image-chat (council NEEDS-FIXES, 2026-09-19,
+        # C2-f migration sweep): on databases that pre-date the
+        # dedicated ``image_refs`` column, ref-style entries
+        # (canonical ``/api/tmp_images/<32hex>`` URLs or the
+        # ``tmpimg://<32hex>`` alias) may still live on the
+        # ``images`` JSONB column (the round-2 schema overloaded both
+        # channels onto ``images``). Detect rows where the entries
+        # look like REFs (not data-URIs) and migrate them to the new
+        # ``image_refs`` column so the worker-claim seam loads them
+        # via ``ProcessingContext.image_refs``. Best-effort:
+        # ``jsonb_array_elements_text`` with a regex predicate
+        # distinguishes refs from legacy data-URIs.
+        #
+        # Discriminator: a REF is any string starting with
+        # ``/api/tmp_images/`` OR ``tmpimg://`` (NEVER a
+        # ``data:image/...;base64,...`` — legacy data-URI path is
+        # preserved). An entry that is a ref lands on
+        # ``image_refs``; the entry stays on ``images`` if and only
+        # if it is a legacy data-URI.
+        #
+        # Idempotent: a row whose ``image_refs`` is already populated
+        # AND whose ``images`` no longer carries a ref entry is left
+        # untouched. Subsequent runs no-op.
+        self._migrate_overloaded_image_refs_rows()
+
+    def _migrate_overloaded_image_refs_rows(self) -> None:
+        """One-time migration: move refs out of ``images`` into
+        ``image_refs`` (council NEEDS-FIXES, C2-f).
+
+        Pre-fix schema: the ``images`` JSONB column carried BOTH legacy
+        data-URI entries AND clipboard ref entries — the round-2
+        overload that the council verdict pinned as a bug. The dedicated
+        ``image_refs`` column was added on top, but pre-fix rows keep
+        refs in ``images`` until this sweep runs.
+
+        Sweep logic: for every ``message_queue`` row whose
+        ``images`` JSONB array contains at least one entry matching
+        the REF shape (``/api/tmp_images/<32hex>`` or
+        ``tmpimg://<32hex>``), move the ref entries to ``image_refs``
+        and remove them from ``images``.
+
+        Failure semantics: like the rest of ``_ensure_postgres_columns``,
+        this method does NOT catch exceptions — if the sweep SQL fails
+        (permissions, syntax, table missing), startup aborts. Better to
+        fail loudly at startup than to silently ship the migration in a
+        half-done state.
+        """
+        from sqlalchemy import text
+
+        # Only run on PostgreSQL. SQLite companion lives in the
+        # migration runner (SQLite-only).
+        if not (
+            self._ensemble_config is not None
+            and self._ensemble_config.is_postgres
+        ):
+            return
+
+        # The sweep: for each row, partition ``images`` into
+        # ``ref_entries`` and ``legacy_entries`` by the discriminator
+        # (URL/tmpimg prefix). Set ``image_refs`` to the union of
+        # ``existing image_refs`` and ``ref_entries`` (NULL-safe; if
+        # ``image_refs`` already carries refs from a prior run we
+        # union-merge instead of clobber). Set ``images`` to
+        # ``legacy_entries`` (which is NULL when no data-URI entries
+        # remain).
+        #
+        # SQL is intentionally written with the same operator chain
+        # (``jsonb_array_elements_text`` + regex ``~``) the rest of
+        # the codebase uses for ref-shape detection — see
+        # ``daemon/models/message.py:_IMAGE_REF_PATTERN``.
+        sweep_sql = text(
+            """
+            UPDATE message_queue AS m
+            SET
+                images = COALESCE(
+                    (
+                        SELECT jsonb_agg(elem)
+                        FROM jsonb_array_elements_text(m.images) AS elem
+                        WHERE elem !~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                    ),
+                    '[]'::jsonb
+                ),
+                image_refs = (
+                    SELECT to_jsonb(array_agg(DISTINCT elem ORDER BY elem))
+                    FROM (
+                        SELECT elem
+                        FROM jsonb_array_elements_text(m.images) AS elem
+                        WHERE elem ~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                        UNION
+                        SELECT elem
+                        FROM jsonb_array_elements_text(COALESCE(m.image_refs, '[]'::jsonb)) AS elem
+                    ) AS refs(elem)
+                )
+            WHERE
+                jsonb_typeof(m.images) = 'array'
+                AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(m.images) AS elem
+                    WHERE elem ~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                )
+            """
+        )
+        with self._engine.begin() as conn:
+            result = conn.execute(sweep_sql)
+            migrated = result.rowcount
+            if migrated:
+                logger.info(
+                    f"[migrate_image_refs] Swept {migrated} pre-fix "
+                    f"message_queue row(s) — moved ref entries from "
+                    f"'images' to the new dedicated 'image_refs' column"
+                )
+
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.
 
