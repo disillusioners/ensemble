@@ -324,28 +324,82 @@ class TestHardeningHeadersE2E:
 
 
 # ===========================================================================
-# Group 6 — phase-3-deferred marker (round-2 amendment O6)
+# Group 6 — W4 real-app route-order pin (phase-1+3 review)
 # ===========================================================================
 
 
-class TestPhase3DeferredMarker:
-    """The DELETE∥sweep race test is DEFERRED until phase 3 ships.
+class TestRealAppTmpImagesRouteOrder:
+    """W4 (phase-1+3 review): pin the REAL ``create_app()`` route table.
 
-    Per architect round-2 amendment O6, this test cannot land until
-    phase 3 ships ``TmpImageCleanupService.sweep_once()``. The test
-    below is the structural placeholder — when phase 3 lands, drop
-    the placeholder and add the real race test.
+    The e2e at this file uses a hand-built mini-app with its own
+    catch-all (Group 3 above). That proves the route-order principle
+    but NOT that the production ``create_app()`` actually registers
+    the tmp_images router BEFORE its SPA catch-all — a future
+    refactor that re-orders the mount would silently break the
+    route, and the mini-app e2e would still pass.
+
+    This suite calls the real ``daemon.api.create_app()`` (no
+    lifespan drive — we only inspect the static route table) and
+    pins:
+
+    * every ``/api/tmp_images`` route appears BEFORE the SPA
+      catch-all ``/{path:path}`` in ``app.routes``;
+    * Starlette first-match-wins would otherwise send
+      ``GET /api/tmp_images/<id>`` to ``index.html``.
     """
 
-    def test_phase_3_deferred_race_test_marker(self):
-        # phase-3-deferred: DELETE∥sweep race test. The real test
-        # would: (1) start the phase-3 TmpImageCleanupService sweep,
-        # (2) issue a DELETE on the same id, (3) assert both succeed
-        # (204 + sweep log) with no error. NOT WRITTABLE in phase 1 —
-        # the sweep service does not exist yet.
-        #
-        # The marker itself is the assertion: phase 1 ships WITHOUT
-        # the race test, and the merge gate must not require it.
-        # When phase 3 lands, replace this method with the real race
-        # assertion.
-        assert True, "phase-3-deferred — see O6"
+    def test_tmp_images_routes_registered_before_spa_catch_all(self):
+        from daemon.api import create_app
+
+        app = create_app()
+
+        # Find the SPA catch-all index — same shape as the
+        # ``test_vscode_routing.py`` precedent.
+        catchall_idx = None
+        for i, route in enumerate(app.routes):
+            if (
+                getattr(route, "path", None) == "/{path:path}"
+                and "GET" in getattr(route, "methods", set())
+            ):
+                catchall_idx = i
+                break
+
+        assert catchall_idx is not None, (
+            "W4: SPA catch-all /{path:path} not found in create_app() routes"
+        )
+
+        # Find every tmp_images route — the router was included via
+        # ``api_router.include_router(tmp_images_router)`` where
+        # api_router has prefix /api and tmp_images_router has prefix
+        # /tmp_images, so the final mounted paths are /api/tmp_images
+        # and /api/tmp_images/{image_id_or_ref:path}.
+        tmp_image_route_idxs = []
+        for i, route in enumerate(app.routes):
+            path = getattr(route, "path", None)
+            if path is None:
+                continue
+            # Match the exact ``/api/tmp_images`` POST + debug GET
+            # and ``/api/tmp_images/<param>`` GET + DELETE shapes.
+            if path == "/api/tmp_images":
+                tmp_image_route_idxs.append(i)
+            elif path.startswith("/api/tmp_images/"):
+                tmp_image_route_idxs.append(i)
+
+        assert tmp_image_route_idxs, (
+            "W4: no /api/tmp_images routes found in create_app() output — "
+            "the tmp_images router may not be wired into api_router. "
+            f"All routes: {[getattr(r, 'path', '?') for r in app.routes]!r}"
+        )
+
+        # Pin: every tmp_images route index is strictly less than the
+        # catch-all index. Starlette matches in registration order;
+        # the first matching route wins. A route AFTER the catch-all
+        # is unreachable for GET (the catch-all's GET swallows it).
+        offenders = [i for i in tmp_image_route_idxs if i > catchall_idx]
+        assert not offenders, (
+            f"W4: tmp_images routes at indices {offenders} are AFTER the "
+            f"SPA catch-all at index {catchall_idx} — Starlette "
+            f"first-match-wins would shadow them. Routes after the "
+            f"catch-all: "
+            f"{[getattr(r, 'path', '?') for r in app.routes[catchall_idx + 1:]]!r}"
+        )

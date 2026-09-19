@@ -186,3 +186,199 @@ class TestFullLifespanWiring:
 
         store = build_tmp_image_store(data_dir=Path(resolved), max_bytes=1024)
         assert store.data_dir == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Group 5 — W1 lifespan fail-soft (phase-1+3 review)
+# ---------------------------------------------------------------------------
+
+
+class TestLifespanFailSoftOnStoreBootError:
+    """W1 (phase-1+3 review): the lifespan must NOT crash when the store
+    factory raises (unwritable data_dir, EACCES/ENOSPC, etc.).
+
+    The production wiring (daemon/api.py:263-289) wraps the
+    ``build_tmp_image_store`` call in a try/except; on failure the
+    store is set to ``None`` and the boot anchor is replaced by an
+    ERROR log. The router's ``_get_store`` then returns 503 for every
+    ``/api/tmp_images`` endpoint. This test mirrors the production
+    wiring shape — same try/except block, same ERROR log, same
+    ``app.state`` assignment — and pins the fail-soft contract:
+
+    * boot completes (TestClient context manager exits cleanly),
+    * ``app.state.tmp_image_store`` is ``None``,
+    * POST/GET/DELETE on ``/api/tmp_images`` all return 503.
+    """
+
+    def test_unwritable_data_dir_boot_completes_with_store_none(self, tmp_path, monkeypatch):
+        """Simulate an unwritable store dir (PermissionError) and verify
+        the lifespan boot completes with the store set to None.
+        """
+        import logging
+        from contextlib import asynccontextmanager
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        # Reach for the function through the module so the monkeypatch
+        # below actually intercepts the call (a ``from X import f``
+        # binding would not — the local name still points at the
+        # original). This mirrors the production lifespan exactly,
+        # which also imports ``build_tmp_image_store`` at module
+        # level then accesses it via the local name.
+        from daemon.services import tmp_image_store as tmp_image_store_module
+
+        # Force the factory to raise — mirrors an unwritable data_dir
+        # (PermissionError, OSError, or any subclass).
+        def boom(**kwargs):
+            raise PermissionError("simulated unwritable data_dir")
+
+        monkeypatch.setattr(
+            "daemon.services.tmp_image_store.build_tmp_image_store",
+            boom,
+        )
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            # Mirror production wiring exactly (daemon/api.py:263-289).
+            tmp_image_store_max_bytes = 1024 * 1024
+            try:
+                tmp_image_store = tmp_image_store_module.build_tmp_image_store(
+                    data_dir=tmp_path,
+                    max_bytes=tmp_image_store_max_bytes,
+                )
+            except Exception as tmp_image_store_boot_exc:
+                tmp_image_store = None
+                logging.getLogger("daemon.api").error(
+                    f"[TmpImages] store init FAILED — tmp-images endpoints "
+                    f"will return 503 until the store is restored: "
+                    f"{tmp_image_store_boot_exc}",
+                    exc_info=True,
+                )
+            app.state.tmp_image_store = tmp_image_store
+            if tmp_image_store is not None:
+                logging.getLogger("daemon.api").info(
+                    f"[TmpImages] ready: dir={tmp_image_store.dir} "
+                    f"count={tmp_image_store.count()} "
+                    f"max_bytes={tmp_image_store_max_bytes}"
+                )
+            try:
+                yield
+            finally:
+                pass
+
+        app = FastAPI(lifespan=lifespan)
+
+        # Mount the real router so the 503 contract is exercised
+        # through the production code path.
+        from daemon.routers import tmp_images as tmp_images_module
+        app.include_router(tmp_images_module.router, prefix="/api")
+
+        # Boot must complete — if the fail-soft is missing the
+        # context manager raises and TestClient propagates it.
+        # Use a valid PNG payload so the POST reaches the route
+        # handler (and thus ``_get_store``) instead of being rejected
+        # at the body-validation layer (FastAPI/pydantic 422 happens
+        # BEFORE the route runs, so a malformed body would short-circuit
+        # past the 503 contract).
+        valid_payload = {
+            "images": [{
+                "filename": "a.png",
+                "content_type": "image/png",
+                "data_base64": (
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lE"
+                    "QVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII="
+                ),
+            }]
+        }
+        with TestClient(app) as client:
+            # app.state.tmp_image_store is None.
+            assert getattr(app.state, "tmp_image_store", "missing") is None, (
+                "W1 fail-soft: store must be None after a failed init"
+            )
+
+            # POST → 503 (body validation passes, handler invokes
+            # ``_get_store`` → 503).
+            r = client.post("/api/tmp_images", json=valid_payload)
+            assert r.status_code == 503, (
+                f"W1 fail-soft: POST must return 503 when store is None, "
+                f"got {r.status_code}: {r.text!r}"
+            )
+
+            # GET → 503 (no body validation; reaches the handler).
+            r = client.get("/api/tmp_images/" + ("a" * 32))
+            assert r.status_code == 503, (
+                f"W1 fail-soft: GET must return 503 when store is None, "
+                f"got {r.status_code}: {r.text!r}"
+            )
+
+            # DELETE → 503 (no body validation; reaches the handler).
+            r = client.delete("/api/tmp_images/" + ("a" * 32))
+            assert r.status_code == 503, (
+                f"W1 fail-soft: DELETE must return 503 when store is None, "
+                f"got {r.status_code}: {r.text!r}"
+            )
+
+    def test_unwritable_data_dir_logs_error_at_fail_soft(self, tmp_path, monkeypatch, caplog):
+        """The fail-soft path must emit an ERROR log naming the exception.
+
+        Pins the diagnostic surface — operators grep for the FAILED
+        marker when /api/tmp_images returns 503.
+        """
+        import logging
+        from contextlib import asynccontextmanager
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from daemon.services import tmp_image_store as tmp_image_store_module
+
+        def boom(**kwargs):
+            raise PermissionError(13, "Permission denied", "/data")
+
+        monkeypatch.setattr(
+            "daemon.services.tmp_image_store.build_tmp_image_store",
+            boom,
+        )
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                tmp_image_store = tmp_image_store_module.build_tmp_image_store(
+                    data_dir=tmp_path,
+                    max_bytes=1024,
+                )
+            except Exception as tmp_image_store_boot_exc:
+                tmp_image_store = None
+                logging.getLogger("daemon.api").error(
+                    f"[TmpImages] store init FAILED — tmp-images endpoints "
+                    f"will return 503 until the store is restored: "
+                    f"{tmp_image_store_boot_exc}",
+                    exc_info=True,
+                )
+            app.state.tmp_image_store = tmp_image_store
+            try:
+                yield
+            finally:
+                pass
+
+        app = FastAPI(lifespan=lifespan)
+        from daemon.routers import tmp_images as tmp_images_module
+        app.include_router(tmp_images_module.router, prefix="/api")
+
+        with caplog.at_level(logging.ERROR, logger="daemon.api"):
+            with TestClient(app):
+                pass
+
+        error_lines = [
+            r for r in caplog.records
+            if r.levelno >= logging.ERROR
+            and "[TmpImages] store init FAILED" in r.getMessage()
+        ]
+        assert len(error_lines) >= 1, (
+            "W1 fail-soft: must emit an ERROR log with the FAILED marker. "
+            f"Got caplog records: {[r.getMessage() for r in caplog.records]}"
+        )
+        msg = error_lines[0].getMessage()
+        assert "Permission denied" in msg, (
+            f"W1 fail-soft: ERROR log must carry the exception message, "
+            f"got: {msg!r}"
+        )

@@ -13,9 +13,13 @@ MIME record, never from a filename suffix).
 
 ``<data_dir>/tmp_images/<id>.json`` — the sidecar with the original
 content_type, decoded byte count, and upload timestamp. Written
-atomically alongside the blob (a partial write would leave an
-unreadable entry; the store writes both in order and treats any failure
-on the second write as a rollback on the first).
+atomically via a tmp-file + ``os.replace`` so a partial write never
+leaves a torn sidecar observable on disk. The blob write is
+``O_CREAT|O_EXCL``-atomic (POSIX create-or-fail); the sidecar write is
+its own atomic step. A failure between the blob write and the
+sidecar rename leaves the blob un-readable (the GET endpoint 404s on
+the missing sidecar — no MIME record) until the next sweep cleans it
+up; mid-batch rollback in ``save`` covers previously-written ids.
 
 The id regex ``^[a-f0-9]{32}$`` is enforced at the router layer
 BEFORE any filesystem call (defense in depth — even if a malformed id
@@ -25,12 +29,12 @@ that would touch paths outside the store).
 Concurrency
 -----------
 
-Writes use ``O_CREAT|O_EXCL`` (POSIX atomic create-or-fail) so a
-collision on a uuid4 id (vanishingly rare, but possible on a client
-retry that re-mints deterministically) raises ``FileExistsError`` —
-the router turns that into HTTP 409 ``CONFLICT``. Per-image byte
-budget is enforced by a walkdir sum immediately before the write so
-we never cross the configured cap (architect amendment #3).
+Writes are NOT atomic per request — the blob write is
+``O_CREAT|O_EXCL``-atomic (POSIX create-or-fail, so a uuid4 collision
+surfaces as ``FileExistsError`` → HTTP 409 ``CONFLICT``) but the
+sidecar is its own atomic step (tmp-file + ``os.replace``). Per-image
+byte budget is enforced by a walkdir sum immediately before the write
+so we never cross the configured cap (architect amendment #3).
 """
 
 from __future__ import annotations
@@ -243,7 +247,7 @@ class TmpImageStore:
         content_bytes: bytes,
         content_type: str,
     ) -> TmpImageRecord:
-        """Persist a new entry. Atomic per request.
+        """Persist a new entry.
 
         1. Walkdir sum: if ``current_total + new_size > max_bytes``,
            raise ``TmpImageStoreFull`` (router → HTTP 507). The
@@ -252,9 +256,14 @@ class TmpImageStore:
            directory, not just blob bytes.
         2. Open the blob with ``O_CREAT|O_EXCL|O_WRONLY`` — a collision
            on the uuid4 hex raises ``FileExistsError`` (router → HTTP 409).
-        3. Write the sidecar AFTER the blob (best-effort cleanup on
-           partial failure: the caller has the original bytes and the
-           router returns 500).
+           The blob write itself is POSIX-atomic.
+        3. Write the sidecar AFTER the blob. The sidecar write is its
+           own atomic step (tmp-file + ``os.replace`` — see below). On
+           any failure between steps 2 and 3, the blob stays on disk
+           but the entry is un-readable (no MIME record → GET 404)
+           until the next sweep reaps it. Mid-batch rollback in the
+           router covers ids written earlier in the same batch; an
+           in-progress failure is left to the sweep (architect §7).
 
         Returns the ``TmpImageRecord`` that was persisted.
         """
@@ -308,20 +317,33 @@ class TmpImageStore:
             uploaded_at=uploaded_at,
             sha256_hex=sha256_hex,
         )
-        # Sidecar write — best-effort: if it fails the blob is
-        # already on disk and the GET endpoint will 404 (no MIME
-        # record). The router surfaces the failure as 500.
-        meta_path.write_text(
-            json.dumps(
-                {
-                    "content_type": record.content_type,
-                    "size_bytes": record.size_bytes,
-                    "uploaded_at": record.uploaded_at,
-                    "sha256_hex": record.sha256_hex,
-                }
-            ),
-            encoding="utf-8",
+        # Sidecar write — atomic via tmp-file + ``os.replace`` so a
+        # partial write is never observable. The tmp file is
+        # namespaced by image_id (no collision risk across concurrent
+        # writers for different ids). On any failure the tmp file is
+        # best-effort unlinked; the blob stays on disk but the entry
+        # is un-readable (no MIME record → GET 404) until the next
+        # sweep reaps it.
+        sidecar_payload = json.dumps(
+            {
+                "content_type": record.content_type,
+                "size_bytes": record.size_bytes,
+                "uploaded_at": record.uploaded_at,
+                "sha256_hex": record.sha256_hex,
+            }
         )
+        tmp_meta_path = meta_path.with_suffix(meta_path.suffix + ".tmp")
+        try:
+            tmp_meta_path.write_text(sidecar_payload, encoding="utf-8")
+            os.replace(str(tmp_meta_path), str(meta_path))
+        except Exception:
+            # Best-effort cleanup of the tmp file so it never lingers
+            # in the store dir after a failed write.
+            try:
+                tmp_meta_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
         return record
 
     def open(self, image_id: str) -> tuple[bytes, str]:

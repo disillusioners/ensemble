@@ -20,16 +20,30 @@ POST /api/tmp_images
               (``/api/tmp_images/<image_id>``). ``tmpimg://<image_id>``
               is NEVER emitted (input-alias only).
     Errors:
-        400 INVALID_REQUEST — base64 malformed, MIME not in allowlist,
-                              count > 3, size > 10MB. Allowlist
-                              rejection message is VERBATIM:
-                              "content_type '<t>' rejected — only
-                              png/jpeg/gif/webp allowed (svg excluded:
-                              stored-XSS via direct navigation)"
-        409 CONFLICT       — image_id collision (caller bug — should
-                              not reuse server-minted ids).
+        422 UNPROCESSABLE_ENTITY — FastAPI/pydantic validation envelope
+                                  (``{"detail": [{"type": ..., "loc": [...],
+                                  "msg": ..., ...}, ...]}``). This is the
+                                  wire shape for a malformed request
+                                  body — count > 3, per-item bytes >
+                                  limit, malformed base64, missing
+                                  fields, etc. The 422 path bypasses
+                                  the typed ``ErrorResponse`` envelope
+                                  below; the FE MUST parse the
+                                  ``detail`` array (extract ``msg``)
+                                  rather than look for a ``code`` field
+                                  that does not exist on this path.
+        400 INVALID_REQUEST      — ``ErrorResponse`` envelope
+                                  (``{"code": "...", "message": "..."}``)
+                                  for explicit allowlist rejections.
+                                  Allowlist rejection message is
+                                  VERBATIM: "content_type '<t>'
+                                  rejected — only png/jpeg/gif/webp
+                                  allowed (svg excluded: stored-XSS via
+                                  direct navigation)".
+        409 CONFLICT             — image_id collision (caller bug — should
+                                  not reuse server-minted ids).
         507 INSUFFICIENT_STORAGE — store byte cap exceeded; rate-limited
-                              WARNING (≤1/min).
+                                  WARNING (≤1/min).
 
 GET /api/tmp_images/{image_id_or_ref}
     Accepts: bare 32-hex id (the normal form), OR

@@ -300,15 +300,39 @@ function toUploadError(err: unknown): UploadError {
 
 /**
  * Pull the daemon's error message out of an HttpErrorResponse. The
- * daemon returns ``{"detail": {"message": "..."}}`` for FastAPI's
- * validation surfaces and ``{"detail": "<string>"}`` for older
- * plain-string errors. Returns the full JSON when no recognizable
- * shape is found so the chip retry affordance shows what the server
- * actually said.
+ * daemon returns several wire shapes; this helper collapses them into
+ * a single human-readable string for the chip retry affordance:
+ *
+ * - ``{"detail": "<string>"}`` — legacy plain-string errors (and the
+ *   ``HTTPException(detail="...")`` path).
+ * - ``{"detail": {"message": "..."}}`` — ``ErrorResponse`` envelope
+ *   from the typed rejection paths (400 INVALID_REQUEST etc.).
+ * - ``{"detail": [{"type": ..., "loc": [...], "msg": ..., ...}, ...]}`` —
+ *   FastAPI/pydantic 422 validation envelope. There is NO ``code``
+ *   field here; we extract ``msg`` from the array items (joining
+ *   multiple with ``; ``) so the chip retry sees the validator's
+ *   actual copy rather than a JSON-stringified dump.
+ *
+ * Falls back to ``JSON.stringify(detail)`` for any unrecognized
+ * object shape, then to the raw body, then to ``statusText`` /
+ * ``HTTP <status>``. Never throws — the chip UX depends on a stable
+ * string surface.
  */
 function extractServerMessage(err: HttpErrorResponse): string {
   const detail = err.error?.detail;
   if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    // FastAPI/pydantic 422 detail-array shape. Each item carries a
+    // human-readable ``msg`` (the validator's verbatim copy); join
+    // them so a multi-field rejection is readable.
+    const msgs = detail
+      .map(item => (item && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string')
+        ? (item as { msg: string }).msg
+        : null)
+      .filter((m): m is string => m !== null);
+    if (msgs.length > 0) return msgs.join('; ');
+    return JSON.stringify(detail);
+  }
   if (detail && typeof detail === 'object') {
     if (typeof detail.message === 'string') return detail.message;
     return JSON.stringify(detail);

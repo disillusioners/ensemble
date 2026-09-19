@@ -260,18 +260,36 @@ async def lifespan(app: FastAPI):
     # The factory helper ``build_tmp_image_store`` is the same one
     # the boot integration test calls directly to verify the wiring
     # shape — keeps the lifespan code symmetric with the test fixture.
+    #
+    # W1 (phase-1+3 review): the boot init is wrapped in a try/except
+    # so an unwritable store dir (EACCES/ENOSPC) does not crash daemon
+    # boot. On failure the store is set to ``None`` and the router
+    # returns 503 for every ``/api/tmp_images`` endpoint (see
+    # ``_get_store`` in ``daemon/routers/tmp_images.py``). The pattern
+    # mirrors the waiting-children watchdog fail-soft above
+    # (daemon/api.py:916-922) — boot always completes, a degraded
+    # service is logged at ERROR with the exception.
     from daemon.services.tmp_image_store import build_tmp_image_store
     tmp_image_store_max_bytes = config.services.tmp_image_store_max_bytes
-    tmp_image_store = build_tmp_image_store(
-        data_dir=data_dir,
-        max_bytes=tmp_image_store_max_bytes,
-    )
+    try:
+        tmp_image_store = build_tmp_image_store(
+            data_dir=data_dir,
+            max_bytes=tmp_image_store_max_bytes,
+        )
+    except Exception as tmp_image_store_boot_exc:
+        tmp_image_store = None
+        daemon_logger.error(
+            f"[TmpImages] store init FAILED — tmp-images endpoints will "
+            f"return 503 until the store is restored: {tmp_image_store_boot_exc}",
+            exc_info=True,
+        )
     app.state.tmp_image_store = tmp_image_store
-    daemon_logger.info(
-        f"[TmpImages] ready: dir={tmp_image_store.dir} "
-        f"count={tmp_image_store.count()} "
-        f"max_bytes={tmp_image_store_max_bytes}"
-    )
+    if tmp_image_store is not None:
+        daemon_logger.info(
+            f"[TmpImages] ready: dir={tmp_image_store.dir} "
+            f"count={tmp_image_store.count()} "
+            f"max_bytes={tmp_image_store_max_bytes}"
+        )
 
     # Apply LLM-specific class-level config that must be set before any
     # ThinkingChatOpenAI instance is created. Mirrors what __main__.py does

@@ -278,3 +278,116 @@ class TestBuildFactoryAndIntrospection:
         store.init()
         store.save(_VALID_HEX_ID_32, b"x" * 50, "image/png")
         assert store.current_total_bytes() > 50  # blob + sidecar
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — W3 sidecar atomicity (phase-1+3 review)
+# ---------------------------------------------------------------------------
+
+
+class TestTmpImageStoreSidecarAtomicity:
+    """W3 (phase-1+3 review): tmp-file + ``os.replace`` atomicity for sidecar.
+
+    The sidecar write is its own atomic step — a tmp file is written
+    then ``os.replace``'d to the real path. On rename failure the
+    tmp file is best-effort unlinked so no torn sidecar is observable
+    on disk. These tests pin:
+
+    * the happy path leaves no ``.json.tmp`` file lingering,
+    * a rename failure leaves NEITHER the real sidecar NOR the tmp
+      file behind (the blob is intentionally left — the router /
+      sweep handles a blob-without-sidecar pair).
+    """
+
+    def test_happy_save_leaves_no_tmp_file_lingering(self, tmp_path):
+        store = TmpImageStore(tmp_path, max_bytes=1024 * 1024)
+        store.init()
+        store.save(_VALID_HEX_ID_32, b"x", "image/png")
+        meta_path = store.dir / f"{_VALID_HEX_ID_32}.json"
+        tmp_meta_path = store.dir / f"{_VALID_HEX_ID_32}.json.tmp"
+        assert meta_path.exists(), "real sidecar must exist after save"
+        assert not tmp_meta_path.exists(), (
+            f"tmp sidecar at {tmp_meta_path} must not linger after save"
+        )
+
+    def test_rename_failure_leaves_no_partial_sidecar(self, tmp_path, monkeypatch):
+        """W3 atomicity pin: ``os.replace`` failure must NOT leave the
+        real sidecar path with partial bytes.
+
+        The tmp file is best-effort unlinked on the failure path;
+        the blob stays on disk (the O_EXCL create is NOT rolled back —
+        that would defeat the atomic-create contract; the router /
+        sweep will reap the blob-without-sidecar pair).
+        """
+        import os
+
+        store = TmpImageStore(tmp_path, max_bytes=1024 * 1024)
+        store.init()
+
+        def boom_replace(src, dst, *args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(
+            "daemon.services.tmp_image_store.os.replace",
+            boom_replace,
+        )
+
+        with pytest.raises(OSError, match="simulated rename failure"):
+            store.save(_VALID_HEX_ID_32, b"x", "image/png")
+
+        # The real sidecar MUST NOT exist — no torn write observable.
+        meta_path = store.dir / f"{_VALID_HEX_ID_32}.json"
+        assert not meta_path.exists(), (
+            f"sidecar at {meta_path} must not exist after rename failure"
+        )
+        # The tmp sidecar MUST NOT linger either — best-effort cleanup.
+        tmp_meta_path = store.dir / f"{_VALID_HEX_ID_32}.json.tmp"
+        assert not tmp_meta_path.exists(), (
+            f"tmp sidecar at {tmp_meta_path} must be cleaned up after rename failure"
+        )
+        # The blob is intentionally left on disk (the router/sweep
+        # handles a blob-without-sidecar pair on the next reap).
+        assert (store.dir / _VALID_HEX_ID_32).exists(), (
+            "blob at the O_EXCL path stays on disk after sidecar failure — "
+            "the next sweep reaps it"
+        )
+
+    def test_happy_save_invokes_os_replace_for_sidecar(self, tmp_path, monkeypatch):
+        """W3 sanity: the happy-path sidecar write goes through ``os.replace``.
+
+        Pins the tmp-file + rename pattern — a future regression to a
+        direct ``write_text`` would FAIL this test (zero replace calls).
+        """
+        import os
+
+        real_replace = os.replace
+        replace_calls: list[tuple[str, str]] = []
+
+        def tracking_replace(src, dst, *args, **kwargs):
+            replace_calls.append((str(src), str(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "daemon.services.tmp_image_store.os.replace",
+            tracking_replace,
+        )
+
+        store = TmpImageStore(tmp_path, max_bytes=1024 * 1024)
+        store.init()
+        store.save(_VALID_HEX_ID_32, b"x", "image/png")
+
+        matching = [
+            c for c in replace_calls
+            if _VALID_HEX_ID_32 in c[0] and _VALID_HEX_ID_32 in c[1]
+        ]
+        assert len(matching) == 1, (
+            f"expected 1 os.replace call for {_VALID_HEX_ID_32}, got "
+            f"{len(matching)}: {matching}"
+        )
+        src, dst = matching[0]
+        assert src.endswith(".json.tmp"), (
+            f"os.replace source should be the tmp sidecar, got {src}"
+        )
+        assert dst.endswith(".json"), (
+            f"os.replace destination should be the real sidecar, got {dst}"
+        )
