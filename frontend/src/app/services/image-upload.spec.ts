@@ -249,6 +249,21 @@ function toUploadError(err: unknown): UploadError {
 function extractServerMessage(err: HttpErrorResponse): string {
   const detail = (err.error as { detail?: unknown })?.detail;
   if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    // FastAPI/pydantic 422 detail-array shape — mirror production
+    // (image-upload.service.ts extractServerMessage). Join each item's
+    // ``msg`` with ``"; "`` so a multi-field rejection is readable;
+    // fall back to JSON.stringify when no item carries a ``msg``.
+    const msgs = detail
+      .map((item: unknown) =>
+        item && typeof item === 'object' && typeof (item as { msg?: unknown }).msg === 'string'
+          ? (item as { msg: string }).msg
+          : null,
+      )
+      .filter((m: string | null): m is string => m !== null);
+    if (msgs.length > 0) return msgs.join('; ');
+    return JSON.stringify(detail);
+  }
   if (detail && typeof detail === 'object') {
     const d = detail as { message?: string };
     if (typeof d.message === 'string') return d.message;
@@ -448,6 +463,51 @@ describe('ImageUploadService', () => {
 
       expect(err).toBeInstanceOf(UploadError);
       expect(err.kind).toBe('server');
+    });
+
+    it('maps 422 detail-array to UploadError joining each item msg with "; "', async () => {
+      // FastAPI/pydantic 422 envelope: detail is an ARRAY of items
+      // each carrying a validator's ``msg``. Production
+      // extractServerMessage joins them so the chip retry sees the
+      // validator's verbatim copy rather than a JSON dump.
+      http.responses = [{
+        status: 422,
+        error: {
+          detail: [
+            { type: 'value_error', loc: ['body', 'images', 0, 'data_base64'], msg: 'first must be valid base64' },
+            { type: 'too_many', loc: ['body', 'images'], msg: 'second count exceeds 3' },
+          ],
+        },
+      }];
+
+      const file = new File(['x'], 'photo.png', { type: 'image/png' });
+      const err = await new Promise<UploadError>((resolve, reject) => {
+        service.upload(file).subscribe({ next: () => reject(new Error('expected error')), error: resolve });
+      });
+
+      expect(err).toBeInstanceOf(UploadError);
+      expect(err.status).toBe(422);
+      expect(err.serverMessage).toBe('first must be valid base64; second count exceeds 3');
+      expect(err.kind).toBe('client');
+    });
+
+    it('falls back to JSON.stringify when 422 detail-array items carry no msg', async () => {
+      // Fallback pin: when no array item carries a string ``msg``,
+      // production extractServerMessage stringifies the array so the
+      // surfaced message still carries the wire shape rather than
+      // an empty string. Asserting the full stringified array pins
+      // the fallback contract exactly.
+      http.responses = [{ status: 422, error: { detail: [{}] } }];
+
+      const file = new File(['x'], 'photo.png', { type: 'image/png' });
+      const err = await new Promise<UploadError>((resolve, reject) => {
+        service.upload(file).subscribe({ next: () => reject(new Error('expected error')), error: resolve });
+      });
+
+      expect(err).toBeInstanceOf(UploadError);
+      expect(err.status).toBe(422);
+      expect(err.serverMessage).toContain('[{}]');
+      expect(err.kind).toBe('client');
     });
   });
 });
