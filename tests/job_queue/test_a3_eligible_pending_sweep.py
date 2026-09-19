@@ -483,8 +483,22 @@ class TestA3EligiblePendingSweep:
     async def test_sweep_continues_on_notify_work_failure(
         self, engine, caplog
     ):
-        """A notify_work that raises is caught; the sweep advances
-        counters without aborting."""
+        """A notify_work that raises is caught by the consolidated
+        helper (``safe_notify_all_pools``); the sweep sees the
+        helper's silent ``None`` return and advances counters
+        cleanly without aborting.
+
+        Phase B re-contract: pre-Phase-B, the sweep called
+        ``worker_pool.notify_work()`` inline inside a try/except
+        that bumped ``cumulative_errors``. Post-Phase-B, the
+        helper swallows the exception (logs WARNING, returns
+        ``None``) — the sweep sees ``notify_result is None``,
+        sets ``notified=False``, and does NOT bump
+        ``cumulative_errors`` (the error is captured at the
+        helper layer as the systemic backstop). The behavioral
+        guarantee (a notify failure must NOT break the sweep)
+        is preserved.
+        """
         import logging
 
         now = datetime.now(timezone.utc)
@@ -504,25 +518,59 @@ class TestA3EligiblePendingSweep:
             min_pending_age_seconds=DEFAULT_MIN_PENDING_AGE_SECONDS,
         )
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="daemon.services.pool_orchestrator",
+        ):
             stats = await service.sweep_once()
 
-        # Eligible was found, notify_work was attempted but raised;
-        # counters reflect the attempt + the failure.
+        # Eligible was found, notify_work was attempted but the
+        # helper swallowed the exception; counters reflect the
+        # attempt (NOT a sweep-level error — the helper owns
+        # fail-soft semantics now).
         assert stats["eligible"] == 1
         assert stats["notified"] == 0, (
             f"notify_work raising MUST NOT count as notified; "
             f"got notified={stats['notified']!r}"
         )
-        assert stats["cumulative_errors"] == 1, (
-            f"notify_work raising MUST bump cumulative_errors; "
-            f"got cumulative_errors={stats['cumulative_errors']!r}"
+        # Phase B contract: the helper swallows the exception
+        # silently (WARNING log + return None), so the sweep
+        # does NOT bump cumulative_errors. The error is captured
+        # at the helper layer — that's the new systemic
+        # backstop (the helper docstring spells it out: "next
+        # tick / sweep is the systemic backstop"). The pre-Phase-B
+        # expectation (``cumulative_errors == 1``) was the
+        # OLD shape's contract where the sweep itself owned the
+        # try/except.
+        assert stats["cumulative_errors"] == 0, (
+            f"Helper swallows notify_work failures — sweep "
+            f"MUST NOT bump cumulative_errors (the helper owns "
+            f"fail-soft semantics now); got cumulative_errors="
+            f"{stats['cumulative_errors']!r}"
         )
 
-        # A subsequent tick must still work.
+        # Phase B fail-soft contract: the helper emits a WARNING
+        # log naming the site_label + 'raised' so operators see
+        # which wake site tripped on a transient blip. Capture
+        # from the helper's logger (its home is
+        # daemon/services/pool_orchestrator.py).
+        blip_logs = [
+            r for r in caplog.records
+            if "[EligiblePendingSweep]" in r.getMessage()
+            and "raised" in r.getMessage()
+        ]
+        assert blip_logs, (
+            "Helper MUST emit a WARNING log naming "
+            "'[EligiblePendingSweep]' + 'raised' on notify "
+            "failure — the fail-soft contract that replaces the "
+            "old inline try/except"
+        )
+
+        # A subsequent tick must still work (the helper returned
+        # ``None`` — the service is healthy).
         worker_pool.notify_work.side_effect = None
         stats2 = await service.sweep_once()
-        assert stats2["cumulative_errors"] == 1, (
+        assert stats2["cumulative_errors"] == 0, (
             f"Second tick has a healthy pool → no new errors; "
             f"got cumulative_errors={stats2['cumulative_errors']!r}"
         )
@@ -628,7 +676,12 @@ class TestA3ConstitutionStatic:
 
     def test_a3_module_uses_existing_helpers(self):
         """The sweep MUST use ``TaskRepository.list_pending_tasks_older_than``
-        (no new query method introduced)."""
+        (no new query method introduced) AND the consolidated
+        ``safe_notify_all_pools`` helper (Phase B) for the wake
+        call — the inline ``self._worker_pool.notify_work()`` shape
+        was retired by Phase B (the consolidated helper owns the
+        Mock-compat ``__dict__``-probe + try/except +
+        legacy-fixture fallback in one home)."""
         from pathlib import Path
 
         prod_path = (
@@ -644,9 +697,64 @@ class TestA3ConstitutionStatic:
             "method is allowed (the helper is the single source of "
             "truth for PENDING + NULL heartbeat + aged-past-grace)"
         )
-        assert "self._worker_pool.notify_work()" in contents, (
-            "A3 sweep MUST call the canonical notify_work seam — "
-            "same primitive as task creation and A2 autopromote"
+        # Phase B helper import — the consolidated wake seam must
+        # be imported at module scope (per the canonical pattern
+        # across all wake sites). The sweep uses the relative
+        # import form (``from .pool_orchestrator import``) — the
+        # service lives in the same package.
+        assert (
+            "from .pool_orchestrator import safe_notify_all_pools"
+            in contents
+        ), (
+            "A3 sweep MUST import the consolidated "
+            "safe_notify_all_pools helper from "
+            "daemon.services.pool_orchestrator — the inline "
+            "_worker_pool.notify_work() call shape was retired "
+            "in Phase B"
+        )
+        # Helper call site — the canonical wake seam at the A3
+        # block. The site_label + fallback_pool uniquely identify
+        # the A3 site among the consolidated call sites (the A3
+        # sweep holds the legacy ``worker_pool=`` on the SERVICE
+        # itself — not on the manager — so it MUST pass
+        # ``fallback_pool=self._worker_pool``).
+        assert (
+            'safe_notify_all_pools(\n                    self._manager,'
+            in contents
+        ), (
+            "A3 sweep MUST call the consolidated "
+            "safe_notify_all_pools helper — same primitive as "
+            "task creation and A2 autopromote"
+        )
+        assert (
+            'site_label="EligiblePendingSweep"' in contents
+        ), (
+            "A3 wake site must carry the EligiblePendingSweep "
+            "site_label — the canonical A3 identifier among the "
+            "consolidated call sites"
+        )
+        assert "fallback_pool=self._worker_pool" in contents, (
+            "A3 sweep MUST pass fallback_pool=self._worker_pool "
+            "to the consolidated helper — the sweep stores the "
+            "legacy pool on the SERVICE itself, so the helper's "
+            "fallback branch preserves the pre-Phase-2 reach"
+        )
+        # ``notify_work`` substring still appears in the file (the
+        # helper's home + the per-site wake seam contract is
+        # documented in comments). The substring check is loose —
+        # we only assert the helper call shape, not the inline
+        # ``self._worker_pool.notify_work()`` shape that the
+        # consolidated helper replaces.
+        assert "notify_work" in contents, (
+            "notify_work seam missing — the consolidated helper "
+            "must still document the wake target seam"
+        )
+        # Belt-and-braces: the OLD inline seam must NOT be
+        # present (the consolidated helper retired it).
+        assert "self._worker_pool.notify_work()" not in contents, (
+            "A3 sweep MUST NOT retain the pre-Phase-B inline "
+            "self._worker_pool.notify_work() call — the "
+            "consolidated helper supersedes that shape"
         )
 
 
