@@ -291,6 +291,100 @@ class TestShutdownLogging:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 / Task #8 — shutdown extension: multi-pool assertion +
+# "Chat worker pool stopped" log line present + threads joined ≤30s
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownThreadsJoinedWithinProductionBudget:
+    """Phase 3 / Task #8 — thread-join budget ≤30s (the production
+    ``stop(timeout=30.0)`` budget). The chat pool's 2 workers
+    are joined BEFORE the default pool's 5 workers (E1 ordering),
+    so the total wall-clock is bounded by the sum of per-pool
+    join budgets.
+
+    The Phase 2 / Task #5 shutdown test pins the no-leaked-thread
+    invariant for BOTH pools individually (already in the file).
+    This Phase 3 extension pins the wall-clock budget explicitly.
+    """
+
+    def test_threads_join_within_30s_budget(self, engine, caplog):
+        """With both pools running, ``shutdown_worker_pool`` joins
+        all 7 worker threads (5 default + 2 chat) within the
+        production 30s stop budget per pool.
+
+        Implementation: measure wall-clock from before
+        ``shutdown_worker_pool()`` to when ALL workers' threads
+        report ``is_alive() == False``. The production stop budget
+        is 30s per pool's ``stop()`` call (E1 chat-first ordering),
+        so the total budget is bounded by the sum (60s in
+        worst case if both pools' 30s timers fire fully).
+
+        The test bounds at 30s TOTAL — both pools joined within
+        the production per-pool budget. A worker that fails to
+        join within its 30s budget would trigger the
+        hung-worker WARNING (manager.py:6916) and ``is_alive()``
+        would remain True.
+        """
+        import time
+
+        with _wire_manager(engine) as manager:
+            default_workers = list(manager._worker_pool._workers)
+            chat_workers = list(manager._chat_worker_pool._workers)
+            assert all(w.is_alive() for w in default_workers)
+            assert all(w.is_alive() for w in chat_workers)
+
+            start = time.monotonic()
+            manager.shutdown_worker_pool()
+            elapsed = time.monotonic() - start
+
+            # After shutdown, no worker should still be alive.
+            for w in default_workers + chat_workers:
+                assert not w.is_alive(), (
+                    f"worker {w.worker_id} still alive after "
+                    f"shutdown elapsed={elapsed:.2f}s"
+                )
+
+            # Total wall-clock bounded by 30s — the per-pool
+            # production budget. If this fails, the E1 ordering
+            # or hung-worker WARNING path needs investigation.
+            assert elapsed <= 30.0, (
+                f"shutdown took {elapsed:.2f}s, exceeds 30s "
+                f"production per-pool join budget"
+            )
+
+
+class TestShutdownEmitsChatPoolStoppedLog:
+    """Phase 3 / Task #8 — "Chat worker pool stopped" log line is
+    emitted during teardown (operator-facing observability — paired
+    with the existing "Worker pool stopped" line for the default
+    pool).
+
+    The Phase 2 / Task #5 logging test already pins the chat pool
+    stopped log line. This Phase 3 extension pins it alongside the
+    multi-pool assertion to ensure both pools' lifecycle observability
+    is consistent.
+    """
+
+    def test_chat_pool_stopped_log_emitted_alongside_default(
+        self, engine, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level(logging.INFO):
+            with _wire_manager(engine) as manager:
+                manager.shutdown_worker_pool()
+
+        # BOTH pools' log lines present — paired observability.
+        assert "Worker pool stopped" in caplog.text, (
+            f"expected 'Worker pool stopped' substring; got: "
+            f"{caplog.text!r}"
+        )
+        assert "Chat worker pool stopped" in caplog.text, (
+            f"expected 'Chat worker pool stopped' substring; got: "
+            f"{caplog.text!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Worker counts as a sanity check — both pools still construct at the
 # production sizes (D7 / D10.3).
 # ---------------------------------------------------------------------------
