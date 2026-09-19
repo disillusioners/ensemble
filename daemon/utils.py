@@ -265,6 +265,40 @@ def serialize_message(msg: Any, tool_outputs: dict | None = None, message_id: st
     if source:
         serialized["source"] = source
 
+    # Phase 2 / clipboard-image-chat (round-2 amendment #29):
+    # Display-channel ``image_refs`` UNION extension. Refs are
+    # stamped on the HumanMessage.additional_kwargs["image_refs"]
+    # at construction time (_build_graph_input at
+    # ``daemon/services/instance_messaging.py``; the FIFO drain at
+    # ``daemon/graph.py:6647-6673``; the POST-time echo at
+    # ``daemon/routers/messages.py``). The wire ``images`` field is
+    # the canonical place the FE / SSE consumers read for the
+    # thumbnail / ref list, so we union refs INTO it here — single
+    # field, legacy ``image_url`` blocks unchanged.
+    #
+    # Reviewer question (ii) RULED (decisions.md §2.1): legacy
+    # display surface untouched by the union — Discord HTTPS URLs
+    # and legacy data URIs surface through the same ``images``
+    # field exactly as today; refs add alongside.
+    #
+    # Identity-grep pin (round-2 amend #29): the literal string
+    # ``image_refs`` MUST appear verbatim in this block. A future
+    # ``simplification`` that drops the union is the
+    # serializer-simplification hazard this comment cites.
+    image_refs = additional_kwargs.get("image_refs")
+    if image_refs:
+        # Order-preserving union: existing images first (legacy
+        # data-URI blocks / Discord HTTPS URLs), then refs appended.
+        # ``dict.fromkeys``-style dedup so a ref that's also an
+        # image_url in legacy data doesn't double up.
+        merged: list[str] = list(serialized.get("images") or [])
+        seen = set(merged)
+        for ref in image_refs:
+            if ref not in seen:
+                merged.append(ref)
+                seen.add(ref)
+        serialized["images"] = merged
+
     return serialized
 
 
