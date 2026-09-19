@@ -305,12 +305,12 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 #     mapping-side ``mapping.mapping_metadata.get("slack_thread_ts")``
 #     fallback (:439-440). Per-message metadata is NOT required for
 #     reply routing. ✓
-#   * ``telegram`` — adapter.py:558-573 (mint); reply path at
-#     adapter.py:262-326 reads ``message.metadata.get("reply_chat_id")``
+#   * ``telegram`` — telegram.py:558-573 (mint); reply path at
+#     telegram.py:262-326 reads ``message.metadata.get("reply_chat_id")``
 #     with ``external_user_id`` fallback (:280) — and ``external_user_id``
-#     is ALWAYS ``chat_id`` for both group + private chats, so the
-#     fallback always routes correctly. Per-message metadata is NOT
-#     required. ✓
+#     is always a valid Telegram chat_id (``user_id`` for private chats,
+#     ``chat_id`` for groups), so the fallback always routes correctly.
+#     Per-message metadata is NOT required. ✓
 #   * ``discord`` — adapter.py:1024-1038 / :1170-1196 (mint); reply
 #     path at adapter.py:1589-1627 routes via ``_resolve_send_target``
 #     (:1363-1437) which reads mapping.metadata (Discord does NOT
@@ -323,7 +323,7 @@ INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
 # site):
 #   * slack      — adapter.py:813-825 (+ /new at :829-830)
 #   * discord    — adapter.py:1092-1099 (text) and :1204-1209 (slash)
-#   * telegram   — adapter.py:558-573 (+ /new at :579-580)
+#   * telegram   — telegram.py:558-573 (+ /new at :579-580)
 ROUTING_ENVELOPE_KEYS: dict[str, frozenset[str]] = {
     "slack": frozenset({
         "slack",
