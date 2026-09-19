@@ -6,8 +6,11 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
+
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 
 from .base import (
     IncomingMessage,
@@ -855,7 +858,117 @@ class SourceRegistry:
             
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
-            
+
+            # ── Chat-source live-turn message injection (Phase 6) ────────
+            # Mirrors the web ``routers/messages.py`` injection branch
+            # (~:436-458) and the agent-tool ``tools/instance.py`` path
+            # (:3066-3128). When a chat-source message arrives for a
+            # target instance that is RUNNING with a live graph consumer
+            # AND the message is text-only (no images, no metadata
+            # payload), deliver via the RAM-FIFO injection lane
+            # (``manager.set_injection``) so it lands in the agent's
+            # CURRENT turn — exactly like ``POST /messages``.
+            #
+            # DEFECT-A stranding guard (``daemon/constants.py:279-289``):
+            # ``status == "running"`` is necessary but NOT sufficient for
+            # the RAM-FIFO lane. A graphless RUNNING target (e.g., a
+            # spawn-created child that was cascade-paused + cascade-
+            # resumed without ever being dispatched) reads ``running``
+            # while having NO graph to drain ``_pending_injections`` —
+            # injecting into it would silently strand the message in
+            # memory forever. ``manager.has_live_graph_task`` is the
+            # verifier; a ``False`` result routes through the durable
+            # ``enqueue_message_job`` pipeline below.
+            #
+            # Rich payloads (images / non-empty metadata) ALWAYS take the
+            # durable enqueue fallthrough — ``set_injection`` is text-only
+            # (its signature accepts ``content``, ``source``, ``echo_id``
+            # and nothing else; wiring image-bearing injections would
+            # require extending the FIFO schema + drain site, which is
+            # out of scope here).
+            #
+            # Empty / whitespace-only content also falls through — the
+            # chat-source path does not validate ``message.content`` like
+            # HTTP does (S4), but a blank injection would still produce a
+            # wasted turn; routing it through durable enqueue keeps the
+            # behavior uniform with the existing pipeline.
+            is_text_only_payload = bool(
+                msg.content
+                and msg.content.strip()
+                and not msg.images
+                and not msg.metadata
+            )
+            should_inject_live = False
+            if is_text_only_payload:
+                try:
+                    # ``get_instance_info`` is a sync facade method
+                    # (``daemon/manager.py:10819`` → lifecycle service
+                    # :4351); matches the web reference's call shape
+                    # exactly (``routers/messages.py:198``).
+                    instance_info = self._manager.get_instance_info(
+                        instance_id
+                    )
+                    current_status = (
+                        instance_info.get("status")
+                        if instance_info
+                        else None
+                    )
+                except (KeyError, AttributeError) as probe_err:
+                    # Instance probe failed (transient race / DB miss).
+                    # Fall through to durable enqueue — never silently
+                    # drop a chat-source message.
+                    logger.debug(
+                        f"[chat-source live-injection] probe failed for "
+                        f"{instance_id[:8]}...: "
+                        f"{type(probe_err).__name__}: {probe_err} — "
+                        f"falling through to enqueue"
+                    )
+                    current_status = None
+                if (
+                    current_status in INJECTION_ELIGIBLE_STATUSES
+                    and self._manager.has_live_graph_task(instance_id)
+                ):
+                    should_inject_live = True
+
+            if should_inject_live:
+                # message-display-latency fix (mirrors
+                # ``routers/messages.py:454``): mint a stable
+                # server-side ``echo_id`` here and thread it through
+                # the FIFO entry. The drain site (``daemon/graph.py``)
+                # stamps the same id onto ``HumanMessage.id`` and onto
+                # the POST/drain-time SSE echo (emit-twice-same-id).
+                #
+                # Chat provenance ``source=f"{source_id}:{external_user_id}"``
+                # mirrors the durable-enqueue source format and the
+                # agent-tool ``source=f"internal_agent:<caller>"`` pattern
+                # (``tools/instance.py:3127``); the drain site carries
+                # it onto ``HumanMessage.additional_kwargs["source"]``.
+                # Both kwargs are accepted by ``set_injection``
+                # (``daemon/manager.py:2734-2740``) — Quick-win #1
+                # (S scope) added ``source``, message-display-latency
+                # Phase 1 added ``echo_id``; we use both.
+                echo_id = str(uuid.uuid4())
+                self._manager.set_injection(
+                    instance_id,
+                    msg.content,
+                    source=source,
+                    echo_id=echo_id,
+                )
+                logger.info(
+                    f"⚡ Injected live-turn chat message: "
+                    f"source_id={source_id}, "
+                    f"user={msg.external_user_id}, "
+                    f"instance={instance_id[:8]}..., "
+                    f"echo_id={echo_id}"
+                )
+                # Skip durable enqueue + typing indicator — the agent
+                # is already in an active turn and will drain the FIFO
+                # on its next ``agent_node`` pass. Posting a typing
+                # indicator while the agent is already typing would be
+                # misleading and could toggle the chat client into a
+                # state it does not expect.
+                return
+
             # Phase 5 (cutover): external sources always dispatch through
             # ``enqueue_message_job`` so the JobItem mirror is created
             # alongside the Task row. The legacy Task-only path is gone

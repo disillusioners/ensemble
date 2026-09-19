@@ -255,6 +255,10 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 #   1. ``daemon/routers/messages.py`` (HTTP ``POST /messages``)
 #   2. ``daemon/tools/job_queue.py`` (``job_inject`` tool)
 #   3. ``daemon/tools/instance.py`` (agent-tool ``send_message``)
+#   4. ``daemon/sources/registry.py`` (chat-source ``_handle_message``
+#      — ``feature/chat-source-live-injection``, 2026-09-19; live-turn
+#      injection for ``telegram:/slack:/discord:`` ingest mirroring
+#      the web branch's status + graph-task guards).
 #
 # Test invariant (tests/unit/tools/test_instance_tools.py::test_k_…):
 #   ``grep -n "_INJECTION_ELIGIBLE_STATUSES\s*=\s*{" daemon/`` must
