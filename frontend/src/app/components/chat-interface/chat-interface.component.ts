@@ -757,18 +757,29 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    * discriminate via ``isTmpImageRef`` (phase 5) so a future bug in
    * the data-URI pipeline does NOT regress into the "fallback for
    * data URIs" trap — that would be a visual regression for every
-   * old message.
+   * old message. The DIALOG body keeps its uniform fallback (its
+   * in-memory src is detached from the SSE whitelist, so the
+   * predicate there is uninformative) — see
+   * ``image-viewer-dialog.component`` Task 1 of phase 6.
    */
   onImageError(event: Event, messageId: string, index: number): void {
     const imgEl = event.target as HTMLImageElement | null;
     if (!imgEl) {
       return;
     }
-    // Defensive: if the ref-URL check fails (e.g. a future
-    // adversarial src sneaks past the SSE whitelist), still record the
-    // failure so the bubble does not show a broken-image icon.
-    // isTmpImageRef is the canonical §2 form discriminator.
-    void isTmpImageRef; // referenced for type-narrowing / future parity check
+    // Capture the ORIGINAL src via the attribute (the `.src` property
+    // is the browser-resolved absolute URL, which would not match the
+    // ``TMP_IMAGE_REF_PREFIX`` ``startsWith`` check). This is the
+    // canonical §2 form discriminator: refs only can 410.
+    const originalSrc = imgEl.getAttribute('src') ?? '';
+    if (!isTmpImageRef(originalSrc)) {
+      // data URI / fallback SVG / future non-ref src — bubble must
+      // stay untouched. Do not swap src, do not add the failure class,
+      // do not record into ``failedImages`` (the dialog body would
+      // never reach this pair; recording here would corrupt
+      // ``isImageFailed``).
+      return;
+    }
     if (imgEl.classList.contains('message-image-failed')) {
       // Already failed — do not refire the swap or record again.
       // Belt-and-suspenders: the template binding to imageSrc() should
