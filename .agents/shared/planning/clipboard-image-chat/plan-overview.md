@@ -116,3 +116,7 @@ FE specs per conventions; web-automation e2e (tester, later) hook points per pha
 - R19 CORS/bind posture → leader (proxy tripwire).
 - **Implementation** → developer lane: wave 1 = phase 1 with the 4-check probe FIRST (verbatim
   `quick` in the spawn log = fail + escalate before phase-2 dispatch).
+
+## Phase 3 retention note (shipped 2026-09-19)
+
+`data/tmp_images/` is reaped by `TmpImageCleanupService` — ALWAYS-ON (no kill-switch; architect amendment #15), hourly cadence (deletion latency ≤ retention + interval), default retention **30 days**, age sourced from the sidecar's `uploaded_at` (falling back to file mtime). The only knobs are `SERVICES_TMP_IMAGE_CLEANUP_INTERVAL_SECONDS` (default 3600) and `SERVICES_TMP_IMAGE_CLEANUP_RETENTION_DAYS` (default 30, floor 1 — the operator lever: set very large to effectively disable); both are resolved once at config-load and **require rebuild + restart to flip**. Sweep status surfaces via `GET /api/tmp_images` (gated) `cleanup` block — no `enabled` key. FE phase 6 note: images reaped after retention 404 → the FE `onerror` placeholder is the required companion.
