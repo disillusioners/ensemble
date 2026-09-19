@@ -47,29 +47,41 @@ over a 30s wall-clock window. If observed, the test FAILS
 D10.2 case (ii) — burst waits one task duration, not one poll
 cycle — is the behavior being proven by the ≤3s / ≤6s bounds.
 
-KNOWN BUG (2026-09-18, found by Phase 3 Task #4 isolation
-testing — the bug is documented here and the test asserted
-against it is marked ``xfail``; do NOT weaken the test to
-match the broken behavior):
+ADJUDICATED (2026-09-19, Phase 3 round-2 root-cause pass — the
+former "KNOWN BUG" is RESOLVED as a harness defect; production is
+correct):
 
   * ``claim_pending_task`` produces correct SQL for both lanes
     (``EXISTS(...)`` for chat, ``NOT EXISTS(...)`` for default
-    with flag) — verified by ``tests/unit/test_repository_claim_lane.py``.
-  * Under multi-threaded concurrent claim contention (4+ chat
-    rows on a busy 2-worker chat pool, default pool's 5 workers
-    also polling), the DEFAULT pool's workers intermittently
-    mis-claim chat-prefixed rows despite their ``NOT EXISTS``
-    clause. Failure rate ~25-40% over 20 trials.
-  * The chat-source-worker-lane F2/F11 review contract requires
-    this assertion to be PRESERVED in the test suite; the test
-    uses ``@pytest.mark.xfail(strict=False, reason="...")`` so
-    CI shows a clear xfail (not a flaky red). When the race is
-    fixed, the xfail resolves naturally and the test passes
-    without modification.
+    with flag) — verified by ``tests/unit/test_repository_claim_lane.py``
+    AND re-verified under contention by the round-2 instrumented
+    probes (per-claim composition-time flag capture).
+  * The former ~25-60% mis-claim rate was a HARNESS boot-window
+    race, not a production predicate race: ``setup_worker_pool``
+    starts the DEFAULT pool BEFORE ``set_chat_lane_active(True)``
+    (B1 boot ordering), so every default worker's FIRST claim
+    composes gateless (flag=False fail-open). The harness seeded
+    chat rows within milliseconds of setup completing; a gateless
+    boot claim still in flight (delayed by GIL/SQLite lock
+    contention behind the seeding transactions) executed its
+    UPDATE onto a freshly committed chat row. Instrumented proof:
+    every mis-claim composed with flag=False while a 2ms-sampling
+    monitor thread observed the flag True continuously for the
+    whole mid-test window — i.e. the composition predated the
+    flag flip, and zero flag=False compositions occurred
+    mid-test. The claimed row's message_queue row was ALWAYS
+    visible (non-atomic-seeding hypothesis refuted).
+  * Fix: ``chat_source_harness.build_live_pool_manager`` now
+    drains the default pool's boot claims
+    (``wait_default_pool_boot_claims_drained``) and asserts the
+    flag before yielding. The production boot window itself is
+    the DESIGNED B1 fail-open state (chat pool not yet
+    constructed — processing a chat row on the default lane in
+    that window is the pre-lane behavior; nothing is stranded).
+  * The xfail marks are REMOVED — the assertions now pass
+    deterministically (20/20 verification in the round-2 report).
 
-Branch taken: A — short-task fixture, documented above. Bug
-reproducer: 4 chat rows on 4 different instances, ``_notify_all_pools()``,
-observe ``worker-N`` claiming a chat row in ~25-40% of runs.
+Branch taken: A — short-task fixture, documented above.
 """
 
 from __future__ import annotations
@@ -268,43 +280,18 @@ class TestChatLaneSaturationQueueing:
         durations.
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Lane predicate race: chat-source-worker-lane Phase 3 "
-            "known-bug — see module docstring. Until the production "
-            "race is fixed, default-pool workers occasionally "
-            "mis-claim chat-prefixed rows on a busy chat lane "
-            "(failure rate ~25-40% over 20 trials)."
-        ),
-    )
     def test_third_and_fourth_chat_rows_claim_within_bounds(self, engine):
         """SC#6 — 4 chat rows, 2-worker chat pool, queueing bounds.
 
-        KNOWN BUG (2026-09-18, found by Phase 3 Task #4
-        isolation-testing): the chat-source lane predicate at
-        ``claim_pending_task`` is correct at the unit level
-        (``tests/unit/test_repository_claim_lane.py`` pins every
-        lane/source combination) BUT exhibits a multi-threaded
-        race under high concurrent contention: the DEFAULT pool's
-        workers occasionally mis-claim chat-prefixed rows on a
-        busy chat lane, despite the ``NOT EXISTS (...)`` clause in
-        their SQL. Reproduction: 4 chat rows seeded on 4 different
-        instances, ``_notify_all_pools()``, observe ``worker-N``
-        (``worker-`` prefix, NOT ``chat-worker-``) claiming a chat
-        row. Failed reproducer rate ~25-40% over 20 trials.
-
-        Root cause hypothesis (NOT investigated in Phase 3 — out
-        of scope): the race is between the lane predicate
-        read-time flag check and the atomic UPDATE; the unit tests
-        pin the single-threaded semantics correctly. This test is
-        marked ``xfail(strict=False, ...)`` so:
-          * the assertion is NOT weakened — the test asserts the
-            spec-correct behavior;
-          * when the production race is fixed, this test will
-            pass without modification;
-          * until then, CI sees a clear ``xfail`` (not a flaky
-            red) with the bug reference.
+        ADJUDICATED (2026-09-19 round-2): the former ``xfail`` over a
+        suspected production lane-predicate race is RESOLVED as a
+        HARNESS boot-window defect — see the module docstring for the
+        instrumented root-cause narrative (gateless boot claim
+        composed pre-flag-flip executing onto a freshly seeded chat
+        row; the lane predicate and its flag gating were never wrong
+        mid-test). The harness now drains boot claims before seeding;
+        the strict chat-worker prefix assertion below passes
+        deterministically.
         """
         # Use the short-task fixture validated by Task #4a.
         lock = threading.Lock()
@@ -394,17 +381,13 @@ class TestChatLaneSaturationQueueing:
                 t = fetch_task_by_work_id(engine, wid)
                 assert t is not None
                 assert t.worker_id is not None
-                # BUG-found check (see module docstring): a
-                # chat-prefixed row may be claimed by a default
-                # worker (``worker-N`` prefix, NOT
-                # ``chat-worker-``) under the lane-predicate race.
-                # The test asserts the spec-correct behavior; the
-                # ``xfail`` decorator marks it as expected-to-fail
-                # until the race is fixed.
+                # Strict lane assertion (adjudicated 2026-09-19: the
+                # former xfail was a harness boot-window race, not a
+                # production defect — see module docstring).
                 assert t.worker_id.startswith("chat-worker-"), (
                     f"chat row {wid} was claimed by non-chat worker "
-                    f"{t.worker_id!r} — see chat-source-worker-lane "
-                    f"known-bug docstring"
+                    f"{t.worker_id!r} — lane regression; see the "
+                    f"chat-source-worker-lane adjudication notes"
                 )
 
     def test_no_deadlock_over_30s_window(self, engine):

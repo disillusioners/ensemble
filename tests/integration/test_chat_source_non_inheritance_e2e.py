@@ -29,15 +29,18 @@ The two ``task.worker_id`` strings in the lineage start with
 DIFFERENT prefixes (``chat-worker-`` for the chat row,
 ``worker-`` for the child row) — that is the testable claim.
 
-KNOWN BUG (2026-09-18, found by Phase 3 isolation-testing — see
+ADJUDICATED (2026-09-19, Phase 3 round-2): the former KNOWN BUG
+(default-pool workers occasionally mis-claim chat-prefixed rows
+under contention) is RESOLVED as a HARNESS boot-window race —
+NOT a production predicate defect. See
 ``tests/integration/test_chat_source_lane_saturation.py`` module
-docstring for the full reproducer): the chat-source lane
-predicate has a multi-threaded race; default-pool workers
-occasionally mis-claim chat-prefixed rows. The chat-worker-lineage
-assertion in this test is marked ``xfail(strict=False, ...)``
-(bug-on-the-parent-claim race). The child-claim assertion is
-NOT xfailed — the child is agent-prefixed (NOT chat) and the
-default pool's predicate correctly claims it.
+docstring for the instrumented root-cause narrative; the harness
+now drains the default pool's gateless boot claims before
+seeding (``chat_source_harness.wait_default_pool_boot_claims_drained``).
+The xfail mark on the chat-worker-lineage assertion is removed —
+it passes deterministically. The child-claim assertion was never
+xfailed (the child is agent-prefixed and the default pool
+correctly claims it).
 """
 
 from __future__ import annotations
@@ -88,13 +91,6 @@ class TestNonInheritanceE2E:
     """Chat-prefixed row → chat worker → spawns child (agent-stamped)
     → child claimed by DEFAULT worker (startswith worker-)."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Lane predicate race: chat-source-worker-lane Phase 3 "
-            "known-bug — see module docstring."
-        ),
-    )
     def test_chat_worker_then_child_routes_to_default_lane(self, engine):
         """SC#4 — the chat lane is per-row, not per-instance.
 

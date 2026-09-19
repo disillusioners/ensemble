@@ -44,6 +44,20 @@ saturation-isolation claim is a queue seam assertion, not a full
 HTTP test. The chat pool still receives a real wake via
 ``manager._notify_all_pools()`` so the notify path is exercised.
 
+A2.2 notify-provenance disclosure (Phase 3 round-2, harness
+limitation): the wake in this test is a MANUAL
+``manager._notify_all_pools()`` call, NOT the production
+enqueue→notify path (``enqueue_message_job`` commits the
+MessageQueue+Task rows and THEN calls the wake sites). The
+manual call fans out to the same real ``WorkerPool.notify_work()``
+condition variables the production path reaches, so the
+A2.2 assertion (``workers_woken_by_timeout`` DELTA == 0 over
+[enqueued, claimed]) genuinely proves the notify path delivered
+the claim rather than the 3s poll fallback — but it does NOT
+prove the enqueue-side notify wiring (that is pinned separately
+by the Phase 2 wiring tests). This is a deliberate harness
+limitation, disclosed here per the round-2 protocol.
+
 Pre-test zeroing is FORBIDDEN (F11). The autouse lane-flag reset
 fixture is module-shared and must NOT touch
 ``WorkerPool._stats["workers_woken_by_timeout"]`` — see the

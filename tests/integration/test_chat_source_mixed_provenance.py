@@ -20,19 +20,16 @@ via ``TaskRepository.complete_task`` — mirroring the production
 state beyond what the production claim/complete flow already
 mutates.
 
-KNOWN BUG (2026-09-18, found by Phase 3 isolation-testing — see
+ADJUDICATED (2026-09-19, Phase 3 round-2): the former KNOWN BUG
+(default-pool workers occasionally mis-claim chat-prefixed rows
+under contention) is RESOLVED as a HARNESS boot-window race —
+NOT a production predicate defect. See
 ``tests/integration/test_chat_source_lane_saturation.py`` module
-docstring for the full reproducer and root-cause hypothesis):
-the chat-source lane predicate has a multi-threaded race under
-high concurrent contention; default-pool workers occasionally
-mis-claim chat-prefixed rows. The strict-lane assertions below
-are marked ``xfail(strict=False, ...)`` so:
-  * the assertion is NOT weakened — the test asserts the
-    spec-correct behavior;
-  * when the production race is fixed, this test will pass
-    without modification;
-  * until then, CI sees a clear ``xfail`` (not a flaky red)
-    with the bug reference.
+docstring for the instrumented root-cause narrative; the harness
+now drains the default pool's gateless boot claims before
+seeding (``chat_source_harness.wait_default_pool_boot_claims_drained``).
+The xfail mark is removed — the strict-lane assertions below
+pass deterministically.
 """
 
 from __future__ import annotations
@@ -93,13 +90,6 @@ class TestMixedProvenance:
     default lane.
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Lane predicate race: chat-source-worker-lane Phase 3 "
-            "known-bug — see module docstring."
-        ),
-    )
     def test_same_instance_two_lanes_both_complete(self, engine):
         """SC#5 — mixed provenance on a single instance: both tasks
         complete, no checkpoint corruption."""

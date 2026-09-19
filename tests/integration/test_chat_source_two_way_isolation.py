@@ -23,15 +23,16 @@ claims chat rows) lives in ``tests/integration/test_chat_source_pool_wiring.py::
 test_b1_conditional_fail_open_chat_pool_absent_then_present`` (Phase 2
 home). The flag-True strict two-way case is pinned here end-to-end.
 
-KNOWN BUG (2026-09-18, found by Phase 3 isolation-testing — see
+ADJUDICATED (2026-09-19, Phase 3 round-2): the former KNOWN BUG
+(default-pool workers occasionally mis-claim chat-prefixed rows
+under contention) is RESOLVED as a HARNESS boot-window race —
+NOT a production predicate defect. See
 ``tests/integration/test_chat_source_lane_saturation.py`` module
-docstring for the full reproducer): the chat-source lane predicate
-has a multi-threaded race under concurrent contention; default-pool
-workers occasionally mis-claim chat-prefixed rows (failure rate
-~25-40% in saturation tests). This test uses
-``pytest.mark.xfail(strict=False, ...)`` to preserve the
-spec-correct assertion without weakening it; when the production
-race is fixed, the test passes without modification.
+docstring for the instrumented root-cause narrative; the harness
+now drains the default pool's gateless boot claims before
+seeding (``chat_source_harness.wait_default_pool_boot_claims_drained``).
+The xfail mark is removed — the strict assertions below pass
+deterministically.
 """
 
 from __future__ import annotations
@@ -91,15 +92,6 @@ class TestStrictTwoWayIsolation:
     other pool's rows arriving in the verifiable sequence.
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Lane predicate race: chat-source-worker-lane Phase 3 "
-            "known-bug — see "
-            "tests/integration/test_chat_source_lane_saturation.py "
-            "module docstring for the reproducer."
-        ),
-    )
     def test_no_row_misrouted_across_20_rows(self, engine):
         """Strict two-way isolation: 20 distinct per-row assertions
         pass — chat rows → chat workers, default rows → default

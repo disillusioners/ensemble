@@ -18,7 +18,13 @@ The harness provides:
     ``WORKER_POOL_SIZE=5`` so Task #1 can saturate it). The
     ``USE_WORKER_POOL=false`` kill-switch is exercised via the
     ``use_worker_pool`` kwarg; the env var is restored on
-    fixture teardown.
+    fixture teardown. After ``setup_worker_pool`` returns (non-
+    kill-switch path), the factory DRAINS the default pool's
+    gateless boot claims via
+    :func:`wait_default_pool_boot_claims_drained` and asserts
+    ``is_chat_lane_active()`` — callers may seed immediately
+    (see that function's docstring for the adjudicated
+    boot-window rationale).
 
   * **Seeding helpers** — :func:`seed_chat_message` writes a
     ``MessageQueue`` + ``Task`` pair with a realistic production-
@@ -144,6 +150,76 @@ def _build_config():
     )
 
 
+# ---------------------------------------------------------------------------
+# Boot-claim drain barrier (Phase 3 round-2 adjudication fix)
+# ---------------------------------------------------------------------------
+
+
+def wait_default_pool_boot_claims_drained(
+    manager,
+    *,
+    num_workers: int,
+    timeout_s: float = 10.0,
+) -> None:
+    """Deterministically drain the default pool's boot-window claims.
+
+    Adjudicated root cause of the Phase 3 ``xfail`` class (2026-09-19,
+    instrumented per-claim flag capture + 2ms flag-monitor thread; full
+    narrative in ``tests/integration/test_chat_source_lane_saturation.py``
+    module docstring): ``InstanceManager.setup_worker_pool`` starts the
+    DEFAULT pool BEFORE it calls ``set_chat_lane_active(True)``
+    (``daemon/manager.py:6798``, B1 boot ordering — the flag must flip
+    only after the chat pool constructs so a construction failure
+    leaves fail-open). Every default worker therefore performs its
+    FIRST claim attempt with the flag still False (fail-open, gateless
+    SQL). If a test seeds chat rows in the few milliseconds after
+    ``setup_worker_pool`` returns, a gateless boot claim still in
+    flight (delayed by GIL/SQLite lock contention behind the seeding
+    transactions) can execute its UPDATE onto a freshly committed
+    chat row — ``worker-N`` claims a ``telegram:`` row. The lane
+    predicate itself is correct: every observed mis-claim composed
+    with ``flag=False`` (pre-flip), never mid-test.
+
+    This barrier waits until every default worker has COMPLETED its
+    boot claim attempt, so any gateless composition has fully retired
+    before the caller seeds. Completion is observed via the pool's
+    own stats: each worker's run() loop begins with exactly one claim
+    attempt and cannot re-enter claim until it completes, and no
+    ``notify_work()`` has fired yet (the caller notifies only after
+    seeding), so within the ms-scale barrier window the pool's
+    ``empty_claim_attempts + Σ(worker.tasks_claimed)`` counts exactly
+    the completed boot attempts. Reaching ``>= num_workers`` proves
+    every worker's boot claim returned.
+
+    Not a production fix: in production the boot window is the
+    DESIGNED B1 fail-open state (the chat pool does not exist yet;
+    processing a chat row on the default lane during that window is
+    the pre-lane behavior and nothing is stranded). The harness must
+    simply not seed INTO the boot window.
+    """
+    pool = manager._worker_pool
+    if pool is None:
+        raise RuntimeError(
+            "wait_default_pool_boot_claims_drained: default pool is None "
+            "(USE_WORKER_POOL=false?) — cannot drain boot claims"
+        )
+    deadline = time.monotonic() + timeout_s
+    completed = -1
+    while time.monotonic() < deadline:
+        stats = pool.get_stats()
+        completed = stats.get("empty_claim_attempts", 0) + sum(
+            w.get("tasks_claimed", 0) for w in stats.get("workers", [])
+        )
+        if completed >= num_workers:
+            return
+        time.sleep(0.005)
+    raise RuntimeError(
+        f"default pool boot claims did not drain within {timeout_s}s "
+        f"(completed boot attempts={completed}, needed>={num_workers}) — "
+        f"boot-window gateless claims may still be in flight"
+    )
+
+
 @contextmanager
 def build_live_pool_manager(
     engine: Engine,
@@ -209,7 +285,29 @@ def build_live_pool_manager(
             manager._maintenance_service = MaintenanceService()
             manager._maintenance_service.set_request_registry({})
             manager.setup_worker_pool(num_workers=num_workers)
-            yield manager
+            if use_worker_pool in ("false", "0", "no"):
+                # Kill-switch path: no pools exist, flag stays False
+                # (fail-open) — nothing to drain and the assert below
+                # MUST NOT hold (that is the kill-switch contract).
+                yield manager
+            else:
+                # Adjudication fix (2026-09-19): deterministically
+                # retire the default pool's gateless boot claims
+                # BEFORE yielding to the caller, so tests never seed
+                # into the B1 boot window. Belt: the flag must
+                # already be True here.
+                wait_default_pool_boot_claims_drained(
+                    manager, num_workers=num_workers
+                )
+                from daemon.repositories.task.repository import (
+                    is_chat_lane_active,
+                )
+
+                assert is_chat_lane_active(), (
+                    "chat lane flag must be True after setup_worker_pool "
+                    "— kill-switch early-return or teardown raced the setup"
+                )
+                yield manager
 
             # Safety net: tear down pools even if the caller forgets.
             try:
