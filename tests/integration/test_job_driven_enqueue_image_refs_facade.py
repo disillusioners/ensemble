@@ -230,8 +230,11 @@ class TestImageRefsFacadeChain:
     """The kwarg threads router → facade → service → row + kwargs stamp."""
 
     async def test_image_refs_survives_to_row_column(self, facade_manager, engine):
-        """POST with image_refs=[r1, r2] → MessageQueue.images row
-        carries the URL forms (audit). A3 row-persistence."""
+        """POST with image_refs=[r1, r2] → MessageQueue.image_refs row
+        carries the URL forms (audit) — the dedicated JSONB column
+        landed by council Option A (2026-09-19). The legacy ``images``
+        column stays None — ref-sends NEVER write there (round-2
+        overload reverted)."""
         from daemon import constants
 
         inst = _seed_instance(
@@ -258,9 +261,11 @@ class TestImageRefsFacadeChain:
 
         rows = _load_message_rows(engine, inst.instance_id)
         assert len(rows) == 1
-        # The audit column carries the canonical URL refs (round-2
-        # amendment #28).
-        assert rows[0].images == refs
+        # Refs on the dedicated image_refs column (council Option A).
+        assert rows[0].image_refs == refs
+        # Legacy ``images`` column stays None — the round-2 overload
+        # is reverted.
+        assert rows[0].images is None
 
     async def test_image_refs_default_omitted_writes_null(self, facade_manager, engine):
         """Default-caller path (no image_refs) still succeeds and the
@@ -286,7 +291,8 @@ class TestImageRefsFacadeChain:
         assert rows[0].images is None  # null on the JSONB column
 
     async def test_three_refs_all_persist(self, facade_manager, engine):
-        """A 3-ref POST persists all three in the row column."""
+        """A 3-ref POST persists all three on the dedicated
+        image_refs column."""
         from daemon import constants
 
         inst = _seed_instance(
@@ -305,19 +311,17 @@ class TestImageRefsFacadeChain:
         )
 
         rows = _load_message_rows(engine, inst.instance_id)
-        assert rows[0].images == refs
+        assert rows[0].image_refs == refs
+        assert rows[0].images is None
 
-    async def test_image_refs_alongside_images_xor_rejected_by_model(
+    async def test_image_refs_alongside_images_lands_on_dedicated_column(
         self, facade_manager, engine
     ):
-        """XOR at the model layer — but at the facade level, both
-        kwargs forwarded separately. The XOR is enforced at the
-        MessageCreate validator, not the facade. Pin that the facade
-        accepts both fields forwarded (the router seam is responsible
-        for not passing both at once — that's where the seam lives)."""
-        # This test pins that the facade thread both kwargs independently.
-        # No assertions against runtime behavior here; the test just
-        # verifies the facade accepts the kwarg pair.
+        """When both ``images`` (legacy data-URI) and ``image_refs``
+        are forwarded, the facade writes each to its DEDICATED
+        column (council Option A). The MessageCreate model layer
+        XOR-rejects the request upstream — this test pins the
+        facade-acceptance shape only (no runtime behavior)."""
         from daemon import constants
 
         inst = _seed_instance(
@@ -326,9 +330,7 @@ class TestImageRefsFacadeChain:
             project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
         )
 
-        # Pass both — facade forwards both. The MessageQueue row carries
-        # refs (image_refs takes precedence in the row audit column
-        # per amendment #28).
+        # Pass both — facade forwards both to DEDICATED columns.
         await facade_manager.enqueue_message(
             instance_id=inst.instance_id,
             message="both",
@@ -338,6 +340,7 @@ class TestImageRefsFacadeChain:
         )
 
         rows = _load_message_rows(engine, inst.instance_id)
-        # Per amendment #28: images=(image_refs if image_refs is not
-        # None else images). When image_refs is non-None, refs win.
-        assert rows[0].images == [_CANONICAL_REF_A]
+        # Refs on the dedicated column:
+        assert rows[0].image_refs == [_CANONICAL_REF_A]
+        # Data-URIs on the legacy column:
+        assert rows[0].images == ["data:image/png;base64,abc"]
