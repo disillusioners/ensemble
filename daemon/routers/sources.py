@@ -129,41 +129,26 @@ async def create_source(source_create: SourceCreate, request: Request):
     # D10.1 architect amendment A7.2 — closes the OPERATOR vector the
     # HTTP /jobs gate cannot reach).
     #
-    # TRUE behavior (this validator does NOT normalize operator
-    # input — it only checks that the lowercased id matches the type
-    # name, then passes the RAW id downstream; an earlier comment
-    # block here claimed a normalization that does NOT happen):
+    # TRUE behavior (this validator enforces an EXACT-CASE match between
+    # ``source_id`` and the chat type id; the validator does NOT
+    # normalize operator input):
     #
-    #   * Validation (line below): case-INSENSITIVE equality —
-    #     ``source_id.lower() != source_type.value`` ⇒ 422.
-    #     ``source_id="Telegram"`` + ``source_type="telegram"``
-    #     PASSES (returns 201).
+    #   * Validation (line below): case-SENSITIVE equality —
+    #     ``source_id != source_type.value`` ⇒ 422. Any case-variant
+    #     operator input (``"Telegram"``, ``"TELEGRAM"``, ``"slack:"``)
+    #     is REJECTED at registration time.
     #   * Mint (``daemon/sources/registry.py:857``):
     #     ``f"{source_id}:{external_user_id}"`` uses the RAW
     #     ``source_id`` verbatim — there is NO normalization seam
-    #     between this validator and the mint.
-    #   * Consequence: a registered ``source_id="Telegram"`` mints
-    #     rows like ``Telegram:alice`` whose case-VARIANT prefix is
-    #     NEVER matched by the case-sensitive lane predicate
-    #     ``LIKE 'telegram:%'`` (``CHAT_SOURCE_PREFIXES`` carries
-    #     lowercase prefixes only — same constant the validator
-    #     derives ``chat_source_types`` from). The row therefore
-    #     rides the DEFAULT worker lane with ZERO runtime signal —
-    #     exactly the misconfig the validator is designed to catch,
-    #     except the case-blind comparison lets mixed-case input
-    #     slip past validation and manifest only at lane-routing
-    #     time. A cross-type misconfig (``source_type="discord"`` +
-    #     ``source_id="telegram"``) still 422s and is unaffected.
-    #
-    # NAMED OPERATOR FOLLOW-UP (deliberately NOT changed in this
-    # pass — surgical doc-accuracy only): tightening the comparison
-    # to case-SENSITIVE (``source_id != source_type.value`` ⇒ 422)
-    # would force operators to lowercase at registration, producing
-    # the canonical lowercase prefix at the mint and closing the
-    # silent-default-lane-routing footgun above. That is an
-    # operator-contract change (mixed-case pre-existing
-    # registrations would need a documented migration path) and
-    # belongs in a separate PR.
+    #     between this validator and the mint. An exact-case
+    #     ``source_id="telegram"`` mints ``telegram:<user>`` rows that
+    #     match the case-SENSITIVE lane predicate (``LIKE 'telegram:%'``
+    #     over ``CHAT_SOURCE_PREFIXES`` — lowercase prefixes only).
+    #   * Mint site and lane predicate are case-SENSITIVE by design
+    #     and remain UNCHANGED. The validator is the single point
+    #     where case is enforced — operators MUST supply the canonical
+    #     lowercase type id at registration (the chat adapter types
+    #     accept no other case).
     #
     # The chat TYPE-name set is DERIVED from ``CHAT_SOURCE_PREFIXES``
     # (colon stripped) — a literal ``{"telegram", "slack", "discord"}``
@@ -182,7 +167,7 @@ async def create_source(source_create: SourceCreate, request: Request):
     # to operators across both surfaces.
     chat_source_types = {prefix.rstrip(":") for prefix in CHAT_SOURCE_PREFIXES}
     if source_create.source_type.value in chat_source_types:
-        if source_create.source_id.lower() != source_create.source_type.value:
+        if source_create.source_id != source_create.source_type.value:
             raise HTTPException(
                 status_code=422,
                 detail=JobValidationError(
@@ -192,8 +177,8 @@ async def create_source(source_create: SourceCreate, request: Request):
                             "field": "source_id",
                             "message": (
                                 f"For source_type '{source_create.source_type.value}' "
-                                "the source_id must equal the type name "
-                                "(case-insensitive) so adapter messages "
+                                "the source_id must exactly equal the type name "
+                                "(case-sensitive, lowercase) so adapter messages "
                                 "mint into the chat lane "
                                 f"(got '{source_create.source_id}'). "
                                 "Operators needing a custom source_id "
