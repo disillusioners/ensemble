@@ -51,6 +51,7 @@ from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
 from .llm_failover import wrap_langchain_failover
 from .job_queue_service import TERMINAL_STATUSES
 from .main_loop_bridge import MainLoopBridge
+from .pool_orchestrator import safe_notify_all_pools
 
 if TYPE_CHECKING:
     from ..config import Config, ReportRepairConfig
@@ -4203,37 +4204,19 @@ Provide a concise summary:"""
             # pool even when the default pool is saturated. The helper
             # None-guards every pool and per-pool exceptions are
             # swallowed so a transient blip does NOT abort the report
-            # flow.
-            #
-            # ``__dict__``-check on the manager avoids the Mock
-            # auto-attribute hazard: tests that build a Mock manager
-            # without setting ``_notify_all_pools`` would otherwise
-            # see a Mock and enter the helper branch — the real
-            # ``__dict__`` only contains attributes actually set, so
-            # a Mock manager falls through to the legacy singleton
-            # reach (the pre-Phase-2 default-pool wake) — keeps the
-            # existing test fixtures (which assert on
-            # ``_worker_pool.notify_work``) green.
-            manager_dict = getattr(self._manager, "__dict__", {})
-            notify_pools = manager_dict.get("_notify_all_pools")
-            if notify_pools is not None:
-                try:
-                    notify_pools()
-                except Exception as notify_err:
-                    logger.warning(
-                        f"child_reports: _notify_all_pools() "
-                        f"failed for report Task (non-fatal): {notify_err}"
-                    )
-            elif getattr(self._manager, "_worker_pool", None) is not None:
-                # Pre-Phase-2 manager shape OR legacy test fixture —
-                # fall through to the singleton-attribute reach.
-                try:
-                    self._manager._worker_pool.notify_work()
-                except Exception as notify_err:
-                    logger.warning(
-                        f"child_reports: worker_pool.notify_work() "
-                        f"failed for report Task (non-fatal): {notify_err}"
-                    )
+            # flow. Consolidated via :func:`safe_notify_all_pools`
+            # (Phase B) — the per-site Mock-compat ``__dict__``-probe
+            # + try/except + legacy-fixture fallback blocks collapse
+            # to one helper call. Test fixtures that build a Mock
+            # manager and assert on ``_worker_pool.notify_work``
+            # (the legacy singleton reach) keep working: the helper
+            # falls through to ``manager._worker_pool.notify_work()``
+            # when the bound helper is absent from
+            # ``manager.__dict__``.
+            safe_notify_all_pools(
+                self._manager,
+                site_label="child_reports",
+            )
 
             # Fast-path hint for the report-injection drain: mark this
             # parent as having a pending report so the parent's next

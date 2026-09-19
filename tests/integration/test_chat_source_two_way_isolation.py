@@ -47,26 +47,25 @@ from tests.integration.chat_source_harness import (
     CHAT_WORKER_POOL_SIZE,
     WORKER_POOL_SIZE,
     build_chat_source_engine,
-    chat_lane_flag_reset_fixture,    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,
+    build_live_pool_manager,
     fetch_task_by_work_id,
     seed_chat_message,
     wait_until,
 )
 
+from daemon.services.timestamps import now_utc_naive
 
 pytestmark = pytest.mark.integration
-
 
 # ---------------------------------------------------------------------------
 # Lane-flag isolation
 # ---------------------------------------------------------------------------
 
-
 # Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
 # decoration travels with the harness factory's returned object, so
 # this single module-level assignment wires it for every test here.
 chat_lane_flag_reset = chat_lane_flag_reset_fixture()
-
 
 @pytest.fixture
 def engine(tmp_path):
@@ -74,11 +73,9 @@ def engine(tmp_path):
     yield eng
     eng.dispose()
 
-
 # ---------------------------------------------------------------------------
 # Test class
 # ---------------------------------------------------------------------------
-
 
 class TestStrictTwoWayIsolation:
     """SC#14 — NO row misrouted, regardless of pool state.
@@ -96,7 +93,6 @@ class TestStrictTwoWayIsolation:
         ``(chat, default, chat, default, ...)``."""
         def _complete_run_task(task, cancellation_token=None):
             time.sleep(0.02)
-            from daemon.services.timestamps import now_utc_naive
 
             with Session(engine) as s:
                 t = s.get(Task, task.id)

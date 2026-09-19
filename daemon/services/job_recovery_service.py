@@ -30,6 +30,7 @@ from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc_naive
+from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -3630,58 +3631,22 @@ class JobRecoveryService:
                 # Phase 2 / chat-source-worker-lane (D5 site #10):
                 # when the manager is wired AND has the helper in
                 # its ``__dict__`` (real manager, not a Mock), route
-                # through it so BOTH pools receive the wake. The
-                # ``__dict__``-check avoids the Mock auto-attribute
-                # hazard — ``getattr(Mock(), '_notify_all_pools',
-                # None)`` returns a Mock (truthy), so without the
-                # check legacy test fixtures would route through the
-                # Mock helper and never touch the
-                # ``worker_pool.notify_work`` Mock the tests assert
-                # on. Fall back to ``self._worker_pool.notify_work()``
-                # when the helper is not wired.
-                manager_dict = (
-                    getattr(self._instance_manager, "__dict__", {})
-                    if self._instance_manager is not None
-                    else {}
+                # through it so BOTH pools receive the wake.
+                # Consolidated via :func:`safe_notify_all_pools`
+                # (Phase B) — the per-site Mock-compat
+                # ``__dict__``-probe + try/except + legacy-fixture
+                # fallback blocks collapse to one helper call.
+                # The Mock auto-attribute hazard (see
+                # ``safe_notify_all_pools`` docstring for the full
+                # ``__dict__``-vs-``getattr`` analysis) is preserved
+                # by the helper; legacy test fixtures that build a
+                # Mock manager and assert on
+                # ``worker_pool.notify_work`` keep working via the
+                # helper's legacy-fixture fallback branch.
+                safe_notify_all_pools(
+                    self._instance_manager,
+                    site_label="reconcile_drift_states",
                 )
-                notify_pools = manager_dict.get("_notify_all_pools")
-                if notify_pools is not None:
-                    try:
-                        notify_pools()
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"reconcile_drift_states: Pattern (g) "
-                            f"_notify_all_pools() raised {notify_err!r} "
-                            f"for task {task.id} on instance "
-                            f"{target_instance_id[:8]}... — flip "
-                            f"already committed; the A3 sweep is "
-                            f"the systemic backstop"
-                        )
-                elif self._worker_pool is not None:
-                    try:
-                        self._worker_pool.notify_work()
-                    except Exception as notify_err:
-                        logger.warning(
-                            f"reconcile_drift_states: Pattern (g) "
-                            f"notify_work() raised {notify_err!r} "
-                            f"for task {task.id} on instance "
-                            f"{target_instance_id[:8]}... — flip "
-                            f"already committed; the A3 sweep is "
-                            f"the systemic backstop"
-                        )
-                else:
-                    # No pool wired AND no manager helper — DEBUG log
-                    # preserves forensic traceability without
-                    # polluting prod logs.
-                    logger.debug(
-                        f"reconcile_drift_states: Pattern (g) "
-                        f"_notify_all_pools() skipped — manager "
-                        f"helper not available (test fixture / "
-                        f"pre-wiring lifespan); task {task.id} on "
-                        f"instance {target_instance_id[:8]}... "
-                        f"relies on the A3 sweep to surface the "
-                        f"eligible row"
-                    )
 
             except Exception as row_err:
                 # Per-row isolation — log + continue. The sweep

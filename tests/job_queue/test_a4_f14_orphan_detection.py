@@ -598,8 +598,24 @@ class TestA4ConstitutionStatic:
 
     def test_a4_block_uses_canonical_seam(self):
         """The A4 partition block is wired with the canonical
-        ``worker_pool`` seam (``instance_manager._worker_pool``) —
-        the same primitive as A2 / A3 / A5."""
+        wake seam (Phase B: the consolidated ``safe_notify_all_pools``
+        helper) — same primitive as A2 / A3 / A5.
+
+        Pre-Phase-B: the A4 block called
+        ``worker_pool.notify_work()`` inline.
+        Post-Phase-B: the A4 block calls
+        ``safe_notify_all_pools(self._instance_manager, ...)``
+        which routes through the consolidated helper that
+        internally invokes ``notify_work()`` on the wake target.
+        The behavior is identical (a notify_work call happens
+        after the orphan-detection check); the code shape
+        changed to one-liner via the helper. The ``notify_work``
+        substring remains in the file (the helper's body lives
+        in ``daemon/services/pool_orchestrator.py``) — we pin
+        the helper call shape here, NOT the inline
+        ``worker_pool.notify_work()`` shape that the consolidated
+        helper replaces.
+        """
         from pathlib import Path
 
         prod_path = (
@@ -613,11 +629,56 @@ class TestA4ConstitutionStatic:
             "A4 partition MUST reference is_deferred explicitly "
             "(the orphan branch requires is_deferred=False)"
         )
+        # Phase B helper import — the consolidated wake seam must
+        # be imported at module scope (per the canonical pattern
+        # across all wake sites).
         assert (
-            "worker_pool.notify_work()" in contents
+            "from daemon.services.pool_orchestrator import safe_notify_all_pools"
+            in contents
         ), (
-            "A4 orphan-detection MUST use the canonical "
-            "notify_work seam — same primitive as A2 / A3 / A5"
+            "A4 module must import the consolidated "
+            "safe_notify_all_pools helper — the pre-Phase-B "
+            "inline worker_pool.notify_work() call shape was "
+            "retired"
+        )
+        # Helper call site — the canonical wake seam at the A4
+        # early-gate block. The site_label uniquely identifies
+        # the early-gate among the consolidated call sites.
+        assert (
+            "safe_notify_all_pools(" in contents
+        ), (
+            "A4 orphan-detection MUST route through the "
+            "consolidated safe_notify_all_pools helper (Phase B "
+            "extraction) — same primitive as A2 / A3 / A5"
+        )
+        assert (
+            'site_label="Observer F14 early gate"' in contents
+        ), (
+            "A4 early-gate wake site must carry the "
+            "Observer F14 early gate site_label — the canonical "
+            "A4 early-gate identifier among the consolidated "
+            "call sites"
+        )
+        # ``notify_work`` substring still appears in the file (the
+        # helper's home is daemon/services/pool_orchestrator.py
+        # where ``notify_work()`` is invoked on the wake target,
+        # AND the per-site wake seam contract is documented in
+        # comments). The substring check is loose — we only assert
+        # the helper call shape, not the inline
+        # ``worker_pool.notify_work()`` shape that the consolidated
+        # helper replaces.
+        assert (
+            "notify_work" in contents
+        ), (
+            "notify_work seam missing — the consolidated helper "
+            "must still document the wake target seam"
+        )
+        # Belt-and-braces: the OLD inline seam must NOT be
+        # present (the consolidated helper retired it).
+        assert "worker_pool.notify_work()" not in contents, (
+            "A4 orphan-detection MUST NOT retain the pre-Phase-B "
+            "inline worker_pool.notify_work() call — the "
+            "consolidated helper supersedes that shape"
         )
 
 

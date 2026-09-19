@@ -51,11 +51,17 @@ import pytest
 
 from tests.integration.chat_source_harness import (
     build_chat_source_engine,
-    chat_lane_flag_reset_fixture,    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,
+    build_live_pool_manager,
     fetch_task_by_work_id,
     seed_chat_message,
     wait_until,
 )
+
+from sqlmodel import Session, select
+from daemon.repositories.task.models import Task
+from daemon.repositories.message_queue.models import MessageQueue
+
 
 
 pytestmark = pytest.mark.integration
@@ -268,9 +274,6 @@ class TestNonInheritanceE2E:
             )
 
             # Read the child task row.
-            from sqlmodel import Session, select
-            from daemon.repositories.task.models import Task
-            from daemon.repositories.message_queue.models import MessageQueue
 
             with Session(engine) as s:
                 stmt = (

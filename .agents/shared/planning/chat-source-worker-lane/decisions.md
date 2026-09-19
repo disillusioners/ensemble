@@ -260,6 +260,15 @@
 - **Default-side parallel scenario** (4 default invoke-blocked parents + 1 free default worker): chat workers are unaffected (chat pool = 2, max 2 chat invokes; cap 4 covers both pools). Chat messages continue to be processed by chat workers while default work drains through the 5th default worker.
 - **Conclusion (UNCHANGED by F8 correction):** strict two-way isolation + cap 4 + non-inheritance produces **degrade, not deadlock**, in every reachable configuration.
 
+**Mixed-holder case (chat-lane-followups D8 addendum, 2026-09-19):**
+- The combined worst case spanning both pools is: **2 chat workers + 2 default workers holding all 4 `_invoke_semaphore` permits simultaneously** → momentary **0 free permits** state. The fifth default worker remains free (default pool = 5, but the cap is 4; the 5th default worker is NOT permit-blocked and can continue claiming non-invoke default work).
+- Both chat workers CAN invoke-block simultaneously (per the F8-corrected "chat-pool = 2 ≤ cap 4" analysis above) — that is independent of the mixed-holder scenario but co-occurs in the reached configuration.
+- **Degrade-not-deadlock still holds**, bounded by the double bound (300s `invoke_agent_and_wait` + ~5min `StaleTaskRecovery` heartbeat + 300s `JobRecoveryService` drift reconcile). Specifically:
+  1. The 0-free-permit window is the union of the **outer 300s** `invoke_agent_and_wait` plus the **outer ladder** heartbeat — bounded ~5 min max.
+  2. The 3 free default workers (one not invoke-blocked in the "2 chat + 2 default invoke-blocked" scenario, plus 2 idle during the bust) absorb new non-invoke default work; chat work drains through the chat pool as permits release.
+  3. Reverse: a fresh invoke waiting on the FIFO semaphore queue (cap 4) waits at most for the inner bound (~300s) before its own timeout fires.
+- **No new split-per-lane justification**: adding a lane-aware selector does not change this worst case (the same mixed-holder moment produces 0-free-permits either way; a split selector only rearranges WHICH lane waits).
+
 **Rejected global cap raised to `total−1 = 6` (PROVEN UNSAFE):**
 - 5 default workers could all be blocked parents; their children are default-lane; 0 free default workers; 2 idle chat workers cannot claim default-lane tasks → **deadlock** (strict two-way isolation per D2 makes chat workers UNABLE to claim default work).
 

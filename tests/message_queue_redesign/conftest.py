@@ -100,6 +100,14 @@ class MockTaskProcessor:
         self.should_claim = True
         self.claim_delay = 0
         self.tasks_to_return = []
+        # Phase B hardening (chat-lane-followups, Item 4b): per-call
+        # ``(worker_id, lane)`` record for every claim — mirrors the
+        # ``42ed8f7f`` pattern at worker_notification mocks. Lets a
+        # test assert "every chat-worker claim carried lane='chat'"
+        # without injecting a custom recorder. Append-only; no
+        # assertions wired here (assertions only if natural per the
+        # item spec).
+        self.claim_lane_recordings: list[tuple[str, str]] = []
         # Mock task repository exposing the metrics Worker checks
         # on the empty-claim path. Defaults to "nothing blocked".
         self._task_repo = self._MockTaskRepoForMetrics()
@@ -107,7 +115,7 @@ class MockTaskProcessor:
     class _MockTaskRepoForMetrics:
         def has_pending_tasks_blocked_by_busy_instance(self):
             return False
-    
+
     def claim_task(self, worker_id, lane="default"):
         """Mirror the real ``TaskProcessor.claim_task`` signature.
 
@@ -121,6 +129,12 @@ class MockTaskProcessor:
         pre-lane semantics (default-pool workers thread ``"default"``).
         """
         self.claim_count += 1
+        # Record (worker_id, lane) for every claim so tests can
+        # inspect which lanes were exercised. The lane value is the
+        # value the WorkerPool threaded through (chat-pool workers
+        # thread ``lane='chat'`` per ``WorkerPool(..., lane='chat')``
+        # at ``daemon/services/worker_pool.py:1227``).
+        self.claim_lane_recordings.append((worker_id, lane))
         if self.should_claim and self.tasks_to_return:
             task = self.tasks_to_return.pop(0)
             task.worker_id = worker_id

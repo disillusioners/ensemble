@@ -482,9 +482,24 @@ class TestA5ConstitutionStatic:
         )
 
     def test_a5_block_uses_canonical_seam(self):
-        """The A5 redundant-notify uses the canonical
-        ``worker_pool.notify_work()`` seam — same primitive as
-        A2 / A3 / A4."""
+        """The A5 redundant-notify uses the canonical wake seam
+        (Phase B: the consolidated ``safe_notify_all_pools``
+        helper) — same primitive as A2 / A3 / A4.
+
+        Pre-Phase-B: the A5 block called
+        ``worker_pool.notify_work()`` inline.
+        Post-Phase-B: the A5 block calls
+        ``safe_notify_all_pools(self._manager, ...)`` which
+        routes through the consolidated helper that internally
+        invokes ``notify_work()`` on every live pool. The
+        behavior is identical (a notify_work call happens after
+        the enqueue); the code shape changed to one-liner via
+        the helper. The ``notify_work()`` substring remains in
+        the file (the helper's body lives there) — we pin the
+        helper call shape here, NOT the inline worker_pool call
+        shape, since the inline shape is the very pattern
+        Phase B consolidated away.
+        """
         from pathlib import Path
 
         prod_path = (
@@ -494,11 +509,32 @@ class TestA5ConstitutionStatic:
             / "waiting_children_watchdog.py"
         )
         contents = prod_path.read_text()
+        # Phase B consolidated the inline
+        # ``worker_pool.notify_work()`` call into
+        # ``safe_notify_all_pools(...)`` (the helper lives in
+        # ``daemon/services/pool_orchestrator.py`` and
+        # internally invokes ``notify_work()`` on the wake
+        # target). The A5 redundant-notify MUST reach the
+        # canonical seam via this helper.
         assert (
-            "worker_pool.notify_work()" in contents
+            "safe_notify_all_pools(" in contents
         ), (
-            "A5 redundant-notify MUST use the canonical "
-            "notify_work seam — same primitive as A2 / A3 / A4"
+            "A5 redundant-notify MUST route through the "
+            "consolidated safe_notify_all_pools helper (Phase B "
+            "extraction) — same primitive as A2 / A3 / A4"
+        )
+        # ``notify_work`` still appears in the file (inside the
+        # helper body — see ``daemon/services/pool_orchestrator.py``)
+        # AND in the docstring + comments. The substring check
+        # is loose — we only assert the helper call shape, not
+        # the inline ``worker_pool.notify_work()`` shape that
+        # the consolidated helper replaces.
+        assert (
+            "notify_work" in contents
+        ), (
+            "notify_work seam missing — the consolidated helper "
+            "must still dispatch to notify_work() on the wake "
+            "target"
         )
         # The A5 block sits AFTER the ``enqueue_message`` await.
         # Anchor on the A5 comment marker to find the structural
@@ -509,10 +545,10 @@ class TestA5ConstitutionStatic:
             "A5 marker comment missing — the structural change "
             "may have regressed"
         )
-        # Find the FIRST ``worker_pool.notify_work()`` call AFTER
+        # Find the FIRST ``safe_notify_all_pools(`` call AFTER
         # the A5 marker — that is the A5 redundant-notify.
         a5_call_idx = contents.find(
-            "_notify_result = worker_pool.notify_work()",
+            "safe_notify_all_pools(",
             a5_marker_idx,
         )
         assert a5_call_idx != -1, (

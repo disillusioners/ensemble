@@ -501,34 +501,83 @@ async def test_u8_notify_work_async_mock_awaited(registry):
 
 @pytest.mark.asyncio
 async def test_u9_notify_work_pool_missing_skipped(registry, caplog):
+    """The direct-notify block is a no-op when no pool is wired.
+
+    Phase B (chat-lane-followups) extraction note: the inline
+    notify site in ``long_tool_nudge.py`` was consolidated into
+    ``safe_notify_all_pools`` (the helper lives in
+    ``daemon/services/pool_orchestrator.py``). The helper
+    silently returns ``None`` when no manager helper AND no
+    manager-attribute pool AND no ``fallback_pool=`` is
+    reachable — so the site no longer emits a DEBUG log on the
+    no-pool branch (the helper makes that decision and the
+    caller does not need to know). The behavior IS preserved
+    (no notify dispatched, the durable enqueue already
+    committed, the wake happens via the periodic A3 sweep if
+    needed).
+
+    Pre-Phase-B: a DEBUG log "worker_pool not wired" was
+    emitted. Post-Phase-B: that log lives in the helper
+    (skipped here because the helper returns ``None`` without
+    dispatching — there is no log when no pool is reachable
+    from any of the three branches). The behavioral assertion
+    (``result is True``) is what matters; the log-text
+    assertion is dropped (Phase B consolidation moved the
+    per-site DEBUG into the helper's silent-no-op path).
+    """
     manager = AsyncMock()
     manager.enqueue_message = AsyncMock()
     manager._worker_pool = None
     scanner = _scanner(registry, manager=manager)
-    with caplog.at_level("DEBUG", logger="daemon.services.long_tool_nudge"):
-        result = await scanner.deliver_long_tool_nudge(
-            "parent-1", "child-1", _ctx()
-        )
+    result = await scanner.deliver_long_tool_nudge(
+        "parent-1", "child-1", _ctx()
+    )
     assert result is True
     manager.enqueue_message.assert_awaited_once()
-    assert any("worker_pool not wired" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_u10_notify_work_exception_swallowed(registry, caplog):
+    """A ``notify_work`` exception is swallowed — the durable
+    enqueue already committed, so the nudge ships regardless.
+
+    Phase B extraction note: the WARNING log now lives in
+    ``daemon.services.pool_orchestrator.safe_notify_all_pools``
+    (the consolidated helper). The log message format
+    changed:
+
+      Pre-Phase-B: ``"[LongToolNudge] direct notify_work raised
+        %r for parent %s... — relying on enqueue_message's
+        internal notify"``
+
+      Post-Phase-B: ``"[LongToolNudge] legacy
+        _worker_pool.notify_work() raised RuntimeError('boom')
+        — next tick / sweep is the systemic backstop"``
+
+    The behavioral guarantee (the exception is swallowed, the
+    nudge is durable) is preserved — that is what the test
+    asserts. The logger name is now
+    ``daemon.services.pool_orchestrator`` (the helper's home).
+    """
     manager = AsyncMock()
     manager.enqueue_message = AsyncMock()
     pool = MagicMock()
     pool.notify_work = MagicMock(side_effect=RuntimeError("boom"))
     manager._worker_pool = pool
     scanner = _scanner(registry, manager=manager)
-    with caplog.at_level("WARNING", logger="daemon.services.long_tool_nudge"):
+    with caplog.at_level(
+        "WARNING", logger="daemon.services.pool_orchestrator"
+    ):
         result = await scanner.deliver_long_tool_nudge(
             "parent-1", "child-1", _ctx()
         )
     assert result is True  # nudge durable even if direct notify fails
     manager.enqueue_message.assert_awaited_once()
-    assert any("notify_work raised" in r.getMessage() for r in caplog.records)
+    assert any(
+        "[LongToolNudge]" in r.getMessage()
+        and "raised" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ─── U11: notice structure ───────────────────────────────────────────────────

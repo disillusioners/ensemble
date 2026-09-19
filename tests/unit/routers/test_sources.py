@@ -21,8 +21,10 @@ Coverage here:
        (cross-type misconfig mints into the WRONG lane).
     3. ``source_type="telegram"`` + ``source_id="telegram"`` → 201
        (compliant registration persists).
-    4. Case-insensitive equality accepted (``"Telegram"`` → 201 —
-       the validator compares ``source_id.lower()``).
+    4. Case-variant source_id REJECTED: ``"Telegram"`` / ``"TELEGRAM"``
+       against each chat type → 422 with the same envelope (the
+       validator compares EXACTLY; mint site and lane predicate
+       remain case-sensitive by design, unchanged).
     5. Non-chat types unaffected (``webhook`` + custom id → 201 — the
        validator is a deliberate narrow scope, NOT a general
        source_id naming policy).
@@ -198,48 +200,57 @@ class TestChatSourceRegistrationValidator:
         assert body["source_id"] == "telegram"
         assert body["source_type"] == "telegram"
 
-    def test_create_source_accepts_case_insensitive_match(
-        self, sources_client
-    ):
-        """``source_id`` equality is CASE-INSENSITIVE at validation
-        (the validator compares ``source_id.lower()`` against the
-        type name — see ``daemon/routers/sources.py`` validator
-        block, which now documents the TRUE pass-through behavior
-        this test exercises).
+    def test_create_source_rejects_case_variant_source_id(self, sources_client):
+        """``source_id`` MUST exactly equal the canonical lowercase
+        type id (``"Telegram"``, ``"TELEGRAM"``, or other case
+        variants rejected). The validator compares
+        ``source_id != source_type.value`` directly — case-SENSITIVE.
 
-        PASS-THROUGH CONSEQUENCE (the test asserts the 201, but the
-        interesting post-condition is what happens AFTER the
-        validator returns):
-
-          * ``source_id="Telegram"`` PASSES validation and is
-            persisted verbatim.
-          * ``daemon/sources/registry.py:857`` then mints the
-            row's source prefix from the RAW ``source_id`` —
-            ``f"{source_id}:{external_user_id}"`` produces
-            ``Telegram:alice`` (NOT ``telegram:alice``).
-          * The case-SENSITIVE lane predicate
-            (``LIKE 'telegram:%'`` over ``CHAT_SOURCE_PREFIXES``)
-            NEVER matches the mixed-case prefix, so the row rides
-            the DEFAULT worker lane with zero runtime signal.
-
-        In other words, this test asserts a "silent default-lane
-        routing" pass-through for mixed-case operator input —
-        case-blind validation WITHOUT a downstream normalization
-        seam. A case-SENSITIVE comparison would 422 here; that
-        is a NAMED OPERATOR FOLLOW-UP tracked in the
-        ``daemon/routers/sources.py`` validator comment and is
-        deliberately NOT changed in this pass.
+        Pin rationale (chat-source-worker-lane, D10.1 A7.2
+        follow-up): the case-blind comparison let mixed-case
+        operator input pass validation, then the mint site
+        (``daemon/sources/registry.py:857``) wrote the RAW id
+        verbatim — producing ``Telegram:alice`` rows whose prefix is
+        NEVER matched by the case-sensitive lane predicate
+        (``LIKE 'telegram:%'`` over ``CHAT_SOURCE_PREFIXES``). The
+        row then rode the DEFAULT worker lane with ZERO runtime
+        signal — the exact silent-default-lane misconfig the
+        validator exists to catch. Tightening the validator to
+        case-SENSITIVE forces operators to lowercase at registration
+        so the canonical prefix reaches the mint and the lane
+        predicate matches.
         """
-        resp = sources_client.post(
-            "/sources",
-            json={
-                "source_id": "Telegram",
-                "source_type": "telegram",
-                "name": "Telegram (mixed-case id)",
-            },
-        )
-
-        assert resp.status_code == 201, resp.text
+        case_variants_per_type = [
+            ("telegram", "Telegram"),
+            ("telegram", "TELEGRAM"),
+            ("slack", "Slack"),
+            ("slack", "SLACK"),
+            ("discord", "Discord"),
+            ("discord", "DISCORD"),
+        ]
+        for source_type, source_id in case_variants_per_type:
+            resp = sources_client.post(
+                "/sources",
+                json={
+                    "source_id": source_id,
+                    "source_type": source_type,
+                    "name": f"{source_id} (case variant)",
+                },
+            )
+            assert resp.status_code == 422, (
+                f"case variant ({source_type!r}, {source_id!r}) "
+                f"returned {resp.status_code} — expected 422 (exact-case "
+                f"match required; mint site and lane predicate are "
+                f"case-SENSITIVE by design)"
+            )
+            body = resp.json()
+            assert body["detail"]["error"] == "Validation Error", (
+                f"case variant ({source_type!r}, {source_id!r}) envelope "
+                f"missing: {body}"
+            )
+            assert any(
+                d.get("field") == "source_id" for d in body["detail"]["details"]
+            ), f"case variant ({source_type!r}, {source_id!r}) details missing field=source_id: {body}"
 
     def test_create_source_non_chat_type_unaffected(self, sources_client):
         """Non-chat types keep the free-form ``source_id`` contract —

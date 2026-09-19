@@ -66,6 +66,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
+from .pool_orchestrator import safe_notify_all_pools
 from .dependency_bus import Outcome, get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
@@ -3750,32 +3751,15 @@ class InstanceLifecycleService:
             # Phase 2 / chat-source-worker-lane (D5): route through
             # the manager helper — both default + chat pools receive
             # the wake so a chat-prefixed row whose parent just
-            # resumed surfaces to the chat pool too.
-            #
-            # ``__dict__``-check on the manager avoids the Mock
-            # auto-attribute hazard (see child_reports.py / D5 site
-            # #9 for the rationale).
-            manager_dict = getattr(self._manager, "__dict__", {})
-            notify_pools = manager_dict.get("_notify_all_pools")
-            if notify_pools is not None:
-                try:
-                    notify_pools()
-                except Exception as notify_err:
-                    logger.warning(
-                        f"resume_instance_cascade: _notify_all_pools() "
-                        f"failed (non-fatal): {notify_err}"
-                    )
-            elif getattr(self._manager, "_worker_pool", None) is not None:
-                # Pre-Phase-2 manager shape — fall through to the
-                # singleton-attribute reach (legacy test fixture /
-                # pre-wiring lifespan).
-                try:
-                    self._manager._worker_pool.notify_work()
-                except Exception as notify_err:
-                    logger.warning(
-                        f"resume_instance_cascade: worker_pool.notify_work() "
-                        f"failed (non-fatal): {notify_err}"
-                    )
+            # resumed surfaces to the chat pool too. Consolidated
+            # via :func:`safe_notify_all_pools` (Phase B) — the
+            # per-site Mock-compat ``__dict__``-probe + try/except +
+            # legacy-fixture fallback blocks collapse to one helper
+            # call.
+            safe_notify_all_pools(
+                self._manager,
+                site_label="resume_instance_cascade",
+            )
 
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 

@@ -59,8 +59,14 @@ from .repositories import (
 )
 from .repositories.task.repository import (
     TaskRepository,
-    set_chat_lane_active,
 )
+# The ``set_chat_lane_active`` setter / ``is_chat_lane_active`` getter
+# are reached ONLY through ``daemon/services/pool_orchestrator.py`` now
+# (Phase B extraction — see that module's docstring). The flag STORAGE
+# stays in the repository module; the SET/CLEAR CALL SITES + ``_pools``
+# ownership moved to the orchestrator. The repository's
+# ``claim_pending_task`` reads the flag PER-CLAIM, so the orchestrator
+# writes propagate to every claim without a second truth.
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool
@@ -141,6 +147,12 @@ if TYPE_CHECKING:
     from .services.task_processor import TaskProcessor
     from .services.stale_task_recovery import StaleTaskRecovery
     from .services.mcp_service import McpService
+    # Pool orchestration moved out of InstanceManager (Phase B,
+    # chat-lane-followups). TYPE_CHECKING-only — the runtime import
+    # happens in __init__ after the class body is fully defined (the
+    # orchestrator's own TYPE_CHECKING references InstanceManager,
+    # which is exactly the cycle this seam avoids).
+    from .services.pool_orchestrator import PoolOrchestrator
 
 
 
@@ -1135,40 +1147,79 @@ class InstanceManager:
         # NEW: Optional notification broadcaster (set via set_notification_broadcaster)
         self._notification_broadcaster: Any = None
 
-        # Worker pool for message queue redesign
+        # Worker pool for message queue redesign. The pool slots
+        # remain on the manager so cross-package readers
+        # (``daemon/api.py:455`` late-wires ``work_resolver`` /
+        # ``watcher_repo``; ``tests/integration/chat_source_harness.py:213``
+        # boots the drain barrier; ``tests/integration/test_chat_source_enqueue_wake_e2e.py``
+        # asserts pool counters) reach the pools via
+        # ``manager._worker_pool`` / ``manager._chat_worker_pool``
+        # without going through the orchestrator.
+        #
+        # The orchestrator (constructed below) OWNS the construction
+        # + teardown + ``set_chat_lane_active`` lifecycle; the slots
+        # here are just type-annotated placeholders the orchestrator
+        # fills in during ``setup``.
         self._worker_pool: WorkerPool | None = None
         self._task_processor: TaskProcessor | None = None
         self._stale_recovery: StaleTaskRecovery | None = None
 
-        # Chat-source worker lane (chat-source-worker-lane, Phase 2).
-        # The chat WorkerPool is constructed in ``setup_worker_pool``
-        # INSIDE the USE_WORKER_POOL-gated body — the kill-switch
-        # disables both pools together. ``_pools`` is initialized
-        # eagerly as ``[]`` (E3 — boot-window guard) so any early
-        # wake/wiring that touches ``_pools`` before
-        # ``setup_worker_pool`` runs cannot crash on a missing
-        # attribute. The list is populated in ``setup_worker_pool``
-        # AFTER both pools construct; ``_notify_all_pools`` iterates
-        # it with per-entry None-checks so a future third lane is a
-        # one-list-entry change.
+        # Chat-source worker lane (chat-source-worker-lane, Phase 2 → Phase B).
+        # The chat WorkerPool is constructed INSIDE the
+        # USE_WORKER_POOL-gated body of ``PoolOrchestrator.setup`` —
+        # the kill-switch disables both pools together. The slot
+        # below is set by the orchestrator at the same time as the
+        # default pool.
         self._chat_worker_pool: WorkerPool | None = None
-        self._pools: list[WorkerPool] = []
+
+        # Phase B — wire the pool orchestrator BEFORE assigning
+        # ``self._pools`` and ``self._notify_all_pools``. The
+        # orchestrator's ``__init__`` initializes ``_pools = []``
+        # (E3 — boot-window guard) so any early wake that touches
+        # ``_pools`` before ``setup_worker_pool`` runs cannot crash
+        # on a missing attribute. The list is populated in
+        # ``setup_worker_pool`` AFTER both pools construct;
+        # ``_notify_all_pools`` iterates it with per-entry
+        # None-checks so a future third lane is a one-list-entry
+        # change.
+        from .services.pool_orchestrator import PoolOrchestrator
+        self._orchestrator = PoolOrchestrator(self)
+        # Shared list reference (same Python object as
+        # ``orchestrator._pools``). Manager-side reads at
+        # ``tests/integration/test_chat_source_shutdown.py:180``
+        # (``len(manager._pools) == 2``) and
+        # ``tests/integration/test_chat_source_pool_wiring.py:169-273``
+        # (``manager._worker_pool in manager._pools``) observe the
+        # same list as the orchestrator. Both ``setup`` (populates)
+        # and ``shutdown`` (clears) live on the orchestrator now;
+        # the manager reads via this alias.
+        self._pools: list[WorkerPool] = self._orchestrator.pools
+
         # Phase 2 / D5 fan-out seam — bound-method instance attribute
-        # (adjudication fix, 2026-09-19). Service modules detect the
-        # helper via ``manager.__dict__.get("_notify_all_pools")`` —
-        # the dict lookup is the production-honest check (Mock
-        # managers do NOT auto-populate ``__dict__``, so the lookup
-        # differentiates real InstanceManager from test Mocks).
-        # Storing the bound method as an instance attribute makes
-        # the lookup find it on real managers while still None on
-        # Mock managers. Without this assignment the helper is a
-        # class-level method (in ``InstanceManager.__dict__``, NOT
-        # ``manager.__dict__``) and the service-site guard silently
-        # returns None — every service site would fall through to
-        # the legacy ``_worker_pool.notify_work()`` path and the
-        # chat pool would NEVER wake from the 11 service sites,
-        # including CRITICAL site #12 (instance_messaging.py) which
-        # every registry-minted chat row traverses.
+        # (adjudication fix, 2026-09-19, preserved verbatim through
+        # Phase B extraction). Service modules detect the helper via
+        # ``manager.__dict__.get("_notify_all_pools")`` — the dict
+        # lookup is the production-honest check (Mock managers do
+        # NOT auto-populate ``__dict__``, so the lookup
+        # differentiates a real ``InstanceManager`` from test
+        # Mocks). Storing the bound method as an instance attribute
+        # makes the lookup find it on real managers while still
+        # ``None`` on Mock managers. Without this assignment the
+        # helper is a class-level method (in
+        # ``InstanceManager.__dict__``, NOT ``manager.__dict__``)
+        # and the service-site guard silently returns None — every
+        # service site would fall through to the legacy
+        # ``_worker_pool.notify_work()`` path and the chat pool
+        # would NEVER wake from the 11 service sites, including
+        # CRITICAL site #12 (``instance_messaging.py``) which every
+        # registry-minted chat row traverses.
+        #
+        # The implementation body moved to
+        # ``PoolOrchestrator.notify_all``; the manager-side method
+        # is a thin delegating wrapper (same signature, same name,
+        # same semantics) — the self-assignment below promotes it
+        # from the class ``__dict__`` to the instance ``__dict__``
+        # so the production-honest probe finds it.
         self._notify_all_pools = self._notify_all_pools
 
         # Execution Gate: the single owner of graph.astream per
@@ -6445,504 +6496,81 @@ class InstanceManager:
         self,
         num_workers: int = WORKER_POOL_SIZE,
     ) -> None:
-        """Set up the worker pool for message processing.
-        
-        This should be called after initialize() and before start_sources().
-        
+        """Forward to :meth:`PoolOrchestrator.setup` (chat-lane-followups Phase B).
+
+        Phase B extraction: the body of this method moved to
+        :class:`daemon.services.pool_orchestrator.PoolOrchestrator.setup`
+        to slim ``manager.py`` from the 11.6k-line monolith. The
+        signature is identical — every caller (``daemon/api.py:369``
+        is the only production caller; ``tests/integration/
+        chat_source_harness.py:371`` is the only test caller) keeps
+        working without edits. See the orchestrator module's
+        docstring for the full extraction narrative.
+
         Args:
-            num_workers: Number of worker threads.
+            num_workers: Number of default-pool worker threads
+                (forwarded to ``PoolOrchestrator.setup``). The chat
+                pool is sized by ``CHAT_WORKER_POOL_SIZE`` (a hard
+                constant — same activation discipline as
+                ``WORKER_POOL_SIZE``).
         """
-        import os
-        
-        # Check feature flag from environment
-        env_flag = os.environ.get("USE_WORKER_POOL", "").lower()
-        if env_flag in ("false", "0", "no"):
-            logger.info("Worker pool disabled (USE_WORKER_POOL=false)")
-            return
-        
-        from .services.main_loop_bridge import MainLoopBridge
-        from .services.worker_pool import WorkerPool
-        from .services.task_processor import TaskProcessor
-        from .services.stale_task_recovery import StaleTaskRecovery
-        from .constants import CHAT_WORKER_POOL_SIZE, CHAT_SOURCE_PREFIXES
-        
-        # Set the main loop reference for thread-safe async calls
-        if self._loop is not None:
-            MainLoopBridge.set_loop(self._loop)
-        
-        # Create repositories (use existing engine)
-        from .repositories.task.models import Task
-        from .repositories.event.repository import EventRepository
+        # Facade-forwarding discipline: ``setup_worker_pool``'s
+        # signature here is unchanged, so this is a strict no-op
+        # delegation. ``PoolOrchestrator.setup`` reads the manager's
+        # state via the captured ``self._manager`` ref.
+        self._orchestrator.setup(num_workers=num_workers)
 
-        task_repo = TaskRepository(
-            engine=self._engine,
-            on_pending_task=lambda: self._notify_all_pools()
-        )
-        # Expose on the manager so cross-dispatcher handlers
-        # (``MessageJobHandler._find_running_task_for_instance``)
-        # can read the repo without reaching into a private local.
-        self._task_repo = task_repo
-        # Wire the maintenance service's task repository here (after
-        # ``self._task_repo`` is assigned) so the shared idle probe can use
-        # ``TaskRepository.has_active_non_deferred_work``. Calling this in
-        # ``initialize()`` would crash because ``self._task_repo`` is only
-        # assigned later in ``setup_worker_pool()`` per daemon/api.py.
-        self._maintenance_service.set_task_repository(self._task_repo)
-        event_repo = EventRepository(engine=self._engine)
-
-        # Backfill last_heartbeat_at for any RUNNING tasks that lack one
-        # (legacy rows or in-flight tasks surviving a restart). Without
-        # this, the recovery service would flag every surviving RUNNING
-        # task as stale within stale_task_recovery_threshold_minutes of
-        # the new deploy. Best-effort: the recovery predicate falls back
-        # to started_at, so a failed backfill is a recoverable degraded
-        # state, not a crash.
-        try:
-            backfilled = task_repo.backfill_heartbeats()
-            if backfilled:
-                logger.info(
-                    f"Backfilled last_heartbeat_at for {backfilled} in-flight tasks"
-                )
-        except Exception as e:
-            logger.warning(f"Startup backfill of last_heartbeat_at failed: {e}")
-        
-        # Get shorthand for services config
-        svc = self.config.services
-        
-        # Run startup crash recovery with config values
-        # NOTE: threshold_minutes is sourced from stale_task_recovery_threshold_minutes
-        # (separate from task_timeout_minutes) so that sibling tasks blocked by
-        # Fix B's per-instance guard are unblocked within ~5 minutes of a worker
-        # crash, not the much longer task_timeout_minutes.
-        stale_recovery = StaleTaskRecovery(
-            task_repository=task_repo,
-            message_repository=self._queue_repository,
-            event_repository=event_repo,
-            threshold_minutes=svc.stale_task_recovery_threshold_minutes,
-            check_interval_seconds=svc.stale_task_recovery_interval,
-            cancel_grace_seconds=svc.stale_task_cancel_grace_seconds,
-            max_retries=svc.max_task_retries,
-            retry_backoff_base=svc.task_retry_backoff_base,
-            retry_backoff_max=svc.task_retry_backoff_max,
-            on_task_permanently_failed=self._on_stale_task_permanent_failure,
-            on_task_cancelled_and_retried=self._on_stale_task_cancelled_and_retried,
-            instance_manager=self,
-            usage_limit_window_seconds=svc.usage_limit_window_seconds,
-            usage_limit_retry_delays_seconds=(
-                svc.usage_limit_retry_delays_seconds
-            ),
-            usage_limit_retry_jitter_fraction=(
-                svc.usage_limit_retry_jitter_fraction
-            ),
-        )
-        # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
-        # even if recover_on_startup() raises an exception
-        self._stale_recovery = stale_recovery
-        stale_recovery.recover_on_startup()
-        # FIX: C2 — Start periodic background recovery thread
-        stale_recovery.start()
-
-        # Phase 2 (pause-report-recovery, task 2.5) — wire the
-        # periodic ``ReportDeliveryRecoveryService`` AFTER the
-        # StaleTaskRecovery wiring (binding order S-c: the
-        # ``_ensure_postgres_columns`` + StaleTaskRecovery pair must
-        # complete first so the ``report_injections`` table has its
-        # Phase 1 columns + indexes, AND so the StaleTaskRecovery
-        # thread is already running when the sweep's busy-check
-        # consults ``task_repo.has_instance_busy``).
-        from .services.report_delivery_recovery import (
-            ReportDeliveryRecoveryService,
-        )
-        try:
-            self._report_recovery = ReportDeliveryRecoveryService(
-                task_repo=task_repo,
-                report_injection_repo=self._report_injection_repo,
-                queue_repo=self._queue_repository,
-                instance_repo=self._instance_repository,
-                manager_ref=self,
-                interval_seconds=(
-                    svc.report_delivery_recovery_interval_seconds
-                ),
-                age_bound_minutes=(
-                    svc.report_delivery_recovery_age_bound_minutes
-                ),
-                batch_cap=svc.report_delivery_recovery_batch_cap,
-                recovery_retry_minutes=(
-                    svc.report_delivery_recovery_retry_minutes
-                ),
-                enabled=svc.report_delivery_recovery_enabled,
-                lane_deferred=svc.report_delivery_recovery_lane_deferred,
-                lane_no_row_backstop=(
-                    svc.report_delivery_recovery_lane_no_row_backstop
-                ),
-                lane_pending_age=(
-                    svc.report_delivery_recovery_lane_pending_age
-                ),
-                lane_recovery_retry=(
-                    svc.report_delivery_recovery_lane_recovery_retry
-                ),
-                lane_orphan=svc.report_delivery_recovery_lane_orphan,
-            )
-            # Fire-and-forget boot sweep (binding order S-c:
-            # ``_ensure_postgres_columns`` is in ``initialize()``,
-            # BEFORE this method runs).
-            #
-            # DEEP-REVIEW FIX (2026-08-20, C2): the boot sweep MUST
-            # NOT execute lane bodies on the loop thread. The chain
-            # ``api.py:241 lifespan → setup_worker_pool (here) →
-            # recover_on_startup → _run_all_lanes_sync`` runs ON the
-            # event-loop thread, and ``_handle_recover_deferred_report``
-            # (manager.py:6343-6351) calls
-            # ``run_coroutine_threadsafe(...).result(timeout=30.0)``
-            # per row → self-blocks the loop. Worst case ~30s × 100
-            # rows ≈ 50 min blocked startup, HTTP down. This was the
-            # THIRD occurrence of the loop-thread-blocking bug class
-            # (bcc02b92, 5fe135e3 fixed router/reconcile paths; boot
-            # was missed).
-            #
-            # The fix: schedule the sweep via
-            # ``asyncio.to_thread`` + ``loop.create_task``, which
-            # moves the lane execution OFF the loop thread. The sweep
-            # body is unchanged — it still uses
-            # ``run_coroutine_threadsafe(...).result(...)`` to bridge
-            # to the loop, but now those bridges are coming FROM a
-            # worker thread (correct: the worker thread blocks on
-            # ``.result()`` while the loop continues serving HTTP).
-            try:
-                if self._loop is not None and not self._loop.is_closed():
-                    # POST-DEEP-REVIEW (Y1, 2026-08-20): attach a
-                    # done-callback so a sweep-body exception is
-                    # logged instead of being silently dropped into a
-                    # garbage-collected task (which would surface only
-                    # as "Task exception was never retrieved"). Boot
-                    # MUST stay non-blocking — the callback fires
-                    # when the worker-thread sweep finishes, the boot
-                    # caller does not await the task.
-                    def _log_boot_sweep_done(
-                        t: asyncio.Task,
-                        *,
-                        _mgr: "InstanceManager" = self,
-                    ) -> None:
-                        # Teardown guard: ``stop()`` may have nulled
-                        # ``_report_recovery`` before the callback
-                        # fires; ``logger`` itself is module-level and
-                        # always safe. We only suppress the noise —
-                        # the exception is always retrievable.
-                        if t.cancelled():
-                            return
-                        exc = t.exception()
-                        if exc is None:
-                            return
-                        if getattr(_mgr, "_report_recovery", None) is None:
-                            logger.debug(
-                                "ReportDeliveryRecoveryService boot "
-                                "sweep task failed after manager "
-                                f"teardown (suppressed): "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                            return
-                        logger.warning(
-                            "ReportDeliveryRecoveryService boot sweep "
-                            f"task failed (non-fatal): "
-                            f"{type(exc).__name__}: {exc}"
-                        )
-
-                    # Fire-and-forget: the loop schedules the work
-                    # on a thread-pool worker (asyncio.to_thread).
-                    # The boot call returns immediately; the sweep
-                    # runs concurrently on a worker thread.
-                    boot_sweep_task = self._loop.create_task(
-                        asyncio.to_thread(
-                            self._report_recovery.recover_on_startup
-                        )
-                    )
-                    boot_sweep_task.add_done_callback(_log_boot_sweep_done)
-                else:
-                    # Loop unavailable — fall back to running
-                    # synchronously. F7 (2026-08-20): this
-                    # sync-fallback path exists ONLY for tests /
-                    # contexts that did NOT wire an event loop
-                    # (``manager._loop is None or closed``).
-                    # The production boot path always has a live
-                    # loop (set in ``InstanceManager.initialize()``
-                    # via the application startup sequence) and
-                    # takes the ``loop.create_task(asyncio.to_thread
-                    # (...))`` off-loop dispatch above — the boot
-                    # caller returns immediately and the sweep
-                    # runs concurrently on a worker thread.
-                    #
-                    # Keeping this sync branch is DELIBERATE:
-                    # removing it would break every test that
-                    # builds a service without wiring a loop
-                    # (see ``tests/integration/test_boot_report_
-                    # recovery.py`` and friends). The branch is
-                    # safe because ``recover_on_startup()`` is
-                    # sync + idempotent and the boot caller
-                    # already tolerates a blocking initial sweep
-                    # (the boot sequence itself is the gate, not
-                    # the sweep timing).
-                    logger.info(
-                        "ReportDeliveryRecoveryService boot sweep "
-                        "running synchronously (no loop available)"
-                    )
-                    self._report_recovery.recover_on_startup()
-            except Exception as exc:
-                logger.warning(
-                    f"ReportDeliveryRecoveryService startup sweep "
-                    f"failed (non-fatal): {type(exc).__name__}: {exc}"
-                )
-            # Start the periodic background thread.
-            self._report_recovery.start()
-        except Exception as exc:
-            # Per the MVP growth rule — recovery service cleanup on
-            # shutdown means the wiring failure must be logged but
-            # NEVER crash startup.
-            logger.error(
-                f"ReportDeliveryRecoveryService wiring failed "
-                f"(non-fatal): {type(exc).__name__}: {exc}"
-            )
-            self._report_recovery = None
-
-        # Execution Gate: stale-lease recovery is performed by the
-        # async lifespan in ``daemon/api.py`` BEFORE this method runs,
-        # so the very first ``gate.run`` after startup is guaranteed
-        # to see a clean state. We deliberately do NOT call the sync
-        # wrapper here — it would be fire-and-forget under the
-        # running event loop and would leave up to a 5-minute window
-        # where the first ``gate.run`` could contend against a stale
-        # lease from a crashed prior process.
-        
-        # Create task processor with manager reference
-        self._task_processor = TaskProcessor(
-            task_repo=task_repo,
-            instance_manager=self,
-            event_repo=event_repo,
-            graph_timeout_minutes=svc.graph_timeout_minutes,
-            source_dispatcher=self.source_dispatcher,
-        )
-        
-        # Create and start worker pool with timeout/retry config
-        self._worker_pool = WorkerPool(
-            task_processor=self._task_processor,
-            num_workers=num_workers,
-            timeout_minutes=svc.task_timeout_minutes,
-            max_retries=svc.max_task_retries,
-            retry_backoff_base=svc.task_retry_backoff_base,
-            retry_backoff_max=svc.task_retry_backoff_max,
-            heartbeat_interval_seconds=svc.task_heartbeat_interval_seconds,
-            usage_limit_window_seconds=svc.usage_limit_window_seconds,
-            usage_limit_retry_delays_seconds=(
-                svc.usage_limit_retry_delays_seconds
-            ),
-            usage_limit_retry_jitter_fraction=(
-                svc.usage_limit_retry_jitter_fraction
-            ),
-        )
-        self._worker_pool.start()
-
-        # Chat-source worker lane (chat-source-worker-lane, Phase 2
-        # Task #2): construct the dedicated chat ``WorkerPool`` AFTER
-        # the default pool starts (D10.3 boot ordering — default
-        # workers are alive and stable before any chat worker can
-        # race for shared task rows). The chat pool shares the same
-        # ``TaskProcessor`` singleton (``self._task_processor``) and
-        # the same engine (``self._engine``) — TaskProcessor is the
-        # single seam to ``TaskRepository.claim_pending_task`` and
-        # the lane flows as a per-claim argument (Worker → processor
-        # → repository), never processor state.
-        #
-        # Worker-id prefix ``"chat-worker-"`` distinguishes the
-        # chat lane in ``task.worker_id`` lineage (D10.5).
-        #
-        # B1 — flip strictness ON immediately after start: the
-        # ``set_chat_lane_active(True)`` call writes the
-        # ``_chat_lane_active`` module flag in
-        # ``daemon/repositories/task/repository.py``. From this
-        # point, default-lane claims consult the flag and exclude
-        # chat-prefix rows (strict two-way per D2). The flag is
-        # read PER-CLAIM (E2 — single shared source of truth) so
-        # the value is live, not a snapshot. Teardown flips it
-        # back to False BEFORE the default pool stops so the
-        # default pool resumes claiming chat rows during its own
-        # stop window (= fail-open restored, no stranding).
-        self._chat_worker_pool = WorkerPool(
-            task_processor=self._task_processor,
-            num_workers=CHAT_WORKER_POOL_SIZE,
-            timeout_minutes=svc.task_timeout_minutes,
-            max_retries=svc.max_task_retries,
-            retry_backoff_base=svc.task_retry_backoff_base,
-            retry_backoff_max=svc.task_retry_backoff_max,
-            heartbeat_interval_seconds=svc.task_heartbeat_interval_seconds,
-            usage_limit_window_seconds=svc.usage_limit_window_seconds,
-            usage_limit_retry_delays_seconds=(
-                svc.usage_limit_retry_delays_seconds
-            ),
-            usage_limit_retry_jitter_fraction=(
-                svc.usage_limit_retry_jitter_fraction
-            ),
-            worker_id_prefix="chat-worker-",
-            lane="chat",
-        )
-        self._chat_worker_pool.start()
-        # Populate the wake-fan-out list AFTER both pools construct
-        # (D5 list-shape — future third lane is one list entry).
-        # ``_pools`` was initialized to ``[]`` in ``__init__`` (E3).
-        self._pools = [
-            p for p in (self._worker_pool, self._chat_worker_pool)
-            if p is not None
-        ]
-        # B1 — flip strictness ON. Must come AFTER start so a chat
-        # pool construction failure (e.g. port-in-use) leaves the
-        # flag False (fail-open). And must come AFTER ``_pools``
-        # populate so the very next notify uses the new helper.
-        set_chat_lane_active(True)
-        # Boot-line (Phase 2 Task #6 — substring-pinned by tests).
-        logger.info(
-            f"ChatSourceWorkerPool started: workers={CHAT_WORKER_POOL_SIZE}, "
-            f"prefixes={','.join(CHAT_SOURCE_PREFIXES)}"
-        )
 
     def _notify_all_pools(self) -> None:
-        """Fan-out wake pulse to every live worker pool.
+        """Forward to :meth:`PoolOrchestrator.notify_all` (thin delegating wrapper).
 
-        Chat-source-worker-lane, D5 — replaces the singleton-attribute
-        reach ``self._worker_pool.notify_work() if self._worker_pool else None``
-        at all 19 canonical wake sites. Iterates ``self._pools`` (list,
-        not inline 2-tuple) so a future third lane (priority, per-
-        tenant) is a one-list-entry change. Per-entry ``None``-check
-        satisfies the Wake-site None-guard mandate (each widened wake
-        site is protected even if the helper is reached before a
-        second pool is constructed — the helper is a no-op).
+        Chat-source-worker-lane, D5 fan-out seam — the helper
+        iterates ``self._pools`` (list, owned by the orchestrator)
+        so a future third lane (priority, per-tenant) is a
+        one-list-entry change. Per-entry None-guard + per-pool
+        try/except so a single pool's blip does NOT abort the
+        fan-out (A3 sweep is the systemic backstop).
 
-        The list is populated in ``setup_worker_pool`` AFTER both
-        pools construct; ``_pools`` was initialized to ``[]`` in
-        ``__init__`` (E3 — boot-window guard). ``shutdown_worker_pool``
-        clears the list (and the slots) so post-teardown notifies
-        are a no-op rather than reaching a stopped pool.
+        The bound method is ALSO assigned to the instance
+        ``__dict__`` at the bottom of ``__init__``
+        (``self._notify_all_pools = self._notify_all_pools``) so
+        service sites that probe ``manager.__dict__.get(
+        "_notify_all_pools")`` find it on real managers and
+        ``None`` on Mock managers — that is the production-honest
+        Mock-compat check (see ``PoolOrchestrator.safe_notify_all_pools``
+        for the full mechanism).
+
+        See :meth:`PoolOrchestrator.notify_all` for the canonical
+        implementation. This wrapper exists ONLY to preserve the
+        ``manager.__dict__["_notify_all_pools"]`` probe contract;
+        callers SHOULD prefer ``PoolOrchestrator.safe_notify_all_pools(
+        manager, site_label=...)`` over the bare method call (the
+        helper carries the Mock-compat probe + legacy fallback).
         """
-        for pool in self._pools:
-            if pool is not None:
-                try:
-                    pool.notify_work()
-                except Exception as notify_err:
-                    # Transient pool-side blip — log + skip. The
-                    # wake-site None-guard mandate also covers the
-                    # ``notify_work``-side error path: a single
-                    # pool's exception must NOT abort the fan-out
-                    # to the remaining pool(s). Mirrors the
-                    # site-local try/excepts in child_reports /
-                    # waiting_children_watchdog etc.
-                    logger.warning(
-                        f"_notify_all_pools: pool.notify_work() "
-                        f"raised {notify_err!r} — continuing fan-out"
-                    )
+        self._orchestrator.notify_all()
+
 
     def shutdown_worker_pool(self) -> None:
-        """Shut down the worker pool gracefully (chat-source-worker-lane).
+        """Forward to :meth:`PoolOrchestrator.shutdown` (chat-lane-followups Phase B).
 
-        Teardown ordering (Phase 2 / Task #5 — D10.4 + B2 + B1 + E1):
-
-        1. **B2 — snapshot pools BEFORE any stop/None.** Take
-           ``pools_snapshot = [p for p in (self._chat_worker_pool,
-           self._worker_pool) if p is not None]`` FIRST so the
-           hung-worker WARNING loop iterates LIVE worker refs
-           even after the slots are None'd.
-
-        2. **E1 — chat pool FIRST so ``_chat_lane_active`` flips
-           False BEFORE the default pool stops.** The snapshot is
-           iterated in chat-first order so the B1 fail-open flag
-           flips BEFORE the default pool's stop window opens
-           (default pool claims chat rows again during its own
-           stop window = fail-open restored, no stranding).
-
-        3. **Hung-worker WARNING loop (architect A5.1, reviewer
-           N4).** Iterate the snapshot AFTER both pools stop and
-           for each worker still ``is_alive()`` after the
-           ``stop(30)`` budget, emit a WARNING naming the
-           ``worker_id`` so the operator can identify which pool
-           hung (default vs chat). **N4 choice: option (i) —
-           document the private-attr access.** The WARNING loop
-           accesses the private ``_workers`` list on each pool.
-           This is encapsulated per pool lifecycle — the manager
-           owns the pools and is the only caller — and the
-           observability gain outweighs the public-surface bloat
-           that option (ii) (``is_any_worker_alive()`` accessor)
-           would introduce. Documented here so the next reader
-           knows the exception is deliberate, not accidental.
-
-        4. **Clear ``_pools`` post-teardown** so the
-           ``_notify_all_pools()`` helper is a no-op for any
-           late notify (e.g., a watchdog tick that fires between
-           the pool stop and the daemon thread dying). The helper
-           iterates ``_pools`` with a None-guard; an empty list
-           makes the helper safely a no-op.
+        Phase B extraction: the body of this method moved to
+        :class:`daemon.services.pool_orchestrator.PoolOrchestrator.shutdown`
+        (B2 snapshot-before-stop + E1 chat-first teardown + B1
+        fail-open flag flip + hung-worker WARNING loop + report
+        recovery teardown). The signature is identical — every
+        caller (``daemon/manager.shutdown()`` step list at
+        ``manager.py:~11581``; ``tests/integration/chat_source_harness.py:~335``
+        teardown safety-net; ``tests/integration/test_chat_source_shutdown.py``
+        test surface) keeps working without edits. See the
+        orchestrator module's docstring for the full extraction
+        narrative.
         """
-        # Step 1 — B2 snapshot BEFORE any stop/None. The chat pool
-        # is listed first so the iteration visits the chat pool
-        # BEFORE the default pool (E1).
-        pools_snapshot = [
-            p for p in (self._chat_worker_pool, self._worker_pool)
-            if p is not None
-        ]
+        # Facade-forwarding discipline: ``shutdown_worker_pool``'s
+        # signature here is unchanged, so this is a strict no-op
+        # delegation. ``PoolOrchestrator.shutdown`` reads the
+        # manager's state via the captured ``self._manager`` ref.
+        self._orchestrator.shutdown()
 
-        # Step 2 + 3 — chat-FIRST iteration: flip the B1 fail-open
-        # flag BEFORE the default pool stops so the default pool
-        # resumes claiming chat rows during its own stop window.
-        for pool in pools_snapshot:
-            if pool is self._chat_worker_pool:
-                # B1 — flip fail-open BEFORE stop(). Order matters:
-                # the default pool must see the False flag from the
-                # moment it begins its own stop window (no
-                # stranding — chat rows surface via the default
-                # lane if the chat workers cannot drain them).
-                set_chat_lane_active(False)
-            pool.stop(timeout=30.0)
-            if pool is self._chat_worker_pool:
-                self._chat_worker_pool = None
-                logger.info("Chat worker pool stopped")
-            elif pool is self._worker_pool:
-                self._worker_pool = None
-                logger.info("Worker pool stopped")
-
-        # Step 4 — clear the wake-fan-out list. The helper is a
-        # safe no-op on empty ``_pools``.
-        self._pools = []
-
-        # Step 5 — hung-worker WARNING (N4 option (i) — accesses
-        # private ``_workers``; see method docstring for the
-        # deliberate-trade-off rationale). Iterate the SNAPSHOT
-        # (B2), not the slots — the slots are already None.
-        for pool in pools_snapshot:
-            for worker in pool._workers:
-                # Per-worker guard: one raise (e.g. a torn-down worker
-                # object) must not erase the enumeration of the
-                # remaining workers — log-and-continue, same
-                # observability style as the WARNING below.
-                try:
-                    if worker.is_alive():
-                        logger.warning(
-                            f"Worker {worker.worker_id} still alive after "
-                            f"stop(30) — likely blocked in "
-                            f"invoke_agent_and_wait (mid-invoke stop not "
-                            f"interruptible, see "
-                            f"daemon/services/worker_pool.py:1339-1340)"
-                        )
-                except Exception as enum_err:
-                    logger.warning(
-                        f"Hung-worker enumeration failed for one worker "
-                        f"(non-fatal — continuing with remaining "
-                        f"workers): {enum_err}"
-                    )
-
-        if self._stale_recovery is not None:
-            self._stale_recovery.stop()
-            self._stale_recovery = None
-            logger.info("Stale task recovery stopped")
-
-        if getattr(self, "_report_recovery", None) is not None:
-            self._report_recovery.stop()
-            self._report_recovery = None
-            logger.info("Report delivery recovery stopped")
 
     # ── Lifecycle Service Delegations ─────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.messaging_types import _assert_linkage_contract
+from daemon.services.pool_orchestrator import safe_notify_all_pools
 from daemon.services.job_queue_service import (
     DemandState,
     JobQueueService,
@@ -1265,39 +1266,15 @@ class JobProcessor:
                         # default + chat pools receive the wake so
                         # the pre-existing PENDING Task on either
                         # lane surfaces in the next claim cycle.
-                        # Fall back to the singleton-attribute reach
-                        # when the manager pre-dates Phase 2 (legacy
-                        # test fixtures / pre-wiring lifespan).
-                        #
-                        # ``__dict__``-check on the manager avoids
-                        # the Mock auto-attribute hazard (see
-                        # child_reports.py / D5 site #9 for the
-                        # rationale).
-                        manager_dict = getattr(
-                            self._instance_manager, "__dict__", {}
+                        # Consolidated via :func:`safe_notify_all_pools`
+                        # (Phase B) — the per-site Mock-compat
+                        # ``__dict__``-probe + try/except +
+                        # legacy-fixture fallback blocks collapse to
+                        # one helper call.
+                        safe_notify_all_pools(
+                            self._instance_manager,
+                            site_label="job_processor",
                         )
-                        notify_pools = manager_dict.get("_notify_all_pools")
-                        if notify_pools is not None:
-                            try:
-                                notify_pools()
-                            except Exception as notify_err:
-                                logger.warning(
-                                    f"job_processor: _notify_all_pools() "
-                                    f"failed for chat-source wake "
-                                    f"(non-fatal): {notify_err}"
-                                )
-                        elif getattr(
-                            self._instance_manager, "_worker_pool", None
-                        ) is not None:
-                            try:
-                                self._instance_manager._worker_pool.notify_work()
-                            except Exception as notify_err:
-                                logger.warning(
-                                    f"job_processor: "
-                                    f"worker_pool.notify_work() failed "
-                                    f"for chat-source wake "
-                                    f"(non-fatal): {notify_err}"
-                                )
 
                         logger.info(
                             f"JobProcessor (message branch): woke "

@@ -63,6 +63,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MethodType
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -308,6 +310,25 @@ def _build_service(
     records ``notify_work()`` calls. When ``None``, the service is
     wired without the pool (legacy test fixtures) — the A3 sweep is
     the systemic backstop that catches the missed notify.
+
+    Phase B / chat-lane-followups: the autopromote wake site now
+    routes through ``safe_notify_all_pools`` (the consolidated
+    helper in ``daemon/services/pool_orchestrator.py``). The helper
+    probes ``manager.__dict__.get("_notify_all_pools")`` to find
+    the bound wake method on a real manager — and falls through to
+    ``manager._worker_pool.notify_work()`` (the pre-Phase-2 reach)
+    when the helper is absent.
+
+    We mirror that contract on the test side by building an
+    ``instance_manager`` holder with a ``MethodType``-bound
+    ``_notify_all_pools`` method that delegates to ``worker_pool``.
+    The binding promotes the method from class ``__dict__`` to
+    instance ``__dict__`` — the exact self-assignment the
+    production ``InstanceManager.__init__`` uses
+    (``self._notify_all_pools = self._notify_all_pools``) — so
+    the helper sees the seam and dispatches through it. The
+    behavioral assertions on ``worker_pool.notify_work.call_count``
+    still hold because the holder delegates to the pool.
     """
     if autopromote_env is not None:
         import os
@@ -330,6 +351,24 @@ def _build_service(
     )
     jq_mock = MagicMock()
     jq_mock.notify_watchers = AsyncMock(return_value=None)
+
+    # Build a manager-shaped holder with ``_notify_all_pools`` bound
+    # on the INSTANCE ``__dict__`` (via ``MethodType`` self-binding —
+    # the same trick the production ``InstanceManager.__init__`` uses
+    # to expose the helper to ``safe_notify_all_pools``'s probe).
+    holder: Any = type("A2Holder", (), {})()
+    holder._worker_pool = worker_pool
+
+    def _notify(self: Any) -> None:
+        # Fail-soft mirror of the production helper's per-pool
+        # try/except (the helper ALSO swallows; the holder does it
+        # too so the seam stays fail-soft end-to-end on this test
+        # fixture — the helper still catches anything that escapes).
+        if self._worker_pool is not None:
+            self._worker_pool.notify_work()
+
+    holder._notify_all_pools = MethodType(_notify, holder)
+
     return JobRecoveryService(
         job_repository=repository,
         lock_repository=lock_repo,
@@ -338,6 +377,7 @@ def _build_service(
         task_repository=task_repository,
         stale_task_recovery=stale_recovery,
         worker_pool=worker_pool,
+        instance_manager=holder,
     )
 
 
@@ -636,10 +676,25 @@ class TestA2ConstitutionStatic:
     no new ``work_id`` mints land. Census stays at 23/1/0."""
 
     def test_a2_block_does_not_introduce_new_writer(self):
-        """The A2 ``notify_work()`` call site is in
+        """The A2 wake call site is in
         ``_pattern_g_defer_self_witness_watchdog`` AFTER the flip
-        UPDATE statement — and it calls a METHOD on the pool, not
-        an ``admission_state`` write."""
+        UPDATE statement — and it routes through the consolidated
+        ``safe_notify_all_pools`` helper (one seam, Mock-compat
+        ``__dict__``-probe + try/except + legacy-fixture fallback
+        collapse to one helper call). It does NOT introduce a new
+        ``admission_state`` write / JobItem creator / ``work_id``
+        mint.
+
+        Phase B re-contract: the A2 block calls
+        ``safe_notify_all_pools(self._instance_manager, site_label="reconcile_drift_states")``
+        inline (the consolidated wake seam — same primitive as
+        A3 / A4 / A5). The ``notify_work`` substring remains in the
+        file (inside the helper body in
+        ``daemon/services/pool_orchestrator.py``) — we pin the
+        canonical helper call shape here, NOT the inline
+        ``self._worker_pool.notify_work()`` shape that the
+        consolidated helper replaces.
+        """
         from pathlib import Path
 
         prod_path = (
@@ -649,10 +704,51 @@ class TestA2ConstitutionStatic:
             / "job_recovery_service.py"
         )
         contents = prod_path.read_text()
-        assert "self._worker_pool.notify_work()" in contents, (
-            "A2 notify_work() call missing — the fix may have "
-            "regressed; check that the test still pins the intended "
-            "structural change"
+        # Helper import — the consolidated wake seam must be
+        # imported at module scope (per the canonical pattern).
+        assert (
+            "from daemon.services.pool_orchestrator import safe_notify_all_pools"
+            in contents
+        ), (
+            "A2 module must import the consolidated "
+            "safe_notify_all_pools helper — the inline "
+            "_worker_pool.notify_work() call shape was retired "
+            "in Phase B"
+        )
+        # Helper call site — the canonical wake seam at the A2
+        # block. The site_label uniquely identifies the A2 site
+        # among the consolidated call sites.
+        assert (
+            "safe_notify_all_pools(\n                    self._instance_manager,"
+            in contents
+        ), (
+            "A2 notify_work() call missing — the consolidated "
+            "safe_notify_all_pools(...) call site must be present "
+            "after the is_deferred flip"
+        )
+        assert 'site_label="reconcile_drift_states"' in contents, (
+            "A2 wake site must carry the reconcile_drift_states "
+            "site_label — the canonical A2 identifier among the "
+            "consolidated call sites"
+        )
+        # ``notify_work`` substring still appears in the file (the
+        # helper's home is daemon/services/pool_orchestrator.py
+        # where ``notify_work()`` is invoked on the wake target,
+        # AND the per-site wake seam contract is documented in
+        # comments). The substring check is loose — we only assert
+        # the helper call shape, not the inline
+        # ``self._worker_pool.notify_work()`` shape that the
+        # consolidated helper replaces.
+        assert "notify_work" in contents, (
+            "notify_work seam missing — the consolidated helper "
+            "must still document the wake target seam"
+        )
+        # Belt-and-braces: the OLD inline seam must NOT be
+        # present (the consolidated helper retired it).
+        assert "self._worker_pool.notify_work()" not in contents, (
+            "A2 block must NOT retain the pre-Phase-B inline "
+            "self._worker_pool.notify_work() call — the consolidated "
+            "helper supersedes that shape"
         )
 
     def test_constitution_census_unchanged(self):

@@ -42,26 +42,25 @@ from sqlmodel import Session, select
 from daemon.repositories.task.models import Task, TaskStatus
 from tests.integration.chat_source_harness import (
     build_chat_source_engine,
-    chat_lane_flag_reset_fixture,    build_live_pool_manager,
+    chat_lane_flag_reset_fixture,
+    build_live_pool_manager,
     fetch_task_by_work_id,
     seed_chat_message,
     wait_until,
 )
 
+from daemon.services.timestamps import now_utc_naive
 
 pytestmark = pytest.mark.integration
-
 
 # ---------------------------------------------------------------------------
 # Lane-flag isolation
 # ---------------------------------------------------------------------------
 
-
 # Shared autouse lane-flag reset — the @pytest.fixture(autouse=True)
 # decoration travels with the harness factory's returned object, so
 # this single module-level assignment wires it for every test here.
 chat_lane_flag_reset = chat_lane_flag_reset_fixture()
-
 
 @pytest.fixture
 def engine(tmp_path):
@@ -69,11 +68,9 @@ def engine(tmp_path):
     yield eng
     eng.dispose()
 
-
 # ---------------------------------------------------------------------------
 # Test class
 # ---------------------------------------------------------------------------
-
 
 class TestMixedProvenance:
     """Same instance, one chat row + one default row, both complete.
@@ -101,7 +98,6 @@ class TestMixedProvenance:
             # Mark task COMPLETED — this is what ``_tasks_completed``
             # bookkeeping in the production Worker.run() path does
             # AFTER ``_task_processor.run_task`` returns normally.
-            from daemon.services.timestamps import now_utc_naive
 
             complete_at = now_utc_naive()
             with Session(engine) as s:
@@ -197,7 +193,6 @@ class TestMixedProvenance:
         complete, ZERO pending tasks remain on the instance."""
         def _complete_run_task(task, cancellation_token=None):
             time.sleep(0.02)
-            from daemon.services.timestamps import now_utc_naive
 
             with Session(engine) as s:
                 t = s.get(Task, task.id)
