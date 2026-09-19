@@ -972,7 +972,7 @@ describe('SseService', () => {
      * future contributor who trims or rewrites the comment is forced
      * to keep the architectural argument intact.
      */
-    it('comment-pin identity-grep: 3 architectural-load-bearing substrings are present in the mirror', () => {
+    it('comment-pin identity-grep: 5 architectural-load-bearing substrings are present in the mirror', () => {
       // The mirror source contains the verbatim comment block above.
       // The test reads its own source via ``fs`` and asserts each
       // substring appears verbatim. A rewriter who drops the
@@ -984,13 +984,15 @@ describe('SseService', () => {
       const specSrc = fs.readFileSync(__filename, 'utf8') as string;
       const substrings = [
         'PREFIX-SCOPED, NOT scheme-based',
+        'https:// is explicitly OUT',
         'scheme-widening enables',
         'host allowlist',
+        'Discord-SSE gap is PRE-EXISTING',
       ];
       for (const s of substrings) {
         expect(specSrc).toContain(s);
       }
-      // The production source carries the SAME three substrings — pin
+      // The production source carries the SAME five substrings — pin
       // it explicitly so a silent drift between mirror and production
       // fails this spec rather than the live renderer.
       const prodSrc = fs.readFileSync(

@@ -443,15 +443,17 @@ describe('mergeMessagesById — mandatory merge pin (architect h4/h5)', () => {
 
 /**
  * Phase 5 / clipboard-image-chat — Task 4 identity-grep mirror-parity
- * pin. The predicate ``result[idx].images !== undefined`` MUST appear
- * verbatim in BOTH ``message-merge.util.ts`` AND this spec. CI / a
- * future contributor who deletes the predicate from production will
- * see the spec still pass on the spec side — but a manual side-by-side
- * diff would surface the drift. The identity-grep makes the drift
- * fail this spec rather than only surface in production.
+ * pin. The pin predicate (declared verbatim in the PREDICATE constant
+ * below — this docblock deliberately does NOT repeat the literal, so
+ * the spec-side grep count stays at exactly 1 per plan Task 4
+ * acceptance) MUST appear verbatim in BOTH ``message-merge.util.ts``
+ * AND this spec. CI / a future contributor who deletes the predicate
+ * from production will see the spec still pass on the spec side — but
+ * a manual side-by-side diff would surface the drift. The identity-grep
+ * makes the drift fail this spec rather than only surface in production.
  */
 describe('mergeMessagesById — images pin identity-grep mirror-parity', () => {
-  it('the literal ``result[idx].images !== undefined`` appears in production AND spec', () => {
+  it('the pin predicate appears verbatim in production AND spec', () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     const fs = require('fs');
     // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
