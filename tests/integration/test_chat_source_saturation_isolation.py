@@ -16,7 +16,7 @@ Harness shape:
   * One chat-source row is then seeded and the chat pool is woken
     (``manager._notify_all_pools()`` per D5 fan-out).
   * The test asserts ``task.worker_id.startswith("chat-worker-")``
-    AND ``(claimed_at - enqueued_at) <= 3.5s`` AND the A2.2
+    AND ``(claimed_at - enqueued_at) <= 3.0s`` AND the A2.2
     ``workers_woken_by_timeout`` DELTA over [enqueued, claimed]
     equals 0 — proving the notify path delivered the claim
     (D5), not the 3s poll fallback.
@@ -27,7 +27,7 @@ A2.2 / reviewer F11 — TWO-READ DELTA (FORBID pre-test zeroing):
   ``workers_woken_by_timeout`` for unrelated reasons (an idle worker
   timing out for non-test reasons). Pre-test zeroing of the counter
   would race real increments and mask the regression the assertion
-  is designed to catch (notify-vs-poll — a 3.5s assert alone cannot
+  is designed to catch (notify-vs-poll — a 3.0s assert alone cannot
   distinguish the two paths). The two-read DELTA is the race-free
   assertion: snapshot the counter BEFORE the chat row is enqueued,
   snapshot it AGAIN at claim time, assert delta == 0 over the
@@ -119,7 +119,7 @@ def engine(tmp_path):
 
 
 class TestSaturationIsolation:
-    """Default pool FULLY saturated → chat row claimed in ≤3.5s AND
+    """Default pool FULLY saturated → chat row claimed in ≤3.0s AND
     no poll-fallback timeout fired over the [enqueue, claim] window.
 
     Note (i) — the harness MUST construct the default pool at
@@ -134,7 +134,7 @@ class TestSaturationIsolation:
         """SC#3 — when the default pool is fully saturated (5 long jobs
         filling all 5 workers), a chat message enqueued AFTER the
         saturation is established must be claimed by a chat worker
-        in ≤3.5s from enqueue."""
+        in ≤3.0s from enqueue."""
         # One release event shared across ALL 5 default workers so the
         # test can hold the saturation window open until teardown.
         default_release = threading.Event()
@@ -200,9 +200,9 @@ class TestSaturationIsolation:
                 task = fetch_task_by_work_id(engine, chat_work_id)
                 return task is not None and task.status == "running"
 
-            assert wait_until(_chat_claimed, timeout=3.5), (
+            assert wait_until(_chat_claimed, timeout=3.0), (
                 f"chat row {chat_work_id} not claimed by chat worker "
-                f"within 3.5s — saturation isolation FAILED"
+                f"within 3.0s — saturation isolation FAILED"
             )
 
             claimed_at = time.monotonic()
@@ -211,8 +211,8 @@ class TestSaturationIsolation:
             timeouts_after = chat_stats_after["workers_woken_by_timeout"]
 
             elapsed = claimed_at - enqueued_at
-            assert elapsed <= 3.5, (
-                f"chat row claim latency {elapsed:.3f}s exceeds 3.5s "
+            assert elapsed <= 3.0, (
+                f"chat row claim latency {elapsed:.3f}s exceeds 3.0s "
                 f"SC#3 budget"
             )
 

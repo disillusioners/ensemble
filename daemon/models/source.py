@@ -45,7 +45,15 @@ class SourceCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "source_id": "telegram-main",
+                # NOTE: the chat-source registration validator
+                # (``daemon/routers/sources.py``) rejects any
+                # chat-type ``source_id`` whose lowercased form
+                # does not equal ``source_type.value``. The
+                # example must therefore use a value that passes
+                # the validator — ``"telegram"`` (the type name
+                # itself), not a free-form operator-style id like
+                # ``"telegram-main"`` which would 422.
+                "source_id": "telegram",
                 "source_type": "telegram",
                 "name": "Customer Support Bot",
                 "config": {

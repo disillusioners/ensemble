@@ -129,16 +129,41 @@ async def create_source(source_create: SourceCreate, request: Request):
     # D10.1 architect amendment A7.2 — closes the OPERATOR vector the
     # HTTP /jobs gate cannot reach).
     #
-    # ``registry.py:857`` mints ``f"{source_id}:{external_user_id}"``
-    # — the registered ``source_id`` BECOMES the row's source prefix.
-    # For an interactive-chat adapter type, a free-form ``source_id``
-    # (e.g. ``"tg-prod"``) silently mints NON-chat-prefixed rows that
-    # ride the default worker lane with ZERO runtime signal; a
-    # cross-type misconfig (``source_type="discord"`` +
-    # ``source_id="telegram"``) mints into the WRONG lane. Requiring
-    # ``source_id.lower() == source_type`` pins the minted prefix into
-    # ``CHAT_SOURCE_PREFIXES`` so the lane predicate routes the
-    # adapter's rows correctly.
+    # TRUE behavior (this validator does NOT normalize operator
+    # input — it only checks that the lowercased id matches the type
+    # name, then passes the RAW id downstream; an earlier comment
+    # block here claimed a normalization that does NOT happen):
+    #
+    #   * Validation (line below): case-INSENSITIVE equality —
+    #     ``source_id.lower() != source_type.value`` ⇒ 422.
+    #     ``source_id="Telegram"`` + ``source_type="telegram"``
+    #     PASSES (returns 201).
+    #   * Mint (``daemon/sources/registry.py:857``):
+    #     ``f"{source_id}:{external_user_id}"`` uses the RAW
+    #     ``source_id`` verbatim — there is NO normalization seam
+    #     between this validator and the mint.
+    #   * Consequence: a registered ``source_id="Telegram"`` mints
+    #     rows like ``Telegram:alice`` whose case-VARIANT prefix is
+    #     NEVER matched by the case-sensitive lane predicate
+    #     ``LIKE 'telegram:%'`` (``CHAT_SOURCE_PREFIXES`` carries
+    #     lowercase prefixes only — same constant the validator
+    #     derives ``chat_source_types`` from). The row therefore
+    #     rides the DEFAULT worker lane with ZERO runtime signal —
+    #     exactly the misconfig the validator is designed to catch,
+    #     except the case-blind comparison lets mixed-case input
+    #     slip past validation and manifest only at lane-routing
+    #     time. A cross-type misconfig (``source_type="discord"`` +
+    #     ``source_id="telegram"``) still 422s and is unaffected.
+    #
+    # NAMED OPERATOR FOLLOW-UP (deliberately NOT changed in this
+    # pass — surgical doc-accuracy only): tightening the comparison
+    # to case-SENSITIVE (``source_id != source_type.value`` ⇒ 422)
+    # would force operators to lowercase at registration, producing
+    # the canonical lowercase prefix at the mint and closing the
+    # silent-default-lane-routing footgun above. That is an
+    # operator-contract change (mixed-case pre-existing
+    # registrations would need a documented migration path) and
+    # belongs in a separate PR.
     #
     # The chat TYPE-name set is DERIVED from ``CHAT_SOURCE_PREFIXES``
     # (colon stripped) — a literal ``{"telegram", "slack", "discord"}``

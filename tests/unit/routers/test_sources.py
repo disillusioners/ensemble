@@ -201,13 +201,35 @@ class TestChatSourceRegistrationValidator:
     def test_create_source_accepts_case_insensitive_match(
         self, sources_client
     ):
-        """``source_id`` equality is CASE-INSENSITIVE (the validator
-        compares ``source_id.lower()`` against the type name) —
-        ``"Telegram"`` mints ``Telegram:<user>``... whose case-variant
-        prefix is deliberately NOT recognized downstream (the lane
-        predicate and helpers are case-SENSITIVE), so the validator
-        normalizes the OPERATOR's input at the registration seam
-        instead."""
+        """``source_id`` equality is CASE-INSENSITIVE at validation
+        (the validator compares ``source_id.lower()`` against the
+        type name — see ``daemon/routers/sources.py`` validator
+        block, which now documents the TRUE pass-through behavior
+        this test exercises).
+
+        PASS-THROUGH CONSEQUENCE (the test asserts the 201, but the
+        interesting post-condition is what happens AFTER the
+        validator returns):
+
+          * ``source_id="Telegram"`` PASSES validation and is
+            persisted verbatim.
+          * ``daemon/sources/registry.py:857`` then mints the
+            row's source prefix from the RAW ``source_id`` —
+            ``f"{source_id}:{external_user_id}"`` produces
+            ``Telegram:alice`` (NOT ``telegram:alice``).
+          * The case-SENSITIVE lane predicate
+            (``LIKE 'telegram:%'`` over ``CHAT_SOURCE_PREFIXES``)
+            NEVER matches the mixed-case prefix, so the row rides
+            the DEFAULT worker lane with zero runtime signal.
+
+        In other words, this test asserts a "silent default-lane
+        routing" pass-through for mixed-case operator input —
+        case-blind validation WITHOUT a downstream normalization
+        seam. A case-SENSITIVE comparison would 422 here; that
+        is a NAMED OPERATOR FOLLOW-UP tracked in the
+        ``daemon/routers/sources.py`` validator comment and is
+        deliberately NOT changed in this pass.
+        """
         resp = sources_client.post(
             "/sources",
             json={
