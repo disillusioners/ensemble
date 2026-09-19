@@ -255,6 +255,10 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 #   1. ``daemon/routers/messages.py`` (HTTP ``POST /messages``)
 #   2. ``daemon/tools/job_queue.py`` (``job_inject`` tool)
 #   3. ``daemon/tools/instance.py`` (agent-tool ``send_message``)
+#   4. ``daemon/sources/registry.py`` (chat-source ``_handle_message``
+#      — ``feature/chat-source-live-injection``, 2026-09-19; live-turn
+#      injection for ``telegram:/slack:/discord:`` ingest mirroring
+#      the web branch's status + graph-task guards).
 #
 # Test invariant (tests/unit/tools/test_instance_tools.py::test_k_…):
 #   ``grep -n "_INJECTION_ELIGIBLE_STATUSES\s*=\s*{" daemon/`` must
@@ -275,6 +279,73 @@ DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
 INJECTION_ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "running",
 })
+
+# ── Chat-source routing-envelope allowlist ─────────────────────────────
+# Per-provider allowlist of top-level ``IncomingMessage.metadata`` keys
+# that a chat adapter is contractually required to populate. Used by
+# the chat-source live-injection gate at
+# ``daemon/sources/registry.py:_is_text_only_payload_for_chat_injection``
+# to decide whether a message can safely take the RAM-FIFO injection
+# lane (``manager.set_injection``) or must fall through to the durable
+# ``enqueue_message_job`` path.
+#
+# Iteration 2 (2026-09-19, ``feature/chat-source-live-injection`` fix
+# cycle): the prior blocklist (``not msg.metadata``) was dead-code in
+# production — every chat adapter always populates non-empty provider
+# metadata. A narrow allowlist degrades to durable fallthrough, which
+# is the SAFE direction (an unknown key never strands an injection).
+#
+# Per-provider reply-path verdicts (verified that the agent's outbound
+# send path does NOT depend on per-message metadata that only the
+# durable path carries):
+#
+#   * ``slack``  — slack/adapter.py:813-825 (mint); reply path at
+#     slack/adapter.py:380-449 routes via ``external_user_id`` format
+#     ``{workspace}:{channel_or_user_id}[:{thread_ts}]`` (:401) +
+#     mapping-side ``mapping.mapping_metadata.get("slack_thread_ts")``
+#     fallback (:439-440). Per-message metadata is NOT required for
+#     reply routing. ✓
+#   * ``telegram`` — telegram.py:558-573 (mint); reply path at
+#     telegram.py:262-326 reads ``message.metadata.get("reply_chat_id")``
+#     with ``external_user_id`` fallback (:280) — and ``external_user_id``
+#     is always a valid Telegram chat_id (``user_id`` for private chats,
+#     ``chat_id`` for groups), so the fallback always routes correctly.
+#     Per-message metadata is NOT required. ✓
+#   * ``discord`` — discord/adapter.py:1024-1038 / :1170-1196 (mint); reply
+#     path at discord/adapter.py:1589-1627 routes via ``_resolve_send_target``
+#     (:1363-1437) which reads mapping.metadata (Discord does NOT
+#     populate ``reply_chat_id`` in message metadata — channel/thread
+#     routing lives on the mapping, set at first-message time via
+#     ``extra_mapping_metadata`` in registry.py:820-824). Per-message
+#     metadata is NOT required. ✓
+#
+# Sources (each entry cited from the adapter's metadata construction
+# site):
+#   * slack      — slack/adapter.py:813-825 (+ /new at :829-830)
+#   * discord    — discord/adapter.py:1092-1099 (text) and :1204-1209 (slash)
+#   * telegram   — telegram.py:558-573 (+ /new at :579-580)
+ROUTING_ENVELOPE_KEYS: dict[str, frozenset[str]] = {
+    "slack": frozenset({
+        "slack",
+        "agent",
+        "reply_chat_id",
+        "force_new_instance",
+        "command",
+    }),
+    "discord": frozenset({
+        "discord",
+        "agent",
+        "force_new_instance",
+        "command",
+    }),
+    "telegram": frozenset({
+        "telegram",
+        "agent",
+        "reply_chat_id",
+        "force_new_instance",
+        "command",
+    }),
+}
 
 # DEFECT A (dispatch-lane stranding fix, feature/fix-question-resume-stuck,
 # 2026-09-14): membership in this set is NECESSARY but NOT SUFFICIENT for

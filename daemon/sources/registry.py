@@ -1,4 +1,13 @@
-"""Source registry for managing message source adapters."""
+"""Source registry for managing message source adapters.
+
+Module size rationale (M7, tidier pass 2026-09-19): this file
+owns the cross-source routing surface — adapter registration,
+``_handle_message`` ingest routing (live-injection + durable
+fallthrough), and per-provider mapping-metadata construction.
+Routing logic is interleaved with mapping-metadata construction
+so a naive split would scatter state — the seam is the
+three-clause invariant helper, not a file boundary.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +15,11 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
+
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES, ROUTING_ENVELOPE_KEYS
 
 from .base import (
     IncomingMessage,
@@ -24,6 +36,78 @@ logger = logging.getLogger(__name__)
 
 # Module-level executor for async-safe callbacks (P2 Issue #7)
 _executor = ThreadPoolExecutor(max_workers=4)
+
+
+# Per-provider routing-envelope allowlist is defined canonically in
+# ``daemon/constants.py:ROUTING_ENVELOPE_KEYS`` (single-home per the
+# ``daemon/constants.py`` leaf-module invariant). The chat-source
+# live-injection gate (see ``_is_text_only_payload_for_chat_injection``
+# below) imports it from there. Each entry cites the adapter's
+# metadata construction site (slack/adapter.py:813-825,
+# discord/adapter.py:1092-1099 + :1204-1209, telegram.py:558-573);
+# per-provider reply-path verdicts (verified that outbound routing
+# does NOT depend on per-message metadata that only the durable path
+# carries) are documented at the constant's definition site.
+
+
+def _is_text_only_payload_for_chat_injection(
+    msg: IncomingMessage,
+    source_type: str | None,
+) -> bool:
+    """Text-only predicate for the chat-source live-injection gate.
+
+    Three-clause invariant (round-3, 2026-09-19 — independent
+    reviewer ruling on iteration 2; required for the gate to be
+    safe-by-construction):
+
+      (i) ``source_type`` MUST be in ``ROUTING_ENVELOPE_KEYS`` —
+          None / unknown providers ALWAYS fall through to the
+          durable enqueue path, regardless of metadata shape. The
+          source-type gate runs BEFORE the metadata shape check so
+          a non-allowlisted provider cannot accidentally take the
+          injection lane on an empty-metadata message.
+      (ii) Empty metadata + KNOWN provider → inject. (A KNOWN
+           provider with no metadata is the canonical text-only
+           case the lane was built for.)
+      (iii) Non-empty metadata → every key MUST be in that
+            provider's ``ROUTING_ENVELOPE_KEYS`` allowlist; any
+            foreign / unknown key routes to durable fallthrough
+            (the safe direction — the durable path always works).
+
+    Plus the unconditional gates that run first:
+      * No images (set_injection is text-only — its signature
+        accepts only ``content``, ``source``, ``echo_id``).
+      * Non-empty / non-whitespace content (defensive; the
+        chat-source path does NOT validate ``message.content`` like
+        HTTP does, but a blank injection is a wasted agent turn).
+
+    Args:
+        msg: The incoming chat-source message.
+        source_type: The chat-source's provider type (``slack`` /
+            ``discord`` / ``telegram``). ``None`` or any value not
+            in ``ROUTING_ENVELOPE_KEYS`` causes the predicate to
+            return ``False`` (durable fallthrough).
+
+    Returns:
+        ``True`` iff all the above gates pass.
+    """
+    if msg.images:
+        return False
+    if not msg.content or not msg.content.strip():
+        return False
+    # Clause (i): source_type gate runs FIRST — None / unknown
+    # providers fall through to durable regardless of metadata.
+    if source_type is None:
+        return False
+    allowed = ROUTING_ENVELOPE_KEYS.get(source_type)
+    if allowed is None:
+        # Unknown source type — fall through to durable (safe default).
+        return False
+    # Clauses (ii) and (iii): known provider — empty metadata OK,
+    # non-empty metadata must be a subset of the allowlist.
+    if not msg.metadata:
+        return True
+    return set(msg.metadata.keys()) <= allowed
 
 
 class _HealthCheckFailed(Exception):
@@ -855,7 +939,137 @@ class SourceRegistry:
             
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
-            
+
+            # ── Chat-source live-turn message injection (Phase 6) ────────
+            # See ``_is_text_only_payload_for_chat_injection`` above for
+            # the three-clause invariant (round-3, 2026-09-19) that
+            # gates this branch. This header is the routing-overview
+            # comment — keep it aligned with that helper, do NOT
+            # restate a stale version of the gate.
+            #
+            # DEFECT-A stranding guard (``daemon/constants.py:279-289``):
+            # ``status == "running"`` is necessary but NOT sufficient for
+            # the RAM-FIFO lane. A graphless RUNNING target (e.g., a
+            # spawn-created child that was cascade-paused + cascade-
+            # resumed without ever being dispatched) reads ``running``
+            # while having NO graph to drain ``_pending_injections`` —
+            # injecting into it would silently strand the message in
+            # memory forever. ``manager.has_live_graph_task`` is the
+            # verifier; a ``False`` result routes through the durable
+            # ``enqueue_message_job`` pipeline below.
+            #
+            # Rich payloads (images only — the metadata-shape clause
+            # already lives in the helper) ALWAYS take the durable
+            # enqueue fallthrough. ``set_injection`` is text-only (its
+            # signature accepts ``content``, ``source``, ``echo_id``
+            # and nothing else; wiring image-bearing injections would
+            # require extending the FIFO schema + drain site, which is
+            # out of scope here).
+            is_text_only_payload = _is_text_only_payload_for_chat_injection(
+                msg, source_type
+            )
+            should_inject_live = False
+            if is_text_only_payload:
+                try:
+                    # ``get_instance_info`` is a sync facade method
+                    # (``daemon/manager.py:10819`` → lifecycle service
+                    # :4351); matches the web reference's call shape
+                    # exactly (``routers/messages.py:198``).
+                    instance_info = self._manager.get_instance_info(
+                        instance_id
+                    )
+                    current_status = (
+                        instance_info.get("status")
+                        if instance_info
+                        else None
+                    )
+                except Exception as probe_err:
+                    # Probe failure (transient race / DB miss / any
+                    # unexpected error from the facade). Falls through
+                    # to durable enqueue — never silently drops a
+                    # chat-source message and never crashes the source
+                    # adapter. Broadened from
+                    # ``(KeyError, AttributeError)`` in iteration 2
+                    # because the chat-source lane MUST stay up even
+                    # for unexpected exception classes; if the probe
+                    # can't tell us the status, we err on the side of
+                    # a durable wake (which the existing pipeline
+                    # already handles correctly).
+                    logger.debug(
+                        f"[chat-source live-injection] probe failed for "
+                        f"{instance_id[:8]}...: "
+                        f"{type(probe_err).__name__}: {probe_err} — "
+                        f"falling through to enqueue"
+                    )
+                    current_status = None
+                if (
+                    current_status in INJECTION_ELIGIBLE_STATUSES
+                    and self._manager.has_live_graph_task(instance_id)
+                ):
+                    should_inject_live = True
+
+            if should_inject_live:
+                # message-display-latency fix (mirrors
+                # ``routers/messages.py:454``): mint a stable
+                # server-side ``echo_id`` here and thread it through
+                # the FIFO entry. The drain site (``daemon/graph.py``)
+                # stamps the same id onto ``HumanMessage.id`` and onto
+                # the POST/drain-time SSE echo (emit-twice-same-id).
+                #
+                # Chat provenance ``source=f"{source_id}:{external_user_id}"``
+                # mirrors the durable-enqueue source format and the
+                # agent-tool ``source=f"internal_agent:<caller>"`` pattern
+                # (``tools/instance.py:3127``); the drain site carries
+                # it onto ``HumanMessage.additional_kwargs["source"]``.
+                # Both kwargs are accepted by ``set_injection``
+                # (``daemon/manager.py:2734-2740``) — Quick-win #1
+                # (S scope) added ``source``, message-display-latency
+                # Phase 1 added ``echo_id``; we use both.
+                echo_id = str(uuid.uuid4())
+                self._manager.set_injection(
+                    instance_id,
+                    msg.content,
+                    source=source,
+                    echo_id=echo_id,
+                )
+                logger.info(
+                    f"⚡ Injected live-turn chat message: "
+                    f"source_id={source_id}, "
+                    f"user={msg.external_user_id}, "
+                    f"instance={instance_id[:8]}..., "
+                    f"echo_id={echo_id}"
+                )
+
+                # Typing indicator on the injection branch (iteration 2,
+                # 2026-09-19 — leader decision: FIRE IT). Chat users have
+                # no 202/SSE echo like web; ``start_typing`` on inject
+                # is their only "message received" signal. Mirror the
+                # same call shape the durable path uses below (~:1110-):
+                # same adapter lookup, same ``hasattr`` guard, same
+                # ``reply_chat_id`` resolution with ``external_user_id``
+                # fallback. Byte-identical to the durable path's call —
+                # only the timing differs (the durable path fires AFTER
+                # ``enqueue_message_job`` completes; here we fire AFTER
+                # ``set_injection``).
+                typing_adapter = self.get(source_id)
+                if typing_adapter and hasattr(typing_adapter, 'start_typing'):
+                    typing_chat_id = (
+                        msg.metadata.get("reply_chat_id", msg.external_user_id)
+                        if msg.metadata
+                        else msg.external_user_id
+                    )
+                    await typing_adapter.start_typing(typing_chat_id)  # type: ignore
+                    logger.debug(
+                        f"Started typing indicator for chat {typing_chat_id}"
+                    )
+
+                # Skip durable enqueue — the agent is already in an
+                # active turn and will drain the FIFO on its next
+                # ``agent_node`` pass. Typing indicator already fired
+                # above; no further state to advance on the injection
+                # branch.
+                return
+
             # Phase 5 (cutover): external sources always dispatch through
             # ``enqueue_message_job`` so the JobItem mirror is created
             # alongside the Task row. The legacy Task-only path is gone

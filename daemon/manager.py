@@ -3814,8 +3814,9 @@ class InstanceManager:
         "[Injection] Appended pending message ... queue_depth=1" with no
         graph to ever drain it → tree wedged at WAITING_CHILDREN).
 
-        The three injection-lane consumers (``routers/messages.py``,
-        ``tools/instance.py``, ``tools/job_queue.py`` — the
+        The four injection-lane consumers (``routers/messages.py``,
+        ``tools/instance.py``, ``tools/job_queue.py``,
+        ``sources/registry.py`` — the
         ``INJECTION_ELIGIBLE_STATUSES`` consumer set) MUST call this
         BEFORE choosing the in-memory lane; a ``False`` result routes
         the send through the durable enqueue pipeline instead.
