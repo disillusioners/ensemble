@@ -18,7 +18,19 @@ class SourceStatus(Enum):
 
 @dataclass
 class IncomingMessage:
-    """Normalized incoming message from any source."""
+    """Normalized incoming message from any source.
+
+    Phase 2 / clipboard-image-chat (round-2 amendment #38):
+    ``IncomingMessage`` MUST NOT carry ``image_refs`` — refs are
+    POST-only on ``MessageCreate``. Sources mint text / images via the
+    legacy ``images`` field; the clipboard-image-chat display channel
+    is the user-API surface (``MessageCreate.image_refs``). The static
+    ``dataclasses.fields(IncomingMessage)`` assertion (test freeze
+    list A8) pins this invariant — a future contributor adding
+    ``image_refs`` here would re-open the chat-source invariant
+    bypass (sources could mint refs that ride the live-injection
+    lane).
+    """
     external_user_id: str       # Telegram chat_id, webhook client_id
     content: str                # Message text/content
     source_id: str              # Which source adapter this came from
