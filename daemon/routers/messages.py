@@ -549,9 +549,20 @@ async def send_message(
         # ``_emit_user_message_echo`` can carry refs in
         # ``additional_kwargs`` too. None when the legacy data-URI
         # path is used (refs are NOT a feature of the data-URI
-        # channel). Closes the pre-existing 202 images-drop defect
-        # for LEGACY data-URI sends (see bonus acceptance criterion
-        # in amendment #31.f).
+        # channel).
+        #
+        # OPEN DEFECT (W-a, council NEEDS-FIXES, 2026-09-19): the
+        # pre-existing legacy data-URI ``images`` drop on the FIFO
+        # echo path is NOT closed by this round. The drain site
+        # threads ``image_refs`` (refs reach the wire echo) but the
+        # legacy data-URI ``images`` list is dropped at the FIFO
+        # construction — the drain does NOT add a parallel
+        # ``additional_kwargs["images"]`` stamp for data-URIs. Real
+        # closure requires threading the ``images`` list through the
+        # echo ``additional_kwargs`` the same way ``image_refs`` is
+        # threaded; tracked as a follow-up. The test
+        # ``test_legacy_data_uri_202_images_drop_still_open`` pins
+        # the still-open status.
         entry = manager.set_injection(
             instance_id,
             message.content,

@@ -39,13 +39,17 @@ This hook is the seam that enforces the signature separation:
 Fail-fast (architect amendment #7 — must land BEFORE tests are written)
 ----------------------------------------------------------------------
 
-When ``request.image_refs`` is non-empty AND
-``manager.config.llm.model_vision`` is unset, raise
-:class:`fastapi.HTTPException` (400, ``ErrorResponse`` shape matching
-the existing vision gate at ``messages.py:222-231``). This is the
-router-seam guard that closes the round-1 fail-open position: the user
-sees the breakage at use time instead of every image silently landing
-in a placeholder.
+The fail-fast ``HTTPException 400`` for ``request.image_refs`` +
+``model_vision`` unset lives in the ROUTER seam at
+``daemon/routers/messages.py:242-254`` (BEFORE this hook is invoked).
+This hook does NOT raise the fail-fast — by the time the hook runs,
+the router's fail-fast has either passed (vision configured) or the
+request has been rejected with 400. The hook's responsibility is the
+per-image conversion + text-prefix prepend + ``images`` clear +
+``image_refs`` normalization (canonical URL form). This docstring
+previously claimed the hook raised the fail-fast — that was wrong
+(W-b, council NEEDS-FIXES, 2026-09-19). The router owns the
+fail-fast; the hook owns the conversion.
 
 Disconnect mitigation (architect amendment #11)
 ----------------------------------------------

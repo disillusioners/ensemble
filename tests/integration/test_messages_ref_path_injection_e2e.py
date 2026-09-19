@@ -102,18 +102,29 @@ class Test202LegDisplayParity:
         for ref in entry_refs:
             assert ref in out["images"]
 
-    def test_legacy_data_uri_202_also_threads_images(self):
-        """Bonus acceptance (round-2 amend #31.f): legacy data-URI
-        sends on RUNNING targets — the FIFO entry used to drop
-        ``message.images`` entirely (the pre-existing defect). After
-        h4-S1 the entry ALSO carries refs from the image_refs field;
-        legacy data-URI is unchanged at the FIFO level (the existing
-        drain site doesn't thread images). The wire images field for
-        the echo is empty (no additional_kwargs stamp on the echo —
-        we don't thread data URIs through the echo)."""
-        # The data-URI path on 202 doesn't change — refs is the only
-        # new field. Confirm: a HumanMessage with no additional_kwargs
-        # serializes with images=None (no ref leak).
+    def test_legacy_data_uri_202_images_drop_still_open(self):
+        """The pre-existing defect (round-2 amend #31.f): legacy
+        data-URI sends on RUNNING targets — the FIFO entry used to drop
+        ``message.images`` entirely. The defect is STILL OPEN: a
+        HumanMessage echo on the legacy data-URI path carries no
+        ``additional_kwargs`` (the drain site only threads
+        ``image_refs``), so the echo's wire ``images`` field is
+        ``None``. Serialization reflects this — there is no
+        additional_kwargs stamp to surface data-URI entries. Real
+        closure = a separate fix at the drain seam to thread
+        ``images`` (legacy data-URIs) through ``additional_kwargs``
+        the same way ``image_refs`` is threaded; tracked as a
+        follow-up, NOT attempted in the round-2 amendment #31 round.
+
+        The test was previously named
+        ``test_legacy_data_uri_202_also_threads_images`` which falsely
+        claimed the closure was in place; renamed to tell the truth.
+        Pin: a HumanMessage with no additional_kwargs serializes
+        with images=None (no ref leak — and no data-URI surface)."""
+        # The data-URI path on 202 still drops — refs is the only
+        # threaded field. Confirm: a HumanMessage with no additional_kwargs
+        # serializes with images=None (the defect is open: data-URI
+        # values never reach the wire echo).
         hm = HumanMessage(content="legacy data URI", id="echo-2")
         out = serialize_message(hm)
         assert out["images"] is None
