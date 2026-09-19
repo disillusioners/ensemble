@@ -9362,6 +9362,8 @@ class InstanceManager:
         message: str = "resume",
         silent: bool = False,
         images: list[str] | None = None,
+        *,
+        image_refs: list[str] | None = None,
     ) -> dict | None:
         """Resume a paused instance via an explicit suspension handle.
 
@@ -9472,6 +9474,7 @@ class InstanceManager:
                 message=message,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 target_work_id=suspended_turn.resume_target_turn_id,
                 selected_suspension_reason=suspended_turn.suspension_reason,
                 handle_work_id=suspended_turn.work_id,
@@ -9512,6 +9515,7 @@ class InstanceManager:
                 message=message,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 target_work_id=paused_turn.work_id,
                 selected_suspension_reason=paused_turn.suspension_reason,
                 handle_work_id=paused_turn.work_id,
@@ -9784,6 +9788,7 @@ class InstanceManager:
         selected_suspension_reason: str | None,
         handle_work_id: str,
         route_outcome: str,
+        image_refs: list[str] | None = None,
     ) -> dict:
         """Schedule graph resume against an explicit suspension handle.
 
@@ -10289,6 +10294,7 @@ class InstanceManager:
                 old_job_id=target_work_id,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 cancellation_token=cancellation_source.token,
             )
         )
@@ -10310,6 +10316,8 @@ class InstanceManager:
         silent: bool,
         images: list[str] | None,
         cancellation_token: CancellationToken | None = None,
+        *,
+        image_refs: list[str] | None = None,
     ) -> None:
         """Background task for resumed processing.
 
@@ -10385,6 +10393,14 @@ class InstanceManager:
                     message_source="cascade_resume",
                     silent=silent,  # Pass through silent flag
                     images=images,
+                    # Phase 2 / clipboard-image-chat (C1 facade-forwarding
+                    # fix, 2026-09-19): resume_processing_job accepts
+                    # ``image_refs`` as keyword-only kwarg and threads it
+                    # through to ``_process_message_with_tracking``. Without
+                    # this thread the refs dropped one layer deeper and the
+                    # row+kwargs stamp silently lost refs on PAUSED
+                    # auto-resume — the failure mode the green suite masked.
+                    image_refs=image_refs,
                 )
 
             gate_outcome: Any = None
