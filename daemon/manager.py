@@ -6805,6 +6805,7 @@ class InstanceManager:
         is_background: bool = False,
         work_id: str | None = None,
         work_id_required: bool = False,
+        image_refs: list[str] | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message WITHOUT a JobItem mirror (internal-only path).
 
@@ -6817,60 +6818,21 @@ class InstanceManager:
         :meth:`enqueue_message_job` instead so the public facade can
         read a JobItem + Task pair.
 
-        Behavior is byte-identical to the legacy D13 single-writer
-        contract:
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #27): the new display channel — a list of refs
+        (``/api/tmp_images/<32hex>`` URL form, canonical) that persists
+        into the ``MessageQueue.images`` JSONB column (audit) AND
+        stamps the ``HumanMessage.additional_kwargs["image_refs"]``
+        checkpoint sidecar (display). NEVER reaches the agent
+        channel — ``_build_message_content`` carries only ``images``.
+        Default ``None`` preserves byte-identical behavior for every
+        existing caller.
 
-          1. ``MessageQueue`` + ``Task`` rows are written in a single
-             transaction.
-          2. The WorkerPool is notified to claim the Task.
-
-        ``is_deferred`` (Phase 3 Part B1, 2026-06-27): keyword-only
-        marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True, the
-        created Task row is stamped ``is_deferred=True`` and the worker
-        pool's idle gate holds the task until every non-defer queue is
-        empty. Default False preserves the prior behaviour for every
-        caller that does not opt in.
-
-        ``is_background`` (Phase 3 background seam, 2026-07-14):
-        keyword-only marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True, the
-        created Task row is stamped ``is_background=True`` and the
-        worker pool's idle gate holds the task until every non-
-        deferred, non-background lane system-wide is empty. Default
-        False preserves the prior behaviour for every caller that does
-        not opt in (HTTP route, telegram, scheduler, internal reports).
-        Independent of ``is_deferred`` — a task may be either, both, or
-        neither (e.g. ``is_deferred=True, is_background=False`` for a
-        defer-queued message, ``is_deferred=False, is_background=True``
-        for a background-queued message, both False for a normal
-        foreground message).
-
-        ``work_id_required`` (Fix A, constitution Phase 0): keyword-only
-        marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True (the
-        job-driven dispatch path), a ``None`` ``work_id`` raises
-        :class:`~daemon.services.messaging_types.LinkageContractError`
-        from the service's fail-closed ``work_id`` guard instead of
-        auto-minting a fresh UUID — a re-mint would re-key the Task and
-        break Pattern-f1 ``get_by_work_id`` recovery lookups. Default
-        False preserves the prior self-mint behaviour for every internal
-        caller that does not opt in.
-
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-            is_deferred: See above.
-            is_background: See above.
-            work_id: Optional linkage UUID bound as the Task's
-                ``work_id``. When None the service self-mints a fresh
-                UUID unless ``work_id_required`` forces the fail-closed
-                contract (see above).
-            work_id_required: See above.
+        Keyword-only on purpose — it is a forward-looking affordance
+        and threading it positionally would silently re-route
+        existing traffic (mirrors the ``is_deferred`` /
+        ``is_background`` / ``work_id_required`` style established
+        2026-06-27 / 2026-09-01).
 
         Returns:
             AsyncMessageResult with message_id, instance_id, status, and
@@ -6888,6 +6850,7 @@ class InstanceManager:
             is_background=is_background,
             work_id=work_id,
             work_id_required=work_id_required,
+            image_refs=image_refs,
         )
 
     async def enqueue_message_job(
@@ -6902,32 +6865,15 @@ class InstanceManager:
         is_deferred: bool = False,
         is_background: bool = False,
         queue_id: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
-        Wraps :meth:`InstanceMessagingService.enqueue_message_job`. See that
-        method for the full contract — Task row remains the authoritative
-        dispatch primitive; the JobItem is the informational mirror that
-        the WorkResolver facade can read.
-
-        Args:
-            instance_id: Target instance ID.
-            message: User content.
-            source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
-            priority: 0=system, 1=user (matches ``enqueue_message``).
-            images: Optional base64 images for vision messages.
-            metadata: Optional metadata dict.
-            is_deferred: Forwarded to ``enqueue_message_job`` — stamps
-                ``Task.is_deferred=True``.
-            is_background: Forwarded to ``enqueue_message_job`` — stamps
-                ``Task.is_background=True`` so the dispatcher routes the
-                work onto the background queue instead of the foreground
-                message lane.
-
-        Returns:
-            ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
-            ``status="queued"``, and ``job_id`` populated as the shared
-            UUID4 (Task.work_id == JobItem.job_id).
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #27): keyword-only display-channel kwarg forwarded
+        to ``InstanceMessagingService.enqueue_message_job`` and
+        ultimately to ``_prepare_enqueued_message``. See the
+        ``enqueue_message`` docstring for the contract.
         """
         return await self._messaging_service.enqueue_message_job(
             instance_id=instance_id,
@@ -6939,6 +6885,7 @@ class InstanceManager:
             is_deferred=is_deferred,
             is_background=is_background,
             queue_id=queue_id,
+            image_refs=image_refs,
         )
 
     async def _process_message_with_tracking(
@@ -6953,6 +6900,7 @@ class InstanceManager:
         images: list[str] | None = None,  # Images for multimodal messages
         silent: bool = False,  # If True, skip message injection during checkpoint resume
         task_context: str | None = None,  # Pre-formatted task context from send_message(context=...)
+        image_refs: list[str] | None = None,  # Phase 2: ref-based display channel
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -7009,6 +6957,7 @@ class InstanceManager:
             images=images,
             silent=silent,
             task_context=task_context,
+            image_refs=image_refs,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:

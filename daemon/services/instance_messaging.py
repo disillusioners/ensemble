@@ -406,12 +406,32 @@ def _stamped_additional_kwargs(message_source: str | None) -> dict | None:
     return None
 
 
+def _image_refs_kwarg(image_refs: list[str] | None) -> dict:
+    """``image_refs``-only additive merge fragment, or ``{}``.
+
+    Phase 2 / clipboard-image-chat (round-2 amendment #28): the
+    display channel's ``image_refs`` kwarg merges into the
+    ``HumanMessage.additional_kwargs`` ONLY when non-empty. Returns
+    ``{}`` (NOT ``None``) when absent so the calling code can use the
+    fragment in a ``{**stamped_kwargs, **_image_refs_kwarg(...)}``
+    spread without branching on emptiness — ``**{}`` is a no-op.
+
+    Per ruling #46 (probed 2026-09-19): NO JSON-string fallback — the
+    list value round-trips through the checkpoint verbatim. A1/A3
+    end-to-end assertions are the proof.
+    """
+    if image_refs:
+        return {"image_refs": list(image_refs)}
+    return {}
+
+
 def _build_graph_input(
     content: str | list,
     message_id: str,
     persistent_context_msgs: list[HumanMessage] | None = None,
     prepended_msgs: list[HumanMessage] | None = None,
     message_source: str | None = None,
+    image_refs: list[str] | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -523,12 +543,38 @@ def _build_graph_input(
     # enqueue-lane deliveries carry the stamped shape
     # ``{"injected_message": True, "source": message_source}``; user /
     # API deliveries stay bare (no additional_kwargs).
+    #
+    # Phase 2 / clipboard-image-chat (round-2 amendment #28):
+    # ``image_refs`` (display channel) is ADDITIVE — merged into
+    # ``additional_kwargs`` ONLY when non-empty. Same byte-identical-
+    # when-absent contract as the existing stamp; preserves the
+    # pre-feature wire shape for every legacy caller. NO JSON-string
+    # fallback per round-2 ruling #46 — list-typed values round-trip
+    # through the checkpoint (A1/A3 end-to-end are the proof; the
+    # legacy block list surface is preserved by the serializer union
+    # in ``daemon/utils.py:113-137``+``:252+``).
     stamped_kwargs = _stamped_additional_kwargs(message_source)
+    refs_fragment = _image_refs_kwarg(image_refs)
     if stamped_kwargs is not None:
         user_message = HumanMessage(
-            content=content, id=message_id, additional_kwargs=stamped_kwargs
+            content=content,
+            id=message_id,
+            additional_kwargs={**stamped_kwargs, **refs_fragment},
+        )
+    elif refs_fragment:
+        # Refs-only path — user/API delivery carrying the display
+        # channel. ``HumanMessage`` requires additional_kwargs to be a
+        # non-None dict, so we conditionally attach (byte-identical
+        # entry when image_refs is None — pre-feature shape).
+        user_message = HumanMessage(
+            content=content,
+            id=message_id,
+            additional_kwargs=refs_fragment,
         )
     else:
+        # Byte-identical to the pre-feature shape: no additional_kwargs
+        # at all on this branch. Legacy ``HumanMessage(content=...,
+        # id=...)`` callers see no kwargs change.
         user_message = HumanMessage(content=content, id=message_id)
     # Hybrid split — prepend the persistent context block BEFORE the
     # user message so LangGraph's ``add_messages`` reducer checkpoints
@@ -1538,6 +1584,7 @@ class InstanceMessagingService:
         is_background: bool = False,
         work_id: str | None = None,
         work_id_required: bool = False,
+        image_refs: list[str] | None = None,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -1685,7 +1732,15 @@ class InstanceMessagingService:
                 type=msg_type,
                 status=MessageStatus.READY.value,
                 priority=priority,
-                images=images,
+                # Phase 2 / clipboard-image-chat (round-2 amendment
+                # #28): when ``image_refs`` is non-empty the row
+                # column carries the canonical URL refs (audit) —
+                # XOR at the model layer guarantees the path is taken
+                # only when ``images`` is None / empty. When refs are
+                # absent we preserve the legacy data-URI semantic
+                # (the existing column semantics — ref-sends never
+                # reach this branch with empty refs).
+                images=(image_refs if image_refs is not None else images),
                 message_metadata=metadata or {},
                 # Naive-UTC digits (DC-A fix) — naive column bind.
                 enqueued_at=now_utc_naive(),
@@ -1987,6 +2042,7 @@ class InstanceMessagingService:
         is_background: bool = False,
         work_id: str | None = None,
         work_id_required: bool = False,
+        image_refs: list[str] | None = None,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -2045,6 +2101,7 @@ class InstanceMessagingService:
             is_background=is_background,
             work_id=work_id,
             work_id_required=work_id_required,
+            image_refs=image_refs,
         )
 
         # Phase 5 (Option B): when this message is being delivered via
@@ -2160,6 +2217,7 @@ class InstanceMessagingService:
         is_deferred: bool = False,
         is_background: bool = False,
         queue_id: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -2419,6 +2477,11 @@ class InstanceMessagingService:
             is_background=is_background,
             work_id=job_id,
             work_id_required=True,
+            # Phase 2 / clipboard-image-chat (round-2 amendment #27,
+            # #28): forward image_refs to the prelude so the row
+            # audit column carries refs and the checkpoint kwargs
+            # stamp survives via ``_build_graph_input`` later.
+            image_refs=image_refs,
         )
 
         # Preserve the historical synchronous side effects from the
@@ -2594,6 +2657,7 @@ class InstanceMessagingService:
         images: list[str] | None = None,
         silent: bool = False,
         task_context: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
 
@@ -3887,10 +3951,15 @@ class InstanceMessagingService:
                     # empty, byte-identical pre-m1 behavior). The
                     # provenance stamp threads the queue-row source so a
                     # retried INTERNAL delivery keeps its stamped shape.
+                    # Phase 2 / clipboard-image-chat (round-2 amend #28):
+                    # thread image_refs through the kwargs stamp so the
+                    # display channel persists on the checkpointed
+                    # HumanMessage.
                     graph_input = _build_graph_input(
                         content, message_id,
                         prepended_msgs=leftover_fifo_msgs or None,
                         message_source=message_source,
+                        image_refs=image_refs,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -3902,6 +3971,7 @@ class InstanceMessagingService:
                     content, message_id,
                     prepended_msgs=leftover_fifo_msgs or None,
                     message_source=message_source,
+                    image_refs=image_refs,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -3922,6 +3992,7 @@ class InstanceMessagingService:
                 persistent_context_msgs=persistent_context_msgs or None,
                 prepended_msgs=leftover_fifo_msgs or None,
                 message_source=message_source,
+                image_refs=image_refs,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────
