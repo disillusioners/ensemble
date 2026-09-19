@@ -7,10 +7,16 @@ resolver (graph-node fused block):
 * Verdict-JSON parsing (:func:`_parse_fused_judge_response`) — the
   strict/tolerant shape mirrors the legacy judge's parser; the
   load-bearing field is ``verdict`` ("complete"|"not_complete").
-* Retry-once-on-unparsable (incident 98b59dd7 semantics, mirrored):
-  the retry fires ONLY when the model responded but the verdict JSON
-  did not parse — NEVER on timeout / exception; ``attempt=2`` +
-  ``first_unparsable_excerpt`` on the retry paths.
+* Retry semantics (incident 98b59dd7 lineage + incident bc145c7e
+  R1, 2026-09-19): the retry fires on EITHER attempt-1
+  ``asyncio.TimeoutError`` (the bc145c7e R1 supersession of the prior
+  no-timeout-retry decision for the rescuer path; quick-model tail
+  latency makes the class recurring) OR attempt-1 unparsable verdict
+  JSON (the preserved 98b59dd7 contract carried over from the retired
+  legacy judge). HTTP / API errors keep NO retry (unchanged). On
+  EITHER retry path the result carries ``attempt=2``;
+  ``first_unparsable_excerpt`` is set ONLY on the unparsable-retry
+  path (a timeout leaves no body to redact/excerpt).
 * The ``invoked`` real-invocation flag (Stage-1 review hazard pin:
   the eval row's ``judge_invoked`` derives from it) — True on every
   LLM-attempt path, False ONLY on the degenerate empty-bundle guard.
@@ -167,7 +173,35 @@ class TestFusedJudgeVerdictPaths:
         assert result.evidence_cited == ("child promised future work",)
         assert result.advisory_note_text == "Check the child"
 
-    def test_timeout_no_retry_conservative(self, monkeypatch):
+    def test_timeout_retries_once_recovered(self, monkeypatch):
+        # incident bc145c7e R1 (2026-09-19): the rescuer judge retries
+        # ONCE on attempt-1 timeout. Successful retry → verdict
+        # honored; first-attempt timeout is consumed (no excerpt, no
+        # unparsable row — the prior attempt left no body).
+        responses = [None, _complete_payload()]
+        calls = []
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls.append(payload)
+            if responses[len(calls) - 1] is None:
+                raise asyncio.TimeoutError()
+            return (responses[len(calls) - 1], "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        assert len(calls) == 2
+        assert result.attempt == 2
+        assert result.verdict == "complete"
+        assert result.is_complete is True
+        # No first_unparsable_excerpt on a timeout-retry path — the
+        # timeout left no body to redact/excerpt.
+        assert result.first_unparsable_excerpt is None
+
+    def test_timeout_post_retry_conservative_deny(self, monkeypatch):
+        # bc145c7e R1: post-retry timeout (both attempts timed out) →
+        # conservative fail-safe deny. DP-5 posture unchanged.
         calls = []
 
         async def _stub(config, payload, *, timeout_s, system_prompt=None):
@@ -176,14 +210,84 @@ class TestFusedJudgeVerdictPaths:
 
         monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
         result = asyncio.run(
-            judge_fused_bundle_async("bundle text", config=_config())
+            judge_fused_bundle_async("bundle", config=_config())
         )
+        # ONE retry — exactly 2 HTTP attempts within ONE invocation.
+        assert len(calls) == 2
+        assert result.attempt == 2
         assert result.verdict == "timeout"
         assert result.is_complete is False
         assert result.error_class == "TimeoutError"
-        # NO retry on timeout (98b59dd7 contract) — one HTTP attempt.
-        assert len(calls) == 1
-        assert result.attempt == 1
+
+    def test_timeout_then_error_post_retry_conservative(self, monkeypatch):
+        # bc145c7e R1: timeout@1 → error@2 → conservative deny.
+        # attempt=2, verdict=error, error_class set.
+        state = {"n": 0}
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise asyncio.TimeoutError()
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        result = asyncio.run(
+            judge_fused_bundle_async("bundle", config=_config())
+        )
+        assert result.attempt == 2
+        assert result.verdict == "error"
+        assert result.error_class == "RuntimeError"
+        assert result.is_complete is False
+
+    def test_timeout_retry_log_discrimination(self, monkeypatch, caplog):
+        # bc145c7e R1: log rows carry the discrimination tokens for the
+        # timeout-retry paths. Pin the exact token strings so grep /
+        # incident triage can rely on them.
+        import logging
+
+        calls = {"n": 0}
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise asyncio.TimeoutError()
+            return (_complete_payload(), "fake-quick")
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.attestation_report_judge"
+        ):
+            result = asyncio.run(
+                judge_fused_bundle_async("bundle", config=_config())
+            )
+        assert result.verdict == "complete"
+        text = caplog.text
+        assert "event=fused_judge_first_attempt_timeout" in text
+        assert "event=fused_judge_timeout_retry" in text
+        # Post-retry token must NOT appear on a recovered retry.
+        assert "event=fused_judge_timeout_post_retry" not in text
+
+    def test_timeout_post_retry_log_discrimination(self, monkeypatch, caplog):
+        # bc145c7e R1: post-retry timeout logs BOTH the first-attempt
+        # token AND the post-retry token; the retry token MUST appear
+        # (the retry was actually fired).
+        import logging
+
+        async def _stub(config, payload, *, timeout_s, system_prompt=None):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(jm, "_invoke_judge_llm", _stub)
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.attestation_report_judge"
+        ):
+            result = asyncio.run(
+                judge_fused_bundle_async("bundle", config=_config())
+            )
+        assert result.verdict == "timeout"
+        text = caplog.text
+        assert "event=fused_judge_first_attempt_timeout" in text
+        assert "event=fused_judge_timeout_retry" in text
+        assert "event=fused_judge_timeout_post_retry" in text
 
     def test_error_no_retry_conservative(self, monkeypatch):
         calls = []
