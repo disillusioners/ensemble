@@ -36,38 +36,61 @@ job_create(agent_id="reviewer", task="Task B", watch=True)
 job_create(agent_id="tester", task="Task C", watch=True)
 → record job_id_3
 
-# Then ensure all are watched
-watch_jobs([job_id_1, job_id_2, job_id_3])
+# Then watch each mission (the receipt you hold is a valid handle)
+watch_mission(job_id_1)
+watch_mission(job_id_2)
+watch_mission(job_id_3)
 
 # Verify
-list_watched_jobs() → should show all 3
+list_watched_jobs() → should show all 3 receipts
 ```
 
 ---
 
-## Watching Jobs
+## Watching Missions (not receipts)
 
-### watch_job
+> **You wait on MISSIONS, not receipts.** Create work with `job_create` —
+> you hold a receipt (`job_id`). To wait on the WORK: `await_mission(mission_id)`
+> in-turn, or `watch_mission(mission_id_or_job_ref)` to yield and be revived
+> at mission-terminal. `watch_mission` accepts the receipt you created or the
+> mission_id, and watches every receipt that exists at call time. After
+> `job_continue`, call `watch_mission` again — new receipts are not
+> auto-watched. The FIRST `[JOB_EVENT]` after your watch is the signal; later
+> events on the same mission's other receipts are echoes — act once. Receipts
+> answer transport questions only (`job_get`); never watch a receipt for a
+> work question. A revived mission needs a fresh `watch_mission`; the event
+> carries no epoch — `get_mission` for details. `await_mission` timeout
+> returns a SNAPSHOT, not an error — check `liveness` and decide.
 
-**Purpose:** Register to receive notifications when a job status changes.
+### watch_mission
+
+**Purpose:** THE durable watch — register to be revived when the MISSION
+reaches terminal state (not the transport receipt).
 
 ```raw
-watch_job(job_id="abc123")
+watch_mission(job_id="abc123")        # the receipt from job_create
+watch_mission(mission_id="inst_abc123")  # or the mission itself
 ```
 
-**Edge case:** If job is already in a terminal state, you receive an immediate notification.
+**What it does:** resolves the mission, then registers ONE watcher row per
+receipt that exists at call time (all Task receipts of the mission's
+instance) with `mission_terminal` events. At mission-terminal you receive
+`[JOB_EVENT]` per watched receipt — **the FIRST event is the signal; the
+rest are echoes of the same mission. Act once.**
 
----
+**Edge cases:**
+- Already-terminal mission → registration + immediate notification.
+- Mission not yet dispatched → watching the `job_create` receipt registers
+  before the mission exists; the watch simply waits.
+- After `job_continue` → call `watch_mission(new_job_id)` again — receipts
+  minted after your watch are NOT auto-watched.
+- A revived mission needs a FRESH `watch_mission` (the watch row is consumed
+  at first terminal). The event carries no epoch — call `get_mission` for
+  details.
 
-### watch_jobs
-
-**Purpose:** Watch multiple jobs at once.
-
-```raw
-watch_jobs(job_ids=["abc123", "def456", "ghi789"])
-```
-
-**Use when:** Creating multiple parallel jobs.
+**Use when:** You want to yield and be woken when the work is done.
+For waiting in-turn, use `await_mission` (timeout returns a snapshot,
+not an error).
 
 ---
 
@@ -79,7 +102,8 @@ watch_jobs(job_ids=["abc123", "def456", "ghi789"])
 list_watched_jobs()
 ```
 
-**Returns:** List of job IDs you're watching.
+**Returns:** List of job IDs you're watching, labeled by resolved handle
+(`receipt of mission <id>` / `mission handle`).
 
 **Use for:** Verification after dispatch, debugging tracking issues.
 
@@ -87,7 +111,9 @@ list_watched_jobs()
 
 ### unwatch_job
 
-**Purpose:** Stop watching a job (rarely needed, watches auto-clean).
+**Purpose:** Stop watching (rarely needed, watches auto-clean). The handle
+is tolerant: pass a receipt job_id OR a mission_id — a mission handle
+removes every watched receipt of that mission.
 
 ```raw
 unwatch_job(job_id="abc123")
@@ -393,7 +419,7 @@ job_continue(
 
 **Note:** The old job must be in a terminal state (completed, failed, cancelled, dead_letter). The target instance must not be terminated, errored, or paused.
 
-**Important:** Use `watch_job(new_job_id)` to monitor the new job. Combine `job_continue` + `watch_job` in an atomic flow.
+**Important:** Use `watch_mission(new_job_id)` to monitor the follow-up work. Combine `job_continue` + `watch_mission` in an atomic flow — new receipts are not auto-watched.
 
 ---
 
@@ -407,7 +433,7 @@ job_id = result["job_id"]
 
 # VS separate calls (avoid unless necessary)
 job_id = job_create(agent_id="developer", task="Fix bug")["job_id"]
-watch_job(job_id)  # Must call immediately!
+watch_mission(job_id)  # Must call immediately!
 ```
 
 ### Parallel Dispatch Pattern
@@ -416,7 +442,7 @@ watch_job(job_id)  # Must call immediately!
 2. for task in tasks:
      result = job_create(agent_id=..., task=..., watch=True)
      job_ids.append(result["job_id"])
-3. watch_jobs(job_ids)
+3. watch_mission(job_id) for each — every receipt becomes a watched row
 4. list_watched_jobs()  # Verify
 ```
 
@@ -438,7 +464,7 @@ watch_job(job_id)  # Must call immediately!
      retry_count += 1
      if retry_count < 3:
        job_retry(job_id)
-       watch_job(new_job_id)
+       watch_mission(new_job_id)
        → goto step 2
      else:
        → Report persistent failure
@@ -455,14 +481,14 @@ watch_job(job_id)  # Must call immediately!
 ```raw
 # WRONG - race condition
 job_create(agent_id="developer", task="...")  # No watch
-# Job might complete before watch_job() is called
-watch_job(job_id)
+# Job might complete before watch_mission() is called
+watch_mission(job_id)
 
 # RIGHT - atomic or immediate
 job_create(agent_id="developer", task="...", watch=True)
 # OR
 job_id = job_create(agent_id="developer", task="...")["job_id"]
-watch_job(job_id)  # Called IMMEDIATELY
+watch_mission(job_id)  # Called IMMEDIATELY
 ```
 
 ### Job IDs May Change on Retry
@@ -477,28 +503,28 @@ A job in terminal state (completed, failed, cancelled, terminated, dead_letter) 
 
 If you receive a notification for a job already in terminal state, it should be your first and only notification for that job.
 
-### Watching Already-Terminal Job
+### Watching an Already-Terminal Mission
 
-If you call `watch_job()` on an already-terminal job, you receive an **immediate notification** with the current status.
+If you call `watch_mission()` on an already-terminal mission, you receive an **immediate notification** with the current status (one per watched receipt — the first is the signal, the rest are echoes).
 
-This is expected. Handle it like any other notification.
+This is expected. Handle it like any other notification — act once.
 
 ### Orphan Jobs
 
 An orphan job is one that completed but no one was watching.
 
-**Always use `watch=True`** or call `watch_job()` immediately after creation to prevent orphans.
+**Always use `watch=True`** or call `watch_mission()` immediately after creation to prevent orphans.
 
 ### list_watched_jobs() for Verification
 
 After dispatching multiple jobs, always verify:
 
 ```raw
-job_ids = [job_id_1, job_id_2, job_id_3]
-watch_jobs(job_ids)
+for job_id in [job_id_1, job_id_2, job_id_3]:
+    watch_mission(job_id)
 
 watched = list_watched_jobs()
-assert all(jid in watched for jid in job_ids), "Missing watches!"
+assert all receipts present, "Missing watches!"
 ```
 
 ---
@@ -524,12 +550,19 @@ instead of marking the job complete.
   the final terminal event (`completed ✓` / `failed ✗`).
 - Each job produces exactly **one** terminal event. Do not count `in_progress`
   toward job completion.
-- `in_progress` is included in the **default** watch event set, so any watch
-  created via `job_create(watch=True)` / `watch_job()` without an explicit
-  `watch_events` filter will receive it.
-- If a watch was created with an explicit `watch_events` list that omits
-  `in_progress`, this notification is filtered out (you'll only see the
-  terminal event). This is the only safe way to opt out.
+- `in_progress` is included in the **default** watch event set, so any transport
+  watch created via `job_create(watch=True)` without an explicit
+  `watch_events` filter will receive it. `watch_mission` rows carry
+  `mission_terminal` events only — they fire on mission-terminal
+  (`completed` / `failed` / `cancelled` liveness), so they do not act on
+  `in_progress`. Known engine gap (do not design around it): a `dead_letter`
+  disposition over non-terminal liveness never fires a `mission_terminal`
+  row today — if a mission shows `dead_letter` while its `liveness` is still
+  non-terminal, stop waiting on the watch and poll with `await_mission`
+  (its timeout returns a snapshot) to decide.
+- If a **transport** watch was created with an explicit `watch_events`
+  list that omits `in_progress`, this notification is filtered out (you'll
+  only see the terminal event). This is the only safe way to opt out.
 
 **Action on `in_progress`:**
 - Update internal tracking (record `Waiting for: N` and the `Progress:` text)

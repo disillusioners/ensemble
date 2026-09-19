@@ -18,6 +18,12 @@ watch_jobs, plus the M2 mission-side get_mission / await_mission
 / list_mission helpers (re-exported from
 ``daemon.tools.missions``).
 
+Toolset reshape (2026-09-19, ``feature/mission-watch-toolset``):
+``watch_mission`` joins the surface via the standalone
+``create_mission_watch_tools`` factory below (resolver front-end +
+registration-time receipt fan-out). The ``create_job_tools`` return
+list is UNCHANGED so its index pins stay green.
+
 Tool-name discovery is frozen — adding a new tool requires a
 test_frozen_tool_name_discovery entry; the house registry scans
 the ``@register_tool_category`` decorators.
@@ -47,7 +53,9 @@ if TYPE_CHECKING:
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
     from daemon.services.work_resolver import WorkRecord, WorkResolverService
+    from daemon.services.mission_resolver import MissionRecord, MissionResolver
     from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
+    from daemon.repositories.task.repository import TaskRepository
     from daemon.manager import InstanceManager
 
 CATEGORY_NAME = "Job Queue"
@@ -56,6 +64,46 @@ Create, list, and manage jobs and job queues.
 """
 
 TERMINAL_STATES = set(ALL_TERMINAL_STATES)
+
+# Watch-cap ceiling shared by every watch-family tool (job_create,
+# watch_job, watch_jobs, watch_mission). Single source for both the
+# number and the error sentence so the per-tool wordings cannot drift
+# (tidier round 2026-09-20, #7).
+MAX_WATCHES_PER_INSTANCE = 50
+
+
+def _watch_cap_error(current: int, attempted_clause: str | None = None) -> str:
+    """Build the shared watch-cap error sentence.
+
+    One wording source for every watch-family tool (tidier #7). Two
+    shapes, matching the two cap checks in the tools:
+
+    * single-hit (``attempted_clause is None``) — the instance is at the
+      cap already: "Maximum watch limit (50) reached for this instance"
+    * would-exceed — minting ``attempted_clause`` more rows would pass
+      the cap: "Would exceed maximum watch limit (50). Currently
+      watching N, <attempted_clause>."
+
+    Args:
+        current: The caller's current watch count.
+        attempted_clause: Tail clause naming what would be added
+            (e.g. ``"trying to add 3"`` / ``"mission has 2 receipt
+            watch(es)"``). ``None`` renders the single-hit shape.
+
+    Returns:
+        The error sentence (no trailing period on the single-hit shape —
+        callers that add a reason append it themselves).
+    """
+    if attempted_clause is None:
+        return (
+            f"Error: Maximum watch limit ({MAX_WATCHES_PER_INSTANCE}) "
+            f"reached for this instance"
+        )
+    return (
+        f"Error: Would exceed maximum watch limit "
+        f"({MAX_WATCHES_PER_INSTANCE}). Currently watching {current}, "
+        f"{attempted_clause}."
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +132,10 @@ Args:
 
 Returns:
     Dictionary with job details including job_id and status.
+    ``mission_id`` is included ONLY when already known at response
+    time (mirror rows / post-dispatch rows); it is ABSENT for a
+    fresh pre-dispatch job — pass the returned ``job_id`` to
+    ``watch_mission`` to watch the work.
 
 Example:
     job_create(
@@ -264,12 +316,19 @@ Returns:
     "unwatch_job": """Stop watching a job for lifecycle events.
 
 Args:
-    job_id: The job ID to stop watching. Required.
+    job_id: The handle to stop watching. Tolerant: a receipt job_id
+        OR a mission_id. A mission handle resolves to every watched
+        receipt of that mission and removes them all. Required.
 
 Returns:
     Confirmation message.""",
 
     "list_watched_jobs": """List all jobs the current instance is watching.
+
+Each row is labeled by resolving its handle: ``mission handle`` (the
+row keys on a mission id), ``receipt of mission <id>`` (a
+receipt-keyed row and the mission it belongs to), or unlabeled
+(unresolvable receipt).
 
 Returns:
     List of watched jobs with their event filters.""",
@@ -547,6 +606,50 @@ def _record_mission_is_terminal(record: Optional["WorkRecord"]) -> bool:
     return getattr(record, "status", None) in canonical_terminal
 
 
+def _resolve_mission_record(
+    resolver: "MissionResolver",
+    handle: str,
+    *,
+    context: str,
+) -> Optional["MissionRecord"]:
+    """Resolve ``handle`` onto the mission read-model, degrading to None.
+
+    Shared guard for the mission-handle branches of the watch-family
+    tools (``watch_mission`` / ``unwatch_job`` / ``list_watched_jobs``) —
+    replaces the triplicated try/except guards (tidier round 2026-09-20,
+    High #1 + Med #2).
+
+    Degradation contract: a resolver RAISE (transient DB error) degrades
+    to ``None`` but is NEVER silent — the degraded lookup is logged at
+    warning with the calling context (house pattern:
+    ``daemon/tools/missions.py`` get_mission). A clean miss (no Instance
+    row) returns ``None`` without logging.
+
+    Args:
+        resolver: The wired :class:`MissionResolver` (caller guarantees
+            non-None).
+        handle: The id to resolve (a mission_id or a watched row id).
+        context: Short caller tag for the warning line
+            (``"watch_mission"`` / ``"unwatch_job"`` /
+            ``"list_watched_jobs"``).
+
+    Returns:
+        The :class:`MissionRecord`, or ``None`` when the handle misses
+        or the resolver degraded.
+    """
+    try:
+        return resolver.resolve(handle)
+    except Exception as exc:  # noqa: BLE001 — degraded resolver → caller fallback
+        logger.warning(
+            "%s: mission resolver raised for handle=%r: %s — "
+            "degrading to None",
+            context,
+            handle,
+            exc,
+        )
+        return None
+
+
 def _check_job_access(
     manager: "InstanceManager | None",
     current_instance_id: str,
@@ -725,9 +828,9 @@ def create_job_tools(
             # limit is hit, we return early without creating the job at all.
             if watch and watcher_repo is not None and current_instance_id:
                 count = watcher_repo.count_watches_for_instance(current_instance_id)
-                if count >= 50:
+                if count >= MAX_WATCHES_PER_INSTANCE:
                     return {
-                        "error": "Maximum watch limit (50) reached for this instance. Job was not created.",
+                        "error": _watch_cap_error(count) + ". Job was not created.",
                     }
                 watcher_repo.add_watch(pre_generated_job_id, current_instance_id)
 
@@ -762,7 +865,19 @@ def create_job_tools(
                     except Exception:
                         pass  # best-effort cleanup; stale row is harmless
 
-            return job_item.to_dict()
+            # Toolset reshape (2026-09-19, design §1 A2): surface
+            # ``mission_id`` ONLY when it is already known at response
+            # time — mirror rows and post-dispatch rows carry
+            # ``instance_id`` (= mission_id per M1 identity). A fresh
+            # pre-dispatch task job has ``instance_id=None`` (the
+            # instance is minted at dispatch), so the key is ABSENT and
+            # the agent uses the returned ``job_id`` as the
+            # ``watch_mission`` handle. Additive-only: ``to_dict()`` is
+            # returned verbatim otherwise.
+            response = job_item.to_dict()
+            if getattr(job_item, "instance_id", None):
+                response["mission_id"] = job_item.instance_id
+            return response
         except ValueError as e:
             return {"error": str(e)}
         except Exception as e:
@@ -1600,8 +1715,8 @@ def create_job_tools(
 
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
-            if count >= 50:
-                return f"Error: Maximum watch limit (50) reached for this instance"
+            if count >= MAX_WATCHES_PER_INSTANCE:
+                return _watch_cap_error(count)
 
             # Terminal state check — includes dead_letter
             if _is_terminal(record.status):
@@ -1685,12 +1800,51 @@ def create_job_tools(
     ) -> str:
         """Stop watching a job for lifecycle events.
 
+        The handle is tolerant (toolset reshape 2026-09-19, design §7):
+        it may be a receipt job_id OR a mission_id — a mission handle
+        resolves to every watched receipt of that mission and removes
+        them all.
+
         Use tool_help("unwatch_job") for details."""
         try:
             if watcher_repo is None:
                 return "Error: Watch functionality not available"
             if not current_instance_id:
                 return "Error: No instance context"
+
+            # Mission-handle branch (toolset reshape §7): if the handle
+            # resolves as a mission_id (= instance_id), fan the removal
+            # out over every watched receipt of that mission. Receipt-
+            # keyed rows are what actually fires; a mission handle alone
+            # would only match a stranded pre-reshape mission-keyed row.
+            mission_resolver = getattr(manager, "_mission_resolver", None) if manager is not None else None
+            if mission_resolver is not None:
+                mission_record = _resolve_mission_record(
+                    mission_resolver, job_id, context="unwatch_job"
+                )
+                if mission_record is not None and mission_record.mission_id == job_id:
+                    removed = 0
+                    task_repo = getattr(manager, "_task_repo", None) if manager is not None else None
+                    if task_repo is not None:
+                        tasks = task_repo.get_by_instance(job_id)
+                        for task_row in tasks:
+                            if watcher_repo.remove_watch(
+                                task_row.work_id, current_instance_id
+                            ):
+                                removed += 1
+                    # Best-effort: a stranded pre-reshape mission-keyed
+                    # row (never fires) is cleaned up here too.
+                    if watcher_repo.remove_watch(job_id, current_instance_id):
+                        removed += 1
+                    if removed:
+                        return (
+                            f"Stopped watching mission {job_id[:8]}... "
+                            f"({removed} watch row(s) removed)."
+                        )
+                    return (
+                        f"Not watching mission {job_id[:8]}... (no "
+                        f"matching receipt watches)."
+                    )
 
             removed = watcher_repo.remove_watch(job_id, current_instance_id)
             if removed:
@@ -1706,6 +1860,12 @@ def create_job_tools(
     async def list_watched_jobs() -> str:
         """List all jobs the current instance is watching.
 
+        Rows are labeled by resolving their handles (toolset reshape
+        2026-09-19, design §7): ``mission handle`` (the row keys on a
+        mission id), ``receipt of mission <id>`` (a receipt-keyed row
+        and the mission it belongs to), or unlabeled (unresolvable
+        receipt).
+
         Use tool_help("list_watched_jobs") for details."""
         try:
             if watcher_repo is None:
@@ -1717,9 +1877,47 @@ def create_job_tools(
             if not watches:
                 return "No watched jobs."
 
-            result_lines = [f"Watching {len(watches)} job(s):"]
+            # Label each row by resolving its handle (mission vs
+            # receipt). Best-effort: unwired resolver / degraded reads
+            # fall back to the plain ``receipt`` label.
+            mission_resolver = (
+                getattr(manager, "_mission_resolver", None)
+                if manager is not None
+                else None
+            )
+            labeled: list[tuple[object, str]] = []
             for w in watches:
-                result_lines.append(f"  - {w.job_id[:8]}... (events: {', '.join(w.watch_events)})")
+                label = "receipt"
+                if mission_resolver is not None:
+                    mission_record = _resolve_mission_record(
+                        mission_resolver, w.job_id, context="list_watched_jobs"
+                    )
+                    if mission_record is not None and mission_record.mission_id == w.job_id:
+                        label = "mission handle"
+                    else:
+                        try:
+                            work_record = await job_service.get_work(w.job_id)
+                        except Exception as exc:  # noqa: BLE001 — degraded → plain label
+                            logger.warning(
+                                "list_watched_jobs: work resolver raised for "
+                                "handle=%r: %s — labeling as plain receipt",
+                                w.job_id,
+                                exc,
+                            )
+                            work_record = None
+                        if work_record is not None and getattr(work_record, "instance_id", None):
+                            label = (
+                                f"receipt of mission "
+                                f"{work_record.instance_id[:8]}..."
+                            )
+                labeled.append((w, label))
+
+            result_lines = [f"Watching {len(watches)} job(s):"]
+            for w, label in labeled:
+                result_lines.append(
+                    f"  - {w.job_id[:8]}... (events: {', '.join(w.watch_events)})"
+                    + (f" — {label}" if label != "receipt" else "")
+                )
             return "\n".join(result_lines)
         except Exception as e:
             return f"Error listing watched jobs: {str(e)}"
@@ -1765,8 +1963,8 @@ def create_job_tools(
 
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
-            if count + len(job_ids) > 50:
-                return f"Error: Would exceed maximum watch limit (50). Currently watching {count}, trying to add {len(job_ids)}."
+            if count + len(job_ids) > MAX_WATCHES_PER_INSTANCE:
+                return _watch_cap_error(count, f"trying to add {len(job_ids)}")
 
             from daemon.services.work_status import is_terminal as _is_terminal
 
@@ -2386,4 +2584,314 @@ def create_job_tools(
     ]
 
 
-__all__ = ["create_job_tools", "TERMINAL_STATES"]
+def create_mission_watch_tools(
+    job_service: "JobQueueService",
+    mission_resolver: "MissionResolver",
+    task_repo: "TaskRepository | None" = None,
+    watcher_repo: "JobWatcherRepository | None" = None,
+    current_instance_id: str = "",
+) -> list:
+    """Create the mission-watch tool (``watch_mission``), wired against
+    injected services.
+
+    Toolset-reshape (2026-09-19, ``feature/mission-watch-toolset``; design
+    ``.agents/shared/planning/watch-notification-reliability/toolset-reshape-design.md``
+    §1/§3/§4): ``watch_mission`` is THE durable watch for mission-shaped
+    work. It is a **resolver front-end + registration-time fan-out** —
+    NOT a new watcher table and NOT a mission-keyed row:
+
+    * ``target`` accepts a mission_id (= instance_id) OR a job reference
+      (the receipt ``job_create``/``job_continue`` returned — the same
+      resolver front-end pattern ``job_continue`` uses).
+    * The resolved mission's current receipts are enumerated via
+      ``task_repo.get_by_instance`` (ALL Tasks, newest first, no status
+      filter — terminal Tasks persist, and mirror receipts are
+      ``Task.work_id`` rows too), and ONE ``job_watchers`` row is
+      registered per receipt with ``events=["mission_terminal"]``
+      (HOLD semantics — the engine's ``work_notifier`` gate fires the
+      row only when the mission's liveness is terminal).
+    * The engine's notify path is strictly receipt-keyed
+      (``get_watchers_for_job`` queries ``WHERE job_id == work_id``), so
+      a mission-keyed row would never resolve and strand silently —
+      receipt-keyed rows are the only shape that fires.
+    * ``add_watch`` is an atomic UPSERT on (job_id, instance_id), so a
+      re-watch after ``job_continue`` updates existing rows and mints
+      rows only for genuinely new receipts.
+    * The 50-watch cap is replicated counting EVERY row minted (N
+      receipts = N rows against the cap).
+    * An already-terminal mission registers then notifies immediately
+      per terminal receipt (mirror of ``watch_job``'s terminal branch).
+
+    Mission-not-yet-born edge (design §2b): a receipt from ``job_create``
+    resolves with ``instance_id=None`` until dispatch; registering on
+    that pre-generated receipt UUID is valid by construction — its Task
+    row (``work_id = job_id``) lands at dispatch and enters the engine's
+    terminal candidate set. A mission handle with zero receipts has
+    nothing valid to key on (mission-keyed rows never resolve) and is
+    rejected with an explicit message.
+
+    This factory mirrors the ``create_mission_tools`` assembly precedent
+    (``daemon/tools/missions.py``): one standalone factory with injected
+    dependencies, appended to the daemon-wide tool list by
+    ``daemon/tools/instance.py``. It deliberately lives beside the other
+    watch tools (``watch_job`` / ``unwatch_job`` / ``list_watched_jobs``)
+    because it WRITES ``job_watchers`` rows — the mission tools module
+    is contractually read-only.
+
+    Args:
+        job_service: JobQueueService for work resolution
+            (``get_work``) and immediate terminal notification
+            (``notify_watchers``).
+        mission_resolver: The wired-in :class:`MissionResolver` —
+            resolves ``target`` onto the mission read-model (liveness +
+            terminal_reason, including the W4 ``dead_letter`` flip).
+        task_repo: TaskRepository for receipt enumeration
+            (``get_by_instance``). Optional so partial-wiring test
+            doubles degrade to an explicit error rather than crash.
+        watcher_repo: JobWatcherRepository for registration. Optional
+            (same degrade posture as ``watch_job``).
+        current_instance_id: The watching instance's ID — every minted
+            row keys on it.
+
+    Returns:
+        A list with the single ``watch_mission`` tool callable.
+    """
+
+    class WatchMissionInput(BaseModel):
+        """Input schema for watch_mission tool."""
+        target: Annotated[str, Field(
+            description=(
+                "What to watch: a mission_id (= instance_id) OR a job "
+                "reference — the job_id receipt returned by job_create / "
+                "job_continue. The receipt form works even before the "
+                "mission is dispatched."
+            )
+        )]
+        events: Annotated[list[str] | None, Field(
+            default=None,
+            description=(
+                "Watch events. Default (recommended): ['mission_terminal'] "
+                "— the watch fires ONLY when admission AND mission "
+                "liveness are both terminal (HOLD semantics). Explicit "
+                "transport event names are accepted for advanced use."
+            ),
+        )] = None
+
+    @register_tool_category("mission")
+    @tool(args_schema=WatchMissionInput)
+    # Descriptions live ONLY in ``WatchMissionInput`` (the args_schema) —
+    # the signature carries plain types so the two copies cannot drift
+    # (tidier #6).
+    async def watch_mission(
+        target: str,
+        events: list[str] | None = None,
+    ) -> str:
+        """Watch a MISSION (not a receipt) and be revived at mission-terminal.
+
+        Accepts a mission_id or the job_id receipt returned by
+        job_create / job_continue, and registers one watcher row per
+        receipt that exists at call time.
+
+        Use tool_help("watch_mission") for details."""
+        try:
+            if watcher_repo is None:
+                return "Error: Watch functionality not available"
+            if not current_instance_id:
+                return "Error: No instance context"
+
+            # Events validation — same fail-closed shape as ``watch_job``
+            # (an unknown event name is rejected, never silently degraded
+            # to "match nothing"). Default = mission-terminal HOLD.
+            from daemon.repositories.job_queue.watcher_models import (
+                ALL_WATCHABLE_EVENTS,
+            )
+            accepted_events = set(ALL_WATCHABLE_EVENTS) | {"mission_terminal"}
+            effective_events = (
+                list(events) if events else ["mission_terminal"]
+            )
+            unknown = [e for e in effective_events if e not in accepted_events]
+            if unknown:
+                return (
+                    f"Error: Unknown event(s) {unknown!r}. "
+                    f"Accepted values: {sorted(accepted_events)}."
+                )
+
+            # ── Resolver front-end (job_continue pattern) ─────────────
+            # target may be a mission_id (= instance_id) or a job
+            # reference. Mission side first, then the work side.
+            mission_id: str | None = None
+            mission_record: "MissionRecord | None" = None
+            pre_dispatch_receipt: str | None = None
+            candidate = _resolve_mission_record(
+                mission_resolver, target, context="watch_mission"
+            )
+            if candidate is not None and candidate.mission_id == target:
+                mission_id = target
+                mission_record = candidate
+            else:
+                record: "WorkRecord | None" = await job_service.get_work(target)
+                if record is None:
+                    return (
+                        f"Error: Could not resolve {target[:8]}... as a "
+                        "mission_id or job reference."
+                    )
+                if record.instance_id:
+                    mission_id = record.instance_id
+                    mission_record = _resolve_mission_record(
+                        mission_resolver, mission_id, context="watch_mission"
+                    )
+                else:
+                    # Pre-dispatch receipt (job_create returned, instance
+                    # not minted yet): the receipt UUID IS the future
+                    # mission's first task receipt (its Task row lands at
+                    # dispatch with work_id = job_id). Register on it —
+                    # mission-not-born means not terminal, so the watch
+                    # simply waits. A mission_id key would strand here
+                    # (watcher rows resolve by job_id only).
+                    pre_dispatch_receipt = target
+
+            # ── Pre-mission registration ──────────────────────────────
+            if pre_dispatch_receipt is not None:
+                count = watcher_repo.count_watches_for_instance(
+                    current_instance_id
+                )
+                if count >= MAX_WATCHES_PER_INSTANCE:
+                    return _watch_cap_error(count)
+                watcher_repo.add_watch(
+                    pre_dispatch_receipt, current_instance_id, effective_events
+                )
+                return (
+                    f"Watch registered on receipt "
+                    f"{pre_dispatch_receipt[:8]}... (mission not yet "
+                    f"dispatched). Will notify when admission AND mission "
+                    f"liveness are both terminal."
+                )
+
+            # ── Receipt enumeration (registration-time fan-out) ───────
+            if task_repo is None:
+                return (
+                    "Error: Receipt enumeration unavailable (task "
+                    "repository not wired). Watch the job_id receipt "
+                    "returned by job_create instead."
+                )
+            tasks = task_repo.get_by_instance(mission_id)
+            receipts = [t.work_id for t in tasks]
+            if not receipts:
+                # Nothing valid to key on — mission-keyed rows never
+                # resolve (the engine queries job_watchers by job_id).
+                # Reject explicitly rather than strand a row silently.
+                return (
+                    f"Error: Mission {mission_id[:8]}... has no receipts "
+                    "(no Task rows exist for it yet). Create work with "
+                    "job_create and watch_mission the returned job_id — "
+                    "the receipt registers before the mission exists."
+                )
+
+            # ── 50-watch cap — count EVERY row minted ─────────────────
+            count = watcher_repo.count_watches_for_instance(current_instance_id)
+            if count + len(receipts) > MAX_WATCHES_PER_INSTANCE:
+                return _watch_cap_error(
+                    count, f"mission has {len(receipts)} receipt watch(es)"
+                )
+
+            # ── Register one row per receipt (UPSERT-safe) ────────────
+            for receipt_work_id in receipts:
+                watcher_repo.add_watch(
+                    receipt_work_id, current_instance_id, effective_events
+                )
+
+            # ── Already-terminal mission → register-then-notify (§4) ──
+            # Terminal set {completed, failed, cancelled, dead_letter}:
+            # ``terminal_reason`` is non-None exactly when the mission is
+            # terminal (it mirrors the liveness for terminal instances
+            # and flips to ``dead_letter`` under the W4 hazard) — EXCEPT
+            # the dead_letter-since-revived row: the resolver keeps
+            # ``terminal_reason="dead_letter"`` on a mission whose
+            # liveness has since returned to non-terminal (revive; W4
+            # hazard encoding). Replying "already terminal" to a live,
+            # since-revived mission is misleading — cross-check liveness
+            # before the short-circuit and register normally when the
+            # mission is actually live (M2, review council 2026-09-19).
+            terminal_reason = getattr(mission_record, "terminal_reason", None)
+            liveness = getattr(mission_record, "liveness", None)
+            mission_actually_terminal = (
+                terminal_reason is not None
+                and liveness in {"completed", "failed", "cancelled"}
+            )
+            if mission_actually_terminal:
+                from daemon.services.work_status import is_terminal as _is_terminal
+
+                notified = 0
+                for receipt_work_id in receipts:
+                    # Per-receipt notify with the receipt's own resolved
+                    # status (per_kind_status). Only terminal receipts
+                    # fire — notifying a non-terminal receipt would emit
+                    # spurious progress events at OTHER instances'
+                    # transport watchers on the same receipt. The engine's
+                    # HOLD gate re-checks mission liveness per row.
+                    receipt_record = await job_service.get_work(receipt_work_id)
+                    if receipt_record is None:
+                        continue
+                    if not _is_terminal(receipt_record.status):
+                        continue
+                    notified += await job_service.notify_watchers(
+                        receipt_work_id,
+                        receipt_record.status,
+                        error=receipt_record.error,
+                        result_summary=receipt_record.result_summary,
+                    )
+                return (
+                    f"Mission {mission_id[:8]}... is already terminal "
+                    f"({terminal_reason}). {len(receipts)} receipt "
+                    f"watch(es) registered; immediate notification sent "
+                    f"on {notified} receipt(s)."
+                )
+
+            return (
+                f"Mission watch registered: {len(receipts)} receipt(s) of "
+                f"mission {mission_id[:8]}... (events: "
+                f"{', '.join(effective_events)}). Will notify at "
+                f"mission-terminal. Re-call watch_mission after "
+                f"job_continue — new receipts are not auto-watched."
+            )
+        except Exception as e:
+            return f"Error watching mission: {str(e)}"
+    watch_mission._full_doc_ = (
+        "Watch a MISSION (not a receipt) for mission-terminal events.\n\n"
+        "Resolver front-end: ``target`` accepts a mission_id (= "
+        "instance_id) OR a job reference (the job_id receipt returned "
+        "by job_create / job_continue — the receipt form works even "
+        "before the mission is dispatched). The tool resolves the "
+        "mission, enumerates EVERY receipt that exists at call time "
+        "(all Task.work_ids for the mission's instance), and registers "
+        "ONE job_watchers row per receipt with events="
+        "['mission_terminal'] (HOLD semantics: the row fires only when "
+        "admission AND mission liveness are both terminal).\n\n"
+        "Semantics:\n"
+        "    * One mission-terminal produces N [JOB_EVENT]s for N "
+        "watched receipts — the FIRST event after your watch is the "
+        "signal; the rest are echoes. Act once.\n"
+        "    * Re-call watch_mission after every job_continue — "
+        "receipts minted after this call are NOT auto-watched.\n"
+        "    * A revived mission needs a FRESH watch_mission — the row "
+        "is claimed and deleted at the first terminal; the event "
+        "carries no epoch (call get_mission for details).\n"
+        "    * An already-terminal mission registers then notifies "
+        "immediately (genuinely-terminal only — a "
+        "dead_letter-since-revived mission registers and waits).\n"
+        "    * The 50-watch cap counts every minted row (N receipts = "
+        "N rows).\n\n"
+        "Args:\n"
+        "    target: mission_id OR the job_id receipt from "
+        "job_create / job_continue.\n"
+        "    events (default ['mission_terminal']): Watch events to "
+        "subscribe.\n\n"
+        "Returns:\n"
+        "    str: Registration confirmation (or an explicit error for "
+        "unresolvable targets / zero-receipt missions / cap overflow)."
+    )
+
+    return [watch_mission]
+
+
+__all__ = ["create_job_tools", "create_mission_watch_tools", "TERMINAL_STATES"]

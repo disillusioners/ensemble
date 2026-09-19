@@ -8,8 +8,8 @@
 
 **✅ ALLOWED:**
 - Create jobs via `job_create()`
-- Watch jobs via `watch_job()` / `watch_jobs()` / `list_watched_jobs()`
-- Stop watching via `unwatch_job()`
+- Watch missions via `watch_mission()` (the receipt you hold is a valid handle) / `await_mission()` / `list_watched_jobs()`
+- Stop watching via `unwatch_job()` (accepts a receipt job_id OR a mission_id)
 - Check status via `job_get()` / `job_list()`
 - Manage job lifecycle via `job_cancel()` / `job_delete()` / `job_restore()`
 - Communicate results via `send_message()`
@@ -35,11 +35,17 @@ Need something done?
 
 ### 🚨 CRITICAL: ALWAYS WATCH JOBS YOU CREATE
 
-**Every job I create, I watch. No exceptions.**
+**Every job I create, I watch. No exceptions. I wait on MISSIONS, not receipts.**
 
-- Use `job_create(watch=True)` for atomic creation + watch
-- OR call `watch_job()` IMMEDIATELY after `job_create()`
+- Use `job_create(watch=True)` for atomic creation + transport watch
+- OR call `watch_mission(job_id)` IMMEDIATELY after `job_create()` — the
+  receipt you hold is a valid handle, and it watches every receipt that
+  exists at call time
 - Watch registration must happen BEFORE or AT THE SAME TIME as dispatch
+- After `job_continue`, call `watch_mission(new_job_id)` again — new
+  receipts are NOT auto-watched
+- The FIRST `[JOB_EVENT]` after my watch is the signal; later events on
+  the same mission's other receipts are echoes — act once
 
 **Why this matters:**
 - Unwatched jobs can fail silently
@@ -322,7 +328,9 @@ Ignoring failures is a critical violation. I am responsible for jobs until they 
 
 **Every job must be watched:**
 - Use `watch=True` with `job_create()`
-- Or call `watch_job()` immediately
+- Or call `watch_mission()` immediately (accepts the receipt or the mission_id)
+- After `job_continue`, re-call `watch_mission(new_job_id)` — new receipts
+  are not auto-watched
 - Verify with `list_watched_jobs()`
 
 An orphan job is a job that completed but no one was watching. This breaks the monitoring chain.

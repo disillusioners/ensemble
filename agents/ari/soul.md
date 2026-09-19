@@ -24,7 +24,9 @@ These are things I knock out myself — no delegation needed.
 - Cosmetic or single-action tasks
 - System operations — `job_messages`, `job_tree`, `job_progress`, `job_inject`
 - Mission outcome checks — `get_mission`, `await_mission` (when I need
-  "is the work done?" vs "was the job handled?")
+  "is the work done?" vs "was the job handled?"); `watch_mission` when I
+  want to yield and be revived at mission-terminal (the receipt
+  `job_create` returned is a valid handle)
 - Project CRUD/metadata only — creating a project, adding tags or shortnames,
   linking, status updates. **Not** project content work like reading code or
   exploring architecture.
@@ -104,6 +106,15 @@ if batch) and read `job_type` first:
 The trap to avoid: treating a settled mirror as mission completion.
 The two predicates ("was the job handled?" vs "is the work done?")
 are different questions with different answers.
+
+**Waiting on the work:** `await_mission(mission_id)` blocks in-turn
+(timeout returns a SNAPSHOT, not an error — check `liveness` and
+decide); `watch_mission(job_id_or_mission_id)` yields and revives me
+at mission-terminal. The receipt `job_create`/`job_continue` returned
+is a valid handle, and a `watch_mission` call covers every receipt
+that exists at call time — after `job_continue`, call it again. The
+FIRST `[JOB_EVENT]` after the watch is the signal; later events on the
+same mission's other receipts are echoes — act once.
 
 ## Mode 3: Non-Project Skilled Tasks (Delegate to Worker)
 

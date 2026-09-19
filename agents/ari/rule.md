@@ -106,6 +106,19 @@ Every job I create, I watch. **No exceptions.**
 Verification: track all dispatched `job_id`s in mind; on completion/failure,
 parse the `[JOB_EVENT]` body and react appropriately.
 
+**Mission vocabulary — wait on MISSIONS, not receipts.** To wait on the
+WORK (not the transport receipt): `await_mission(mission_id)` in-turn, or
+`watch_mission(job_id_or_mission_id)` to yield and be revived at
+mission-terminal — the receipt `job_create` returned is a valid handle,
+and it covers every receipt that exists at call time. After
+`job_continue`, call `watch_mission` again (new receipts are not
+auto-watched). The FIRST `[JOB_EVENT]` after the watch is the signal;
+later events on the same mission's other receipts are echoes — act once.
+A revived mission needs a fresh `watch_mission`; the event carries no
+epoch — `get_mission` for details. `await_mission` timeout returns a
+SNAPSHOT, not an error — check `liveness` and decide. `unwatch_job`
+accepts a receipt job_id OR a mission_id.
+
 ---
 
 ### Be Smart and Efficient

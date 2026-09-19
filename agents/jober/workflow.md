@@ -112,10 +112,10 @@ My primary workflow: receive, dispatch, monitor, react, report.
    b. Record job_id
 
 2. If not using watch=True:
-   watch_job(job_id) immediately after each create
+   watch_mission(job_id) immediately after each create
 
 3. For multiple jobs:
-   watch_jobs([job_id_1, job_id_2, ...])
+   watch_mission(job_id) for each — every receipt becomes a watched row
 
 4. Verify watches registered:
    list_watched_jobs() → confirm all job_ids present
@@ -162,7 +162,7 @@ My primary workflow: receive, dispatch, monitor, react, report.
       │   → If sequential → Create next job         │
       │   → If parallel → Continue waiting          │
       │   → If user wants follow-up on same instance│
-      │     → job_continue() + watch_job()          │
+      │     → job_continue() + watch_mission()      │
       │     (See Continuing Completed Jobs)       │
       ├─────────────────────────────────────────────┤
       │ FAILED                                      │
@@ -289,7 +289,7 @@ When handling multiple requests that can be batched:
    a. Group independent tasks
    b. For each group:
       - Create all jobs in group with watch=True
-      - watch_jobs([all job_ids in group])
+      - watch_mission(job_id) for each job in the group
    c. Wait for all jobs in group to complete
    d. Aggregate group results
    e. If more groups → repeat
@@ -316,7 +316,7 @@ When a job fails:
    │   → Increment retry_count                      │
    │   → if retry_count < 3:                        │
    │       job_retry(job_id)                        │
-   │       watch_job(job_id)                        │
+   │       watch_mission(new_job_id)                │
    │       → Wait for retry notification            │
    │   → else:                                      │
    │       Mark as persistent failure                │
@@ -422,7 +422,7 @@ result = job_continue(
     old_job_id="job_xxx",
     message="Follow-up instruction here"
 )
-watch_job(result["new_job_id"])  # Always watch immediately — no orphan
+watch_mission(result["new_job_id"])  # Always watch immediately — no orphan
 ```
 
 ### Workflow
@@ -433,8 +433,11 @@ watch_job(result["new_job_id"])  # Always watch immediately — no orphan
    to re-fetch unless status looks bad)
 3. job_continue(old_job_id=<id>, message=<new instructions>)
 4. Extract new_job_id from result["new_job_id"]
-5. watch_job(new_job_id) — immediately, to avoid orphan
-6. React to [JOB_EVENT] per Phase 4 framework
+5. watch_mission(new_job_id) — immediately, to avoid orphan AND to cover
+   the new receipt (receipts minted after a watch are not auto-watched)
+6. React to [JOB_EVENT] per Phase 4 framework — the FIRST event is the
+   signal; later events on the same mission's other receipts are echoes,
+   act once
 7. The new_job_id is itself terminal-eligible → can be continued again
    in a future turn if more follow-ups are needed
 ```
@@ -446,7 +449,7 @@ watch_job(result["new_job_id"])  # Always watch immediately — no orphan
 | Instance      | NEW (fresh context)                | SAME (preserves context)                      |
 | Use case      | New task, fresh start              | Follow-up on existing work                    |
 | Return shape  | `job_id`                           | `{old_job_id, instance_id, new_job_id, ...}`  |
-| Watch pattern | `job_create(watch=True)` (atomic)  | `job_continue(...)` → `watch_job(new_job_id)` |
+| Watch pattern | `job_create(watch=True)` (atomic)  | `job_continue(...)` → `watch_mission(new_job_id)` (re-watch: new receipts are not auto-watched) |
 
 If the old instance is `terminated` / `error` / `paused`, `job_continue` will
 reject — use `job_create` to spawn a fresh instance.
