@@ -108,7 +108,18 @@ class MockTaskProcessor:
         def has_pending_tasks_blocked_by_busy_instance(self):
             return False
     
-    def claim_task(self, worker_id):
+    def claim_task(self, worker_id, lane="default"):
+        """Mirror the real ``TaskProcessor.claim_task`` signature.
+
+        Phase 1 commit 18a31644 widened the production signature to
+        forward the worker's pool-configured ``lane`` as a CLAIM ARGUMENT
+        (``Worker.run`` → ``claim_task(worker_id, lane=self._lane)``;
+        ``daemon/services/worker_pool.py:302``); the mock MUST accept
+        ``lane`` or every WorkerPool that uses this mock silently raises
+        TypeError inside ``Worker.run``'s ``except Exception`` guard,
+        leaving ``claim_count`` pinned at 0. Re-contract preserves
+        pre-lane semantics (default-pool workers thread ``"default"``).
+        """
         self.claim_count += 1
         if self.should_claim and self.tasks_to_return:
             task = self.tasks_to_return.pop(0)
