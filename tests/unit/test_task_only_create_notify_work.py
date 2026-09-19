@@ -217,6 +217,21 @@ class TestTaskOnlyCreateNotifyWorkSync:
         holder._reconcile_deferred_report = MethodType(
             InstanceManager._reconcile_deferred_report, holder,
         )
+        # Phase2 wake-site widening (``daemon/manager.py:6805``
+        # ``_notify_all_pools``) means the seam now calls
+        # ``self._notify_all_pools()`` after the explicit commit
+        # in sub-shapes (b)/(c). The bare ``type(...)`` holder
+        # has no such attribute pre-fix — bind a fan-out stub
+        # that delegates to the single ``_worker_pool`` the test
+        # holds (mirrors the production helper's per-pool
+        # ``try/except`` + ``None``-guard).
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     def test_notify_work_called_after_commit(
@@ -381,6 +396,16 @@ class TestTaskOnlyCreateNotifyWorkAsync:
         holder._reconcile_deferred_report_async = MethodType(
             InstanceManager._reconcile_deferred_report_async, holder,
         )
+        # Phase2 wake-site widening — see SyncHolderB5 sibling
+        # for the rationale. The async seam also calls
+        # ``self._notify_all_pools()`` at manager.py:8797/8860.
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     @pytest.mark.asyncio
@@ -524,6 +549,16 @@ class TestMessageOnlyRecreateNotifyWorkSync:
         holder._reconcile_deferred_report = MethodType(
             InstanceManager._reconcile_deferred_report, holder,
         )
+        # Phase2 wake-site widening — see SyncHolderB5 sibling
+        # for the rationale. The message_only_recreate branch
+        # also calls ``self._notify_all_pools()`` (W3 contract).
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     def test_notify_work_called_after_commit_sync(
@@ -694,6 +729,15 @@ class TestMessageOnlyRecreateNotifyWorkAsync:
         holder._reconcile_deferred_report_async = MethodType(
             InstanceManager._reconcile_deferred_report_async, holder,
         )
+        # Phase2 wake-site widening — see SyncHolderB5 sibling
+        # for the rationale. Async mirror of the W3 contract.
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     @pytest.mark.asyncio

@@ -254,6 +254,19 @@ class TestSubshapeCCarrierRevivalSync:
         holder._is_parent_alive = MethodType(
             InstanceManager._is_parent_alive, holder,
         )
+        # Phase2 wake-site widening (``daemon/manager.py:6805``)
+        # — sub-shape (c) revival calls ``self._notify_all_pools()``
+        # at manager.py:8916 AFTER the explicit commit. The bare
+        # ``type(...)`` holder has no such attribute pre-fix; bind
+        # a fan-out stub that delegates to the single
+        # ``_worker_pool`` the test holds.
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     def test_revives_carrier_when_alive_parent_no_live_carrier(
@@ -454,6 +467,15 @@ class TestSubshapeCCarrierRevivalAsync:
         holder._is_parent_alive = MethodType(
             InstanceManager._is_parent_alive, holder,
         )
+        # Phase2 wake-site widening — see SyncHolder sibling for
+        # the rationale. Async mirror of the c_revival wake call.
+        def _notify(self) -> None:
+            if self._worker_pool is not None:
+                try:
+                    self._worker_pool.notify_work()
+                except Exception:
+                    pass
+        holder._notify_all_pools = MethodType(_notify, holder)
         return holder
 
     @pytest.mark.asyncio
