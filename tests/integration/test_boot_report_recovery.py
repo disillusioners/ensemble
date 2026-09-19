@@ -195,29 +195,43 @@ class TestBootOrder:
     def test_setup_worker_pool_wires_recovery_after_stale(
         self,
     ) -> None:
-        """The wiring code in ``manager.setup_worker_pool`` wires
-        ``_stale_recovery`` BEFORE ``_report_recovery`` — verified
-        by reading the file structure (no behavioral assertion;
-        the test pins the ordering contract for future refactors).
+        """The wiring code in
+        ``daemon.services.pool_orchestrator.PoolOrchestrator.setup``
+        wires ``_stale_recovery`` BEFORE ``_report_recovery`` —
+        verified by reading the file structure (no behavioral
+        assertion; the test pins the ordering contract for future
+        refactors).
+
+        Phase B (chat-lane-followups) extraction note: the body of
+        ``setup_worker_pool`` moved from ``daemon/manager.py`` to
+        ``daemon/services/pool_orchestrator.py``. The S-c binding
+        order invariant is preserved (the test now scans the
+        orchestrator file, NOT manager.py — manager.py's facade
+        ``setup_worker_pool`` only delegates to the orchestrator).
         """
         from pathlib import Path
 
-        manager_path = Path("daemon/manager.py")
+        # Phase B: the source-order wiring lives in the
+        # orchestrator module now (``manager.setup_worker_pool``
+        # is a thin facade).
+        manager_path = Path("daemon/services/pool_orchestrator.py")
         text = manager_path.read_text()
         # Find the order of the two ``self._stale_recovery`` /
         # ``self._report_recovery`` wiring assignments in
-        # ``setup_worker_pool``.
-        stale_idx = text.find("self._stale_recovery = stale_recovery")
-        # Look for the next "self._report_recovery = ReportDeliveryRecoveryService"
+        # ``PoolOrchestrator.setup``.
+        stale_idx = text.find("manager._stale_recovery = stale_recovery")
+        # Look for the next "manager._report_recovery = ReportDeliveryRecoveryService"
         # after the stale wiring.
         report_idx = text.find(
-            "self._report_recovery = ReportDeliveryRecoveryService"
+            "manager._report_recovery = ReportDeliveryRecoveryService"
         )
         assert stale_idx != -1, (
-            "manager.setup_worker_pool must wire self._stale_recovery"
+            "PoolOrchestrator.setup must wire "
+            "manager._stale_recovery (S-c binding order)"
         )
         assert report_idx != -1, (
-            "manager.setup_worker_pool must wire self._report_recovery"
+            "PoolOrchestrator.setup must wire "
+            "manager._report_recovery (S-c binding order)"
         )
         assert stale_idx < report_idx, (
             "S-c binding order: StaleTaskRecovery wiring must "
@@ -785,36 +799,42 @@ class TestBootSweepDispatchShape:
     def test_setup_worker_pool_dispatches_boot_sweep_off_loop(
         self,
     ) -> None:
-        """The dispatch site at ``setup_worker_pool`` MUST wrap
-        ``self._report_recovery.recover_on_startup`` in
+        """The dispatch site at ``PoolOrchestrator.setup`` (Phase B
+        extraction — was ``manager.setup_worker_pool`` pre-B) MUST
+        wrap ``manager._report_recovery.recover_on_startup`` in
         ``asyncio.to_thread(...)`` and schedule it via
-        ``self._loop.create_task(...)``.
+        ``manager._loop.create_task(...)``.
 
         Why this test exists: the pre-existing
         ``TestBootSweepOffLoopThread`` tests construct their OWN
         ``loop.create_task(asyncio.to_thread(...))`` shape onto a
         MagicMock — they do not bind production source. A production
-        revert (synchronous ``self._report_recovery.recover_on_startup()``
-        inside ``setup_worker_pool``) leaves those behavioral tests
-        green. This source-scan test pins the production dispatch
-        shape so the regression cannot return silently.
+        revert (synchronous ``manager._report_recovery.recover_on_startup()``
+        inside ``PoolOrchestrator.setup``) leaves those behavioral
+        tests green. This source-scan test pins the production
+        dispatch shape so the regression cannot return silently.
 
-        Robust to line drift: anchored on the ``setup_worker_pool``
-        method name + a balanced-paren walker over its body window,
-        NOT absolute line numbers (verified manually: the unique
-        anchor ``boot_sweep_task = self._loop.create_task(`` only
-        appears once in the file).
+        Robust to line drift: anchored on the
+        ``PoolOrchestrator.setup`` method name + a balanced-paren
+        walker over its body window, NOT absolute line numbers
+        (verified manually: the unique anchor ``boot_sweep_task =
+        manager._loop.create_task(`` only appears once in the
+        orchestrator file).
         """
         import re
         from pathlib import Path
 
-        manager_path = Path("daemon/manager.py")
+        # Phase B extraction: the dispatch site moved from
+        # ``daemon/manager.py:setup_worker_pool`` to
+        # ``daemon/services/pool_orchestrator.py:PoolOrchestrator.setup``.
+        manager_path = Path("daemon/services/pool_orchestrator.py")
         text = manager_path.read_text()
 
-        # 1) Locate the ``setup_worker_pool`` method body window.
-        method_start = text.find("def setup_worker_pool(")
+        # 1) Locate the ``PoolOrchestrator.setup`` method body window.
+        method_start = text.find("def setup(self")
         assert method_start != -1, (
-            "daemon/manager.py must contain a setup_worker_pool method"
+            "daemon/services/pool_orchestrator.py must contain "
+            "a PoolOrchestrator.setup method"
         )
         body_start = text.find("\n", method_start) + 1
         # Sibling method at 4-space indent closes the body window.
@@ -825,9 +845,10 @@ class TestBootSweepDispatchShape:
 
         # 2) Locate the dispatch site by its unique anchor. The
         #    variable name ``boot_sweep_task`` and the explicit
-        #    ``self._loop.create_task(`` prefix appear only at the
-        #    off-loop dispatch site in the file (verified by grep).
-        dispatch_anchor = "boot_sweep_task = self._loop.create_task("
+        #    ``manager._loop.create_task(`` prefix (Phase B:
+        #    manager-qualified) appear only at the off-loop
+        #    dispatch site in the file (verified by grep).
+        dispatch_anchor = "boot_sweep_task = manager._loop.create_task("
         dispatch_idx = method_body.find(dispatch_anchor)
         assert dispatch_idx != -1, (
             "setup_worker_pool must dispatch the boot sweep via "

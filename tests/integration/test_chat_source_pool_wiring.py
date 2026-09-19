@@ -441,20 +441,38 @@ class TestNotifyAllPoolsFanOut:
 
     def test_real_manager_service_site_guard_finds_helper(self, engine):
         """Service-site lookup pattern (verbatim from
-        ``daemon/services/instance_messaging.py:2100-2101``) returns
+        ``daemon/services/pool_orchestrator.py:safe_notify_all_pools``
+        — the consolidated helper lives at the new home) returns
         the helper on a real manager. This is the EXACT pattern
-        CRITICAL site #12 uses to find the helper — without the
-        instance-bound fix the lookup returns ``None``."""
+        every service wake site uses to find the helper — without
+        the instance-bound fix the lookup returns ``None``.
+
+        Phase B (chat-lane-followups) extraction note: pre-Phase-B
+        the per-site inline ``manager_dict = getattr(...) +
+        notify_pools = ...`` block was duplicated 11 times across
+        the service modules. Phase B consolidated the per-site
+        block into the
+        :func:`daemon.services.pool_orchestrator.safe_notify_all_pools`
+        helper. This test pins the EXACT lookup shape the helper
+        uses — verbatim — so any future regression that breaks the
+        ``__dict__``-probe contract (the bug class that already
+        shipped on this codebase in the
+        ``__dict__``-probe incident) is caught at the
+        helper-home, not 11× at each call site.
+        """
         with wire_manager_only(engine) as manager:
             manager.setup_worker_pool(num_workers=WORKER_POOL_SIZE)
 
-            # Verbatim service-site lookup.
+            # Verbatim service-site lookup (the helper's own
+            # lookup shape — see
+            # ``daemon/services/pool_orchestrator.py:safe_notify_all_pools``).
             manager_dict = getattr(manager, "__dict__", {})
             notify_pools = manager_dict.get("_notify_all_pools")
 
             assert notify_pools is not None, (
                 "Service-site __dict__ guard returns None on a real manager "
-                "— the 11 service-module wake sites (incl. CRITICAL "
+                "— the consolidated ``safe_notify_all_pools`` helper "
+                "(and the 11 service-module wake sites, incl. CRITICAL "
                 "instance_messaging.py site #12) silently fall through to "
                 "legacy _worker_pool.notify_work(). The fix is the "
                 "instance-bound `self._notify_all_pools = self._notify_all_pools` "

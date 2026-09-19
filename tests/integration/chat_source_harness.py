@@ -181,17 +181,20 @@ def wait_default_pool_boot_claims_drained(
     narrative in ``tests/integration/test_chat_source_lane_saturation.py``
     module docstring): ``InstanceManager.setup_worker_pool`` starts the
     DEFAULT pool BEFORE it calls ``set_chat_lane_active(True)``
-    (``daemon/manager.py:6798``, B1 boot ordering — the flag must flip
-    only after the chat pool constructs so a construction failure
-    leaves fail-open). Every default worker therefore performs its
-    FIRST claim attempt with the flag still False (fail-open, gateless
-    SQL). If a test seeds chat rows in the few milliseconds after
-    ``setup_worker_pool`` returns, a gateless boot claim still in
-    flight (delayed by GIL/SQLite lock contention behind the seeding
-    transactions) can execute its UPDATE onto a freshly committed
-    chat row — ``worker-N`` claims a ``telegram:`` row. The lane
-    predicate itself is correct: every observed mis-claim composed
-    with ``flag=False`` (pre-flip), never mid-test.
+    (Phase B extraction: the call site lives in
+    ``daemon/services/pool_orchestrator.PoolOrchestrator.setup`` —
+    was ``daemon/manager.py:6798`` pre-Phase-B, B1 boot ordering —
+    the flag must flip only after the chat pool constructs so a
+    construction failure leaves fail-open). Every default worker
+    therefore performs its FIRST claim attempt with the flag still
+    False (fail-open, gateless SQL). If a test seeds chat rows in
+    the few milliseconds after ``setup_worker_pool`` returns, a
+    gateless boot claim still in flight (delayed by GIL/SQLite
+    lock contention behind the seeding transactions) can execute
+    its UPDATE onto a freshly committed chat row — ``worker-N``
+    claims a ``telegram:`` row. The lane predicate itself is
+    correct: every observed mis-claim composed with ``flag=False``
+    (pre-flip), never mid-test.
 
     This barrier waits until every default worker has COMPLETED its
     boot claim attempt, so any gateless composition has fully retired
@@ -209,6 +212,20 @@ def wait_default_pool_boot_claims_drained(
     processing a chat row on the default lane during that window is
     the pre-lane behavior and nothing is stranded). The harness must
     simply not seed INTO the boot window.
+
+    DO NOT REMOVE THIS BARRIER. The B1 fail-open boot window is a
+    DESIGNED production state (chat rows can be claimed on the
+    default lane while the chat pool does not yet exist — that is
+    the pre-lane behavior, not a bug). Removing this drain would
+    re-introduce the Phase 3 ``xfail`` race class (a default
+    worker, mid-flight on a gateless claim when ``setup_worker_pool``
+    returns, executes the UPDATE after the harness seeds a chat
+    row). The class is timing-sensitive (the race window is the
+    few-ms gap between the default pool starting and
+    ``set_chat_lane_active(True)`` flipping) — tests that exercise
+    lane routing MUST drain before seeding, OR set
+    ``drain_boot_claims=False`` and add an explicit per-test
+    justification for skipping the drain.
     """
     pool = manager._worker_pool
     if pool is None:

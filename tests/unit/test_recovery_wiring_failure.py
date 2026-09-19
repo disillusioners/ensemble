@@ -118,22 +118,25 @@ class TestWiringSourceStructure:
 
     def test_wiring_block_is_wrapped_in_try_except(self) -> None:
         """The ``ReportDeliveryRecoveryService`` wiring block in
-        ``manager.setup_worker_pool`` is wrapped in a try/except
-        that catches ``Exception`` and sets ``_report_recovery =
-        None`` on failure.
+        ``PoolOrchestrator.setup`` (Phase B extraction — was
+        ``manager.setup_worker_pool`` pre-B) is wrapped in a
+        try/except that catches ``Exception`` and sets
+        ``_report_recovery = None`` on failure.
         """
-        manager_path = Path("daemon/manager.py")
+        manager_path = Path("daemon/services/pool_orchestrator.py")
         text = manager_path.read_text()
 
         # Find the wiring assignment. The first
-        # ``self._report_recovery = ReportDeliveryRecoveryService``
-        # inside ``setup_worker_pool`` is the construction.
+        # ``manager._report_recovery = ReportDeliveryRecoveryService``
+        # inside ``PoolOrchestrator.setup`` is the construction
+        # (Phase B: the orchestrator captures a ``manager`` ref
+        # and writes through it).
         construction_idx = text.find(
-            "self._report_recovery = ReportDeliveryRecoveryService"
+            "manager._report_recovery = ReportDeliveryRecoveryService"
         )
         assert construction_idx != -1, (
-            "manager.setup_worker_pool must wire "
-            "self._report_recovery = ReportDeliveryRecoveryService"
+            "PoolOrchestrator.setup must wire "
+            "manager._report_recovery = ReportDeliveryRecoveryService"
         )
 
         # Walk backwards from the construction to find the
@@ -184,11 +187,11 @@ class TestWiringSourceStructure:
             "to catch construction failures"
         )
 
-        # After the outer except, the ``self._report_recovery = None``
-        # assignment must follow.
+        # After the outer except, the ``manager._report_recovery = None``
+        # assignment must follow (Phase B: manager-qualified).
         after_except = following[outer_except_idx:]
-        assert "self._report_recovery = None" in after_except, (
-            "wiring failure MUST set ``self._report_recovery = None`` "
+        assert "manager._report_recovery = None" in after_except, (
+            "wiring failure MUST set ``manager._report_recovery = None`` "
             "so the rest of the daemon sees the recovery feature as "
             "disabled (and the endpoint returns 503 instead of 500)"
         )
@@ -251,7 +254,7 @@ def sqlite_engine() -> Engine:
 def _extract_wiring_block() -> str:
     """Extract the OUTER try/except that wraps
     ``ReportDeliveryRecoveryService(...)`` construction from
-    ``daemon/manager.py``.
+    ``daemon/services/pool_orchestrator.py``.
 
     Returns the source text of the try/except block. The text is
     expected to compile as a function body when prefixed with
@@ -263,17 +266,26 @@ def _extract_wiring_block() -> str:
     most recent one in the preceding window), then walks forward
     to find the corresponding ``except`` (the LAST one in the
     following window, since the block is nested).
+
+    Phase B (chat-lane-followups) extraction note: the wiring
+    block moved from ``daemon/manager.py:setup_worker_pool`` to
+    ``daemon/services/pool_orchestrator.py:PoolOrchestrator.setup``.
+    The wiring construction is now
+    ``manager._report_recovery = ReportDeliveryRecoveryService(...)``
+    (the orchestrator holds a captured manager reference and
+    writes to ``manager._report_recovery`` — same final state on
+    the manager as before).
     """
-    manager_path = Path("daemon/manager.py")
+    manager_path = Path("daemon/services/pool_orchestrator.py")
     text = manager_path.read_text()
 
     construction_idx = text.find(
-        "self._report_recovery = ReportDeliveryRecoveryService"
+        "manager._report_recovery = ReportDeliveryRecoveryService"
     )
     if construction_idx == -1:
         raise AssertionError(
-            "manager.setup_worker_pool must wire "
-            "self._report_recovery = ReportDeliveryRecoveryService"
+            "PoolOrchestrator.setup must wire "
+            "manager._report_recovery = ReportDeliveryRecoveryService"
         )
 
     # Walk back to find the OUTER ``try:`` opening. We
@@ -344,16 +356,16 @@ def _extract_wiring_block() -> str:
     outer_except_match = except_matches[-1]
     outer_except_pos_in_following = outer_except_match.start()
 
-    # Find the ``self._report_recovery = None`` assignment
-    # AFTER the outer except.
+    # Find the ``manager._report_recovery = None`` assignment
+    # AFTER the outer except (Phase B: manager-qualified).
     after_except = following[outer_except_pos_in_following:]
     none_assignment_idx = after_except.find(
-        "self._report_recovery = None"
+        "manager._report_recovery = None"
     )
     if none_assignment_idx == -1:
         raise AssertionError(
-            "wiring block must set ``self._report_recovery = "
-            "None`` on failure"
+            "wiring block must set ``manager._report_recovery = "
+            "None`` on failure (Phase B: manager-qualified)"
         )
     # The assignment is followed by a newline. End the block
     # just past the newline that terminates the assignment line.
@@ -390,18 +402,42 @@ def _compile_wiring_block(block_text: str) -> Any:
     (the class — monkeypatched for the construction-failure test),
     ``logger`` (the module logger), and ``task_repo`` (a
     pre-constructed ``TaskRepository`` that the wiring block
-    passes to the recovery service). Replace ``self.`` and
-    keyword-arg uses of ``self`` (``= self``) with ``_stub.``
-    / ``_stub`` in the block so it works against a stub.
+    passes to the recovery service).
+
+    Pre-Phase-B: replace ``self.`` and bare ``self`` with
+    ``_stub.``/``_stub`` — manager-local refs.
+
+    Post-Phase-B: replace ``manager.`` and bare ``manager`` with
+    ``_stub.``/``_stub`` — the orchestrator captures a
+    ``manager`` ref (the parameter to ``PoolOrchestrator.__init__``)
+    and writes to ``manager._report_recovery`` etc. Both
+    replacements run, so the compile works against any block
+    shape that uses either pattern.
     """
-    # Replace ``self.`` (attribute access) with ``_stub.``.
+    # Replace ``self.`` (attribute access) with ``_stub.`` —
+    # pre-Phase-B shape (the wiring block lived inside
+    # ``InstanceManager.setup_worker_pool``).
     block_text = re.sub(r"\bself\.", "_stub.", block_text)
-    # Replace keyword-arg / value uses of ``self`` — e.g.
-    # ``manager_ref=self,`` and ``_mgr: "InstanceManager" = self,``
-    # — with ``_stub``. Use a negative lookbehind to avoid
+    # Replace ``manager.`` (attribute access) with ``_stub.`` —
+    # post-Phase-B shape (the wiring block lives inside
+    # ``PoolOrchestrator.setup`` and writes to the captured
+    # ``manager`` ref).
+    block_text = re.sub(r"\bmanager\.", "_stub.", block_text)
+    # Replace keyword-arg / value uses of ``self`` (e.g.
+    # ``manager_ref=self,`` and ``_mgr: "InstanceManager" = self,``)
+    # with ``_stub``. Use a negative lookbehind to avoid
     # double-replacing ``_stub.`` we just inserted.
     block_text = re.sub(
         r"(?<![\w.])self(?=[\s,)\]])",
+        "_stub",
+        block_text,
+    )
+    # Replace keyword-arg / value uses of ``manager`` (Phase B:
+    # ``manager_ref=manager,`` etc.) with ``_stub``. The
+    # ``manager`` keyword must not appear inside an attribute
+    # access (already rewritten above) or as a kwarg key.
+    block_text = re.sub(
+        r"(?<![\w.])manager(?=[\s,)\]])",
         "_stub",
         block_text,
     )
