@@ -203,6 +203,36 @@ class TmpImageStore:
                     oldest = mtime
         return oldest
 
+    def list_ids_with_mtime(self) -> list[tuple[str, float]]:
+        """List every regular file in the store as ``(name, mtime)``.
+
+        Phase 3 / clipboard-image-chat (retention sweep). Returns the
+        raw filename (NOT the stripped id — the caller distinguishes
+        blobs from ``.json`` sidecars by the suffix) paired with the
+        POSIX mtime. The hidden ``data/tmp_images/.gitignore`` (phase 1
+        Task 10) is excluded — it is a repo-hygiene artifact, not a
+        stored image, and must never be reaped.
+
+        Includes sidecar entries as well as blobs: the sweep needs the
+        orphan-sidecar view (a sidecar whose blob was already removed)
+        to age and reap it by its own mtime. Missing dir → ``[]``
+        (caller may invoke before ``init()`` in tests); a file removed
+        between ``scandir`` and ``stat`` (FE DELETE ∥ sweep race) is
+        skipped silently — mirrors ``oldest_mtime``.
+        """
+        if not self._dir.exists():
+            return []
+        out: list[tuple[str, float]] = []
+        with os.scandir(self._dir) as it:
+            for entry in it:
+                if not entry.is_file() or entry.name == ".gitignore":
+                    continue
+                try:
+                    out.append((entry.name, entry.stat().st_mtime))
+                except FileNotFoundError:
+                    continue
+        return out
+
     # ------------------------------------------------------------------
     # Mutation
     # ------------------------------------------------------------------
