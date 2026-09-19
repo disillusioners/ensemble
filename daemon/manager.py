@@ -5132,6 +5132,21 @@ class InstanceManager:
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instances.agent_tag: agent version tag for directory-suffix versioning
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
+            # message_queue.image_refs (Phase 2 / clipboard-image-chat,
+            # council NEEDS-FIXES, 2026-09-19): DEDICATED JSONB column
+            # for clipboard ``/api/tmp_images/<32hex>`` refs. Distinct
+            # from the legacy ``images`` column (data-URIs only). Fresh
+            # databases get the column from SQLModel.metadata.create_all()
+            # via the MessageQueue SQLModel declaration at
+            # daemon/repositories/message_queue/models.py; existing
+            # databases need the ADD COLUMN here. ADD COLUMN IF NOT
+            # EXISTS is INVALID SQLite syntax — this method is gated by
+            # ``is_postgres`` at the call site, so SQLite never reaches
+            # this list (its DDL is landed by ``create_all``).
+            (
+                "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS "
+                "image_refs JSONB"
+            ),
             # instances.attestation_denied_count (Phase 3, 2026-09-05):
             # row-scoped per-instance counter for the leader completion
             # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows
@@ -5446,6 +5461,7 @@ class InstanceManager:
                 "              ('instances','metadata'),\n"
                 "              ('message_queue','metadata'),\n"
                 "              ('message_queue','images'),\n"
+                "              ('message_queue','image_refs'),\n"
                 "              ('mcp_servers','config'),\n"
                 "              ('mcp_servers','config_schema'),\n"
                 "              ('opencode_sessions','latest_response'),\n"

@@ -1732,15 +1732,22 @@ class InstanceMessagingService:
                 type=msg_type,
                 status=MessageStatus.READY.value,
                 priority=priority,
-                # Phase 2 / clipboard-image-chat (round-2 amendment
-                # #28): when ``image_refs`` is non-empty the row
-                # column carries the canonical URL refs (audit) —
-                # XOR at the model layer guarantees the path is taken
-                # only when ``images`` is None / empty. When refs are
-                # absent we preserve the legacy data-URI semantic
-                # (the existing column semantics — ref-sends never
-                # reach this branch with empty refs).
-                images=(image_refs if image_refs is not None else images),
+                # Phase 2 / clipboard-image-chat (council NEEDS-FIXES,
+                # 2026-09-19, council Option A — RESTORES the architect
+                # round-2 signature-separation ruling): the ``images``
+                # column carries LEGACY data-URI entries exclusively;
+                # clipboard ``/api/tmp_images/<32hex>`` refs NEVER
+                # persist here. Refs land on the dedicated ``image_refs``
+                # JSONB column below. This closes the durable-leg A1
+                # violation where the round-2 schema overloaded both
+                # channels onto ``images`` and the worker-claim chain
+                # (``_build_message_content`` →
+                # ``has_images`` → ``use_vision_model``) constructed
+                # ``image_url`` blocks from relative ``/api/tmp_images/<32hex>``
+                # strings, firing the vision gate on POST to
+                # IDLE/terminal instances and erroring at the provider.
+                images=images,
+                image_refs=image_refs,
                 message_metadata=metadata or {},
                 # Naive-UTC digits (DC-A fix) — naive column bind.
                 enqueued_at=now_utc_naive(),
