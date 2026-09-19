@@ -418,7 +418,15 @@ class ProcessMessageProcessor(BaseProcessor):
 
         message_content = message.content if message else ""
         message_source = message.source if message else None
+        # Phase 2 / clipboard-image-chat (council NEEDS-FIXES,
+        # 2026-09-19, council Option A): ``images`` column carries
+        # LEGACY data-URI entries ONLY; ``image_refs`` is the dedicated
+        # column for clipboard ``/api/tmp_images/<32hex>`` refs. Both
+        # fields load into the SEPARATE ProcessingContext fields so the
+        # ``_build_message_content`` / ``has_images`` /
+        # ``use_vision_model`` chain cannot reach refs.
         message_images = getattr(message, 'images', None) if message else None
+        message_image_refs = getattr(message, 'image_refs', None) if message else None
         message_metadata = getattr(message, 'message_metadata', None) if message else None
         original_resume_mode = (
             message_metadata.get("resume_mode", False)
@@ -456,6 +464,12 @@ class ProcessMessageProcessor(BaseProcessor):
             message_source=message_source,
             silent=silent,
             images=message_images,
+            # Phase 2 / clipboard-image-chat (council NEEDS-FIXES,
+            # 2026-09-19): SEPARATE ``image_refs`` channel — refs do
+            # NOT enter ``images``. The pipeline passes image_refs
+            # through the kwargs stamp at
+            # ``message_processing_pipeline.py:_do_process``.
+            image_refs=message_image_refs,
             resume_mode=is_retry,
             cancellation_token=cancellation_token,
             task_context=task_context_text,

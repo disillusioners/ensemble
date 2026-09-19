@@ -141,6 +141,15 @@ class ProcessingContext:
 
     Fields default to safe values so callers can construct a context
     incrementally.
+
+    Phase 2 / clipboard-image-chat (council NEEDS-FIXES, 2026-09-19):
+    ``image_refs`` is the DEDICATED clipboard-ref channel (canonical
+    ``/api/tmp_images/<32hex>`` form). Distinct from ``images`` which
+    carries LEGACY data-URI entries exclusively. The pipeline threads
+    ``image_refs`` through the kwargs stamp (``_build_graph_input``)
+    so the refs NEVER enter ``_build_message_content`` —
+    ``has_images`` / ``use_vision_model`` cannot reach them and the
+    main chat agent is NEVER switched to vision on this path.
     """
 
     instance_id: str
@@ -150,6 +159,7 @@ class ProcessingContext:
     message_source: str | None = None
     silent: bool = False
     images: list[str] | None = None
+    image_refs: list[str] | None = None
     resume_mode: bool = False
     cancellation_token: Optional["CancellationToken"] = None
     task_context: str | None = None  # Pre-formatted [SYSTEM CONTEXT: Task Context] block from send_message(context=...)
@@ -406,6 +416,17 @@ class MessageProcessingPipeline:
                 retry_count=context.retry_count,
                 message_source=context.message_source,
                 images=context.images,
+                # Phase 2 / clipboard-image-chat (council NEEDS-FIXES,
+                # 2026-09-19, council Option A): thread the
+                # ``image_refs`` channel through the kwargs stamp so
+                # the worker-claim seam stamps refs onto
+                # ``HumanMessage.additional_kwargs["image_refs"]`` and
+                # the UNFILTERED ``_build_message_content`` twin at
+                # ``daemon/manager.py:_build_message_content`` and
+                # ``daemon/services/instance_messaging.py:_build_message_content``
+                # NEVER sees refs (legacy data-URI semantic stays
+                # byte-identical).
+                image_refs=context.image_refs,
                 silent=context.silent,
                 task_context=context.task_context,
             )
