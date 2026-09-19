@@ -456,6 +456,11 @@ class SQLModelMessageQueueRepository:
             last_error=mapping["last_error"],
             message_metadata=_coerce_json(mapping["metadata"], as_dict=True),
             images=_coerce_json(mapping["images"], as_list=True),
+            # Phase 2 / clipboard-image-chat (council NEEDS-FIXES,
+            # 2026-09-19): dedicated JSONB column for clipboard
+            # ``/api/tmp_images/<32hex>`` refs. Loaded as a list
+            # (parallel to the ``images`` column coercion).
+            image_refs=_coerce_json(mapping.get("image_refs"), as_list=True),
             enqueued_at=_coerce_datetime(mapping["enqueued_at"]),
             processing_started_at=_coerce_datetime(mapping["processing_started_at"]),
             last_activity_at=_coerce_datetime(mapping["last_activity_at"]),
