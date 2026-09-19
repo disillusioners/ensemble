@@ -174,6 +174,45 @@ export interface InstanceNode {
 }
 
 /**
+ * Hide-idle pre-filter for the ``Live conversations`` tree. Drops
+ * every row whose ``status === 'idle'`` BEFORE the wire page is
+ * nested by ``buildInstanceNodes`` — idle roots never become roots,
+ * idle children never nest under their parents, and any non-idle
+ * descendant of a filtered idle parent degrades to a ROOT via the
+ * existing orphan-promotes-to-root branch (NEVER-hide preserved,
+ * receipts + non-idle rows stay visible).
+ *
+ * Scope: ``Live conversations`` ONLY. ``Recent`` (terminal roots) is
+ * unaffected — ``idle`` is non-terminal, so ``Recent`` would never
+ * render an idle row today, and we do not want to change the
+ * terminal-cluster behaviour. Job receipts are not in the wire page
+ * (they come from ``/api/jobs`` and attach via the grouping key) so
+ * this filter cannot drop a receipt, and even a receipt whose
+ * grouping key references a filtered-out idle instance falls back to
+ * ``queued`` (non-terminal) or ``recentFlat`` (terminal) — the
+ * receiver's orphan-routing is independent of the wire-row filter,
+ * so receipts are NEVER hidden.
+ *
+ * Why client-side: ``GET /api/instances`` does NOT expose a status
+ * filter param (the BE only honours ``limit / offset / project_id /
+ * exclude_kb / include_descendants / search / order`` — see
+ * ``daemon/routers/instances.py:list_instances``); per the change's
+ * scope, no new BE endpoint is added.
+ *
+ * Window caveat: this filter cannot widen the BE's paginated window.
+ * With ``limit=10`` and a window dominated by idle rows, the user may
+ * see fewer non-idle roots than exist on the BE (the cheap 8s poll's
+ * window-capped view was already the panel's truth). Acceptable for
+ * this minimal change; full window coverage requires a BE status
+ * filter, deliberately deferred.
+ */
+export function filterIdleInstanceRows(
+  rows: ReadonlyArray<InstanceRow>
+): InstanceRow[] {
+  return rows.filter((r) => r.status !== 'idle');
+}
+
+/**
  * Build the nested root list from the FLAT ``GET /api/instances`` page
  * (roots + all their descendants, BFS order). Same pattern as the
  * instance-list page's ``instanceTree`` computed: Map-based node
