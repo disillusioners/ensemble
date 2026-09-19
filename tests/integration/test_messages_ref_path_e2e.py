@@ -4,7 +4,7 @@ council NEEDS-FIXES, 2026-09-19).
 Drives the worker-claim seam end-to-end through REAL production
 modules:
 
-  * ``manager.enqueue_message_job(image_refs=[r1, r2])`` → real
+  * ``manager.enqueue_message(image_refs=[r1, r2])`` → real
     ``InstanceMessagingService`` → real ``_prepare_enqueued_message``
     → real ``MessageQueue`` row INSERT (refs land on the dedicated
     ``image_refs`` JSONB column).

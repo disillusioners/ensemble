@@ -3,12 +3,16 @@
 
 Background: round-2 amendment #27 made the ``image_refs`` forwarding
 REQUIRED across the chain:
-  InstanceManager.enqueue_message_job
-  → InstanceMessagingService.enqueue_message_job
+  InstanceManager.enqueue_message
+  → InstanceMessagingService.enqueue_message
   → _prepare_enqueued_message (row write + checkpoint kwargs stamp)
   → MessageQueue row carries refs (audit column)
   → _build_graph_input stamps additional_kwargs["image_refs"]
   → HumanMessage.additional_kwargs on the checkpoint
+(i.e. the INTERNAL ``enqueue_message`` facade — the ``enqueue_message_job``
+facade variant the production POST /messages route actually calls is
+covered by ``TestImageRefsJobFacadeChain`` below; C10 M2 escape,
+2026-09-20).
 
 What this file proves, through the REAL facade → real
 ``InstanceMessagingService`` → real ``_prepare_enqueued_message``
@@ -344,3 +348,137 @@ class TestImageRefsFacadeChain:
         assert rows[0].image_refs == [_CANONICAL_REF_A]
         # Data-URIs on the legacy column:
         assert rows[0].images == ["data:image/png;base64,abc"]
+
+
+# ---------------------------------------------------------------------------
+# Job-variant facade: InstanceManager.enqueue_message_job (C10 M2 escape)
+# ---------------------------------------------------------------------------
+
+
+def _seed_system_parallel_queue(eng: Engine) -> str:
+    """Seed the ``system_parallel_queue`` row that ``enqueue_message_job``
+    queue resolution AND ``JobQueueService.enqueue`` require — the job
+    path is fail-closed when the row is missing (ValueError from
+    ``enqueue``: "No system parallel queue found")."""
+    from daemon import constants
+    from daemon.repositories.job_queue.models import JobQueue
+
+    qid = "queue-sys-parallel-image-refs"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with Session(eng) as s:
+        s.add(
+            JobQueue(
+                queue_id=qid,
+                project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
+                queue_name="system_parallel_queue",
+                queue_name_lower="system_parallel_queue",
+                queue_type="parallel",
+                concurrency_limit=3,
+                is_system=True,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        )
+        s.commit()
+    return qid
+
+
+class TestImageRefsJobFacadeChain:
+    """REAL dispatch through ``InstanceManager.enqueue_message_job`` —
+    the facade variant the production POST /messages route calls
+    (``daemon/routers/messages.py``). Closes the C10 M2 escape: the
+    sibling ``enqueue_message`` classes above do NOT cross this facade
+    method, so an ``image_refs`` forward dropped HERE stayed green
+    against the whole integration suite (2026-09-20 mutation audit).
+
+    The forward assertion uses a PASSTHROUGH spy on the service's
+    ``_prepare_enqueued_message`` (capture kwargs, then run the REAL
+    prelude) — the dispatch stays genuine end-to-end and the row
+    assertions read production-written columns, never test-local
+    mirrors.
+    """
+
+    async def test_job_facade_forwards_image_refs_and_persists_row(
+        self, facade_manager, engine
+    ):
+        """enqueue_message_job(image_refs=[r1, r2]) → (a) the service's
+        prelude receives the kwarg (facade forward survived) AND (b) the
+        REAL MessageQueue row carries the refs on the DEDICATED column
+        with legacy ``images`` NULL (durable dual-column contract)."""
+        from daemon import constants
+        from daemon.repositories.message_queue.models import MessageQueue  # noqa: F401
+
+        _seed_system_parallel_queue(engine)
+        inst = _seed_instance(
+            engine,
+            instance_id=str(uuid.uuid4()),
+            project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
+        )
+        refs = [_CANONICAL_REF_A, _CANONICAL_REF_B]
+
+        service = facade_manager._messaging_service
+        real_prepare = service._prepare_enqueued_message
+        captured: dict = {}
+
+        def _passthrough_spy(**kwargs):
+            captured.update(kwargs)
+            return real_prepare(**kwargs)
+
+        with patch.object(
+            service, "_prepare_enqueued_message", _passthrough_spy
+        ):
+            result = await facade_manager.enqueue_message_job(
+                instance_id=inst.instance_id,
+                message="job-path refs",
+                source="api",
+                image_refs=refs,
+            )
+
+        assert result.message_id
+        # (a) FORWARD assertion: exactly what survived the
+        # facade → service hop.
+        assert captured.get("image_refs") == refs
+        # (b) Durable dual-column contract on the production row.
+        rows = _load_message_rows(engine, inst.instance_id)
+        assert len(rows) == 1
+        assert rows[0].image_refs == refs
+        assert rows[0].images is None
+
+    async def test_job_facade_omitted_image_refs_writes_null(
+        self, facade_manager, engine
+    ):
+        """Omitted kwarg → the prelude receives ``image_refs=None`` and
+        the row column stays NULL (byte-identical default for every
+        existing job-path caller)."""
+        from daemon import constants
+
+        _seed_system_parallel_queue(engine)
+        inst = _seed_instance(
+            engine,
+            instance_id=str(uuid.uuid4()),
+            project_id=constants.SYSTEM_DEFAULT_PROJECT_ID,
+        )
+
+        service = facade_manager._messaging_service
+        real_prepare = service._prepare_enqueued_message
+        captured: dict = {}
+
+        def _passthrough_spy(**kwargs):
+            captured.update(kwargs)
+            return real_prepare(**kwargs)
+
+        with patch.object(
+            service, "_prepare_enqueued_message", _passthrough_spy
+        ):
+            result = await facade_manager.enqueue_message_job(
+                instance_id=inst.instance_id,
+                message="job-path plain",
+                source="api",
+            )
+
+        assert result.message_id
+        assert captured.get("image_refs") is None
+        rows = _load_message_rows(engine, inst.instance_id)
+        assert len(rows) == 1
+        assert rows[0].image_refs is None
+        assert rows[0].images is None
