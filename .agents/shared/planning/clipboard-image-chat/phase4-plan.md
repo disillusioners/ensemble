@@ -137,11 +137,9 @@ npm run build   # 10 pre-existing warnings known
 
 This phase is DONE when:
 
-- Pasting an image into the composer produces a preview chip indistinguishable from picker/drag-drop (same `processFiles` sink, same caps, same validation messages).
-- Clicking send uploads each preview to the daemon's new endpoint, receives ref URLs, and POSTs `/messages` carrying ONLY refs (zero data URIs).
-- If any upload fails, the message is NOT sent (block-send default) and the user sees per-chip retry affordances plus a banner summary.
-- Plain-TS specs (`message-input.paste`, `image-upload`, `message-input.submit`, extended `message-input`) all pass under `npx jest`; `npx tsc --noEmit` and `npm run build` pass with the known 10 pre-existing warnings.
-- The wire-parity hazard is closed: `grep -RIn "data:image/" frontend/src/app/components/message-r pass) confirms the optimistic bubble renders the ref URL immediately on send and the persisted message shows the thumbnail after the GET /messages round-trip.
- the optimistic bubble renders the ref URL immediately on send and the persisted message shows the thumbnail after the GET /messages round-trip.
-round-trip.
- the optimistic bubble renders the ref URL immediately on send and the persisted message shows the thumbnail after the GET /messages round-trip.
+- (a) Pasting an image into the composer produces a preview chip indistinguishable from picker/drag-drop (same `processFiles` sink, same `MAX_IMAGES=3` cap, same `MAX_IMAGE_SIZE=10MiB` cap, same per-file validation messages).
+- (b) Clicking send uploads each preview to the daemon's new endpoint, receives ref URLs, and POSTs `/messages` carrying ONLY refs (zero data URIs in the wire body — ref-sends carry `image_refs` and NEVER `images`).
+- (c) If any upload fails, the message is NOT sent (block-send default) and the user sees per-chip retry affordances plus a banner summary.
+- (d) Plain-TS specs (`message-input.paste`, `image-upload`, `message-input.submit`, extended `message-input`, extended `api-service` mirrors) all pass under `npx jest message-input image-upload api-service`; `npx tsc --noEmit -p tsconfig.app.json` is clean; `npm run build` passes with only the 10 known pre-existing warnings (no NEW warnings/errors).
+- (e) The wire-parity identity-grep hazard is closed: `grep -RIn "data:image/" frontend/src/app/components/message-input/` returns ONLY the `convertToBase64` helper body (the local preview encoding); `grep -RIn "data_base64" frontend/src/app/` returns ONLY the `ImageUploadService` body; `grep -RIn "/api/tmp_images" frontend/src/app/` returns ONLY the `ImageUploadService` body; `grep -RIn "image_refs" frontend/src/app/services/api.service.ts` returns the canonical sibling-field location.
+- (f) The optimistic bubble renders the ref URL immediately on send (the `makeProvisionalMessage` `images` param is threaded with the ref URLs at the chat-component call site); the persisted message shows the thumbnail after the GET `/messages` round-trip (no FE schema change — the BE serializer unions refs into wire `images` per architect C1 (b) ruling).
