@@ -7,29 +7,29 @@
     </radialGradient>
     <linearGradient id="node" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#5eead4"/>
-      <stop offset="100%" stop-color="#0d9488"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
     </linearGradient>
     <linearGradient id="hub" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#818cf8"/>
-      <stop offset="100%" stop-color="#4338ca"/>
+      <stop offset="0%" stop-color="#a5b4fc"/>
+      <stop offset="100%" stop-color="#818cf8"/>
     </linearGradient>
   </defs>
 
   <!-- Background tile (rounded square; matches app body bg #0f172a family) -->
-  <rect width="32" height="32" rx="7" fill="url(#bg)"/>
+  <rect width="32" height="32" rx="8" fill="url(#bg)"/>
 
   <!-- Connection lines: outer agent nodes -> central ensemble hub -->
-  <g stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" opacity="0.6">
-    <line x1="16" y1="7"   x2="16" y2="17"/>
-    <line x1="7.5" y1="22" x2="16" y2="17"/>
-    <line x1="24.5" y1="22" x2="16" y2="17"/>
+  <g stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" opacity="0.95">
+    <line x1="16"     y1="7"    x2="16" y2="18"/>
+    <line x1="6.474"  y1="23.5" x2="16" y2="18"/>
+    <line x1="25.526" y1="23.5" x2="16" y2="18"/>
   </g>
 
-  <!-- Three outer agent nodes -->
-  <circle cx="16"   cy="7"  r="4" fill="url(#node)"/>
-  <circle cx="7.5"  cy="22" r="4" fill="url(#node)"/>
-  <circle cx="24.5" cy="22" r="4" fill="url(#node)"/>
+  <!-- Three outer agent nodes (exact 120° spacing around hub center) -->
+  <circle cx="16"     cy="7"    r="3.8" fill="url(#node)"/>
+  <circle cx="6.474"  cy="23.5" r="3.8" fill="url(#node)"/>
+  <circle cx="25.526" cy="23.5" r="3.8" fill="url(#node)"/>
 
   <!-- Central ensemble hub (the conductor) -->
-  <circle cx="16" cy="17" r="5" fill="url(#hub)"/>
+  <circle cx="16" cy="18" r="4.6" fill="url(#hub)"/>
 </svg>

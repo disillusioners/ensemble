@@ -35,21 +35,36 @@ from PIL import Image
 # ---------- Palette (must match frontend/public/favicon.svg) ----------
 BG_CENTER = (0x1E, 0x29, 0x3B)   # slate-800, radial-gradient center
 BG_EDGE   = (0x0B, 0x12, 0x22)   # near-black slate, radial-gradient edge
-LINE      = (0x2D, 0xD4, 0xBF)   # teal-400, connection lines @ 0.6 alpha
+LINE      = (0x2D, 0xD4, 0xBF)   # teal-400, connection lines (solid, high-alpha)
 NODE_LT   = (0x5E, 0xEA, 0xD4)   # teal-300, outer-node gradient top
-NODE_DK   = (0x0D, 0x94, 0x88)   # teal-600, outer-node gradient bot
-HUB_LT    = (0x81, 0x8C, 0xF8)   # indigo-400, hub gradient top
-HUB_DK    = (0x43, 0x38, 0xCA)   # indigo-700, hub gradient bot
+NODE_DK   = (0x2D, 0xD4, 0xBF)   # teal-400, outer-node gradient bot (flattened: teal-300 -> teal-400 for 16px snap)
+HUB_LT    = (0xA5, 0xB4, 0xFC)   # indigo-300, hub gradient top (brightened for pop)
+HUB_DK    = (0x81, 0x8C, 0xF8)   # indigo-400, hub gradient bot (round-3: was indigo-700, lifted for 16px hub-vs-sat parity)
 
 # ---------- Geometry (logical 32x32 units, mirrors the SVG) ----------
-VIEW = 32
-BG_RADIUS = 7  # rounded-square corner radius (logical units)
-OUTER_R   = 4
-HUB_R     = 5
+# Round-3 polish: ring grown to 11 so the exposed spoke corridor is 2.6u (was
+# 1.6u -> invisible). Satellites at exact 120° around the hub center — derived
+# from RING_R + sin/cos of 60°, NOT eyeballed.
+# Hub-edge to satellite-edge gap (corridor) = RING_R - (HUB_R + OUTER_R).
+VIEW      = 32
+BG_RADIUS = 8    # rounded-square corner radius (25% of viewBox)
+OUTER_R   = 3.8  # satellite radius (round-2 was 3.6, +0.2 for 16px mass)
+HUB_R     = 4.6  # hub radius
+RING_R    = 11.0 # distance from hub center to each satellite center
 
-# (cx, cy) in logical units
-OUTER_NODES = [(16.0, 7.0), (7.5, 22.0), (24.5, 22.0)]
-HUB         = (16.0, 17.0)
+# Hub center (logical units) — shifted down to (16, 18) for optical balance
+# now that the ring spans more of the tile, AND to keep the bot pair clear of
+# the bottom corner arcs (verified numerically, see notes below).
+HUB = (16.0, 18.0)
+
+# Outer nodes — 120° around hub. SVG y is down: angles are clock-face from
+# the top (270° at top, 30° bottom-right, 150° bottom-left). Positions are
+# computed as hub + RING_R*(sin θ, -cos θ) so they line up by construction.
+_SIXTY = math.radians(60.0)
+_TOP    = (HUB[0],                       HUB[1] - RING_R)
+_BOT_R  = (HUB[0] + RING_R * math.sin(_SIXTY), HUB[1] + RING_R * math.cos(_SIXTY))
+_BOT_L  = (HUB[0] - RING_R * math.sin(_SIXTY), HUB[1] + RING_R * math.cos(_SIXTY))
+OUTER_NODES = [_TOP, _BOT_R, _BOT_L]
 
 
 # ---------- Rendering primitives ----------
@@ -160,10 +175,10 @@ def render_master(size: int = 512) -> Image.Image:
                 size,
                 _to_px(ox, scale), _to_px(oy, scale),
                 _to_px(HUB[0], scale), _to_px(HUB[1], scale),
-                _to_px(2.0, scale),  # stroke-width 2 in logical units
+                _to_px(3.0, scale),  # stroke-width 3 in logical units (was 2)
             ),
         )
-    line_mask *= 0.6  # opacity
+    line_mask *= 0.95  # opacity (was 0.6 — illegible smudge)
     m = line_mask[..., None]
     canvas[:] = np.broadcast_to(LINE, canvas.shape) * m + canvas * (1 - m)
 
