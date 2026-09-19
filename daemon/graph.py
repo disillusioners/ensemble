@@ -5221,11 +5221,15 @@ def create_attestation_gate_node(
         #     logs, node skipped).
         #
         # The ONE judge invocation per evaluation is the budget
-        # invariant: the retry-once-on-unparsable inside
-        # ``judge_fused_bundle_async`` is 2 HTTP attempts within ONE
-        # logical invocation (the preserved 98b59dd7 contract — the
-        # budget sentinel pins the INVOCATION level; see
-        # tests/unit/test_attestation_resolver_stage2.py).
+        # invariant: BOTH retries inside
+        # ``judge_fused_bundle_async`` are 2 HTTP attempts within ONE
+        # logical invocation — the preserved 98b59dd7 contract
+        # (retry-once-on-unparsable) AND the bc145c7e R1 supersession
+        # (retry-once-on-timeout, 2026-09-19). The budget sentinel pins
+        # the INVOCATION level; see
+        # tests/unit/test_attestation_resolver_stage2.py
+        # (``test_unparsable_retry_is_attempts_within_one_invocation`` +
+        # ``test_timeout_retry_is_attempts_within_one_invocation``).
         resolver_snapshot = getattr(decision, "resolver", None)
         if resolver_snapshot is not None:
             # F-B (2026-09-16) — fail-open wrapper around the ENTIRE
@@ -5659,12 +5663,26 @@ def create_attestation_gate_node(
             # enqueue, no revive, no terminal write. Counter increments
             # were committed by safe_increment above; the ledger write
             # lands in the same decision path.
+            # R3 minor (2026-09-19, incident bc145c7e follow-up): stamp
+            # an explicit UTC ISO timestamp on the nudge-injection log
+            # line. The default Python logging formatter stamps wall
+            # time, but operators triage nudge spam across multiple
+            # deny rows by exact injection time — an in-message ISO
+            # stamp keeps the row grep-friendly without depending on
+            # the configured formatter. Uses the canonical
+            # ``daemon.services.timestamps.now_utc_iso`` (the project's
+            # sanctioned ISO-string producer, single source of truth).
+            # Lazy import: ``daemon.services`` re-enters ``daemon.graph``
+            # at module-load time, so the function-scoped import avoids
+            # the cycle at import time.
+            from .services.timestamps import now_utc_iso
             logger.info(
                 "[AttestationGate] deny instance=%s denied_count=%s -> "
-                "next=%s; injecting in-graph nudge",
+                "next=%s nudge_inject_ts=%s; injecting in-graph nudge",
                 effective_instance_id,
                 decision.denied_count,
                 decision.next_denied_count,
+                now_utc_iso(),
             )
             # FIX-3 (2026-09-16, incident 6a0d60c9): the nudge carries
             # a STABLE per-instance id (``attestation_nudge:{id}``,

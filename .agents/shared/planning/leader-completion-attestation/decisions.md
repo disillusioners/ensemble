@@ -1795,3 +1795,67 @@ Baseline 940 collected / 64 files → post-retirement: unit 671 green (incl. +22
 **Activation contract (no behavior drift outside the A-band).** ``activation_predicate`` is BYTE-IDENTICAL on the wire (same 4-field OR, same D2 semantics). ``_build_a_section`` is BYTE-IDENTICAL (same renderer, same cap ``BUNDLE_A_SECTION_MAX = 3000``). The fused bundle's A-section can now render scan-derived ``ChildReportCheckEvidence`` rows (with ``child_instance_id`` extracted from the ``source`` stamp's uuid substring) instead of note-body-parsed ids — visual surface unchanged.
 
 **Out of scope (deferred).** Repairing the legacy note-path detector to prefer the stamped kwargs surface when both old notes and new internal_report messages exist on the same conversation (rare cross-upgrade scenario). The double-evidence-row case is bounded by ``A_EVIDENCE_NOTES_CAP = 5`` and produces one row + a stable_id dedup; the budget stays correct.
+
+---
+
+## D-ENTRY 2026-09-19 — Incident bc145c7e R1: fused judge retry-once-on-timeout (rescuer-path supersession)
+
+**Trigger:** Incident bc145c7e (2026-09-19, R1 read-only-verified). A delegated investigation mission produced a complete report-shaped answer and obeyed the suppression rule (no ``attest`` call); the deny-band rescuer judge TIMED OUT at exactly 25.000s (attempt 1 of 1, ``verdict=timeout``, ``reason=""``, ``model=quick``) → conservative fail-safe deny → nudge → leader attested next turn → clean complete. No spec violation, but the suppression rule makes the judge load-bearing for EVERY delegated completion, and quick-model tail latency (documented 2.6–22s live, 25s cap) makes the class recurring. The class-D design DELIBERATELY excluded timeout from retry (timeout kept fail-safe semantics) — this decision SUPERSEDES that exclusion for the rescuer path.
+
+**Decision — ``judge_fused_bundle_async`` retries ONCE on attempt-1 ``TimeoutError`` (mirrors the unparsable retry shape):**
+
+The rescuer judge retries ONCE when attempt 1 raises :class:`asyncio.TimeoutError`. SAME per-attempt timeout window for the retry (``_resolver_get_judge_timeout_s()``, default 25.0s, env-tunable via ``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S``). Attempt accounting via :attr:`FusedJudgeResult.attempt` (1 → 2). The retry fits the existing budget sentinel exactly like the unparsable retry:
+
+* ``entries == 1`` (ONE logical invocation per evaluation — the pre-flip budget pin still holds)
+* ``len(spy.attempts) <= 2`` (the retry fires AT MOST ONCE — the existing pin's ``<=`` already covers timeout-then-success)
+
+DISTINCT log discrimination (three tokens, one per state):
+
+* ``event=fused_judge_first_attempt_timeout`` — first attempt timed out, retry pending. Format: ``timeout_s=%s latency_ms=%s will_retry=true``.
+* ``event=fused_judge_timeout_retry`` — retry was fired on the timeout path. Format: ``timeout_s=%s attempt=%s``.
+* ``event=fused_judge_timeout_post_retry`` — both attempts timed out (post-retry timeout path). Format: ``timeout_s=%s retry_latency_ms=%s``.
+
+The canonical graph-node log row at ``daemon/graph.py:5341`` (``event=leader_completion_gate_fused_judge``) already discriminates via ``verdict`` + ``attempt`` + ``error_class`` — ``verdict=timeout attempt=2 error_class=TimeoutError`` is the post-retry timeout surface; ``verdict=complete|not_complete attempt=2`` is the recovered-retry surface. The three tokens above are forensic granularity inside the function for grep triage.
+
+**Decision — HTTP/API errors keep NO retry (unchanged):**
+
+The ``except Exception`` arm still returns conservative fail-safe ``verdict=error attempt=1`` immediately. Only :class:`asyncio.TimeoutError` triggers the retry. DP-5 posture is preserved: error/timeout/unparsable-after-retry NEVER fail-safe-allow.
+
+**Decision — worst-case latency accounting (2 × timeout_s):**
+
+With retry, worst-case wall-clock on the routing path before fail-safe deny is ``2 × JUDGE_TIMEOUT_S`` (default: 2 × 25.0s = 50.0s). Documented in:
+
+* ``daemon/services/attestation_report_judge.py`` module docstring (Bounds section + the retry-once-on-unparsable comment block)
+* ``daemon/services/attestation_report_judge.py::judge_fused_bundle_async`` ``timeout_s`` parameter docstring
+* ``docs/setup.md`` runbook note (JUDGE_TIMEOUT_S section, retry semantics, worst-case)
+
+**Decision — ``first_unparsable_excerpt`` is NOT stamped on a timeout-retry path:**
+
+The :attr:`FusedJudgeResult.first_unparsable_excerpt` field is reserved for the forensic surface of an unparsable-on-attempt-1 row (incident 98b59dd7). A timeout leaves no body to redact/excerpt, so the field stays ``None`` on every timeout-retry path (recovered-retry, post-retry-timeout, timeout-then-error). This preserves the dataclass invariant that ``first_unparsable_excerpt is not None iff attempt == 2 AND the prior attempt was an unparsable row``.
+
+**Rationale — why this supersedes the class-D no-timeout-retry decision:**
+
+* The suppression rule (no ``attest`` call for non-deny-band rows; the judge is the ONLY way the deny band allows end-of-mission) makes judge reliability load-bearing for EVERY delegated completion.
+* Quick-model tail latency is documented 2.6–22s live with a 25s cap — recurring class, not a one-shot.
+* A successful retry RECOVERS the false-positive class (incident bc145c7e R1 itself: a complete report + clean rescue would have allowed end-of-mission without the nudge round-trip).
+* Post-retry timeout still → conservative fail-safe deny → DP-5 posture unchanged.
+* The retry fits the existing budget sentinel (``entries==1 && attempts<=2``) exactly — no expansion of the per-evaluation judge budget, only a re-distribution of the existing budget across attempt-1 and attempt-2 on the rescuer path.
+
+**DO NOT TOUCH (this decision):** ``nudge/hint`` text constants (``ATTESTATION_NUDGE_TEXT``, marker hint message body); deny-band band-mapping (the rescuer's verdict-driven band mapping at ``daemon/graph.py``); marker/length triggers (``MID_WORK_MARKERS``, ``SHORT_REPORT_WORD_THRESHOLD``); Section U bundle rendering; bound/escalation (``deny_bound`` predicate, ``attestation_denied_count`` semantics); kill-switch coupling (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0`` disables the judge ENTIRELY — retries included, unchanged).
+
+**Files (this decision):**
+
+* ``daemon/services/attestation_report_judge.py`` — ``judge_fused_bundle_async`` retry-once-on-timeout branch (three new logger.info tokens); module docstring + ``timeout_s`` parameter docstring + retry-once-on-unparsable comment block updated for the new retry class.
+* ``tests/unit/test_attestation_fused_judge.py`` — five new tests: ``test_timeout_retries_once_recovered``, ``test_timeout_post_retry_conservative_deny``, ``test_timeout_then_error_post_retry_conservative``, ``test_timeout_retry_log_discrimination``, ``test_timeout_post_retry_log_discrimination``. Existing ``test_timeout_no_retry_conservative`` retired (its assertion — ``timeout → 1 attempt, attempt=1`` — was the inverse of the new contract).
+* ``docs/setup.md`` — runbook note under JUDGE_TIMEOUT_S (retry semantics, worst-case 2 × timeout_s).
+* This file (``decisions.md``, this D-entry). ``requirements.md`` is NOT modified by this change (acceptance-criteria SUPERSEDED notes belong to a separate append-only ledger entry, out of scope here).
+
+**Matrix verification (this decision, scoped to the attestation pack — NOT repo-wide):** Glob-enumerated ``tests/**/test_attestation*.py`` → 62 files collected (the cohort breakdown is authoritative per file — do NOT re-run to verify, just reconcile the ledger to the cohort table):
+
+* 29 unit files / 671 tests PASS (``tests/unit/test_attestation_*.py`` + ``tests/unit/tools/test_attestation_*.py``).
+* 15 self-contained integration files / 127 tests PASS, per-file enumeration (corpus replay, O1 boot assert, marker bound enforcement, marker routing, nudge supersede, runbook drift, observability, wakeups helper, dry mode, mode tri-state [non-enforce subset], user answer pending, stage2 failopen, stage2 killswitch, must-not-break, c2 both branches). Stage-3 zoo, compaction, config, performance are NOT in the self-contained cohort (either deselected under default addopts or live-LLM-only).
+* 13 live-LLM integration files / 67 tests env-blocked (SSE hang on ``llm_stream_watchdog`` — requires live LLM provider infra, exactly like ``tests/probe/lca2_live_fused_judge_probe.py``).
+* 1 migration file / 18 tests: 17 PASS + 1 known env-fail (PG-only ``DROP CONSTRAINT IF EXISTS`` trap; ``migration 20260714_000001``).
+* 1 postgres file / 21 tests fully deselected under default addopts (PG-only marker).
+
+Glob total: **62 files / 904 tests**.

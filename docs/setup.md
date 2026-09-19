@@ -1061,12 +1061,14 @@ The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_
 | Parse success ("yes") | No | 1 | `yes` | `True` |
 | Parse success ("no") | No | 1 | `no` | `False` |
 | Unparseable body | **YES** (same input, fresh call) | 1 or 2 | retry's outcome | retry's outcome |
-| `asyncio.TimeoutError` | No | 1 | `timeout` | `False` |
+| `asyncio.TimeoutError` | **YES** (same input, fresh call — incident bc145c7e R1, 2026-09-19) | 2 | retry's outcome | retry's outcome |
 | Any other exception | No | 1 | `error` | `False` |
 
 ### Worst-case latency bound
 
 The retry uses its OWN per-attempt timeout window (`timeout_s`). Total worst-case wall-clock = `2 × timeout_s`. With the default 25.0s cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`), worst-case = **50.0s**. The HA facade's `wall_clock_cap_s` and `asyncio.wait_for` bounds still apply per-attempt (the retry does NOT stack timeouts across attempts). Each retry attempt is a fresh LLM call — same prompt, same model, same config; no prompt mutation, no model swap, no backoff delay.
+
+The `JUDGE_TIMEOUT_S` env knob is `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S` (Pattern C restart-read resolver at `daemon/services/attestation_judge_timeout_resolver.py`); default 25.0s; minimum clamp 5.0s with a one-shot WARN. Operators with a known-fast quick-model can tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` for a faster worst-case bound (with retry: 2 × 15 = 30s); operators with a slow quick-model can loosen to `=40` (with retry: 2 × 40 = 80s). Restart required to flip.
 
 ### New log-row fields (Stage-3: on `event=leader_completion_gate_fused_judge` — the two legacy rows retired)
 
@@ -1136,6 +1138,57 @@ On `Decision.DENIED` rows, the marker/length scanner NEVER runs (the scan is gat
 - `daemon/graph.py` — two log rows extended with `llm_judge_attempt=%s` + `llm_judge_first_unparsable_excerpt=%s`
 - `tests/unit/test_attestation_report_judge.py` — 18 new tests + 2 updated tests + 1 new constants pin
 - `tests/unit/test_attestation_gate.py` — new `TestDeniedRowsHaveDefaultMarkerFields` class with 4 tests
+
+### Runbook note (2026-09-19, incident bc145c7e R1 — fused judge retry-once-on-timeout)
+
+The LCA inline-LLM completion-report judge (`daemon/services/attestation_report_judge.py::judge_fused_bundle_async`) now retries ONCE on attempt-1 `asyncio.TimeoutError`, superseding the class-D (98b59dd7) decision that explicitly excluded timeout from the retry surface. Rationale: the suppression rule makes the deny-band rescuer judge load-bearing for EVERY delegated completion (no `attest` toolcall for non-deny-band rows; the judge is the ONLY way the deny band allows end-of-mission), and quick-model tail latency (documented 2.6–22s live, 25s cap) makes the timeout class recurring. Incident bc145c7e R1 itself: a delegated investigation produced a complete report-shaped answer; the rescuer judge timed out at exactly 25.000s (attempt 1 of 1) → conservative fail-safe deny → nudge round-trip → clean complete on the next turn. The retry RECOVERS this class — a complete report + clean rescue would allow end-of-mission without the nudge round-trip.
+
+### Retry semantics (timeout path, incident bc145c7e R1)
+
+| Outcome of attempt 1 | Retry fires? | `attempt` | `verdict` | `is_complete_report` |
+|---|---|---|---|---|
+| `asyncio.TimeoutError` | **YES** (same input, fresh call, same per-attempt timeout window) | 2 | retry's outcome (success → `complete`/`not_complete`; unparsable → `unparsable`; timeout → `timeout`; error → `error`) | retry's outcome |
+| Any other exception (HTTP / API / failover) | No (unchanged — error retry excluded) | 1 | `error` | `False` |
+
+### Worst-case latency (timeout retry)
+
+The timeout retry uses the SAME per-attempt timeout window (`JUDGE_TIMEOUT_S`). Total worst-case wall-clock = `2 × JUDGE_TIMEOUT_S`. With the default 25.0s cap (`ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S`), worst-case = **50.0s** (unchanged from the unparsable retry worst-case — both retries stack on the same per-attempt window). The retry does NOT stack timeouts across attempts; each attempt is bounded independently.
+
+### Distinct log discrimination tokens (timeout retry, incident bc145c7e R1)
+
+Three tokens, one per state, emitted at the `attestation_report_judge.py` logger (NOT the graph-node canonical log row — forensic granularity for grep triage):
+
+| Token | When | Format |
+|---|---|---|
+| `event=fused_judge_first_attempt_timeout` | First attempt timed out, retry pending | `timeout_s=%s latency_ms=%s will_retry=true` |
+| `event=fused_judge_timeout_retry` | Retry was fired on the timeout path | `timeout_s=%s attempt=%s` |
+| `event=fused_judge_timeout_post_retry` | Both attempts timed out (post-retry timeout, conservative deny) | `timeout_s=%s retry_latency_ms=%s` |
+
+The graph-node canonical log row at `daemon/graph.py:5341` (`event=leader_completion_gate_fused_judge`) discriminates the timeout-retry outcome via `verdict` + `attempt` + `error_class`:
+- `verdict=timeout attempt=2 error_class=TimeoutError` → post-retry timeout (fail-safe deny)
+- `verdict=complete|not_complete attempt=2 error_class=None` → recovered retry (no nudge round-trip)
+
+### DP-5 posture unchanged
+
+Post-retry timeout still → conservative fail-safe deny → `Decision.DENIED` path → nudge. The judge is best-effort (no fail-safe allow anywhere, incident DP-5 REJECTED). The 3-deny escalation bound caps worst-case misfires.
+
+### Kill-switch OFF = zero judge calls (including zero timeout retries)
+
+The kill-switch `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` is checked at the graph layer BEFORE the judge is called. When the kill-switch is OFF, the judge is never called → zero retries by construction (unparsable retry + timeout retry both suppressed).
+
+### Operator quick-reference (timeout retry)
+
+* **Did the timeout retry fire?** Grep `event=leader_completion_gate_fused_judge llm_judge_attempt=2` AND `verdict=timeout` (post-retry) OR `verdict=complete|not_complete` (recovered).
+* **Was the first attempt a timeout?** Grep `event=fused_judge_first_attempt_timeout` (forensic surface inside the function).
+* **Was the retry exhausted (both timeouts)?** `event=fused_judge_timeout_post_retry` AND `event=leader_completion_gate_fused_judge llm_judge_attempt=2 verdict=timeout error_class=TimeoutError`.
+* **Tuning for a slow quick-model:** Loosen via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=40` (worst-case 2 × 40 = 80s with retry). Restart required to flip.
+* **Tuning for a fast quick-model:** Tighten via `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=15` (worst-case 2 × 15 = 30s with retry). Restart required to flip.
+
+### References (timeout retry)
+
+- `.agents/shared/planning/leader-completion-attestation/decisions.md` — D-ENTRY 2026-09-19 (incident bc145c7e R1)
+- `daemon/services/attestation_report_judge.py` — `judge_fused_bundle_async` retry-once-on-timeout branch (three new logger.info tokens); module docstring + `timeout_s` parameter docstring updated
+- `tests/unit/test_attestation_fused_judge.py` — 5 new tests (timeout-retries-once-recovered, timeout-post-retry-conservative-deny, timeout-then-error-post-retry-conservative, timeout-retry-log-discrimination, timeout-post-retry-log-discrimination); existing `test_timeout_no_retry_conservative` retired (its assertion — `timeout → 1 attempt, attempt=1` — was the inverse of the new contract)
 
 ### Runbook note (2026-09-16, incident 6a0d60c9 — marker-path bound enforcement + answer-gate blindness + nudge id stability)
 
