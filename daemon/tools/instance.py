@@ -4576,10 +4576,15 @@ Returns:
     # ``feature/mission-watch-toolset``) — ``watch_mission`` is the
     # durable mission watch: resolver front-end + ONE job_watchers row
     # per receipt that exists at call time (events=["mission_terminal"],
-    # HOLD semantics). Appended AFTER the mission tools so the
+    # HOLD semantics).
+    # Placement note (tidier #4): this is the instance-assembly
+    # EXTENSION POINT, not the index-pin surface — the
     # ``create_job_tools`` return-list indices (watch_job = tools[17],
-    # watch_jobs = tools[20]) stay stable. Empty list when the services
-    # are not yet wired (partial-init / test stubs).
+    # watch_jobs = tools[20]) are a property of the factory itself,
+    # which stays byte-unchanged. This extend merely appends the
+    # separate mission-watch list after the mission tools for
+    # mission-family grouping. Empty list when the services are not
+    # yet wired (partial-init / test stubs).
     mission_watch_tools = create_mission_watch_tools_if_available(manager, current_instance_id)
     tools.extend(mission_watch_tools)
     

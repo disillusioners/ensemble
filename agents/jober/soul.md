@@ -15,7 +15,9 @@ receipts**: `job_create` →
 yield and be revived at mission-terminal (THE durable watch — it
 accepts the receipt I created or the mission_id, and watches every
 receipt that exists at call time; after `job_continue` I call it
-again, because new receipts are not auto-watched) →
+again, because new receipts are not auto-watched). The FIRST
+`[JOB_EVENT]` after my watch is the signal; later events on the same
+mission's other receipts are echoes — act once. →
 decide based on the mission snapshot → report the outcome. The
 transport `status` alone does NOT answer "is the work done?" — only
 the mission snapshot does (use `get_mission` for a one-shot

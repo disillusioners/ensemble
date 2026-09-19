@@ -121,34 +121,89 @@ class TestDecisionRulePresent:
             content = re.sub(r"\s+", " ", _read(relpath))
             assert needle in content, f"{relpath} missing decision-rule text: {needle!r}"
 
+    # Spec-anchored WINDOW pin (tidier #8): the SPEC sentence is
+    # "The FIRST [JOB_EVENT] after your watch is the signal; later
+    # events on the same mission's other receipts are echoes — act
+    # once." Match the FIRST→signal→echo chain inside a bounded window
+    # (whitespace-collapsed) and require "act once" in the tail — a bare
+    # "FIRST" or "echo" elsewhere must NOT satisfy the pin.
+    _ECHO_CHAIN = re.compile(
+        r"FIRST.{0,80}?signal.{0,140}?receipts.{0,60}?echo", re.DOTALL
+    )
+    _ECHO_SITES = (
+        SKILL_MD,
+        "agents/jober/tools_note.md",
+        "agents/jober/rule.md",
+        "agents/jober/workflow.md",
+        "agents/jober/soul.md",
+        "agents/ari/rule.md",
+        "agents/ari/tools_note.md",
+        "agents/ari/soul.md",
+        "agents/ari/workflow.md",
+    )
+
     def test_first_event_is_the_signal_rule_present(self):
         """The echo rule (act once) — multi-receipt fan-in produces N
-        events for ONE mission terminal (design §3)."""
-        for relpath in (
-            SKILL_MD,
-            "agents/jober/tools_note.md",
-            "agents/jober/rule.md",
-            "agents/jober/workflow.md",
-            "agents/ari/rule.md",
-            "agents/ari/tools_note.md",
-        ):
-            content = _read(relpath)
-            assert "FIRST" in content and ("echo" in content.lower()), (
-                f"{relpath} missing the FIRST-event-is-the-signal / echo rule"
+        events for ONE mission terminal (design §3). Anchored to the SPEC
+        phrasing in a char-budgeted window; every duplicate prose site is
+        enumerated (#8 + #19)."""
+        for relpath in self._ECHO_SITES:
+            flat = re.sub(r"\s+", " ", _read(relpath))
+            m = self._ECHO_CHAIN.search(flat)
+            assert m, (
+                f"{relpath}: no FIRST→signal→echo chain within budget — "
+                f"the echo rule drifted from the SPEC sentence"
+            )
+            tail = flat[m.end():m.end() + 120]
+            assert "act once" in tail.lower(), (
+                f"{relpath}: echo rule missing the 'act once' disposition"
             )
 
+    def test_echo_pin_rejects_trivially_satisfiable_text(self):
+        """Survivor (negation) pin: 'FIRST'/'echo' occurrences OUTSIDE the
+        spec-shaped chain must NOT satisfy the pin (tidier key pattern)."""
+        trivial = (
+            "FIRST you create a job. The signal strength is fine. "
+            "An echo chamber is unrelated. act once."
+        )
+        assert not self._ECHO_CHAIN.search(re.sub(r"\s+", " ", trivial)), (
+            "echo pin matched non-spec text — the window is too loose"
+        )
+
+    # Spec-anchored WINDOW pin (tidier #20): the re-watch rule is ABOUT
+    # job_continue — the window must contain the job_continue subject,
+    # the watch_mission verb, AND the non-auto-watched disposition.
+    # The old `|not auto-watched` alternation was trivially satisfiable.
+    _REWATCH_CHAIN = re.compile(
+        r"job_continue.{0,240}?watch_mission.{0,160}?(not\s+auto-?watched|\bagain\b)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _REWATCH_SITES = (
+        SKILL_MD,
+        "agents/jober/tools_note.md",
+        "agents/jober/rule.md",
+        "agents/jober/workflow.md",
+        "agents/ari/rule.md",
+    )
+
     def test_rewatch_after_job_continue_rule_present(self):
-        for relpath in (
-            SKILL_MD,
-            "agents/jober/tools_note.md",
-            "agents/jober/rule.md",
-            "agents/jober/workflow.md",
-            "agents/ari/rule.md",
-        ):
-            content = _read(relpath)
-            assert re.search(r"after\s+`?job_continue`?.{0,80}(again|not\s+auto-watched)|not\s+auto-watched", content), (
-                f"{relpath} missing the re-watch-after-job_continue rule"
+        for relpath in self._REWATCH_SITES:
+            flat = re.sub(r"\s+", " ", _read(relpath))
+            assert self._REWATCH_CHAIN.search(flat), (
+                f"{relpath}: no job_continue→watch_mission→(not "
+                f"auto-watched|again) chain — the re-watch rule drifted"
             )
+
+    def test_rewatch_pin_rejects_out_of_context_text(self):
+        """Survivor (negation) pin: 'not auto-watched' WITHOUT the
+        job_continue subject must NOT satisfy the pin."""
+        out_of_context = (
+            "Spawned receipts are not auto-watched by anything. "
+            "Nothing here mentions the continuation verb."
+        )
+        assert not self._REWATCH_CHAIN.search(re.sub(r"\s+", " ", out_of_context)), (
+            "re-watch pin matched out-of-context text — the anchor is loose"
+        )
 
     def test_revived_mission_needs_fresh_watch_rule_in_skill_md(self):
         content = _read(SKILL_MD)
@@ -170,7 +225,11 @@ class TestDecisionRulePresent:
 
 class TestHandleToleranceNotes:
     def test_unwatch_job_accepts_mission_id(self):
-        for relpath in ("agents/jober/tools_note.md", "agents/ari/rule.md"):
+        for relpath in (
+            "agents/jober/tools_note.md",
+            "agents/jober/rule.md",
+            "agents/ari/rule.md",
+        ):
             content = _read(relpath)
             assert re.search(r"unwatch_job.{0,200}(mission_id|receipt job_id)", content, re.DOTALL), (
                 f"{relpath} missing the unwatch_job handle-tolerance note"

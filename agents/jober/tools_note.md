@@ -560,9 +560,9 @@ instead of marking the job complete.
   row today — if a mission shows `dead_letter` while its `liveness` is still
   non-terminal, stop waiting on the watch and poll with `await_mission`
   (its timeout returns a snapshot) to decide.
-- If a watch was created with an explicit `watch_events` list that omits
-  `in_progress`, this notification is filtered out (you'll only see the
-  terminal event). This is the only safe way to opt out.
+- If a **transport** watch was created with an explicit `watch_events`
+  list that omits `in_progress`, this notification is filtered out (you'll
+  only see the terminal event). This is the only safe way to opt out.
 
 **Action on `in_progress`:**
 - Update internal tracking (record `Waiting for: N` and the `Progress:` text)

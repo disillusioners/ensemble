@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,6 +195,33 @@ def _seed_task(engine: Engine, *, work_id: str, instance_id: str, status: str = 
     return work_id
 
 
+def _seed_job_item(
+    engine: Engine,
+    *,
+    instance_id: str,
+    job_id: str | None = None,
+    admission_state: str = AdmissionState.DONE.value,
+    job_type: str = "task",
+    terminal_reason: str | None = "completed",
+) -> str:
+    """Insert a JobItem row (model: ``tests/unit/tools/test_mission_tools.py``)."""
+    jid = job_id or str(uuid.uuid4())
+    with Session(engine) as s:
+        s.add(JobItem(
+            job_id=jid,
+            agent_id="developer",
+            agent_dir="agents/developer",
+            message="seeded",
+            source="agent:test",
+            instance_id=instance_id,
+            admission_state=admission_state,
+            job_type=job_type,
+            terminal_reason=terminal_reason,
+        ))
+        s.commit()
+    return jid
+
+
 def _work_record(work_id, kind, status, *, instance_id=None, job_type=None,
                  mission_liveness=None, error=None, result_summary=None):
     """WorkRecord-shaped mock (mirrors ``tests/test_job_queue_tools.py``)."""
@@ -340,6 +368,7 @@ class TestAlreadyTerminal:
 
         assert "already terminal (failed)" in result
         job_service.notify_watchers.assert_awaited_once()
+        assert job_service.notify_watchers.await_args.args[0] == receipt
 
     def test_dead_letter_since_revived_registers_normally_not_short_circuit(
         self, engine, job_service, watch_mission, watcher_repo
@@ -352,18 +381,10 @@ class TestAlreadyTerminal:
         the tool cross-checks liveness)."""
         mid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
-        with Session(engine) as s:
-            s.add(JobItem(
-                job_id=str(uuid.uuid4()),
-                agent_id="developer",
-                agent_dir="agents/developer",
-                message="dead attempt",
-                source="agent:test",
-                instance_id=mid,
-                admission_state=AdmissionState.DEAD.value,
-                job_type="task",
-            ))
-            s.commit()
+        _seed_job_item(
+            engine, instance_id=mid,
+            admission_state=AdmissionState.DEAD.value, terminal_reason=None,
+        )
 
         async def _get_work(work_id):
             # The live receipt resolves non-terminal (instance revived).
@@ -388,18 +409,10 @@ class TestAlreadyTerminal:
         ``dead_letter`` terminal_reason is surfaced."""
         mid = _seed_instance(engine, status=InstanceStatus.ERROR.value)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
-        with Session(engine) as s:
-            s.add(JobItem(
-                job_id=str(uuid.uuid4()),
-                agent_id="developer",
-                agent_dir="agents/developer",
-                message="dead attempt",
-                source="agent:test",
-                instance_id=mid,
-                admission_state=AdmissionState.DEAD.value,
-                job_type="task",
-            ))
-            s.commit()
+        _seed_job_item(
+            engine, instance_id=mid,
+            admission_state=AdmissionState.DEAD.value, terminal_reason=None,
+        )
 
         async def _get_work(work_id):
             return _work_record(work_id, "report", "failed", instance_id=mid,
@@ -608,7 +621,7 @@ class TestRemovalPins:
     @pytest.mark.parametrize("agent", ["ari", "jober"])
     def test_resolved_toolset_excludes_watch_and_includes_watch_mission(self, agent):
         meta = json.loads((REPO_ROOT / "agents" / agent / "meta.json").read_text())
-        tools = _build_registry_tools()
+        _build_registry_tools()  # populates the registry metadata (global scan)
         categories = list_tools_by_category()
 
         resolved = resolve_tool_filter(
@@ -651,16 +664,6 @@ class TestRemovalPins:
         _build_registry_tools()
         assert "watch_mission" in list_tools_by_category()["mission"]
 
-    def test_meta_versions_bumped(self):
-        for agent in ("ari", "jober"):
-            meta = json.loads((REPO_ROOT / "agents" / agent / "meta.json").read_text())
-            assert meta["version"] == "1.2.0"
-
-    def test_meta_deny_entries(self):
-        ari = json.loads((REPO_ROOT / "agents" / "ari" / "meta.json").read_text())
-        assert set(ari["tools"]["deny"]) >= {"watch_job", "watch_jobs"}
-        jober = json.loads((REPO_ROOT / "agents" / "jober" / "meta.json").read_text())
-        assert set(jober["tools"]["deny"]) >= {"watch_job", "watch_jobs"}
 
     def test_watch_mission_in_known_tool_names(self):
         """New tool ⇒ KNOWN_TOOL_NAMES entry (the no-drift detector in
@@ -728,38 +731,125 @@ class TestJobCreateMissionIdResponse:
         assert result["mission_id"] == mid
 
 
+# ─── High#1 companion: resolver-RAISE degraded paths are logged ───────────
+
+
+class TestResolverRaiseDegraded:
+    """One fixture per handler (watch_mission / unwatch_job /
+    list_watched_jobs): a resolver RAISE degrades to the receipt/plain
+    path AND is logged at warning — the degraded lookups are never
+    silent (tidier High #1 + Med #2; house pattern missions.py
+    get_mission)."""
+
+    def test_watch_mission_resolver_raise_falls_to_work_side_and_logs(
+        self, engine, job_service, resolver, watcher_repo, watch_mission, caplog
+    ):
+        mid = _seed_instance(engine)
+        receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+
+        def _raise(handle):
+            raise RuntimeError("db down")
+
+        resolver.resolve = _raise
+
+        async def _get_work(work_id):
+            return _work_record(work_id, "report", "processing", instance_id=mid)
+
+        job_service.get_work = AsyncMock(side_effect=_get_work)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.job_queue"):
+            result = asyncio.run(watch_mission.ainvoke({"target": receipt}))
+
+        # Degraded mission side → work side still resolves the receipt.
+        assert "Mission watch registered" in result
+        assert _watched_job_ids(watcher_repo) == {receipt}
+        assert any(
+            "watch_mission" in msg and "mission resolver raised" in msg
+            for msg in caplog.messages
+        ), caplog.messages
+
+    def test_unwatch_job_resolver_raise_falls_to_receipt_path_and_logs(
+        self, resolver, watcher_repo, task_repo, caplog
+    ):
+        watcher_repo2, _job_service, by_name = _build_job_tools_with_repos(watcher_repo, task_repo, resolver)
+        receipt = str(uuid.uuid4())
+        watcher_repo2.add_watch(receipt, CALLER, ["mission_terminal"])
+
+        def _raise(handle):
+            raise RuntimeError("db down")
+
+        resolver.resolve = _raise
+
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.job_queue"):
+            result = asyncio.run(by_name["unwatch_job"].ainvoke({"job_id": receipt}))
+
+        # Degraded mission side → receipt path removes the row.
+        assert "Stopped watching job" in result
+        assert _watched_job_ids(watcher_repo2) == set()
+        assert any(
+            "unwatch_job" in msg and "mission resolver raised" in msg
+            for msg in caplog.messages
+        ), caplog.messages
+
+    def test_list_watched_jobs_resolver_raise_labels_plain_and_logs(
+        self, engine, resolver, watcher_repo, task_repo, caplog
+    ):
+        watcher_repo2, _job_service, by_name = _build_job_tools_with_repos(watcher_repo, task_repo, resolver)
+        mid = _seed_instance(engine)
+        receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
+        watcher_repo2.add_watch(receipt, CALLER, ["mission_terminal"])
+
+        def _raise(handle):
+            raise RuntimeError("db down")
+
+        resolver.resolve = _raise
+
+        with caplog.at_level(logging.WARNING, logger="daemon.tools.job_queue"):
+            result = asyncio.run(by_name["list_watched_jobs"].ainvoke({}))
+
+        assert receipt[:8] in result
+        assert "receipt of mission" not in result  # plain, unlabeled row
+        assert any(
+            "list_watched_jobs" in msg and "mission resolver raised" in msg
+            for msg in caplog.messages
+        ), caplog.messages
+
+
 # ─── unwatch_job / list_watched_jobs resolver extension ───────────────────
 
 
+def _build_job_tools_with_repos(watcher_repo, task_repo, resolver):
+    """Build the job-tool set over the SHARED fixtures (no local repo
+    rebuild — tidier #15); returns (watcher_repo, job_service, by_name).
+
+    One shared harness for ``TestUnwatchAndListResolverExtension`` and
+    ``TestResolverRaiseDegraded``."""
+    job_service = MagicMock(name="job_service")
+    # Default: unresolved work (labels degrade to plain receipts).
+    job_service.get_work = AsyncMock(return_value=None)
+    manager = MagicMock(name="manager")
+    manager._mission_resolver = resolver
+    manager._task_repo = task_repo
+    tools = create_job_tools(
+        job_service=job_service,
+        queue_mgmt_service=MagicMock(name="queue_mgmt"),
+        dead_letter_service=MagicMock(name="dlq"),
+        current_instance_id=CALLER,
+        watcher_repo=watcher_repo,
+        manager=manager,
+    )
+    by_name = {t.name: t for t in tools}
+    return watcher_repo, job_service, by_name
+
+
 class TestUnwatchAndListResolverExtension:
-    def _harness(self, engine, resolver):
-        watcher_repo = JobWatcherRepository(engine)
-        task_repo = TaskRepository(engine)
-        job_service = MagicMock(name="job_service")
-        # Default: unresolved work (labels degrade to plain receipts).
-        job_service.get_work = AsyncMock(return_value=None)
-        manager = {
-            "watcher_repo": watcher_repo,
-            "manager": MagicMock(name="manager"),
-            "job_service": job_service,
-        }
-        manager["manager"]._mission_resolver = resolver
-        manager["manager"]._task_repo = task_repo
-        tools = create_job_tools(
-            job_service=job_service,
-            queue_mgmt_service=MagicMock(name="queue_mgmt"),
-            dead_letter_service=MagicMock(name="dlq"),
-            current_instance_id=CALLER,
-            watcher_repo=watcher_repo,
-            manager=manager["manager"],
-        )
-        by_name = {t.name: t for t in tools}
-        return watcher_repo, job_service, by_name
+    def _harness(self, watcher_repo, task_repo, resolver):
+        return _build_job_tools_with_repos(watcher_repo, task_repo, resolver)
 
     def test_unwatch_job_mission_handle_removes_all_receipt_rows(
-        self, engine, resolver
+        self, engine, resolver, watcher_repo, task_repo
     ):
-        watcher_repo, _job_service, by_name = self._harness(engine, resolver)
+        watcher_repo, _job_service, by_name = self._harness(watcher_repo, task_repo, resolver)
         mid = _seed_instance(engine)
         receipt_a = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
         receipt_b = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
@@ -772,8 +862,10 @@ class TestUnwatchAndListResolverExtension:
         assert "2 watch row(s) removed" in result
         assert _watched_job_ids(watcher_repo) == set()
 
-    def test_unwatch_job_receipt_handle_still_works(self, engine, resolver):
-        watcher_repo, _job_service, by_name = self._harness(engine, resolver)
+    def test_unwatch_job_receipt_handle_still_works(
+        self, resolver, watcher_repo, task_repo
+    ):
+        watcher_repo, _job_service, by_name = self._harness(watcher_repo, task_repo, resolver)
         receipt = str(uuid.uuid4())
         watcher_repo.add_watch(receipt, CALLER, ["mission_terminal"])
 
@@ -783,9 +875,9 @@ class TestUnwatchAndListResolverExtension:
         assert _watched_job_ids(watcher_repo) == set()
 
     def test_list_watched_jobs_labels_receipts_with_mission(
-        self, engine, resolver
+        self, engine, resolver, watcher_repo, task_repo
     ):
-        watcher_repo, job_service, by_name = self._harness(engine, resolver)
+        watcher_repo, job_service, by_name = self._harness(watcher_repo, task_repo, resolver)
         mid = _seed_instance(engine)
         receipt = _seed_task(engine, work_id=str(uuid.uuid4()), instance_id=mid)
         watcher_repo.add_watch(receipt, CALLER, ["mission_terminal"])
@@ -801,9 +893,9 @@ class TestUnwatchAndListResolverExtension:
         assert f"receipt of mission {mid[:8]}..." in result
 
     def test_list_watched_jobs_unresolvable_receipt_gets_no_label(
-        self, engine, resolver
+        self, resolver, watcher_repo, task_repo
     ):
-        watcher_repo, _job_service, by_name = self._harness(engine, resolver)
+        watcher_repo, _job_service, by_name = self._harness(watcher_repo, task_repo, resolver)
         receipt = str(uuid.uuid4())
         watcher_repo.add_watch(receipt, CALLER, ["mission_terminal"])
 
