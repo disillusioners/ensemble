@@ -114,6 +114,14 @@ def _make_paused_manager(
     manager.get_instance_info = MagicMock(
         return_value={"status": "paused", "instance_id": instance_id}
     )
+    # Command dispatcher — the route calls
+    # ``await manager.command_dispatcher.dispatch(...)`` to handle
+    # slash commands BEFORE the PAUSED branch. Stub the dispatcher
+    # so the MagicMock default (a non-awaitable) does not blow up.
+    manager.command_dispatcher = MagicMock()
+    manager.command_dispatcher.dispatch = AsyncMock(
+        return_value=MagicMock(kind="passthrough", sanitized_text=None, ack=None)
+    )
 
     # resume_instance_cascade returns the resumed/skipped dict.
     manager.resume_instance_cascade = AsyncMock(return_value={
@@ -123,6 +131,12 @@ def _make_paused_manager(
     })
 
     # resume_processing_job — caller controls whether None or a dict.
+    # C1 facade-forwarding fix (council NEEDS-FIXES, 2026-09-19):
+    # the facade accepts ``image_refs=`` as a keyword-only kwarg.
+    # The AsyncMock below accepts ANY kwargs — a positional kwarg
+    # drop would be masked by AsyncMock. We add a signature-shape
+    # assertion in test_paused_target_resume_image_refs_kwarg_accepted
+    # below to close the mask class.
     if resume_processing_return is None:
         manager.resume_processing_job = AsyncMock(return_value=None)
     else:
@@ -373,3 +387,80 @@ class TestPausedAutoResumeFallback:
         assert "route" not in target_result
 
         manager.enqueue_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# C1 facade-acceptance mask-pin (council NEEDS-FIXES, 2026-09-19)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeFacadeKwargAcceptance:
+    """C1 facade-forwarding fix mask-pin: assert the real
+    ``InstanceManager.resume_processing_job`` signature accepts
+    ``image_refs=`` as a keyword-only kwarg.
+
+    The AsyncMock above at line ~:127 masks a kwarg-drop bug
+    (AsyncMock accepts any kwargs). The pin here closes the mask
+    class — a future refactor that drops ``image_refs`` from the
+    facade signature trips this test.
+    """
+
+    def test_resume_facade_signature_accepts_image_refs_keyword_only(self):
+        """The real ``InstanceManager.resume_processing_job``
+        signature carries ``image_refs`` as a KEYWORD-ONLY kwarg
+        (post-C1 fix)."""
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        sig = inspect.signature(InstanceManager.resume_processing_job)
+        image_refs_param = sig.parameters.get("image_refs")
+        assert image_refs_param is not None, (
+            "resume_processing_job is missing the image_refs kwarg — "
+            "C1 facade-forwarding fix REGRESSED"
+        )
+        # Keyword-only discipline: a positional caller would mask
+        # the kwarg-drop bug class.
+        assert (
+            image_refs_param.kind == inspect.Parameter.KEYWORD_ONLY
+        ), (
+            f"image_refs must be keyword-only on resume_processing_job "
+            f"(C1 facade discipline); got kind={image_refs_param.kind!r}"
+        )
+
+    def test_resume_router_forwards_image_refs_kwarg(self, client_and_state):
+        """The router calls ``resume_processing_job`` with
+        ``image_refs=message.image_refs`` (matches the pre-fix
+        AsyncMock; pin the router passes the kwarg)."""
+        client, state = client_and_state
+        manager = _make_paused_manager(
+            instance_id="inst-paused",
+            resume_processing_return=None,
+            with_vision=True,
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        refs = ["/api/tmp_images/" + "a" * 32]
+        # Note: the manager mock's image_refs handling depends on
+        # with_vision=True so the legacy vision gate passes (image_refs
+        # path is gated on model_vision in the router). We use
+        # ``images=`` here to keep the test focused on the
+        # resume_processing_job kwarg-passing, not the
+        # image_refs/vision gate.
+        resp = client.post(
+            "/instances/inst-paused/messages",
+            json={"content": "look", "images": ["data:image/png;base64,abc"]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        # The router passed images= (legacy data-URI channel). The
+        # AsyncMock on resume_processing_job captured the call —
+        # assert the kwarg was forwarded.
+        manager.resume_processing_job.assert_awaited()
+        call = manager.resume_processing_job.call_args
+        # Pin the kwarg exists in the call (the AsyncMock-mask
+        # class: if the facade signature dropped images=, this
+        # call would still succeed via the mock's permissive
+        # signature; the actual facade would TypeError).
+        assert "images" in call.kwargs

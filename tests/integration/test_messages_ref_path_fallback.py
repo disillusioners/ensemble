@@ -219,9 +219,11 @@ class TestRefPathFallbackRowPersistence:
                 )
             )
         assert len(rows) == 1
-        # A3 row assertion: image_refs persists on the audit column
-        # regardless of conversion success.
-        assert rows[0].images == refs
+        # A3 row assertion: image_refs persists on the dedicated
+        # ``image_refs`` JSONB column (council Option A — refs NEVER
+        # write to the legacy ``images`` column).
+        assert rows[0].image_refs == refs
+        assert rows[0].images is None
 
     def test_error_string_constant_shape(self):
         """The timeout / agent-error STRINGS the converter collapses
