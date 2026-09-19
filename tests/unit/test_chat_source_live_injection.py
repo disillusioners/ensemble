@@ -58,15 +58,48 @@ from daemon.sources.registry import SourceRegistry
 # ---------------------------------------------------------------------------
 
 
-def _build_registry_with_manager(manager: MagicMock) -> SourceRegistry:
+def _build_registry_with_manager(
+    manager: MagicMock,
+    *,
+    source_types: dict[str, str] | None = None,
+) -> SourceRegistry:
     """Build a ``SourceRegistry`` with the given pre-stubbed ``manager``.
 
     The source repo only needs ``check_and_mark_processed`` to return
     ``False`` (no duplicate) for these tests.
+
+    ``source_types`` (iteration 2) maps ``source_id`` → ``source_type``
+    for each chat adapter the tests want to register. This is required
+    for tests that exercise the live-injection branch with NON-empty
+    metadata: the registry reads ``adapter.source_type`` at line ~858
+    and the live-injection gate's per-provider allowlist lookup
+    (``_is_text_only_payload_for_chat_injection``) keys off it. When
+    ``source_types`` is omitted (or the source_id isn't in the dict),
+    ``self.get(source_id)`` returns ``None`` and
+    ``source_type=None`` — which the predicate treats as "unknown
+    provider, fall through to durable" (the safe default).
     """
     mock_source_repo = MagicMock()
     mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)
-    return SourceRegistry(mock_source_repo, manager)
+    registry = SourceRegistry(mock_source_repo, manager)
+    if source_types:
+        for source_id, source_type in source_types.items():
+            registry.register(_make_adapter_mock(source_id, source_type))
+    return registry
+
+
+def _make_adapter_mock(source_id: str, source_type: str) -> MagicMock:
+    """Build a MagicMock adapter with the given ``source_id`` /
+    ``source_type``. The typing-indicator call on the injection branch
+    (iteration 2) needs ``adapter.start_typing`` to be awaitable;
+    ``adapter.send`` is needed for the /new confirmation branch.
+    """
+    adapter = MagicMock()
+    adapter.source_id = source_id
+    adapter.source_type = source_type
+    adapter.start_typing = AsyncMock(return_value=None)
+    adapter.send = AsyncMock(return_value=True)
+    return adapter
 
 
 def _stub_manager(
@@ -460,9 +493,17 @@ class TestNonRunningStatusDurableFallback:
 
 
 class TestRichPayloadDurableFallback:
-    """Images and non-empty metadata ALWAYS take the durable lane
-    (``set_injection`` is text-only; its signature accepts ``content``,
-    ``source``, ``echo_id`` and nothing else).
+    """Images and non-allowlisted metadata keys ALWAYS take the durable
+    lane (``set_injection`` is text-only; its signature accepts
+    ``content``, ``source``, ``echo_id`` and nothing else).
+
+    Iteration 2 (2026-09-19): the prior blocklist (``not msg.metadata``)
+    was dead-code in production — every chat adapter always populates
+    non-empty provider metadata. The gate is now an ALLOWLIST keyed off
+    ``ROUTING_ENVELOPE_KEYS[source_type]``; a message with metadata
+    keys outside the per-provider allowlist takes the durable path
+    even when the provider is registered. This class pins that
+    fallthrough for both images AND unknown-metadata-keys.
     """
 
     @pytest.mark.asyncio
@@ -471,7 +512,9 @@ class TestRichPayloadDurableFallback:
         MUST still take the durable enqueue path.
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -484,6 +527,15 @@ class TestRichPayloadDurableFallback:
             content="see attached",
             source_id="telegram",
             images=["https://example.com/photo.jpg"],
+            metadata={
+                "telegram": {
+                    "message_id": "1",
+                    "chat_id": "1",
+                    "chat_type": "private",
+                },
+                "agent": "ari",
+                "reply_chat_id": "1",
+            },
         )
 
         with patch(
@@ -502,13 +554,20 @@ class TestRichPayloadDurableFallback:
         assert kwargs["images"] == ["https://example.com/photo.jpg"]
 
     @pytest.mark.asyncio
-    async def test_metadata_bearing_falls_through_even_when_live(self):
-        """A message with non-empty ``metadata`` on a RUNNING+live-graph
-        target MUST still take the durable enqueue path. Empty ``{}``
-        metadata is text-only and stays injectable.
+    async def test_unknown_metadata_key_falls_through_even_when_live(self):
+        """A message whose metadata contains a key OUTSIDE the
+        per-provider allowlist (even when every other key IS in the
+        allowlist) MUST take the durable path on a RUNNING+live-graph
+        target. The slack adapter's mint site
+        (``slack/adapter.py:813-825``) populates ``slack``, ``agent``,
+        ``reply_chat_id``; this test pins the predicate's
+        "every key ⊆ allowlist" semantics by injecting an extra
+        unknown key — the safe fallthrough direction.
         """
         manager = _stub_manager(status="running", has_live_graph=True)
-        registry = _build_registry_with_manager(manager)
+        registry = _build_registry_with_manager(
+            manager, source_types={"slack": "slack"}
+        )
         mock_mapper_instance = _stub_mapper()
         mock_agent_registry = MagicMock()
         mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
@@ -518,11 +577,13 @@ class TestRichPayloadDurableFallback:
 
         msg = IncomingMessage(
             external_user_id="alice",
-            content="with metadata",
+            content="with extra key",
             source_id="slack",
             metadata={
-                "slack_channel_id": "C123",
-                "slack_thread_ts": "1700000000.000100",
+                "slack": {"channel_id": "C123", "thread_ts": "1700000000.000100"},
+                "agent": "ari",
+                "reply_chat_id": "C123",
+                "unknown_provider_key": "boom",  # NOT in slack allowlist
             },
         )
 
@@ -534,6 +595,658 @@ class TestRichPayloadDurableFallback:
             return_value=mock_agent_registry,
         ):
             await registry._handle_message("slack", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_type_falls_through(self):
+        """A source type not in ``ROUTING_ENVELOPE_KEYS`` (e.g.,
+        ``"scheduler"``, or any future adapter that hasn't been
+        individually allowlisted) MUST take the durable path on a
+        RUNNING+live-graph target — the safe default for any
+        non-allowlisted provider.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"scheduler": "scheduler"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="scheduler",
+            metadata={"some_key": "some_value"},
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("scheduler", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Realistic adapter-shaped metadata → inject happy path (per-provider)
+# ---------------------------------------------------------------------------
+
+
+def _slack_metadata() -> dict:
+    """Realistic slack envelope read directly from
+    ``slack/adapter.py:813-825`` — channel/thread/workspace/user keys
+    are nested under ``slack``; ``agent`` + ``reply_chat_id`` are
+    top-level.
+    """
+    return {
+        "slack": {
+            "channel_id": "C12345",
+            "channel_type": "channel",
+            "user_id": "U99999",
+            "ts": "1700000123.000456",
+            "thread_ts": "1700000000.000100",
+            "workspace_id": "T0ABCDEF",
+            "workspace_name": "acme",
+        },
+        "agent": "ari",
+        "reply_chat_id": "C12345",
+    }
+
+
+def _telegram_metadata() -> dict:
+    """Realistic telegram envelope read directly from
+    ``telegram.py:558-573`` — chat/from/date nested under ``telegram``;
+    ``agent`` + ``reply_chat_id`` top-level.
+    """
+    return {
+        "telegram": {
+            "message_id": "1234",
+            "chat_id": "-1001234567890",
+            "chat_type": "supergroup",
+            "from_id": "987654321",
+            "from_username": "alice",
+            "from_first_name": "Alice",
+            "from_last_name": "Wonder",
+            "date": 1700000000,
+            "edit_date": None,
+        },
+        "agent": "ari",
+        "reply_chat_id": "-1001234567890",
+    }
+
+
+def _discord_metadata() -> dict:
+    """Realistic discord envelope read directly from
+    ``discord/adapter.py:1024-1038`` — guild/channel/thread nested under
+    ``discord``; ``agent`` is the only top-level non-cmd key
+    (discord intentionally does NOT populate ``reply_chat_id`` — see
+    the constants.py per-provider verdict).
+    """
+    return {
+        "discord": {
+            "guild_id": "111111111",
+            "guild_name": "Acme",
+            "channel_id": "222222222",
+            "channel_name": "general",
+            "channel_type": "text",
+            "thread_id": None,
+            "thread_name": None,
+            "parent_channel_id": None,
+            "user_id": "333333333",
+            "user_name": "alice",
+            "user_display_name": "Alice",
+            "message_id": "444444444",
+            "is_dm": False,
+        },
+        "agent": "ari",
+    }
+
+
+class TestPerProviderEnvelopeInjection:
+    """Realistic per-provider adapter-shaped metadata (read directly
+    from each adapter's mint site) MUST inject on a RUNNING+live-graph
+    target. These tests are the iteration-2 happy-path pins that
+    REPLACE the dead-code prior blocklist behavior — every chat
+    adapter always populates non-empty metadata, so the prior
+    ``not msg.metadata`` check was effectively never True in prod.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slack_realistic_envelope_injects(self):
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"slack": "slack"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hello from slack",
+            source_id="slack",
+            metadata=_slack_metadata(),
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("slack", msg)
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message_job.assert_not_called()
+        assert (
+            manager.set_injection.call_args.kwargs["source"]
+            == "slack:alice"
+        )
+
+    @pytest.mark.asyncio
+    async def test_telegram_realistic_envelope_injects(self):
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="charlie",
+            content="hello from telegram group",
+            source_id="telegram",
+            metadata=_telegram_metadata(),
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message_job.assert_not_called()
+        assert (
+            manager.set_injection.call_args.kwargs["source"]
+            == "telegram:charlie"
+        )
+
+    @pytest.mark.asyncio
+    async def test_discord_realistic_envelope_injects(self):
+        """Discord's envelope is the most distinctive: it has NO
+        ``reply_chat_id`` (channel/thread routing lives on the
+        mapping, set at first-message time via
+        ``extra_mapping_metadata`` in registry.py:820-824). The
+        discord allowlist contains exactly 4 keys (``discord``,
+        ``agent``, ``force_new_instance``, ``command``) — this test
+        pins that the realistic mint shape (the other two keys are
+        absent on the text path) injects correctly.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"discord": "discord"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="bob",
+            content="hello from discord",
+            source_id="discord",
+            metadata=_discord_metadata(),
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("discord", msg)
+
+        manager.set_injection.assert_called_once()
+        manager.enqueue_message_job.assert_not_called()
+        assert (
+            manager.set_injection.call_args.kwargs["source"]
+            == "discord:bob"
+        )
+
+    @pytest.mark.asyncio
+    async def test_slack_command_short_circuits_before_injection(self):
+        """``/new`` (and other commands) MUST short-circuit BEFORE the
+        injection branch — they don't go through agent processing at
+        all (the registry sends a confirmation via ``adapter.send``
+        and returns). Pin that even on a RUNNING+live-graph target
+        with the full slack envelope, a /new message does NOT
+        trigger ``set_injection`` — it falls through the /new
+        early-return at ``registry.py:~902``.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"slack": "slack"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="/new",
+            source_id="slack",
+            message_type="command",
+            metadata={
+                **_slack_metadata(),
+                "force_new_instance": True,
+                "command": "/new",
+            },
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("slack", msg)
+
+        # /new short-circuits at ~902 — NO injection, NO durable enqueue
+        manager.set_injection.assert_not_called()
+        manager.enqueue_message_job.assert_not_called()
+        # Confirmation was sent via adapter.send
+        adapter = registry.get("slack")
+        adapter.send.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Typing indicator on the injection branch (iteration 2 leader decision)
+# ---------------------------------------------------------------------------
+
+
+class TestTypingIndicatorOnInjection:
+    """Iteration 2 (2026-09-19) — leader decision: FIRE the typing
+    indicator on the injection branch. Chat users have no 202/SSE echo
+    like web; ``start_typing`` on inject is their only "message
+    received" signal.
+
+    Mirrors the same call shape the durable path uses (~:1110-1116 in
+    registry.py): same adapter lookup, same ``hasattr`` guard, same
+    ``reply_chat_id`` resolution with ``external_user_id`` fallback.
+
+    These tests pin BOTH ways:
+      * injection branch fires ``adapter.start_typing``
+      * durable fallthrough behavior is unchanged from iteration 1
+        (typing indicator still fires after ``enqueue_message_job``)
+    """
+
+    @pytest.mark.asyncio
+    async def test_typing_indicator_fires_on_injection(self):
+        """RUNNING + live-graph + text-only + telegram envelope ⇒
+        ``adapter.start_typing`` called with the ``reply_chat_id``
+        from the envelope (mirrors the durable path's resolution).
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+            metadata=_telegram_metadata(),
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.set_injection.assert_called_once()
+        # start_typing called on the registered adapter
+        adapter = registry.get("telegram")
+        adapter.start_typing.assert_awaited_once()
+        # typing_chat_id = metadata["reply_chat_id"] for telegram
+        # (mirrors the durable-path call shape)
+        assert adapter.start_typing.await_args.args[0] == "-1001234567890", (
+            f"typing chat id wrong: {adapter.start_typing.await_args.args[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_typing_indicator_uses_external_user_id_when_no_metadata(self):
+        """Same as above but with empty metadata — typing indicator
+        should still fire on the injection branch, falling back to
+        ``external_user_id`` (mirrors the durable-path fallback).
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice-no-meta",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.set_injection.assert_called_once()
+        adapter = registry.get("telegram")
+        adapter.start_typing.assert_awaited_once()
+        assert (
+            adapter.start_typing.await_args.args[0] == "alice-no-meta"
+        )
+
+    @pytest.mark.asyncio
+    async def test_typing_indicator_not_fired_when_no_start_typing_attr(self):
+        """Adapters registered in the registry without ``start_typing``
+        MUST NOT crash the injection branch — the ``hasattr`` guard
+        (same as the durable path's) skips the call. The injection
+        itself still happens; only the typing-indicator surface call
+        is suppressed.
+
+        To exercise the injection branch with a no-``start_typing``
+        adapter, we register ``telegram`` (which IS in
+        ``ROUTING_ENVELOPE_KEYS``) and then strip ``start_typing``
+        off the registered mock. The predicate passes (empty
+        metadata short-circuits before source_type check at the
+        top of ``_is_text_only_payload_for_chat_injection``),
+        ``set_injection`` is called, ``start_typing`` is NOT.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        adapter = registry.get("telegram")
+        # Strip the auto-attached start_typing
+        del adapter.start_typing
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            # Must NOT raise — the hasattr guard skips start_typing.
+            await registry._handle_message("telegram", msg)
+
+        # set_injection happened (no start_typing crash)
+        manager.set_injection.assert_called_once()
+        # Durable path NOT taken
+        manager.enqueue_message_job.assert_not_called()
+        # start_typing not invoked (no AttributeError surface)
+        assert not hasattr(adapter, "start_typing"), (
+            "test setup error: adapter.start_typing should have been deleted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_typing_indicator_unchanged_on_durable_fallthrough(self):
+        """Regression pin: the durable fallthrough path's typing
+        indicator behavior (iteration 1 contract) is UNCHANGED by
+        iteration 2 — typing fires AFTER ``enqueue_message_job`` on
+        the durable path with the same ``reply_chat_id`` resolution.
+        """
+        manager = _stub_manager(status="idle", has_live_graph=False)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+            metadata=_telegram_metadata(),
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        # Durable path: enqueue ran AND typing indicator fired
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+        adapter = registry.get("telegram")
+        adapter.start_typing.assert_awaited_once()
+        assert (
+            adapter.start_typing.await_args.args[0] == "-1001234567890"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Broadened probe exception catch (iteration 2 leader decision)
+# ---------------------------------------------------------------------------
+
+
+class TestBroadenedProbeExceptionCatch:
+    """Iteration 2: ``(KeyError, AttributeError)`` → ``Exception`` for
+    the live-injection probe. The chat-source lane MUST stay up even
+    for unexpected exception classes — if the probe can't tell us the
+    status, we err on the side of a durable wake.
+    """
+
+    @pytest.mark.asyncio
+    async def test_keyerror_still_falls_through(self):
+        """Regression pin: the original KeyError path still works
+        (broadened catch must still cover KeyError).
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(side_effect=KeyError("miss"))
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attributeerror_still_falls_through(self):
+        """Regression pin: the original AttributeError path still works
+        (broadened catch must still cover AttributeError).
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(
+            side_effect=AttributeError("bad shape")
+        )
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_runtimeerror_falls_through(self):
+        """New behavior: any ``Exception`` subclass from the probe
+        (e.g., ``RuntimeError``) now also falls through. The chat
+        lane must NOT crash on unexpected exception classes — that's
+        the whole point of the broadened catch.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(
+            side_effect=RuntimeError("transient DB blip")
+        )
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            # Must NOT raise — the catch is now Exception.
+            await registry._handle_message("telegram", msg)
+
+        manager.enqueue_message_job.assert_awaited_once()
+        manager.set_injection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_value_error_falls_through(self):
+        """New behavior: another ``Exception`` subclass (``ValueError``)
+        also falls through — proves the catch is broadened beyond
+        ``(KeyError, AttributeError)``.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        manager.get_instance_info = MagicMock(side_effect=ValueError("bad data"))
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="alice",
+            content="hi",
+            source_id="telegram",
+        )
+
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ):
+            await registry._handle_message("telegram", msg)
 
         manager.enqueue_message_job.assert_awaited_once()
         manager.set_injection.assert_not_called()

@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from daemon.constants import INJECTION_ELIGIBLE_STATUSES
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES, ROUTING_ENVELOPE_KEYS
 
 from .base import (
     IncomingMessage,
@@ -27,6 +27,63 @@ logger = logging.getLogger(__name__)
 
 # Module-level executor for async-safe callbacks (P2 Issue #7)
 _executor = ThreadPoolExecutor(max_workers=4)
+
+
+# Per-provider routing-envelope allowlist is defined canonically in
+# ``daemon/constants.py:ROUTING_ENVELOPE_KEYS`` (single-home per the
+# ``daemon/constants.py`` leaf-module invariant). The chat-source
+# live-injection gate (see ``_is_text_only_payload_for_chat_injection``
+# below) imports it from there. Each entry cites the adapter's
+# metadata construction site (slack/adapter.py:813-825,
+# discord/adapter.py:1092-1099 + :1204-1209, telegram/adapter.py:558-573);
+# per-provider reply-path verdicts (verified that outbound routing
+# does NOT depend on per-message metadata that only the durable path
+# carries) are documented at the constant's definition site.
+
+
+def _is_text_only_payload_for_chat_injection(
+    msg: IncomingMessage,
+    source_type: str | None,
+) -> bool:
+    """Text-only predicate for the chat-source live-injection gate.
+
+    Returns ``True`` iff the message can safely take the RAM-FIFO
+    injection lane (``manager.set_injection``):
+
+      * No images (set_injection is text-only — its signature accepts
+        only ``content``, ``source``, ``echo_id``).
+      * Non-empty / non-whitespace content (defensive; the chat-source
+        path does NOT validate ``message.content`` like HTTP does, but
+        a blank injection is a wasted agent turn).
+      * Either empty metadata OR every metadata key is in the
+        per-provider allowlist (``ROUTING_ENVELOPE_KEYS``).
+      * Known chat source type (``slack`` / ``discord`` / ``telegram``).
+        Unknown / unconfigured source types default to False — the
+        durable path is the safe baseline for any adapter that hasn't
+        been individually allowlisted.
+
+    Args:
+        msg: The incoming chat-source message.
+        source_type: The chat-source's provider type (``slack`` /
+            ``discord`` / ``telegram``). May be ``None`` for adapters
+            that did not register a ``source_type``.
+
+    Returns:
+        ``True`` iff all the above gates pass.
+    """
+    if msg.images:
+        return False
+    if not msg.content or not msg.content.strip():
+        return False
+    if not msg.metadata:
+        return True
+    if source_type is None:
+        return False
+    allowed = ROUTING_ENVELOPE_KEYS.get(source_type)
+    if allowed is None:
+        # Unknown source type — fall through to durable (safe default).
+        return False
+    return set(msg.metadata.keys()) <= allowed
 
 
 class _HealthCheckFailed(Exception):
@@ -880,23 +937,25 @@ class SourceRegistry:
             # verifier; a ``False`` result routes through the durable
             # ``enqueue_message_job`` pipeline below.
             #
-            # Rich payloads (images / non-empty metadata) ALWAYS take the
-            # durable enqueue fallthrough — ``set_injection`` is text-only
-            # (its signature accepts ``content``, ``source``, ``echo_id``
-            # and nothing else; wiring image-bearing injections would
-            # require extending the FIFO schema + drain site, which is
-            # out of scope here).
+            # Rich payloads (images / unknown metadata keys) ALWAYS
+            # take the durable enqueue fallthrough. ``set_injection`` is
+            # text-only (its signature accepts ``content``, ``source``,
+            # ``echo_id`` and nothing else; wiring image-bearing
+            # injections would require extending the FIFO schema + drain
+            # site, which is out of scope here). Metadata keys NOT in the
+            # per-provider ``ROUTING_ENVELOPE_KEYS`` allowlist
+            # (top-of-module definition; each entry cited from the
+            # adapter's metadata construction site) also fall through —
+            # a narrow allowlist degrades to durable, which is the safe
+            # direction (an unknown key never strands an injection).
             #
             # Empty / whitespace-only content also falls through — the
             # chat-source path does not validate ``message.content`` like
             # HTTP does (S4), but a blank injection would still produce a
             # wasted turn; routing it through durable enqueue keeps the
             # behavior uniform with the existing pipeline.
-            is_text_only_payload = bool(
-                msg.content
-                and msg.content.strip()
-                and not msg.images
-                and not msg.metadata
+            is_text_only_payload = _is_text_only_payload_for_chat_injection(
+                msg, source_type
             )
             should_inject_live = False
             if is_text_only_payload:
@@ -913,10 +972,18 @@ class SourceRegistry:
                         if instance_info
                         else None
                     )
-                except (KeyError, AttributeError) as probe_err:
-                    # Instance probe failed (transient race / DB miss).
-                    # Fall through to durable enqueue — never silently
-                    # drop a chat-source message.
+                except Exception as probe_err:
+                    # Probe failure (transient race / DB miss / any
+                    # unexpected error from the facade). Falls through
+                    # to durable enqueue — never silently drops a
+                    # chat-source message and never crashes the source
+                    # adapter. Broadened from
+                    # ``(KeyError, AttributeError)`` in iteration 2
+                    # because the chat-source lane MUST stay up even
+                    # for unexpected exception classes; if the probe
+                    # can't tell us the status, we err on the side of
+                    # a durable wake (which the existing pipeline
+                    # already handles correctly).
                     logger.debug(
                         f"[chat-source live-injection] probe failed for "
                         f"{instance_id[:8]}...: "
@@ -961,12 +1028,35 @@ class SourceRegistry:
                     f"instance={instance_id[:8]}..., "
                     f"echo_id={echo_id}"
                 )
-                # Skip durable enqueue + typing indicator — the agent
-                # is already in an active turn and will drain the FIFO
-                # on its next ``agent_node`` pass. Posting a typing
-                # indicator while the agent is already typing would be
-                # misleading and could toggle the chat client into a
-                # state it does not expect.
+
+                # Typing indicator on the injection branch (iteration 2,
+                # 2026-09-19 — leader decision: FIRE IT). Chat users have
+                # no 202/SSE echo like web; ``start_typing`` on inject
+                # is their only "message received" signal. Mirror the
+                # same call shape the durable path uses below (~:1110-):
+                # same adapter lookup, same ``hasattr`` guard, same
+                # ``reply_chat_id`` resolution with ``external_user_id``
+                # fallback. Byte-identical to the durable path's call —
+                # only the timing differs (the durable path fires AFTER
+                # ``enqueue_message_job`` completes; here we fire AFTER
+                # ``set_injection``).
+                typing_adapter = self.get(source_id)
+                if typing_adapter and hasattr(typing_adapter, 'start_typing'):
+                    typing_chat_id = (
+                        msg.metadata.get("reply_chat_id", msg.external_user_id)
+                        if msg.metadata
+                        else msg.external_user_id
+                    )
+                    await typing_adapter.start_typing(typing_chat_id)  # type: ignore
+                    logger.debug(
+                        f"Started typing indicator for chat {typing_chat_id}"
+                    )
+
+                # Skip durable enqueue — the agent is already in an
+                # active turn and will drain the FIFO on its next
+                # ``agent_node`` pass. Typing indicator already fired
+                # above; no further state to advance on the injection
+                # branch.
                 return
 
             # Phase 5 (cutover): external sources always dispatch through
