@@ -524,34 +524,48 @@ def decide(
        → :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED and zero nudge/hint. The pending party is the
        USER; the leader cannot progress alone, so the awaiting answer
-       is the FIFTH legitimate-pending input. Fires BEFORE the
-       attested check deliberately: the plain-allow contract is ZERO
+       is the FIFTH legitimate-pending input. Fires BEFORE every
+       other branch deliberately: the plain-allow contract is ZERO
        counter movement — an attested-allow reset (trigger 1) does not
        run while an answer is pending.
-    2. attested → IF the final AIMessage is a standalone text report
-       (no tool calls, non-trivial length >=
-       ``SHORT_REPORT_WORD_THRESHOLD``) →
-       :attr:`Decision.ALLOWED` with ``next_denied_count = 0`` (reset
-       trigger 1). OTHERWISE (attested but final AIMessage is the
-       attest-call message itself, OR the bundled shape where the
-       AIMessage carried text + tool_call) →
-       :attr:`Decision.HOLD` with ``next_denied_count = denied_count``
-       (counter UNCHANGED — HOLD is not a denial) and
-       ``should_inject_reminder = True``. The reminder text is
-       ``reminder_text_bundled`` when ``is_bundled_call`` else
-       ``reminder_text_clean``. The 2026-09-19 attest-first contract
-       (closes incident c5d9a38a — prompt-only fixes failed twice,
-       so system-side enforcement via HOLD now).
-    3. not attested + any pending wakeup input > 0 (THREE-input R2 —
+    2. any pending wakeup input > 0 (THREE-input R2 —
        ``pending_children``, ``queued_or_expected_wakeups``, OR
        ``live_descendants``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
-       protection). The ``live_descendants`` arm closes the 809e2a59
-       waiting_children false-deny incident class: deferral fires the
-       parent's watcher (so ``pending_children`` drops to 0) while a
-       deeper grandchild still runs, AND deferral emits no report/task
-       row (so ``queued_or_expected_wakeups`` stays 0).
+       protection). Fires BEFORE the attested-split step (3)
+       deliberately (2026-09-20, N1 ratification): an attest issued
+       DURING an active mission is premature — the mission
+       continues, the attest either stays in-window or falls out
+       and re-attestation happens at true completion (the
+       quiet-tree end state). The ``live_descendants`` arm closes
+       the 809e2a59 waiting_children false-deny incident class:
+       deferral fires the parent's watcher (so ``pending_children``
+       drops to 0) while a deeper grandchild still runs, AND
+       deferral emits no report/task row (so
+       ``queued_or_expected_wakeups`` stays 0). NO reminder is
+       injected on this branch — the leader is not done; the
+       attest was premature.
+    3. attested (and step (2) was quiet — no pending wakeups)
+       → IF the final AIMessage is a standalone text report (no
+       tool calls, non-trivial length >=
+       ``SHORT_REPORT_WORD_THRESHOLD``) →
+       :attr:`Decision.ALLOWED` with ``next_denied_count = 0``
+       (reset trigger 1; the report-completion reset is bound to
+       this path ONLY — the R2 allow in step (2) does NOT fire the
+       counter reset on a premature-attest input). OTHERWISE
+       (attested but final AIMessage is the attest-call message
+       itself, OR the bundled shape where the AIMessage carried
+       text + tool_call) → :attr:`Decision.HOLD` with
+       ``next_denied_count = denied_count`` (counter UNCHANGED —
+       HOLD is not a denial) and ``should_inject_reminder = True``.
+       The reminder text is ``reminder_text_bundled`` when
+       ``is_bundled_call`` else ``reminder_text_clean``. The
+       2026-09-19 attest-first contract (closes incident
+       c5d9a38a — prompt-only fixes failed twice, so system-side
+       enforcement via HOLD now). HOLD exists ONLY for the
+       quiet-tree end state: the tree must be QUIET (R2 inputs all
+       zero) for this branch to fire.
     4. not attested + no pending wakeups +
        ``denied_count + 1 > bound`` → :attr:`Decision.TERMINAL_AFTER_BOUND`
        with ``next_denied_count = 0`` (reset trigger 2; the same reset
@@ -632,7 +646,7 @@ def decide(
     # The leader has an OPEN awaiting-answer suspension handle: the
     # pending party is the USER and the leader cannot progress alone.
     # PLAIN ALLOW with the counter UNCHANGED (zero counter movement —
-    # deliberately BEFORE the attested check so even an attested-allow
+    # deliberately BEFORE every other branch so even an attested-allow
     # reset does not run while an answer is pending). The evaluate()
     # glue additionally skips the marker/length scan entirely on this
     # input (no scan, no judge, no nudge, no hint).
@@ -644,15 +658,52 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (2) attested — the 2026-09-19 attest-first contract split:
-    # IF the final AIMessage is a standalone text report (no tool
-    # calls, non-trivial length >= SHORT_REPORT_WORD_THRESHOLD) →
-    # plain ALLOWED with counter reset (trigger 1).
-    # OTHERWISE → HOLD with a counter-INDEPENDENT reminder
-    # injection. Counter does NOT increment; the bound/escalation
-    # machinery is NEVER touched on HOLD. The graph node enforces
-    # the per-mission reminder cap (ATTESTATION_REMINDER_CAP) and
-    # falls through to plain meta_bypass allow on the cap.
+    # (2) R2 allow — legitimate pending wakeup (THREE-input predicate:
+    # pending_children OR queued_or_expected_wakeups OR live_descendants).
+    # Fires BEFORE the attested-split step (3) deliberately
+    # (2026-09-20, N1 ratification): a premature attest during an
+    # active mission would otherwise fight the R2 legit-pending
+    # allow — the mission continues, the attest either stays in
+    # window or falls out and re-attestation happens at true
+    # completion (the quiet-tree end state). Counter unchanged
+    # (ruling 1: the R2 non-reset IS the loop protection). The
+    # attested counter-reset (trigger 1) is NOT bound to this path;
+    # the report-completion reset is reserved for the attested +
+    # standalone-text-report ALLOWED path at step (3). NO reminder
+    # is injected on this branch — the leader is not done; the
+    # attest was premature. The ``live_descendants`` arm closes
+    # the 809e2a59 waiting_children false-deny incident class:
+    # deferral fires the parent's watcher (so ``pending_children``
+    # drops to 0) while a deeper grandchild still runs, AND
+    # deferral emits no report/task row (so
+    # ``queued_or_expected_wakeups`` stays 0).
+    if (
+        pending_children > 0
+        or queued_or_expected_wakeups > 0
+        or live_descendants > 0
+    ):
+        return GateDecision(
+            decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
+            next_denied_count=denied_count,
+            should_inject_nudge=False,
+            should_inject_reminder=False,  # premature-attest: no reminder (the leader is not done)
+            attestation_required=attestation_required,
+        )
+
+    # (3) attested — the 2026-09-19 attest-first contract split. By
+    # construction this branch is ONLY reachable with quiet R2 inputs
+    # (no pending wakeups — step (2) caught them). IF the final
+    # AIMessage is a standalone text report (no tool calls,
+    # non-trivial length >= SHORT_REPORT_WORD_THRESHOLD) → plain
+    # ALLOWED with counter reset (trigger 1; the
+    # report-completion reset). OTHERWISE → HOLD with a
+    # counter-INDEPENDENT reminder injection. Counter does NOT
+    # increment; the bound/escalation machinery is NEVER touched
+    # on HOLD. The graph node enforces the per-mission reminder
+    # cap (ATTESTATION_REMINDER_CAP) and falls through to plain
+    # meta_bypass allow on the cap. HOLD exists ONLY for the
+    # quiet-tree end state (the R2 inputs were all zero at step
+    # (2)).
     if attested:
         if final_ai_is_text_report:
             return GateDecision(
@@ -682,22 +733,6 @@ def decide(
             final_ai_is_text_report=False,
             final_ai_is_attest_call=final_ai_is_attest_call,
             is_bundled_call=is_bundled_call,
-        )
-
-    # (3) R2 allow — legitimate pending wakeup (THREE-input predicate:
-    # pending_children OR queued_or_expected_wakeups OR live_descendants);
-    # counter unchanged (ruling 1: the R2 non-reset IS the loop
-    # protection).
-    if (
-        pending_children > 0
-        or queued_or_expected_wakeups > 0
-        or live_descendants > 0
-    ):
-        return GateDecision(
-            decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
-            next_denied_count=denied_count,
-            should_inject_nudge=False,
-            attestation_required=attestation_required,
         )
 
     # (4) bound exceeded — escalation; counter reset (trigger 2).

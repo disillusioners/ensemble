@@ -1454,21 +1454,37 @@ class TestDecideLiveDescendantsMatrix:
         assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
         assert result.next_denied_count == 2
 
-    def test_attested_takes_precedence_over_live_descendants(self):
-        """Attested allow is reset trigger 1 — comes BEFORE the R2 allow
-        branch in the decision tree, even with a non-zero third input.
+    def test_r2_pending_takes_precedence_over_attested_split(self):
+        """2026-09-20 (N1 ratification, leader-completion-attestation):
+        the R2 legitimate-pending inputs (``pending_children``,
+        ``queued_or_expected_wakeups``, ``live_descendants``) PRECEDE
+        the attested-split in ``decide()``. An attest issued DURING
+        an active mission (R2 inputs > 0) is premature — the mission
+        continues, the attest either stays in-window or falls out and
+        re-attestation happens at true completion. The R2 allow path
+        returns ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` with the
+        counter UNCHANGED (NO counter reset — the attested counter-
+        reset is bound to the report-completion reset on the
+        attested + standalone-text-report ALLOWED path, not to the
+        premature-attest R2 allow).
 
-        2026-09-19 (attest-first contract, c5d9a38a remediation):
-        ``decide()`` step (2) now requires ``final_ai_is_text_report=True``
-        for the attested-allow path — the FINAL AIMessage must be a
-        standalone text report (no tool calls, >=
-        ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the gate to
-        allow END via ``Decision.ALLOWED``. The ``decide()`` here
-        passes ``final_ai_is_text_report=True`` so the test pins the
-        attested-takes-precedence-over-R2 invariant with the new
-        contract (a leader that emitted a clean attest_call AND a
-        subsequent standalone report gets ``Decision.ALLOWED`` with
-        counter reset, even when live_descendants > 0)."""
+        Re-anchored from the OLD
+        ``test_attested_takes_precedence_over_live_descendants``
+        which pinned the OLD ordering (attested-split BEFORE R2) —
+        that ordering fired ``Decision.ALLOWED`` with counter RESET
+        even when ``live_descendants=3``. Under the N1 ratification
+        the R2 pending input wins, so the expected decision is
+        ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` with counter UNCHANGED.
+
+        The companion test
+        ``TestDecideHOLDPath::test_a_clean_attest_with_text_report_
+        returns_allowed`` in
+        ``tests/unit/test_attestation_attest_first_contract.py``
+        pins the OTHER half of the contract: attested + quiet tree
+        + standalone-text-report → ``Decision.ALLOWED`` with counter
+        RESET (the report-completion reset on the quiet-tree
+        ALLOWED path).
+        """
         result = decide(
             attested=True,
             pending_children=2,
@@ -1477,13 +1493,23 @@ class TestDecideLiveDescendantsMatrix:
             denied_count=2,
             bound=3,
             attestation_required=True,
-            # 2026-09-19: the new contract splits attested into
-            # ALLOWED (text report final AI) vs HOLD (attest-call
-            # or bundled final AI). This test pins attested-with-
-            # text-report → ALLOWED; the HOLD variant is the
-            # adjacent ``test_attested_no_text_report_returns_hold``
-            # in ``test_attestation_gate.py``.
+            # N1 ratification: the attested-split only fires when
+            # the tree is QUIET (R2 inputs all zero at step (2)).
+            # With all three R2 inputs > 0 the R2 allow wins,
+            # regardless of ``final_ai_is_text_report`` — the
+            # attested counter-reset is structurally exclusive to
+            # the quiet-tree ALLOWED path.
             final_ai_is_text_report=True,
         )
-        assert result.decision is Decision.ALLOWED
-        assert result.next_denied_count == 0  # reset trigger 1
+        assert result.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP, (
+            f"N1 ratification: R2 pending inputs > 0 must take precedence "
+            f"over the attested-split; got {result.decision!r}"
+        )
+        # Counter UNCHANGED on the premature-attest R2 allow — the
+        # attested counter-reset (trigger 1) is NOT bound to this
+        # path. It stays bound to the report-completion reset on
+        # the quiet-tree attested + standalone-text-report ALLOWED.
+        assert result.next_denied_count == 2, (
+            f"R2 allow is counter-INDEPENDENT — the attested counter-reset "
+            f"must NOT fire here; got next_denied_count={result.next_denied_count}"
+        )

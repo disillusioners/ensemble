@@ -1938,3 +1938,9 @@ The matrix breakdown for the unit cohort (single source of truth — do NOT reco
 
 The new E2E acceptance tests (the canonical evidence the user requested) are STABLE in CI — they pass against the LIVE gate node + the LIVE tool body (no unit mocks); they drive the full leader sequence through the production graph.
 
+
+## N1 ratification 2026-09-20 — pending-children/wakeups suppress HOLD
+
+**Step-order change in `decide()`:** the attested-split (HOLD branch) moves AFTER the R2 pending check. New order: `(1) user_answer_pending → (2) R2 pending (pending_children / queued_wakeups / live_descendants > 0 → ALLOWED_LEGITIMATE_PENDING_WAKEUP) → (3) attested-split (ALLOWED/HOLD) → (4) bound → (5) deny`. Step (1) and steps (4)/(5) are unchanged.
+
+**Rationale:** a premature attest during an active mission (children still running, wakeup en route) would otherwise fight the R2 legit-pending allow — the leader would be forced to deliver the report before children finish, but the children are still running. HOLD reserved for the quiet-tree end state (R2 inputs all zero). The premature-attest R2 allow path: NO reminder, deny counter UNTOUCHED; the attested counter-reset (trigger 1) is bound to the **report-completion reset** on the attested + standalone-text-report ALLOWED path only. Counter moves ONLY on (a) attested + standalone-text-report ALLOWED and (b) `terminal_after_bound`; every other path leaves the counter at its input value. The 2026-09-19 attest-first HOLD-state semantics are otherwise unchanged (clean-call vs bundled reminder text, per-mission reminder cap `ATTESTATION_REMINDER_CAP`, counter-independence on HOLD).

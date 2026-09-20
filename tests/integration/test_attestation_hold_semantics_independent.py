@@ -587,8 +587,11 @@ class TestCounterStaticAtBoundDuringHoldCycles:
         # ── Proper attested allow — clean attest + standalone long report.
         # Final AI = the long text report (no tool calls,
         # >= SHORT_REPORT_WORD_THRESHOLD words). The gate's
-        # ``decide()`` step (2) is the attested-allow branch with
-        # counter RESET (trigger 1).
+        # ``decide()`` step (3) is the attested-allow branch with
+        # counter RESET (trigger 1; the report-completion reset is
+        # bound to this path ONLY — the R2 allow in step (2) does
+        # NOT fire the counter reset on a premature-attest input,
+        # per N1 ratification 2026-09-20).
         caplog.clear()
         with caplog.at_level(
             logging.INFO, logger="daemon.services.attestation_gate"
@@ -655,9 +658,10 @@ class TestNoAttestationPrecedence:
     ``queued_or_expected_wakeups>0``) is one of the THREE R2 inputs
     (``pending_children``, ``queued_or_expected_wakeups``,
     ``live_descendants``) the gate reads via the manager facades. The
-    gate's ``decide()`` step (3) returns
-    ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` BEFORE the un-attested deny
-    path. This case is the delegation turn-end class (mid-mission
+    gate's ``decide()`` step (2) returns
+    ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` BEFORE the attested-split
+    step (3) (N1 ratification 2026-09-20) and BEFORE the un-attested
+    deny path. This case is the delegation turn-end class (mid-mission
     with delegation; the leader has not yet issued ``attest_completion``
     — the canonical R2 precedence over the un-attested deny path).
     """
@@ -788,22 +792,15 @@ class TestNoAttestationPrecedence:
             f"row: {row[:200]!r}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "R2 pending_children does not precede the attested/HOLD step; "
-            "only user_answer_pending does; surfaced 2026-09-20 merge gate; "
-            "pending leader ratification (decide() step order 1→2→3)"
-        ),
-    )
     def test_user_described_attest_plus_pending_precedes_hold(
         self, caplog
     ):
-        """CONTRACT ASSERTION — the user-described scenario (ii):
-        ``pending_children>0`` AND ``attest_completion`` IN-window AND
-        no subsequent standalone text report → MUST ALLOW without HOLD
-        (the R2 legitimate-pending input is supposed to precede the
-        attested/HOLD step).
+        """CONTRACT ASSERTION (POSITIVE PIN, N1 ratification 2026-09-20) —
+        the user-described scenario (ii): ``pending_children>0`` AND
+        ``attest_completion`` IN-window AND no subsequent standalone
+        text report → MUST ALLOW as ``ALLOWED_LEGITIMATE_PENDING_WAKEUP``
+        (the R2 legitimate-pending input precedes the attested/HOLD
+        step in ``decide()``).
 
         Constructed EXACTLY per the user prompt:
             * ``attest_completion`` is present in the bounded window
@@ -813,13 +810,21 @@ class TestNoAttestationPrecedence:
               leader's report is not yet due).
             * NO subsequent standalone text report.
 
-        Expected per the contract text: ALLOW (no message injected,
-        no route). The current code's ``decide()`` step (2) — the
-        attested check — fires BEFORE the R2 legitimate-pending step
-        (3), so the gate returns ``Decision.HOLD`` whenever
-        ``attested=True`` and ``final_ai_is_text_report=False``,
-        regardless of pending_children. THIS IS A CONTRACT DEVIATION
-        if the assertion fails.
+        Expected per the N1 ratification: ALLOW (no message injected,
+        no route), ``decision=allowed_legitimate_pending_wakeup``,
+        the deny counter UNTOUCHED (the attested counter-reset is NOT
+        bound to the premature-attest R2 allow — it stays bound to
+        the report-completion reset on the attested + standalone-text-
+        report ALLOWED path). The attest was premature; the mission
+        continues; the attest stays in-window or falls out and
+        re-attestation happens at true completion.
+
+        Pre-N1 behavior (now retired): the gate's ``decide()`` step
+        (2) — the attested check — fired BEFORE the R2 legitimate-
+        pending step (3), so the gate returned ``Decision.HOLD``
+        whenever ``attested=True`` and ``final_ai_is_text_report=
+        False``, regardless of ``pending_children``. This is the
+        contract deviation the N1 ratification closes.
         """
         instance_id = "test-attest-plus-pending-contract"
         ledger = _FakeLedger(denied_count=0)
@@ -877,8 +882,86 @@ class TestNoAttestationPrecedence:
         # Canonical row records the precedence decision.
         row = _canonical_log_row(caplog)
         assert row is not None
+        assert "decision=allowed_legitimate_pending_wakeup" in row, (
+            f"N1 ratification: pending_children>0 + attested + no report "
+            f"must resolve to allowed_legitimate_pending_wakeup (the R2 "
+            f"allow precedes the attested/HOLD step); got row: {row[:200]!r}"
+        )
         assert "pending_children=1" in row, (
             f"the row must surface the R2 input value; row: {row[:200]!r}"
+        )
+        assert "attestation_present=True" in row, (
+            f"the attest call IS in-window; row: {row[:200]!r}"
+        )
+
+    def test_user_described_attest_plus_queued_wakeups_precedes_hold(
+        self, caplog
+    ):
+        """N1 ratification variant — ``queued_or_expected_wakeups>0``
+        AND ``attest_completion`` IN-window AND no subsequent
+        standalone text report → MUST ALLOW as
+        ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` (same expectations as
+        the ``pending_children>0`` variant; the second R2 input is
+        the canonical sibling).
+
+        The N1 ratification contract applies symmetrically to all
+        THREE R2 inputs (``pending_children``,
+        ``queued_or_expected_wakeups``, ``live_descendants``) —
+        any one being > 0 routes to the R2 allow before the
+        attested-split. This test pins the ``queued_or_expected_
+        wakeups`` arm so a future regression that reorders just one
+        of the three inputs breaks a sibling pin.
+        """
+        instance_id = "test-attest-plus-wakeups-contract"
+        ledger = _FakeLedger(denied_count=0)
+        manager = _make_manager(queued_wakeups=1)
+        node = _make_node(
+            instance_id=instance_id,
+            ledger=ledger,
+            manager=manager,
+            denied_count=0,
+        )
+
+        messages = [
+            HumanMessage(content="do the work"),
+            _delegated_ai("child-1"),
+            _clean_attest_ai("att-1"),
+        ]
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.attestation_gate"
+        ), caplog.at_level(
+            logging.INFO, logger="daemon.graph"
+        ):
+            result = _run(
+                node,
+                _make_state(messages, reminder_count=0),
+                thread_id=instance_id,
+            )
+
+        # Same expectations as the ``pending_children>0`` variant:
+        # plain ALLOW, no reminder, no route, counter UNTOUCHED.
+        assert "messages" not in result, (
+            f"queued_wakeups>0 + attested + no report must plain-allow; "
+            f"got: {result!r}"
+        )
+        assert result.get("attestation_route") is None, (
+            f"contract expectation: NO route on ALLOW; got "
+            f"{result.get('attestation_route')!r}"
+        )
+        assert ledger.denied_count == 0
+        assert ledger.increment_calls == []
+        assert ledger.reset_calls == []
+        # Canonical row records the precedence decision + the R2 input.
+        row = _canonical_log_row(caplog)
+        assert row is not None
+        assert "decision=allowed_legitimate_pending_wakeup" in row, (
+            f"queued_wakeups R2 arm must resolve to "
+            f"allowed_legitimate_pending_wakeup; got row: {row[:200]!r}"
+        )
+        assert "queued_or_expected_wakeups=1" in row, (
+            f"the row must surface the queued_wakeups R2 input value; "
+            f"row: {row[:200]!r}"
         )
         assert "attestation_present=True" in row, (
             f"the attest call IS in-window; row: {row[:200]!r}"
@@ -905,8 +988,11 @@ class TestWindowIntegrityReportAfterAttestReminder:
     The scanner walks the last 3 AIMessages (window=3): the
     delegation_ai + the attest_ai + the report_ai. The attest_ai is
     still in-window; the final_ai is the report (NO tool calls, >=
-    150 words). ``decide()`` step (2) attested + text_report →
-    ``Decision.ALLOWED`` with counter RESET (trigger 1).
+    150 words). ``decide()`` step (3) attested + quiet tree +
+    text_report → ``Decision.ALLOWED`` with counter RESET (trigger 1;
+    the report-completion reset is bound to this path ONLY — the R2
+    allow in step (2) does NOT fire the counter reset on a
+    premature-attest input, per N1 ratification 2026-09-20).
     """
 
     def test_attestation_in_window_at_report_turn_end_allows(self, caplog):
