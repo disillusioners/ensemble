@@ -352,7 +352,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="force_complete_task",
         anchor="reconcile_drift_states", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:1273",
+        hooked_at="daemon/services/job_recovery_service.py:1284",
         reason="F10 zombie-task force-complete is a silent Task-terminal write "
                "(JobItem already done); notify 'completed' at the caller. The "
                "write itself (stale_task_recovery.force_complete_task -> "
@@ -398,7 +398,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_dead", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:3904",
+        hooked_at="daemon/services/job_recovery_service.py:3915",
         reason="checklist site 6; in-function post-transition notify 'dead_letter'",
     ),
     # ── Canonical boundary writers (notify-wired before this phase) ──
@@ -455,7 +455,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_failed_terminal", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:4234",
+        hooked_at="daemon/services/job_recovery_service.py:4245",
         reason="f-failed-terminal finalize; notify wired in-function",
     ),
     # ── Non-terminal transitions (shape-matched, not terminal writes) ──

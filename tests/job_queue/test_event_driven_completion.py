@@ -831,8 +831,99 @@ class TestSiteF10ForceComplete:
 
         assert stats.get("reconciled", 0) >= 1 or stats.get("reconciled_bad_state", 0) >= 0
         deliveries = _delivered(enqueue_mock)
+        # Message-mirror shape → per-kind token 'settled' (M3 derivation;
+        # the pre-M3 hardcoded 'completed' was wrong for this shape).
+        assert f"internal_agent:job_event:{work_id}:settled" in deliveries, (
+            f"F10 force-complete must notify the work_id with the "
+            f"per-kind token; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+
+    @pytest.mark.asyncio
+    async def test_f10_task_kind_default_completed_token(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        """Task-kind done+completed shape → default token 'completed'."""
+        recovery = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=MagicMock(name="lock_repo"),
+            instance_repository=instance_repo,
+            job_queue_service=service,
+            task_repository=task_repo,
+            stale_task_recovery=_RealCompleteStaleDouble(task_repo),
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        with Session(engine) as s:
+            s.add(JobItem(
+                job_id=work_id,
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="task work",
+                source="agent:test",
+                instance_id=instance_id,
+                admission_state="done",
+                terminal_reason="completed",
+                job_type="task",
+            ))
+            s.commit()
+        _seed_watcher(watcher_repo, work_id)
+
+        await recovery.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=0,
+        )
+
+        deliveries = _delivered(enqueue_mock)
         assert f"internal_agent:job_event:{work_id}:completed" in deliveries, (
-            f"F10 force-complete must notify the work_id; got {deliveries}"
+            f"task-kind F10 must keep the 'completed' default; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+
+    @pytest.mark.asyncio
+    async def test_f10_failed_shape_resolves_failed_token(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        """M3 pre-merge pin: F10's precondition admits done+failed
+        JobItems too — the derived token must be 'failed', not the
+        hardcoded 'completed'."""
+        recovery = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=MagicMock(name="lock_repo"),
+            instance_repository=instance_repo,
+            job_queue_service=service,
+            task_repository=task_repo,
+            stale_task_recovery=_RealCompleteStaleDouble(task_repo),
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        with Session(engine) as s:
+            s.add(JobItem(
+                job_id=work_id,
+                agent_id="developer",
+                agent_dir="agents/developer",
+                message="failed work",
+                source="agent:test",
+                instance_id=instance_id,
+                admission_state="done",
+                terminal_reason="failed",
+                job_type="task",
+            ))
+            s.commit()
+        _seed_watcher(watcher_repo, work_id)
+
+        await recovery.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=0,
+        )
+
+        deliveries = _delivered(enqueue_mock)
+        assert f"internal_agent:job_event:{work_id}:failed" in deliveries, (
+            f"failed-shape F10 must derive the 'failed' token; got {deliveries}"
         )
         assert watcher_repo.get_watchers_for_job(work_id) == []
 
