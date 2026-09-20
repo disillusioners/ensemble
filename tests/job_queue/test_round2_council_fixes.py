@@ -333,6 +333,75 @@ class TestCascadeEmissionGateFailOpen:
             "the publish (mirrors the adjacent publish's try/except)."
         )
 
+    @pytest.mark.asyncio
+    async def test_emission_gate_production_wrap_fails_open_no_mock_of_wrap(
+        self, job_engine
+    ):
+        """Exercise the PRODUCTION fail-open wrap at child_reports.py:1069-1080.
+
+        The companion test_emission_gate_fails_open_on_exception calls
+        _root_completion_gate directly and wraps the call in its own
+        try/except, so a regression REMOVING the production wrap would not be
+        caught — the test-local try/except would still pass. This test
+        invokes the REAL _process_child_completion_and_notify_parent with
+        _root_completion_gate patched to raise on the second call, and
+        asserts the lifecycle publish STILL happens (fail-open for parity
+        with the adjacent publish at child_reports.py:1113-1122).
+
+        Setup mirrors test_cascade_publish_regate_suppresses_and_downgrades
+        so the cascade decision at :~439 returns a non-None
+        ``completed_parent_id`` (decision gate allows because pending_count
+        is 0 + fresh assistant message). The emission-time gate at :~1069
+        then RAISES — the production wrap must catch and fail-open.
+        """
+        with Session(job_engine) as session:
+            session.add(Instance(
+                instance_id="parent-1", agent_id="leader",
+                agent_dir="./agents/leader", parent_id=None,
+                status=InstanceStatus.WAITING_CHILDREN.value, waiting_for=1,
+            ))
+            session.add(Instance(
+                instance_id="child-1", agent_id="coder",
+                agent_dir="./agents/coder", parent_id="parent-1",
+                status=InstanceStatus.COMPLETED.value, waiting_for=0,
+            ))
+            session.commit()
+
+        add_child_completed_event(job_engine, "parent-1", T_CHILD_COMPLETED)
+
+        service, events_service, manager, patcher = make_child_reports(
+            job_engine, make_history("fresh parent response", T_FRESH_ASSISTANT)
+        )
+
+        # First gate call = decision at :~439 in _update_parent_on_child_complete
+        # (returns (True, None) so completed_parent_id="parent-1").
+        # Second gate call = emission-time at :~1069 in
+        # _process_child_completion_and_notify_parent (RAISES).
+        # The production try/except wrap MUST catch and fail-open
+        # (allowed=True, block_reason=None) so the lifecycle publish
+        # below at :~1113-1122 still happens.
+        side_effects = [
+            (True, None),
+            RuntimeError("simulated emission-time gate failure"),
+        ]
+        with patcher, \
+             patch("daemon.services.child_reports.MainLoopBridge.run_async_no_wait"), \
+             patch.object(
+                 service, "_root_completion_gate",
+                 new_callable=AsyncMock, side_effect=side_effects,
+             ):
+            await service._process_child_completion_and_notify_parent(
+                "child-1", "child-msg-1"
+            )
+
+        # Fail-open: lifecycle publish MUST happen despite the emission-time
+        # gate raising. If the production wrap is removed, the exception
+        # propagates and this assert fails — the test's whole point.
+        events_service._publish_instance_lifecycle_event.assert_awaited_once()
+        call = events_service._publish_instance_lifecycle_event.call_args
+        assert call.kwargs["status"] == "completed"
+        assert call.kwargs["instance_id"] == "parent-1"
+
 
 class TestRootMirrorGate:
     """Finding 5: root lane emission-time mirror gate (new in Round 2).
