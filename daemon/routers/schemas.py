@@ -1283,6 +1283,76 @@ class PlaneConfigResponse(BaseModel):
     url: str = Field(..., description="The Plane base URL (empty string if disabled)")
 
 
+# ==================== Plane Project Sync Schemas (Phase 3) ====================
+# Manual re-sync endpoint (POST /api/plane/sync/{project_id}). The response
+# carries the resulting sync state + action + plane_project_id so the caller
+# can reconcile downstream state without a second GET roundtrip.
+
+
+class PlaneProjectSyncRequest(BaseModel):
+    """Request body for POST /api/plane/sync/{project_id}.
+
+    Currently no fields — the endpoint is a "force a re-sync of this
+    project right now" trigger. Reserved for future flags (e.g. a
+    "reset_attempt_count" knob) without breaking the wire shape.
+    """
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {},
+        }
+    }
+
+
+class PlaneProjectSyncResponse(BaseModel):
+    """Response body for POST /api/plane/sync/{project_id}.
+
+    Fields mirror :meth:`daemon.services.plane_sync_service.PlaneSyncService.sync_project`
+    with the addition of ``project_id`` (the URL path param is echoed so
+    the client can correlate the result with its request without parsing
+    a separate ``Location`` header).
+
+    The ``status`` field carries the canonical state after the attempt:
+    ``"linked"`` / ``"drift"`` / ``"error"`` / ``"disabled"`` /
+    ``"syncing"`` / ``"not_found"``.
+    """
+
+    project_id: str = Field(..., description="Echo of the URL path parameter")
+    status: str = Field(..., description="Resulting sync state after the attempt")
+    action: str | None = Field(
+        default=None,
+        description="CREATE/UPDATE/RECREATE outcome — None on error/disabled/syncing/not_found",
+    )
+    plane_project_id: str | None = Field(
+        default=None,
+        description="Plane's UUID for the project (when known)",
+    )
+    synced_at: str | None = Field(
+        default=None,
+        description="ISO8601 timestamp of the successful sync (None on failure)",
+    )
+    attempt: int | None = Field(
+        default=None,
+        description="Consecutive-failure count after this attempt (None on success)",
+    )
+    message: str | None = Field(
+        default=None,
+        description="Human-readable detail (errors, disabled reason, rate-limit notice)",
+    )
+
+
+class PlaneProjectSyncErrorResponse(BaseModel):
+    """Error envelope for the sync endpoint (404 / 409 / 503).
+
+    The endpoint returns this shape for every non-2xx status code so
+    clients can switch on ``error`` without parsing ad-hoc strings.
+    """
+
+    error: str = Field(..., description="Stable error code (machine-readable)")
+    project_id: str = Field(..., description="The project ID from the URL path")
+    message: str = Field(..., description="Human-readable detail")
+
+
 # ==================== Mission Schemas (M4-i pull-forward) ====================
 # HTTP surface for the mission read-model projection (docs/job-task-system.md
 # §8.4). Additive to the schema module — mirrors ``MissionRecord``

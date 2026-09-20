@@ -66,8 +66,10 @@ flat project. Auto-runs on project creation; manually callable when you
 need to re-sync after a Plane outage or to pick up changes that the v1
 auto-sync layer doesn't cover (name, description).
 
-Requires `PLANE_BASE_URL`, `PLANE_MCP_API_KEY`, `PLANE_MCP_WORKSPACE_SLUG`
+Requires `PLANE_BASE_URL`, `PLANE_API_KEY`, `PLANE_MCP_WORKSPACE_SLUG`
 env vars. When unset, the tool returns ``{"status": "disabled"}``.
+(`PLANE_MCP_API_KEY` stays MCP-only; the REST client requires its own
+dedicated `PLANE_API_KEY` — see `daemon/clients/plane_http_client.py`.)
 """
 
 
@@ -93,7 +95,7 @@ Returns:
     Dictionary with:
       - ``status``: ``"synced"`` | ``"error"`` | ``"disabled"`` |
         ``"rate_limited"``
-      - ``action``: ``"created"`` | ``"updated"`` | ``"recreated"`` |
+      - ``action``: ``"created"`` | ``"updated"`` |
         ``None`` (on error/disabled/rate_limited)
       - ``plane_project_id``: Plane's UUID for the project (when synced)
       - ``synced_at``: ISO8601 timestamp of the sync
@@ -224,7 +226,10 @@ def create_plane_sync_tools(
         if not PlaneSyncService.is_available():
             return {
                 "status": "disabled",
-                "message": "Plane sync not configured (PLANE_BASE_URL not set)",
+                "message": (
+                    "Plane sync disabled — "
+                    f"{PlaneSyncService.unavailable_reason()}"
+                ),
             }
 
         service = PlaneSyncService(store)

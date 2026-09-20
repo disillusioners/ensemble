@@ -120,7 +120,7 @@ flowchart TD
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `PLANE_MCP_URL` | MCP server endpoint URL | `https://mcp.ensem.dev/plane/http/api-key/mcp` |
-| `PLANE_MCP_API_KEY` | Bearer token for Authorization header | `plane_api_947db192e75b4237ab43bf9a31b546f2` |
+| `PLANE_MCP_API_KEY` | Bearer token for Authorization header | `plan…46f2` (redacted 2026-09-20 — value was leaked in full here; rotation flagged as USER ACTION, git history retains the old value) |
 | `PLANE_MCP_WORKSPACE_SLUG` | Workspace identifier for x-workspace-slug header | `nea` |
 | `MCP_DISABLE_BUILT_IN_PLANE` | Disable Plane (standard builtin disable pattern) | `true` |
 

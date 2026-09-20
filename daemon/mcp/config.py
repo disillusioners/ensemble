@@ -61,6 +61,76 @@ def _is_restricted_ip(ip_str: str, allow_local: bool) -> bool:
     return False
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    """Strip ONE layer of matching surrounding quotes from a config value.
+
+    Shell-based ``.env`` loaders that bypass quote handling (e.g.
+    ``export $(cat .env | xargs)``) leak the surrounding quote characters
+    into ``os.environ`` values verbatim. When those values flow into MCP
+    server configs (builtin or user-created) and are persisted to the
+    ``mcp_servers`` table, the stored URL / header values carry literal
+    ``"`` characters. A quoted URL is scheme-less to httpx
+    (``httpcore.UnsupportedProtocol: Request URL is missing an 'http://'
+    or 'https://' protocol.``), which kills the MCP transport's task
+    group and surfaces — misleadingly — as ``McpError: Connection
+    closed`` at session creation.
+
+    Only strips when the FIRST and LAST characters are the SAME quote
+    character (``"..."`` or ``'...'``); anything else passes through
+    unchanged, so legitimate values containing interior quotes are never
+    altered.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        return value[1:-1]
+    return value
+
+
+def _sanitize_quoted_url(url: str) -> str:
+    """Normalize a config URL that a quote-leaking ``.env`` loader poisoned.
+
+    Strips surrounding whitespace and ONE layer of matching wrapping
+    quotes. Applied ``mode="before"`` on the ``url`` field of every HTTP
+    transport config so already-persisted poisoned rows heal at
+    session-creation time — no operator DB surgery, no restart gating
+    beyond the connection attempt itself.
+    """
+    return _strip_wrapping_quotes(url.strip())
+
+
+def _sanitize_quoted_headers(headers: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize header values poisoned by quote-leaking ``.env`` loaders.
+
+    Two shapes occur in the wild (both observed on a live ``plane``
+    server row, 2026-09-20):
+
+    1. Whole value wrapped: ``"nea"`` → ``nea``.
+    2. Credential wrapped after a scheme word, on ``Authorization`` only:
+       ``Bearer "tok"`` → ``Bearer tok``. Gated to the ``authorization``
+       header (case-insensitive) to keep the blast radius minimal — a
+       quoted token inside a non-auth header is left untouched unless the
+       WHOLE value is quoted (shape 1).
+
+    Non-str VALUES are passed through untouched so pydantic core surfaces
+    a proper ``ValidationError`` (HTTP 422) instead of ``AttributeError``
+    escaping the ``mode="before"`` wrapping (HTTP 500). See W-1 in the
+    council fast-follow.
+    """
+    if not headers:
+        return headers
+    sanitized: dict[str, Any] = {}
+    for key, value in headers.items():
+        if not isinstance(value, str):
+            sanitized[key] = value
+            continue
+        value = _strip_wrapping_quotes(value.strip())
+        if key.lower() == "authorization":
+            scheme, sep, credentials = value.partition(" ")
+            if sep:
+                value = f"{scheme} {_strip_wrapping_quotes(credentials)}"
+        sanitized[key] = value
+    return sanitized
+
+
 def _validate_url_not_ssrf(url: str) -> str:
     """
     Validate that a URL does not point to a restricted/internal address.
@@ -138,6 +208,33 @@ class McpSseConfig(BaseModel):
     url: str = Field(description="URL endpoint for the SSE MCP server")
     headers: dict[str, str] | None = Field(default=None, description="HTTP headers for the connection")
 
+    @field_validator("url", mode="before")
+    @classmethod
+    def sanitize_quoted_url(cls, url: str) -> str:
+        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url).
+
+        W-1: non-str inputs (None / int / list / …) return untouched so pydantic
+        core surfaces the proper ``ValidationError`` (HTTP 422) instead of
+        ``AttributeError`` escaping the ``mode="before"`` wrapping (HTTP 500).
+        """
+        if not isinstance(url, str):
+            return url
+        return _sanitize_quoted_url(url)
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def sanitize_quoted_headers(cls, headers: dict[str, str] | None) -> dict[str, str] | None:
+        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers).
+
+        W-1: non-dict inputs (incl. ``None`` for the optional field) return
+        untouched so pydantic core surfaces the proper ``ValidationError``
+        (HTTP 422) instead of ``AttributeError`` escaping the ``mode="before"``
+        wrapping (HTTP 500). Non-str VALUES are handled in the helper.
+        """
+        if not isinstance(headers, dict):
+            return headers
+        return _sanitize_quoted_headers(headers)
+
     @field_validator("url", mode="after")
     @classmethod
     def validate_url_no_ssrf(cls, url: str) -> str:
@@ -151,6 +248,33 @@ class McpStreamableHttpConfig(BaseModel):
     transport: Literal["streamable-http"] = Field(default="streamable-http", description="Transport type")
     url: str = Field(description="URL endpoint for the Streamable HTTP MCP server")
     headers: dict[str, str] | None = Field(default=None, description="HTTP headers for the connection")
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def sanitize_quoted_url(cls, url: str) -> str:
+        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url).
+
+        W-1: non-str inputs (None / int / list / …) return untouched so pydantic
+        core surfaces the proper ``ValidationError`` (HTTP 422) instead of
+        ``AttributeError`` escaping the ``mode="before"`` wrapping (HTTP 500).
+        """
+        if not isinstance(url, str):
+            return url
+        return _sanitize_quoted_url(url)
+
+    @field_validator("headers", mode="before")
+    @classmethod
+    def sanitize_quoted_headers(cls, headers: dict[str, str] | None) -> dict[str, str] | None:
+        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers).
+
+        W-1: non-dict inputs (incl. ``None`` for the optional field) return
+        untouched so pydantic core surfaces the proper ``ValidationError``
+        (HTTP 422) instead of ``AttributeError`` escaping the ``mode="before"``
+        wrapping (HTTP 500). Non-str VALUES are handled in the helper.
+        """
+        if not isinstance(headers, dict):
+            return headers
+        return _sanitize_quoted_headers(headers)
 
     @field_validator("url", mode="after")
     @classmethod

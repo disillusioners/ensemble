@@ -16,6 +16,7 @@ with a stub that lacks the real functions.
 """
 import asyncio
 import inspect
+import logging
 import pytest
 import sys
 from types import SimpleNamespace
@@ -103,6 +104,61 @@ class TestPlaneIsAvailable:
         monkeypatch.setenv("PLANE_MCP_URL", "   ")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "   ")
         assert PlaneServerDefinition.is_available() is False
+
+
+class TestPlaneMcpKillSwitch:
+    """``PLANE_MCP_ENABLED`` — explicitly user-requested integration
+    kill-switch (sanctioned 2026-09-20). Gates the MCP plane
+    integration at the OUTERMOST availability/registration seam;
+    default ON."""
+
+    def test_switch_off_disables_even_with_full_env(self, monkeypatch):
+        """Kill-switch beats URL + key config — the gate is upstream."""
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "false")
+        monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example/plane/mcp")
+        monkeypatch.setenv("PLANE_MCP_API_KEY", "secret-key-123")
+        assert PlaneServerDefinition.is_available() is False
+
+    @pytest.mark.parametrize("value", ["0", "False", "no", "off"])
+    def test_switch_falsy_values_disable(self, monkeypatch, value):
+        monkeypatch.setenv("PLANE_MCP_ENABLED", value)
+        monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example/plane/mcp")
+        monkeypatch.setenv("PLANE_MCP_API_KEY", "secret-key-123")
+        assert PlaneServerDefinition.is_available() is False
+
+    def test_switch_explicit_true_stays_available(self, monkeypatch):
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "true")
+        monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example/plane/mcp")
+        monkeypatch.setenv("PLANE_MCP_API_KEY", "secret-key-123")
+        assert PlaneServerDefinition.is_available() is True
+
+    def test_switch_off_still_requires_env_when_on(self, monkeypatch):
+        """Switch ON + no env → still unavailable (both gates stack)."""
+        monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+        monkeypatch.delenv("PLANE_MCP_URL", raising=False)
+        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        assert PlaneServerDefinition.is_available() is False
+
+    def test_switch_off_logs_once(self, monkeypatch, caplog):
+        """OFF → ONE precise log line at the first availability check
+        (lazy boot anchor), not one per check."""
+        import daemon.mcp.builtin_servers.plane as plane_module
+
+        monkeypatch.setattr(plane_module, "_kill_switch_log_emitted", False)
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "false")
+        monkeypatch.delenv("PLANE_MCP_URL", raising=False)
+        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.mcp.builtin_servers.plane"
+        ):
+            assert PlaneServerDefinition.is_available() is False
+            assert PlaneServerDefinition.is_available() is False
+
+        switch_lines = [
+            r for r in caplog.records if "PLANE_MCP_ENABLED" in r.getMessage()
+        ]
+        assert len(switch_lines) == 1
 
 
 # ---------------------------------------------------------------------------

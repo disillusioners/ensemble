@@ -257,6 +257,7 @@ from .language_tools import create_language_tools
 from .proc_tools import create_proc_tools
 from .tunables import create_set_instance_tunable_tool
 from ._tool_registry import (
+    DYNAMIC_TOOL_PREFIXES,
     PRIVILEGED_TOOL_CATEGORIES,
     list_tools_by_category,
     scan_tools_for_full_docs,
@@ -305,9 +306,11 @@ def resolve_tool_filter(
         deny: List of category names and/or individual tool names to deny
         tool_categories: Optional dict mapping category names to tool name lists.
             If None, uses the dynamic tool registry via list_tools_by_category().
-        all_tool_names: Optional set of all available tool names. Used for dynamic
-            category expansion of MCP tools (tools starting with "mcp_" with at least
-            2 underscores in the name).
+        all_tool_names: Optional set of all available tool names. Used for
+            dynamic category expansion of MCP tools (tools starting with
+            "mcp_" with at least 2 underscores in the name) and of the
+            other dynamic toolsets in DYNAMIC_TOOL_PREFIXES (e.g. "plane"
+            → the server's live plane_* tool surface).
     
     Returns:
         Set of allowed tool names, or None if all tools should be allowed
@@ -336,6 +339,41 @@ def resolve_tool_filter(
                 if name.startswith("mcp_") and "_" in name[4:]
             }
             tool_categories["mcp"] = list(mcp_tools)
+
+    # Expand the remaining dynamic-toolset categories (D1 fix, 2026-09-20).
+    #
+    # ``DYNAMIC_TOOL_PREFIXES`` (``_tool_registry``) lists tool-name
+    # namespaces that are only known at RUNTIME — MCP servers registered
+    # with a ``tool_name_prefix`` override (e.g. the built-in Plane server
+    # exposes ``plane_*`` tools, not ``mcp_plane_*``). An allow/deny entry
+    # naming such a toolset (``"plane"``) is not a static category with
+    # tools (the ``plane_tools`` stub registers the category EMPTY) and is
+    # not a literal tool name either — without this expansion it fell
+    # through to literal-name matching and every ``plane_*`` tool was
+    # silently dropped at the ``_apply_tool_filter`` membership test.
+    # Populating the category here also lets ``deny`` target the toolset
+    # and lets the empty-allow default universe include live dynamic tools,
+    # mirroring how the incumbent ``mcp`` category behaves.
+    #
+    # The ``mcp_`` prefix keeps its historical lane ABOVE (≥2-underscore
+    # ``mcp_<server>_<tool>`` shape) — the loop below intentionally covers
+    # every OTHER dynamic prefix, generically, so a future prefix-overridden
+    # server needs no new filter code.
+    if all_tool_names is not None:
+        for prefix in sorted(DYNAMIC_TOOL_PREFIXES):
+            if prefix == "mcp_":
+                # Incumbent lane above owns this prefix (different name
+                # shape); never double-expand it here.
+                continue
+            category_key = prefix.removesuffix("_")
+            if tool_categories.get(category_key):
+                # Category already populated (statically registered tools
+                # or caller-supplied) — trust it, never clobber.
+                continue
+            tool_categories[category_key] = sorted(
+                name for name in all_tool_names if name.startswith(prefix)
+            )
+
     if allow is None or len(allow) == 0:
         # No allow list means everything is potentially allowed — EXCEPT
         # privileged categories (R-SR16, P2.2 tool-api-design.md §3.5):

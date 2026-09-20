@@ -1154,9 +1154,16 @@ class TestEagerWarmSchemas:
     @pytest.mark.asyncio
     async def test_empty_set_not_counted_as_primed(self, service, manager, caplog):
         """A server with an empty schema set is NOT primed; the failed
-        server is visible by name with '0 tools' in the log."""
+        server is visible by name with '0 tools' in the log.
+
+        Re-contracted for the D5 availability gate (2026-09-20): the dead
+        server used to be named "plane" — a BUILTIN name, now skipped
+        before discovery when unavailable (see
+        ``TestEagerWarmAvailabilityGate``). A non-builtin name preserves
+        this test's actual intent: honest empty-count accounting.
+        """
         good = _make_server(name="good-server", is_builtin=False)
-        bad = _make_server(name="plane", is_builtin=False)
+        bad = _make_server(name="dead-server", is_builtin=False)
         manager._mcp_server_repository.list_mcp_servers.return_value = [good, bad]
 
         async def _lookup(server):
@@ -1171,15 +1178,20 @@ class TestEagerWarmSchemas:
 
         assert primed == 1
         assert any(
-            "plane: 0 tools" in rec.message for rec in caplog.records
+            "dead-server: 0 tools" in rec.message for rec in caplog.records
         )
 
     @pytest.mark.asyncio
     async def test_all_empty_returns_zero(self, service, manager, caplog):
         """All-empty is the production incident shape: honest 0/N, never
-        a silent 'primed N/N'."""
-        dead1 = _make_server(name="plane", is_builtin=False)
-        dead2 = _make_server(name="other", is_builtin=False)
+        a silent 'primed N/N'.
+
+        Re-contracted for the D5 availability gate: non-builtin server
+        names (a builtin-named row would be availability-gated before
+        discovery now).
+        """
+        dead1 = _make_server(name="dead-server-1", is_builtin=False)
+        dead2 = _make_server(name="dead-server-2", is_builtin=False)
         manager._mcp_server_repository.list_mcp_servers.return_value = [dead1, dead2]
 
         service.get_schemas_for_server = AsyncMock(return_value=[])
@@ -1215,6 +1227,128 @@ class TestEagerWarmSchemas:
         assert primed == 2
         assert any("alpha: 2 tool(s)" in rec.message for rec in caplog.records)
         assert any("beta: 1 tool(s)" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# TestEagerWarmAvailabilityGate — D5: kill-switch honored at eager warm
+# ---------------------------------------------------------------------------
+
+
+class TestEagerWarmAvailabilityGate:
+    """D5 (2026-09-20): ``eager_warm_schemas`` must gate built-in servers
+    through the SAME ``is_available()`` seam bootstrap and the warmup pool
+    use. Pre-fix, a stale ACTIVE ``plane`` DB row got schema-warmed (177
+    tools primed server-side) even with ``PLANE_MCP_ENABLED=false`` — the
+    kill-switch only stopped bootstrap from CREATING the row, never from
+    WARMING an existing one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_switch_off_plane_not_warmed(self, service, manager, monkeypatch, caplog):
+        """``PLANE_MCP_ENABLED=false`` ⇒ the plane row is NOT warmed: no
+        discovery call, no schemas, one clean skip notice."""
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "false")
+        plane = _make_server(name="plane", is_builtin=True)
+        user = _make_server(name="user-mcp", is_builtin=False)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [plane, user]
+
+        service.get_schemas_for_server = AsyncMock(
+            side_effect=lambda s: [_make_schema("t1", s.name)]
+            if s.name == "user-mcp"
+            else []
+        )
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 1  # only the user server
+        warmed = [
+            c.args[0] for c in service.get_schemas_for_server.await_args_list
+        ]
+        assert [s.name for s in warmed] == ["user-mcp"]  # plane never discovered
+        assert any(
+            "builtin 'plane' not available" in rec.message
+            and "skipping schema warm" in rec.message
+            for rec in caplog.records
+        )
+        # Denominator counts only ELIGIBLE servers (gated ones excluded).
+        assert any("primed 1/1" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_switch_on_with_config_plane_warmed(self, service, manager, monkeypatch, caplog):
+        """Default switch (unset = enabled) + URL + API key ⇒ the plane
+        row IS warmed, exactly as before the gate for available servers."""
+        monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+        monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.example.test/plane/http")
+        monkeypatch.setenv("PLANE_MCP_API_KEY", "plane_api_test")
+        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test")
+        plane = _make_server(name="plane", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [plane]
+
+        schemas = [_make_schema("plane_list_issues", "plane")]
+        service.get_schemas_for_server = AsyncMock(return_value=schemas)
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 1
+        assert service.get_schemas_for_server.await_count == 1
+        assert any("plane: 1 tool(s)" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_switch_on_but_missing_config_still_gated(self, service, manager, monkeypatch, caplog):
+        """Switch enabled but URL/key absent ⇒ gated (same
+        ``is_available`` seam includes the config legs, matching
+        bootstrap's skip behavior)."""
+        monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+        monkeypatch.delenv("PLANE_MCP_URL", raising=False)
+        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        plane = _make_server(name="plane", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [plane]
+
+        service.get_schemas_for_server = AsyncMock(return_value=[])
+
+        with caplog.at_level(logging.INFO, logger="daemon.services.mcp_service"):
+            primed = await service.eager_warm_schemas()
+
+        assert primed == 0
+        assert service.get_schemas_for_server.await_count == 0
+        assert any(
+            "builtin 'plane' not available" in rec.message
+            for rec in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_user_created_servers_never_gated(self, service, manager, monkeypatch):
+        """Servers with no builtin definition (user-created rows) warm
+        unconditionally, even when plane env is fully switched off."""
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "false")
+        user = _make_server(name="my-own-mcp", is_builtin=False)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [user]
+
+        service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("t1", "my-own-mcp")]
+        )
+
+        primed = await service.eager_warm_schemas()
+
+        assert primed == 1
+        assert service.get_schemas_for_server.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_all_builtins_gated_returns_zero_without_discovery(self, service, manager, monkeypatch):
+        """Every server gated off ⇒ primed 0, zero discovery calls, no
+        summary line (early return after the gate)."""
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "false")
+        plane = _make_server(name="plane", is_builtin=True)
+        manager._mcp_server_repository.list_mcp_servers.return_value = [plane]
+
+        service.get_schemas_for_server = AsyncMock()
+
+        primed = await service.eager_warm_schemas()
+
+        assert primed == 0
+        assert service.get_schemas_for_server.await_count == 0
 
 
 # ---------------------------------------------------------------------------

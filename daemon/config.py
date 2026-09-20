@@ -1566,6 +1566,62 @@ class ServicesConfig(BaseSettings):
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
         ),
     )
+    # Phase 3 of plane-integration-revival — retry machinery. Knobs for
+    # ``PlaneSyncWatchdogService``. Mirrors the F3 / job-lock-sweep
+    # convention (no kill-switch — ALWAYS-ON infrastructure; the only
+    # lever is the interval). Defaults match
+    # ``daemon/constants.py:PLANE_SYNC_WATCHDOG_*`` so the two stay
+    # in lock-step.
+    plane_sync_watchdog_interval_seconds: int = Field(
+        default=300,
+        ge=5,
+        description=(
+            "Phase 3 / plane-integration-revival (2026-09-20): how "
+            "often ``PlaneSyncWatchdogService`` runs its re-drive "
+            "sweep for projects in error/drift states (seconds). "
+            "Default 300s — 5min cadence matches the SaaS API rate "
+            "envelope (Plane does not need sub-minute retry). Lower = "
+            "faster recovery for stuck projects but more API traffic; "
+            "floor 5s prevents spin. Out-of-range values FAIL FAST AT "
+            "BOOT via pydantic ValidationError. ALWAYS-ON (no kill-"
+            "switch — per project owner's HARD POLICY on Batch A). "
+            "Override via SERVICES_PLANE_SYNC_WATCHDOG_INTERVAL_SECONDS."
+        ),
+    )
+    plane_sync_watchdog_backoff_base_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Phase 3 / plane-integration-revival: per-project "
+            "exponential backoff base (seconds). attempt_count=2 → "
+            "BASE wait; attempt_count=3 → 2*BASE; etc., capped at "
+            "plane_sync_watchdog_backoff_max_seconds. Default 60s. "
+            "Override via SERVICES_PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS."
+        ),
+    )
+    plane_sync_watchdog_backoff_max_seconds: int = Field(
+        default=1800,
+        ge=1,
+        description=(
+            "Phase 3 / plane-integration-revival: per-project "
+            "exponential backoff ceiling (seconds). Default 1800s "
+            "(30min) — long outages do not push retry delay into the "
+            "hours. Override via SERVICES_PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS."
+        ),
+    )
+    plane_sync_watchdog_max_attempts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Phase 3 / plane-integration-revival: consecutive-failure "
+            "threshold above which the watchdog stops re-driving a "
+            "project (writes a terminal dead-letter hint to "
+            "plane_last_error). The operator can call POST "
+            "/api/plane/sync/{project_id} to reset attempt_count and "
+            "re-drive. Default 5 ≈ 25min of steady-state sweeps before "
+            "quarantine. Override via SERVICES_PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS."
+        ),
+    )
     # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
     # hard cap on the tmp-image store's total disk usage. The store
     # performs a walkdir sum BEFORE each write and raises

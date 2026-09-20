@@ -1,0 +1,979 @@
+"""Phase 4 / plane-integration-revival — hygiene + advisories tests.
+
+Covers the Phase-4 dispatch items:
+
+* ``PLANE_SYNC_ENABLED`` kill-switch (explicitly user-requested,
+  sanctioned 2026-09-20): off → every sync-side surface disabled with
+  NO state writes; default (unset) → everything available.
+* Crash-recovery wedge fix (advisory a): boot sweep recovers rows
+  stuck in ``syncing`` beyond N x interval; fresh syncing rows are
+  left alone.
+* Tightened claim CAS (advisory a(1)): the claim is a rowcount-guarded
+  conditional upsert — a stale read can no longer win the slot.
+* Adopt-path drift threading (advisory i): the adoption UPDATE
+  response feeds the drift check.
+* Attempt-counter preservation on read failure (advisory j): a failed
+  counter read returns ``None`` and PRESERVES the stored value.
+
+Mocking surface mirrors ``tests/unit/test_plane_sync_phase3.py``:
+AsyncMock at the client boundary, in-memory SQLite, monkeypatch for
+env vars. NEVER hits real plane.ensem.dev.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session, create_engine, select
+
+from daemon.clients.plane_http_client import (
+    PlaneAPIError,
+    PlaneIdentifierCollisionError,
+)
+from daemon.constants import (
+    PLANE_ATTEMPT_COUNT_METADATA_KEY,
+    PLANE_LAST_ATTEMPT_METADATA_KEY,
+    PLANE_LAST_ERROR_METADATA_KEY,
+    PLANE_PROJECT_ID_METADATA_KEY,
+    PLANE_SYNC_STATE_ERROR,
+    PLANE_SYNC_STATE_DRIFT,
+    PLANE_SYNC_STATE_LINKED,
+    PLANE_SYNC_STATE_METADATA_KEY,
+    PLANE_SYNC_STATE_SYNCING,
+)
+from daemon.repositories import SQLModelProjectRepository
+from daemon.repositories.project.models import (
+    Project,
+    ProjectMetadataRecord,
+    ProjectShortnameLink,
+)
+from daemon.services.plane_sync_service import (
+    PlaneSyncService,
+    plane_sync_enabled,
+)
+from daemon.services.plane_sync_watchdog_service import (
+    PlaneSyncWatchdogService,
+)
+from daemon.tools.plane_sync import (
+    _last_sync,
+    create_plane_sync_tools,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixtures (mirrors test_plane_sync_phase3.py — file runnable in isolation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def engine():
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _ = (Project, ProjectMetadataRecord, ProjectShortnameLink)
+    SQLModel.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture
+def repo(engine) -> SQLModelProjectRepository:
+    return SQLModelProjectRepository(engine)
+
+
+@pytest.fixture
+def mock_plane_env(monkeypatch):
+    """Enable the integration AND clear both kill-switches (opt-in
+    fixture shadows the conftest autouse clearing, so the switches
+    must be cleared explicitly here)."""
+    monkeypatch.setenv("PLANE_BASE_URL", "https://plane.example.com")
+    monkeypatch.setenv("PLANE_API_KEY", "test-api-key-xyz")
+    monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test-ws")
+    monkeypatch.delenv("PLANE_SYNC_ENABLED", raising=False)
+    monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def clear_cooldown():
+    """Reset the tool-level cooldown dict between tests."""
+    _last_sync.clear()
+    yield
+    _last_sync.clear()
+
+
+def _make_client_mock() -> MagicMock:
+    mock = MagicMock()
+    mock.create_project = AsyncMock(return_value={"id": "plane-1"})
+    mock.update_project = AsyncMock(return_value={"id": "plane-1"})
+    mock.list_projects = AsyncMock(return_value=[])
+    mock.get_project = AsyncMock(return_value={"id": "plane-1"})
+    return mock
+
+
+def _seed_state(repo, project_id, key, value):
+    with Session(repo.engine) as session:
+        repo.set_metadata_record(session, project_id, key, value)
+        session.commit()
+
+
+def _read_meta(repo, project_id) -> dict:
+    with Session(repo.engine) as session:
+        records = repo.list_metadata_records(session, project_id)
+    return {r.meta_key: r.meta_value for r in records}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PLANE_SYNC_ENABLED kill-switch
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPlaneSyncEnabledKillSwitch:
+    """PLANE_SYNC_ENABLED — explicitly user-requested integration
+    kill-switch (sanctioned 2026-09-20). Default ON; OFF must produce
+    the no-key surfaces with NO error-state writes."""
+
+    def test_default_unset_is_enabled(self, monkeypatch):
+        monkeypatch.delenv("PLANE_SYNC_ENABLED", raising=False)
+        assert plane_sync_enabled() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "False", "no", "OFF", " off "])
+    def test_falsy_values_disable(self, monkeypatch, value):
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", value)
+        assert plane_sync_enabled() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", ""])
+    def test_other_values_keep_enabled(self, monkeypatch, value):
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", value)
+        assert plane_sync_enabled() is True
+
+    def test_is_available_false_when_switch_off(self, repo, mock_plane_env, monkeypatch):
+        """Switch off beats full env config — the gate is independent."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        assert PlaneSyncService.is_available() is False
+        assert "PLANE_SYNC_ENABLED" in PlaneSyncService.unavailable_reason()
+
+    def test_sync_project_disabled_without_state_writes(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """Switch off + env configured + client mock injected →
+        ``disabled``, and the pre-seeded error row is untouched (same
+        discipline as the no-key path)."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="SwitchOffProj")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_ERROR)
+
+        mock = _make_client_mock()
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError("must not be called when disabled")
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "disabled"
+        assert "PLANE_SYNC_ENABLED" in result["message"]
+        mock.list_projects.assert_not_called()
+
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+    def test_watchdog_noop_with_boot_log(self, repo, mock_plane_env, monkeypatch, caplog):
+        """Switch off → sweep_once emits ONE boot log line naming the
+        kill-switch and returns an all-zero summary; an error row is
+        not mutated."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="SwitchOffWatchdog")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_ERROR)
+
+        watchdog = PlaneSyncWatchdogService(repo, interval_seconds=1)
+        with caplog.at_level(logging.INFO, logger="daemon.services.plane_sync_watchdog_service"):
+            summary = asyncio.run(watchdog.sweep_once())
+
+        assert summary["considered"] == 0
+        assert summary["re_drove"] == 0
+        assert summary["recovered_stale_syncing"] == 0
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+        switch_lines = [
+            r for r in caplog.records if "PLANE_SYNC_ENABLED" in r.getMessage()
+        ]
+        assert len(switch_lines) == 1
+
+    def test_watchdog_noop_boot_log_emitted_once(self, repo, mock_plane_env, monkeypatch, caplog):
+        """The boot log is a ONE-line-per-watchdog notice, not per-tick."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        watchdog = PlaneSyncWatchdogService(repo, interval_seconds=1)
+        with caplog.at_level(logging.INFO, logger="daemon.services.plane_sync_watchdog_service"):
+            asyncio.run(watchdog.sweep_once())
+            asyncio.run(watchdog.sweep_once())
+        switch_lines = [
+            r for r in caplog.records if "PLANE_SYNC_ENABLED" in r.getMessage()
+        ]
+        assert len(switch_lines) == 1
+
+    def test_tool_disabled(self, repo, mock_plane_env, monkeypatch):
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        tools = create_plane_sync_tools(repo)
+        result = tools[0].func(project_id="any-id")
+        assert result["status"] == "disabled"
+        assert "PLANE_SYNC_ENABLED" in result["message"]
+
+    def test_explicit_true_keeps_available(self, repo, mock_plane_env, monkeypatch):
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "true")
+        assert PlaneSyncService.is_available() is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Crash-recovery: stale ``syncing`` rows (advisory a-2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStaleSyncingRecovery:
+    """Boot sweep must recover rows wedged in ``syncing`` (claimer died
+    between claim and release) — the wedge class that strands slots."""
+
+    def _seed_syncing(self, repo, project_id, *, attempt_age_seconds):
+        _seed_state(repo, project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_SYNCING)
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=attempt_age_seconds)
+        _seed_state(repo, project_id, PLANE_LAST_ATTEMPT_METADATA_KEY,
+                    stamp.isoformat())
+
+    def test_stale_syncing_recovered_and_re_driven(self, repo, mock_plane_env):
+        project = repo.create(name="WedgedRow")
+        self._seed_syncing(repo, project.project_id, attempt_age_seconds=600)
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            return_value=[{"id": "plane-1", "name": "WedgedRow"}]
+        )
+        mock.update_project = AsyncMock(
+            return_value={"id": "plane-1", "name": "WedgedRow"}
+        )
+        sync_service = PlaneSyncService(repo, http_client=mock)
+        # interval=1 → stale threshold 2s; attempt is 600s old → stale.
+        watchdog = PlaneSyncWatchdogService(repo, interval_seconds=1,
+                                            sync_service=sync_service)
+        summary = asyncio.run(watchdog.sweep_once())
+
+        assert summary["recovered_stale_syncing"] == 1
+        assert summary["re_drove"] == 1
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_LINKED
+
+    def test_fresh_syncing_row_not_stolen(self, repo, mock_plane_env):
+        """A healthy in-flight sync (attempt seconds old) is untouched —
+        no false steal, no double-drive."""
+        project = repo.create(name="LiveSyncRow")
+        self._seed_syncing(repo, project.project_id, attempt_age_seconds=0)
+
+        mock = _make_client_mock()
+        sync_service = PlaneSyncService(repo, http_client=mock)
+        watchdog = PlaneSyncWatchdogService(repo, interval_seconds=300,
+                                            sync_service=sync_service)
+        summary = asyncio.run(watchdog.sweep_once())
+
+        assert summary["recovered_stale_syncing"] == 0
+        assert summary["re_drove"] == 0
+        mock.list_projects.assert_not_called()
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_SYNCING
+
+    def test_missing_attempt_timestamp_counts_as_stale(self, repo, mock_plane_env):
+        """Claim stamps the attempt immediately after taking the slot —
+        a syncing row with NO attempt stamp died between the two writes."""
+        project = repo.create(name="NoStampRow")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_SYNCING)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.is_stale_syncing(
+            project.project_id, stale_after_seconds=2
+        ) is True
+
+    def test_fail_stale_syncing_is_cas_guarded(self, repo, mock_plane_env):
+        """The steal only fires while the row is STILL ``syncing`` — a
+        sync that released between check and steal is not clobbered."""
+        project = repo.create(name="RaceRow")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_LINKED)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.fail_stale_syncing(project.project_id) is False
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_LINKED
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tightened claim CAS (advisory a-1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestClaimCas:
+    """claim_sync_slot is a rowcount-guarded conditional upsert."""
+
+    def test_claim_inserts_when_row_missing(self, repo, mock_plane_env):
+        project = repo.create(name="FreshClaim")
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.claim_sync_slot(project.project_id) is True
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_SYNCING
+
+    def test_claim_from_linked_state(self, repo, mock_plane_env):
+        project = repo.create(name="LinkedClaim")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_LINKED)
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.claim_sync_slot(project.project_id) is True
+
+    def test_second_claim_refused_while_syncing(self, repo, mock_plane_env):
+        """Rowcount-guarded: once the slot is held, ANY further claim is
+        refused — including from a caller holding a STALE read."""
+        project = repo.create(name="HeldSlot")
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.claim_sync_slot(project.project_id) is True
+        assert svc.claim_sync_slot(project.project_id) is False
+
+    def test_stale_read_cannot_win_the_slot(self, repo, mock_plane_env, monkeypatch):
+        """THE race pin: a claimer whose metadata READ predates another
+        caller's claim must still be refused. Under the old
+        read-check-write implementation this succeeded (TOCTOU); under
+        the conditional upsert the DB row is the authority."""
+        project = repo.create(name="StaleReader")
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_SYNCING)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        # Simulate a stale cached read that says "linked".
+        monkeypatch.setattr(
+            svc,
+            "get_state_metadata",
+            lambda pid: {PLANE_SYNC_STATE_METADATA_KEY: PLANE_SYNC_STATE_LINKED},
+        )
+        assert svc.claim_sync_slot(project.project_id) is False
+
+    def test_claim_fails_closed_on_db_error(self, repo, mock_plane_env, monkeypatch):
+        """Guard-write failure → no claim (fail-closed): the sync must
+        not run without a durable re-entrancy claim."""
+        project = repo.create(name="DbFailClaim")
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+
+        def boom(session):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(repo, "_get_dialect_insert", boom)
+        assert svc.claim_sync_slot(project.project_id) is False
+
+    def test_endpoint_claim_release_cycle_still_works(self, repo, mock_plane_env):
+        """The endpoint contract (claim → sync with claim_slot=False →
+        release) is preserved by the CAS rewrite."""
+        project = repo.create(name="CycleRow")
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        assert svc.claim_sync_slot(project.project_id) is True
+        result = asyncio.run(
+            svc.sync_project(project.project_id, claim_slot=False)
+        )
+        assert result["status"] == "linked"
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_LINKED
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adopt-path drift threading (advisory i)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAdoptPathDrift:
+    """Adoption sync previously hardcoded ``plane_response = {}`` so a
+    Plane-side divergence at adoption time was invisible (state
+    mis-marked ``linked``)."""
+
+    def test_adopt_with_divergent_response_flags_drift(self, repo, mock_plane_env):
+        project = repo.create(name="AdoptDrift", description="d")
+        # No plane_project_id → CREATE/adopt path. Plane has a match.
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            return_value=[{"id": "plane-existing", "name": "AdoptDrift"}]
+        )
+        # The adoption UPDATE response disagrees on identity → drift.
+        mock.update_project = AsyncMock(
+            return_value={"id": "plane-existing", "name": "OTHER", "description": "d"}
+        )
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError("adopt path must not create")
+        )
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_DRIFT
+        assert result["action"] == "updated"
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_DRIFT
+        assert meta[PLANE_PROJECT_ID_METADATA_KEY] == "plane-existing"
+
+    def test_adopt_with_agreeing_response_is_linked(self, repo, mock_plane_env):
+        project = repo.create(name="AdoptOk", description="d")
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            return_value=[{"id": "plane-existing", "name": "AdoptOk"}]
+        )
+        mock.update_project = AsyncMock(
+            return_value={"id": "plane-existing", "name": "AdoptOk", "description": "d"}
+        )
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_LINKED
+
+    def test_fresh_create_still_trivially_linked(self, repo, mock_plane_env):
+        """No Plane match → CREATE path → ``plane_response`` is {} →
+        no drift (fresh row trivially agrees)."""
+        project = repo.create(name="FreshCreate")
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_LINKED
+        assert result["action"] == "created"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Attempt-counter preservation on read failure (advisory j)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAttemptCounterPreservation:
+    """A failed counter READ must not reset the stored counter."""
+
+    def test_read_failure_returns_none_and_preserves_value(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        project = repo.create(name="CounterPreserve")
+        _seed_state(repo, project.project_id,
+                    PLANE_ATTEMPT_COUNT_METADATA_KEY, 3)
+        _seed_state(repo, project.project_id, PLANE_SYNC_STATE_METADATA_KEY,
+                    PLANE_SYNC_STATE_ERROR)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+
+        def broken_list(session, pid):
+            raise RuntimeError("read failed")
+
+        monkeypatch.setattr(repo, "list_metadata_records", broken_list)
+        assert svc._bump_attempt_count(project.project_id) is None
+
+        # The stored value is PRESERVED (old code reset it to 1) —
+        # verify via a direct select (the repo method stays patched).
+        with Session(repo.engine) as session:
+            rec = session.exec(
+                select(ProjectMetadataRecord).where(
+                    ProjectMetadataRecord.project_id == project.project_id,
+                    ProjectMetadataRecord.meta_key
+                    == PLANE_ATTEMPT_COUNT_METADATA_KEY,
+                )
+            ).first()
+        assert rec is not None
+        assert rec.meta_value == 3
+
+    def test_error_path_response_carries_attempt_none_on_read_failure(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """The sync_project error handlers surface attempt=None (not a
+        fabricated 1) when the counter read failed.
+
+        The read failure is injected ONLY at the counter call (3rd
+        ``list_metadata_records`` call: 1 = project load enrichment,
+        2 = sync's pre-claim metadata read, 3 = counter read) — earlier
+        callers must still succeed for the flow to reach the error
+        handler.
+        """
+        project = repo.create(name="AttemptNone")
+        _seed_state(repo, project.project_id, PLANE_PROJECT_ID_METADATA_KEY,
+                    "plane-existing")
+
+        mock = _make_client_mock()
+        mock.update_project = AsyncMock(side_effect=Exception("plane down"))
+        svc = PlaneSyncService(repo, http_client=mock)
+
+        real_list = repo.list_metadata_records
+        calls = {"n": 0}
+
+        def flaky_list(session, pid):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                raise RuntimeError("read failed")
+            return real_list(session, pid)
+
+        monkeypatch.setattr(repo, "list_metadata_records", flaky_list)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == "error"
+        assert result["attempt"] is None
+        assert calls["n"] == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wave-2 advisories — early-return slot release + list-failure guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEarlyReturnSlotRelease:
+    """Wave-2 advisory: when ``sync_project`` early-returns while the
+    CALLER holds the slot (``claim_slot=False`` — the HTTP router's
+    pattern), the slot MUST be released. The old code only released on
+    the success/error path through the create/update try/except, leaving
+    the row wedged in ``syncing`` for
+    ``STALE_SYNCING_INTERVAL_MULTIPLIER x interval`` (default 2 x 300s =
+    600s) waiting for the stale-steal pass to heal it.
+
+    The pre-claim ``plane_sync_state`` is unknown at the early-return
+    points (the metadata read happens AFTER them) — ``error`` with
+    ``plane_last_error`` set is the documented fallback (and the
+    watchdog retry pass is happy to re-drive an ``error`` row)."""
+
+    def test_disabled_path_releases_claim(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """``PLANE_SYNC_ENABLED=false`` + ``claim_slot=False`` ⇒ row
+        leaves ``syncing`` immediately (NOT wedged for the
+        stale-steal window)."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="WedgeOnDisabled")
+        # Simulate the router having already claimed the slot.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_SYNCING,
+        )
+
+        mock = _make_client_mock()
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "must not be called on disabled early-return"
+            )
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(
+            svc.sync_project(project.project_id, claim_slot=False)
+        )
+
+        assert result["status"] == "disabled"
+        meta = _read_meta(repo, project.project_id)
+        # The slot was released to error; the row is no longer wedged.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        # plane_last_error explains why the row left syncing.
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        assert (
+            "claim_slot=False" in meta[PLANE_LAST_ERROR_METADATA_KEY]
+        )
+        # A subsequent claim succeeds immediately — the watchdog /
+        # operator path is unblocked.
+        assert svc.claim_sync_slot(project.project_id) is True
+
+    def test_not_found_path_releases_claim(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """Caller held the claim + project deleted between router's
+        existence check and sync_project's → row leaves ``syncing``
+        immediately rather than waiting for stale-steal."""
+        project = repo.create(name="DeletedMidSync")
+        # Simulate the router having already claimed the slot for a
+        # project that has since been removed.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_SYNCING,
+        )
+        # Replace the repo's ``get`` so sync_project sees the project
+        # as gone (the race: router's existence check passed earlier,
+        # but the project is deleted by the time sync_project's
+        # internal check fires).
+        def no_get(project_id):
+            return None
+
+        monkeypatch.setattr(repo, "get", no_get)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        result = asyncio.run(
+            svc.sync_project(project.project_id, claim_slot=False)
+        )
+
+        assert result["status"] == "not_found"
+        meta = _read_meta(repo, project.project_id)
+        # Row left 'syncing' — would have been wedged without the fix.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        assert (
+            "claim_slot=False" in meta[PLANE_LAST_ERROR_METADATA_KEY]
+        )
+
+    def test_claim_slot_true_does_not_release_on_early_return(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """``claim_slot=True`` is the watchdog / fire-and-forget
+        pattern — the slot is held by the SAME flow that owns the
+        early-return, and the claim hasn't fired yet at the
+        disabled/not_found early-return points. The fix MUST NOT
+        release a slot this caller never claimed. (Without the
+        ``if not claim_slot`` guard the watchdog would clobber a
+        stale read on a row it does not own.)"""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="WatcherNoOp")
+        # Pre-seed state to 'error' — the watchdog's natural re-drive
+        # target. The fix must NOT touch it on the disabled early-return.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_ERROR,
+        )
+
+        mock = _make_client_mock()
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+        # claim_slot=True (default) — early-return leaves the row alone.
+        assert result["status"] == "disabled"
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+
+class TestIdempotencyListFailureGuard:
+    """Wave-2 advisory: a transient ``list_projects()`` failure MUST
+    NOT fall through to ``create_project``. The list is the only
+    idempotency guard before CREATE; if we cannot enumerate, creating
+    is unsafe (a Plane-side duplicate is the cost). The fix re-raises
+    ``PlaneAPIError`` so the outer ``sync_project``'s ``except
+    PlaneAPIError`` handler stamps ``error`` + bumps ``attempt_count``
+    + sets ``plane_last_error`` — the watchdog re-drives on the next
+    sweep."""
+
+    def test_list_failure_errors_out_without_calling_create(
+        self, repo, mock_plane_env
+    ):
+        """``list_projects`` raises ``PlaneAPIError`` ⇒ ``create_project``
+        is NEVER called; status is ``error``; the row is
+        retry-eligible (state=error, attempt>=1)."""
+        project = repo.create(name="ListFailProj")
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            side_effect=PlaneAPIError("plane list 503 transient")
+        )
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "must not CREATE when list_projects fails "
+                "(list is the idempotency guard)"
+            )
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        # No CREATE was attempted.
+        mock.create_project.assert_not_called()
+        # Slot released to error so it is retry-eligible.
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        # The attempt counter was bumped (existing error-path contract).
+        assert PLANE_ATTEMPT_COUNT_METADATA_KEY in meta
+        assert int(meta[PLANE_ATTEMPT_COUNT_METADATA_KEY]) >= 1
+
+    def test_list_failure_does_not_wedge_existing_claim(
+        self, repo, mock_plane_env
+    ):
+        """A transient list failure during CREATE MUST release the
+        sync slot — if we never released, the row would be wedged
+        in ``syncing`` until the stale-steal pass recovered it.
+        Pre-seed ``error`` (a retryable state — the watchdog's
+        normal re-drive target) so the claim succeeds; the list
+        fails AFTER the claim, simulating the production race.
+        """
+        project = repo.create(name="SyncingListFail")
+        # Retryable state → watchdog's normal re-drive target → the
+        # claim acquires the slot cleanly.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_ERROR,
+        )
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            side_effect=PlaneAPIError("plane list 503 transient")
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        meta = _read_meta(repo, project.project_id)
+        # The outer PlaneAPIError handler released the slot — the row
+        # is no longer wedged in 'syncing'.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D3 — create_payload_identifier + deterministic collision fallback
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Live evidence: POST without ``identifier`` returns HTTP 400
+# ``{"identifier":["This field is required."]}`` (verified against
+# plane.ensem.dev on 2026-09-20). The CREATE path can NEVER reach
+# linked without a valid identifier. The fix: derive a deterministic
+# identifier from the ensemble project (shortname preferred, name
+# fallback), uppercase + alphanumeric + ≤12 chars (Plane's max);
+# on PlaneIdentifierCollisionError (409) retry with a deterministic
+# suffix (attempt+1 → ENSEMBLE2, ENSEMBLE3, ...).
+#
+# Pure-function pins (derive_plane_identifier, _env) live in
+# tests/unit/test_plane_identifier.py. These are the integration pins
+# that exercise the actual sync-service retry loop.
+
+
+class TestCreatePayloadIdentifier:
+    """The CREATE payload MUST include a Plane-valid ``identifier``.
+
+    Pre-fix: ``create_project`` was called with ``name`` +
+    ``description`` only. Plane returned 400 ``{"identifier": …}`` on
+    every fresh sync → ``syncing`` → ``error`` → re-drive forever.
+    """
+
+    def test_create_payload_includes_identifier(self, repo, mock_plane_env):
+        """First-attempt CREATE sends ``identifier`` derived from the
+        project's shortname (preferred) or name (fallback). Without
+        this, Plane returns 400 — verified live 2026-09-20."""
+        project = repo.create(name="AgentsEnsemble")
+        # No plane_project_id → CREATE path. Plane has no match.
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        # The create_project call MUST carry a valid ``identifier``.
+        assert mock.create_project.call_count == 1
+        kwargs = mock.create_project.call_args.kwargs
+        assert "identifier" in kwargs, (
+            "create_project must receive an ``identifier`` kwarg — "
+            "Plane returns 400 if missing (verified live 2026-09-20)"
+        )
+        identifier = kwargs["identifier"]
+        # Identifier conforms to the live-verified Plane rules.
+        assert 1 <= len(identifier) <= 12, identifier
+        assert identifier.isalnum(), identifier
+        assert identifier.isupper(), identifier
+        # The seed for "AgentsEnsemble" → "AGENTSENSEMBLE" (12 chars).
+        assert identifier == "AGENTSENSEMB"
+
+    def test_create_payload_identifier_uses_shortname_when_present(
+        self, repo, mock_plane_env
+    ):
+        """``shortnames[0]`` is the preferred seed — already short and
+        human-set. ``name`` is the fallback only when shortnames is
+        empty."""
+        project = repo.create(name="A Very Long Project Name")
+        # Seed shortname on the freshly-created project via the
+        # repository's add_shortname path (mirrors real creation flow).
+        repo.add_shortname(project.project_id, "avlp")
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        kwargs = mock.create_project.call_args.kwargs
+        assert kwargs["identifier"] == "AVLP"
+
+    def test_create_payload_identifier_is_deterministic_across_retries(
+        self, repo, mock_plane_env
+    ):
+        """Two CREATE flows for the same project MUST yield the same
+        identifier — retries converge, no random churn.
+
+        Without this, the watchdog's re-drive would mint a fresh
+        identifier per attempt, polluting Plane with one-off rows.
+
+        Setup: a single CREATE flow. The determinism contract is
+        checked against the pure ``derive_plane_identifier`` (a
+        second CREATE on the same project would take the adopt/UPDATE
+        path because the first sync persisted ``plane_project_id``,
+        which is itself proof that the second flow would NOT mint a
+        fresh identifier)."""
+        from daemon.clients.plane_http_client import (
+            derive_plane_identifier,
+        )
+
+        project = repo.create(name="DetProj")
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        id_1 = mock.create_project.call_args.kwargs["identifier"]
+        # The identifier matches the pure deterministic derivation —
+        # same project, same attempt (1), same input → same output,
+        # by construction.
+        assert id_1 == derive_plane_identifier("DetProj", attempt=1)
+        # Calling the helper again produces the same output (the
+        # actual "across retries" contract).
+        assert id_1 == derive_plane_identifier("DetProj", attempt=1)
+
+
+class TestCreateIdentifierCollisionRetry:
+    """On HTTP 409 (PlaneIdentifierCollisionError), the sync service
+    MUST retry with a deterministic suffixed identifier — same
+    ensemble project + same attempt index → same suffix, never
+    random."""
+
+    def test_collision_triggers_deterministic_suffix_retry(
+        self, repo, mock_plane_env
+    ):
+        """First call: 409 (identifier taken). Second call: 201 with
+        the suffixed identifier. The suffix is deterministic — same
+        project, same attempt, same identifier across processes."""
+        # ≤12 char base → no truncation; collision → retry with
+        # suffixed identifier.
+        project = repo.create(name="CollideProj")
+
+        call_identifiers: list[str] = []
+
+        async def flaky_create(**kwargs):
+            call_identifiers.append(kwargs.get("identifier"))
+            if kwargs.get("identifier") == "COLLIDEPROJ":
+                raise PlaneIdentifierCollisionError(
+                    "Plane identifier conflict",
+                    status_code=409,
+                    body='{"identifier":["already exists"]}',
+                )
+            return {"id": "plane-after-retry"}
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=flaky_create)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # First attempt used the base identifier (taken → 409).
+        # Second attempt used the suffixed identifier (succeeded).
+        assert call_identifiers[0] == "COLLIDEPROJ"
+        assert len(call_identifiers) >= 2
+        assert call_identifiers[1] != call_identifiers[0]
+        assert call_identifiers[1].endswith("2"), (
+            f"Retry suffix MUST be deterministic decimal attempt "
+            f"number — got {call_identifiers[1]!r}"
+        )
+        # The sync succeeded after retry.
+        assert result["status"] == PLANE_SYNC_STATE_LINKED
+        assert result["action"] == "created"
+
+    def test_collision_retry_uses_shortname_seed(
+        self, repo, mock_plane_env
+    ):
+        """The retry path uses the same seed (shortnames[0]) as the
+        first attempt — the only thing that changes is the attempt
+        counter (which drives the deterministic suffix)."""
+        project = repo.create(name="Full Project Name")
+        repo.add_shortname(project.project_id, "fpn")
+
+        call_identifiers: list[str] = []
+
+        async def flaky_create(**kwargs):
+            ident = kwargs.get("identifier")
+            call_identifiers.append(ident)
+            if ident == "FPN":
+                raise PlaneIdentifierCollisionError(
+                    "taken", status_code=409
+                )
+            return {"id": "plane-after-retry"}
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=flaky_create)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        # First attempt: ``FPN`` (taken).
+        assert call_identifiers[0] == "FPN"
+        # Second attempt: ``FPN2`` (base truncated to fit "2" suffix;
+        # here FPN + "2" = 4 chars, no truncation needed).
+        assert call_identifiers[1] == "FPN2"
+
+    def test_collision_budget_exhaustion_records_error(
+        self, repo, mock_plane_env
+    ):
+        """If Plane rejects every deterministic identifier through
+        the retry budget, the sync must stamp ``error`` and let the
+        watchdog re-drive — the row is NOT wedged in ``syncing``."""
+        from daemon.services.plane_sync_service import (
+            _PLANE_IDENTIFIER_MAX_ATTEMPTS,
+        )
+
+        project = repo.create(name="AlwaysCollides")
+
+        async def always_collide(**_kwargs):
+            raise PlaneIdentifierCollisionError(
+                "taken", status_code=409
+            )
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=always_collide)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Budget exhausted exactly.
+        assert mock.create_project.call_count == _PLANE_IDENTIFIER_MAX_ATTEMPTS
+        # Sync recorded an error — NOT a wedged ``syncing``.
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+    def test_non_collision_plane_api_error_does_not_retry(
+        self, repo, mock_plane_env
+    ):
+        """A non-collision ``PlaneAPIError`` (e.g. 400 bad payload,
+        500 server) MUST propagate without retrying — the retry loop
+        is for identifier-collision ONLY. The outer error handler
+        stamps ``error`` on the row."""
+        project = repo.create(name="BadPayloadProj")
+        call_count = {"n": 0}
+
+        async def bad_request(**_kwargs):
+            call_count["n"] += 1
+            raise PlaneAPIError("bad payload", status_code=400)
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=bad_request)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Exactly one attempt — no retry on non-collision errors.
+        assert call_count["n"] == 1
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
