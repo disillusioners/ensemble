@@ -19,6 +19,7 @@ from ..registry import get_registry
 from .completion_content import (
     event_created_at_as_utc,
     get_last_assistant_message,
+    get_last_assistant_timestamp,
     parse_checkpoint_ts,
 )
 from .main_loop_bridge import MainLoopBridge
@@ -414,10 +415,27 @@ Provide a concise summary:"""
         # regardless of current status (e.g., RUNNING from previous cascade). This ensures
         # parent waits for ALL children before completing, not just the first batch.
         if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
-            # DEFECT-2 FIX: full completion gate — waiting_for==0 AND pending_count==0
+            # DEFECT-2 FIX (Round 1): full completion gate — waiting_for==0 AND pending_count==0
             # AND fresh assistant message after the last child_completed. Suppressed
             # parents are held in WAITING_CHILDREN; the predicate is re-evaluated on
             # the existing message-completed signal (event-driven, no polling).
+            #
+            # COUNCIL FINDING 1 (Round 2 — cascade-gate reality):
+            # In the cascade lane, ``_create_completion_report`` was called upstream
+            # and ``session.add(report_message)`` already staged a READY report row
+            # for the parent. SQLAlchemy autoflush makes that staged row visible to
+            # the pending_count query, so this gate ALWAYS returns False in normal
+            # cascade traffic — ``pending_count>=1``. This is INTENTIONALLY
+            # conservative: the cascade lane's role is to defer and wait, NOT to
+            # be load-bearing for the terminal decision. The load-bearing gates are
+            # the emission-time re-check at :~950 (this module) and the mirror at
+            # :~765-771 (root lane, added Round 2). The message-completed signal
+            # is the event-driven path that re-evaluates the gate and ultimately
+            # transitions the instance to COMPLETED via the root lane.
+            #
+            # Test coverage: TestCascadeCompletionGate in
+            # tests/job_queue/test_job_result_summary_and_gate.py exercises the
+            # real production sequence without mocking this gate.
             allowed, block_reason = await self._root_completion_gate(
                 session, parent.instance_id, waiting_for=parent.waiting_for
             )
@@ -544,6 +562,11 @@ Provide a concise summary:"""
         child completion report — otherwise its "final" message predates the
         last child's report and the subtree isn't truly done (job 5e197a30).
 
+        Uses ``get_last_assistant_timestamp`` (NOT ``get_last_assistant_message``)
+        so empty-content AI turns (e.g. pure tool-call responses) still count as
+        a fresh response. This closes the empty-final-turn wedge where the parent
+        processed the report but produced no visible content.
+
         Args:
             session: Open DB session (used for the child_completed lookup).
             instance_id: The instance (root/parent) to check.
@@ -567,7 +590,10 @@ Provide a concise summary:"""
             return True, None
 
         try:
-            _content, last_assistant_ts = await get_last_assistant_message(
+            # EMPTY-FINAL-TURN WEDGE CLOSURE: any AI message (even empty content)
+            # counts as fresh. A pure tool-call response still indicates the
+            # instance responded AFTER the child_completed event.
+            last_assistant_ts = await get_last_assistant_timestamp(
                 self._checkpointer, instance_id
             )
 
@@ -602,6 +628,82 @@ Provide a concise summary:"""
             f"child_completed ({last_child_dt.isoformat()})"
         )
 
+    async def _gate_wedge_resolver(
+        self,
+        session,
+        instance_id: str,
+    ) -> tuple[bool, str | None]:
+        """Wedge resolver: close the stale-readable / dead-letter wedge paths.
+
+        Wedge paths occur when ``_assistant_message_fresh`` returns False (the
+        parent has a stale assistant timestamp) BUT pending_count is already 0
+        — the gate cannot wait for a response that will never come. In that
+        situation, if the most recent message for this instance is in a
+        TERMINAL state (COMPLETED or FAILED), the parent has done all it can
+        and the job must terminate. We allow the gate to pass with a best-
+        effort empty result; the result_summary will be None or whatever the
+        checkpointer returns.
+
+        Three wedge paths close via this resolver (all event-driven, no polling):
+
+        (a) STALE-READABLE: parent's last assistant timestamp is readable but
+            predates the most recent child_completed (no new AI response).
+            If the report message that triggered the child_completed has been
+            processed to a terminal state, the parent is wedged: allow.
+
+        (b) EMPTY-FINAL-TURN: parent processed the report and produced only
+            tool calls (no content). With the empty-content-aware
+            ``get_last_assistant_timestamp`` change, the freshness check now
+            returns True for this case — the wedge resolver is a belt-and-
+            suspenders for the race where the AI message is unparseable.
+
+        (c) DEAD-LETTER: the completion report message transitions to FAILED
+            after max retries. The parent never had a chance to respond. If
+            the FAILED message is the most recent for this instance, the
+            parent is wedged: allow with empty result.
+
+        Trigger: the existing message-completed signal (for paths a/b) and
+        the new ``_on_stale_task_permanent_failure`` wedge hook in
+        ``manager.py`` (for path c, fires on the FAILED transition).
+
+        Args:
+            session: Open DB session with the staged child_completed event.
+            instance_id: The instance to evaluate.
+
+        Returns:
+            (allowed, reason): True (no reason) when the wedge is closed;
+            False + reason when neither freshness nor terminal-state apply.
+        """
+        is_fresh, reason = await self._assistant_message_fresh(session, instance_id)
+        if is_fresh:
+            return True, None
+
+        # Wedge detected: freshness failed but pending_count is already 0
+        # (gate's pending_count leg already passed). Check the most recent
+        # terminal-state message for this instance.
+        last_terminal_msg_id = session.exec(
+            select(MessageQueue.message_id)
+            .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.status.in_([
+                MessageStatus.COMPLETED.value,
+                MessageStatus.FAILED.value,
+            ]))
+            .order_by(MessageQueue.completed_at.desc())
+            .limit(1)
+        ).first()
+
+        if last_terminal_msg_id is not None:
+            logger.warning(
+                "Wedge-resolver: instance %s... freshness failed but most "
+                "recent message is terminal (message_id=%s); allowing "
+                "completion with best-effort empty result",
+                instance_id[:8],
+                last_terminal_msg_id[:8],
+            )
+            return True, None
+
+        return False, reason
+
     async def _root_completion_gate(
         self,
         session,
@@ -615,7 +717,9 @@ Provide a concise summary:"""
           1. waiting_for == 0 — no outstanding children
           2. pending_count == 0 — no queued/processing messages
           3. fresh assistant message after the last child_completed event —
-             the instance has responded to every child report
+             the instance has responded to every child report. Wedge-resolved
+             by ``_gate_wedge_resolver`` when freshness fails but the most
+             recent message is terminal (best-effort empty result).
 
         Suppressed instances are held in WAITING_CHILDREN; the predicate is
         re-evaluated on the existing message-completed signal (each completed
@@ -657,7 +761,10 @@ Provide a concise summary:"""
             if pending_count > 0:
                 return False, f"pending_count={pending_count}"
 
-            return await self._assistant_message_fresh(session, instance_id)
+            # DEADLOCK GUARD: route the freshness leg through the wedge resolver
+            # so dead-letter / empty-final-turn / stale-readable wedge paths
+            # close event-driven (no polling).
+            return await self._gate_wedge_resolver(session, instance_id)
         finally:
             if owns_session:
                 session.close()
@@ -750,6 +857,58 @@ Provide a concise summary:"""
                 instance.version = (instance.version or 1) + 1
 
                 session.commit()
+
+                # COUNCIL FINDING 5 (Round 2 — root/cascade symmetry):
+                # The root lane's gate decision at :~825 and the publish below are
+                # separated by a small window (commit + SSE broadcast). A concurrent
+                # message enqueue for this instance could regress the predicate
+                # (new READY message → pending_count>0). The cascade lane's
+                # emission-time gate at :~950 is the mirror; the root lane needs
+                # the same protection for symmetry. Fail-open for parity with the
+                # adjacent publish: if the mirror raises, log and proceed.
+                try:
+                    mirror_allowed, mirror_reason = await self._root_completion_gate(
+                        None, instance_id
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Root emission-time mirror gate raised for %s...: %s; "
+                        "fail-open to publish (degraded safety)",
+                        instance_id[:8], e,
+                    )
+                    mirror_allowed = True
+                    mirror_reason = None
+
+                if not mirror_allowed:
+                    # Gate regressed between decision and commit. Downgrade the
+                    # root back to WAITING_CHILDREN; the message-completed signal
+                    # (fired by any newly-enqueued message's processing) will
+                    # re-evaluate and finish the job properly.
+                    logger.warning(
+                        "Root %s... emission-time mirror gate regressed (%s); "
+                        "downgrading to WAITING_CHILDREN (re-evaluate on next "
+                        "message-completed signal)",
+                        instance_id[:8], mirror_reason,
+                    )
+                    try:
+                        with Session(self._manager._engine) as downgrade_session:
+                            row = downgrade_session.get(Instance, instance_id)
+                            if (row is not None
+                                    and row.status == InstanceStatus.COMPLETED.value):
+                                row.status = InstanceStatus.WAITING_CHILDREN.value
+                                row.updated_at = datetime.now(timezone.utc).isoformat()
+                                row.version = (row.version or 1) + 1
+                                downgrade_session.add(row)
+                                downgrade_session.commit()
+                    except Exception as e:
+                        logger.error(
+                            "Failed to downgrade suppressed root %s...: %s",
+                            instance_id[:8], e,
+                        )
+                    # Skip the completed SSE + lifecycle publish; fall through
+                    # to the child's own title generation below.
+                    self._trigger_title_generation(instance_id, completed_message_id)
+                    return
 
                 # Emit status_change SSE event for root instance completed
                 if self._manager._live_hub:
@@ -888,15 +1047,38 @@ Provide a concise summary:"""
         
         # If parent completed (all children done), publish lifecycle event to mark job as completed
         if completed_parent_id:
-            # DEFECT-2 FIX: re-verify the full gate at EMISSION time. The decision
+            # DEFECT-2 FIX (Round 1): re-verify the full gate at EMISSION time. The decision
             # in _update_parent_on_child_complete predates several awaits (SSE,
             # child_completed broadcast); a concurrent child completion can land a
             # new CHILD_COMPLETED event / report in that window. If the gate no
             # longer holds, downgrade the parent so the re-evaluation on the next
             # message-completed signal can finish the job properly.
-            allowed, block_reason = await self._root_completion_gate(
-                None, completed_parent_id
-            )
+            #
+            # COUNCIL FINDING 1 (Round 2 — which gate is load-bearing):
+            # The emission-time gate HERE is the load-bearing check for the
+            # cascade completion path. It runs in a fresh session (so it sees
+            # the committed report row, not a staged one — unlike the cascade
+            # decision at :~421 which is intentionally conservative due to
+            # autoflush skew). On failure, the parent is downgraded back to
+            # WAITING_CHILDREN; the message-completed signal will re-evaluate.
+            #
+            # FAIL-OPEN wrap: the gate call itself must not crash the emit.
+            # If the gate raises (corrupt DB row, etc.), log and proceed to
+            # publish — the adjacent publish is already guarded by try/except,
+            # this gate must be too for parity.
+            try:
+                allowed, block_reason = await self._root_completion_gate(
+                    None, completed_parent_id
+                )
+            except Exception as e:
+                logger.error(
+                    "Emission-time gate raised for parent %s...: %s; "
+                    "fail-open to publish (degraded safety)",
+                    completed_parent_id[:8], e,
+                )
+                allowed = True
+                block_reason = None
+
             if not allowed:
                 logger.warning(
                     "Parent %s... completion publish suppressed at emission time "

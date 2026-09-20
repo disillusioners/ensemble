@@ -103,16 +103,25 @@ class JobRepository:
 
     def get_by_instance(self, instance_id: str) -> JobItem | None:
         """Get a job by instance ID.
-        
+
         Args:
             instance_id: Instance identifier.
-            
+
         Returns:
             JobItem if found, None otherwise.
+
+        Note:
+            ROUND-2 (FINDING 4 nit): ``.first()`` is unordered. For MESSAGE
+            jobs multiple rows can exist for one instance over time; the
+            observer picks the most recent created row. Zero-risk: only the
+            ordering changes, no behavioral impact when one job is present.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.instance_id == instance_id).where(
-                JobItem.deleted_at.is_(None)
+            stmt = (
+                select(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+                .order_by(JobItem.created_at.desc())
             )
             job = db_session.exec(stmt).first()
             return job

@@ -999,10 +999,17 @@ class InstanceManager:
 
     def _on_stale_task_permanent_failure(self, instance_id: str, error: str, message_id: str | None) -> None:
         """Bridge from StaleTaskRecovery thread to InstanceManager._send_error_report.
-        
+
         Called on the recovery thread when a task permanently fails.
         Uses MainLoopBridge to safely invoke the async _send_error_report method.
-        
+
+        For ROOT instances (no parent), also fires the wedge-resolution hook
+        ``_process_child_completion_and_notify_parent``: this re-evaluates the
+        root-completion gate so the dead-letter wedge closes event-driven.
+        ``_send_error_report`` is a no-op for roots (no parent to notify),
+        so the gate hook is the only path that can transition a wedged root
+        out of WAITING_CHILDREN.
+
         Args:
             instance_id: The instance ID that had the stale task.
             error: The error message describing the failure.
@@ -1017,6 +1024,24 @@ class InstanceManager:
                 message_id=message_id,
             )
         )
+
+        # COUNCIL FINDING 2 (Round 2 — deadlock-guard wedge paths):
+        # If the failed task belongs to a ROOT instance (parent_id is None),
+        # ``_send_error_report`` returns early — there is no parent to notify.
+        # The root stays in WAITING_CHILDREN forever, wedged. Fire the gate
+        # re-evaluation: with the wedge resolver in child_reports (terminal
+        # message → best-effort empty result), the root transitions to a
+        # terminal state and the job terminates via the observer.
+        # For non-root instances, ``_send_error_report`` already handles the
+        # cascade — calling the gate hook here would double-decrement the
+        # parent's waiting_for counter.
+        instance = self._instance_repository.get(instance_id)
+        if instance is not None and instance.parent_id is None:
+            MainLoopBridge.run_async_no_wait(
+                self._process_child_completion_and_notify_parent(
+                    instance_id, message_id or ""
+                )
+            )
 
     def setup_worker_pool(
         self,
