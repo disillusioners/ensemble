@@ -26,6 +26,12 @@ from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
+from .completion_content import (
+    event_created_at_as_utc,
+    get_last_assistant_message,
+    get_last_assistant_timestamp,
+    parse_checkpoint_ts,
+)
 from ..write_pause_guard import WriteGuardSession
 from ..constants import (
     DEFERRED_REASON_IDEMPOTENCY_SKIP,
@@ -1799,6 +1805,11 @@ Provide a concise summary:"""
         child completion report — otherwise its "final" message predates the
         last child's report and the subtree isn't truly done (job 5e197a30).
 
+        Uses ``get_last_assistant_timestamp`` (NOT ``get_last_assistant_message``)
+        so empty-content AI turns (e.g. pure tool-call responses) still count as
+        a fresh response. This closes the empty-final-turn wedge where the parent
+        processed the report but produced no visible content.
+
         Args:
             session: Open DB session (used for the child_completed lookup).
             instance_id: The instance (root/parent) to check.
@@ -1822,7 +1833,10 @@ Provide a concise summary:"""
             return True, None
 
         try:
-            _content, last_assistant_ts = await get_last_assistant_message(
+            # EMPTY-FINAL-TURN WEDGE CLOSURE: any AI message (even empty content)
+            # counts as fresh. A pure tool-call response still indicates the
+            # instance responded AFTER the child_completed event.
+            last_assistant_ts = await get_last_assistant_timestamp(
                 self._checkpointer, instance_id
             )
 
@@ -1857,6 +1871,82 @@ Provide a concise summary:"""
             f"child_completed ({last_child_dt.isoformat()})"
         )
 
+    async def _gate_wedge_resolver(
+        self,
+        session,
+        instance_id: str,
+    ) -> tuple[bool, str | None]:
+        """Wedge resolver: close the stale-readable / dead-letter wedge paths.
+
+        Wedge paths occur when ``_assistant_message_fresh`` returns False (the
+        parent has a stale assistant timestamp) BUT pending_count is already 0
+        — the gate cannot wait for a response that will never come. In that
+        situation, if the most recent message for this instance is in a
+        TERMINAL state (COMPLETED or FAILED), the parent has done all it can
+        and the job must terminate. We allow the gate to pass with a best-
+        effort empty result; the result_summary will be None or whatever the
+        checkpointer returns.
+
+        Three wedge paths close via this resolver (all event-driven, no polling):
+
+        (a) STALE-READABLE: parent's last assistant timestamp is readable but
+            predates the most recent child_completed (no new AI response).
+            If the report message that triggered the child_completed has been
+            processed to a terminal state, the parent is wedged: allow.
+
+        (b) EMPTY-FINAL-TURN: parent processed the report and produced only
+            tool calls (no content). With the empty-content-aware
+            ``get_last_assistant_timestamp`` change, the freshness check now
+            returns True for this case — the wedge resolver is a belt-and-
+            suspenders for the race where the AI message is unparseable.
+
+        (c) DEAD-LETTER: the completion report message transitions to FAILED
+            after max retries. The parent never had a chance to respond. If
+            the FAILED message is the most recent for this instance, the
+            parent is wedged: allow with empty result.
+
+        Trigger: the existing message-completed signal (for paths a/b) and
+        the new ``_on_stale_task_permanent_failure`` wedge hook in
+        ``manager.py`` (for path c, fires on the FAILED transition).
+
+        Args:
+            session: Open DB session with the staged child_completed event.
+            instance_id: The instance to evaluate.
+
+        Returns:
+            (allowed, reason): True (no reason) when the wedge is closed;
+            False + reason when neither freshness nor terminal-state apply.
+        """
+        is_fresh, reason = await self._assistant_message_fresh(session, instance_id)
+        if is_fresh:
+            return True, None
+
+        # Wedge detected: freshness failed but pending_count is already 0
+        # (gate's pending_count leg already passed). Check the most recent
+        # terminal-state message for this instance.
+        last_terminal_msg_id = session.exec(
+            select(MessageQueue.message_id)
+            .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.status.in_([
+                MessageStatus.COMPLETED.value,
+                MessageStatus.FAILED.value,
+            ]))
+            .order_by(MessageQueue.completed_at.desc())
+            .limit(1)
+        ).first()
+
+        if last_terminal_msg_id is not None:
+            logger.warning(
+                "Wedge-resolver: instance %s... freshness failed but most "
+                "recent message is terminal (message_id=%s); allowing "
+                "completion with best-effort empty result",
+                instance_id[:8],
+                last_terminal_msg_id[:8],
+            )
+            return True, None
+
+        return False, reason
+
     async def _root_completion_gate(
         self,
         session,
@@ -1870,7 +1960,9 @@ Provide a concise summary:"""
           1. waiting_for == 0 — no outstanding children
           2. pending_count == 0 — no queued/processing messages
           3. fresh assistant message after the last child_completed event —
-             the instance has responded to every child report
+             the instance has responded to every child report. Wedge-resolved
+             by ``_gate_wedge_resolver`` when freshness fails but the most
+             recent message is terminal (best-effort empty result).
 
         Suppressed instances are held in WAITING_CHILDREN; the predicate is
         re-evaluated on the existing message-completed signal (each completed
@@ -1912,7 +2004,10 @@ Provide a concise summary:"""
             if pending_count > 0:
                 return False, f"pending_count={pending_count}"
 
-            return await self._assistant_message_fresh(session, instance_id)
+            # DEADLOCK GUARD: route the freshness leg through the wedge resolver
+            # so dead-letter / empty-final-turn / stale-readable wedge paths
+            # close event-driven (no polling).
+            return await self._gate_wedge_resolver(session, instance_id)
         finally:
             if owns_session:
                 session.close()
