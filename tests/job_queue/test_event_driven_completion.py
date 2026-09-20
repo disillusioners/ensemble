@@ -37,7 +37,6 @@ from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
@@ -653,8 +652,13 @@ class TestSite3Exemption:
             "site-3 carve-out comment missing from repository.py — the "
             "census breadcrumb must live at the site"
         )
-        def_block = repo_src[marker:marker + 900]
-        assert "def reap_legacy_mirror_zombies(" in def_block, (
-            "carve-out block no longer sits directly above the def"
+        def_line = repo_src.find("def reap_legacy_mirror_zombies(", marker)
+        carve_out = repo_src[marker:def_line]
+        # Gap bound: the block must sit DIRECTLY above the def — drift
+        # (comment moved away, def moved first) fails loudly instead of
+        # passing quietly on a stale window.
+        assert 0 < def_line - marker < 1200, (
+            "carve-out block no longer sits directly above the def "
+            f"(gap={def_line - marker} chars)"
         )
-        assert "orphan_retired" in def_block
+        assert "orphan_retired" in carve_out

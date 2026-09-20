@@ -175,6 +175,29 @@ def _seed_task(
     return wid
 
 
+def _patch_resolver_record(resolver, *, wid, status, job_type):
+    """Point ``resolver.resolve_work`` at a synthetic WorkRecord;
+    returns the original callable for restoration."""
+    from daemon.services.work_resolver import WorkRecord
+
+    record = WorkRecord(
+        work_id=wid,
+        kind="job",
+        status=status,
+        instance_id="inst-dl-1",
+        project_id="test-project",
+        agent_id="developer",
+        result_summary=None,
+        error=None,
+        created_at=datetime.now(timezone.utc),
+        job_type=job_type,
+        mission_liveness=None,
+    )
+    original = resolver.resolve_work
+    resolver.resolve_work = MagicMock(return_value=record)
+    return original
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -806,24 +829,9 @@ class TestMissionTerminalDeadLetterFire:
 
     @staticmethod
     def _patch_record(resolver, *, wid, status, job_type):
-        from daemon.services.work_resolver import WorkRecord
-
-        record = WorkRecord(
-            work_id=wid,
-            kind="job",
-            status=status,
-            instance_id="inst-dl-1",
-            project_id="test-project",
-            agent_id="developer",
-            result_summary=None,
-            error=None,
-            created_at=datetime.now(timezone.utc),
-            job_type=job_type,
-            mission_liveness=None,
+        return _patch_resolver_record(
+            resolver, wid=wid, status=status, job_type=job_type
         )
-        original = resolver.resolve_work
-        resolver.resolve_work = MagicMock(return_value=record)
-        return original
 
     @pytest.mark.asyncio
     async def test_dead_letter_mission_terminal_fires(self, n1_components):

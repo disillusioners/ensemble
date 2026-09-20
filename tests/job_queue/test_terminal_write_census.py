@@ -68,6 +68,7 @@ contract attaches at callers when first wired.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,8 +150,6 @@ def discover_terminal_write_sites(root: Path = DAEMON_ROOT) -> list[DiscoveredSi
         try:
             tree = ast.parse(src)
         except SyntaxError as exc:  # pragma: no cover — daemon/ is importable
-            import logging
-
             logging.getLogger(__name__).warning(
                 "terminal-write census: skipping unparseable file %s: %s",
                 rel, exc,
@@ -218,7 +217,7 @@ def _notify_near(rel_path: str, line: int, window: int = 5) -> bool:
     lines = _read(rel_path).splitlines()
     lo = max(0, line - 1 - window)
     hi = min(len(lines), line + window)
-    return any("notify_watchers" in line for line in lines[lo:hi])
+    return any("notify_watchers" in row for row in lines[lo:hi])
 
 
 # ── Documented exemptions INVISIBLE to the walker (notes, not entries —
@@ -285,7 +284,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         anchor="reap_legacy_mirror_zombies", classification="exempt",
         exempt_kind="D2",
         reason="write side of checklist site 3 — same D2 carve-out "
-               "('orphan_retired' ∉ _TERMINAL_STATUSES); docstring carries the carve-out.",
+               "('orphan_retired' ∉ _TERMINAL_STATUSES); comment block above the function carries the carve-out.",
     ),
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="reap_legacy_mirror_zombies",
@@ -383,13 +382,13 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         file="daemon/repositories/job_queue/repository.py", site="atomic_transition",
         anchor="start_job_atomic", classification="exempt",
         exempt_kind="non-terminal",
-        reason="non-terminal:  (queued→active) — matched on method name only",
+        reason="non-terminal: (queued→active) — matched on method name only",
     ),
     CensusEntry(
         file="daemon/services/job_queue_service.py", site="atomic_transition",
         anchor="start_job", classification="exempt",
         exempt_kind="non-terminal",
-        reason="non-terminal:  (queued→active dispatch) — matched on method name only",
+        reason="non-terminal: (queued→active dispatch) — matched on method name only",
     ),
     CensusEntry(
         file="daemon/services/worker_pool.py", site="atomic_transition",
