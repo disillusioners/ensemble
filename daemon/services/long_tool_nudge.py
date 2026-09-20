@@ -635,6 +635,53 @@ def wrapped_tools_node(
                 continue
             await registry.record_start(instance_id, tc_id, tc_name, parent_id)
 
+        # (2.b) ATTEST-FIRST RUNTIME HOOK (2026-09-19, c5d9a38a
+        # remediation). The attestation tool reads the calling
+        # AIMessage's content via
+        # ``daemon.tools.attestation.set_attest_caller_content`` to
+        # pick the clean-call vs bundled-call teacher text. We
+        # STAMP the most-recent AIMessage (the one whose
+        # tool_calls this wrapper is about to invoke) here, BEFORE
+        # delegating to the bare ToolNode. The stamp is per-thread
+        # (``threading.local``) and is read+cleared by the tool
+        # body — safe across concurrent worker threads. Only fires
+        # when an ``attest_completion`` tool_call is in this batch
+        # (the canonical case where the runtime hook is needed);
+        # other tool batches are untouched. Lazy import — the
+        # attestation tool module is on the tools-node hot path;
+        # a call-time import keeps the graph module-level imports
+        # dependency-light and matches the lazy-import discipline
+        # of the long-tool-nudge wrapper.
+        try:
+            from daemon.tools.attestation import (
+                set_attest_caller_content as _set_attest_caller,
+            )
+
+            for tc in tool_calls:
+                tc_name = (
+                    tc.get("name")
+                    if isinstance(tc, dict)
+                    else getattr(tc, "name", "")
+                )
+                if tc_name == "attest_completion" and last_ai is not None:
+                    _set_attest_caller(last_ai)
+                    break
+        except Exception as _attest_hook_exc:  # noqa: BLE001 — defense-in-depth; hook MUST never break the tools node
+            # The hook is best-effort. A failure here means the tool
+            # falls back to the stack-inspector path
+            # (``_fallback_extract_attest_caller_content``) which
+            # itself falls back to the clean-call teacher text —
+            # the safe default. Logged at DEBUG (not WARNING) so a
+            # misconfigured import never spams the operator log.
+            logger.debug(
+                "event=attest_caller_hook_error instance_id=%s "
+                "error_class=%s detail=%s; tool body will fall back "
+                "to clean-call teacher text",
+                instance_id,
+                type(_attest_hook_exc).__name__,
+                _attest_hook_exc,
+            )
+
         # (3) Delegate to the bare ToolNode; (4) ALWAYS clear in finally —
         # pause-cancel (graph_task.cancel()) and the task-cap TimeoutError
         # both raise through this node (Python guarantees finally on

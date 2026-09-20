@@ -268,12 +268,15 @@ EXPECTED_NUDGE_TEXT_CANONICAL = (
     "and other non-delegating turns do NOT trigger this gate. When "
     "you have dispatched a child this mission, the work is not "
     "complete until you attest.\n\n"
-    "Attestation is a SEPARATE step: FIRST deliver your full "
-    "detailed final report as its own message (outcomes, evidence, "
-    "follow-ups), THEN call attest_completion ALONE as a "
-    "subsequent step — never bundle the report into the attestation "
-    "tool-call message (at most a one-line ack such as \"Report "
-    "delivered above; attesting completion.\").\n\n"
+    "Attestation is the ATTEST-FIRST PURE-TOOLCALL-TURN CONTRACT "
+    "(2026-09-19, closes incident c5d9a38a): when the work is "
+    "truly complete, FIRST call attest_completion ALONE in a PURE "
+    "TOOLCALL TURN (the AIMessage that carries the call must have "
+    "EMPTY content — no report text, no ack, nothing), THEN "
+    "deliver your full detailed final report as a SUBSEQUENT "
+    "standalone AI message (no tool calls). The order flipped: "
+    "attest FIRST, report SECOND, separate messages — never "
+    "bundle the report into the attestation tool-call message.\n\n"
     "Reminder: when — and only when — the work is truly complete "
     "(delegated children have all reported and you have the full "
     "picture), you MUST call the attest_completion tool before "
@@ -285,16 +288,17 @@ EXPECTED_NUDGE_TEXT_CANONICAL = (
     '    TurnEnd["Your turn is about to end"] --> UsedSend{"Did you use send_message since the last user message?"}\n'
     '    UsedSend -- No --> FinishFree["Finish freely - no attestation needed"]\n'
     '    UsedSend -- Yes --> AttestRecent{"Is attest_completion in your last 3 messages?"}\n'
-    '    AttestRecent -- Yes --> FinishGate["Finish - gate allows"]\n'
-    '    AttestRecent -- No --> ReportJudge{"Did the gate\'s report judge confirm a real completion report?"}\n'
-    '    ReportJudge -- Yes --> FinishGate\n'
-    '    ReportJudge -- No --> Nudged["You are being nudged: work not finished"]\n'
+    '    AttestRecent -- No --> Nudged["You are being nudged: work not finished"]\n'
     '    Nudged --> CheckContinue["Check children and task status, continue working"]\n'
     '    CheckContinue --> TrulyDone{"Work truly complete?"}\n'
     '    TrulyDone -- "No, keep working" --> CheckContinue\n'
-    '    TrulyDone -- Yes --> Report["Deliver detailed report as its own message"]\n'
-    '    Report --> Attest["Then call attest_completion alone"]\n'
-    '    Attest --> FinishGate\n'
+    '    TrulyDone -- Yes --> AttestFirst["Call attest_completion ALONE first (PURE TOOLCALL TURN, empty content)"]\n'
+    '    AttestFirst --> ReportSecond["Then deliver detailed report as its own standalone message"]\n'
+    '    ReportSecond --> FinishGate["Finish - gate allows"]\n'
+    '    AttestRecent -- Yes --> ReportPresent{"Is the LAST AI a standalone text report (no tool calls, >=150 words)?"}\n'
+    '    ReportPresent -- No --> Hold["HOLD: re-issue the report as its own standalone message"]\n'
+    '    Hold --> ReportSecond\n'
+    '    ReportPresent -- Yes --> FinishGate\n'
     "```"
 )
 

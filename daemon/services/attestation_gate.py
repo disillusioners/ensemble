@@ -81,7 +81,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, NamedTuple
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
@@ -151,6 +151,19 @@ class Decision(str, Enum):
     #: R2 deny under enforce — terminal-status write NOT performed;
     #: in-graph nudge injected; execution routes back to ``agent``.
     DENIED = "denied"
+    #: 2026-09-19 (attest-first contract, c5d9a38a remediation) —
+    #: attestation IS present, but the final AIMessage is NOT a
+    #: standalone text report (it's either the attest-call message
+    #: itself with no subsequent text, or the bundled shape where
+    #: the AIMessage carried text + the tool_call). The gate injects
+    #: a short reminder (counter-INDEPENDENT — does NOT increment
+    #: ``attestation_denied_count``; capped at
+    #: ``ATTESTATION_REMINDER_CAP`` per mission) and routes back to
+    #: ``agent``. Completion (meta_bypass allow) fires ONLY when
+    #: attestation_present AND the final AIMessage is a standalone
+    #: text report (no tool calls, non-trivial length >=
+    #: ``SHORT_REPORT_WORD_THRESHOLD``).
+    HOLD = "hold"
     #: escalation path under enforce — allow terminal +
     #: ``completion_gate_escalated=true`` + counter reset (Phase 3
     #: persists both; this module only emits the decision value).
@@ -284,6 +297,48 @@ class GateDecision:
     #: this, never the raw enum, so ``terminal_after_bound`` and
     #: ``dry_log`` structurally cannot nudge.
     should_inject_nudge: bool
+    #: 2026-09-19 (attest-first contract, c5d9a38a remediation) —
+    #: True ONLY for :attr:`Decision.HOLD` — the in-graph reminder
+    #: injection guard reads this, never the raw enum, so the
+    #: remind path is structurally exclusive to HOLD. Counter-
+    #: INDEPENDENT: the HOLD injection does NOT increment
+    #: ``attestation_denied_count`` and never engages the bound or
+    #: escalation machinery. Capped at ``ATTESTATION_REMINDER_CAP``
+    #: per mission (the graph node enforces the cap, falling
+    #: through to plain ``meta_bypass`` allow on the cap).
+    should_inject_reminder: bool = False
+    #: 2026-09-19 — when ``should_inject_reminder`` is True, the
+    #: reminder text to inject (``ATTESTATION_FINAL_REPORT_REMINDER``
+    #: for the clean-call HOLD, ``ATTESTATION_BUNDLED_REMINDER``
+    #: for the bundled-shape HOLD). ``None`` on every other path.
+    reminder_text: str | None = None
+    #: 2026-09-19 — True when the final AIMessage carried non-empty
+    #: content AND an attest_completion tool_call (the c5d9a38a
+    #: bundled shape). Drives the choice of reminder text. Logged
+    #: alongside the decision row for forensics.
+    is_bundled_call: bool = False
+    #: 2026-09-19 — True when the final AIMessage is a standalone
+    #: text report (no tool_calls, non-trivial length >=
+    #: ``SHORT_REPORT_WORD_THRESHOLD``). The attested-allow path
+    #: requires this to be True (the only path to ``Decision.
+    #: ALLOWED`` when ``attestation_present=True``); the gate
+    #: falls into ``Decision.HOLD`` otherwise. Logged alongside
+    #: the decision row for forensics.
+    final_ai_is_text_report: bool = False
+    #: 2026-09-19 — True when the last AIMessage in the window IS
+    #: the attest-call message itself (the AIMessage that carried
+    #: the ``attest_completion`` tool_call). Drives the HOLD branch:
+    #: the gate knows to remind the leader to deliver the report as
+    #: a subsequent standalone AI message.
+    final_ai_is_attest_call: bool = False
+    #: 2026-09-19 — the in-window attestation scan's index of the
+    #: AIMessage that carries the attest_completion tool_call
+    #: (``-1`` when ``attestation_present=False``). The graph node
+    #: uses this + the in-window ordering to determine whether the
+    #: attest-call message is the LAST AIMessage in the tail (HOLD
+    #: case) or a non-last AIMessage with subsequent text after it
+    #: (allow case when the subsequent text is a standalone report).
+    attestation_index: int = -1
     # Transient error marker: a fail-open evaluation remains visible in the
     # checkpoint and in the operator log after a crash/resume.
     gate_exception_seen: bool = False
@@ -449,6 +504,11 @@ def decide(
     *,
     attestation_required: bool,
     user_answer_pending: bool = False,
+    final_ai_is_text_report: bool = False,
+    final_ai_is_attest_call: bool = False,
+    is_bundled_call: bool = False,
+    reminder_text_clean: str = "",
+    reminder_text_bundled: str = "",
 ) -> GateDecision:
     """Pure ENFORCE-tree decision over the R2 inputs (Stage 3 shape).
 
@@ -468,8 +528,20 @@ def decide(
        attested check deliberately: the plain-allow contract is ZERO
        counter movement — an attested-allow reset (trigger 1) does not
        run while an answer is pending.
-    2. attested → :attr:`Decision.ALLOWED` with
-       ``next_denied_count = 0`` (reset trigger 1).
+    2. attested → IF the final AIMessage is a standalone text report
+       (no tool calls, non-trivial length >=
+       ``SHORT_REPORT_WORD_THRESHOLD``) →
+       :attr:`Decision.ALLOWED` with ``next_denied_count = 0`` (reset
+       trigger 1). OTHERWISE (attested but final AIMessage is the
+       attest-call message itself, OR the bundled shape where the
+       AIMessage carried text + tool_call) →
+       :attr:`Decision.HOLD` with ``next_denied_count = denied_count``
+       (counter UNCHANGED — HOLD is not a denial) and
+       ``should_inject_reminder = True``. The reminder text is
+       ``reminder_text_bundled`` when ``is_bundled_call`` else
+       ``reminder_text_clean``. The 2026-09-19 attest-first contract
+       (closes incident c5d9a38a — prompt-only fixes failed twice,
+       so system-side enforcement via HOLD now).
     3. not attested + any pending wakeup input > 0 (THREE-input R2 —
        ``pending_children``, ``queued_or_expected_wakeups``, OR
        ``live_descendants``) →
@@ -523,6 +595,32 @@ def decide(
             + freshness guard, read via
             ``InstanceManager.has_open_user_answer``). Arms the plain
             allow (step 1) with ZERO counter movement.
+        final_ai_is_text_report: 2026-09-19 — True when the final
+            AIMessage is a standalone text report (no tool calls,
+            non-trivial length >= ``SHORT_REPORT_WORD_THRESHOLD``).
+            The attested-allow path requires this True (step 2
+            positive arm). Computed by the caller
+            (:func:`evaluate`) from the messages list.
+        final_ai_is_attest_call: 2026-09-19 — True when the LAST
+            AIMessage in the window IS the attest-call message
+            itself (carries an ``attest_completion`` tool_call).
+            Drives the HOLD branch when attested but the final AI
+            is not a text report. Computed by the caller
+            (:func:`evaluate`).
+        is_bundled_call: 2026-09-19 — True when the final AIMessage
+            carried non-empty content AND an attest_completion
+            tool_call (the c5d9a38a bundled shape). Drives the
+            choice of reminder text on the HOLD path.
+        reminder_text_clean: 2026-09-19 — the reminder text for the
+            clean-call HOLD (final AI is the attest-call message
+            with empty content, no subsequent text). The graph node
+            injects this via :func:`_make_attestation_final_report_
+            reminder_message`. Canonical home:
+            ``daemon/graph.py:ATTESTATION_FINAL_REPORT_REMINDER``.
+        reminder_text_bundled: 2026-09-19 — the reminder text for
+            the bundled-shape HOLD (final AI carried text + tool
+            call). Canonical home:
+            ``daemon/graph.py:ATTESTATION_BUNDLED_REMINDER``.
 
     Returns:
         :class:`GateDecision` — the decision core.
@@ -546,13 +644,44 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (2) attested allow — reset trigger 1.
+    # (2) attested — the 2026-09-19 attest-first contract split:
+    # IF the final AIMessage is a standalone text report (no tool
+    # calls, non-trivial length >= SHORT_REPORT_WORD_THRESHOLD) →
+    # plain ALLOWED with counter reset (trigger 1).
+    # OTHERWISE → HOLD with a counter-INDEPENDENT reminder
+    # injection. Counter does NOT increment; the bound/escalation
+    # machinery is NEVER touched on HOLD. The graph node enforces
+    # the per-mission reminder cap (ATTESTATION_REMINDER_CAP) and
+    # falls through to plain meta_bypass allow on the cap.
     if attested:
+        if final_ai_is_text_report:
+            return GateDecision(
+                decision=Decision.ALLOWED,
+                next_denied_count=0,
+                should_inject_nudge=False,
+                attestation_required=attestation_required,
+                final_ai_is_text_report=True,
+                final_ai_is_attest_call=final_ai_is_attest_call,
+                is_bundled_call=is_bundled_call,
+            )
+        # Attested but the final AIMessage is NOT a standalone text
+        # report — HOLD. The reminder text depends on whether the
+        # final AIMessage was the bundled shape (text + tool_call
+        # in ONE message, c5d9a38a) or the clean attest-call
+        # message with no subsequent text yet.
+        chosen_reminder = (
+            reminder_text_bundled if is_bundled_call else reminder_text_clean
+        )
         return GateDecision(
-            decision=Decision.ALLOWED,
-            next_denied_count=0,
+            decision=Decision.HOLD,
+            next_denied_count=denied_count,  # UNCHANGED — HOLD is not a denial
             should_inject_nudge=False,
+            should_inject_reminder=bool(chosen_reminder),
+            reminder_text=chosen_reminder or None,
             attestation_required=attestation_required,
+            final_ai_is_text_report=False,
+            final_ai_is_attest_call=final_ai_is_attest_call,
+            is_bundled_call=is_bundled_call,
         )
 
     # (3) R2 allow — legitimate pending wakeup (THREE-input predicate:
@@ -591,6 +720,171 @@ def decide(
         should_inject_nudge=True,
         attestation_required=attestation_required,
     )
+
+
+def classify_final_ai_shape(
+    messages: list[BaseMessage],
+    window: int,
+    attested: bool,
+) -> tuple[bool, bool, bool, int]:
+    """Classify the FINAL AIMessage in the (bounded) message tail.
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation): the
+    attested-allow path requires the final AIMessage to be a
+    standalone text report (no tool calls, non-trivial length >=
+    ``SHORT_REPORT_WORD_THRESHOLD``). This helper returns the four
+    facts the gate's HOLD branch needs:
+
+    * ``final_ai_is_text_report`` — the final AIMessage has no
+      ``attest_completion`` (and no other) tool calls AND its
+      flattened content word count is >=
+      ``SHORT_REPORT_WORD_THRESHOLD``. The attestation must be in
+      the window (the last-3 AIMessages) but the report itself
+      must NOT carry tool calls.
+    * ``final_ai_is_attest_call`` — the LAST AIMessage in the tail
+      IS the AIMessage that carries the ``attest_completion``
+      tool_call (regardless of whether it has content). The gate
+      uses this to drive the HOLD reminder shape.
+    * ``is_bundled_call`` — the LAST AIMessage carries an
+      ``attest_completion`` tool_call AND has non-empty content
+      (the c5d9a38a bundled shape — report + attest in ONE
+      message). Drives the choice of reminder text on the HOLD
+      path.
+    * ``attestation_index`` — the index of the AIMessage that
+      carries the ``attest_completion`` tool_call within the
+      bounded window (``-1`` when ``attested=False``). Used by the
+      gate for forensics + log schema.
+
+    Pure function; no I/O. Walks the messages tail backward up to
+    ``window`` AIMessages (mirroring the existing scanners'
+    bounded-walk semantics). The "final AIMessage" is the newest
+    AIMessage in the tail — the same shape the length scanner's
+    ``_flatten_ai_content`` sees. List-of-blocks content
+    (LangChain text + reasoning blocks) is flattened inline so
+    the helper is self-contained.
+
+    Args:
+        messages: The in-node message list (``state["messages"]``).
+        window: How many tail AIMessages to inspect when locating
+            the attestation call. Values ``< 1`` are clamped to 1.
+        attested: Scanner verdict — whether ``attest_completion``
+            appears in the bounded window. When ``False``, the
+            helper short-circuits with ``(False, False, False, -1)``.
+
+    Returns:
+        Tuple ``(final_ai_is_text_report, final_ai_is_attest_call,
+        is_bundled_call, attestation_index)`` — all four fields the
+        gate's HOLD branch reads.
+    """
+    bounded_window = max(1, int(window) if window is not None else 1)
+    if not attested:
+        return (False, False, False, -1)
+
+    # Walk backward through the bounded tail. Find:
+    #   1. the LAST AIMessage in the tail (the "final AI");
+    #   2. the index of the AIMessage that carries the attestation
+    #      tool_call.
+    final_ai: AIMessage | None = None
+    final_ai_index: int = -1
+    attest_ai: AIMessage | None = None
+    attest_ai_index: int = -1
+    ai_count = 0
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        if final_ai is None:
+            final_ai = message
+            final_ai_index = index
+        ai_count += 1
+        if attest_ai is None and _has_attest_completion_call(message):
+            attest_ai = message
+            attest_ai_index = index
+        if ai_count >= bounded_window and attest_ai is not None and final_ai is not None:
+            break
+
+    if attest_ai is None:
+        # ``attested`` was True at the call site but we couldn't
+        # locate the AIMessage that carries the attestation call
+        # in the bounded walk — degenerate state (e.g. the scanner
+        # saw a stale cross-window call and the messages list has
+        # compacted since). Be conservative: treat as
+        # NOT-text-report (HOLD on the attested path).
+        return (False, False, False, -1)
+
+    # ``final_ai_is_attest_call``: the LAST AIMessage in the tail
+    # IS the attestation-carrying message. When the last AI is a
+    # DIFFERENT message than the attestation-carrying one, the
+    # leader has already delivered a subsequent standalone AI
+    # message after the attest call (the "happy path").
+    final_ai_is_attest_call = (
+        final_ai is not None and final_ai_index == attest_ai_index
+    )
+
+    # ``is_bundled_call``: the LAST AIMessage carries the
+    # attestation tool_call AND has non-empty flattened content.
+    is_bundled = False
+    if final_ai_is_attest_call and final_ai is not None:
+        flat = _flatten_for_classify(getattr(final_ai, "content", ""))
+        is_bundled = bool(flat.strip())
+
+    # ``final_ai_is_text_report``: the LAST AIMessage has no
+    # tool calls at all AND its flattened word count is >=
+    # SHORT_REPORT_WORD_THRESHOLD. The attestation-carrying AI
+    # itself (which carries tool calls) NEVER satisfies this
+    # even when its content is long.
+    final_ai_is_text_report = False
+    if (
+        final_ai is not None
+        and not _has_attest_completion_call(final_ai)
+        and not (getattr(final_ai, "tool_calls", None) or [])
+    ):
+        flat = _flatten_for_classify(getattr(final_ai, "content", ""))
+        word_count = len(flat.split()) if flat else 0
+        final_ai_is_text_report = word_count >= _CLASSIFY_REPORT_WORD_THRESHOLD
+
+    return (
+        final_ai_is_text_report,
+        final_ai_is_attest_call,
+        is_bundled,
+        attest_ai_index,
+    )
+
+
+#: The word-count threshold for ``final_ai_is_text_report`` (2026-09-19).
+#: Mirrors :data:`daemon.services.attestation_marker_scanner.
+#: SHORT_REPORT_WORD_THRESHOLD` — the SAME 150-word threshold the
+#: gate's length trigger uses. Aliased here (not imported) so this
+#: helper stays dependency-light on the hot classify path.
+_CLASSIFY_REPORT_WORD_THRESHOLD: int = 150
+
+
+def _flatten_for_classify(content: object) -> str:
+    """Flatten an AIMessage's content into a plain string (classify-only).
+
+    Mirrors :func:`daemon.services.attestation_marker_scanner._flatten_ai_content`.
+    Kept inline to avoid the cross-module import on the hot
+    classify path; if the canonical helper ever changes, this
+    mirror must be updated in lockstep (pinned by
+    :data:`_CLASSIFY_REPORT_WORD_THRESHOLD`).
+    """
+    if isinstance(content, list):
+        flat_parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                flat_parts.append(str(block.get("text", "")))
+            else:
+                flat_parts.append(str(block))
+        return " ".join(flat_parts)
+    return str(content) if content else ""
+
+
+def _has_attest_completion_call(message: BaseMessage) -> bool:
+    """True iff ``message`` carries an ``attest_completion`` tool call."""
+    for tool_call in getattr(message, "tool_calls", None) or []:
+        if isinstance(tool_call, dict) and tool_call.get("name") == "attest_completion":
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -835,6 +1129,24 @@ def evaluate(
         # (i) scanner — bounded in-window scan (AC-2.5).
         scan = scan_for_attestation_detailed(messages, mode_resolver.window, tool_name)
 
+        # 2026-09-19 (attest-first contract, c5d9a38a remediation) —
+        # classify the FINAL AIMessage shape so the attested-allow
+        # path can require a standalone text report (no tool calls,
+        # non-trivial length). Runs BEFORE the conditional /
+        # not-required bypasses because the bypasses return ALLOWED
+        # with `attestation_present=False` (the gate is OFF for those
+        # missions — the classify output is moot on those paths).
+        # Always computed when ``scan.attested=True``; cheap when
+        # attested=False (short-circuits to all-False / -1).
+        (
+            final_ai_is_text_report,
+            final_ai_is_attest_call,
+            is_bundled_call,
+            attestation_index,
+        ) = classify_final_ai_shape(
+            messages, mode_resolver.window, scan.attested
+        )
+
         # (v.b) Conditional-attestation scanner (2026-09-06, FR-3
         # conditionality) — pure walk of the messages list that
         # answers: was ``send_message`` called since the last REAL user
@@ -1022,6 +1334,19 @@ def evaluate(
                 attestation_required=False,
             )
         else:
+            # Lazy import: the reminder-text constants live in
+            # ``daemon/graph.py`` (the canonical home — NFR-6 parity
+            # with ``ATTESTATION_NUDGE_TEXT`` + ``COMPLETION_CHECK_NOTE_TEXT``).
+            # We pass the strings through to ``decide()`` rather than
+            # reading the constants here to keep ``attestation_gate.py``
+            # dependency-light (graph.py is the runtime seam that
+            # already owns the reminder-text body — same pattern as
+            # the marker-hint factory in graph.py:5504).
+            from daemon.graph import (
+                ATTESTATION_BUNDLED_REMINDER,
+                ATTESTATION_FINAL_REPORT_REMINDER,
+            )
+
             result = decide(
                 attested=scan.attested,
                 pending_children=pending_children,
@@ -1031,6 +1356,11 @@ def evaluate(
                 bound=mode_resolver.deny_bound,
                 attestation_required=attestation_required,
                 user_answer_pending=user_answer_pending,
+                final_ai_is_text_report=final_ai_is_text_report,
+                final_ai_is_attest_call=final_ai_is_attest_call,
+                is_bundled_call=is_bundled_call,
+                reminder_text_clean=ATTESTATION_FINAL_REPORT_REMINDER,
+                reminder_text_bundled=ATTESTATION_BUNDLED_REMINDER,
             )
         if mode_resolver.mode == "dry":
             # R3 fold: dry is a property of the resolver/mode layer —
@@ -1039,11 +1369,21 @@ def evaluate(
             # and the nudge disarmed; every other diagnostic field
             # (delegation scan, would-be outcome inputs) stays intact
             # for the dry-mode soak.
+            # 2026-09-19 (attest-first contract): the HOLD-state
+            # reminder is also disarmed here — dry mode is a
+            # passive observer (D2/D8), it never injects any
+            # side-effect (no nudge, no hint, no reminder). The
+            # decision is computed (so the dry-log row carries the
+            # full forensic surface — including the would-be
+            # reminder text) but the injection flag is forced
+            # off so the graph node's HOLD branch never fires in
+            # dry mode.
             result = replace(
                 result,
                 decision=Decision.DRY_LOG,
                 next_denied_count=denied_count,
                 should_inject_nudge=False,
+                should_inject_reminder=False,
             )
 
         # Attach diagnostics + R2 inputs → log-ready object.
@@ -1051,6 +1391,12 @@ def evaluate(
         # predicate's ``b_fires`` term consumes it (R5: Source B is
         # busy-muted; Source A deliberately is NOT — approved Δ2) and
         # the log row carries the count for forensics.
+        # The 2026-09-19 HOLD-state fields (``final_ai_is_text_report``,
+        # ``final_ai_is_attest_call``, ``is_bundled_call``,
+        # ``attestation_index``) are also stamped here — they're
+        # forensic-only (NOT in the canonical 17-field schema) but the
+        # graph node reads them to drive the reminder injection
+        # (post-evaluate path).
         result = replace(
             result,
             scanner_window_truncated=scan.window_truncated,
@@ -1069,6 +1415,10 @@ def evaluate(
             last_real_user_index=delegation_scan.last_real_user_index,
             first_delegation_after_last_user_index=delegation_scan.first_delegation_after_last_user_index,
             delegation_tool_call_total=delegation_scan.delegation_tool_call_total,
+            final_ai_is_text_report=final_ai_is_text_report,
+            final_ai_is_attest_call=final_ai_is_attest_call,
+            is_bundled_call=is_bundled_call,
+            attestation_index=attestation_index,
         )
 
         # (iii.b) Source-B activation-signal scans (2026-09-11,

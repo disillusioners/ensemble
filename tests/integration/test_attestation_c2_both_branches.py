@@ -88,9 +88,19 @@ def real_langgraph_for_attestation():
 
 
 @tool
-def attest_completion() -> dict:
-    """Test stub of the Phase 1 attestation tool (no-op confirmation)."""
-    return {"attested": True}
+def attest_completion() -> str:
+    """Test stub of the attestation tool (the new contract — returns
+    the teacher text per the 2026-09-19 attest-first contract). The
+    real tool's return value is the teacher text the LLM reads via
+    the ToolMessage — ``ATTEST_CLEAN_RESULT_TEXT`` (empty-content
+    caller) or ``ATTEST_BUNDLED_RESULT_TEXT`` (bundled c5d9a38a
+    caller). For the integration tests, the stub unconditionally
+    returns the clean-call shape (the runtime hook that sets the
+    per-thread state from the tools-node caller is exercised in the
+    unit tests, not here)."""
+    from daemon.tools.attestation import ATTEST_CLEAN_RESULT_TEXT
+
+    return ATTEST_CLEAN_RESULT_TEXT
 
 
 def plain_ai(text="Working on the mission."):
@@ -110,9 +120,58 @@ def delegate_ai():
 
 
 def attest_ai():
+    """2026-09-19 attest-first contract: the AIMessage that calls
+    ``attest_completion`` MUST have EMPTY content (pure toolcall
+    turn). The legacy "Attesting now." content was the c5d9a38a
+    bundled shape — that shape is now ``Decision.HOLD`` instead
+    of ``Decision.ALLOWED``."""
     return AIMessage(
-        content="Attesting now.",
+        content="",
         tool_calls=[{"name": "attest_completion", "args": {}, "id": "call-1"}],
+    )
+
+
+def bundled_attest_ai(text="Bundled report + attest in one message."):
+    """2026-09-19 attest-first contract: the BUNDLED shape (text +
+    ``attest_completion`` tool_call in ONE AIMessage) is the
+    c5d9a38a shape. Tests that exercise the HOLD branch on
+    bundled attestation use this helper."""
+    return AIMessage(
+        content=text,
+        tool_calls=[{"name": "attest_completion", "args": {}, "id": "call-1"}],
+    )
+
+
+# Long standalone text report — same shape as the unit test
+# fixture ``report_ai()``. Required for the 2026-09-19
+# attest-first contract's ALLOWED path (the FINAL AIMessage must
+# be a standalone text report, no tool calls, >=
+# SHORT_REPORT_WORD_THRESHOLD words).
+def long_report_ai():
+    return AIMessage(
+        content=(
+            "The work is finished. All four patches shipped; the "
+            "test matrix is green; the integration tests pass on "
+            "every environment we maintain. Patch 1 fixed the "
+            "off-by-one in the cache TTL calculator; the unit "
+            "tests now exercise both the elapsed-second and "
+            "wall-clock-second boundaries at the second and "
+            "minute granularity. Patch 2 cleaned up the dead "
+            "imports in the worker pool module after the "
+            "migration, removing the legacy compatibility shim "
+            "and the related test scaffolding. Patch 3 refactored "
+            "the error-reporting decorator so the stack-frame "
+            "metadata is consistent across all four call sites in "
+            "the graph node and the manager facade. Patch 4 added "
+            "the missing operator-boot log line for the new "
+            "resolver module so operators can grep the boot "
+            "summary for the resolved effective values. All four "
+            "patches passed their respective suites on the first "
+            "run with no flake; the integration matrix is green "
+            "end-to-end across all environments we maintain. No "
+            "follow-ups outstanding; the mission is complete and "
+            "ready for review by the next teammate in the chain."
+        ),
     )
 
 
@@ -161,7 +220,15 @@ def build_graph(
     build_instance_graph = _real_graph_module.build_instance_graph
 
     if scripted is None:
-        scripted = [plain_ai(), attest_ai(), plain_ai("Done.")]
+        # 2026-09-19 attest-first contract: the default scripted
+        # flow uses the CLEAN attest_call (empty content +
+        # ``attest_completion`` tool_call) followed by the long
+        # standalone text report. The OLD default
+        # ``[plain_ai(), attest_ai(), plain_ai("Done.")]`` carried
+        # the bundled shape (``attest_ai`` had content) AND a
+        # short final prose — under the new contract both would
+        # produce Decision.HOLD instead of Decision.ALLOWED.
+        scripted = [plain_ai(), attest_ai(), long_report_ai()]
 
     def _invoke(messages, *args, **kwargs):
         return scripted.pop(0)
@@ -247,12 +314,24 @@ class TestC2BothBranchesActivation:
         # 2026-09-06 amendment: anchor as delegated (gate ON) by
         # injecting a send_message dispatch as the first scripted
         # response. The activation test exercises the deny → nudge →
-        # attest flow on delegated missions.
+        # attest → long-report flow on delegated missions.
+        # 2026-09-19 attest-first contract: the FINAL AIMessage
+        # MUST be a standalone text report (no tool calls, >=
+        # SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate
+        # to allow END via Decision.ALLOWED. The scripted flow
+        # uses the clean attest_call (empty content + tool_call)
+        # followed by the long_report_ai() helper to satisfy the
+        # contract.
         graph = build_graph(
             language_check_enabled,
             attestation_enabled=True,
             manager=manager,
-            scripted=[delegate_ai(), plain_ai(), attest_ai(), plain_ai("Done.")],
+            scripted=[
+                delegate_ai(),
+                plain_ai(),
+                attest_ai(),  # clean attest_call (empty content)
+                long_report_ai(),  # standalone text report — ALLOWED
+            ],
         )
 
         with caplog.at_level(logging.INFO, logger="daemon.services.attestation_gate"):
@@ -264,7 +343,7 @@ class TestC2BothBranchesActivation:
 
         # deny nudge landed in state and routed back through agent
         # (scripted flow: deny nudge → agent attests → tools → agent
-        # final prose → gate allow → END)
+        # final long-report → gate allow → END)
         nudges = nudge_messages(messages)
         assert len(nudges) == 1, f"expected exactly 1 nudge, got {len(nudges)}"
         assert nudges[0].content == NUDGE_TEXT

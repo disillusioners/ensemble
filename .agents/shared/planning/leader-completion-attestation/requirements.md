@@ -1207,3 +1207,26 @@ The fused bundle MUST carry the user's original request so the completion judge 
 * **FR-U1-3 (budget)**: `BUNDLE_TOTAL_MAX` 12000→14000 with U additive (raise = exactly the U cap; A/B/C caps + pins untouched; final hard clip unchanged).
 * **FR-U1-4 (prompt)**: `FUSED_JUDGE_SYSTEM_PROMPT` enumerates four sections (U first) + the intent-fulfillment instruction (genuine answer ⇒ completion report regardless of formality; formal report ignoring the ask ⇒ NOT complete). Conservative default, single-line strict-JSON contract, retry-once-on-unparsable, `FUSED_JUDGE_MAX_OUTPUT_CHARS=2048` unchanged; ≤1 logical judge invocation per evaluation (U = input enrichment at the single call site).
 * **Pinned by** `tests/unit/test_attestation_resolver_user_intent.py` (intent-match / intent-mismatch / anchor-absent / caps+redaction / witnesses / row fields / prompt+cap identity).
+
+
+# SUPERSESSION ENTRY (2026-09-19) — Attest-first pure-toolcall-turn contract
+
+The acceptance criteria for the 2026-09-06 conditional-attestation teaching
+(suppression rule + concise tool description) are NOT superseded — they
+remain in force and are enforced by ``daemon/services/attestation_gate.py``
+term 1 (``attestation_required``) + ``agents/leader/rule.md`` + the
+``daemon/tools/attestation.py`` docstring. What IS superseded is the
+ordering teaching: the OLD "deliver the report FIRST, then call
+``attest_completion``" is replaced by the NEW "call ``attest_completion``
+ALONE in a PURE TOOLCALL TURN (empty content), THEN deliver the full
+detailed final report as a SUBSEQUENT standalone AI message" — enforced
+system-side via the HOLD-state gate branch (D-entry 2026-09-19, this
+file). See the D-entry for the full rationale + the verification matrix.
+
+Superseded ACs (2026-09-19):
+* Any AC that pinned the OLD order (report-first-then-attest) is
+  superseded by the new order (attest-first-then-report). The OLD
+  contract's "deliver the report FIRST, then attest" prose is gone
+  from the leader prompt (``agents/leader/rule.md``) and from the
+  tool docstring (``daemon/tools/attestation.py``). The new contract
+  is taught in BOTH places + enforced by the gate.

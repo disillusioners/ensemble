@@ -120,15 +120,52 @@ SUPPRESSION_RULE_FRAGMENTS = (
     "just complete normally",
 )
 
+# Attest-first contract teaching fragments (2026-09-19, c5d9a38a
+# remediation). The leader prompt MUST carry the attest-first
+# contract teaching — a separate "Wrong Attestation Order"
+# section under `## Must Not` that explains the new contract
+# (PURE TOOLCALL TURN for the attest_call, then a SUBSEQUENT
+# standalone text report as the FINAL AIMessage). Pinning
+# PRESENCE here guards against a future contributor silently
+# reverting to the old report-first-then-attest teaching (or
+# to a no-teaching state where the leader reverts to its
+# natural habit of bundling report + attest into ONE AIMessage).
+ATTEST_FIRST_CONTRACT_FRAGMENTS = (
+    # Section heading — a `### ❌` subsection named explicitly so
+    # operators can grep for it.
+    "Wrong Attestation Order",
+    # Attest-first pure-toolcall-turn contract — the two-step
+    # sequence (empty-content attest_call THEN subsequent
+    # standalone text report).
+    "attest-first pure-toolcall-turn contract",
+    "PURE TOOLCALL TURN",
+    # The negative instruction — DO NOT bundle report + attest
+    # into ONE AIMessage (the c5d9a38a shape).
+    "c5d9a38a shape",
+    # The negative instruction — DO NOT deliver report FIRST and
+    # call attest in the same message (the old pre-2026-09-19
+    # teaching).
+    "report-first-then-attest",
+    # The new contract — attest first, report second.
+    "attest-first, report-second",
+    # The standalone-text-report requirement (the gate's
+    # Decision.ALLOWED path).
+    "subsequent standalone AI message",
+    # The suppression rule restated — DO NOT attest on
+    # non-delegating missions.
+    "non-delegating turns",
+)
+
 # Concise-conditional docstring fragments (2026-09-08 follow-up
-# amendment): ``daemon/tools/attestation.py`` MUST carry the concise
-# conditional tool description — CONDITIONAL framing, when-not-to-call
-# guidance, and the ack-note example. The docstring is shown to the
-# LLM at tool-listing time and is the second half of the suppression
-# defense (the suppression rule is the first half). Pinning PRESENCE
-# here guards against the description silently bloating back to the
-# old verbose shape (which conditioned the LLM to call the tool on
-# every turn) or losing its conditional framing.
+# amendment + 2026-09-19 attest-first contract). The
+# ``daemon/tools/attestation.py`` MUST carry the concise conditional
+# tool description — CONDITIONAL framing, when-not-to-call guidance,
+# and the teacher-text-as-instruction surface. The docstring is
+# shown to the LLM at tool-listing time and is the second half of
+# the suppression defense (the suppression rule is the first half).
+# Pinning PRESENCE here guards against the description silently
+# bloating back to the old verbose shape (which conditioned the LLM
+# to call the tool on every turn) or losing its conditional framing.
 DOCSTRING_FRAGMENTS = (
     # Conditional framing — must lead with this so the LLM knows the
     # tool is conditional on its' situation.
@@ -139,8 +176,64 @@ DOCSTRING_FRAGMENTS = (
     # When the gate or judge has already released — explicit ack that
     # the nudge is the trigger, not self-motivation.
     "the gate or judge has already released",
-    # Ack-note example — verbatim, so the LLM sees a concrete phrasing.
-    "Report delivered above; attesting completion.",
+    # 2026-09-19: the "Report delivered above" ack-note retired
+    # with the attest-first contract flip. The new teacher text
+    # tells the leader to deliver the report as a SUBSEQUENT
+    # standalone message (the previous wording implied the report
+    # was already delivered, which the contract forbids). The
+    # fragment below pins the NEW teacher-text opening.
+    "Attestation recorded",
+)
+
+# Attest-first contract docstring fragments (2026-09-19, c5d9a38a
+# remediation). The attestation tool's docstring + module header +
+# ``_full_doc_`` MUST teach the new attest-first contract (PURE
+# TOOLCALL TURN for the attest_call, then a SUBSEQUENT standalone
+# text report as the FINAL AIMessage). The tool description is
+# what the LLM sees at tool-listing time; if it does not teach
+# the new order, leaders will continue to revert to the
+# c5d9a38a shape (report + attest bundled into ONE AIMessage)
+# — prompt-only fixes failed twice, hence system-side enforcement
+# in the HOLD-state gate, but the prompt teaching is the
+# SECOND half of the closed loop. Pinning PRESENCE here guards
+# against a future contributor silently reverting to the old
+# report-first-then-attest teaching.
+ATTEST_FIRST_DOCSTRING_FRAGMENTS = (
+    # 2026-09-19 user addendum: the docstring MUST LEAD with the
+    # exact contract text (the canonical one-sentence opener that
+    # the LLM reads first at tool-listing time). Pinning the
+    # verbatim leading sentence closes the contract on
+    # "what shape the tool description MUST start with" — any
+    # drift to the old "Signal that a delegated mission is
+    # genuinely complete" opener would silently let leaders
+    # revert to bundling.
+    "Call this tool ALONE in one turn",
+    "must contain nothing else",
+    "no report, no commentary",
+    "deliver your full detailed final report as your final standalone message",
+    # Attest-first pure-toolcall-turn contract — the two-step
+    # sequence (empty-content attest_call THEN subsequent
+    # standalone text report). The fragment matches both the
+    # module header's mixed-case "Attest-first" and the
+    # docstring's uppercase "ATTEST-FIRST" via case-insensitive
+    # substring containment (the test below uses ``lower()`` on
+    # both sides so the fragment matches either casing).
+    "attest-first pure-toolcall-turn contract",
+    # PURE TOOLCALL TURN — the AIMessage that carries the
+    # attest_call must have empty content.
+    "pure toolcall turn",
+    # Empty content requirement.
+    "empty content",
+    # Subsequent standalone AI message — the report must follow
+    # as its own AI message after the attest_call.
+    "subsequent",
+    "standalone ai message",
+    # The teacher text — the tool's return value tells the
+    # leader what shape the next message must take.
+    "teacher text",
+    # Counter-independence — the HOLD-state reminder does NOT
+    # increment ``attestation_denied_count``.
+    "counter-independent",
 )
 
 
@@ -217,6 +310,33 @@ class TestRuleMdContract:
             f"rule that prevents the leader from calling "
             f"``attest_completion`` unless the system nudges it. "
             f"Restore the rule."
+        )
+
+    @pytest.mark.parametrize("fragment", ATTEST_FIRST_CONTRACT_FRAGMENTS)
+    def test_attest_first_contract_teaching_present(
+        self, source: str, fragment: str
+    ) -> None:
+        """The 2026-09-19 attest-first contract teaching MUST be
+        present in rule.md (closes incident c5d9a38a — report +
+        attest bundled into ONE AIMessage; prompt-only fixes failed
+        twice so the contract is now both prompt-taught and system-
+        enforced via the HOLD-state gate). The teaching explains
+        the two-step sequence (PURE TOOLCALL TURN for the
+        attest_call, THEN a SUBSEQUENT standalone text report as
+        the FINAL AIMessage) and the negative instructions
+        (DO NOT bundle; DO NOT deliver report FIRST). Removing
+        any of these fragments would silently let leaders revert
+        to either the old report-first-then-attest teaching or to
+        a no-teaching state where the natural habit of bundling
+        report + attest into ONE AIMessage re-emerges."""
+        assert fragment in source, (
+            f"rule.md is missing the attest-first contract "
+            f"fragment: {fragment!r}. The 2026-09-19 amendment added "
+            f"this teaching after instance c5d9a38a bundled report + "
+            f"attest into ONE AIMessage twice (prompt-only fixes had "
+            f"failed). System-side enforcement is in place via the "
+            f"HOLD-state gate; the prompt-side teaching closes the "
+            f"loop. Restore the teaching."
         )
 
 
@@ -318,4 +438,38 @@ class TestAttestationToolDocstring:
             f"the conditional framing at tool-listing time; restoring "
             f"the verbose shape or stripping the conditional framing "
             f"would let LLMs over-call the tool on non-delegated turns."
+        )
+
+    @pytest.mark.parametrize(
+        "fragment", ATTEST_FIRST_DOCSTRING_FRAGMENTS
+    )
+    def test_attest_first_docstring_fragment_present(
+        self, source: str, fragment: str
+    ) -> None:
+        """Each fragment of the 2026-09-19 attest-first contract
+        teaching MUST be present in ``daemon/tools/attestation.py``.
+        The tool description is what the LLM sees at tool-listing
+        time; if it does not teach the new order (attest-first
+        pure-toolcall-turn contract, then subsequent standalone AI
+        message), leaders will continue to revert to the
+        c5d9a38a shape (report + attest bundled into ONE AIMessage).
+        The system-side HOLD-state gate is the enforcement half;
+        the docstring teaching is the SECOND half of the closed
+        loop. Removing these fragments would silently let the
+        prompt-side defense collapse even though system-side
+        enforcement would still catch the bad shape via HOLD.
+
+        Case-insensitive substring check — the fragments match
+        both the module header's mixed-case "Attest-first" and
+        the docstring's uppercase "ATTEST-FIRST" / "COUNTER-
+        INDEPENDENT" spellings without forcing a single casing
+        on the prose."""
+        assert fragment.lower() in source.lower(), (
+            f"attestation.py is missing the attest-first contract "
+            f"docstring fragment: {fragment!r}. The 2026-09-19 "
+            f"amendment teaches the new contract after incident "
+            f"c5d9a38a (report + attest bundled into ONE AIMessage — "
+            f"prompt-only fixes had failed twice). System-side "
+            f"enforcement is via the HOLD-state gate; the docstring "
+            f"teaching closes the loop. Restore the teaching."
         )

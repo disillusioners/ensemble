@@ -554,7 +554,18 @@ def test_judge_not_called_when_env_kill_switch_off(monkeypatch, caplog):
 
 
 def test_judge_not_called_on_attested_path(monkeypatch):
-    """Attested allow → judge never invoked (no would-be-deny)."""
+    """Attested allow → judge never invoked (no would-be-deny).
+
+    2026-09-19 attest-first contract: the FINAL AIMessage MUST
+    be a standalone text report (no tool calls, >=
+    SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate to
+    allow END via Decision.ALLOWED. The clean attest_call is
+    the SECOND-TO-LAST AIMessage (empty content + tool_call);
+    the FULL REPORT is the LAST AIMessage (long, no tool
+    calls). The old contract ("attest_call is the last
+    AIMessage") retired with the attest-first flip — it
+    produced Decision.HOLD on the new contract.
+    """
     calls = []
 
     async def must_not_be_called(config, user_payload, *, timeout_s):
@@ -563,8 +574,38 @@ def test_judge_not_called_on_attested_path(monkeypatch):
 
     monkeypatch.setattr(judge_mod, "_invoke_judge_llm", must_not_be_called)
 
+    # Long standalone text report — the FINAL AIMessage (no
+    # tool calls, >= 150 words) that satisfies the attest-first
+    # contract's standalone-report requirement.
+    long_report = (
+        "The work is finished. All four patches shipped; the "
+        "test matrix is green; the integration tests pass on "
+        "every environment we maintain. Patch 1 fixed the "
+        "off-by-one in the cache TTL calculator; the unit "
+        "tests now exercise both the elapsed-second and "
+        "wall-clock-second boundaries at the second and "
+        "minute granularity. Patch 2 cleaned up the dead "
+        "imports in the worker pool module after the "
+        "migration, removing the legacy compatibility shim "
+        "and the related test scaffolding. Patch 3 refactored "
+        "the error-reporting decorator so the stack-frame "
+        "metadata is consistent across all four call sites in "
+        "the graph node and the manager facade. Patch 4 added "
+        "the missing operator-boot log line for the new "
+        "resolver module so operators can grep the boot "
+        "summary for the resolved effective values. All four "
+        "patches passed their respective suites on the first "
+        "run with no flake; the integration matrix is green "
+        "end-to-end across all environments we maintain. No "
+        "follow-ups outstanding; the mission is complete and "
+        "ready for review by the next teammate in the chain."
+    )
     node, manager, ledger = _make_node(instance_id="judge-att-it")
-    # The attest_completion tool call is in window → attested allow.
+    # The attest_completion tool call is in window → attested
+    # allow. The CLEAN attest_call (empty content + tool_call)
+    # is the SECOND-TO-LAST AIMessage; the standalone text
+    # report is the LAST AIMessage — the attest-first contract
+    # sequence.
     result = asyncio.run(
         node(
             {
@@ -591,6 +632,7 @@ def test_judge_not_called_on_attested_path(monkeypatch):
                             }
                         ],
                     ),
+                    AIMessage(content=long_report),
                 ]
             },
             config={"configurable": {"thread_id": "judge-att-it"}},

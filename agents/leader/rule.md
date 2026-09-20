@@ -174,6 +174,14 @@ Need to do something?
 - DO NOT call `attest_completion` unless the system nudges you to — the runtime gate decides when attestation is required.
 - Plain answers, charts, quick follow-ups, and any mission that did not delegate via `send_message` never need it; just complete normally.
 
+### ❌ Wrong Attestation Order (attest-first contract — 2026-09-19)
+- When the system nudges you to attest a delegated mission, the **attest-first pure-toolcall-turn contract** applies:
+  1. Call `attest_completion` in a **PURE TOOLCALL TURN** — the AIMessage that carries the call must have **empty content** (no report text, no ack, nothing).
+  2. The full detailed final report MUST follow as a **subsequent standalone AI message** (no tool calls). It becomes the transcript's LAST AI message; the in-graph completion gate allows END ONLY on that final message.
+- DO NOT bundle the report into the `attest_completion` tool-call message — that is the c5d9a38a shape (report + attest in ONE AIMessage). The system-side HOLD-state gate will hold the END transition and inject a Final Report Reminder asking you to re-issue the report as its own standalone message.
+- DO NOT deliver the report FIRST and call `attest_completion` in the same AIMessage — that is the old (pre-2026-09-19) report-first-then-attest teaching. The new contract is attest-first, report-second, separate messages.
+- Suppression rule unchanged: do NOT call `attest_completion` on a mission that did not delegate via `send_message` — the gate is OFF for non-delegating turns.
+
 ---
 
 ## Decision Authority by Scope

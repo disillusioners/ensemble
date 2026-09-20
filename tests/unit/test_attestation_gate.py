@@ -188,14 +188,70 @@ class TestDryModeAtCompositionLayer:
 class TestDecideEnforce:
     def test_attested_allow_resets_counter(self):
         # Architect addition — attested allow is reset trigger (1).
+        # 2026-09-19 attest-first contract: attested alone is no
+        # longer sufficient for ALLOWED — the FINAL AIMessage must
+        # ALSO be a standalone text report (no tool calls,
+        # >= SHORT_REPORT_WORD_THRESHOLD words). When attested=True
+        # WITHOUT a final text report, decide() returns HOLD (not
+        # ALLOWED) and the gate injects the clean-call Final
+        # Report Reminder.
         result = decide(
             attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
             denied_count=3, bound=3, scope_applicable=True, mode="enforce",
             attestation_enabled=True,
+            final_ai_is_text_report=True,  # 2026-09-19: required for ALLOWED
         )
         assert result.decision is Decision.ALLOWED
         assert result.next_denied_count == 0
         assert result.should_inject_nudge is False
+
+    def test_attested_without_text_report_returns_hold(self):
+        """2026-09-19 attest-first contract: attested=True but the
+        final AIMessage is NOT a standalone text report (it's the
+        attest-call message itself, OR a short/bundled shape) ⇒
+        HOLD with reminder injection. Counter is UNCHANGED (no
+        bound/escalation interaction). This is the new
+        attestation_present-but-not-text-report branch."""
+        result = decide(
+            attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
+            denied_count=3, bound=3, scope_applicable=True, mode="enforce",
+            attestation_enabled=True,
+            final_ai_is_text_report=False,  # 2026-09-19: HOLD triggers
+            final_ai_is_attest_call=True,  # last AI IS the attest-call
+            is_bundled_call=False,  # clean-call HOLD (not bundled)
+            reminder_text_clean="[SYSTEM CONTEXT: Final Report Reminder]",
+        )
+        assert result.decision is Decision.HOLD
+        # Counter UNCHANGED — HOLD is NOT a denial. No
+        # bound/escalation interaction.
+        assert result.next_denied_count == 3
+        assert result.should_inject_nudge is False
+        assert result.should_inject_reminder is True
+        assert result.reminder_text == "[SYSTEM CONTEXT: Final Report Reminder]"
+
+    def test_attested_bundled_returns_hold_with_bundled_reminder(self):
+        """2026-09-19 attest-first contract: attested=True AND the
+        last AIMessage bundled text + attest tool_call (the
+        c5d9a38a shape) ⇒ HOLD with the bundled-call reminder
+        text. Counter UNCHANGED. The bundled reminder is
+        distinct from the clean-call reminder — the gate node
+        passes both texts via ``reminder_text_clean`` /
+        ``reminder_text_bundled`` and ``decide()`` picks based on
+        ``is_bundled_call``."""
+        result = decide(
+            attested=True, pending_children=0, queued_or_expected_wakeups=0, live_descendants=0,
+            denied_count=2, bound=3, scope_applicable=True, mode="enforce",
+            attestation_enabled=True,
+            final_ai_is_text_report=False,
+            final_ai_is_attest_call=True,
+            is_bundled_call=True,  # c5d9a38a shape
+            reminder_text_clean="[CLEAN]",
+            reminder_text_bundled="[BUNDLED]",
+        )
+        assert result.decision is Decision.HOLD
+        assert result.next_denied_count == 2
+        assert result.should_inject_reminder is True
+        assert result.reminder_text == "[BUNDLED]"  # bundled text wins
 
     def test_r2_allow_pending_children(self):
         result = decide(
@@ -278,12 +334,26 @@ class TestDecideEnforce:
 
 
 class TestDecisionEnumCanonical:
-    """The canonical 5-value enum (Phase 4 task 4.5 — verbatim values)."""
+    """The canonical enum (Phase 4 task 4.5 — verbatim values).
 
-    def test_exactly_five_values(self):
+    2026-09-19 (attest-first contract, c5d9a38a remediation): the
+    enum gained a sixth value, ``Decision.HOLD = "hold"``. The HOLD
+    branch fires when attestation_present=True but the FINAL
+    AIMessage is NOT a standalone text report (either the
+    attest-call message itself with no subsequent text, or the
+    bundled c5d9a38a shape). The branch injects a checkpoint-
+    durable Final Report Reminder (counter-INDEPENDENT, capped at
+    :data:`daemon.graph.ATTESTATION_REMINDER_CAP` per mission) and
+    routes back to ``agent``. Completion (meta_bypass allow) fires
+    ONLY when attestation_present AND the final AIMessage is a
+    standalone text report. The 5-value invariant retired.
+    """
+
+    def test_exactly_six_values(self):
         assert {d.value for d in Decision} == {
             "allowed",
             "denied",
+            "hold",
             "terminal_after_bound",
             "dry_log",
             "allowed_legitimate_pending_wakeup",
@@ -295,16 +365,34 @@ class TestDecisionEnumCanonical:
             expected = value is Decision.DENIED
             assert result.should_inject_nudge is expected
 
+    def test_reminder_only_on_hold(self):
+        """2026-09-19 — the reminder guard mirrors the nudge guard:
+        ``should_inject_reminder`` is True ONLY for ``Decision.HOLD``.
+        Every other enum value (allowed / denied / terminal_after_bound
+        / dry_log / allowed_legitimate_pending_wakeup) is structurally
+        forbidden from injecting the Final Report Reminder. The
+        reminder path is counter-INDEPENDENT — no bound/escalation
+        interaction — and the structural exclusivity to HOLD is the
+        invariant that keeps the new branch from leaking into the
+        existing deny / allow / bound machinery."""
+        for value in Decision:
+            result = GateDecisionFactory(value)
+            expected = value is Decision.HOLD
+            assert result.should_inject_reminder is expected
+
 
 def GateDecisionFactory(value: Decision):
-    """Build a GateDecision carrying ``value`` with the nudge guard applied
-    by construction (mirrors decide()'s invariant for every enum member)."""
+    """Build a GateDecision carrying ``value`` with the nudge + reminder guards
+    applied by construction (mirrors decide()'s invariant for every enum
+    member). 2026-09-19: ``should_inject_reminder`` joins the guard set;
+    the reminder path is structurally exclusive to ``Decision.HOLD``."""
     from daemon.services.attestation_gate import GateDecision
 
     return GateDecision(
         decision=value,
         next_denied_count=0,
         should_inject_nudge=(value is Decision.DENIED),
+        should_inject_reminder=(value is Decision.HOLD),
     )
 
 

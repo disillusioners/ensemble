@@ -53,6 +53,34 @@ from tests.support.scripted_chat_model import ScriptedChatModel
 INSTANCE_ID = "attestation-leader-e2e"
 _EXPECTED_HEAD_PREFIX = "feature/lca-resolver-stage3"
 
+# 2026-09-19 attest-first contract: the FINAL AIMessage MUST be a
+# standalone text report (no tool calls, >=
+# SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate to allow
+# END via Decision.ALLOWED. The scripted flow uses this as the
+# final response so the clean attest_call + report-as-subsequent-
+# standalone-message sequence satisfies the contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
 
 def _git_head() -> str:
     import subprocess
@@ -262,16 +290,20 @@ async def test_zoo_scenario_1_child_lie_full_lifecycle_real_graph(
     #     routes back to agent
     #   LLM 2: hallucinated → end_candidate → gate eval1 (BAND_DENY +
     #     judge=not_complete → DENY+NUDGE, counter 0→1; routes back)
-    #   LLM 3: attest_ai (attest_completion) → tools (succeeds) →
+    #   LLM 3: clean attest_call (empty content + tool_call, the
+    #     2026-09-19 attest-first contract) → tools (succeeds) →
     #     routes back to agent
-    #   LLM 4: final_ai → end_candidate → gate eval2 (attested
-    #     meta-bypass → ALLOW, counter reset to 0; END)
+    #   LLM 4: standalone text report (no tool calls, >=
+    #     SHORT_REPORT_WORD_THRESHOLD = 150 words — the
+    #     full-report helper) → end_candidate → gate eval2
+    #     (attested meta-bypass + final-AI-text-report → ALLOW,
+    #     counter reset to 0; END)
     model1 = ScriptedChatModel(
         responses=[
             _delegate_ai(),
             AIMessage(content="hallucinated-1"),
             AIMessage(
-                content="Attesting now.",
+                content="",
                 tool_calls=[
                     {
                         "name": "attest_completion",
@@ -280,7 +312,7 @@ async def test_zoo_scenario_1_child_lie_full_lifecycle_real_graph(
                     }
                 ],
             ),
-            AIMessage(content="full report delivered"),
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )

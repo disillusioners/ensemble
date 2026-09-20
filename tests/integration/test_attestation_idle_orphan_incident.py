@@ -56,6 +56,34 @@ from tests.support.scripted_chat_model import ScriptedChatModel
 
 INSTANCE_ID = "attestation-leader-e2e"
 
+# 2026-09-19 attest-first contract: the FINAL AIMessage MUST be a
+# standalone text report (no tool calls, >=
+# SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate to allow
+# END via Decision.ALLOWED. The scripted flow uses this as the
+# final response so the clean attest_call + report-as-subsequent-
+# standalone-message sequence satisfies the contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
 # Incident-faithful tree constants (b08f40fe / tester c6f57749).
 TESTER_CHILD_ID = "orphan-tree-tester-c6f57749"
 TERMINAL_CHILD_STATUSES = [
@@ -136,9 +164,17 @@ def _terminate_orphans(engine) -> None:
 
 
 @tool
-def attest_completion() -> dict:
-    """Test stub of the attestation tool (no-op confirmation)."""
-    return {"attested": True}
+def attest_completion() -> str:
+    """Test stub of the attestation tool (the new contract — returns
+    the teacher text per the 2026-09-19 attest-first contract). The
+    real tool returns the clean-call teacher text on an empty-
+    content caller; for the integration tests the stub
+    unconditionally returns the clean-call shape (the runtime hook
+    that sets the per-thread state from the tools-node caller is
+    exercised in the unit tests, not here)."""
+    from daemon.tools.attestation import ATTEST_CLEAN_RESULT_TEXT
+
+    return ATTEST_CLEAN_RESULT_TEXT
 
 
 def _delegate_ai() -> AIMessage:
@@ -155,8 +191,13 @@ def _delegate_ai() -> AIMessage:
 
 
 def _attest_ai() -> AIMessage:
+    """2026-09-19 attest-first contract: clean attest_call (empty
+    content + ``attest_completion`` tool_call). The OLD bundled
+    shape (``content="Attesting completion."`` + tool_call) was
+    the c5d9a38a class — under the new contract it produces
+    Decision.HOLD instead of Decision.ALLOWED."""
     return AIMessage(
-        content="Attesting completion.",
+        content="",
         tool_calls=[{"name": "attest_completion", "args": {}, "id": "call-attest"}],
     )
 
@@ -303,9 +344,14 @@ async def test_b08f40fe_after_orphans_terminated_and_attested_allows(
             _delegate_ai(),
             # Turn-end 1: all-terminal tree, not attested → DENIED + nudge.
             AIMessage(content="hallucinated completion"),
-            # Turn-end 2: attested → ALLOWED (counter reset).
+            # Turn-end 2: clean attest_call (empty content + tool_call,
+            # the 2026-09-19 attest-first contract) → Decision.HOLD
+            # (no subsequent standalone text report).
             _attest_ai(),
-            AIMessage(content="Done."),
+            # Turn-end 3: standalone text report (no tool calls, >=
+            # SHORT_REPORT_WORD_THRESHOLD = 150 words) → Decision.ALLOWED
+            # with counter reset (the attested-allow path).
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )
