@@ -16,6 +16,11 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..registry import get_registry
+from .completion_content import (
+    event_created_at_as_utc,
+    get_last_assistant_message,
+    parse_checkpoint_ts,
+)
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
@@ -409,40 +414,25 @@ Provide a concise summary:"""
         # regardless of current status (e.g., RUNNING from previous cascade). This ensures
         # parent waits for ALL children before completing, not just the first batch.
         if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
-            # Check if parent has any pending messages
-            parent_pending = session.exec(
-                select(func.count())
-                .select_from(MessageQueue)
-                .where(MessageQueue.instance_id == parent.instance_id)
-                .where(MessageQueue.status.in_([
-                    MessageStatus.READY.value,
-                    MessageStatus.PROCESSING.value,
-                    MessageStatus.RETRYING.value,
-                ]))
-            ).scalar_one()
-            
-            if parent_pending == 0:
-                # No pending messages, parent is truly complete
-                # Publish lifecycle event to mark job as completed
-                parent.status = InstanceStatus.COMPLETED.value
-                parent.updated_at = datetime.now(timezone.utc).isoformat()
-                logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
-                
-                # Capture parent_id for event publishing (instance will be detached after session closes)
-                completed_parent_id = parent.instance_id
-                completed_parent_parent_id = parent.parent_id
-                
-                return False, completed_parent_id, completed_parent_parent_id
-            else:
-                # Has pending messages but all children done - transition to WAITING_CHILDREN
+            # DEFECT-2 FIX: full completion gate — waiting_for==0 AND pending_count==0
+            # AND fresh assistant message after the last child_completed. Suppressed
+            # parents are held in WAITING_CHILDREN; the predicate is re-evaluated on
+            # the existing message-completed signal (event-driven, no polling).
+            allowed, block_reason = await self._root_completion_gate(
+                session, parent.instance_id, waiting_for=parent.waiting_for
+            )
+
+            if not allowed:
+                # Parent has queued work and/or has not yet responded after the last
+                # child report - transition to WAITING_CHILDREN.
                 # FIX: Changed from RUNNING to WAITING_CHILDREN. Parent should wait for its own
                 # message processing to complete before marking job done. When parent completes
                 # its message, the status check will keep it in WAITING_CHILDREN, and the cascade
                 # will run again to mark it COMPLETED.
                 parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
-                    f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                    f"pending messages, status=WAITING_CHILDREN"
+                    f"Parent {parent.instance_id[:8]}... held in WAITING_CHILDREN after "
+                    f"children done (gate blocked: {block_reason})"
                 )
                 # Emit status_change SSE event for parent waiting_children
                 if self._manager._live_hub:
@@ -451,6 +441,18 @@ Provide a concise summary:"""
                     except Exception as e:
                         logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
                 return True, None, None
+
+            # Gate passed - parent is truly complete
+            # Publish lifecycle event to mark job as completed
+            parent.status = InstanceStatus.COMPLETED.value
+            parent.updated_at = datetime.now(timezone.utc).isoformat()
+            logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+            
+            # Capture parent_id for event publishing (instance will be detached after session closes)
+            completed_parent_id = parent.instance_id
+            completed_parent_parent_id = parent.parent_id
+            
+            return False, completed_parent_id, completed_parent_parent_id
         
         return False, None, None
         
@@ -507,10 +509,14 @@ Provide a concise summary:"""
 
     async def _get_last_assistant_message(self, instance_id: str, agent_id: str) -> str | None:
         """Get the last assistant message from instance history.
-        
+
         This is the default/simple approach for completion reports - just
         pass the agent's last response to the parent.
-        
+
+        Extraction is delegated to the shared canonical helper in
+        completion_content (also used by JobFeedbackObserver for job
+        result_summary); this wrapper only adds the report prefix.
+
         Args:
             instance_id: The instance ID to get message from.
             agent_id: The agent ID (e.g., "coder", "leader").
@@ -520,24 +526,141 @@ Provide a concise summary:"""
         """
         # Get the report prefix
         prefix = self._get_instance_report_prefix(instance_id, agent_id)
-        
-        if self._checkpointer:
-            messages = await get_instance_messages(self._checkpointer, instance_id)
-        else:
-            messages = []
-        
-        # Find the last assistant message
-        last_assistant_content = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if content and content.strip():
-                    last_assistant_content = content.strip()
-                    break
-        
+
+        last_assistant_content, _created_at = await get_last_assistant_message(
+            self._checkpointer, instance_id
+        )
+
         if last_assistant_content:
             return f"{prefix}, below is the response:\n{last_assistant_content}"
         return None
+
+    # ── Root-completion predicate (DEFECT-2 fix: premature terminal emission) ──
+
+    async def _assistant_message_fresh(self, session, instance_id: str) -> tuple[bool, str | None]:
+        """Check the instance produced an assistant message after its last child_completed.
+
+        The root may only complete a task job once it has responded AFTER every
+        child completion report — otherwise its "final" message predates the
+        last child's report and the subtree isn't truly done (job 5e197a30).
+
+        Args:
+            session: Open DB session (used for the child_completed lookup).
+            instance_id: The instance (root/parent) to check.
+
+        Returns:
+            (is_fresh, reason): reason is a short diagnostic when not fresh.
+            Fail-open (True) when the instance has no child_completed events
+            (nothing to be fresh after — also the fast path for childless
+            roots) or when checkpoint timestamps are unreadable: a missing
+            timestamp must never wedge the job into eternal PROCESSING
+            (see DEADLOCK GUARD in the fix design).
+        """
+        last_child_completed_at = session.exec(
+            select(func.max(Event.created_at))
+            .where(Event.instance_id == instance_id)
+            .where(Event.kind == EventKind.CHILD_COMPLETED.value)
+        ).scalar_one_or_none()
+
+        if last_child_completed_at is None:
+            # No child ever reported to this instance — freshness is vacuous.
+            return True, None
+
+        try:
+            _content, last_assistant_ts = await get_last_assistant_message(
+                self._checkpointer, instance_id
+            )
+
+            last_assistant_dt = parse_checkpoint_ts(last_assistant_ts)
+        except Exception as e:
+            # Fail-open: an unusable checkpointer must never wedge the job into
+            # eternal PROCESSING (DEADLOCK GUARD). The waiting_for/pending legs
+            # above remain authoritative; this leg is anti-premature-emission
+            # belt-and-suspenders.
+            logger.warning(
+                "Freshness check failed for instance %s... (%s); treating as "
+                "fresh (fail-open)",
+                instance_id[:8], e,
+            )
+            return True, None
+
+        if last_assistant_dt is None:
+            # Unreadable/absent checkpoint timestamp — fail open (no deadlock).
+            logger.warning(
+                "Instance %s... has child_completed events but no readable "
+                "assistant timestamp; treating freshness as satisfied",
+                instance_id[:8],
+            )
+            return True, None
+
+        last_child_dt = event_created_at_as_utc(last_child_completed_at)
+        if last_assistant_dt >= last_child_dt:
+            return True, None
+
+        return False, (
+            f"last assistant message ({last_assistant_ts}) predates last "
+            f"child_completed ({last_child_dt.isoformat()})"
+        )
+
+    async def _root_completion_gate(
+        self,
+        session,
+        instance_id: str,
+        waiting_for: int | None = None,
+    ) -> tuple[bool, str | None]:
+        """Full emission predicate for marking a root/parent's job terminal.
+
+        A terminal "completed" lifecycle event (which JobFeedbackObserver maps
+        to job completion) may only be published when ALL of:
+          1. waiting_for == 0 — no outstanding children
+          2. pending_count == 0 — no queued/processing messages
+          3. fresh assistant message after the last child_completed event —
+             the instance has responded to every child report
+
+        Suppressed instances are held in WAITING_CHILDREN; the predicate is
+        re-evaluated on the existing message-completed signal (each completed
+        message for the instance re-invokes _process_child_completion_and_
+        notify_parent via task_processor / message_job_handler). This is an
+        event-driven re-check on signal — NOT a poll loop.
+
+        Args:
+            session: Open DB session; when None an ephemeral session is opened.
+            instance_id: The instance to evaluate.
+            waiting_for: In-session waiting_for value; read from DB when None.
+
+        Returns:
+            (allowed, block_reason): block_reason is a diagnostic when blocked.
+        """
+        owns_session = session is None
+        if owns_session:
+            session = Session(self._manager._engine)
+
+        try:
+            if waiting_for is None:
+                instance = session.get(Instance, instance_id)
+                waiting_for = (instance.waiting_for or 0) if instance else 0
+
+            if waiting_for > 0:
+                return False, f"waiting_for={waiting_for}"
+
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalar_one()
+
+            if pending_count > 0:
+                return False, f"pending_count={pending_count}"
+
+            return await self._assistant_message_fresh(session, instance_id)
+        finally:
+            if owns_session:
+                session.close()
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
@@ -583,28 +706,27 @@ Provide a concise summary:"""
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
-                
-                # waiting_for == 0, but check for pending messages before completing.
-                # This handles the case where child completion reports are still queued
-                # but waiting_for was already decremented by a previous cascade.
-                pending_count = session.exec(
-                    select(func.count())
-                    .select_from(MessageQueue)
-                    .where(MessageQueue.instance_id == instance_id)
-                    .where(MessageQueue.status.in_([
-                        MessageStatus.READY.value,
-                        MessageStatus.PROCESSING.value,
-                        MessageStatus.RETRYING.value,
-                    ]))
-                ).scalar_one()
-                
-                if instance.waiting_for > 0 and pending_count > 0:
-                    # Has explicit children to wait for
+
+                # DEFECT-2 FIX (premature terminal emission, job 5e197a30): the old
+                # code warned-then-proceeded to COMPLETED whenever waiting_for==0
+                # but messages were still queued (e.g. child completion reports),
+                # publishing "completed" before the root produced its final
+                # response. The full gate now holds the instance in
+                # WAITING_CHILDREN until waiting_for==0 AND pending_count==0 AND
+                # a fresh assistant message exists after the last child_completed.
+                # Suppression is re-evaluated on the existing message-completed
+                # signal (this handler re-runs for every completed message) —
+                # event-driven, no polling.
+                allowed, block_reason = await self._root_completion_gate(
+                    session, instance_id, waiting_for=instance.waiting_for
+                )
+                if not allowed:
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
-                        f"Instance {instance_id[:8]}... waiting_for={instance.waiting_for}, pending={pending_count}, "
-                        f"status=WAITING_CHILDREN"
+                        "Instance %s... held in WAITING_CHILDREN, job not terminal "
+                        "(gate blocked: %s)",
+                        instance_id[:8], block_reason,
                     )
                     # Emit status_change SSE event
                     if self._manager._live_hub:
@@ -613,14 +735,12 @@ Provide a concise summary:"""
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
-                elif pending_count > 0 and instance.waiting_for == 0:
-                    logger.warning(
-                        "Instance %s has pending_count=%d but waiting_for=0 — "
-                        "proceeding to COMPLETED (not waiting_children)",
-                        instance_id[:8], pending_count
-                    )
-                
-                # No children, no pending messages - safe to complete
+
+                # Gate passed (waiting_for==0 ∧ pending_count==0 ∧ fresh response)
+                # - safe to complete. The publish below is covered by this gate:
+                # only non-blocking awaits (SSE broadcast) separate it from the
+                # gate evaluation, and freshness cannot meaningfully regress
+                # across that window.
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
 
                 # Update instance status to COMPLETED in DB
@@ -768,6 +888,39 @@ Provide a concise summary:"""
         
         # If parent completed (all children done), publish lifecycle event to mark job as completed
         if completed_parent_id:
+            # DEFECT-2 FIX: re-verify the full gate at EMISSION time. The decision
+            # in _update_parent_on_child_complete predates several awaits (SSE,
+            # child_completed broadcast); a concurrent child completion can land a
+            # new CHILD_COMPLETED event / report in that window. If the gate no
+            # longer holds, downgrade the parent so the re-evaluation on the next
+            # message-completed signal can finish the job properly.
+            allowed, block_reason = await self._root_completion_gate(
+                None, completed_parent_id
+            )
+            if not allowed:
+                logger.warning(
+                    "Parent %s... completion publish suppressed at emission time "
+                    "(gate blocked: %s); downgrading to WAITING_CHILDREN",
+                    completed_parent_id[:8], block_reason,
+                )
+                try:
+                    with Session(self._manager._engine) as downgrade_session:
+                        parent_row = downgrade_session.get(Instance, completed_parent_id)
+                        if parent_row is not None and parent_row.status == InstanceStatus.COMPLETED.value:
+                            parent_row.status = InstanceStatus.WAITING_CHILDREN.value
+                            parent_row.updated_at = datetime.now(timezone.utc).isoformat()
+                            parent_row.version = (parent_row.version or 1) + 1
+                            downgrade_session.add(parent_row)
+                            downgrade_session.commit()
+                except Exception as e:
+                    logger.error(
+                        f"Failed to downgrade suppressed parent {completed_parent_id[:8]}...: {e}"
+                    )
+                # Skip the completed SSE + lifecycle publish; fall through to the
+                # child's own title generation below.
+                self._trigger_title_generation(instance_id, completed_message_id)
+                return
+
             try:
                 # Emit status_change SSE event for parent completed
                 if self._manager._live_hub:

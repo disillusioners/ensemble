@@ -11,6 +11,12 @@ Key behaviors:
 - Handles race conditions gracefully (e.g., with terminate_instance())
 - Provides health monitoring with periodic logging
 """
+# DEFERRED ANNOTATIONS: the __init__ signature uses forward-ref string unions
+# (e.g. "JobSystemConfig" | None) that raise TypeError at class-definition time
+# on Python < 3.14 (PEP 649 lazy annotations). Deferring keeps this module
+# importable on the 3.13 venv so the test suite can collect it.
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime
 import logging
@@ -20,6 +26,7 @@ from typing import TYPE_CHECKING
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.project.repository import SQLModelProjectRepository
+from daemon.services.completion_content import get_last_assistant_message
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 
@@ -198,6 +205,42 @@ class JobFeedbackObserver:
 
         logger.info(f"JobFeedbackObserver stopped after processing {events_processed} events")
 
+    async def _extract_result_summary(self, instance_id: str) -> str | None:
+        """Best-effort extraction of the instance's last assistant message.
+
+        Used as the job ``result_summary`` on terminal transitions so watcher
+        notifications carry a non-empty "Result:" body and job_get returns a
+        populated result_summary (fix for empty completed-event results).
+
+        DEADLOCK GUARD: this must NEVER block a terminal transition — any
+        failure (no checkpointer, unreadable history, no assistant content)
+        yields None and the job still terminates. The observer is
+        predicate-blind: whenever the instance reaches a terminal lifecycle
+        state (completed/error; terminated is handled by terminate_instance),
+        the job terminates regardless of result availability. No eternal
+        PROCESSING.
+
+        Args:
+            instance_id: The instance that reached a terminal state.
+
+        Returns:
+            The last assistant message content, or None when unavailable.
+        """
+        try:
+            checkpointer = getattr(self._instance_manager, "_checkpointer", None)
+            if checkpointer is None:
+                return None
+            content, _created_at = await get_last_assistant_message(
+                checkpointer, instance_id
+            )
+            return content
+        except Exception as e:
+            logger.debug(
+                f"result_summary extraction failed for instance "
+                f"{instance_id[:8]}...: {e}"
+            )
+            return None
+
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.
 
@@ -250,29 +293,39 @@ class JobFeedbackObserver:
         now = datetime.utcnow().isoformat()
         try:
             if status == "completed":
+                # DEFECT-1 FIX: carry the root's last assistant message as
+                # result_summary so notify_watchers renders a non-empty
+                # "Result:" body and job_get stops returning result_summary:null.
+                result_summary = await self._extract_result_summary(instance_id)
                 # Use atomic_transition for PROCESSING -> COMPLETED
                 self._job_repo.atomic_transition(
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.COMPLETED.value,
                     completed_at=now,
+                    result_summary=result_summary,
                 )
                 logger.info(
                     f"Observer: completed job {job.job_id[:8]}... "
                     f"for instance {instance_id[:8]}..."
+                    + (f" (result_summary: {len(result_summary)} chars)" if result_summary else " (no result content)")
                 )
                 # Notify watchers after successful transition
                 await self._job_queue_service.notify_watchers(job.job_id, "completed")
 
             elif status == "error":
-                # Use atomic_transition for PROCESSING -> FAILED with error
+                # DEFECT-1 FIX: keep error_message AND add best-effort
+                # result_summary from the instance's last assistant message.
                 error_message = error if error else "Unknown error"
+                result_summary = await self._extract_result_summary(instance_id)
+                # Use atomic_transition for PROCESSING -> FAILED with error
                 self._job_repo.atomic_transition(
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.FAILED.value,
                     completed_at=now,
                     error_message=error_message,
+                    result_summary=result_summary,
                 )
                 logger.info(
                     f"Observer: failed job {job.job_id[:8]}... "

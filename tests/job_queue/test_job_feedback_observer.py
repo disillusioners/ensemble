@@ -120,6 +120,7 @@ class TestObserverCompletesJob:
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary=ANY,
         )
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
 
@@ -164,6 +165,7 @@ class TestObserverFailsJob:
             to_status=JobStatus.FAILED.value,
             completed_at=ANY,
             error_message="Something went wrong",
+            result_summary=ANY,
         )
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
 
@@ -550,6 +552,7 @@ class TestObserverDefaultErrorMessage:
             to_status=JobStatus.FAILED.value,
             completed_at=ANY,
             error_message="Unknown error",
+            result_summary=ANY,
         )
 
 
@@ -700,12 +703,14 @@ class TestObserverStartStop:
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary=ANY,
         )
         mock_job_repo.atomic_transition.assert_any_call(
             job_id="job-2",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary=ANY,
         )
 
 
