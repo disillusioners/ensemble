@@ -11,16 +11,25 @@ Endpoint shape::
 
 Headers::
 
-    Authorization: Bearer {PLANE_MCP_API_KEY}
+    X-Api-Key: {PLANE_API_KEY}
     x-workspace-slug: {PLANE_MCP_WORKSPACE_SLUG}
     Content-Type: application/json
 
+**Authentication scheme.** Plane REST uses the ``X-Api-Key`` header
+(``Authorization: Bearer`` is rejected with HTTP 401). The bearer key
+historically bound here was scoped to the MCP deployment (mcp.ensem.dev);
+that scoping means the same secret cannot be reused for REST. We therefore
+require a dedicated ``PLANE_API_KEY`` (workspace-level REST token minted
+from Plane's Settings → API Tokens UI) and **never** silently fall back
+to ``PLANE_MCP_API_KEY`` — a silent fallback would mask the exact
+misconfiguration class we're fixing (the dead-on-REST key).
+
 Feature gating
 --------------
-The client is feature-gated on ``PLANE_BASE_URL``: when the URL env var
-is unset (or empty), :meth:`is_available` returns ``False`` and
-:meth:`create` returns ``None``. This lets callers no-op gracefully
-without sprinkling ``if`` checks throughout the codebase.
+The client is feature-gated on ``PLANE_BASE_URL`` + ``PLANE_API_KEY``:
+when either env var is unset (or empty), :meth:`is_available` returns
+``False`` and :meth:`create` returns ``None``. This lets callers no-op
+gracefully without sprinkling ``if`` checks throughout the codebase.
 
 Circuit breaker
 ---------------
@@ -124,7 +133,10 @@ class PlaneHttpClient:
 
         Args:
             base_url: REST base URL. Defaults to ``_rest_base_url()``.
-            api_key: Bearer token. Defaults to ``PLANE_MCP_API_KEY``.
+            api_key: REST API token. Defaults to ``PLANE_API_KEY``.
+                Sent as the ``X-Api-Key`` header. We do **not** fall back
+                to ``PLANE_MCP_API_KEY`` — the MCP-scoped key is invalid
+                for REST and a silent fallback would mask misconfiguration.
             workspace_slug: Workspace slug. Defaults to
                 ``PLANE_MCP_WORKSPACE_SLUG``. Used for the
                 ``x-workspace-slug`` header.
@@ -133,7 +145,7 @@ class PlaneHttpClient:
             timeout: Per-request timeout in seconds.
         """
         self._base_url = base_url if base_url is not None else _rest_base_url()
-        self._api_key = api_key if api_key is not None else _env("PLANE_MCP_API_KEY")
+        self._api_key = api_key if api_key is not None else _env("PLANE_API_KEY")
         self._workspace_slug = (
             workspace_slug
             if workspace_slug is not None
@@ -146,8 +158,15 @@ class PlaneHttpClient:
 
     @classmethod
     def is_available(cls) -> bool:
-        """Return True when all required env vars are present."""
-        return _rest_base_url() is not None and bool(_env("PLANE_MCP_API_KEY"))
+        """Return True when all required env vars are present.
+
+        Gated on ``PLANE_BASE_URL`` + ``PLANE_API_KEY``. We do **not**
+        accept ``PLANE_MCP_API_KEY`` as a substitute — that key is
+        scoped to the MCP deployment (mcp.ensem.dev) and is rejected
+        by Plane REST. A silent fallback would mask misconfiguration
+        (the exact incident class this PR is fixing).
+        """
+        return _rest_base_url() is not None and bool(_env("PLANE_API_KEY"))
 
     @classmethod
     def create(cls) -> "PlaneHttpClient | None":
@@ -163,9 +182,13 @@ class PlaneHttpClient:
     # ── Internal helpers ────────────────────────────────────────────────
 
     def _headers(self) -> dict[str, str]:
-        """Build the request headers — never log the Authorization value."""
+        """Build the request headers — never log the API key value.
+
+        Plane REST uses the ``X-Api-Key`` header (not
+        ``Authorization: Bearer`` — which is rejected with HTTP 401).
+        """
         return {
-            "Authorization": f"Bearer {self._api_key}",
+            "X-Api-Key": self._api_key,
             "x-workspace-slug": self._workspace_slug,
             "Content-Type": "application/json",
             "Accept": "application/json",

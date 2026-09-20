@@ -809,6 +809,6 @@ def _disable_plane_sync_in_tests(request, monkeypatch):
         yield
         return
 
-    for var in ("PLANE_BASE_URL", "PLANE_MCP_API_KEY", "PLANE_MCP_WORKSPACE_SLUG"):
+    for var in ("PLANE_BASE_URL", "PLANE_API_KEY", "PLANE_MCP_API_KEY", "PLANE_MCP_WORKSPACE_SLUG"):
         monkeypatch.delenv(var, raising=False)
     yield

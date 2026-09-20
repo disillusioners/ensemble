@@ -108,7 +108,7 @@ def mock_plane_env(monkeypatch):
     exercise the disabled path use ``monkeypatch.delenv`` directly.
     """
     monkeypatch.setenv("PLANE_BASE_URL", "https://plane.example.com")
-    monkeypatch.setenv("PLANE_MCP_API_KEY", "test-api-key-xyz")
+    monkeypatch.setenv("PLANE_API_KEY", "test-api-key-xyz")
     monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test-ws")
     yield
 
@@ -485,49 +485,49 @@ class TestPlaneHttpClientFeatureGating:
     def test_feature_disabled_no_env(self, monkeypatch):
         """All Plane env vars unset → ``is_available`` False."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
         assert PlaneHttpClient.is_available() is False
 
     def test_feature_disabled_only_url(self, monkeypatch):
         """Only ``PLANE_BASE_URL`` set → still disabled (API key missing)."""
         monkeypatch.setenv("PLANE_BASE_URL", "https://x")
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "ws")
         assert PlaneHttpClient.is_available() is False
 
     def test_feature_disabled_only_api_key(self, monkeypatch):
-        """Only ``PLANE_MCP_API_KEY`` set → still disabled."""
+        """Only ``PLANE_API_KEY`` set → still disabled."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.setenv("PLANE_MCP_API_KEY", "k")
+        monkeypatch.setenv("PLANE_API_KEY", "k")
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
         assert PlaneHttpClient.is_available() is False
 
     def test_feature_disabled_only_workspace_slug(self, monkeypatch):
         """Only ``PLANE_MCP_WORKSPACE_SLUG`` set → still disabled."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "ws")
         assert PlaneHttpClient.is_available() is False
 
     def test_feature_enabled_all_set(self, monkeypatch):
         """All three env vars set → ``is_available`` True."""
         monkeypatch.setenv("PLANE_BASE_URL", "https://x")
-        monkeypatch.setenv("PLANE_MCP_API_KEY", "k")
+        monkeypatch.setenv("PLANE_API_KEY", "k")
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "ws")
         assert PlaneHttpClient.is_available() is True
 
     def test_feature_disabled_whitespace_only(self, monkeypatch):
         """Whitespace-only env values are stripped → disabled."""
         monkeypatch.setenv("PLANE_BASE_URL", "   ")
-        monkeypatch.setenv("PLANE_MCP_API_KEY", "   ")
+        monkeypatch.setenv("PLANE_API_KEY", "   ")
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "   ")
         assert PlaneHttpClient.is_available() is False
 
     def test_create_returns_none_when_disabled(self, monkeypatch):
         """``create()`` returns ``None`` when env vars are missing."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
         assert PlaneHttpClient.create() is None
 
@@ -601,7 +601,12 @@ class TestPlaneHttpClientHeaders:
     def test_request_includes_authorization_header(
         self, mock_plane_env, monkeypatch
     ):
-        """The ``Authorization: Bearer <key>`` header is sent."""
+        """The ``X-Api-Key: <key>`` header is sent.
+
+        Plane REST uses ``X-Api-Key`` (NOT ``Authorization: Bearer``,
+        which is rejected with HTTP 401). See
+        ``daemon/clients/plane_http_client.py`` for the auth-scheme note.
+        """
         captured: list[httpx.Request] = []
         transport = _make_transport(
             [httpx.Response(200, json={"id": "p1"})]
@@ -638,9 +643,13 @@ class TestPlaneHttpClientHeaders:
 
         assert len(captured) == 1
         req = captured[0]
-        assert req.headers["authorization"] == "Bearer my-secret-key"
+        assert req.headers["x-api-key"] == "my-secret-key"
         assert req.headers["x-workspace-slug"] == "ws-slug"
         assert req.headers["content-type"] == "application/json"
+        # Negative assertion: Bearer would be silently wrong (HTTP 401 in
+        # production). Pin the absence so a future refactor doesn't
+        # silently re-introduce it.
+        assert "authorization" not in req.headers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -911,7 +920,7 @@ class TestPlaneSyncServiceSync:
     def test_sync_disabled(self, repo, monkeypatch):
         """Feature not configured → status="disabled"."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
 
         project = repo.create(name="DisabledProj")
@@ -1020,7 +1029,7 @@ class TestPlaneSyncServiceIsAvailable:
 
     def test_is_not_available_when_env_missing(self, monkeypatch):
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
         assert PlaneSyncService.is_available() is False
 
@@ -1079,7 +1088,7 @@ class TestPlaneSyncProjectToolIntegration:
     ):
         """When ``PlaneSyncService.is_available()`` is False → tool returns disabled."""
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
+        monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
 
         tools = create_plane_sync_tools(repo)

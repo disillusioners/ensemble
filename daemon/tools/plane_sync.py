@@ -66,8 +66,10 @@ flat project. Auto-runs on project creation; manually callable when you
 need to re-sync after a Plane outage or to pick up changes that the v1
 auto-sync layer doesn't cover (name, description).
 
-Requires `PLANE_BASE_URL`, `PLANE_MCP_API_KEY`, `PLANE_MCP_WORKSPACE_SLUG`
+Requires `PLANE_BASE_URL`, `PLANE_API_KEY`, `PLANE_MCP_WORKSPACE_SLUG`
 env vars. When unset, the tool returns ``{"status": "disabled"}``.
+(`PLANE_MCP_API_KEY` stays MCP-only; the REST client requires its own
+dedicated `PLANE_API_KEY` — see `daemon/clients/plane_http_client.py`.)
 """
 
 
