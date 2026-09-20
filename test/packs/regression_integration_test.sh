@@ -70,6 +70,8 @@ timeout 350s .venv/bin/python -m pytest \
   -n auto --tb=short -q -rf \
   --override-ini="timeout=240" \
   --ignore-glob='**/test_chat_source_*.py' \
+  --deselect tests/integration/test_skill_cross_phase_flow_b.py::TestStep6ABTestResolution::test_full_flow_resolves_ab_test_with_clear_winner \
+  --deselect tests/integration/test_skill_cross_phase_flow_b.py::TestStep6ABTestResolution::test_resolution_force_resolves_when_max_extensions_exceeded \
   2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

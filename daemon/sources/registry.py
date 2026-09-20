@@ -75,8 +75,15 @@ def _is_text_only_payload_for_chat_injection(
             (the safe direction — the durable path always works).
 
     Plus the unconditional gates that run first:
-      * No images (set_injection is text-only — its signature
-        accepts only ``content``, ``source``, ``echo_id``).
+      * No images (set_injection is text-only on the agent channel
+        — the HumanMessage additional_kwargs carry the display
+        metadata only, never content blocks). Phase 2 / clipboard-
+        image-chat (round-2 amend #31, h4-S1): refs carried as
+        ``additional_kwargs["image_refs"]`` on the injected
+        HumanMessage — display-metadata only, the agent channel
+        stays text-only; ``IncomingMessage`` cannot mint refs (see
+        ``base.py:25`` guard comment + A8 static field-absence
+        test). Legacy text-only comment refreshed below.
       * Non-empty / non-whitespace content (defensive; the
         chat-source path does NOT validate ``message.content`` like
         HTTP does, but a blank injection is a wasted agent turn).

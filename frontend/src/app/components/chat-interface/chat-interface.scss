@@ -641,6 +641,18 @@ $cyan: #06b6d4;
   }
 }
 
+// Phase 6 (clipboard-image-chat) — fallback styling for the
+// `(error)` handler. Applies when the bubble thumbnail's src 410s
+// after the 30-day tmp-image cleanup: opacity is dimmed, color is
+// desaturated, the cursor stays `pointer` so the user can still
+// click to attempt to open the dialog (in case the file was briefly
+// re-uploaded — the dialog will refetch).
+.message-image-failed {
+  opacity: 0.55;
+  filter: grayscale(1);
+  cursor: pointer;
+}
+
 // Defect #5 (2026-08-31): failed-send bubble + retry/dismiss panel.
 // The bubble keeps its existing shape — only the border color and a
 // subtle red wash flip — so the user can still see WHAT failed to

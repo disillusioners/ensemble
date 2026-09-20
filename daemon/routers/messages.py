@@ -19,6 +19,7 @@ from daemon.constants import (
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.live_event_hub import LiveEventHub
+from daemon.services.tmp_image_message_hook import pre_dispatch_image_hook
 from daemon.services.work_status import canonicalize_status
 from daemon.utils import serialize_message
 from sse_starlette.sse import EventSourceResponse
@@ -219,6 +220,59 @@ async def send_message(
             ).model_dump(),
         )
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Phase 2 / clipboard-image-chat — fail-fast + conversion seam
+    # ─────────────────────────────────────────────────────────────────────
+    # Architect amendment #7 — fail-fast at TOP of the conversion hook:
+    # when ``image_refs`` is non-empty AND the daemon-global vision model
+    # is unconfigured, refuse the request loudly. The error shape
+    # matches the existing vision gate just below (ErrorResponse →
+    # HTTPException 400) so FE error handling is uniform.
+    #
+    # Sits BEFORE the legacy vision gate (:222-231) and BEFORE the
+    # slash-command intercept (:233+). On the ref-send path the legacy
+    # vision gate naturally skips because the hook clears
+    # ``message.images`` to ``None`` (see comment below the gate).
+    #
+    # Sync-in-POST (architect §4 ratification; no env knob per amendment
+    # #12). The seam is hard-coded to call
+    # ``await pre_dispatch_image_hook(...)``; to flip the default to
+    # pre-dispatch pipeline, change the call site + tests — no env
+    # resolver.
+    if message.image_refs:
+        if not manager.config.llm.model_vision:
+            raise HTTPException(
+                status_code=400,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message=(
+                        "image_refs provided but model_vision is not configured. "
+                        "Set OPENAI_MODEL_VISION environment variable or model_vision in "
+                        "config.yaml."
+                    ),
+                ).model_dump(),
+            )
+        # Read the in-process TmpImageStore published at lifespan boot
+        # (see ``daemon/api.py:265-269``). If the app wasn't constructed
+        # with one (rare; only in tests that wire a half-built manager),
+        # the seam is unavailable and we 503 loudly rather than silently
+        # dropping the refs.
+        tmp_image_store = getattr(request.app.state, "tmp_image_store", None)
+        if tmp_image_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message="tmp-image store is unavailable; cannot convert image_refs",
+                ).model_dump(),
+            )
+        message = await pre_dispatch_image_hook(
+            request=message,
+            manager=manager,
+            tmp_image_store=tmp_image_store,
+            http_request=request,
+        )
+
     # Validate images
     if message.images and not manager.config.llm.model_vision:
         raise HTTPException(
@@ -229,6 +283,15 @@ async def send_message(
                         "Set OPENAI_MODEL_VISION environment variable or model_vision in config.yaml.",
             ).model_dump(),
         )
+    # Phase 2 / clipboard-image-chat: when the request arrived with
+    # ``image_refs`` (ref-send path), the conversion hook above cleared
+    # ``message.images`` to ``None`` so the legacy vision gate
+    # naturally skips on this branch. The two channels are XOR-validated
+    # at the model layer so exactly one of ``images``/``image_refs`` is
+    # non-empty at this point — ref-sends always carry refs via
+    # ``image_refs`` and cleared ``images``; legacy data-URI sends carry
+    # ``images`` only.
+
 
     # ── Slash-command intercept (Phase 1 / WS-1) ──────────────────────────
     # Sits AFTER images validation (~:240) and BEFORE status capture (~:243).
@@ -246,6 +309,19 @@ async def send_message(
     # ~3ms post-ack, unseen by the client, card stuck waiting) cases
     # are handled BEFORE any ExecutionGate acquisition. The status
     # read at :207 doubles as the gate's input — no extra DB hit.
+    #
+    # NOTE (Phase 2 / round-2 review MINOR #4): ``image_refs`` + a
+    # leading ``/`` slash-command in the same request is NOT
+    # supported. The conversion hook above (:269) prepends a
+    # ``[Image N: <desc>]\n...`` prefix to ``content`` BEFORE this
+    # intercept runs, so the first whitespace-separated token the
+    # command dispatcher sees is ``[Image`` (or ``[`` if the
+    # conversion failed) — NEVER the user's slash. The user's slash
+    # appears AFTER the prefix and never triggers the command path;
+    # this is by design (the human-readable image descriptions are
+    # part of the agent turn; a slash-command in the user bubble
+    # would race the dispatch decision). Callers that need both
+    # features must split into two separate POSTs.
     command_outcome = await manager.command_dispatcher.dispatch(
         instance_id=instance_id,
         text=message.content,
@@ -311,6 +387,11 @@ async def send_message(
                     message=message.content if is_target else "resume",
                     silent=not is_target,
                     images=message.images if is_target else None,  # Pass images for target only
+                    # Phase 2 / clipboard-image-chat: forward image_refs
+                    # alongside images (XOR at model layer guarantees at
+                    # most one non-empty). The target instance keeps refs;
+                    # non-target cascade children receive none.
+                    image_refs=message.image_refs if is_target else None,
                 )
             except Exception as e:
                 logger.warning(f"Failed to resume processing for {resumed_id[:8]}...: {e}")
@@ -344,6 +425,10 @@ async def send_message(
                             message=message.content,
                             source="api_resume_fallback",
                             images=message.images,
+                            # Phase 2 / clipboard-image-chat: forward
+                            # image_refs alongside images (XOR at model
+                            # layer guarantees at most one non-empty).
+                            image_refs=message.image_refs,
                         )
                         fallback_message_id = fallback_result.message_id
                         job_result = {
@@ -455,7 +540,35 @@ async def send_message(
 
         # W5: stream_message with custom event_type — no new method
         # added to LiveEventHub.
-        entry = manager.set_injection(instance_id, message.content, echo_id=echo_id)
+        #
+        # Phase 2 / clipboard-image-chat (round-2 amendment #31, h4-S1):
+        # thread ``image_refs`` into the RAM-FIFO entry so the
+        # drain site (``daemon/graph.py:6647-6673``) can stamp them
+        # onto ``HumanMessage.additional_kwargs["image_refs"]`` for
+        # checkpoint persistence, and the POST-time echo
+        # ``_emit_user_message_echo`` can carry refs in
+        # ``additional_kwargs`` too. None when the legacy data-URI
+        # path is used (refs are NOT a feature of the data-URI
+        # channel).
+        #
+        # OPEN DEFECT (W-a, council NEEDS-FIXES, 2026-09-19): the
+        # pre-existing legacy data-URI ``images`` drop on the FIFO
+        # echo path is NOT closed by this round. The drain site
+        # threads ``image_refs`` (refs reach the wire echo) but the
+        # legacy data-URI ``images`` list is dropped at the FIFO
+        # construction — the drain does NOT add a parallel
+        # ``additional_kwargs["images"]`` stamp for data-URIs. Real
+        # closure requires threading the ``images`` list through the
+        # echo ``additional_kwargs`` the same way ``image_refs`` is
+        # threaded; tracked as a follow-up. The test
+        # ``test_legacy_data_uri_202_images_drop_still_open`` pins
+        # the still-open status.
+        entry = manager.set_injection(
+            instance_id,
+            message.content,
+            echo_id=echo_id,
+            image_refs=message.image_refs,
+        )
         pending_count = manager.get_injection_count(instance_id)
 
         await _emit_injection_sse(
@@ -483,9 +596,22 @@ async def send_message(
         # queued).
         if live_hub is not None:
             try:
+                # Phase 2 / clipboard-image-chat (round-2 amendment
+                # #31.b, POST-time echo stamp): when the FIFO entry
+                # carries refs, stamp them onto the POST-time echo
+                # HumanMessage via additional_kwargs so ``serialize_message``
+                # UNION-extracts them into the wire ``images`` field (Task
+                # 14 / amendment #29). Same conditional-add pattern as
+                # source / echo_id — byte-identical entry when the entry
+                # has no refs.
+                echo_kwargs: dict | None = None
+                post_echo_entry_refs = entry.get("image_refs")
+                if post_echo_entry_refs:
+                    echo_kwargs = {"image_refs": list(post_echo_entry_refs)}
                 post_echo_msg = HumanMessage(
                     content=entry.get("content", ""),
                     id=entry.get("echo_id"),
+                    additional_kwargs=echo_kwargs,
                 )
                 post_serialized = serialize_message(post_echo_msg)
                 post_serialized["instance_id"] = instance_id
@@ -556,6 +682,17 @@ async def send_message(
             message=message.content,
             source="api",
             images=message.images,
+            # Phase 2 / clipboard-image-chat (round-2 amendment #26,
+            # C1 two-channel design): the router seam threads BOTH
+            # channels in parallel. The facade must forward both —
+            # ``images`` reaches the agent channel (content blocks →
+            # vision routing, legacy data-URI vision path ONLY) and
+            # ``image_refs`` reaches the display channel (DEDICATED
+            # MessageQueue.image_refs audit column + checkpoint sidecar
+            # via additional_kwargs, post-C2-f migration — refs MUST
+            # NEVER land on MessageQueue.images). XOR at the model
+            # layer guarantees at most one non-empty.
+            image_refs=message.image_refs,
             queue_id=message.queue_id,
         )
     except Exception as e:

@@ -1,9 +1,11 @@
 import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input, effect, inject, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Subject } from 'rxjs';
 import type { CommandDefinition, InstanceStatus, JobQueue } from '../../models';
 import { ApiService } from '../../services/api.service';
 import { CommandRegistryService } from '../../services/command-registry.service';
+import { ImageUploadService, UploadedImage, UploadError } from '../../services/image-upload.service';
 import {
   filterCommandsByPrefix,
   isSlashCommandTrigger,
@@ -14,9 +16,39 @@ import {
   slashPaletteLiveMessage,
 } from './slash-command-palette.util';
 
+/**
+ * Per-chip upload status. ``idle`` is the default; ``uploading`` and
+ * ``uploaded`` flow through the send pipeline; ``failed`` keeps the
+ * chip in place with a retry affordance and blocks send (per
+ * architect amendment #16's block-send default scope, phase4-plan
+ * Task 5).
+ */
+export type UploadStatus = 'idle' | 'uploading' | 'uploaded' | 'failed';
+
+/**
+ * Composer phase state (amendment #17, phase4-plan Task 12). Drives
+ * the inline conversion-wait spinner overlay on the send button.
+ *
+ * - ``idle`` — no active send in flight; canSend() is the gate.
+ * - ``uploading`` — at least one chip is uploading to /api/tmp_images.
+ * - ``converting`` — all uploads finished; the messages POST is in
+ *   flight, the daemon is doing sync-in-POST image→text conversion.
+ *   The send button shows "Converting images, this may take a minute"
+ *   inline.
+ * - ``sending`` — pure text-only send in flight (no image-refs path).
+ */
+export type ComposerPhaseState = 'idle' | 'uploading' | 'converting' | 'sending';
+
 export interface MessagePayload {
   content: string;
   images?: string[];  // optional, not required
+  /**
+   * Phase 4 (clipboard-image-chat): ref-form image refs
+   * (``/api/tmp_images/<32hex>``). XOR-sibling of ``images`` — the FE
+   * never sends both fields non-empty. The chat component's
+   * ``api.sendMessage`` call site threads this sibling through.
+   */
+  image_refs?: string[];
   queue_id?: string | null;
   /**
    * Defect #5 retry path (2026-08-31, must-fix #1): when set, this send
@@ -31,12 +63,35 @@ export interface MessagePayload {
   retry_of_message_id?: string;
 }
 
+/**
+ * One image attached to the composer. ``refUrl`` is the canonical
+ * daemon-side URL emitted by ``ImageUploadService``; ``uploadStatus``
+ * drives the chip's status pill (⏳/✓/⚠); ``uploadError`` is the
+ * server-verbatim message captured for the retry affordance.
+ *
+ * The original ``File`` is cached on a module-scoped ``WeakMap``
+ * (NOT on this object) to keep the signal value JSON-serializable
+ * (plan Risk #6).
+ */
 interface FilePreview {
   id: string;
   dataUrl: string;
   name: string;
   size: number;
+  refUrl?: string;
+  imageId?: string;
+  uploadStatus?: UploadStatus;
+  uploadError?: string;
 }
+
+/**
+ * Module-scoped File cache keyed by ``FilePreview.id``. The
+ * ``File`` reference itself is stable for the lifetime of the
+ * composition; the cache lives for the lifetime of the page. The
+ * chip's per-image upload POST uses the cached File so we don't
+ * re-decode the data URL back to bytes on send (plan Risk #6).
+ */
+const FILE_CACHE = new WeakMap<FilePreview, File>();
 
 @Component({
   selector: 'app-message-input',
@@ -48,6 +103,21 @@ interface FilePreview {
 export class MessageInputComponent {
   private readonly apiService = inject(ApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly imageUpload = inject(ImageUploadService);
+
+  /**
+   * Per-chip abort subjects — one Subject per in-flight upload. The
+   * key is the FilePreview id (UUID). ``removeImage`` fires the
+   * subject to cancel the HttpClient subscription mid-flight (Task 7
+   * acceptance). Cleared on terminal state (uploaded / failed).
+   */
+  private readonly uploadAborters = new Map<string, Subject<void>>();
+
+  /**
+   * Composer phase state (amendment #17, Task 12). Drives the
+   * inline conversion-wait spinner overlay. Read by the template.
+   */
+  protected readonly phaseState = signal<ComposerPhaseState>('idle');
 
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
@@ -161,13 +231,24 @@ export class MessageInputComponent {
 
   protected readonly MAX_IMAGES = 3;
   protected readonly MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+
+  /**
+   * Phase 4 (clipboard-image-chat) round-2 / O3 — trimmed to the
+   * daemon 4-type allowlist (architect amendment #1, matching
+   * ``daemon/models/tmp_image.py`` 4-type ``_MAGIC_SIGNATURES``).
+   * Dropped types (``image/bmp``, ``image/tiff``) surface the
+   * typed "Content type rejected" validation error via
+   * ``showValidationError`` and the chip never enters a stuck-422
+   * state. Identical to the daemon: ``image/png``, ``image/jpeg``,
+   * ``image/jpg`` (normalized to ``image/jpeg`` server-side),
+   * ``image/gif``, ``image/webp``.
+   */
   private readonly ACCEPTED_TYPES = [
     'image/png',
     'image/jpeg',
+    'image/jpg',
     'image/gif',
     'image/webp',
-    'image/bmp',
-    'image/tiff'
   ];
 
   agentColorMap: Record<string, string> = {
@@ -182,8 +263,19 @@ export class MessageInputComponent {
     return this.agentColorMap[this.agentColor()] || '#10a7f7';
   });
 
+  /**
+   * Send-eligibility gate. True when:
+   * - the instance is not disabled AND
+   * - the user has something to send (text or images) AND
+   * - no chip is currently uploading (Task 5 acceptance: send button
+   *   ``disabled`` while any preview has ``uploadStatus === 'uploading'``).
+   */
   readonly canSend = computed(() => {
-    return (!!this.message().trim() || this.images().length > 0) && !this.disabled();
+    if (this.disabled()) return false;
+    const hasContent = !!this.message().trim() || this.images().length > 0;
+    if (!hasContent) return false;
+    const anyUploading = this.images().some(img => img.uploadStatus === 'uploading');
+    return !anyUploading;
   });
 
   queues = signal<JobQueue[]>([]);
@@ -245,18 +337,176 @@ export class MessageInputComponent {
     }
   }
 
-  handleSubmit(): void {
+  /**
+   * Phase 4 (clipboard-image-chat) async handleSubmit. Two-stage:
+   *   1. Gather every preview that lacks ``refUrl``; upload each
+   *      in parallel via ``ImageUploadService`` (Task 5).
+   *   2. Block-send default — if ANY upload fails, do NOT emit; the
+   *      chip transitions to ``failed`` with a retry affordance
+   *      (Task 10) and a banner summary surfaces.
+   *   3. On all-success, emit a payload with ``image_refs`` populated
+   *      (NOT ``images``). The chat component threads ``image_refs``
+   *      through ``api.sendMessage`` (XOR with ``images``).
+   *
+   * Phase state transitions (Task 12, amendment #17):
+   *   idle → uploading (any chip uploading) → converting (all
+   *   uploads finished, the messages POST is in flight). The send
+   *   button shows the inline "Converting images, this may take a
+   *   minute" copy while ``phaseState === 'converting'``.
+   */
+  async handleSubmit(): Promise<void> {
     const trimmedMessage = this.message().trim();
     if ((!trimmedMessage && this.images().length === 0) || this.disabled()) return;
 
+    const previews = this.images();
+    const pending = previews.filter(p => !p.refUrl && p.uploadStatus !== 'uploaded');
+
+    if (pending.length === 0) {
+      // No uploads needed — emit synchronously (no image refs path).
+      this.phaseState.set('sending');
+      const payload: MessagePayload = {
+        content: trimmedMessage,
+        queue_id: this.isQueueSelectorVisible() ? this.selectedQueueId() : null,
+      };
+      this.sendMessage.emit(payload);
+      // Reset phase state on the next microtask — the chat
+      // component's success / error handler runs synchronously after
+      // the emit, but we don't want to hold "sending" forever if
+      // the parent doesn't reset it. The parent's response handler
+      // calls ``clearInput`` on success which we'll observe via an
+      // effect — for the no-image path this is moot (no converting
+      // spinner would ever show). Reset on next tick.
+      queueMicrotask(() => this.phaseState.set('idle'));
+      return;
+    }
+
+    // Upload phase.
+    this.phaseState.set('uploading');
+    const settled = await Promise.allSettled(
+      pending.map(preview => this.uploadPreview(preview)),
+    );
+
+    // Block-send default: any failure → no emit, chip already marked failed.
+    const anyFailed = settled.some(r => r.status === 'rejected');
+    if (anyFailed) {
+      const failedCount = settled.filter(r => r.status === 'rejected').length;
+      this.showValidationError(
+        failedCount === 1
+          ? 'Upload failed — retry the chip to send.'
+          : `${failedCount} uploads failed — retry to send.`,
+      );
+      this.phaseState.set('idle');
+      return;
+    }
+
+    // All uploads succeeded — collect the ref URLs and emit.
+    this.phaseState.set('converting');
+    const refs = this.images().map(img => img.refUrl).filter((u): u is string => !!u);
     const payload: MessagePayload = {
       content: trimmedMessage,
-      images: this.images().map(img => img.dataUrl),
-      queue_id: this.isQueueSelectorVisible() ? this.selectedQueueId() : null
+      image_refs: refs,
+      queue_id: this.isQueueSelectorVisible() ? this.selectedQueueId() : null,
     };
-
     this.sendMessage.emit(payload);
-    // Do NOT clear message/images here — parent calls clearInput() on API success
+    // The parent (chat component) toggles phaseState back to 'idle'
+    // by calling ``clearInput`` on success or staying in 'converting'
+    // during the long blocking POST. We re-arm to 'idle' here as a
+    // safety net; the parent's response handler resets it again
+    // before the user sees the spinner disappear.
+    queueMicrotask(() => this.phaseState.set('idle'));
+  }
+
+  /**
+   * Upload a single preview's cached ``File``. Resolves with the
+   * UploadedImage on success; rejects with the typed ``UploadError``
+   * on failure. Updates the chip's ``uploadStatus`` along the way
+   * so the template can render the status pill.
+   *
+   * The AbortController is owned here so ``removeImage`` can cancel
+   * an in-flight upload (Task 7 acceptance).
+   */
+  private uploadPreview(preview: FilePreview): Promise<UploadedImage> {
+    const file = FILE_CACHE.get(preview);
+    if (!file) {
+      // The cache lost the file (e.g. GC pressure); treat as a
+      // permanent failure so the user sees the retry affordance.
+      const err = new UploadError(0, 'Lost file reference', 'network', 'File reference lost');
+      return Promise.reject(err);
+    }
+
+    this.updatePreviewStatus(preview.id, { uploadStatus: 'uploading', uploadError: undefined });
+    const controller = new AbortController();
+    const aborter = new Subject<void>();
+    this.uploadAborters.set(preview.id, aborter);
+
+    return new Promise<UploadedImage>((resolve, reject) => {
+      // Bridge the AbortController and the rxjs Subject so
+      // ``removeImage`` can cancel via either seam.
+      const sub = aborter.subscribe(() => controller.abort());
+      this.imageUpload.upload(file, { signal: controller.signal }).subscribe({
+        next: result => {
+          sub.unsubscribe();
+          this.uploadAborters.delete(preview.id);
+          this.updatePreviewStatus(preview.id, {
+            uploadStatus: 'uploaded',
+            refUrl: result.ref_url,
+            imageId: result.image_id,
+            uploadError: undefined,
+          });
+          resolve(result);
+        },
+        error: (err: unknown) => {
+          sub.unsubscribe();
+          this.uploadAborters.delete(preview.id);
+          if (err instanceof UploadError && err.serverMessage === 'aborted') {
+            // The chip was removed — silently resolve (no error UI).
+            resolve(undefined as unknown as UploadedImage);
+            return;
+          }
+          const message =
+            err instanceof UploadError ? err.serverMessage : String((err as Error)?.message ?? err);
+          this.updatePreviewStatus(preview.id, {
+            uploadStatus: 'failed',
+            uploadError: message,
+          });
+          reject(err);
+        },
+      });
+    });
+  }
+
+  /**
+   * Per-chip retry affordance (Task 5 acceptance, Task 10). When a
+   * chip is in ``failed`` state, clicking retry re-runs the upload
+   * with the cached ``File`` — no re-pick needed.
+   */
+  retryUpload(previewId: string): void {
+    const preview = this.images().find(p => p.id === previewId);
+    if (!preview) return;
+    if (preview.uploadStatus !== 'failed') return;
+    this.uploadPreview(preview).catch(() => {
+      // Errors are already surfaced on the chip via ``uploadError``;
+      // swallow here so the retry click doesn't bubble a runtime
+      // exception.
+    });
+  }
+
+  /**
+   * Helper — patch the preview strip in-place by id (returns a NEW
+   * array reference so the signal triggers). Used by the upload
+   * state machine to keep the chip's ``uploadStatus`` /
+   * ``uploadError`` in sync without disturbing the rest of the
+   * signal.
+   */
+  private updatePreviewStatus(
+    previewId: string,
+    patch: Partial<Pick<FilePreview, 'uploadStatus' | 'uploadError' | 'refUrl' | 'imageId'>>,
+  ): void {
+    this.images.update(imgs =>
+      imgs.map(img =>
+        img.id === previewId ? { ...img, ...patch } : img,
+      ),
+    );
   }
 
   handleResume(): void {
@@ -439,6 +689,14 @@ export class MessageInputComponent {
     return setTimeout(() => this.validationError.set(null), durationMs);
   }
 
+  /**
+   * Public sink for paste / drag-drop / picker. Validates every file
+   * against the 4-type allowlist, the count cap, and the per-file
+   * size cap; caches the original ``File`` on the module-scoped
+   * WeakMap (Task 6 acceptance — avoid a re-decode round-trip on
+   * send). On success, appends a preview chip in ``idle`` upload
+   * state.
+   */
   async processFiles(files: File[]): Promise<void> {
     for (const file of files) {
       // Check count limit
@@ -447,9 +705,13 @@ export class MessageInputComponent {
         break;
       }
 
-      // Check file type
+      // Check file type — round-2 / O3: dropped bmp/tiff. The daemon
+      // 4-type allowlist is the source of truth; the FE mirror is
+      // here only for the instant client-side UX (no chip-then-422).
       if (!this.ACCEPTED_TYPES.includes(file.type)) {
-        this.showValidationError('Unsupported image type. Please use PNG, JPEG, GIF, WebP, BMP, or TIFF.');
+        this.showValidationError(
+          'Unsupported image type. Please use PNG, JPEG, GIF, or WebP.',
+        );
         continue;
       }
 
@@ -466,8 +728,10 @@ export class MessageInputComponent {
           id: crypto.randomUUID(),
           dataUrl,
           name: file.name,
-          size: file.size
+          size: file.size,
+          uploadStatus: 'idle',
         };
+        FILE_CACHE.set(filePreview, file);
         this.images.update(imgs => [...imgs, filePreview]);
       } catch (error) {
         this.showValidationError('Failed to read file "' + file.name + '".');
@@ -475,7 +739,32 @@ export class MessageInputComponent {
     }
   }
 
+  /**
+   * Phase 4 (clipboard-image-chat) — chip removal (Task 7). If the
+   * chip has an in-flight upload, abort the underlying HttpClient
+   * via the per-chip aborter subject. If the chip has a ``refUrl``
+   * (already uploaded), fire a best-effort DELETE so the daemon can
+   * release storage eagerly — the 30-day cleanup sweep is the
+   * safety net.
+   */
   removeImage(id: string): void {
+    const aborter = this.uploadAborters.get(id);
+    if (aborter) {
+      aborter.next();
+      aborter.complete();
+      this.uploadAborters.delete(id);
+    }
+
+    const preview = this.images().find(p => p.id === id);
+    if (preview?.imageId) {
+      this.imageUpload.deleteImage(preview.imageId).subscribe({
+        error: () => {
+          // Best-effort — log and swallow.
+          console.warn('[ImageUpload] eager DELETE failed for', preview.imageId);
+        },
+      });
+    }
+
     this.images.update(imgs => imgs.filter(img => img.id !== id));
   }
 
@@ -492,10 +781,65 @@ export class MessageInputComponent {
   onDrop(event: DragEvent): void {
     event.preventDefault();
     this.isDragOver.set(false);
-    
+
     const files = event.dataTransfer?.files;
     if (files) {
       this.processFiles(Array.from(files));
     }
   }
+
+  /**
+   * Phase 4 (clipboard-image-chat) — paste handler. Walks
+   * ``clipboardData.items``, picks ``kind === 'file'`` items whose
+   * ``type`` is in the 4-type allowlist, builds ``File[]``, and
+   * routes through the existing ``processFiles`` sink so the
+   * preview-strip / caps / validation are shared with picker /
+   * drag-drop (Task 3 acceptance — uniform behavior).
+   *
+   * **Text-only pastes pass through UNTOUCHED.** When zero images
+   * are extracted, this handler does NOT call ``preventDefault`` so
+   * the browser's default paste-into-textarea behavior continues to
+   * work (Task 3 acceptance — non-regression).
+   */
+  onPaste(event: ClipboardEvent): void {
+    const files = extractPastedImages(event);
+    if (files.length === 0) return;
+    event.preventDefault();
+    this.processFiles(files);
+  }
+}
+
+/**
+ * Pure helper — walks ``ClipboardEvent.clipboardData.items`` and
+ * returns the image files that pass the 4-type allowlist. Exported
+ * so the logic-mirror spec (``message-input.paste.spec.ts``) can
+ * exercise mixed text + image items, text-only pastes, and dropped
+ * (rejected) types without spinning up Angular TestBed.
+ *
+ * ``getAsFile`` on a ``DataTransferItem`` returns ``null`` for
+ * non-file items (string items) — we skip those. The allowlist is
+ * deliberately NOT enforced here — the sink
+ * (``MessageInputComponent.processFiles``) owns the single
+ * validation surface (picker / drop / paste all funnel through it
+ * and see the same error copy).
+ */
+export function extractPastedImages(event: ClipboardEvent): File[] {
+  const items = event.clipboardData?.items;
+  if (!items) return [];
+  const out: File[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    // Filter to image MIME types — the per-file size + 4-type
+    // allowlist check happens in processFiles so all three inputs
+    // (paste / drop / picker) see the same validation surface and
+    // error copy. We accept ANY image MIME here so the user sees the
+    // typed "Unsupported image type" rejection for bmp/tiff rather
+    // than a silent no-op.
+    if (!file.type.startsWith('image/')) continue;
+    out.push(file);
+  }
+  return out;
 }

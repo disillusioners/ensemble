@@ -197,6 +197,46 @@ export function mergeMessagesById(
       if (result[idx].retry_content !== undefined) {
         merged.retry_content = result[idx].retry_content;
       }
+      // Phase 5 / clipboard-image-chat — ``images`` pin (architect
+      // amendment #20, h4/h5): MANDATORY and LOAD-BEARING for the SSE
+      // live-echo leg (predates and survives the round-1 ``serialize_message``
+      // union — amendment #37 (a)). Verified anchor: ``daemon/utils.py:213``
+      // ``serialize_message`` emits ``"images": null`` UNCONDITIONALLY when
+      // the input ``images`` local is ``None`` (:137 reassigns empty list to
+      // ``None`` AND no caller along the SSE-echo path passes a real
+      // ``images`` value). Without this pin, the spread would clobber the
+      // optimistic bubble's ref array with ``null`` after the SSE echo,
+      // and the thumbnail would NEVER appear after drain.
+      //
+      // Existing-wins whenever existing has ``images``:
+      //   (a) incoming lacks the field          → existing wins
+      //   (b) incoming has ``images: undefined`` → existing wins
+      //   (e) incoming has ``images: null``      → existing wins (the
+      //       literal ``serialize_message`` echo shape — pin catches
+      //       null too, not just undefined)
+      //   (d) both have ``images``               → existing wins
+      //                                          (symmetric with
+      //                                          failed/queue_id/retry_content;
+      //                                          the FE is the source of
+      //                                          truth for the thumbnail
+      //                                          list and the server may
+      //                                          be stale)
+      //   (c) existing lacks, incoming has       → incoming wins (new info)
+      //
+      // The runtime pin predicate (see code below) is the
+      // identity-grep mirror-parity pin (FE conventions) — verbatim in
+      // BOTH ``message-merge.util.ts`` AND ``message-merge.util.spec.ts``.
+      // A future contributor proposing to "simplify" the merge helper
+      // MUST add a replacement defense-in-depth (e.g. an explicit
+      // images-not-in-incoming clause) before removing the pin, per
+      // ``architecture-recommendation.md`` §6.5/§6.6 (h4/h5
+      // cross-reference). The runtime occurrence below is the LOAD-
+      // BEARING pin; the comment above references the predicate by
+      // name without repeating the literal so the identity-grep
+      // matches exactly once in production.
+      if (result[idx].images !== undefined) {
+        merged.images = result[idx].images;
+      }
       // MIN-4: for CONFIRMED (non-pending) entries keep the earlier of
       // the local/incoming timestamps so the moving GET re-stamp
       // (checkpoint-commit ts) cannot churn the displayed time. This

@@ -5,6 +5,7 @@ import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import type { Message } from '../../models';
 import { ChatInterfaceComponent } from './chat-interface.component';
+import { ImageViewerActionsService } from '../../services/image-viewer-actions.service';
 
 /**
  * ngx-markdown ships raw ESM (fesm2022 + marked.esm.js) that the jest
@@ -364,5 +365,379 @@ describe('ChatInterfaceComponent — /compact card copy (compaction-output-struc
       detail: { compacted_type: 'noop', noop_reason: 'below_floor' },
     } as never);
     expect(line).toBe('Context too small to compact');
+  });
+});
+
+// ─── Phase 6 / image-viewer dialog + onerror fallback (clipboard-image-chat) ─
+//
+// Plain-TS-logic mirror (per FE conventions) for the bubble-level image
+// interactions. The chat-interface owns the click + (error) bindings
+// on the rendered thumbnails; the dialog itself is opened via
+// `ImageViewerActionsService` (stubbed here so the spec does not mount
+// MatDialog).
+//
+// Test strategy (plan / phase6-plan.md Test Strategy table rows 3, 5, 6):
+//
+//   - Click handler opens the dialog with the right data
+//   - Click on a FAILED image does NOT open the dialog
+//   - Click does not bubble (defensive stopPropagation — pinned by
+//     reading the production source rather than mounting a parent
+//     handler spy, since today no parent (click) handler exists)
+//   - onerror swaps src to the pinned SVG fallback
+//   - onerror records the failure in `failedImages`
+//   - onerror is idempotent — a second error event for the same
+//     (message_id, index) pair is a no-op
+//   - Cross-seam invariant (row 6): a user message with images
+//     retains its `images` array after the (error) handler fires —
+//     the DOM-side failure does NOT cascade into a model-side clear
+//
+// Fixtures cover the cap ladder:
+//   - 1 image, onerror fires
+//   - 3 images where only the middle one 410s — the other two render
+//     normally (independent state per index)
+//   - 0 images — no-op (the @if branch never enters)
+//   - ref URL vs data URI discrimination via isTmpImageRef
+//     (predicate is the canonical §2 form discriminator)
+
+const REF_URL_32HEX = '/api/tmp_images/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const DATA_URI_A = 'data:image/png;base64,AAAA';
+const DATA_URI_B = 'data:image/jpeg;base64,/9j/4AAQ';
+
+function makeUserImageMessage(overrides: Partial<Message> = {}): Message {
+  return {
+    message_id: 'srv-images',
+    role: 'user',
+    // Empty content keeps the markdown bubble OUT of the render tree
+    // so the spec-local MarkdownModule stub doesn't trigger NG0304
+    // ("markdown is not a known element") during CD. The image tests
+    // exercise the `message.images` branch only — the markdown bubble
+    // is irrelevant to the click/error semantics.
+    content: '',
+    created_at: '2026-09-19T19:00:00+00:00',
+    instance_id: 'inst-1',
+    images: [DATA_URI_A],
+    ...overrides,
+  };
+}
+
+describe('ChatInterfaceComponent — image-viewer click + onerror (phase 6)', () => {
+  let fixture: ComponentFixture<ChatInterfaceComponent>;
+  let component: ChatInterfaceComponent;
+  let imageViewerOpen: jest.Mock;
+
+  function setupMount(messages: Message[]): void {
+    imageViewerOpen = jest.fn();
+    TestBed.configureTestingModule({
+      imports: [ChatInterfaceComponent],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        provideNoopAnimations(),
+        provideMarkdown(),
+        {
+          provide: ImageViewerActionsService,
+          useValue: { openViewer: imageViewerOpen },
+        },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(ChatInterfaceComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('instanceId', 'inst-1');
+    fixture.componentRef.setInput('messages', messages);
+    fixture.detectChanges();
+  }
+
+  function queryThumbnails(): HTMLImageElement[] {
+    return Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="message-image"]'),
+    ) as HTMLImageElement[];
+  }
+
+  describe('click handler — opens the dialog', () => {
+    it('opens the dialog with the correct src + message_id on click', () => {
+      setupMount([makeUserImageMessage({ images: [DATA_URI_A] })]);
+      const img = queryThumbnails()[0];
+      expect(img).toBeDefined();
+      img.click();
+      expect(imageViewerOpen).toHaveBeenCalledTimes(1);
+      expect(imageViewerOpen).toHaveBeenCalledWith(DATA_URI_A, 'srv-images');
+    });
+
+    it('opens the dialog for a canonical /api/tmp_images/<id> src', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      queryThumbnails()[0].click();
+      expect(imageViewerOpen).toHaveBeenCalledWith(REF_URL_32HEX, 'srv-images');
+    });
+
+    it('stopPropagation is called defensively (read-by-source pin)', () => {
+      // No parent (click) handler exists today, so we cannot wire a
+      // bubble spy. The defensive stopPropagation is pinned by the
+      // chat-interface.component.spec.ts comment + the production
+      // source (chat-interface.component.ts:onImageThumbnailClick).
+      // This spec asserts the click reached the handler with the
+      // correct args — a future regression that drops stopPropagation
+      // would still pass this spec (the click is processed correctly),
+      // but the merge-gate identity-grep will catch the production
+      // source drift.
+      setupMount([makeUserImageMessage()]);
+      queryThumbnails()[0].click();
+      expect(imageViewerOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT open the dialog when the thumbnail is already failed', () => {
+      // Use a ref URL so the prior (error) event actually records
+      // (data URIs are gated out by ``isTmpImageRef`` in the
+      // bubble-level handler — see the onerror describe block).
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      // First trigger an error so the (message_id, 0) pair is recorded
+      // as failed.
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(component.isImageFailed('srv-images', 0)).toBe(true);
+      imageViewerOpen.mockClear();
+      // Click on the failed thumbnail — the handler must short-circuit.
+      img.click();
+      expect(imageViewerOpen).not.toHaveBeenCalled();
+    });
+
+    it('opens the dialog for a message with 3 images (independent click handlers per index)', () => {
+      setupMount([
+        makeUserImageMessage({
+          message_id: 'srv-3',
+          images: [DATA_URI_A, REF_URL_32HEX, DATA_URI_B],
+        }),
+      ]);
+      const imgs = queryThumbnails();
+      expect(imgs.length).toBe(3);
+      imgs[1].click();
+      expect(imageViewerOpen).toHaveBeenCalledWith(REF_URL_32HEX, 'srv-3');
+      imgs[0].click();
+      expect(imageViewerOpen).toHaveBeenCalledWith(DATA_URI_A, 'srv-3');
+    });
+
+    it('is a no-op when a user message has 0 images (the @if branch never enters)', () => {
+      setupMount([makeUserImageMessage({ images: [] })]);
+      expect(queryThumbnails().length).toBe(0);
+      // No click → no dialog open call.
+      expect(imageViewerOpen).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('onerror handler — fallback swap + idempotency', () => {
+    it('swaps the src to the pinned SVG fallback on the first error event', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // The src binding is computed by imageSrc() — once the (m, 0)
+      // pair is recorded as failed, imageSrc() returns the fallback
+      // SVG. OnPush re-renders pick it up via the signal.
+      expect(component.isImageFailed('srv-images', 0)).toBe(true);
+      expect(img.getAttribute('src')).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+      // The class flip adds the SCSS styling.
+      expect(img.classList.contains('message-image-failed')).toBe(true);
+    });
+
+    it('records the failure in failedImages keyed by (message_id, index)', () => {
+      setupMount([
+        makeUserImageMessage({
+          message_id: 'srv-images',
+          images: [DATA_URI_A, REF_URL_32HEX, DATA_URI_B],
+        }),
+      ]);
+      const imgs = queryThumbnails();
+      imgs[1].dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // The middle index (1) is failed; the others are NOT.
+      expect(component.isImageFailed('srv-images', 0)).toBe(false);
+      expect(component.isImageFailed('srv-images', 1)).toBe(true);
+      expect(component.isImageFailed('srv-images', 2)).toBe(false);
+    });
+
+    it('is idempotent — a second error event for the same pair does not re-fire the swap', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      const srcAfterFirst = img.getAttribute('src');
+      const failedAfterFirst = component.failedImages();
+      // Second error event — must be a no-op.
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // The signal must have stable referential identity (no-op
+      // update returns the previous reference).
+      expect(component.failedImages()).toBe(failedAfterFirst);
+      // The src remains the fallback (no further swap to a different
+      // value).
+      expect(img.getAttribute('src')).toBe(srcAfterFirst);
+    });
+
+    it('clears the native onerror on the broken element to suppress further events', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.onerror = jest.fn();
+      img.dispatchEvent(new Event('error'));
+      // The chat-interface nils the element-level onerror handler so
+      // the browser does not refire the event when we swap the src.
+      expect(img.onerror).toBeNull();
+    });
+
+    it('is a defensive no-op when the event target is null', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      // Direct invocation with a null target — must not throw and
+      // must NOT record a phantom failure (no messageId resolution
+      // is possible without a target).
+      expect(() =>
+        component.onImageError({ target: null } as unknown as Event, 'srv-images', 0),
+      ).not.toThrow();
+      expect(component.isImageFailed('srv-images', 0)).toBe(false);
+    });
+
+    it('does not regress legacy data URIs (ref-URL-only fallback)', () => {
+      // Plan Task 9 / risk #4: only refs can 410 (data URIs are inline
+      // and never fail). The bubble-level (error) handler discriminates
+      // via ``isTmpImageRef`` and early-returns on non-ref src — so a
+      // spurious (error) event on a legacy data URI does NOT swap the
+      // src, does NOT add the ``message-image-failed`` class, and
+      // does NOT record the pair into ``failedImages`` (which would
+      // otherwise corrupt ``isImageFailed`` for any later ref that
+      // happens to share the (message_id, 0) tuple).
+      setupMount([makeUserImageMessage({ images: [DATA_URI_A] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // src NOT swapped, class NOT added, NOT in failedImages.
+      expect(img.getAttribute('src')).toBe(DATA_URI_A);
+      expect(img.classList.contains('message-image-failed')).toBe(false);
+      expect(component.isImageFailed('srv-images', 0)).toBe(false);
+    });
+
+    it('gates the fallback via isTmpImageRef — ref URLs still fall back', () => {
+      // Phase-6 review: the discriminator is real. A canonical
+      // ``/api/tmp_images/<32-hex>`` src that fires (error) MUST
+      // still swap to the fallback SVG, add the failure class, and
+      // record into ``failedImages``. This pins the ref-URL happy
+      // path explicitly so the gate does not regress in the other
+      // direction (over-gating and leaving every ref broken).
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(component.isImageFailed('srv-images', 0)).toBe(true);
+      expect(img.classList.contains('message-image-failed')).toBe(true);
+      expect(img.getAttribute('src')).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+    });
+
+    it('gates the fallback via isTmpImageRef — non-ref src among a mixed set does not poison siblings', () => {
+      // Cross-index invariant: gating must not bleed across indices.
+      // A data-URI sibling of a ref-URL sibling must keep rendering
+      // normally even if the data URI's bubble somehow fires (error),
+      // and the ref URL must still fall back on its own index.
+      setupMount([
+        makeUserImageMessage({
+          message_id: 'srv-mixed',
+          images: [DATA_URI_A, REF_URL_32HEX, DATA_URI_B],
+        }),
+      ]);
+      const imgs = queryThumbnails();
+      // Synthetic error on the data-URI index 0 — gated out, index 2
+      // untouched. Ref at index 1 also untouched here.
+      imgs[0].dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(component.isImageFailed('srv-mixed', 0)).toBe(false);
+      expect(component.isImageFailed('srv-mixed', 1)).toBe(false);
+      expect(component.isImageFailed('srv-mixed', 2)).toBe(false);
+      expect(imgs[0].getAttribute('src')).toBe(DATA_URI_A);
+      // Now fire the real failure on the ref at index 1 — must swap.
+      imgs[1].dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(component.isImageFailed('srv-mixed', 1)).toBe(true);
+      expect(component.isImageFailed('srv-mixed', 0)).toBe(false);
+      expect(component.isImageFailed('srv-mixed', 2)).toBe(false);
+      expect(imgs[1].getAttribute('src')).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+    });
+  });
+
+  describe('cross-seam invariant — onerror → model survives', () => {
+    // Plan row 6: the DOM-side failure does NOT cascade into a
+    // model-side clear. The message retains its `images` array
+    // (the phase-5 merge pin protects this). The bubble renders the
+    // fallback SVG, not a broken-image icon.
+    it('retains the message.images array after the (error) handler fires', () => {
+      const originalImages = [REF_URL_32HEX];
+      setupMount([makeUserImageMessage({ images: originalImages })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // The model is untouched — the (error) handler swaps the DOM
+      // src, not the model field.
+      expect(component.messages[0].images).toEqual(originalImages);
+    });
+
+    it('keeps the bubble visible — the fallback SVG renders, not a broken-image icon', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // The image element still exists in the DOM — the fallback
+      // SVG is its src.
+      expect(img).toBeDefined();
+      expect(img.tagName.toLowerCase()).toBe('img');
+      expect(img.getAttribute('src')).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+      // The class adds the SCSS styling — opacity 0.55, grayscale(1).
+      expect(img.classList.contains('message-image-failed')).toBe(true);
+    });
+  });
+
+  describe('imageSrc helper — template binding', () => {
+    it('returns the original src when the (message_id, index) is not failed', () => {
+      setupMount([makeUserImageMessage({ images: [DATA_URI_A] })]);
+      expect(component.imageSrc(DATA_URI_A, 'srv-images', 0)).toBe(DATA_URI_A);
+    });
+
+    it('returns the fallback src when the (message_id, index) IS failed', () => {
+      setupMount([makeUserImageMessage({ images: [REF_URL_32HEX] })]);
+      const img = queryThumbnails()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(component.imageSrc(REF_URL_32HEX, 'srv-images', 0)).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+    });
+  });
+
+  describe('cap-fixture coverage', () => {
+    // Plan row "Fixtures at AND past caps": 1 image, 3 images where
+    // only the middle one 410s, 0 images (no-op). The cases above
+    // cover 1 and 3; this block covers the "middle-only" independence.
+
+    it('3 images where only the middle 410s — the other two render normally (independent state per index)', () => {
+      setupMount([
+        makeUserImageMessage({
+          message_id: 'srv-middle',
+          images: [DATA_URI_A, REF_URL_32HEX, DATA_URI_B],
+        }),
+      ]);
+      const imgs = queryThumbnails();
+      imgs[1].dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      // Index 0 + 2 are NOT failed — imageSrc returns the originals.
+      expect(component.imageSrc(DATA_URI_A, 'srv-middle', 0)).toBe(DATA_URI_A);
+      expect(component.imageSrc(DATA_URI_B, 'srv-middle', 2)).toBe(DATA_URI_B);
+      // Index 1 IS failed — imageSrc returns the fallback.
+      expect(component.imageSrc(REF_URL_32HEX, 'srv-middle', 1)).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+    });
   });
 });

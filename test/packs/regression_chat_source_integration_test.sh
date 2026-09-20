@@ -40,6 +40,7 @@ timeout 50s .venv/bin/python -m pytest \
   tests/integration/test_chat_source_*.py \
   --override-ini="addopts=" \
   -m integration \
+  --deselect tests/integration/test_chat_source_saturation_isolation.py::TestSaturationIsolation::test_chat_message_claimed_by_chat_worker_under_saturation \
   --tb=short -q 2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

@@ -2737,6 +2737,7 @@ class InstanceManager:
         content: str,
         source: str | None = None,
         echo_id: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> dict[str, str]:
         """Append a pending user message to the RAM injection queue.
 
@@ -2755,6 +2756,19 @@ class InstanceManager:
         shape — no ``"source"`` key is added, and the downstream
         ``HumanMessage.additional_kwargs`` is unchanged.
 
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #31, h4-S1): keyword-only display-channel list of
+        refs that the drain site stamps onto
+        ``HumanMessage.additional_kwargs["image_refs"]`` for
+        checkpoint persistence + the serializer union reads on
+        GET /messages. Conditional add (mirror ``source`` /
+        ``echo_id``) — byte-identical entry dict when ``image_refs``
+        is ``None`` (the tool-path back-compat contract). The drain
+        site is documented to NEVER build content blocks from
+        ``image_refs`` (the AGENT channel stays text-only — refs are
+        display metadata only, langchain_openai does not serialize
+        additional_kwargs to the wire).
+
         Args:
             instance_id: Target instance.
             content: The user message text to inject on the next LLM call.
@@ -2772,12 +2786,20 @@ class InstanceManager:
                 — required by the tool-path back-compat contract
                 (agent-tool ``instance.py`` / ``job_inject``
                 ``job_queue.py`` call sites pass no ``echo_id``).
+            image_refs: Optional display-channel list (Phase 2
+                clipboard-image-chat). The drain site
+                (``daemon/graph.py:6647-6673``) stamps this onto
+                ``HumanMessage.additional_kwargs["image_refs"]``.
+                ``None`` (default) preserves byte-identical entry
+                shape — the agent-tool / job_inject call sites do
+                not pass ``image_refs`` today.
 
         Returns:
             The newly appended entry as ``{"content": str, "timestamp": str}``,
-            plus ``"source"`` when provided, plus ``"echo_id"`` when provided.
+            plus ``"source"`` when provided, plus ``"echo_id"`` when
+            provided, plus ``"image_refs"`` when provided.
         """
-        entry: dict[str, str] = {
+        entry: dict[str, Any] = {
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -2795,6 +2817,18 @@ class InstanceManager:
             # (agent-tool ``instance.py``, ``job_inject``
             # ``job_queue.py``) must keep today's exact behavior.
             entry["echo_id"] = echo_id
+        if image_refs is not None:
+            # Phase 2 / clipboard-image-chat (round-2 amendment #31):
+            # display-channel refs. Same conditional-add pattern as
+            # ``source`` / ``echo_id`` — entry stays byte-identical to
+            # pre-feature shape when image_refs is None. ``list(...)``
+            # defensive copy so the caller's list mutation cannot
+            # affect the stored entry. Tool-path call sites (the four
+            # ``set_injection`` consumers in ``tools/instance.py`` /
+            # ``tools/job_queue.py`` / ``sources/registry.py`` /
+            # ``routers/messages.py``) DO NOT pass image_refs today —
+            # they stay byte-identical.
+            entry["image_refs"] = list(image_refs)
         queue = self._pending_injections.get(instance_id)
         if queue is None:
             queue = []
@@ -5098,6 +5132,21 @@ class InstanceManager:
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instances.agent_tag: agent version tag for directory-suffix versioning
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
+            # message_queue.image_refs (Phase 2 / clipboard-image-chat,
+            # council NEEDS-FIXES, 2026-09-19): DEDICATED JSONB column
+            # for clipboard ``/api/tmp_images/<32hex>`` refs. Distinct
+            # from the legacy ``images`` column (data-URIs only). Fresh
+            # databases get the column from SQLModel.metadata.create_all()
+            # via the MessageQueue SQLModel declaration at
+            # daemon/repositories/message_queue/models.py; existing
+            # databases need the ADD COLUMN here. ADD COLUMN IF NOT
+            # EXISTS is INVALID SQLite syntax — this method is gated by
+            # ``is_postgres`` at the call site, so SQLite never reaches
+            # this list (its DDL is landed by ``create_all``).
+            (
+                "ALTER TABLE message_queue ADD COLUMN IF NOT EXISTS "
+                "image_refs JSONB"
+            ),
             # instances.attestation_denied_count (Phase 3, 2026-09-05):
             # row-scoped per-instance counter for the leader completion
             # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows
@@ -5412,6 +5461,7 @@ class InstanceManager:
                 "              ('instances','metadata'),\n"
                 "              ('message_queue','metadata'),\n"
                 "              ('message_queue','images'),\n"
+                "              ('message_queue','image_refs'),\n"
                 "              ('mcp_servers','config'),\n"
                 "              ('mcp_servers','config_schema'),\n"
                 "              ('opencode_sessions','latest_response'),\n"
@@ -6241,6 +6291,122 @@ class InstanceManager:
                 else:
                     raise
 
+        # Phase 2 / clipboard-image-chat (council NEEDS-FIXES, 2026-09-19,
+        # C2-f migration sweep): on databases that pre-date the
+        # dedicated ``image_refs`` column, ref-style entries
+        # (canonical ``/api/tmp_images/<32hex>`` URLs or the
+        # ``tmpimg://<32hex>`` alias) may still live on the
+        # ``images`` JSONB column (the round-2 schema overloaded both
+        # channels onto ``images``). Detect rows where the entries
+        # look like REFs (not data-URIs) and migrate them to the new
+        # ``image_refs`` column so the worker-claim seam loads them
+        # via ``ProcessingContext.image_refs``. Best-effort:
+        # ``jsonb_array_elements_text`` with a regex predicate
+        # distinguishes refs from legacy data-URIs.
+        #
+        # Discriminator: a REF is any string starting with
+        # ``/api/tmp_images/`` OR ``tmpimg://`` (NEVER a
+        # ``data:image/...;base64,...`` — legacy data-URI path is
+        # preserved). An entry that is a ref lands on
+        # ``image_refs``; the entry stays on ``images`` if and only
+        # if it is a legacy data-URI.
+        #
+        # Idempotent: a row whose ``image_refs`` is already populated
+        # AND whose ``images`` no longer carries a ref entry is left
+        # untouched. Subsequent runs no-op.
+        self._migrate_overloaded_image_refs_rows()
+
+    def _migrate_overloaded_image_refs_rows(self) -> None:
+        """One-time migration: move refs out of ``images`` into
+        ``image_refs`` (council NEEDS-FIXES, C2-f).
+
+        Pre-fix schema: the ``images`` JSONB column carried BOTH legacy
+        data-URI entries AND clipboard ref entries — the round-2
+        overload that the council verdict pinned as a bug. The dedicated
+        ``image_refs`` column was added on top, but pre-fix rows keep
+        refs in ``images`` until this sweep runs.
+
+        Sweep logic: for every ``message_queue`` row whose
+        ``images`` JSONB array contains at least one entry matching
+        the REF shape (``/api/tmp_images/<32hex>`` or
+        ``tmpimg://<32hex>``), move the ref entries to ``image_refs``
+        and remove them from ``images``.
+
+        Failure semantics: fail-loud is DELIBERATE — this method does
+        NOT catch exceptions: a failed sweep leaves the C2 bug
+        silently persisting (refs still overloaded onto ``images``),
+        so aborting boot is the safer failure mode, consistent with
+        the host ``_ensure_postgres_columns`` convention
+        (``manager.py:_ensure_postgres_columns``). Do NOT add a
+        try/except here.
+        """
+        from sqlalchemy import text
+
+        # Only PostgreSQL. No SQLite sweep exists — by design; SQLite
+        # fresh-boot gets the column via create_all; pre-existing
+        # SQLite rows with overloaded images are an acknowledged
+        # residual (R2).
+        if not (
+            self._ensemble_config is not None
+            and self._ensemble_config.is_postgres
+        ):
+            return
+
+        # The sweep: for each row, partition ``images`` into
+        # ``ref_entries`` and ``legacy_entries`` by the discriminator
+        # (URL/tmpimg prefix). Set ``image_refs`` to the union of
+        # ``existing image_refs`` and ``ref_entries`` (NULL-safe; if
+        # ``image_refs`` already carries refs from a prior run we
+        # union-merge instead of clobber). Set ``images`` to
+        # ``legacy_entries`` (which is NULL when no data-URI entries
+        # remain).
+        #
+        # SQL is intentionally written with the same operator chain
+        # (``jsonb_array_elements_text`` + regex ``~``) the rest of
+        # the codebase uses for ref-shape detection — see
+        # ``daemon/models/message.py:_IMAGE_REF_PATTERN``.
+        sweep_sql = text(
+            """
+            UPDATE message_queue AS m
+            SET
+                images = COALESCE(
+                    (
+                        SELECT jsonb_agg(elem)
+                        FROM jsonb_array_elements_text(m.images) AS elem
+                        WHERE elem !~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                    ),
+                    '[]'::jsonb
+                ),
+                image_refs = (
+                    SELECT to_jsonb(array_agg(DISTINCT elem ORDER BY elem))
+                    FROM (
+                        SELECT elem
+                        FROM jsonb_array_elements_text(m.images) AS elem
+                        WHERE elem ~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                        UNION
+                        SELECT elem
+                        FROM jsonb_array_elements_text(COALESCE(m.image_refs, '[]'::jsonb)) AS elem
+                    ) AS refs(elem)
+                )
+            WHERE
+                jsonb_typeof(m.images) = 'array'
+                AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(m.images) AS elem
+                    WHERE elem ~ '^(/api/tmp_images/|tmpimg://)[a-f0-9]{32}$'
+                )
+            """
+        )
+        with self._engine.begin() as conn:
+            result = conn.execute(sweep_sql)
+            migrated = result.rowcount
+            if migrated:
+                logger.info(
+                    f"[migrate_image_refs] Swept {migrated} pre-fix "
+                    f"message_queue row(s) — moved ref entries from "
+                    f"'images' to the new dedicated 'image_refs' column"
+                )
+
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.
 
@@ -6805,6 +6971,7 @@ class InstanceManager:
         is_background: bool = False,
         work_id: str | None = None,
         work_id_required: bool = False,
+        image_refs: list[str] | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message WITHOUT a JobItem mirror (internal-only path).
 
@@ -6817,60 +6984,23 @@ class InstanceManager:
         :meth:`enqueue_message_job` instead so the public facade can
         read a JobItem + Task pair.
 
-        Behavior is byte-identical to the legacy D13 single-writer
-        contract:
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #27): the new display channel — a list of refs
+        (``/api/tmp_images/<32hex>`` URL form, canonical) that persists
+        into the DEDICATED ``MessageQueue.image_refs`` JSONB column
+        (audit, post-C2-f migration — refs MUST NEVER land on
+        ``MessageQueue.images``) AND stamps the
+        ``HumanMessage.additional_kwargs["image_refs"]`` checkpoint
+        sidecar (display). NEVER reaches the agent channel —
+        ``_build_message_content`` carries only ``images`` (legacy
+        data-URI vision path only). Default ``None`` preserves
+        byte-identical behavior for every existing caller.
 
-          1. ``MessageQueue`` + ``Task`` rows are written in a single
-             transaction.
-          2. The WorkerPool is notified to claim the Task.
-
-        ``is_deferred`` (Phase 3 Part B1, 2026-06-27): keyword-only
-        marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True, the
-        created Task row is stamped ``is_deferred=True`` and the worker
-        pool's idle gate holds the task until every non-defer queue is
-        empty. Default False preserves the prior behaviour for every
-        caller that does not opt in.
-
-        ``is_background`` (Phase 3 background seam, 2026-07-14):
-        keyword-only marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True, the
-        created Task row is stamped ``is_background=True`` and the
-        worker pool's idle gate holds the task until every non-
-        deferred, non-background lane system-wide is empty. Default
-        False preserves the prior behaviour for every caller that does
-        not opt in (HTTP route, telegram, scheduler, internal reports).
-        Independent of ``is_deferred`` — a task may be either, both, or
-        neither (e.g. ``is_deferred=True, is_background=False`` for a
-        defer-queued message, ``is_deferred=False, is_background=True``
-        for a background-queued message, both False for a normal
-        foreground message).
-
-        ``work_id_required`` (Fix A, constitution Phase 0): keyword-only
-        marker forwarded to the underlying
-        ``InstanceMessagingService.enqueue_message``. When True (the
-        job-driven dispatch path), a ``None`` ``work_id`` raises
-        :class:`~daemon.services.messaging_types.LinkageContractError`
-        from the service's fail-closed ``work_id`` guard instead of
-        auto-minting a fresh UUID — a re-mint would re-key the Task and
-        break Pattern-f1 ``get_by_work_id`` recovery lookups. Default
-        False preserves the prior self-mint behaviour for every internal
-        caller that does not opt in.
-
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-            is_deferred: See above.
-            is_background: See above.
-            work_id: Optional linkage UUID bound as the Task's
-                ``work_id``. When None the service self-mints a fresh
-                UUID unless ``work_id_required`` forces the fail-closed
-                contract (see above).
-            work_id_required: See above.
+        Keyword-only on purpose — it is a forward-looking affordance
+        and threading it positionally would silently re-route
+        existing traffic (mirrors the ``is_deferred`` /
+        ``is_background`` / ``work_id_required`` style established
+        2026-06-27 / 2026-09-01).
 
         Returns:
             AsyncMessageResult with message_id, instance_id, status, and
@@ -6888,6 +7018,7 @@ class InstanceManager:
             is_background=is_background,
             work_id=work_id,
             work_id_required=work_id_required,
+            image_refs=image_refs,
         )
 
     async def enqueue_message_job(
@@ -6902,32 +7033,15 @@ class InstanceManager:
         is_deferred: bool = False,
         is_background: bool = False,
         queue_id: str | None = None,
+        image_refs: list[str] | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
-        Wraps :meth:`InstanceMessagingService.enqueue_message_job`. See that
-        method for the full contract — Task row remains the authoritative
-        dispatch primitive; the JobItem is the informational mirror that
-        the WorkResolver facade can read.
-
-        Args:
-            instance_id: Target instance ID.
-            message: User content.
-            source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
-            priority: 0=system, 1=user (matches ``enqueue_message``).
-            images: Optional base64 images for vision messages.
-            metadata: Optional metadata dict.
-            is_deferred: Forwarded to ``enqueue_message_job`` — stamps
-                ``Task.is_deferred=True``.
-            is_background: Forwarded to ``enqueue_message_job`` — stamps
-                ``Task.is_background=True`` so the dispatcher routes the
-                work onto the background queue instead of the foreground
-                message lane.
-
-        Returns:
-            ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
-            ``status="queued"``, and ``job_id`` populated as the shared
-            UUID4 (Task.work_id == JobItem.job_id).
+        ``image_refs`` (Phase 2 / clipboard-image-chat, round-2
+        amendment #27): keyword-only display-channel kwarg forwarded
+        to ``InstanceMessagingService.enqueue_message_job`` and
+        ultimately to ``_prepare_enqueued_message``. See the
+        ``enqueue_message`` docstring for the contract.
         """
         return await self._messaging_service.enqueue_message_job(
             instance_id=instance_id,
@@ -6939,6 +7053,7 @@ class InstanceManager:
             is_deferred=is_deferred,
             is_background=is_background,
             queue_id=queue_id,
+            image_refs=image_refs,
         )
 
     async def _process_message_with_tracking(
@@ -6953,6 +7068,7 @@ class InstanceManager:
         images: list[str] | None = None,  # Images for multimodal messages
         silent: bool = False,  # If True, skip message injection during checkpoint resume
         task_context: str | None = None,  # Pre-formatted task context from send_message(context=...)
+        image_refs: list[str] | None = None,  # Phase 2: ref-based display channel
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -7009,6 +7125,7 @@ class InstanceManager:
             images=images,
             silent=silent,
             task_context=task_context,
+            image_refs=image_refs,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
@@ -9379,6 +9496,8 @@ class InstanceManager:
         message: str = "resume",
         silent: bool = False,
         images: list[str] | None = None,
+        *,
+        image_refs: list[str] | None = None,
     ) -> dict | None:
         """Resume a paused instance via an explicit suspension handle.
 
@@ -9489,6 +9608,7 @@ class InstanceManager:
                 message=message,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 target_work_id=suspended_turn.resume_target_turn_id,
                 selected_suspension_reason=suspended_turn.suspension_reason,
                 handle_work_id=suspended_turn.work_id,
@@ -9529,6 +9649,7 @@ class InstanceManager:
                 message=message,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 target_work_id=paused_turn.work_id,
                 selected_suspension_reason=paused_turn.suspension_reason,
                 handle_work_id=paused_turn.work_id,
@@ -9801,6 +9922,7 @@ class InstanceManager:
         selected_suspension_reason: str | None,
         handle_work_id: str,
         route_outcome: str,
+        image_refs: list[str] | None = None,
     ) -> dict:
         """Schedule graph resume against an explicit suspension handle.
 
@@ -10306,6 +10428,7 @@ class InstanceManager:
                 old_job_id=target_work_id,
                 silent=silent,
                 images=images,
+                image_refs=image_refs,
                 cancellation_token=cancellation_source.token,
             )
         )
@@ -10327,6 +10450,8 @@ class InstanceManager:
         silent: bool,
         images: list[str] | None,
         cancellation_token: CancellationToken | None = None,
+        *,
+        image_refs: list[str] | None = None,
     ) -> None:
         """Background task for resumed processing.
 
@@ -10402,6 +10527,14 @@ class InstanceManager:
                     message_source="cascade_resume",
                     silent=silent,  # Pass through silent flag
                     images=images,
+                    # Phase 2 / clipboard-image-chat (C1 facade-forwarding
+                    # fix, 2026-09-19): resume_processing_job accepts
+                    # ``image_refs`` as keyword-only kwarg and threads it
+                    # through to ``_process_message_with_tracking``. Without
+                    # this thread the refs dropped one layer deeper and the
+                    # row+kwargs stamp silently lost refs on PAUSED
+                    # auto-resume — the failure mode the green suite masked.
+                    image_refs=image_refs,
                 )
 
             gate_outcome: Any = None

@@ -1,0 +1,35 @@
+<div
+  class="fullscreen-shell"
+  data-testid="image-viewer-dialog"
+  role="dialog"
+  aria-modal="true"
+  [attr.aria-label]="altText()"
+>
+  <header class="fullscreen-header">
+    <h2 class="fullscreen-title">{{ altText() }}</h2>
+    <div class="fullscreen-actions">
+      <button
+        type="button"
+        mat-icon-button
+        class="close-btn"
+        data-testid="image-viewer-close"
+        (click)="onClose()"
+        aria-label="Close image viewer"
+        title="Close (Esc)"
+      >
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+  </header>
+
+  <div class="fullscreen-body">
+    <img
+      class="viewer-image"
+      data-testid="image-viewer-img"
+      [src]="currentSrc()"
+      [alt]="altText()"
+      [class.viewer-image-failed]="imgFailed()"
+      (error)="onImgError($event)"
+    />
+  </div>
+</div>

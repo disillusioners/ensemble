@@ -1566,6 +1566,84 @@ class ServicesConfig(BaseSettings):
             "Override via SERVICES_JOB_LOCK_SWEEP_INTERVAL_SECONDS."
         ),
     )
+    # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
+    # hard cap on the tmp-image store's total disk usage. The store
+    # performs a walkdir sum BEFORE each write and raises
+    # ``TmpImageStoreFull`` if ``current + new_size > max_bytes``;
+    # the router turns that into HTTP 507. This is the ONLY safeguard
+    # against unbounded fill while phase 3's sweep service is
+    # pending — per architect ruling the store is the choke point
+    # (no kill-switch, no per-upload override). Default 1 GiB is
+    # generous enough for ~10k typical clipboard pastes; raise via
+    # SERVICES_TMP_IMAGE_STORE_MAX_BYTES. Floor 1 MiB — out-of-range
+    # values FAIL FAST AT BOOT via pydantic ValidationError.
+    tmp_image_store_max_bytes: int = Field(
+        default=1024 ** 3,
+        ge=1024 ** 2,
+        description=(
+            "clipboard-image-chat Phase 1 (Task 2b, architect "
+            "amendment #3): hard cap on the tmp-image store's total "
+            "disk usage in bytes. The store walks the directory "
+            "before each write and refuses the write (HTTP 507) if "
+            "``current_total + new_size > max_bytes``. Default 1 GiB; "
+            "override via SERVICES_TMP_IMAGE_STORE_MAX_BYTES. Floor "
+            "1 MiB — out-of-range values FAIL FAST AT BOOT. NO "
+            "kill-switch — the cap is the safety net until phase 3 "
+            "ships the retention sweep."
+        ),
+    )
+    # clipboard-image-chat Phase 3 / Tasks 2 + 3 (architect amendment
+    # #15): cadence + retention window for ``TmpImageCleanupService``
+    # — the always-on sweep that reaps ``data/tmp_images/`` entries
+    # older than the retention window. Two knobs, NOT three: the
+    # kill-switch (``tmp_image_cleanup_enabled`` /
+    # ``SERVICES_TMP_IMAGE_CLEANUP_ENABLED``) is DELETED per amendment
+    # #15 — it contradicts the project owner's HARD POLICY on
+    # always-on infrastructure codified in ``job_lock_sweep.py`` (the
+    # unique failure mode of a toggle is silent permanent storage
+    # growth when flipped by accident). The retention-days knob IS
+    # the operator lever (set it very large to effectively disable
+    # reaping without removing the service).
+    tmp_image_cleanup_interval_seconds: int = Field(
+        default=3600,
+        ge=1,
+        description=(
+            "clipboard-image-chat Phase 3 (Task 2, architect §7): how "
+            "often ``TmpImageCleanupService`` runs its retention "
+            "sweep over ``data/tmp_images/`` (seconds). Default "
+            "3600s — PINNED hourly (was 86400 in the draft plan; "
+            "hourly wins because deletion latency ≤ retention + "
+            "interval and the scan is a cheap filesystem stat-walk, "
+            "no DB). The sweep is ALWAYS-ON infrastructure (no "
+            "kill-switch env var — per the project owner's HARD "
+            "POLICY on Batch A); the interval knob tunes deletion "
+            "latency vs scan frequency. Floor 1s; out-of-range "
+            "values FAIL FAST AT BOOT via pydantic ValidationError. "
+            "Restart to flip (resolved once at config-load time). "
+            "Override via SERVICES_TMP_IMAGE_CLEANUP_INTERVAL_SECONDS."
+        ),
+    )
+    tmp_image_cleanup_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "clipboard-image-chat Phase 3 (Task 2, architect §7): "
+            "age threshold for the tmp-image retention sweep — "
+            "entries in ``data/tmp_images/`` older than this many "
+            "days (age source: the sidecar's ``uploaded_at`` "
+            "timestamp, falling back to the file's mtime when the "
+            "sidecar is missing or unparseable) are reaped as a "
+            "blob+sidecar pair. Default 30 days. This knob IS the "
+            "operator lever for the ALWAYS-ON sweep (no kill-switch "
+            "env var — per the project owner's HARD POLICY on Batch "
+            "A): set it to a very large value to effectively "
+            "disable reaping without removing the service. Floor 1 "
+            "day — 0 would delete everything on the first tick. "
+            "Out-of-range values FAIL FAST AT BOOT via pydantic "
+            "ValidationError. Restart to flip. Override via "
+            "SERVICES_TMP_IMAGE_CLEANUP_RETENTION_DAYS."
+        ),
+    )
     # service-tool Phase 1 (A8): reconciliation cadence for
     # ``ServiceReconciliationService`` — the D6 boot sweep +
     # periodic PID-liveness / start-time-match reconcile that marks

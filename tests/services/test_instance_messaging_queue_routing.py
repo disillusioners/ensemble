@@ -702,6 +702,12 @@ class TestEnqueueMessageJobQueueIdResolution:
             is_deferred=False,
             is_background=False,
             queue_id="queue-abc",
+            # Phase 2 / clipboard-image-chat: image_refs is a keyword-only
+            # kwarg on InstanceManager.enqueue_message_job (default None)
+            # and is forwarded to InstanceMessagingService.enqueue_message_job.
+            # The facade-forwarding contract requires the kwarg to be present
+            # on the forwarded call, so we pin it explicitly here.
+            image_refs=None,
         )
 
 

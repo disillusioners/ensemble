@@ -1,0 +1,78 @@
+{
+  "leg_a": {
+    "url": "http://127.0.0.1:4199/projects/all/instances/7b011705-4ca0-4f3e-a84a-33d2c6a07e21",
+    "mount": {
+      "mounted": true,
+      "reloads": 0
+    },
+    "scan": {
+      "images": [],
+      "hasInjectedText": true,
+      "hasStoryText": true,
+      "hasWhatDoYouSee": false,
+      "hasDescribeWake": false
+    },
+    "has_tmp_images_thumb": false,
+    "tmp_thumb_loaded": false,
+    "has_datauri_img": false,
+    "datauri_loaded": false,
+    "screenshot": "leg-a-7b011705.png",
+    "status": "scanned"
+  },
+  "leg_b": {
+    "url": "http://127.0.0.1:4199/projects/all/instances/0621b9f8-cab8-4945-80d6-23e4c7fcd85b",
+    "mount": {
+      "mounted": true,
+      "reloads": 0
+    },
+    "scan": {
+      "images": [
+        {
+          "src": "/api/tmp_images/97a8d81ee32442f4ac0b3380e1b3bf00",
+          "naturalWidth": 320,
+          "complete": true,
+          "failedClass": false,
+          "dataImageIndex": "0"
+        }
+      ],
+      "hasInjectedText": false,
+      "hasStoryText": false,
+      "hasWhatDoYouSee": false,
+      "hasDescribeWake": true
+    },
+    "has_tmp_images_thumb": true,
+    "tmp_thumb_loaded": true,
+    "has_datauri_img": false,
+    "datauri_loaded": false,
+    "screenshot": "leg-b-0621b9f8.png",
+    "status": "scanned"
+  },
+  "leg_c": {
+    "url": "http://127.0.0.1:4199/projects/all/instances/10512653-5c45-4104-ad62-3f01f469ed89",
+    "mount": {
+      "mounted": true,
+      "reloads": 2
+    },
+    "scan": {
+      "images": [
+        {
+          "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAACMCAIAAACCr+eGAAASX0lEQVR4nO3cCXQT1cIH8JnsTZsmaZ",
+          "naturalWidth": 320,
+          "complete": true,
+          "failedClass": false,
+          "dataImageIndex": "0"
+        }
+      ],
+      "hasInjectedText": false,
+      "hasStoryText": false,
+      "hasWhatDoYouSee": true,
+      "hasDescribeWake": false
+    },
+    "has_tmp_images_thumb": false,
+    "tmp_thumb_loaded": false,
+    "has_datauri_img": true,
+    "datauri_loaded": true,
+    "screenshot": "leg-c-10512653.png",
+    "status": "scanned"
+  }
+}

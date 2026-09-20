@@ -3,6 +3,7 @@ import type { Message, SSEEvent, ToolCall, InstanceInfo, CommandProgressEvent } 
 import type { QuestionPack } from '../models/question.model';
 import { ApiService } from './api.service';
 import { isTerminalStatus } from './message-merge.util';
+import { isTmpImageRef } from '../constants/image-ref';
 
 export interface SubTask {
   id: string;
@@ -471,8 +472,11 @@ export class SseService {
       tool_calls: Array.isArray(data['tool_calls']) ? data['tool_calls'] as ToolCall[] : undefined,
       created_at: (data['created_at'] as string) || new Date().toISOString(),
       instance_id: data['instance_id'] as string | undefined,
-      images: Array.isArray(data['images']) 
-        ? (data['images'] as string[]).filter((img: unknown) => typeof img === 'string' && img.startsWith('data:image/'))
+      // Whitelist is PREFIX-SCOPED, NOT scheme-based. https:// is explicitly OUT (scheme-widening enables tracking-pixel + internal-network-probe vectors via <img src>). The Discord-SSE gap is PRE-EXISTING and out of scope — its correct future fix is a host allowlist (e.g. cdn.discordapp.com), recorded as follow-up.
+      images: Array.isArray(data['images'])
+        ? (data['images'] as string[]).filter((img: unknown): img is string =>
+            typeof img === 'string' && (img.startsWith('data:image/') || isTmpImageRef(img))
+          )
         : undefined,
     };
   }

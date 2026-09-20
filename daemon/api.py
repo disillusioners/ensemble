@@ -129,6 +129,7 @@ from daemon.routers import (
     blueprints_router,        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     recovery_router,          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
+    tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
 )
 from daemon.routers.workspace import router as workspace_router
 
@@ -245,6 +246,50 @@ async def lifespan(app: FastAPI):
 
     # Load config first
     config = load_config()
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 1 / clipboard-image-chat / Task 3 + Task 8 — wire the
+    # transient image store BEFORE the routers are mounted, so the
+    # routers see a non-None ``app.state.tmp_image_store``. The store
+    # is filesystem-only (no DB, no manager dependency) — safe to
+    # construct this early. Boot log shape mirrors
+    # ``JobLockSweepService`` (see ``daemon/api.py:797-801``):
+    # a single ``[TmpImages] ready: dir=… count=… max_bytes=…`` line
+    # the merge-gate tester greps for.
+    #
+    # The factory helper ``build_tmp_image_store`` is the same one
+    # the boot integration test calls directly to verify the wiring
+    # shape — keeps the lifespan code symmetric with the test fixture.
+    #
+    # W1 (phase-1+3 review): the boot init is wrapped in a try/except
+    # so an unwritable store dir (EACCES/ENOSPC) does not crash daemon
+    # boot. On failure the store is set to ``None`` and the router
+    # returns 503 for every ``/api/tmp_images`` endpoint (see
+    # ``_get_store`` in ``daemon/routers/tmp_images.py``). The pattern
+    # mirrors the waiting-children watchdog fail-soft above
+    # (daemon/api.py:916-922) — boot always completes, a degraded
+    # service is logged at ERROR with the exception.
+    from daemon.services.tmp_image_store import build_tmp_image_store
+    tmp_image_store_max_bytes = config.services.tmp_image_store_max_bytes
+    try:
+        tmp_image_store = build_tmp_image_store(
+            data_dir=data_dir,
+            max_bytes=tmp_image_store_max_bytes,
+        )
+    except Exception as tmp_image_store_boot_exc:
+        tmp_image_store = None
+        daemon_logger.error(
+            f"[TmpImages] store init FAILED — tmp-images endpoints will "
+            f"return 503 until the store is restored: {tmp_image_store_boot_exc}",
+            exc_info=True,
+        )
+    app.state.tmp_image_store = tmp_image_store
+    if tmp_image_store is not None:
+        daemon_logger.info(
+            f"[TmpImages] ready: dir={tmp_image_store.dir} "
+            f"count={tmp_image_store.count()} "
+            f"max_bytes={tmp_image_store_max_bytes}"
+        )
 
     # Apply LLM-specific class-level config that must be set before any
     # ThinkingChatOpenAI instance is created. Mirrors what __main__.py does
@@ -798,6 +843,40 @@ async def lifespan(app: FastAPI):
         f"JobLockSweepService started: interval="
         f"{job_lock_sweep_interval}s (default "
         f"{DEFAULT_JOB_LOCK_SWEEP_INTERVAL_SECONDS}s)"
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
+    # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
+    # the project owner's HARD POLICY on Batch A, architect amendment
+    # #15); the ONLY knobs are the hourly cadence + the 30-day
+    # retention window, both read from ``config.services`` and
+    # FAIL-FAST at boot via pydantic ``Field(ge=1)``. ``enabled=True``
+    # is HARDCODED here — the constructor kwarg is an internal test
+    # seam, never a production toggle. Wired AFTER the
+    # ``JobLockSweepService`` boot block and AFTER the phase-1
+    # ``TmpImageStore`` wiring (the sweep consumes that store's dir).
+    # The first tick runs IMMEDIATELY inside ``_run`` (sweep before
+    # the first sleep), so the boot-time sweep needs no separate
+    # synchronous pre-tick.
+    from daemon.services.tmp_image_cleanup_service import (
+        TmpImageCleanupService,
+    )
+    tmp_image_cleanup = TmpImageCleanupService(
+        tmp_image_store,
+        enabled=True,
+        interval_seconds=(
+            config.services.tmp_image_cleanup_interval_seconds
+        ),
+        retention_days=config.services.tmp_image_cleanup_retention_days,
+    )
+    tmp_image_cleanup.start()
+    app.state.tmp_image_cleanup = tmp_image_cleanup
+    daemon_logger.info(
+        f"[TmpImages] cleanup service started: interval="
+        f"{config.services.tmp_image_cleanup_interval_seconds}s "
+        f"retention="
+        f"{config.services.tmp_image_cleanup_retention_days}d"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -1666,6 +1745,23 @@ async def lifespan(app: FastAPI):
             )
         app.state.orphan_watcher_sweep = None
 
+    # --- TmpImageCleanupService shutdown (clipboard-image-chat phase 3) ---
+    # Stop the retention sweep BEFORE the JobLockSweepService
+    # shutdown — the cleanup stops touching the filesystem first,
+    # then the DB-side sweeps wind down. getattr-guarded so a
+    # partial startup failure (service never stored) is a silent
+    # no-op; WARNING on stop failure (mirrors the
+    # JobLockSweepService shutdown shape).
+    tmp_image_cleanup = getattr(app.state, "tmp_image_cleanup", None)
+    if tmp_image_cleanup is not None:
+        try:
+            await tmp_image_cleanup.stop()
+        except Exception as e:
+            logger.warning(
+                f"TmpImageCleanupService shutdown error: {e}"
+            )
+        app.state.tmp_image_cleanup = None
+
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down
     # so any in-flight reclaim tick completes before the DB
@@ -2518,6 +2614,13 @@ def create_app() -> FastAPI:
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
     api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    # Phase 1 / clipboard-image-chat — /api/tmp_images. Registered
+    # here (inside ``api_router`` which is mounted via
+    # ``app.include_router(api_router)`` BEFORE the SPA catch-all
+    # at daemon/api.py:2612). Starlette first-match-wins would
+    # otherwise send ``GET /api/tmp_images/<id>`` to the
+    # index.html fallback (architect phase1-plan.md risk #1).
+    api_router.include_router(tmp_images_router)       # /api/tmp_images
 
     app.include_router(api_router)
 

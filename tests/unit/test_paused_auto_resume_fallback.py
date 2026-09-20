@@ -114,6 +114,14 @@ def _make_paused_manager(
     manager.get_instance_info = MagicMock(
         return_value={"status": "paused", "instance_id": instance_id}
     )
+    # Command dispatcher — the route calls
+    # ``await manager.command_dispatcher.dispatch(...)`` to handle
+    # slash commands BEFORE the PAUSED branch. Stub the dispatcher
+    # so the MagicMock default (a non-awaitable) does not blow up.
+    manager.command_dispatcher = MagicMock()
+    manager.command_dispatcher.dispatch = AsyncMock(
+        return_value=MagicMock(kind="passthrough", sanitized_text=None, ack=None)
+    )
 
     # resume_instance_cascade returns the resumed/skipped dict.
     manager.resume_instance_cascade = AsyncMock(return_value={
@@ -123,6 +131,12 @@ def _make_paused_manager(
     })
 
     # resume_processing_job — caller controls whether None or a dict.
+    # C1 facade-forwarding fix (council NEEDS-FIXES, 2026-09-19):
+    # the facade accepts ``image_refs=`` as a keyword-only kwarg.
+    # The AsyncMock below accepts ANY kwargs — a positional kwarg
+    # drop would be masked by AsyncMock. We add a signature-shape
+    # assertion in test_resume_facade_signature_accepts_image_refs_keyword_only
+    # below to close the mask class.
     if resume_processing_return is None:
         manager.resume_processing_job = AsyncMock(return_value=None)
     else:
@@ -170,12 +184,17 @@ def client_and_state():
 
     app = FastAPI()
     app.include_router(router)
-    state: dict = {"manager": None, "live_hub": None}
+    state: dict = {"manager": None, "live_hub": None, "tmp_image_store": None}
 
     @app.middleware("http")
     async def _inject_state(request, call_next):
         request.app.state.manager = state["manager"]
         request.app.state.live_hub = state["live_hub"]
+        # Inject tmp_image_store so the router's image_refs conversion
+        # hook (``getattr(request.app.state, "tmp_image_store", None)``)
+        # resolves on ref-send tests; ``None`` keeps non-ref tests on
+        # the no-hook path (mirrors the ref-path router test harness).
+        request.app.state.tmp_image_store = state["tmp_image_store"]
         return await call_next(request)
 
     client = TestClient(app)
@@ -373,3 +392,120 @@ class TestPausedAutoResumeFallback:
         assert "route" not in target_result
 
         manager.enqueue_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# C1 facade-acceptance mask-pin (council NEEDS-FIXES, 2026-09-19)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeFacadeKwargAcceptance:
+    """C1 facade-forwarding fix mask-pin: assert the real
+    ``InstanceManager.resume_processing_job`` signature accepts
+    ``image_refs=`` as a keyword-only kwarg.
+
+    The AsyncMock above at line ~:127 masks a kwarg-drop bug
+    (AsyncMock accepts any kwargs). The pin here closes the mask
+    class — a future refactor that drops ``image_refs`` from the
+    facade signature trips this test.
+    """
+
+    def test_resume_facade_signature_accepts_image_refs_keyword_only(self):
+        """The real ``InstanceManager.resume_processing_job``
+        signature carries ``image_refs`` as a KEYWORD-ONLY kwarg
+        (post-C1 fix)."""
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        sig = inspect.signature(InstanceManager.resume_processing_job)
+        image_refs_param = sig.parameters.get("image_refs")
+        assert image_refs_param is not None, (
+            "resume_processing_job is missing the image_refs kwarg — "
+            "C1 facade-forwarding fix REGRESSED"
+        )
+        # Keyword-only discipline: a positional caller would mask
+        # the kwarg-drop bug class.
+        assert (
+            image_refs_param.kind == inspect.Parameter.KEYWORD_ONLY
+        ), (
+            f"image_refs must be keyword-only on resume_processing_job "
+            f"(C1 facade discipline); got kind={image_refs_param.kind!r}"
+        )
+
+    def test_resume_router_forwards_images_kwarg(self, client_and_state):
+        """The router calls ``resume_processing_job`` with
+        ``images=message.images`` on the PAUSED-branch resume call
+        (legacy data-URI channel — the request carries a data-URI
+        ``images`` payload, so THAT is the kwarg this test pins)."""
+        client, state = client_and_state
+        manager = _make_paused_manager(
+            instance_id="inst-paused",
+            resume_processing_return=None,
+            with_vision=True,
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+
+        refs = ["/api/tmp_images/" + "a" * 32]
+        # Note: the manager mock's image_refs handling depends on
+        # with_vision=True so the legacy vision gate passes (image_refs
+        # path is gated on model_vision in the router). We use
+        # ``images=`` here to keep the test focused on the
+        # resume_processing_job kwarg-passing, not the
+        # image_refs/vision gate.
+        resp = client.post(
+            "/instances/inst-paused/messages",
+            json={"content": "look", "images": ["data:image/png;base64,abc"]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        # The router passed images= (legacy data-URI channel). The
+        # AsyncMock on resume_processing_job captured the call —
+        # assert the kwarg was forwarded.
+        manager.resume_processing_job.assert_awaited()
+        call = manager.resume_processing_job.call_args
+        # Pin the kwarg exists in the call (the AsyncMock-mask
+        # class: if the facade signature dropped images=, this
+        # call would still succeed via the mock's permissive
+        # signature; the actual facade would TypeError).
+        assert "images" in call.kwargs
+
+    def test_resume_router_forwards_image_refs_kwarg(self, client_and_state):
+        """PAUSED-branch resume call forwards ``image_refs`` — the
+        router's real wiring (``daemon/routers/messages.py`` PAUSED
+        branch) passes ``image_refs=message.image_refs`` for the
+        target instance (phase-2 clipboard channel). The request goes
+        through the REAL ``pre_dispatch_image_hook`` conversion seam
+        (canonical refs normalize to themselves), and the captured
+        ``resume_processing_job`` call must carry the refs."""
+        client, state = client_and_state
+        manager = _make_paused_manager(
+            instance_id="inst-paused",
+            resume_processing_return={
+                "status": "ok",
+                "message_id": "msg-resumed-1",
+            },
+            with_vision=True,
+        )
+        state["manager"] = manager
+        state["live_hub"] = _make_live_hub()
+        # The conversion hook requires an in-process tmp-image store
+        # (else the router 503s before reaching the PAUSED branch).
+        store = MagicMock()
+        store.get_image_bytes = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nfake")
+        state["tmp_image_store"] = store
+
+        refs = ["/api/tmp_images/" + "a" * 32]
+        resp = client.post(
+            "/instances/inst-paused/messages",
+            json={"content": "look", "image_refs": refs},
+        )
+
+        assert resp.status_code == 200, resp.text
+        manager.resume_processing_job.assert_awaited()
+        call = manager.resume_processing_job.call_args
+        # The REAL wiring: target instance keeps the request's
+        # (hook-normalized) refs — non-target cascade children get
+        # None.
+        assert call.kwargs["image_refs"] == refs

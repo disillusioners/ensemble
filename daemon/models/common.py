@@ -30,6 +30,19 @@ class ErrorCodes(str, Enum):
     # FE toasts on ``code`` and ``details.available`` later feeds
     # slash autocomplete without a contract change.
     UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
+    # clipboard-image-chat Phase 1 (router: GET/DELETE /api/tmp_images/{id}).
+    # Additive — wire consumers that pattern-match on the code value
+    # need to handle this new entry (FE phase-4/5 toast on ``code``).
+    TMP_IMAGE_NOT_FOUND = "TMP_IMAGE_NOT_FOUND"
+    # clipboard-image-chat Phase 1 (POST /api/tmp_images). Surfaced
+    # when the O_CREAT|O_EXCL atomic-create collides on a uuid4 id
+    # (vanishingly rare with random hex; possible on a client retry
+    # that re-mints deterministically).
+    TMP_IMAGE_CONFLICT = "TMP_IMAGE_CONFLICT"
+    # clipboard-image-chat Phase 1 (POST /api/tmp_images). Surfaced
+    # when the store byte cap is exceeded — the router turns this
+    # into HTTP 507 + a rate-limited WARNING log.
+    TMP_IMAGE_STORE_FULL = "TMP_IMAGE_STORE_FULL"
 
 
 class ErrorResponse(BaseModel):

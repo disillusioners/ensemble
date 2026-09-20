@@ -1,0 +1,82 @@
+{
+  "id_d": "0f40bde9-5dbf-4285-b62a-4f1939be4b27",
+  "injection_http": 202,
+  "inject_latency_after_running": 4.01,
+  "delivered": false,
+  "final_status": "completed",
+  "transcript": [
+    {
+      "label": "1. create ID_D2",
+      "http_status": 201,
+      "body": {
+        "instance_id": "0f40bde9-5dbf-4285-b62a-4f1939be4b27",
+        "agent_id": "experiencer",
+        "project_id": "71931ae0-0f25-5fbf-853b-2a78cc978d7e",
+        "agent_dir": "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble-clipboard-img/agents/experiencer",
+        "status": "idle",
+        "title": null,
+        "initiative_message": null,
+        "parent_id": null,
+        "children": [],
+        "mcp_tool_names": [
+          "mcp_context7_resolve-library-id",
+          "mcp_context7_query-docs"
+        ],
+        "created_at": "2026-09-19T23:32:27.777161Z",
+        "updated_at": "2026-09-19T23:32:27.777161Z",
+        "pending_count": 0,
+        "pinned": null,
+        "color_tag": null,
+        "icon_tag": null,
+        "pinned_at": null,
+        "agent_tag": null,
+        "model": null,
+        "watchover_enabled": false,
+        "watchover_context": null,
+        "watchover_denial_count": 0
+      }
+    },
+    {
+      "label": "2. long-story POST",
+      "http_status": 200,
+      "body": {
+        "message_id": "33dd8ed5-1ecb-4786-bf99-ec2940c0d59e",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:32:27.797644Z",
+        "job_id": "e57948ac-63be-4931-b9a8-c0d88c3810d3",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    },
+    {
+      "label": "3. PLAIN-TEXT injection (expect 202; latency after RUNNING: 4.01s)",
+      "http_status": 202,
+      "body": {
+        "status": "injected",
+        "instance_id": "0f40bde9-5dbf-4285-b62a-4f1939be4b27",
+        "content": "QUICKNOTE-8842 plain text injection delayed 4s",
+        "timestamp": "2026-09-19T23:32:31.816777+00:00",
+        "created_at": "2026-09-19T23:32:31.816777+00:00",
+        "pending_count": 1,
+        "message_id": "97e56240-11fa-4eb5-82bf-7f490e4c1484"
+      }
+    },
+    {
+      "label": "5. GET /injection",
+      "http_status": 200,
+      "body": {
+        "instance_id": "0f40bde9-5dbf-4285-b62a-4f1939be4b27",
+        "pending": true,
+        "pending_count": 1,
+        "content": "QUICKNOTE-8842 plain text injection delayed 4s",
+        "timestamp": "2026-09-19T23:32:31.816777+00:00"
+      }
+    }
+  ]
+}

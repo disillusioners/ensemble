@@ -18,11 +18,39 @@
     @if (images().length > 0) {
       <div class="image-preview-strip">
         @for (img of images(); track img.id) {
-          <div class="image-preview-item">
+          <div class="image-preview-item" data-testid="image-upload-chip">
             <img [src]="img.dataUrl" class="preview-thumbnail" alt="Preview">
-            <button 
-              type="button" 
-              class="remove-image-btn" 
+            <span
+              class="image-upload-status"
+              [class.uploading]="img.uploadStatus === 'uploading'"
+              [class.uploaded]="img.uploadStatus === 'uploaded'"
+              [class.failed]="img.uploadStatus === 'failed'"
+              [attr.data-testid]="'image-upload-status'"
+              [attr.data-status]="img.uploadStatus ?? 'idle'"
+              [title]="img.uploadStatus === 'failed' ? (img.uploadError ?? 'Upload failed') : (img.uploadStatus ?? '')"
+            >
+              @switch (img.uploadStatus) {
+                @case ('uploading') { ⏳ }
+                @case ('uploaded') { ✓ }
+                @case ('failed') { ⚠ }
+                @default { }
+              }
+            </span>
+            @if (img.uploadStatus === 'failed') {
+              <button
+                type="button"
+                class="retry-image-btn"
+                data-testid="image-upload-retry"
+                (click)="retryUpload(img.id)"
+                [attr.aria-label]="'Retry upload for ' + img.name"
+                title="Retry upload"
+              >
+                ↻
+              </button>
+            }
+            <button
+              type="button"
+              class="remove-image-btn"
               (click)="removeImage(img.id)"
               aria-label="Remove image"
               [title]="'Remove ' + img.name"
@@ -46,13 +74,14 @@
         #textarea
         [value]="message()"
         (input)="onInput($event)"
+        (paste)="onPaste($event)"
         (keydown.enter)="onKeydownEnter($event)"
         (keydown.arrowup)="onSlashArrow($event, -1)"
         (keydown.arrowdown)="onSlashArrow($event, 1)"
         (keydown.escape)="onSlashEscape($event)"
         (keydown.tab)="onSlashTab($event)"
         [disabled]="disabled()"
-        placeholder="Type your message or drag images here..."
+        placeholder="Type your message, paste images, or drag images here..."
         rows="1"
         class="input-textarea"
         [class.active]="canSend()"
@@ -106,21 +135,30 @@
     
     @if (canInject()) {
         <div class="injection-actions">
-            <button
-                type="button"
-                [disabled]="!canSend()"
-                class="send-button"
-                [style.backgroundColor]="canSend() ? color() : '#343541'"
-                [style.color]="canSend() ? 'white' : '#6e6e80'"
-                [style.cursor]="canSend() ? 'pointer' : 'not-allowed'"
-                (click)="handleSubmit()"
-                title="Send to running instance"
-                aria-label="Send to running instance"
-            >
-                <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                </svg>
-            </button>
+            <div class="send-button-wrap">
+                <button
+                    type="button"
+                    [disabled]="!canSend() || phaseState() === 'converting'"
+                    data-testid="send-button"
+                    class="send-button"
+                    [style.backgroundColor]="canSend() && phaseState() !== 'converting' ? color() : '#343541'"
+                    [style.color]="canSend() && phaseState() !== 'converting' ? 'white' : '#6e6e80'"
+                    [style.cursor]="canSend() && phaseState() !== 'converting' ? 'pointer' : 'not-allowed'"
+                    (click)="handleSubmit()"
+                    title="Send to running instance"
+                    aria-label="Send to running instance"
+                >
+                    <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                </button>
+                @if (phaseState() === 'converting') {
+                    <div class="converting-overlay" data-testid="converting-overlay">
+                        <span class="converting-spinner"></span>
+                        <span>Converting images, this may take a minute</span>
+                    </div>
+                }
+            </div>
             <button type="button" class="pause-button" (click)="pauseInstance.emit()" title="Pause" aria-label="Pause">
                 <svg class="pause-icon" fill="currentColor" viewBox="0 0 24 24">
                     <rect x="6" y="5" width="4" height="14" rx="1" />
@@ -142,19 +180,28 @@
             </svg>
         </button>
     } @else {
-        <button
-            type="button"
-            [disabled]="!canSend()"
-            class="send-button"
-            [style.backgroundColor]="canSend() ? color() : '#343541'"
-            [style.color]="canSend() ? 'white' : '#6e6e80'"
-            [style.cursor]="canSend() ? 'pointer' : 'not-allowed'"
-            (click)="handleSubmit()"
-        >
-            <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-        </button>
+        <div class="send-button-wrap">
+            <button
+                type="button"
+                [disabled]="!canSend() || phaseState() === 'converting'"
+                data-testid="send-button"
+                class="send-button"
+                [style.backgroundColor]="canSend() && phaseState() !== 'converting' ? color() : '#343541'"
+                [style.color]="canSend() && phaseState() !== 'converting' ? 'white' : '#6e6e80'"
+                [style.cursor]="canSend() && phaseState() !== 'converting' ? 'pointer' : 'not-allowed'"
+                (click)="handleSubmit()"
+            >
+                <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+            </button>
+            @if (phaseState() === 'converting') {
+                <div class="converting-overlay" data-testid="converting-overlay">
+                    <span class="converting-spinner"></span>
+                    <span>Converting images, this may take a minute</span>
+                </div>
+            }
+        </div>
     }
   </div>
   

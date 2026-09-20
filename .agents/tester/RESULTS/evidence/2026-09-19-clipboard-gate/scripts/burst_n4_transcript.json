@@ -1,0 +1,119 @@
+{
+  "t0_utc": "2026-09-19T23:06:14.481961+00:00",
+  "instance_ids": [
+    "6085a9d7-7d48-4a43-8234-3f48d5e72246",
+    "d455550a-1380-4df4-8188-5079d3c18640",
+    "2a9dc584-6917-410f-9045-7d9ea316d766",
+    "0392965f-d8ef-4029-ac45-940f94914bdb"
+  ],
+  "refs": [
+    "/api/tmp_images/4cd2cf1b75514c89a44b5ad48432fed0",
+    "/api/tmp_images/24aa70627ec14e7db18f80bf923783b4",
+    "/api/tmp_images/3db17d3aae3a4d9eb428165eaa420fa3",
+    "/api/tmp_images/22f49fb7ab6f45599057c13db572d2a6"
+  ],
+  "burst": [
+    {
+      "k": 1,
+      "instance_id": "6085a9d7-7d48-4a43-8234-3f48d5e72246",
+      "ref": "/api/tmp_images/4cd2cf1b75514c89a44b5ad48432fed0",
+      "http_status": 200,
+      "post_seconds": 7.34,
+      "body": {
+        "message_id": "6db06ba0-31d8-4483-907b-0013b71764ed",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:06:21.824073Z",
+        "job_id": "9f6881e7-e7e0-40de-892a-57fa5e2eeafd",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    },
+    {
+      "k": 2,
+      "instance_id": "d455550a-1380-4df4-8188-5079d3c18640",
+      "ref": "/api/tmp_images/24aa70627ec14e7db18f80bf923783b4",
+      "http_status": 200,
+      "post_seconds": 7.51,
+      "body": {
+        "message_id": "bc96ecc7-fa95-46e4-9fda-716a26ec97f0",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:06:21.989910Z",
+        "job_id": "7f7d7325-4e4f-478c-8e37-5a2ea454e8a1",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    },
+    {
+      "k": 3,
+      "instance_id": "2a9dc584-6917-410f-9045-7d9ea316d766",
+      "ref": "/api/tmp_images/3db17d3aae3a4d9eb428165eaa420fa3",
+      "http_status": 200,
+      "post_seconds": 7.76,
+      "body": {
+        "message_id": "6515a448-ff0f-45c4-ae07-94c494abded7",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:06:22.236829Z",
+        "job_id": "6d1d051f-e571-42e6-b7b8-e81276d70e00",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    },
+    {
+      "k": 4,
+      "instance_id": "0392965f-d8ef-4029-ac45-940f94914bdb",
+      "ref": "/api/tmp_images/22f49fb7ab6f45599057c13db572d2a6",
+      "http_status": 200,
+      "post_seconds": 3.84,
+      "body": {
+        "message_id": "2a6f2e04-dacd-4f0a-9137-11f1cf7c3f62",
+        "role": "assistant",
+        "content": "",
+        "thinking": null,
+        "thinking_extracted": null,
+        "tool_calls": null,
+        "images": null,
+        "created_at": "2026-09-19T23:06:18.318949Z",
+        "job_id": "66aafad0-4666-4d52-9365-7fbb1bf0707f",
+        "queued": false,
+        "auto_resumed": false,
+        "resume_info": null
+      }
+    }
+  ],
+  "final": {
+    "1": {
+      "status": "completed",
+      "completed_at_rel_s": 35.02
+    },
+    "2": {
+      "status": "completed",
+      "completed_at_rel_s": 77.35
+    },
+    "3": {
+      "status": "completed",
+      "completed_at_rel_s": 19.91
+    },
+    "4": {
+      "status": "completed",
+      "completed_at_rel_s": 13.83
+    }
+  }
+}

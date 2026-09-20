@@ -6,6 +6,7 @@ from daemon.models.source import *
 from daemon.models.schedule import *
 from daemon.models.mapping import *
 from daemon.models.mcp_server import *
+from daemon.models.tmp_image import *
 
 __all__ = [
     # common
@@ -60,4 +61,10 @@ __all__ = [
     "BuiltinServerTemplate",
     "BuiltinTemplateListResponse",
     "BuiltinServerConfigure",
+    # tmp_image (Phase 1: clipboard-image-chat)
+    "TmpImageUpload",
+    "TmpImageUploadRequest",
+    "TmpImageUploadResponse",
+    "TmpImageUploadBatchResponse",
+    "TmpImageDebugListingResponse",
 ]

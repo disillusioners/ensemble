@@ -90,11 +90,41 @@ class MessageQueue(SQLModel, table=True):
     
     # FK to task table
     processing_task_id: str | None = Field(default=None, index=True)
-    
-    # Images for multimodal messages (base64 data URIs)
+
+    # Images for multimodal messages (base64 data URIs — LEGACY channel
+    # only). Phase 2 / clipboard-image-chat (round-2 amendment #28):
+    # the ``images`` column carries LEGACY data-URI entries exclusively
+    # (the ``data:image/...;base64,...`` shape). Refs in the canonical
+    # URL form (``/api/tmp_images/<32hex>``) NEVER persist here — they
+    # live on the dedicated ``image_refs`` JSONB column below. This is
+    # the durable-leg A1 fix from the council NEEDS-FIXES round
+    # (2026-09-19): the previous round-2 schema overloaded both
+    # channels onto ``images`` and the
+    # ``_build_message_content``/``has_images`` chain at the worker
+    # pick-up site constructed ``image_url`` blocks from relative
+    # ``/api/tmp_images/<32hex>`` strings — use_vision_model fired on
+    # POST to IDLE/terminal instances and the LLM provider errored on
+    # invalid relative-URL sources.
     images: list[str] | None = Field(
         default=None,
         sa_column=Column("images", JSONBType)
+    )
+
+    # Phase 2 / clipboard-image-chat (council NEEDS-FIXES, 2026-09-19,
+    # council Option A — RESTORES the architect round-2 signature-
+    # separation ruling): DEDICATED JSONB column for clipboard
+    # ``/api/tmp_images/<32hex>`` refs. Distinct from ``images`` so
+    # the worker-claim path (task_processor) can load them into a
+    # SEPARATE ``ProcessingContext.image_refs`` field and pass them
+    # via the kwargs stamp — they NEVER enter
+    # ``_build_message_content`` and the ``has_images`` /
+    # ``use_vision_model`` chain cannot reach them. The wire
+    # ``images`` field on GET /messages still surfaces refs via the
+    # serializer UNION (``daemon/utils.py``) so the FE/curl display
+    # surface is unchanged.
+    image_refs: list[str] | None = Field(
+        default=None,
+        sa_column=Column("image_refs", JSONBType)
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -115,6 +145,7 @@ class MessageQueue(SQLModel, table=True):
             "processing_task_id": self.processing_task_id,
             "metadata": dict(self.message_metadata) if self.message_metadata else {},
             "images": self.images,
+            "image_refs": self.image_refs,
             "enqueued_at": self.enqueued_at.isoformat() if self.enqueued_at else None,
             "processing_started_at": self.processing_started_at.isoformat() if self.processing_started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

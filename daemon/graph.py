@@ -6650,6 +6650,22 @@ def create_agent_node(
                     entry_source = entry.get("source")
                     if entry_source is not None:
                         extra_kwargs["source"] = entry_source
+                    # Phase 2 / clipboard-image-chat (round-2 amend
+                    # #31.b, drain-site stamp): when the entry carries
+                    # ``image_refs``, stamp them onto
+                    # ``HumanMessage.additional_kwargs["image_refs"]``
+                    # so the checkpoint persists refs alongside the
+                    # text content. METADATA ONLY — the agent channel
+                    # stays text-only (langchain_openai does not
+                    # serialize additional_kwargs to the wire at
+                    # :6657-6661). GET /messages surfaces the refs via
+                    # the serializer union at daemon/utils.py:113-137
+                    # + :252+. Conditional add (same pattern as
+                    # source/echo_id) — byte-identical-to-pre-feature
+                    # shape when the entry has no refs.
+                    entry_image_refs = entry.get("image_refs")
+                    if entry_image_refs is not None:
+                        extra_kwargs["image_refs"] = list(entry_image_refs)
                     # message-display-latency Phase 1: carry the entry's
                     # optional server-minted ``echo_id`` onto
                     # ``HumanMessage.id`` so the checkpoint (and GET
