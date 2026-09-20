@@ -3927,7 +3927,12 @@ Provide a concise summary:"""
                             _token = _resolver.per_kind_status_for(
                                 _work_id, default="completed"
                             )
-                        except Exception:
+                        except Exception as per_kind_err:
+                            logger.warning(
+                                f"root_completed: per-kind resolve failed "
+                                f"for {_work_id[:8]}...: {per_kind_err} — "
+                                f"defaulting to 'completed'"
+                            )
                             _token = "completed"
                     if not _work_status_is_terminal(_token):
                         # §3 guard — never fire non-terminal.
@@ -3974,62 +3979,18 @@ Provide a concise summary:"""
                 )
             return
 
-        # B4 cycle-2 (2026-09-11, W5 obligation re-mint): the
-        # ``idempotency_skip`` outcome USUALLY means "already reported,
-        # nothing to do" — the natural path's prior turn already wrote
-        # the ``internal_report:`` MessageQueue row and the bus emit
-        # fired. The common case is a no-op here.
-        #
-        # But in the 84563a03 wedge (turn done 10:59:15+07, no terminal
-        # report, parent parked ~4.5h) the natural path returned this
-        # outcome WITHOUT firing the bus emit: the report row was
-        # created but the obligation was never honored — the parent's
-        # PENDING watcher on the (parent, child) pair stays PENDING
-        # and the parent stays wedged in ``waiting_children``.
-        #
-        # The bus's corrective multi-turn primitive
-        # ``_emit_terminal_for_child_instance_via_bus`` is the only
-        # obligation-honoring primitive that can fire a (parent, child)-
-        # keyed watcher regardless of which task id the terminal graph
-        # turn landed on. It is unconditionally safe — its underlying
-        # ``transition_state`` guarded UPDATE returns ``rowcount == 0``
-        # when the natural path already fired (matched_rows → 0,
-        # empty FollowUp list). So when the obligation IS unmet (wedge
-        # case), this branch re-mints the emit; when the obligation IS
-        # met (legit skip), this branch is a no-op.
-        #
-        # Obligation-unmet conditions — all three required:
-        #   1. ``parent_id`` is non-None (root has no obligation).
-        #   2. ``inst.status == COMPLETED`` (the defer was NOT
-        #      legitimate — the child is actually done, not in a
-        #      retry/pause bridge).
-        #   3. No TOCTOU at this seam: the re-mint site does NOT
-        #      pre-check for a PENDING watcher. The bus helper's
-        #      ``emit_terminal_for_child_instance``
-        #      (``daemon/services/dependency_bus.py:874-887``) reads
-        #      ``matched_rows`` via ``fetch_pending_for_target_and_
-        #      child`` and then atomically transitions each matched
-        #      row with ``transition_state``'s guarded
-        #      ``WHERE state='PENDING'`` UPDATE — the atomic write-
-        #      time re-verify inside the helper is what actually
-        #      serializes concurrent callers and exactly-once-fires
-        #      the PENDING watcher. When the natural path already
-        #      fired, the helper's ``matched_rows`` read returns
-        #      ``[]`` (no PENDING row exists) and the helper returns
-        #      an empty FollowUp list — no spurious emit, no double
-        #      fire. The helper is unconditionally safe to call
-        #      without a separate pre-check.
-        #
-        # SCOPE NOTE (W2, R2 polish 2026-09-11): this re-mint is
-        # COMPLETED-only BY DESIGN. ERROR-terminal children are NOT
-        # covered here — they reach the bus's corrective multi-turn
-        # emit via the error-lane pair at ``error_reporting.py:636``
-        # (see the ``_emit_terminal_for_child_instance_via_bus`` call
-        # in the ``status="error"`` branch). ACCEPTED RESIDUAL: if
-        # that error-lane hook itself fails (the helper logs WARNING
-        # and the call is unguarded against a top-level raise there),
-        # the ERROR-shape stays unhealed — documented as a backlog
-        # item, not in scope for this branch.
+        # B4 cycle-2 (W5 obligation re-mint; incident pointer:
+        # 84563a03 wedge — parent parked ~4.5h in waiting_children).
+        # ``idempotency_skip`` usually no-ops (obligation already
+        # honored by the natural path's bus emit). When the obligation
+        # is UNMET (parent alive + instance COMPLETED + a PENDING
+        # (parent, child) watcher), the corrective multi-turn emit
+        # ``_emit_terminal_for_child_instance_via_bus`` re-mints it —
+        # exactly-once via the bus helper's transition_state guarded
+        # UPDATE (matched_rows == [] on the natural path → no-op).
+        # COMPLETED-only by design: ERROR-terminal children are covered
+        # by the error-lane pair at ``error_reporting.py:636`` (accepted
+        # residual: a failing error-lane hook stays unhealed — backlog).
         if outcome == "idempotency_skip":
             if parent_id is not None:
                 try:

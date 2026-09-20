@@ -18,6 +18,7 @@ notify chain (real ``notify_work_watchers`` over real
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -206,6 +207,34 @@ def _task_pk(engine: Engine, work_id: str) -> int:
         return row.id
 
 
+def _make_manager(service, task_repo, instance_repository=None):
+    """Manager double carrying the real job-queue service + task repo
+    (and optionally the instance repo for the W6 anchor clear)."""
+    return SimpleNamespace(
+        _job_queue_service=service,
+        _task_repo=task_repo,
+        _instance_repository=instance_repository,
+    )
+
+
+def _seed_task_kind_job(engine, job_id, instance_id, *, admission_state, terminal_reason):
+    """Seed a task-kind JobItem with an explicit terminal disposition."""
+    with Session(engine) as s:
+        s.add(JobItem(
+            job_id=job_id,
+            agent_id="developer",
+            agent_dir="agents/developer",
+            message="task work",
+            source="agent:test",
+            instance_id=instance_id,
+            admission_state=admission_state,
+            terminal_reason=terminal_reason,
+            job_type="task",
+        ))
+        s.commit()
+    return job_id
+
+
 def _build_task_processor(task_repo, resolver, watcher_repo, manager):
     """Minimal ``ProcessMessageProcessor`` carrying exactly the
     attributes the ``on_success`` closure reads."""
@@ -247,9 +276,7 @@ class TestSite1InlineMirrorFinalize:
 
         # instance_manager reach: on_success reads _job_queue_service
         # (the hook) and _instance_repository (W6 anchor clear).
-        manager = SimpleNamespace(
-            _job_queue_service=service, _instance_repository=None
-        )
+        manager = _make_manager(service, task_repo)
         tp = _build_task_processor(
             task_repo, service._work_resolver, watcher_repo, manager
         )
@@ -307,9 +334,7 @@ class TestSite1InlineMirrorFinalize:
         _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
         _seed_watcher(watcher_repo, work_id)
 
-        manager = SimpleNamespace(
-            _job_queue_service=service, _instance_repository=instance_repo
-        )
+        manager = _make_manager(service, task_repo, instance_repo)
         tp = _build_task_processor(
             task_repo, service._work_resolver, watcher_repo, manager
         )
@@ -359,9 +384,7 @@ class TestSite1InlineMirrorFinalize:
 
         # instance_manager reach: on_success reads _job_queue_service
         # (the hook) and _instance_repository (W6 anchor clear).
-        manager = SimpleNamespace(
-            _job_queue_service=service, _instance_repository=None
-        )
+        manager = _make_manager(service, task_repo)
         tp = _build_task_processor(
             task_repo, service._work_resolver, watcher_repo, manager
         )
@@ -715,19 +738,10 @@ class TestRootCompletionHook:
         )
         work_id = str(uuid4())
         _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
-        with Session(engine) as s:
-            s.add(JobItem(
-                job_id=work_id,
-                agent_id="worker",
-                agent_dir="agents/worker",
-                message="task work",
-                source="agent:test",
-                instance_id=instance_id,
-                admission_state="done",
-                terminal_reason="completed",
-                job_type="task",
-            ))
-            s.commit()
+        _seed_task_kind_job(
+            engine, work_id, instance_id,
+            admission_state="done", terminal_reason="completed",
+        )
         _seed_watcher(watcher_repo, work_id)
 
         queue_repo = MagicMock(name="queue_repo")
@@ -805,7 +819,7 @@ class _RealCompleteStaleDouble:
 
 class TestSiteF10ForceComplete:
     @pytest.mark.asyncio
-    async def test_f10_force_complete_fires_completed_notify(
+    async def test_f10_force_complete_fires_per_kind_notify(
         self, engine, job_repo, task_repo, instance_repo, watcher_repo,
         enqueue_mock, service,
     ):
@@ -829,7 +843,9 @@ class TestSiteF10ForceComplete:
             min_orphan_age_seconds=0,
         )
 
-        assert stats.get("reconciled", 0) >= 1 or stats.get("reconciled_bad_state", 0) >= 0
+        assert stats.get("reconciled", 0) >= 1, (
+            f"F10 drift pass must reconcile the zombie task; got {stats}"
+        )
         deliveries = _delivered(enqueue_mock)
         # Message-mirror shape → per-kind token 'settled' (M3 derivation;
         # the pre-M3 hardcoded 'completed' was wrong for this shape).
@@ -901,19 +917,10 @@ class TestSiteF10ForceComplete:
         instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
         work_id = str(uuid4())
         _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
-        with Session(engine) as s:
-            s.add(JobItem(
-                job_id=work_id,
-                agent_id="developer",
-                agent_dir="agents/developer",
-                message="failed work",
-                source="agent:test",
-                instance_id=instance_id,
-                admission_state="done",
-                terminal_reason="failed",
-                job_type="task",
-            ))
-            s.commit()
+        _seed_task_kind_job(
+            engine, work_id, instance_id,
+            admission_state="done", terminal_reason="failed",
+        )
         _seed_watcher(watcher_repo, work_id)
 
         await recovery.reconcile_drift_states(
@@ -926,6 +933,124 @@ class TestSiteF10ForceComplete:
             f"failed-shape F10 must derive the 'failed' token; got {deliveries}"
         )
         assert watcher_repo.get_watchers_for_job(work_id) == []
+
+
+class _RaisingPerKindResolver:
+    """Delegates everything to the real resolver except
+    ``per_kind_status_for``, which raises (the DB-error window the
+    fallback arms exist for)."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def per_kind_status_for(self, work_id, default=None):
+        raise RuntimeError("per-kind resolver down")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestResolverRaiseFallback:
+    """Mandated 2/3 pins: a resolver RAISE inside the per-kind token
+    derivation falls back to 'completed', the notify STILL FIRES, and
+    the fallback is logged (never silent, never re-stranding)."""
+
+    @pytest.mark.asyncio
+    async def test_hook_a_resolver_raise_still_delivers(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service, caplog,
+    ):
+        instance_id = _seed_instance(
+            engine, f"inst-{uuid4().hex[:8]}", "completed"
+        )
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="done")
+        _seed_watcher(watcher_repo, work_id)
+
+        service._work_resolver = _RaisingPerKindResolver(service._work_resolver)
+
+        queue_repo = MagicMock(name="queue_repo")
+        queue_repo.get = MagicMock(return_value=None)
+        manager = MagicMock(name="manager")
+        manager._live_hub = None
+        manager._job_queue_service = service
+        manager._task_repo = task_repo
+        manager._queue_repository = queue_repo
+
+        svc = self._service(manager) if hasattr(self, "_service") else None
+        from daemon.services.child_reports import ChildReportsService
+
+        from daemon.services.child_reports import _ChildCompletionDbResult
+
+        svc = ChildReportsService.__new__(ChildReportsService)
+        svc._manager = manager
+        svc._events_service = None
+        result = _ChildCompletionDbResult(
+            outcome="root_completed",
+            instance_id=instance_id,
+            agent_id="worker",
+            parent_id=None,
+            b_violation_report=None,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="daemon.services.child_reports"):
+            await svc._dispatch_post_commit_side_effects(
+                result, last_content="42",
+                completed_message_id=str(uuid4()),
+            )
+
+        deliveries = _delivered(enqueue_mock)
+        assert deliveries and deliveries[0].endswith(":completed"), (
+            f"fallback token 'completed' must still deliver; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+        assert any(
+            "root_completed" in m and "per-kind resolve failed" in m
+            for m in caplog.messages
+        ), caplog.messages
+
+    @pytest.mark.asyncio
+    async def test_hook_b_resolver_raise_still_delivers(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service, caplog,
+    ):
+        recovery = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=MagicMock(name="lock_repo"),
+            instance_repository=instance_repo,
+            job_queue_service=service,
+            task_repository=task_repo,
+            stale_task_recovery=_RealCompleteStaleDouble(task_repo),
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        _seed_task_kind_job(
+            engine, work_id, instance_id,
+            admission_state="done", terminal_reason="failed",
+        )
+        _seed_watcher(watcher_repo, work_id)
+
+        service._work_resolver = _RaisingPerKindResolver(service._work_resolver)
+
+        with caplog.at_level(logging.WARNING, logger="daemon.services.job_recovery_service"):
+            await recovery.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=0,
+            )
+
+        deliveries = _delivered(enqueue_mock)
+        # Notify STILL FIRES despite the resolver raise — with the
+        # fallback token 'completed' (the re-stranding class closed).
+        assert f"internal_agent:job_event:{work_id}:completed" in deliveries, (
+            f"Hook B must fall back to 'completed' and deliver; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+        assert any(
+            "F10_zombie_task" in m and "per-kind resolve failed" in m
+            for m in caplog.messages
+        ), caplog.messages
 
 
 # ── Site 3: exemption pin ─────────────────────────────────────────────────

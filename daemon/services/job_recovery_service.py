@@ -1277,9 +1277,19 @@ class JobRecoveryService:
                             None,
                         )
                         if _f10_resolver is not None:
-                            _f10_token = _f10_resolver.per_kind_status_for(
-                                _f10_work_id, default="completed"
-                            )
+                            try:
+                                _f10_token = (
+                                    _f10_resolver.per_kind_status_for(
+                                        _f10_work_id, default="completed"
+                                    )
+                                )
+                            except Exception as token_err:
+                                logger.warning(
+                                    f"F10_zombie_task: per-kind resolve "
+                                    f"failed for {_f10_work_id[:8]}...: "
+                                    f"{token_err} — defaulting to "
+                                    f"'completed'"
+                                )
                         try:
                             await self._job_queue_service.notify_watchers(
                                 _f10_work_id, _f10_token
