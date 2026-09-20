@@ -20,9 +20,48 @@ INSTANCE_ID = "attestation-leader-e2e"
 
 
 @tool
-def attest_completion() -> dict:
-    """Tool used to finish the scripted enforce-mode case."""
-    return {"attested": True}
+def attest_completion() -> str:
+    """Tool used to finish the scripted enforce-mode case.
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation):
+    returns the clean-call teacher text the leader reads via
+    the ToolMessage (the runtime hook sets the per-thread caller-
+    AIMessage state before invocation)."""
+    from daemon.tools.attestation import (
+        ATTEST_CLEAN_RESULT_TEXT as _clean,
+    )
+
+    return _clean
+
+
+# 2026-09-19 (attest-first contract, c5d9a38a remediation):
+# the FINAL AIMessage MUST be a standalone text report (no tool
+# calls, >= ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the
+# gate to allow END via ``Decision.ALLOWED``. The OLD
+# ``content="finally done"`` short prose was below the threshold
+# and would have produced ``Decision.HOLD`` under the new
+# contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
 
 
 def _settings(mode):
@@ -104,7 +143,7 @@ async def test_tri_state_mode_semantics_are_separate(
             AIMessage(content="hallucinated end"),
             AIMessage(content="still not done"),
             AIMessage(
-                content="attesting now",
+                content="",
                 tool_calls=[
                     {
                         "name": "attest_completion",
@@ -113,7 +152,19 @@ async def test_tri_state_mode_semantics_are_separate(
                     }
                 ],
             ),
-            AIMessage(content="finally done"),
+            # 2026-09-19 (attest-first contract, c5d9a38a
+            # remediation): the FINAL AIMessage MUST be a
+            # standalone text report (no tool calls, >=
+            # ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for
+            # the gate to allow END via ``Decision.ALLOWED``.
+            # The OLD ``content="finally done"`` short prose
+            # was below the threshold and would have produced
+            # ``Decision.HOLD`` under the new contract — this
+            # test's PRIMARY evidence (2 denies + 1 attested
+            # allow with counter reset, exactly 1 nudge) is
+            # preserved by emitting the clean attest_call + the
+            # long standalone text report.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )

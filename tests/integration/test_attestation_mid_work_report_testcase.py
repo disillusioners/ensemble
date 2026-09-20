@@ -118,15 +118,58 @@ LONG_BENIGN_REPORT = (
 )
 
 
+# 2026-09-19 (attest-first contract, c5d9a38a remediation):
+# the FINAL AIMessage MUST be a standalone text report (no tool
+# calls, >= ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the
+# gate to allow END via ``Decision.ALLOWED``. The OLD
+# ``content="Done."`` short prose was below the threshold and
+# would have produced ``Decision.HOLD`` under the new contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Tool — mirrored from the in-graph flagship test
 # ─────────────────────────────────────────────────────────────────────────
 
 
 @tool
-def attest_completion() -> dict:
-    """The real leader attestation tool used by the graph's ToolNode."""
-    return {"attested": True, "timestamp": "2026-09-12T00:00:00+00:00"}
+def attest_completion() -> str:
+    """The real leader attestation tool used by the graph's ToolNode.
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation): the
+    tool returns the clean-call teacher text the leader reads via
+    the ToolMessage. The runtime hook (the tools-node caller in
+    ``daemon/services/long_tool_nudge.py:wrapped_tools_node``)
+    sets the per-thread caller-AIMessage state BEFORE the tool
+    body runs; the body picks the clean vs bundled teacher text
+    from that state via ``ContextVar`` (asyncio-aware state —
+    ``threading.local`` would NOT transfer across ``asyncio.
+    to_thread``).
+    """
+    from daemon.tools.attestation import (
+        attest_completion as _real,
+    )
+    return _real.invoke({})
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -259,9 +302,17 @@ def _delegate_ai() -> AIMessage:
 
 
 def _attest_ai() -> AIMessage:
-    """The attested-allow AIMessage: a tool_call to ``attest_completion``."""
+    """The attested-allow AIMessage: a tool_call to ``attest_completion``.
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation): the
+    AIMessage that calls ``attest_completion`` MUST have EMPTY content
+    (the attest-first pure toolcall turn). The OLD bundled shape
+    (``content="Attesting completion."`` + tool_call) was the
+    c5d9a38a class — under the new contract it produces
+    ``Decision.HOLD`` instead of ``Decision.ALLOWED``.
+    """
     return AIMessage(
-        content="Attesting completion.",
+        content="",
         tool_calls=[
             {"name": "attest_completion", "args": {}, "id": "call-attest-mid-work"}
         ],
@@ -748,7 +799,21 @@ async def test_scenario_b_all_terminal_deny_nudge(
             # attested-allow counter reset).
             AIMessage(content=VERBATIM_TRANSCRIPT),
             _attest_ai(),
-            AIMessage(content="Done."),
+            # 2026-09-19 (attest-first contract, c5d9a38a
+            # remediation): the FINAL AIMessage MUST be a
+            # standalone text report (no tool calls, >=
+            # ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for
+            # the gate to allow END via ``Decision.ALLOWED``.
+            # The OLD ``content="Done."`` short prose was
+            # below the threshold and would have produced
+            # ``Decision.HOLD`` under the new contract — this
+            # script is the (b) scenario's PRIMARY counter
+            # evidence (the deny ladder must increment
+            # ``attestation_denied_count`` 0 → 1) AND the
+            # post-attest allow must reset the counter to 0
+            # (the script's secondary evidence, demonstrating
+            # reset trigger #1).
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )
@@ -912,11 +977,27 @@ async def test_scenario_c1_attested_no_scan_plain_allow(
             _delegate_ai(),
             # The attested-allow AIMessage — the SECOND AIMessage carries
             # the ``attest_completion`` tool_call, which is the
-            # attested-allow short-circuit signal.
+            # attested-allow short-circuit signal. The 2026-09-19
+            # contract requires this AIMessage to have EMPTY content
+            # (the clean attest_call shape) — the bundled shape
+            # (``content="Attesting completion."`` + tool_call)
+            # would have produced ``Decision.HOLD`` instead of
+            # ``Decision.ALLOWED``.
             _attest_ai(),
-            # Trailing post-attestation prose (graph routes back one more
-            # turn after the tool result lands).
-            AIMessage(content="Done."),
+            # 2026-09-19 (attest-first contract, c5d9a38a
+            # remediation): the FINAL AIMessage MUST be a
+            # standalone text report (no tool calls, >=
+            # ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for
+            # the gate to allow END via ``Decision.ALLOWED``.
+            # The OLD ``content="Done."`` short prose was
+            # below the threshold and would have produced
+            # ``Decision.HOLD`` under the new contract — this
+            # test's PRIMARY intent (attested allow short-
+            # circuits the marker scan, NO judge call, NO
+            # nudge, NO hint, counter stays 0) is preserved
+            # by emitting the clean attest_call + the long
+            # standalone text report.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )
@@ -1395,8 +1476,17 @@ async def test_scenario_b_live_judge(
             # Continue the script so a deny ladder has room to terminate
             # cleanly; the primary evidence is the FIRST deny + nudge.
             AIMessage(content="I see the nudge — let me continue working."),
+            # 2026-09-19 (attest-first contract): the CLEAN
+            # attest_call (empty content + tool_call) replaces
+            # the OLD bundled shape.
             _attest_ai(),
-            AIMessage(content="Done."),
+            # 2026-09-19 (attest-first contract): the FINAL
+            # AIMessage MUST be a standalone text report (no
+            # tool calls, >= ``SHORT_REPORT_WORD_THRESHOLD`` =
+            # 150 words) for the gate to allow END via
+            # ``Decision.ALLOWED``. The OLD ``content="Done."``
+            # short prose was below the threshold.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )

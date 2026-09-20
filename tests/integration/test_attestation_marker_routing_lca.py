@@ -286,12 +286,51 @@ def _delegated_mission_with_marker(final_text: str) -> dict:
     }
 
 
+# Long standalone text report — required for the 2026-09-19
+# attest-first contract's ALLOWED path (the FINAL AIMessage must
+# be a standalone text report, no tool calls, >=
+# ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words). Mirrors the unit
+# fixture ``report_ai()``.
+_LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
+
 def _delegated_mission_attested() -> dict:
     """Delegated mission WITH attestation in window — must skip scan.
 
     Used by the (g) scenario: an attested allow short-circuits the
     marker scan entirely. The natural decision is ``ALLOWED`` via
     attestation, with counter reset (trigger 1).
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation):
+    the FINAL AIMessage MUST be a standalone text report (no tool
+    calls, >= ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the
+    gate to allow END via ``Decision.ALLOWED``. The OLD
+    ``content="I am done with attestation"`` short prose was below
+    the threshold and would have produced ``Decision.HOLD`` under
+    the new contract — the (g) test's PRIMARY intent (attested
+    allow short-circuits the marker scan, counter reset to 0) is
+    preserved by emitting the clean attest_call + the long
+    standalone text report.
     """
     delegation_ai = AIMessage(
         content="",
@@ -299,18 +338,27 @@ def _delegated_mission_attested() -> dict:
             {"name": "send_message", "args": {"target": "child-id"}, "id": "c1"}
         ],
     )
+    # Clean attest_call (empty content + tool_call) — the
+    # 2026-09-19 attest-first contract's required shape for
+    # the FIRST half of the deliver-then-attest sequence.
     attestation_ai = AIMessage(
         content="",
         tool_calls=[
             {"name": "attest_completion", "args": {}, "id": "a1"}
         ],
     )
+    # Standalone text report — the FINAL AIMessage (no tool
+    # calls, >= 150 words). The 2026-09-19 contract requires
+    # the FINAL AIMessage to be the standalone report for the
+    # gate to allow END via ``Decision.ALLOWED`` (the attested-
+    # allow path requires ``final_ai_is_text_report=True``).
+    final_report_ai = AIMessage(content=_LONG_REPORT_TEXT)
     return {
         "messages": [
             HumanMessage(content="please do it"),
             delegation_ai,
             attestation_ai,
-            AIMessage(content="I am done with attestation"),
+            final_report_ai,
         ]
     }
 

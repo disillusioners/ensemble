@@ -1457,7 +1457,18 @@ class TestDecideLiveDescendantsMatrix:
     def test_attested_takes_precedence_over_live_descendants(self):
         """Attested allow is reset trigger 1 — comes BEFORE the R2 allow
         branch in the decision tree, even with a non-zero third input.
-        """
+
+        2026-09-19 (attest-first contract, c5d9a38a remediation):
+        ``decide()`` step (2) now requires ``final_ai_is_text_report=True``
+        for the attested-allow path — the FINAL AIMessage must be a
+        standalone text report (no tool calls, >=
+        ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the gate to
+        allow END via ``Decision.ALLOWED``. The ``decide()`` here
+        passes ``final_ai_is_text_report=True`` so the test pins the
+        attested-takes-precedence-over-R2 invariant with the new
+        contract (a leader that emitted a clean attest_call AND a
+        subsequent standalone report gets ``Decision.ALLOWED`` with
+        counter reset, even when live_descendants > 0)."""
         result = decide(
             attested=True,
             pending_children=2,
@@ -1465,6 +1476,14 @@ class TestDecideLiveDescendantsMatrix:
             live_descendants=3,
             denied_count=2,
             bound=3,
+            attestation_required=True,
+            # 2026-09-19: the new contract splits attested into
+            # ALLOWED (text report final AI) vs HOLD (attest-call
+            # or bundled final AI). This test pins attested-with-
+            # text-report → ALLOWED; the HOLD variant is the
+            # adjacent ``test_attested_no_text_report_returns_hold``
+            # in ``test_attestation_gate.py``.
+            final_ai_is_text_report=True,
         )
         assert result.decision is Decision.ALLOWED
         assert result.next_denied_count == 0  # reset trigger 1

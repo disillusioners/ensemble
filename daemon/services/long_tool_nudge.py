@@ -642,16 +642,23 @@ def wrapped_tools_node(
         # pick the clean-call vs bundled-call teacher text. We
         # STAMP the most-recent AIMessage (the one whose
         # tool_calls this wrapper is about to invoke) here, BEFORE
-        # delegating to the bare ToolNode. The stamp is per-thread
-        # (``threading.local``) and is read+cleared by the tool
-        # body — safe across concurrent worker threads. Only fires
-        # when an ``attest_completion`` tool_call is in this batch
-        # (the canonical case where the runtime hook is needed);
-        # other tool batches are untouched. Lazy import — the
-        # attestation tool module is on the tools-node hot path;
-        # a call-time import keeps the graph module-level imports
-        # dependency-light and matches the lazy-import discipline
-        # of the long-tool-nudge wrapper.
+        # delegating to the bare ToolNode. The stamp is per-task
+        # via ``contextvars.ContextVar`` and transfers across
+        # ``asyncio.to_thread`` via ``contextvars.copy_context()``
+        # (the tool body runs in a worker thread dispatched by
+        # LangChain's tool invocation framework — ``threading.local``
+        # would NOT transfer across that thread boundary). The
+        # tool body READS the state to pick the clean vs bundled
+        # teacher text; production code never resets it (per-task
+        # lifetime is the natural scope). Safe across concurrent
+        # worker threads — each task carries its own contextvar
+        # binding. Only fires when an ``attest_completion`` tool_call
+        # is in this batch (the canonical case where the runtime
+        # hook is needed); other tool batches are untouched. Lazy
+        # import — the attestation tool module is on the tools-node
+        # hot path; a call-time import keeps the graph module-level
+        # imports dependency-light and matches the lazy-import
+        # discipline of the long-tool-nudge wrapper.
         try:
             from daemon.tools.attestation import (
                 set_attest_caller_content as _set_attest_caller,
