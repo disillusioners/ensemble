@@ -128,6 +128,34 @@ from daemon.services.context_messages import CONTEXT_KIND_CHILD_REPORT_CHECK
 #: between runs — the resolvers are reset in the autouse fixture below).
 LCANW_INSTANCE_ID = "attestation-leader-e2e"
 
+# 2026-09-19 attest-first contract: the FINAL AIMessage MUST be a
+# standalone text report (no tool calls, >=
+# SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate to allow
+# END via Decision.ALLOWED. The scripted flow uses this as the
+# final response so the clean attest_call + report-as-subsequent-
+# standalone-message sequence satisfies the contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
 #: Real-shaped UUIDs so the resolver's ``_INTERNAL_REPORT_ID_FROM_SOURCE_RE``
 #: regex can match the stamped ``source`` attribute identically across
 #: scenarios (same shape the drain emits at ``daemon/graph.py:6960`` and
@@ -624,15 +652,14 @@ def test_s1_live_drain_writer_sees_report_at_turn_T_end(
             # the A-band source; the A-band signal comes from the
             # drained report in state.
             AIMessage(content="Awaiting child reply. Ending turn."),
-            # 3rd call (post-deny-nudge re-route): an attest_completion
-            # tool call so the next gate invocation plain-allows
-            # (the canonical deny → nudge → attest → allow flow; the
-            # nudge is added to the leader's state by the gate node
-            # before the 3rd LLM call, so it is visible in the final
-            # state the test inspects). Mirrors the
-            # ``test_attestation_in_graph_nudge_flow.py`` flagship shape.
+            # 3rd call (post-deny-nudge re-route): the CLEAN
+            # attest_call (empty content + tool_call — the
+            # 2026-09-19 attest-first contract). The OLD bundled
+            # shape (``content="Attesting now."`` + tool_call)
+            # was the c5d9a38a class — under the new contract
+            # it produces Decision.HOLD instead of Decision.ALLOWED.
             AIMessage(
-                content="Attesting now.",
+                content="",
                 tool_calls=[
                     {
                         "name": "attest_completion",
@@ -641,8 +668,17 @@ def test_s1_live_drain_writer_sees_report_at_turn_T_end(
                     }
                 ],
             ),
-            # 4th call: final prose after the attested allow → END.
-            AIMessage(content="Finished after the continuation nudge."),
+            # 4th call: full standalone text report after the
+            # clean attest_call → Decision.ALLOWED + END (the
+            # 2026-09-19 attest-first contract requires the
+            # FINAL AIMessage to be a standalone text report
+            # — no tool calls, >= SHORT_REPORT_WORD_THRESHOLD
+            # = 150 words — for the gate to allow END via
+            # Decision.ALLOWED). The OLD short prose "Finished
+            # after the continuation nudge." was below the
+            # threshold and would have produced Decision.HOLD
+            # under the new contract.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )

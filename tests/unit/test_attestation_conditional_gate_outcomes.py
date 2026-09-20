@@ -81,13 +81,78 @@ def send_message_ai(tc_id: str = "t1") -> AIMessage:
 
 
 def attest_ai(tc_id: str = "t-attest") -> AIMessage:
+    """Clean attest_call AIMessage — EMPTY content (attest-first contract,
+    2026-09-19). The attestation tool-call message must NOT carry the
+    report; per the new contract, the gate treats the empty-content
+    attest_call as the FIRST half of the deliver-then-attest
+    sequence. Tests that exercise the bundled shape (report text +
+    tool_call in ONE AIMessage — the c5d9a38a shape) use
+    :func:`bundled_attest_ai` instead."""
     return AIMessage(
-        content="Attesting now.",
+        content="",
         tool_calls=[{"name": "attest_completion", "args": {}, "id": tc_id}],
     )
 
 
+def bundled_attest_ai(
+    content: str = "Bundled report + attest in one message.",
+    tc_id: str = "t-attest-bundled",
+) -> AIMessage:
+    """Bundled attest_call AIMessage — NON-empty content + the
+    attest_completion tool_call (the c5d9a38a shape). The
+    attest-first contract (2026-09-19) treats this as a
+    contract violation: the leader bundled the report into the
+    attestation tool-call message. The gate's classify_final_ai_
+    shape helper detects this shape and the decide() returns
+    Decision.HOLD (not Decision.ALLOWED)."""
+    return AIMessage(
+        content=content,
+        tool_calls=[{"name": "attest_completion", "args": {}, "id": tc_id}],
+    )
+
+
+def report_ai(
+    content: str = (
+        "The work is finished. All four patches shipped; the test "
+        "matrix is green; the integration tests pass on every "
+        "environment we maintain. Patch 1 fixed the off-by-one in "
+        "the cache TTL calculator; the unit tests now exercise both "
+        "the elapsed-second and wall-clock-second boundaries at the "
+        "second and minute granularity. Patch 2 cleaned up the dead "
+        "imports in the worker pool module after the migration, "
+        "removing the legacy compatibility shim and the related "
+        "test scaffolding. Patch 3 refactored the error-reporting "
+        "decorator so the stack-frame metadata is consistent across "
+        "all four call sites in the graph node and the manager "
+        "facade. Patch 4 added the missing operator-boot log line "
+        "for the new resolver module so operators can grep the "
+        "boot summary for the resolved effective values. All four "
+        "patches passed their respective suites on the first run "
+        "with no flake; the integration matrix is green end-to-end "
+        "across all environments we maintain. No follow-ups "
+        "outstanding; the mission is complete and ready for review "
+        "by the next teammate in the chain."
+    ),
+    tc_id: str = "t-report",
+) -> AIMessage:
+    """Standalone text-report AIMessage — NO tool calls, >= 150 words
+    (above ``SHORT_REPORT_WORD_THRESHOLD``). The attest-first contract
+    requires the FINAL AIMessage to look like this for the gate to
+    allow END via Decision.ALLOWED after a clean attest_call."""
+    return AIMessage(content=content)
+
+
 def plain_ai(content: str = "All done.") -> AIMessage:
+    return AIMessage(content=content)
+
+
+def short_report_ai(content: str = "Done. Shipped.") -> AIMessage:
+    """Short standalone AIMessage — below ``SHORT_REPORT_WORD_THRESHOLD``
+    (150 words). After a clean attest_call, the gate's
+    classify_final_ai_shape helper rejects this as the report-ish
+    final AIMessage (the length threshold gates the ALLOWED path);
+    the decide() returns Decision.HOLD with the clean-call
+    Final Report Reminder text."""
     return AIMessage(content=content)
 
 
@@ -238,13 +303,22 @@ class TestConditionalGateEvaluateOutcomes:
         self,
     ) -> None:
         """Case (d) at the evaluate level — delegated AND attested
-        → ALLOWED with ``next_denied_count = 0`` (the
-        attested-allow reset trigger). The conditional gate stays
-        ON but the toolcall was made."""
+        (attest-first contract, 2026-09-19) → ALLOWED with
+        ``next_denied_count = 0`` (the attested-allow reset trigger).
+        The conditional gate stays ON, the toolcall was made in a
+        PURE TOOLCALL TURN (empty content per the new contract),
+        AND a subsequent standalone text report (>= 150 words, no
+        tool calls) is the FINAL AIMessage — the gate's
+        classify_final_ai_shape helper detects this shape and
+        decide() returns Decision.ALLOWED.
+        """
+        # attest-first contract: clean attest_call (empty content) +
+        # subsequent standalone text report (the FINAL AIMessage).
         msgs = [
             real("delegate and finish"),
             send_message_ai(),
             attest_ai(),
+            report_ai(),
         ]
         result = evaluate(
             "inst-del-attest",
@@ -257,6 +331,12 @@ class TestConditionalGateEvaluateOutcomes:
         assert result.attestation_required is True  # gate was ON
         assert result.attestation_present is True
         assert result.should_inject_nudge is False
+        # 2026-09-19 attest-first contract: the FINAL AIMessage
+        # was the standalone text report (no tool calls), so the
+        # gate's classify_final_ai_shape reports True.
+        assert result.final_ai_is_text_report is True
+        assert result.final_ai_is_attest_call is False
+        assert result.is_bundled_call is False
         # Reset trigger 1: attested-allow resets the counter.
         assert result.next_denied_count == 0
 

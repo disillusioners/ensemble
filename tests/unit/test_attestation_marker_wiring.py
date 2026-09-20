@@ -188,7 +188,20 @@ def _delegated_mission_with_marker(final_text: str) -> dict:
 
 
 def _delegated_mission_attested() -> dict:
-    """Delegated mission WITH attestation in window — must skip scan."""
+    """Delegated mission WITH attestation in window — must skip scan.
+
+    2026-09-19 attest-first contract: the FINAL AIMessage MUST be a
+    standalone text report (no tool calls, >=
+    ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words) for the gate to
+    allow END via Decision.ALLOWED. The clean attest_call
+    (empty content + ``attest_completion`` tool_call) is the
+    SECOND-TO-LAST AIMessage; the LONG standalone text report
+    is the LAST AIMessage. The OLD "short prose after the
+    attest_call" shape retired with the attest-first flip —
+    it would now produce Decision.HOLD (the marker scan skip
+    test still works because the attested path skips the scan
+    regardless of the final-AI length — but the allow-vs-hold
+    branch requires the standalone text report shape)."""
     delegation_ai = AIMessage(
         content="",
         tool_calls=[
@@ -201,12 +214,35 @@ def _delegated_mission_attested() -> dict:
             {"name": "attest_completion", "args": {}, "id": "a1"}
         ],
     )
+    long_report = (
+        "The work is finished. All four patches shipped; the "
+        "test matrix is green; the integration tests pass on "
+        "every environment we maintain. Patch 1 fixed the "
+        "off-by-one in the cache TTL calculator; the unit "
+        "tests now exercise both the elapsed-second and "
+        "wall-clock-second boundaries at the second and "
+        "minute granularity. Patch 2 cleaned up the dead "
+        "imports in the worker pool module after the "
+        "migration, removing the legacy compatibility shim "
+        "and the related test scaffolding. Patch 3 refactored "
+        "the error-reporting decorator so the stack-frame "
+        "metadata is consistent across all four call sites in "
+        "the graph node and the manager facade. Patch 4 added "
+        "the missing operator-boot log line for the new "
+        "resolver module so operators can grep the boot "
+        "summary for the resolved effective values. All four "
+        "patches passed their respective suites on the first "
+        "run with no flake; the integration matrix is green "
+        "end-to-end across all environments we maintain. No "
+        "follow-ups outstanding; the mission is complete and "
+        "ready for review by the next teammate in the chain."
+    )
     return {
         "messages": [
             HumanMessage(content="please do it"),
             delegation_ai,
             attestation_ai,
-            AIMessage(content="I am done with attestation"),
+            AIMessage(content=long_report),
         ]
     }
 

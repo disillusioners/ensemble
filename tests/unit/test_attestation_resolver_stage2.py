@@ -1112,16 +1112,52 @@ class TestIncidentOriginalChildLie:
 
         # ── Eval 3: the child delivered; the leader attests → allow
         # with the counter RESET (trigger 1 — attested-allow).
+        # 2026-09-19 attest-first contract: the FINAL AIMessage
+        # MUST be a standalone text report (no tool calls, >=
+        # SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate
+        # to allow END via Decision.ALLOWED. The clean attest_call
+        # is the SECOND-TO-LAST AIMessage (empty content +
+        # attest tool_call); the FULL REPORT is the LAST
+        # AIMessage (long, no tool calls).
         attestation_ai = AIMessage(
             content="",
             tool_calls=[
                 {"name": "attest_completion", "args": {}, "id": "a1"}
             ],
         )
+        # Long standalone text report — same shape as the unit
+        # test fixture ``report_ai()`` but kept inline so the
+        # incident-arc test stays self-contained.
+        full_report_text = (
+            "The work is finished. All four patches shipped; the "
+            "test matrix is green; the integration tests pass on "
+            "every environment we maintain. Patch 1 fixed the "
+            "off-by-one in the cache TTL calculator; the unit "
+            "tests now exercise both the elapsed-second and "
+            "wall-clock-second boundaries at the second and "
+            "minute granularity. Patch 2 cleaned up the dead "
+            "imports in the worker pool module after the "
+            "migration, removing the legacy compatibility shim "
+            "and the related test scaffolding. Patch 3 refactored "
+            "the error-reporting decorator so the stack-frame "
+            "metadata is consistent across all four call sites in "
+            "the graph node and the manager facade. Patch 4 added "
+            "the missing operator-boot log line for the new "
+            "resolver module so operators can grep the boot "
+            "summary for the resolved effective values. All four "
+            "patches passed their respective suites on the first "
+            "run with no flake; the integration matrix is green "
+            "end-to-end across all environments we maintain. No "
+            "follow-ups outstanding; the mission is complete and "
+            "ready for review by the next teammate in the chain."
+        )
         node3, _m3, ledger3 = _make_node(instance_id="child-lie")
         state3 = _delegated_mission(
-            "Full report delivered above.",
-            extra_messages=[_child_report_check_note(), attestation_ai],
+            full_report_text,
+            extra_messages=[
+                _child_report_check_note(),
+                attestation_ai,
+            ],
         )
         with _capture(caplog).at_level(logging.INFO):
             result3 = _run(node3, state3, "child-lie")

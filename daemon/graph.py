@@ -4632,12 +4632,15 @@ ATTESTATION_NUDGE_TEXT = (
     "and other non-delegating turns do NOT trigger this gate. When "
     "you have dispatched a child this mission, the work is not "
     "complete until you attest.\n\n"
-    "Attestation is a SEPARATE step: FIRST deliver your full "
-    "detailed final report as its own message (outcomes, evidence, "
-    "follow-ups), THEN call attest_completion ALONE as a "
-    "subsequent step — never bundle the report into the attestation "
-    "tool-call message (at most a one-line ack such as \"Report "
-    "delivered above; attesting completion.\").\n\n"
+    "Attestation is the ATTEST-FIRST PURE-TOOLCALL-TURN CONTRACT "
+    "(2026-09-19, closes incident c5d9a38a): when the work is "
+    "truly complete, FIRST call attest_completion ALONE in a PURE "
+    "TOOLCALL TURN (the AIMessage that carries the call must have "
+    "EMPTY content — no report text, no ack, nothing), THEN "
+    "deliver your full detailed final report as a SUBSEQUENT "
+    "standalone AI message (no tool calls). The order flipped: "
+    "attest FIRST, report SECOND, separate messages — never "
+    "bundle the report into the attestation tool-call message.\n\n"
     "Reminder: when — and only when — the work is truly complete "
     "(delegated children have all reported and you have the full "
     "picture), you MUST call the attest_completion tool before "
@@ -4649,16 +4652,17 @@ ATTESTATION_NUDGE_TEXT = (
     '    TurnEnd["Your turn is about to end"] --> UsedSend{"Did you use send_message since the last user message?"}\n'
     '    UsedSend -- No --> FinishFree["Finish freely - no attestation needed"]\n'
     '    UsedSend -- Yes --> AttestRecent{"Is attest_completion in your last 3 messages?"}\n'
-    '    AttestRecent -- Yes --> FinishGate["Finish - gate allows"]\n'
-    '    AttestRecent -- No --> ReportJudge{"Did the gate\'s report judge confirm a real completion report?"}\n'
-    '    ReportJudge -- Yes --> FinishGate\n'
-    '    ReportJudge -- No --> Nudged["You are being nudged: work not finished"]\n'
+    '    AttestRecent -- No --> Nudged["You are being nudged: work not finished"]\n'
     '    Nudged --> CheckContinue["Check children and task status, continue working"]\n'
     '    CheckContinue --> TrulyDone{"Work truly complete?"}\n'
     '    TrulyDone -- "No, keep working" --> CheckContinue\n'
-    '    TrulyDone -- Yes --> Report["Deliver detailed report as its own message"]\n'
-    '    Report --> Attest["Then call attest_completion alone"]\n'
-    '    Attest --> FinishGate\n'
+    '    TrulyDone -- Yes --> AttestFirst["Call attest_completion ALONE first (PURE TOOLCALL TURN, empty content)"]\n'
+    '    AttestFirst --> ReportSecond["Then deliver detailed report as its own standalone message"]\n'
+    '    ReportSecond --> FinishGate["Finish - gate allows"]\n'
+    '    AttestRecent -- Yes --> ReportPresent{"Is the LAST AI a standalone text report (no tool calls, >=150 words)?"}\n'
+    '    ReportPresent -- No --> Hold["HOLD: re-issue the report as its own standalone message"]\n'
+    '    Hold --> ReportSecond\n'
+    '    ReportPresent -- Yes --> FinishGate\n'
     "```"
 )
 
@@ -4685,10 +4689,79 @@ COMPLETION_CHECK_NOTE_TEXT = (
     "send_message if needed) — if the pending "
     "work was orphaned or already idle, clean it up or call "
     "attest_completion once the work is truly done. Reminder: when "
-    "you do finish, FIRST deliver your full detailed final report as "
-    "its own message, THEN call attest_completion ALONE — never "
+    "you do finish, the ATTEST-FIRST PURE-TOOLCALL-TURN CONTRACT "
+    "(2026-09-19) applies — FIRST call attest_completion ALONE in a "
+    "PURE TOOLCALL TURN (empty content), THEN deliver your full "
+    "detailed final report as its own standalone AI message — never "
     "bundle the report into the attestation tool-call message."
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Attest-first contract (2026-09-19, c5d9a38a remediation)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The attest-first pure-toolcall-turn contract is the new
+# canonical order for delegated-mission completions. The runtime
+# gate enforces it system-side via the HOLD-state (see
+# ``attestation_gate.Decision.HOLD`` + ``classify_final_ai_shape``).
+# These two reminder constants are the SINGLE home of the in-graph
+# reminder text the gate injects on HOLD (mirroring the
+# ATTESTATION_NUDGE_TEXT / COMPLETION_CHECK_NOTE_TEXT NFR-6
+# single-source-of-truth discipline). Like the nudge and the note,
+# each reminder leads with a single non-blank header line so the
+# LLM recognizes it as system-origin at parse time. The header
+# prefix reuses the established ``_make_context_message`` factory
+# style — same prefix discipline.
+#
+# Hold-state accounting: the reminder injection does NOT increment
+# ``attestation_denied_count`` (no bound / escalation interaction).
+# The graph node enforces a per-mission cap (``ATTESTATION_REMINDER_CAP``)
+# and falls through to plain ``meta_bypass`` allow on the cap — the
+# documented escape so a leader that keeps emitting empty / short
+# finals is never stuck in an infinite HOLD loop.
+
+#: Final Report Reminder (HOLD-state, clean-call case). Injected when
+#: the leader called ``attest_completion`` in a pure toolcall turn
+#: (AIMessage with empty content) but did NOT subsequently deliver a
+#: standalone text report as the final AIMessage. Tells the leader
+#: to deliver the full detailed final report now as its own
+#: standalone message.
+ATTESTATION_FINAL_REPORT_REMINDER = (
+    "[SYSTEM CONTEXT: Final Report Reminder]\n\n"
+    "Attestation received. Deliver your full detailed final report "
+    "now as your final message."
+)
+
+#: Bundled-call Reminder (HOLD-state, bundled-shape case). Injected
+#: when the leader bundled the report + attest into ONE AIMessage
+#: (incident c5d9a38a shape — AIMessage carried text AND the
+#: ``attest_completion`` tool_call). Tells the leader that the
+#: attestation call must be text-free and to re-issue the report as
+#: its own standalone message.
+ATTESTATION_BUNDLED_REMINDER = (
+    "[SYSTEM CONTEXT: Final Report Reminder]\n\n"
+    "Attestation received, but your tool-call message contained text - "
+    "the attestation call must be text-free. Re-issue your full "
+    "detailed final report now as its own standalone message."
+)
+
+#: Per-mission reminder cap (2026-09-19, attest-first contract).
+#: The graph node tracks ``attestation_reminder_count`` per mission
+#: and falls through to plain ``meta_bypass`` allow when the count
+#: reaches this value. The cap is the documented escape so a leader
+#: that keeps emitting empty / short finals after the attest call
+#: is never stuck in an infinite HOLD loop. Deliberately NOT
+#: env-tunable by design (one knob fewer; matches the
+#: ``SHORT_REPORT_WORD_THRESHOLD`` precedent — module-level constant).
+ATTESTATION_REMINDER_CAP: int = 2
+
+#: State channel key for the per-mission reminder count (2026-09-19,
+#: attest-first contract). The graph node reads this on each turn-
+#: end evaluation; on a HOLD it increments and writes the new value
+#: back via the return dict. Reset to 0 when the leader delivers a
+#: standalone text report and the gate allows END (the same allow
+#: path that resets ``attestation_denied_count``).
+ATTESTATION_REMINDER_COUNT_KEY: str = "attestation_reminder_count"
 
 # Single-source the body derivation for the (b)-path hint. The header
 # string below is sourced from ``context_messages.CONTEXT_PREFIX`` +
@@ -4807,6 +4880,102 @@ def _fused_hint_citation(fused_result: Any) -> str | None:
     if not blocks:
         return None
     return "\n\n".join(blocks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Attest-first HOLD-state factory (2026-09-19, c5d9a38a remediation)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The HOLD-state reminder factory mirrors the marker-hint factory
+# (``_make_completion_check_note_message``) but is structurally
+# simpler — no evidence citation suffix, no advisory note. The
+# reminder body is the canonical :data:`ATTESTATION_FINAL_REPORT_REMINDER`
+# (clean-call HOLD) or :data:`ATTESTATION_BUNDLED_REMINDER` (bundled-
+# shape HOLD). The factory slices the body past the canonical header
+# (the same `_make_context_message`-sourced triplet used by the
+# Completion Check Note factory) and rebuilds the message via the
+# SAME factory so the header discipline is single-source.
+#
+# Stable id contract: every reminder message carries
+# ``attestation_final_report_reminder:{instance_id}`` so consecutive
+# HOLD-state reminders on the SAME instance SUPERSEDE in place via
+# LangGraph's ``add_messages`` reducer upsert — the unbounded
+# ``context_kind=task_context`` tail under three-bucket compaction
+# (cf. the F1 Shape A precedent for the Completion Check Note) is
+# closed. The cap (``ATTESTATION_REMINDER_CAP = 2``) prevents the
+# supersede chain from running forever in the degenerate case.
+_FINAL_REPORT_REMINDER_TITLE = "Final Report Reminder"
+
+
+def _make_attestation_final_report_reminder_message(
+    instance_id: str | None = None,
+    *,
+    reminder_text: str | None = None,
+) -> HumanMessage:
+    """Build the HOLD-state Final Report Reminder as a HumanMessage.
+
+    2026-09-19 (attest-first contract, c5d9a38a remediation). The
+    factory derives the reminder body from the canonical
+    :data:`ATTESTATION_FINAL_REPORT_REMINDER` (or
+    :data:`ATTESTATION_BUNDLED_REMINDER` when ``reminder_text`` is
+    supplied with the bundled body — the gate node picks which
+    based on the ``is_bundled_call`` decision field). Single-source:
+    the reminder body lives ONLY in this module, mirroring the
+    ATTESTATION_NUDGE_TEXT / COMPLETION_CHECK_NOTE_TEXT NFR-6
+    discipline.
+
+    Args:
+        instance_id: Owning instance id. When supplied, the reminder
+            carries a stable id so repeated HOLD events on the SAME
+            instance supersede in place (the F1 Shape A contract
+            applied to the HOLD-state). When ``None``, the factory
+            falls back to a fresh ``uuid4`` so tests that don't
+            care about supersede semantics stay green.
+        reminder_text: Override body — when supplied, used as the
+            reminder body INSTEAD of
+            :data:`ATTESTATION_FINAL_REPORT_REMINDER`. The gate
+            node passes :data:`ATTESTATION_BUNDLED_REMINDER` here
+            on the bundled-shape HOLD. Must start with the
+            canonical header so the header slice below finds the
+            same body length.
+
+    Returns:
+        A ``HumanMessage`` with the canonical HOLD-state reminder
+        body and the ``CONTEXT_KIND_TASK_CONTEXT`` ``context_kind``.
+        Stable id when ``instance_id`` is supplied (F1 Shape A
+        contract — supersede in place on repeated HOLD events).
+    """
+    from .services.context_messages import (
+        CONTEXT_KIND_TASK_CONTEXT,
+        CONTEXT_PREFIX,
+        CONTEXT_SUFFIX,
+        _make_context_message,
+        _stable_id_for,
+    )
+
+    body_source = reminder_text or ATTESTATION_FINAL_REPORT_REMINDER
+    # Slice past the canonical header — the header is the
+    # ``_make_context_message`` factory's prefix triplet
+    # (``CONTEXT_PREFIX`` + title + ``CONTEXT_SUFFIX``), the SAME
+    # triplet the factory re-emits when we call it below. Slicing
+    # keeps the body content in lockstep with the constant —
+    # callers never re-literal the header in this module.
+    header = CONTEXT_PREFIX + _FINAL_REPORT_REMINDER_TITLE + CONTEXT_SUFFIX
+    body = body_source[len(header):]
+    stable_id = (
+        _stable_id_for(
+            "attestation_final_report_reminder", instance_id=instance_id
+        )
+        if instance_id
+        else None
+    )
+    return _make_context_message(
+        kind=CONTEXT_KIND_TASK_CONTEXT,
+        title=_FINAL_REPORT_REMINDER_TITLE,
+        content=body,
+        id_=stable_id,
+    )
+
 
 #: Graph node name + conditional-route name for the attestation gate.
 ATTESTATION_GATE_NODE_NAME = "attestation_gate"
@@ -5726,6 +5895,109 @@ def create_attestation_gate_node(
                 "attestation_nudge_denied_count": counted_denied_count,
             }
 
+        # ─────────────────────────────────────────────────────────────
+        # HOLD branch (2026-09-19, attest-first contract, c5d9a38a)
+        # ─────────────────────────────────────────────────────────────
+        # Decision.HOLD fires when attestation_present=True but the
+        # final AIMessage is NOT a standalone text report (it's
+        # either the attest-call message itself with no subsequent
+        # text yet, or the bundled shape where the AIMessage
+        # carried text + the tool_call). The branch:
+        #
+        # 1. Reads the per-mission reminder count from the state
+        #    channel (``attestation_reminder_count``).
+        # 2. On the cap (``ATTESTATION_REMINDER_CAP``) — fall
+        #    through to plain ``meta_bypass`` allow. The cap is the
+        #    documented escape so a leader that keeps emitting
+        #    empty / short finals after the attest call is never
+        #    stuck in an infinite HOLD loop. The counter is reset
+        #    to 0 here so a future sub-turn that delivers a real
+        #    report gets a fresh start.
+        # 3. Otherwise — inject the Final Report Reminder via the
+        #    factory (stable-id supersede contract — F1 Shape A
+        #    applied to HOLD). The reminder body comes from the
+        #    gate's ``decision.reminder_text`` (the
+        #    ``ATTESTATION_BUNDLED_REMINDER`` on the bundled shape,
+        #    ``ATTESTATION_FINAL_REPORT_REMINDER`` on the clean-
+        #    call HOLD). Counter-INDEPENDENT — the reminder
+        #    injection does NOT increment ``attestation_denied_count``
+        #    and never engages the bound / escalation machinery.
+        #    Routes back to ``agent`` (same execution shape as the
+        #    DENIED branch).
+        if decision.decision is Decision.HOLD:
+            # Per-mission reminder count — read from the state
+            # channel (set by the previous HOLD if any). Default 0
+            # when the channel is absent (fresh mission, or
+            # channel not yet initialized).
+            if isinstance(state, dict):
+                prior_reminder_count = state.get(
+                    ATTESTATION_REMINDER_COUNT_KEY, 0
+                )
+            else:
+                prior_reminder_count = getattr(
+                    state, ATTESTATION_REMINDER_COUNT_KEY, 0
+                ) or 0
+            # Coerce to int defensively (degenerate embeddings may
+            # surface other types; the gate never errors).
+            try:
+                prior_reminder_count = int(prior_reminder_count)
+            except (TypeError, ValueError):
+                prior_reminder_count = 0
+
+            if prior_reminder_count >= ATTESTATION_REMINDER_CAP:
+                # Cap reached — fall through to plain meta_bypass
+                # allow. The leader's mission is NEVER stuck in an
+                # infinite HOLD loop; this is the documented
+                # escape. Reset the reminder counter so a future
+                # sub-turn that delivers a real report starts
+                # fresh.
+                logger.info(
+                    "event=leader_completion_gate_hold_reminder_cap "
+                    "instance_id=%s prior_reminder_count=%s "
+                    "cap=%s decision=fall_through_to_meta_bypass_allow",
+                    effective_instance_id,
+                    prior_reminder_count,
+                    ATTESTATION_REMINDER_CAP,
+                )
+                # Fall through to the allow branch below (same as
+                # the marker_hint_message path / dry_log /
+                # terminal_after_bound — all just return END).
+            else:
+                # Cap NOT reached — inject the reminder and route
+                # back to agent. The reminder body comes from the
+                # gate's ``decision.reminder_text`` — picked by
+                # ``decide()`` based on the bundled flag.
+                reminder_body = decision.reminder_text or (
+                    ATTESTATION_BUNDLED_REMINDER
+                    if decision.is_bundled_call
+                    else ATTESTATION_FINAL_REPORT_REMINDER
+                )
+                reminder = _make_attestation_final_report_reminder_message(
+                    instance_id=effective_instance_id,
+                    reminder_text=reminder_body,
+                )
+                # Counter-INDEPENDENT log line — this is NOT a
+                # denial, so no bound/escalation interaction. The
+                # row carries the reminder-count channel value for
+                # forensics + the bundled flag so operators can
+                # see which reminder shape fired.
+                logger.info(
+                    "[AttestationGate] hold instance=%s "
+                    "is_bundled_call=%s final_ai_is_attest_call=%s "
+                    "reminder_count=%s -> next=%s; "
+                    "injecting Final Report Reminder (counter-independent)",
+                    effective_instance_id,
+                    decision.is_bundled_call,
+                    decision.final_ai_is_attest_call,
+                    prior_reminder_count,
+                    prior_reminder_count + 1,
+                )
+                return {
+                    "messages": [reminder],
+                    "attestation_route": "agent",
+                    ATTESTATION_REMINDER_COUNT_KEY: prior_reminder_count + 1,
+                }
+
         # allow / terminal_after_bound / dry_log /
         # allowed_legitimate_pending_wakeup — allow the END, zero side
         # effects on the routing. The canonical decision log line was
@@ -5736,10 +6008,35 @@ def create_attestation_gate_node(
         # pending work), inject the hint alongside the END as a
         # checkpoint-durable record for the next turn. NO re-route —
         # the turn still ends; the hint is an informational record.
+        # EXCEPTION (2026-09-19, attest-first HOLD cap fall-through):
+        # when prior_reminder_count reached ``ATTESTATION_REMINDER_CAP``
+        # on a HOLD, this allow branch is reached with
+        # ``decision.decision is Decision.HOLD`` — we MUST also reset
+        # the per-mission reminder counter to 0 here so a future
+        # sub-turn that delivers a real report gets a fresh start.
         if decision.marker_hint_message is not None:
             return {
                 "messages": [decision.marker_hint_message],
                 "attestation_route": None,
+            }
+        # HOLD cap fall-through: when ``decision.decision is HOLD`` and
+        # we already logged the cap event above, reset the reminder
+        # counter and allow END. Same return shape as the marker-hint
+        # path (zero side effects on the routing beyond the channel
+        # reset).
+        if decision.decision is Decision.HOLD:
+            return {
+                "attestation_route": None,
+                ATTESTATION_REMINDER_COUNT_KEY: 0,
+            }
+        # Attested allow (Decision.ALLOWED with attestation_present=True)
+        # — the leader delivered a proper standalone text report and
+        # the gate cleared END. Reset the per-mission HOLD reminder
+        # counter so the next HOLD sequence (if any) starts fresh.
+        if decision.decision is Decision.ALLOWED and decision.attestation_present:
+            return {
+                "attestation_route": None,
+                ATTESTATION_REMINDER_COUNT_KEY: 0,
             }
         return {"attestation_route": None}
 

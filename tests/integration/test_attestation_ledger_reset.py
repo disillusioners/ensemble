@@ -21,9 +21,14 @@ def _enforce_mode(monkeypatch):
 
 
 @tool
-def attest_completion() -> dict:
-    """Record a scripted mission attestation."""
-    return {"attested": True}
+def attest_completion() -> str:
+    """Record a scripted mission attestation (2026-09-19 contract —
+    returns the teacher text the leader reads via the ToolMessage)."""
+    from daemon.tools.attestation import (
+        ATTEST_CLEAN_RESULT_TEXT as _clean,
+    )
+
+    return _clean
 
 
 def _settings():
@@ -51,6 +56,34 @@ def _build(graph_module, model, manager, checkpointer):
         )
 
 
+# Long standalone text report — required for the 2026-09-19
+# attest-first contract's ALLOWED path (the FINAL AIMessage must
+# be a standalone text report, no tool calls, >=
+# ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words). Mirrors the unit
+# fixture ``report_ai()``.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
+
+
 def _script():
     return ScriptedChatModel(
         responses=[
@@ -74,8 +107,13 @@ def _script():
                 ],
             ),
             AIMessage(content="plain completion"),
+            # 2026-09-19 attest-first contract: the CLEAN
+            # attest_call (empty content + tool_call) replaces
+            # the OLD ``content="attest"`` shape. The OLD shape
+            # was the bundled c5d9a38a class under the new
+            # contract.
             AIMessage(
-                content="attest",
+                content="",
                 tool_calls=[
                     {
                         "name": "attest_completion",
@@ -84,7 +122,13 @@ def _script():
                     }
                 ],
             ),
-            AIMessage(content="done"),
+            # 2026-09-19 attest-first contract: the standalone
+            # text report (the FINAL AIMessage, no tool calls,
+            # >= SHORT_REPORT_WORD_THRESHOLD = 150 words) is the
+            # LAST AI message. The OLD ``content="done"``
+            # short prose was below the threshold and would
+            # produce ``Decision.HOLD`` under the new contract.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )

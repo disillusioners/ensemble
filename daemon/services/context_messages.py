@@ -267,10 +267,31 @@ def _stable_id_for(
                 "instance_id"
             )
         return f"attestation_nudge:{instance_id}"
+    if kind == "attestation_final_report_reminder":
+        # 2026-09-19 (attest-first contract, c5d9a38a remediation):
+        # the HOLD-state Final Report Reminder carries the SAME
+        # stable-id supersede contract as the existing
+        # ``attestation_nudge`` and ``completion_check_note``
+        # kinds. Consecutive HOLD events on the SAME instance
+        # collapse to ONE reminder block in the resulting state
+        # via LangGraph's ``add_messages`` reducer upsert (F1
+        # Shape A applied to the HOLD-state) — the unbounded
+        # ``context_kind=task_context`` tail under three-bucket
+        # compaction is closed. The cap
+        # (``daemon.graph.ATTESTATION_REMINDER_CAP = 2``) prevents
+        # the supersede chain from running forever in the
+        # degenerate case.
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('attestation_final_report_reminder') "
+                "requires instance_id"
+            )
+        return f"attestation_final_report_reminder:{instance_id}"
     raise ValueError(
         f"_stable_id_for: unknown kind {kind!r} — C0 mints ids only "
         "for 'project', 'shared_meta_kv', 'completion_check_note', "
-        "and 'attestation_nudge' blocks"
+        "'attestation_nudge', and 'attestation_final_report_reminder' "
+        "blocks"
     )
 
 

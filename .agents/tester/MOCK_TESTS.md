@@ -430,3 +430,62 @@ Edit-Source modal agent selection fix (WeakMap memoization of toSelectOptions + 
 - **Date**: 2026-09-16
 - **Result**: PASS (pack ~25s; health 200/200)
 - **Report**: `RESULTS/2026-09-16-lca-stage2-flip-verification.md` (Job 7)
+
+## Mock Test: LCA attest-first BOOT SMOKE variant B — Delegated mission HOLD-state test
+
+### Metadata
+- **Created**: 2026-09-20
+- **Script**: `/tmp/lca-smoke/variant-b/boot_smoke.py` (+ dynamically generated `/tmp/lca-smoke/variant-b/mock_llm_server.py`)
+- **Language**: Python
+- **Status**: ACTIVE (variant B gate artifact for `feature/lca-attest-first-contract` @ `01d0e3a9`)
+- **Variant A sibling**: `/tmp/lca-smoke/boot_smoke.py` (no-delegation happy path)
+
+### Configuration
+- **Timeout**: 300s outer `timeout 300` + 240s internal SIGALRM (script-internal)
+- **Daemon Port**: 8090 (uvicorn `daemon.api:app`, NO --reload, never dev.sh)
+- **Mock Ports**: 18080 (stdlib `http.server` HTTPServer, OpenAI-compatible mock LLM)
+- **DB**: disposable PG14 on port 15433 (initdb -A trust; per-field POSTGRES_* set; `POSTGRES_URL` explicitly unset; split-brain guard); fresh tmp DATA_DIR
+- **Cleanup**: SIGTERM uvicorn (verified bound to :8090) → wait ≤30s; pg_ctl stop -m fast; rm -rf datadir; port-freedom asserted (15433/8090/18080); protected 8088/8079 never touched
+- **HEAD pin**: `01d0e3a9` = `0b8f4de2` + single test-only commit on `tests/unit/tools/test_attestation_surface_chain.py` (merge-base ancestor verified; diff name-only shows only tests/ paths; daemon code unchanged)
+
+### What It Tests
+- Variant A's contract (`attestation_required=True` — only reachable via DELEGATION) is verified live in this delegated-mission flow (variant A proved happy path but reached the no-delegation branch with `attestation_required=False`)
+- BUNDLED shape (c5d9a38a violation — text + `attest_completion` tool_call in ONE AIMessage) recorded in transcript + leader's clean-attest correction + standalone report → gate fires ALLOWED with `attestation_required=True`
+- Counter-independence: `attestation_denied_count == 0` throughout
+- Default mode = `enforce` (no mode env set; DEFAULT_MODE = `enforce` per `daemon/services/attestation_resolver.py:111`)
+
+### Mock Services Required
+- OpenAI-compatible LLM: mock on port 18080 (per-instance state keyed by `sha256(system_prompt[:300] + "|" + model + "|" + n_tools)`)
+- Role discriminator: `model=quick` OR `n_tools=0` → title-gen; `n_tools >= 50` → leader; else → child
+- Leader sequence: `send_message(to=<pre-spawned child_id>)` → BUNDLED shape → clean attest (empty content) → standalone report (≥200 words)
+
+### Test Scenarios
+1. Disposable PG boots, `ensemble_smoke` DB created — verified via `psql -c "SELECT 1"`
+2. Daemon boots in enforce mode, `/readyz` returns 200, attestation boot line captured
+3. Pre-spawn `developer` child instance via API; verify idle state
+4. Spawn leader instance; send user message ("Delegate a trivial no-op task to a child and finish.")
+5. Mock drives leader through 4-call sequence; leader reaches `completed` status
+6. Assertions verify transcript shape + counter + gate row + boot line
+
+### Success Criteria
+- [x] All scenarios pass
+- [x] Transcript contains BUNDLED AIMessage with attest_completion tool_call (196 words)
+- [x] Transcript contains clean attest AIMessage (empty content + attest_completion tool_call)
+- [x] Final AIMessage is standalone report (199 words, 0 tool_calls)
+- [x] `attestation_denied_count = 0` throughout
+- [x] Gate log row has `attestation_required=True` (variant A's branch)
+- [x] Boot log shows `mode=enforce`
+- [x] All ports freed after test
+- [ ] HOLD-state decision=hold + reminder injection — **DOCUMENTED LIMITATION** (langgraph re-invokes agent after each tool_call; the bundled is never the LAST AI when the gate evaluates; spec escape clause allows `attestation_required=True` as the primary contract)
+
+### Implementation Notes
+- **Variant A env overrides carried forward**: `OPENAI_REQUEST_GZIP=false` (parent shell has `OPENAI_REQUEST_GZIP=true` which caused gzip-decoded crash); `OPENAI_BASE_URL_BACKUP=""` (no failover); venv python (Homebrew python lacks `psycopg`)
+- Mock stderr captured to `/tmp/lca-smoke/variant-b/mock_stderr.log` (lesson learned from variant A where `instance_key()` arg mismatch silently broke the mock)
+
+### Last Run
+- **Date**: 2026-09-20
+- **Result**: PASS WITH DOCUMENTED LIMITATION (~12s wall-clock; PG 1s + daemon boot 5s + pre-spawn 2s + scripted flow 1s + assertions <1s + cleanup 2s)
+- **Quick Fixes**: 
+  1. Fixed `instance_key(sys_prompt)` → `instance_key(sys_prompt, model, n_tools)` (mock crashed silently on every POST)
+  2. Discriminator changed from system-prompt-fingerprint to `(model, n_tools)` for stability across langgraph's per-turn system-prompt additions
+- **Report**: `/tmp/lca-smoke/variant-b/RESULTS_2026-09-20.md`

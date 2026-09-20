@@ -20,6 +20,35 @@ from sqlmodel import Session, select, func
 from daemon.graph import ATTESTATION_NUDGE_TEXT as NUDGE_TEXT
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
+
+# 2026-09-19 attest-first contract: the FINAL AIMessage MUST be a
+# standalone text report (no tool calls, >=
+# SHORT_REPORT_WORD_THRESHOLD = 150 words) for the gate to allow
+# END via Decision.ALLOWED. The flagship flow uses this as the
+# final scripted response so the clean attest_call +
+# report-as-subsequent-standalone-message sequence satisfies the
+# contract.
+LONG_REPORT_TEXT = (
+    "The work is finished. All four patches shipped; the test "
+    "matrix is green; the integration tests pass on every "
+    "environment we maintain. Patch 1 fixed the off-by-one in "
+    "the cache TTL calculator; the unit tests now exercise both "
+    "the elapsed-second and wall-clock-second boundaries at the "
+    "second and minute granularity. Patch 2 cleaned up the dead "
+    "imports in the worker pool module after the migration, "
+    "removing the legacy compatibility shim and the related "
+    "test scaffolding. Patch 3 refactored the error-reporting "
+    "decorator so the stack-frame metadata is consistent across "
+    "all four call sites in the graph node and the manager "
+    "facade. Patch 4 added the missing operator-boot log line "
+    "for the new resolver module so operators can grep the "
+    "boot summary for the resolved effective values. All four "
+    "patches passed their respective suites on the first run "
+    "with no flake; the integration matrix is green end-to-end "
+    "across all environments we maintain. No follow-ups "
+    "outstanding; the mission is complete and ready for review "
+    "by the next teammate in the chain."
+)
 from tests.support.scripted_chat_model import ScriptedChatModel
 INSTANCE_ID = "attestation-leader-e2e"
 
@@ -135,8 +164,14 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
                 ],
             ),
             AIMessage(content="Hallucinated completion."),
+            # 2026-09-19 attest-first contract: the CLEAN attest_call
+            # (empty content + ``attest_completion`` tool_call)
+            # replaces the OLD bundled shape (``Attesting now.``
+            # content + tool_call). The bundled shape is the
+            # c5d9a38a class — under the new contract it produces
+            # Decision.HOLD instead of Decision.ALLOWED.
             AIMessage(
-                content="Attesting now.",
+                content="",
                 tool_calls=[
                     {
                         "name": "attest_completion",
@@ -145,7 +180,15 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
                     }
                 ],
             ),
-            AIMessage(content="Finished after the continuation nudge."),
+            # 2026-09-19 attest-first contract: the FINAL AIMessage
+            # MUST be a standalone text report (no tool calls,
+            # >= SHORT_REPORT_WORD_THRESHOLD = 150 words) for the
+            # gate to allow END via Decision.ALLOWED. The OLD
+            # short "Finished after the continuation nudge."
+            # was below the threshold — under the new contract
+            # the leader MUST emit the full report as its own
+            # standalone AI message after the attest_call.
+            AIMessage(content=LONG_REPORT_TEXT),
         ],
         i=0,
     )
@@ -176,7 +219,12 @@ async def test_flagship_deny_nudge_routes_back_and_attests(
     }
     assert final_state["attestation_nudge_denied_count"] == 1
     assert any(isinstance(m, AIMessage) and m.tool_calls for m in messages)
-    assert final_state["messages"][-1].content == "Finished after the continuation nudge."
+    # 2026-09-19 attest-first contract: the FINAL AIMessage is the
+    # long standalone text report (``LONG_REPORT_TEXT``); the OLD
+    # "Finished after the continuation nudge." was below the
+    # ``SHORT_REPORT_WORD_THRESHOLD`` and would have produced
+    # Decision.HOLD under the new contract (cap → fall through).
+    assert final_state["messages"][-1].content == LONG_REPORT_TEXT
 
     # The decision log contains one deny and one allow, never escalation.
     assert caplog.text.count("decision=denied") == 1

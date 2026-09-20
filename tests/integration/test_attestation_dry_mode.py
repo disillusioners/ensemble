@@ -400,8 +400,14 @@ async def test_dry_mode_attested_allow_does_not_reset_counter(caplog):
     """
     manager = make_manager(pending_children=0, wakeups=0)
 
-    # Override the LLM script: emit an attestation AIMessage followed
-    # by a final plain AIMessage (attested allow).
+    # Override the LLM script: emit the CLEAN attest_call (empty
+    # content + ``attest_completion`` tool_call — the 2026-09-19
+    # attest-first contract) followed by a long standalone text
+    # report (>= SHORT_REPORT_WORD_THRESHOLD = 150 words). The
+    # OLD bundled shape (``content="Attesting now."`` + tool_call)
+    # + short prose would now produce Decision.HOLD under the new
+    # contract — the gate would inject a Final Report Reminder
+    # instead of allowing END.
     assert _real_graph_module is not None
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -409,13 +415,42 @@ async def test_dry_mode_attested_allow_does_not_reset_counter(caplog):
 
     def attest_ai():
         return AIMessage(
-            content="Attesting now.",
+            content="",
             tool_calls=[
                 {"name": "attest_completion", "args": {}, "id": "call-1"}
             ],
         )
 
-    scripted = [attest_ai(), plain_ai("Done.")]
+    def long_report_ai():
+        return AIMessage(
+            content=(
+                "The work is finished. All four patches shipped; "
+                "the test matrix is green; the integration tests "
+                "pass on every environment we maintain. Patch 1 "
+                "fixed the off-by-one in the cache TTL calculator; "
+                "the unit tests now exercise both the elapsed-"
+                "second and wall-clock-second boundaries at the "
+                "second and minute granularity. Patch 2 cleaned "
+                "up the dead imports in the worker pool module "
+                "after the migration, removing the legacy "
+                "compatibility shim and the related test "
+                "scaffolding. Patch 3 refactored the error-"
+                "reporting decorator so the stack-frame metadata "
+                "is consistent across all four call sites in the "
+                "graph node and the manager facade. Patch 4 "
+                "added the missing operator-boot log line for "
+                "the new resolver module so operators can grep "
+                "the boot summary for the resolved effective "
+                "values. All four patches passed their respective "
+                "suites on the first run with no flake; the "
+                "integration matrix is green end-to-end across "
+                "all environments we maintain. No follow-ups "
+                "outstanding; the mission is complete and ready "
+                "for review by the next teammate in the chain."
+            )
+        )
+
+    scripted = [attest_ai(), long_report_ai()]
 
     def _invoke(messages, *args, **kwargs):
         return scripted.pop(0)

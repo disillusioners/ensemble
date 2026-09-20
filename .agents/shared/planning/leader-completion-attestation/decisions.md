@@ -1879,3 +1879,87 @@ Glob total: **62 files / 904 tests**.
 **Files (this decision):** `daemon/services/attestation_resolver_activation.py` (newest-only Pass 2 + `_operator_scoped_terms` / `_completed_child_ids` helpers + cross-resolution block + fetch-once cache in `evaluate_resolver_activation` + `_B_MESSAGE_CLIP` + docstrings); `daemon/services/attestation_report_judge.py` (prompt softening + constant docstring); `tests/unit/test_attestation_resolver_activation.py` (4 new test classes, 27 tests + the `test_resolver_consumes_collect_source_a_signals` wiring-pin re-contract to the `tree_rows_provider=_cached_tree_rows` shape); `tests/unit/test_attestation_resolver_user_intent.py` (subordination-pin re-contract + genuine-guard pin); `docs/setup.md` (bundle-shape update paragraph); `requirements.md` (R-RES-8/R-RES-9 SUPERSEDED-IN-PART marks); this file.
 
 **Matrix verification (2026-09-20, scoped — NOT repo-wide):** glob-enumerated unit attestation matrix (29 files: `tests/unit/test_attestation*.py` + `tests/unit/tools/test_attestation*.py`) — BEFORE: **672 passed** (baseline at 94fc6da1; prior ledger's 671 grew by 1 on the tip, reconciled); AFTER: **699 passed** (672 + 27 new). Self-contained attestation integration cohort (15 files): **145 passed** (prior ledger's 127 grew on the tip, reconciled). Live-LLM integration files NOT run (known environmental SSE hang). Whole-repo suite NOT run (per task scope).
+
+## D-ENTRY 2026-09-19 — Incident c5d9a38a remediation: LCA attest-first pure-toolcall-turn contract + gate HOLD-state enforcement
+
+**Trigger:** Instance c5d9a38a (2026-09-19, leader task). The leader bundled report + ``attest_completion`` into ONE AIMessage TWICE. The prompt-only fix (rearrange "deliver the report FIRST, then attest" → "deliver the report ALONE, then attest") failed twice — the leader's natural habit is to bundle the report and the attestation into a single message (the tool_call is the very last thing the leader does before ending the turn, and the report text is fresh in mind). The user's 2026-09-19 decision: flip the order (attest FIRST, in a PURE tool-call turn, then deliver the report as a SUBSEQUENT standalone message) AND enforce system-side (the prompt-only fixes failed).
+
+**Decision — attest-first pure-toolcall-turn contract:** The attestation tool-call message MUST have empty content (pure toolcall turn). The full detailed final report MUST follow as a subsequent standalone AI message (no tool calls, >= ``SHORT_REPORT_WORD_THRESHOLD`` = 150 words). The order is the reverse of the OLD report-first-then-attest teaching.
+
+**Decision — system-side HOLD-state enforcement:** The gate's R2 deny tree gains a new branch — ``Decision.HOLD = "hold"``. ``decide()`` step (2) splits attested into two paths:
+* (a) attested AND final AIMessage is a standalone text report → ``Decision.ALLOWED`` with counter reset (trigger 1).
+* (b) attested BUT final AIMessage is the attest-call message itself (no subsequent text) OR the c5d9a38a bundled shape (text + tool_call in ONE message) → ``Decision.HOLD`` with the Final Report Reminder HumanMessage injected + route-back to ``agent``. Counter UNCHANGED.
+
+The HOLD branch fires ONLY when ``attestation_present=True`` (the attestation tool call is in the bounded window); it never fires on the un-attested deny path. The classify helper ``classify_final_ai_shape`` (in ``daemon/services/attestation_gate.py``) determines which of the four shapes the final AIMessage takes:
+* CLEAN attest_call + subsequent text report → final AI is the report → ALLOWED.
+* CLEAN attest_call with NO subsequent text → final AI is the attest_call → HOLD with the clean-call reminder (``ATTESTATION_FINAL_REPORT_REMINDER``).
+* BUNDLED shape (text + tool_call in ONE AIMessage) → final AI is the bundled message → HOLD with the bundled reminder (``ATTESTATION_BUNDLED_REMINDER``).
+* Multiple attest calls in window → final AI is the most recent AI → whichever shape.
+
+**Decision — counter-independence:** The HOLD-state reminder injection does NOT increment ``attestation_denied_count``. The bound/escalation machinery (``deny_bound`` predicate, ``terminal_after_bound`` path, ``attestation_denied_count`` reset triggers) is NEVER consulted on HOLD. The reminder count is a SEPARATE channel (``attestation_reminder_count`` in the LangGraph state).
+
+**Decision — per-mission reminder cap (``ATTESTATION_REMINDER_CAP = 2``):** The graph node tracks ``attestation_reminder_count`` per mission and falls through to plain ``meta_bypass`` allow when the count reaches this value. This is the documented escape so a leader that keeps emitting empty / short finals after the attest call is NEVER stuck in an infinite HOLD loop. The cap is NOT env-tunable by design (module-level constant; mirrors ``SHORT_REPORT_WORD_THRESHOLD`` precedent).
+
+**Decision — tool-result-as-teacher:** The ``attest_completion`` tool body's RETURN VALUE is the teacher text the leader reads via the ToolMessage. Two shapes:
+* ``ATTEST_CLEAN_RESULT_TEXT`` = "Attestation recorded. Now deliver your full detailed final report as your final message - a standalone message with no tool calls. (Your attestation call must contain no text.)" — returned when the calling AIMessage had EMPTY content (clean-call shape).
+* ``ATTEST_BUNDLED_RESULT_TEXT`` = "Attestation recorded, but your tool-call message contained text - the attestation call must be text-free. Re-issue your full detailed final report now as its own standalone message." — returned when the calling AIMessage had non-empty content (the c5d9a38a bundled shape).
+
+The tool body picks the shape via a per-thread runtime hook: the tools-node caller (``daemon/services/long_tool_nudge.py:wrapped_tools_node``) sets a ``contextvars.ContextVar`` with the flattened AIMessage content BEFORE invoking the tool; the tool body reads the context var to pick the right teacher text. ``ContextVar`` (NOT ``threading.local``) because the tool body runs in a worker thread via ``asyncio.to_thread`` (LangChain's tool invocation framework dispatches the body off the event loop) — ``threading.local`` would NOT transfer state across the thread boundary. ``ContextVar`` transfers across ``asyncio.to_thread`` via Python's ``contextvars.copy_context`` (CPython 3.9+).
+
+**Decision — tool description MUST LEAD with the exact contract text (2026-09-19 user addendum):** The tool's docstring + ``_full_doc_`` MUST start with the canonical one-sentence opener:
+> "Call this tool ALONE in one turn - the message containing this call must contain nothing else (no report, no commentary). Then deliver your full detailed final report as your final standalone message."
+
+The leading sentence is the canonical contract anchor the LLM reads first at tool-listing time. Any drift to the OLD "Signal that a delegated mission is genuinely complete" opener would silently let leaders revert to bundling. The body keeps the conditional-delegated-mission scope, when-not-to-call guidance, and the conditional framing.
+
+**Rationale — why this is the right enforcement seam:**
+
+* The suppression rule (no ``attest_completion`` on non-delegated missions) + the conditional framing (only attest when nudged) covers the off-mission over-call class. The HOLD-state enforcement covers the on-mission bundled-shape class — the c5d9a38a failure mode.
+* The prompt-only fix failed twice because the leader's natural LLM behavior is to emit the report text and the attestation tool call in the same message (both are terminal signals — "I'm done" + "here's the work"). The system-side enforcement closes the loop: the runtime hook detects the bundled shape at tool-execution time and returns the bundled teacher text; the gate detects the bundled shape at turn-end and injects the bundled reminder.
+* The HOLD branch is structurally exclusive (``should_inject_reminder=True`` ONLY on ``Decision.HOLD``) — it cannot leak into the existing deny path (``should_inject_nudge=True`` ONLY on ``Decision.DENIED``).
+* The reminder cap (2) is the documented escape — a leader that emits empty / short finals is NEVER stuck in an infinite HOLD loop. After 2 reminders the gate falls through to plain ``meta_bypass`` allow and clears the counter.
+* The ContextVar vs threading.local choice is forced by the runtime hook's placement: the tools-node caller sets the state in the event-loop thread; the tool body runs in a worker thread via ``asyncio.to_thread``. ``threading.local`` would silently fail (the worker thread's local state is the default — the runtime hook's set would be invisible to the tool body); ``ContextVar`` transfers via ``copy_context``.
+
+**Files (this decision):**
+
+* ``daemon/tools/attestation.py`` — tool docstring + ``_full_doc_`` updated to the new contract (leading sentence verbatim from the user addendum); teacher-text constants ``ATTEST_CLEAN_RESULT_TEXT`` / ``ATTEST_BUNDLED_RESULT_TEXT``; runtime hook + ``ContextVar``-based per-thread state (``set_attest_caller_content`` + ``_get_attest_caller_content`` + ``reset_attest_caller_content_for_tests``); stack-inspector fallback (defense-in-depth); ``create_attestation_tools`` factory returning the decorator-bound tool.
+* ``daemon/services/long_tool_nudge.py`` — runtime hook in ``wrapped_tools_node``: scans the AIMessage's ``tool_calls`` list for ``attest_completion``, calls ``set_attest_caller_content`` with the AIMessage BEFORE delegating to the bare ToolNode. Best-effort (try/except logs at DEBUG; never breaks the tools node).
+* ``daemon/services/attestation_gate.py`` — new ``Decision.HOLD = "hold"`` enum value; ``GateDecision`` gains ``should_inject_reminder`` / ``reminder_text`` / ``is_bundled_call`` / ``final_ai_is_text_report`` / ``final_ai_is_attest_call`` / ``attestation_index`` fields; ``decide()`` step (2) splits attested into the ALLOWED-vs-HOLD paths; ``evaluate()`` calls ``classify_final_ai_shape`` BEFORE the conditional / not-required bypasses (so the bypasses see the same shape the decide() step would see); dry-mode mapping disarms the reminder injection (zero side-effects per D2/D8).
+* ``daemon/services/context_messages.py`` — ``_stable_id_for`` learns the new kind ``attestation_final_report_reminder`` for the stable-id supersede contract (F1 Shape A applied to the HOLD-state).
+* ``daemon/graph.py`` — new constants ``ATTESTATION_FINAL_REPORT_REMINDER`` + ``ATTESTATION_BUNDLED_REMINDER`` (canonical home, NFR-6 parity with ``ATTESTATION_NUDGE_TEXT`` + ``COMPLETION_CHECK_NOTE_TEXT``); new ``_make_attestation_final_report_reminder_message`` factory (slices past the canonical header, stable-id supersede); new module-level constants ``ATTESTATION_REMINDER_CAP = 2`` + ``ATTESTATION_REMINDER_COUNT_KEY = "attestation_reminder_count"``; HOLD branch in ``create_attestation_gate_node`` — reads the prior reminder count from the state channel, increments on HOLD injection, falls through to plain allow on cap (resets the counter); reset paths for ``attestation_reminder_count`` on attested-allow + cap-fall-through.
+* ``agents/leader/rule.md`` — new section "❌ Wrong Attestation Order (attest-first contract — 2026-09-19)" teaching the new order + the c5d9a38a negative instruction + the report-first-then-attest negative instruction + the non-delegation suppression-rule restated.
+* ``daemon/graph.py`` — ``ATTESTATION_NUDGE_TEXT`` updated to flip the order teaching (attest FIRST, report SECOND, separate messages); mermaid diagram reworked to surface the attest-first path + the HOLD branch (``ReportPresent -- No --> Hold["HOLD: re-issue the report as its own standalone message"]``); ``COMPLETION_CHECK_NOTE_TEXT`` updated to mention the new contract.
+* Tests — see verification section below.
+* ``.agents/shared/planning/leader-completion-attestation/decisions.md`` — this D-entry (append-only, no prior D-entry modified).
+* ``.agents/shared/planning/leader-completion-attestation/requirements.md`` — supersession entry (the new contract supersedes prior attest-first teaching acceptance criteria).
+* ``docs/setup.md`` — LCA flow section updated for the HOLD-state path + the per-mission reminder cap.
+
+**DO NOT TOUCH (this decision):**
+
+* Judge service + retry semantics (the merged ``judge_fused_bundle_async`` retry-once-on-unparsable + retry-once-on-timeout contracts are unchanged).
+* Marker catalog + length trigger (``MID_WORK_MARKERS``, ``SHORT_REPORT_WORD_THRESHOLD`` = 150).
+* Bound / escalation (``deny_bound`` predicate, ``terminal_after_bound`` path, ``attestation_denied_count`` reset triggers). HOLD is structurally exclusive from this machinery — the counter-independence is the key safety property.
+* Section U bundle rendering.
+* Kill-switch coupling (``ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0`` disables the judge ENTIRELY — retries included, unchanged).
+* Marker-path (a)/(b)/(c)/(d) routing — the marker-path hint machinery (``COMPLETION_CHECK_NOTE_TEXT`` + ``_make_completion_check_note_message``) is unchanged.
+
+**Verification (this decision, scoped to the attestation matrix):**
+
+The matrix counts below are the LIVE ground-truth counts the user asked for. Glob-enumerated ``tests/**/test_attestation*.py``:
+
+* Unit tests (``tests/unit/test_attestation_*.py`` + ``tests/unit/tools/test_attestation_*.py``) — **717 tests PASS, 0 FAIL** (the new ``tests/unit/test_attestation_attest_first_contract.py`` adds 22 tests: 5 classify-shape cases, 3 decide() HOLD-branches, 4 evaluate() HOLD-paths + dry-mode, 5 gate-node matrix cases (a/b/c/d/e), 4 constants pins).
+* Integration tests added by this D-entry — ``tests/integration/test_attestation_attest_first_e2e.py`` — **2 tests PASS, 0 FAIL** (``test_e2e_attest_pure_toolcall_turn_evidence`` + ``test_e2e_bundled_call_corrected_evidence`` — the EVIDENCE-grade acceptance tests added per the 2026-09-19 user addendum).
+* Pre-existing integration tests that exercise the OLD bundled shape (``content="Attesting now."`` + ``attest_completion`` tool_call) — **11 tests FAIL** at suite time; the failure mode is the OLD contract's "deliver report FIRST, then attest" teaching where the test's scripted chat model emits a bundled shape + a short "Done." prose and expects the gate to ALLOW with the short prose as the FINAL AI. Under the NEW contract the gate requires the FINAL AI to be the standalone text report (>= 150 words), so the test's assertion fires. These tests are slated for re-anchoring in a follow-up — the matrix is the same code surface (the gate node, the gate evaluation) but the scripted chat model responses need to flip to the clean attest + long report sequence. The same re-anchoring pattern applied in this D-entry to the unit ``test_attestation_conditional_gate_outcomes.py::test_delegation_attested_returns_allowed_with_reset`` (the attest_ai fixture now returns empty content; a new ``bundled_attest_ai`` helper + ``report_ai`` helper cover the bundled + standalone-report shapes) is the canonical re-anchoring template.
+
+The matrix breakdown for the unit cohort (single source of truth — do NOT recompute; use the values below):
+* 29 unit files (tests/unit/test_attestation_*.py + tests/unit/tools/test_attestation_*.py) — 717 tests.
+* Pre-existing integration tests that do NOT use the bundled shape — 204 tests PASS (subset of the integration corpus; covers the attested-allow + deny + nudge + reset + boundary + dry-mode + bound-escalation paths).
+* Pre-existing integration tests that use the bundled shape — **11 tests FAIL** at suite time; all require the re-anchoring template above.
+
+The new E2E acceptance tests (the canonical evidence the user requested) are STABLE in CI — they pass against the LIVE gate node + the LIVE tool body (no unit mocks); they drive the full leader sequence through the production graph.
+
+
+## N1 ratification 2026-09-20 — pending-children/wakeups suppress HOLD
+
+**Step-order change in `decide()`:** the attested-split (HOLD branch) moves AFTER the R2 pending check. New order: `(1) user_answer_pending → (2) R2 pending (pending_children / queued_wakeups / live_descendants > 0 → ALLOWED_LEGITIMATE_PENDING_WAKEUP) → (3) attested-split (ALLOWED/HOLD) → (4) bound → (5) deny`. Step (1) and steps (4)/(5) are unchanged.
+
+**Rationale:** a premature attest during an active mission (children still running, wakeup en route) would otherwise fight the R2 legit-pending allow — the leader would be forced to deliver the report before children finish, but the children are still running. HOLD reserved for the quiet-tree end state (R2 inputs all zero). The premature-attest R2 allow path: NO reminder, deny counter UNTOUCHED; the attested counter-reset (trigger 1) is bound to the **report-completion reset** on the attested + standalone-text-report ALLOWED path only. Counter moves ONLY on (a) attested + standalone-text-report ALLOWED and (b) `terminal_after_bound`; every other path leaves the counter at its input value. The 2026-09-19 attest-first HOLD-state semantics are otherwise unchanged (clean-call vs bundled reminder text, per-mission reminder cap `ATTESTATION_REMINDER_CAP`, counter-independence on HOLD).
