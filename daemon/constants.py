@@ -190,16 +190,104 @@ DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key i
 # Metadata keys for the Plane project sync subsystem. Each Ensemble project
 # that has been mirrored to Plane stores:
 #   - plane_project_id: Plane's internal UUID — the primary mapping handle
-#   - plane_sync_state: "synced" | "error" | "pending"
-#   - plane_synced_at:   ISO8601 timestamp of the most recent sync attempt
+#   - plane_sync_state: "linked" | "syncing" | "drift" | "error"
+#                       ("synced" kept as a back-compat alias for "linked"
+#                        — pre-Phase-3 writers wrote "synced"; new code
+#                        writes "linked". See PLANE_SYNC_STATES below.)
+#   - plane_synced_at:   ISO8601 timestamp of the most recent SUCCESSFUL sync
+#   - plane_last_attempt: ISO8601 timestamp of the most recent attempt
+#                         (success OR failure) — backing the watchdog's
+#                         "next eligible retry" math.
+#   - plane_attempt_count: int — consecutive-failure counter that backs
+#                               the per-project exponential backoff and
+#                               the watchdog's max-attempts circuit.
+#   - plane_last_error: short string — last error reason (advisory; used
+#                       by the drift-classifier for diagnostics).
 PLANE_PROJECT_ID_METADATA_KEY = "plane_project_id"
 PLANE_SYNC_STATE_METADATA_KEY = "plane_sync_state"
 PLANE_SYNCED_AT_METADATA_KEY = "plane_synced_at"
+PLANE_LAST_ATTEMPT_METADATA_KEY = "plane_last_attempt"
+PLANE_ATTEMPT_COUNT_METADATA_KEY = "plane_attempt_count"
+PLANE_LAST_ERROR_METADATA_KEY = "plane_last_error"
+
+# Canonical sync state vocabulary (Phase 3 expansion).
+#
+# - "linked"  — Plane project is paired with the Ensemble project and the
+#               identity fields agree. Steady-state success.
+# - "syncing" — a sync is in flight right now. Used as a re-entrancy guard
+#               for the manual endpoint and the watchdog sweep.
+# - "drift"   — the most recent sync SUCCEEDED at the API level, but
+#               identity-field comparison flagged divergence between the
+#               Ensemble side (name/description/status) and the Plane
+#               side. Next successful corrective sync flips to "linked".
+# - "error"   — the most recent attempt failed (API error, auth, network,
+#               circuit-open, etc.). Watchdog re-drives with exponential
+#               backoff.
+#
+# "synced" is retained as a back-compat alias that pre-Phase-3 writes
+# may carry (the v1 vocabulary). Reads treat "synced" as equivalent to
+# "linked"; new writes always use the canonical "linked"/"syncing"/
+# "drift"/"error" form. Pre-existing rows do NOT need migration.
+PLANE_SYNC_STATE_LINKED = "linked"
+PLANE_SYNC_STATE_SYNCING = "syncing"
+PLANE_SYNC_STATE_DRIFT = "drift"
+PLANE_SYNC_STATE_ERROR = "error"
+PLANE_SYNC_STATE_SYNCED_ALIAS = "synced"  # legacy v1 success marker
+
+PLANE_SYNC_STATES: frozenset[str] = frozenset({
+    PLANE_SYNC_STATE_LINKED,
+    PLANE_SYNC_STATE_SYNCING,
+    PLANE_SYNC_STATE_DRIFT,
+    PLANE_SYNC_STATE_ERROR,
+    PLANE_SYNC_STATE_SYNCED_ALIAS,  # accepted but never written
+})
+
+# States eligible for the periodic watchdog to re-drive. "linked" is the
+# steady-state success marker and excluded — there is nothing to retry.
+# "syncing" is also excluded because a sweep must NEVER overlap an
+# in-flight sync (the manual endpoint's 409 idempotent return enforces
+# the same rule at the HTTP layer).
+PLANE_SYNC_STATES_RETRYABLE: frozenset[str] = frozenset({
+    PLANE_SYNC_STATE_ERROR,
+    PLANE_SYNC_STATE_DRIFT,
+})
 
 # Per-project cooldown (seconds) for the ``plane_sync_project`` agent tool.
 # Prevents a tight LLM loop from hammering the Plane API. ``force=True``
 # bypasses this gate.
 PLANE_SYNC_COOLDOWN_S: float = 30.0
+
+# Phase 3 retry machinery — default knobs. Tuned to be sane for an
+# external SaaS API: not so tight that a flap hammers the server, not
+# so loose that 21 stuck projects stay stuck for hours. All overrides
+# live on ``ServicesConfig`` (see ``daemon/config.py``) and FAIL FAST
+# when out-of-range.
+#
+# PLANE_SYNC_WATCHDOG_INTERVAL_SECONDS:
+#   Steady-state cadence of the periodic sweep. 300s = 5min — Plane is
+#   a SaaS API, hammering every minute is wasteful. Bounded by
+#   ``ServicesConfig.plane_sync_watchdog_interval_seconds`` (ge=5).
+PLANE_SYNC_WATCHDOG_INTERVAL_SECONDS: int = 300
+
+# PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS:
+#   Base of the per-project exponential backoff. attempt_count=0/1 → no
+#   extra wait; attempt_count=2 → 60s; attempt_count=3 → 120s; ...
+#   Formula: min(MAX, BASE * 2 ** (attempt_count - 2)) — capped by
+#   PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS so a long-running outage
+#   does not push retry delay into "hours" territory.
+PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS: int = 60
+PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS: int = 1800  # 30min ceiling
+
+# PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS:
+#   Consecutive-failure threshold above which the watchdog STOPS
+#   re-driving a project (writes a terminal "dead" hint to the logs and
+#   to ``plane_last_error`` but does NOT touch ``plane_sync_state`` —
+#   that field keeps the operator-visible "error" marker so the manual
+#   endpoint can still be used to force a re-sync after the operator
+#   has investigated). 5 attempts × 5min cadence ≈ 25min before
+#   quarantine; the operator can call POST /api/plane/sync/{id} to
+#   reset attempt_count and re-drive.
+PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS: int = 5
 
 # Mapping from Ensemble ``ProjectStatus`` → Plane project state. Best-effort
 # — Plane's state vocabulary differs from ours and we default to "active"

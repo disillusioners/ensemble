@@ -16,13 +16,18 @@ Headers::
     Content-Type: application/json
 
 **Authentication scheme.** Plane REST uses the ``X-Api-Key`` header
-(``Authorization: Bearer`` is rejected with HTTP 401). The bearer key
-historically bound here was scoped to the MCP deployment (mcp.ensem.dev);
-that scoping means the same secret cannot be reused for REST. We therefore
-require a dedicated ``PLANE_API_KEY`` (workspace-level REST token minted
-from Plane's Settings → API Tokens UI) and **never** silently fall back
-to ``PLANE_MCP_API_KEY`` — a silent fallback would mask the exact
-misconfiguration class we're fixing (the dead-on-REST key).
+(``Authorization: Bearer`` is rejected with HTTP 401). ``PLANE_API_KEY``
+and ``PLANE_MCP_API_KEY`` are kept as SEPARATE env vars by design — not
+because the same key cannot serve both deployments (a live probe on
+2026-09-20 confirmed ``PLANE_MCP_API_KEY`` returns HTTP 200 on the REST
+endpoint), but to follow separation-of-concerns: a dedicated REST token
+gives independent rotation, scoped blast radius (revoking REST does not
+disable MCP and vice versa), and a clean audit trail in Plane's API
+Tokens UI. We therefore require a dedicated ``PLANE_API_KEY``
+(workspace-level REST token minted from Plane's Settings → API Tokens
+UI) and **never** silently fall back to ``PLANE_MCP_API_KEY`` — a
+silent fallback would mask the exact misconfiguration class Phase 2
+fixed (the dead-on-REST key, observed in prod pre-Phase-2).
 
 Feature gating
 --------------
@@ -135,8 +140,10 @@ class PlaneHttpClient:
             base_url: REST base URL. Defaults to ``_rest_base_url()``.
             api_key: REST API token. Defaults to ``PLANE_API_KEY``.
                 Sent as the ``X-Api-Key`` header. We do **not** fall back
-                to ``PLANE_MCP_API_KEY`` — the MCP-scoped key is invalid
-                for REST and a silent fallback would mask misconfiguration.
+                to ``PLANE_MCP_API_KEY`` — separation-of-concerns
+                (independent rotation, scoped blast radius, clean
+                audit trail in Plane's API Tokens UI); a silent
+                fallback would mask misconfiguration.
             workspace_slug: Workspace slug. Defaults to
                 ``PLANE_MCP_WORKSPACE_SLUG``. Used for the
                 ``x-workspace-slug`` header.
@@ -161,10 +168,10 @@ class PlaneHttpClient:
         """Return True when all required env vars are present.
 
         Gated on ``PLANE_BASE_URL`` + ``PLANE_API_KEY``. We do **not**
-        accept ``PLANE_MCP_API_KEY`` as a substitute — that key is
-        scoped to the MCP deployment (mcp.ensem.dev) and is rejected
-        by Plane REST. A silent fallback would mask misconfiguration
-        (the exact incident class this PR is fixing).
+        accept ``PLANE_MCP_API_KEY`` as a substitute — separation-of-
+        concerns (independent rotation, scoped blast radius, clean
+        audit trail in Plane's API Tokens UI); a silent fallback would
+        mask misconfiguration (the exact incident class Phase 2 fixed).
         """
         return _rest_base_url() is not None and bool(_env("PLANE_API_KEY"))
 

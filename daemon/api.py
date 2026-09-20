@@ -132,6 +132,7 @@ from daemon.routers import (
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
 )
 from daemon.routers.workspace import router as workspace_router
+from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
 
 from daemon.mcp import (
     create_kb_mcp_server,
@@ -878,6 +879,62 @@ async def lifespan(app: FastAPI):
         f"retention="
         f"{config.services.tmp_image_cleanup_retention_days}d"
     )
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 3 / plane-integration-revival — PlaneSyncWatchdogService.
+    # Periodic sweep that re-drives Plane sync rows stuck in ``error``
+    # or ``drift`` (the "never retries" class fix). ALWAYS-ON
+    # infrastructure (no kill-switch — per the project owner's HARD
+    # POLICY on Batch A codified in ``job_lock_sweep.py``); the only
+    # tuning knobs are the four ``ServicesConfig.plane_sync_watchdog_*``
+    # fields, all FAIL-FAST-AT-BOOT via pydantic ``Field(ge=...)``. The
+    # service constructs cleanly even when the integration is
+    # disabled (``PLANE_API_KEY`` empty) — ``start()`` still spawns the
+    # task, but ``sweep_once`` returns a no-op summary and emits a
+    # ONE-line boot log so an operator can see the gap.
+    #
+    # Wired AFTER the tmp_image_cleanup service and BEFORE the
+    # waiting-children watchdog so the boot-sweep runs as part of the
+    # "infrastructure sweeps" block — the first tick fires immediately
+    # (no leading sleep) so the ~21 stuck projects observed in prod
+    # start recovering without operator intervention.
+    from daemon.services.plane_sync_watchdog_service import (
+        PlaneSyncWatchdogService,
+    )
+    plane_sync_watchdog = PlaneSyncWatchdogService(
+        project_repo=manager._project_repository,
+        interval_seconds=(
+            config.services.plane_sync_watchdog_interval_seconds
+        ),
+        backoff_base_seconds=(
+            config.services.plane_sync_watchdog_backoff_base_seconds
+        ),
+        backoff_max_seconds=(
+            config.services.plane_sync_watchdog_backoff_max_seconds
+        ),
+        max_attempts=(
+            config.services.plane_sync_watchdog_max_attempts
+        ),
+    )
+    plane_sync_watchdog.start()
+    app.state.plane_sync_watchdog = plane_sync_watchdog
+    daemon_logger.info(
+        f"[PlaneSync] watchdog started: interval="
+        f"{config.services.plane_sync_watchdog_interval_seconds}s "
+        f"backoff_base="
+        f"{config.services.plane_sync_watchdog_backoff_base_seconds}s "
+        f"backoff_max="
+        f"{config.services.plane_sync_watchdog_backoff_max_seconds}s "
+        f"max_attempts="
+        f"{config.services.plane_sync_watchdog_max_attempts}"
+    )
+
+    # Wire the project repository into the new /api/plane router (Phase 3).
+    # The DI pattern mirrors the projects/settings/queues routers (set a
+    # module-level global via the lifespan-set setter; the router's
+    # ``get_project_repository`` dependency reads it back).
+    from daemon.routers.plane import set_project_repository as set_plane_project_repo
+    set_plane_project_repo(manager._project_repository)
 
     # ─────────────────────────────────────────────────────────────
     # Issue #8 — WAITING_CHILDREN hang watchdog. Periodic asyncio
@@ -1762,6 +1819,21 @@ async def lifespan(app: FastAPI):
             )
         app.state.tmp_image_cleanup = None
 
+    # --- PlaneSyncWatchdogService shutdown (Phase 3) ---
+    # Stop the periodic re-drive sweep BEFORE the manager shuts down
+    # so any in-flight Plane HTTP call completes before the DB
+    # connection closes. Mirrors the tmp_image_cleanup / job_lock_sweep
+    # shutdown shape (graceful stop with WARNING on failure).
+    plane_sync_watchdog = getattr(app.state, "plane_sync_watchdog", None)
+    if plane_sync_watchdog is not None:
+        try:
+            await plane_sync_watchdog.stop()
+        except Exception as e:
+            logger.warning(
+                f"PlaneSyncWatchdogService shutdown error: {e}"
+            )
+        app.state.plane_sync_watchdog = None
+
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down
     # so any in-flight reclaim tick completes before the DB
@@ -2614,6 +2686,13 @@ def create_app() -> FastAPI:
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)
     api_router.include_router(recovery_router)          # /api/recovery (Phase 2: pause-report-recovery crash-recovery endpoint)
+    # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
+    # The router is mounted BEFORE the SPA catch-all (the catch-all
+    # only fires for unmatched paths; the prefix /api/plane is owned
+    # by this router). Wired immediately after recovery_router to
+    # group Phase-3 features together — see plane.py for the retry
+    # endpoint contract.
+    api_router.include_router(plane_router)             # /api/plane (Phase 3: manual re-sync trigger)
     # Phase 1 / clipboard-image-chat — /api/tmp_images. Registered
     # here (inside ``api_router`` which is mounted via
     # ``app.include_router(api_router)`` BEFORE the SPA catch-all

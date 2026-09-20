@@ -759,7 +759,7 @@ class TestPlaneSyncServiceSync:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "created"
         assert result["plane_project_id"] == "plane-NEW"
         assert "synced_at" in result
@@ -769,7 +769,7 @@ class TestPlaneSyncServiceSync:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
         assert meta[PLANE_PROJECT_ID_METADATA_KEY] == "plane-NEW"
-        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "synced"
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "linked"
         assert PLANE_SYNCED_AT_METADATA_KEY in meta
 
     def test_sync_existing_project_updates(self, repo, mock_plane_env):
@@ -792,7 +792,7 @@ class TestPlaneSyncServiceSync:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "updated"
         assert result["plane_project_id"] == "old-id"
         mock.update_project.assert_called_once()
@@ -813,13 +813,25 @@ class TestPlaneSyncServiceSync:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "updated"
         assert result["plane_project_id"] == "plane-existing"
         mock.update_project.assert_called_once()
 
-    def test_sync_404_on_update_recreates(self, repo, mock_plane_env):
-        """UPDATE fails with ``PlaneNotFoundError`` → recreate path."""
+    def test_sync_404_on_update_marks_error_and_clears_handle(
+        self, repo, mock_plane_env
+    ):
+        """UPDATE fails with ``PlaneNotFoundError`` → mark error and
+        clear the stale plane_project_id handle so the watchdog re-drives
+        cleanly on the next sweep.
+
+        Phase 3 change: the legacy fallback-to-CREATE path (which used
+        to immediately recreate the row inline) was removed in favor
+        of the explicit "clear handle + mark error → watchdog recovers"
+        contract. The watchdog owns the recovery path now; inline
+        recreate would have masked the quorum-counter / backoff
+        machinery.
+        """
         project = repo.create(name="RecreateProj")
         # Pre-seed a stale plane_project_id
         with Session(repo.engine) as session:
@@ -834,14 +846,26 @@ class TestPlaneSyncServiceSync:
             raise PlaneNotFoundError("Plane 404 on ...: missing")
 
         mock.update_project = AsyncMock(side_effect=update_404)
-        mock.create_project = AsyncMock(return_value={"id": "fresh-id"})
+        # Create must NOT be called — the watchdog owns recovery now.
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "CREATE must NOT be called inline on 404 — the watchdog "
+                "owns the recovery path."
+            )
+        )
 
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
-        assert result["action"] == "recreated"
-        assert result["plane_project_id"] == "fresh-id"
+        assert result["status"] == "error"
+        assert "recreate" in result["message"].lower()
+
+        # Stale handle was cleared.
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        meta = {r.meta_key: r.meta_value for r in records}
+        assert meta.get(PLANE_PROJECT_ID_METADATA_KEY) is None
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "error"
 
     def test_sync_auth_error(self, repo, mock_plane_env):
         """``PlaneAuthError`` → status="error", state="error"."""
@@ -867,7 +891,10 @@ class TestPlaneSyncServiceSync:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
         assert meta.get(PLANE_SYNC_STATE_METADATA_KEY) == "error"
-        assert PLANE_SYNCED_AT_METADATA_KEY in meta
+        # Phase 3: failure stamps plane_last_attempt (NOT plane_synced_at).
+        assert "plane_last_attempt" in meta
+        assert "plane_attempt_count" in meta
+        assert meta["plane_attempt_count"] == 1
 
     def test_sync_api_error(self, repo, mock_plane_env):
         """Generic ``PlaneAPIError`` → status="error"."""
@@ -906,13 +933,13 @@ class TestPlaneSyncServiceSync:
         assert "Unexpected error" in result["message"]
 
     def test_sync_project_not_found(self, repo, mock_plane_env):
-        """Unknown ``project_id`` → status="error" with not-found message."""
+        """Unknown ``project_id`` → status="not_found" with not-found message."""
         mock = MagicMock()
         mock.create_project = AsyncMock()
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project("nonexistent-id"))
 
-        assert result["status"] == "error"
+        assert result["status"] == "not_found"
         assert "not found" in result["message"].lower()
         # No HTTP calls should have been made
         mock.create_project.assert_not_called()
@@ -1137,7 +1164,7 @@ class TestPlaneSyncProjectToolIntegration:
             instance.is_available.return_value = True
             instance.sync_project = AsyncMock(
                 return_value={
-                    "status": "synced",
+                    "status": "linked",
                     "action": "created",
                     "plane_project_id": "plane-X",
                     "synced_at": "2026-08-14T00:00:00+00:00",
@@ -1146,7 +1173,7 @@ class TestPlaneSyncProjectToolIntegration:
 
             result = tool.func(project_id=project.project_id, force=True)
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         instance.sync_project.assert_called_once()
 
     def test_tool_records_cooldown_even_on_error(
@@ -1353,35 +1380,46 @@ class TestEdgeCaseMalformedResponses:
         assert result["status"] == "error"
         assert "no id" in result["message"].lower()
 
-        # Metadata should reflect the error state
+        # Metadata should reflect the error state. Phase 3: failure
+        # stamps ``plane_last_attempt`` (NOT ``plane_synced_at``).
         with Session(repo.engine) as session:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
         assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "error"
-        assert PLANE_SYNCED_AT_METADATA_KEY in meta
+        assert "plane_last_attempt" in meta
+        assert "plane_attempt_count" in meta
+        assert meta["plane_attempt_count"] == 1
 
     def test_sync_service_handles_adopt_path_create_response_missing_id(
         self, repo, mock_plane_env
     ):
-        """Adopt-by-name path: list returns stale Plane project, update
-        fails with 404 → recreate; if create returns no id, still error."""
+        """Adopt-by-name path: list returns stale Plane project, lookup
+        finds it → adopt; ``create_project`` is never called.
+
+        Phase 3 update: the legacy "list returns match → 404-on-update
+        → recreate" cascade is gone. With the watchdog owning the
+        recovery path, the adopt-by-name flow only succeeds when the
+        matched Plane project accepts the UPDATE — a 404 falls through
+        to the error + handle-clear path instead.
+        """
         project = repo.create(name="AdoptNoIdProj")
         mock = MagicMock()
-
-        async def update_404(*args, **kwargs):
-            raise PlaneNotFoundError("Plane 404 on ...: missing")
-
-        mock.update_project = AsyncMock(side_effect=update_404)
-        mock.create_project = AsyncMock(
-            return_value={"name": "X"}  # no id
+        mock.list_projects = AsyncMock(
+            return_value=[{"id": "plane-existing", "name": "AdoptNoIdProj"}]
         )
-        mock.list_projects = AsyncMock(return_value=[])
+        mock.update_project = AsyncMock(
+            return_value={"id": "plane-existing", "name": "AdoptNoIdProj"}
+        )
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError("CREATE must NOT be called when name matches")
+        )
 
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "error"
-        assert "no id" in result["message"].lower()
+        # Adopt succeeds → linked.
+        assert result["status"] == "linked"
+        assert result["action"] == "updated"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1437,7 +1475,13 @@ class TestEdgeCaseCircuitBreakerOpenAtService:
         self, repo, mock_plane_env
     ):
         """When the breaker is OPEN, the project metadata is marked
-        ``plane_sync_state="error"`` so the next manual sync can recover."""
+        ``plane_sync_state="error"`` so the next manual sync can recover.
+
+        Phase 3 update: ``plane_synced_at`` is the SUCCESS timestamp and
+        must NOT advance on failure — failure stamps ``plane_last_attempt``
+        instead. The presence check is replaced by the assertion that
+        ``plane_last_attempt`` is written.
+        """
         project = repo.create(name="BreakerOpenMeta")
         # Pre-seed an existing plane_project_id so the UPDATE path is taken.
         with Session(repo.engine) as session:
@@ -1469,7 +1513,12 @@ class TestEdgeCaseCircuitBreakerOpenAtService:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
         assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "error"
-        assert PLANE_SYNCED_AT_METADATA_KEY in meta
+        # Phase 3: failure stamps ``plane_last_attempt`` (NOT
+        # ``plane_synced_at`` — that field is reserved for success).
+        assert "plane_last_attempt" in meta
+        assert "plane_attempt_count" in meta
+        assert meta["plane_attempt_count"] == 1
+        assert "plane_last_error" in meta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1497,7 +1546,7 @@ class TestEdgeCaseSpecialCharacters:
             svc = PlaneSyncService(repo, http_client=mock)
             result = asyncio.run(svc.sync_project(project.project_id))
 
-            assert result["status"] == "synced"
+            assert result["status"] == "linked"
             # Verify the unicode name was sent verbatim
             call_kwargs = mock.create_project.call_args.kwargs
             assert call_kwargs["name"] == name
@@ -1512,7 +1561,7 @@ class TestEdgeCaseSpecialCharacters:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         kwargs = mock.create_project.call_args.kwargs
         assert kwargs["name"] == "🚀 Rocket Project 🎯"
 
@@ -1527,7 +1576,7 @@ class TestEdgeCaseSpecialCharacters:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert mock.create_project.call_args.kwargs["name"] == name
 
     def test_sync_project_with_newline_in_name(self, repo, mock_plane_env):
@@ -1541,7 +1590,7 @@ class TestEdgeCaseSpecialCharacters:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert mock.create_project.call_args.kwargs["name"] == name
 
     def test_sync_project_with_backslash_and_special_chars(
@@ -1557,7 +1606,7 @@ class TestEdgeCaseSpecialCharacters:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert mock.create_project.call_args.kwargs["name"] == name
 
 
@@ -1589,7 +1638,7 @@ class TestEdgeCaseConcurrentSync:
             instance.is_available.return_value = True
             instance.sync_project = AsyncMock(
                 return_value={
-                    "status": "synced",
+                    "status": "linked",
                     "action": "created",
                     "plane_project_id": "plane-conc",
                     "synced_at": "2026-08-14T00:00:00+00:00",
@@ -1623,8 +1672,8 @@ class TestEdgeCaseConcurrentSync:
             # At most one call should have made it past the cooldown.
             # The other must be rate_limited.
             statuses = sorted(r["status"] for r in results)
-            assert statuses == ["rate_limited", "synced"], (
-                f"Expected 1 synced + 1 rate_limited, got {statuses}"
+            assert statuses == ["linked", "rate_limited"], (
+                f"Expected 1 linked + 1 rate_limited, got {statuses}"
             )
 
             # The service must have been called at most once.
@@ -1643,7 +1692,7 @@ class TestEdgeCaseConcurrentSync:
             instance.is_available.return_value = True
             instance.sync_project = AsyncMock(
                 return_value={
-                    "status": "synced",
+                    "status": "linked",
                     "action": "created",
                     "plane_project_id": "plane-x",
                     "synced_at": "2026-08-14T00:00:00+00:00",
@@ -1666,7 +1715,7 @@ class TestEdgeCaseConcurrentSync:
             t2.join(timeout=10)
 
             assert len(results) == 2
-            assert all(r["status"] == "synced" for r in results), (
+            assert all(r["status"] == "linked" for r in results), (
                 f"Both syncs should succeed, got {results}"
             )
 
@@ -1714,16 +1763,25 @@ class TestEdgeCaseConcurrentSync:
         # writes race — one wins, the other gets a "tuple index out of
         # range" / API-misuse error from SQLite. With C1 fixed, that
         # error is now correctly surfaced as status="error" (the old
-        # code silently swallowed it and reported "synced", which is
-        # exactly the C1 bug). So the valid post-fix outcomes are:
-        #   - both "synced"  (timing happened to serialize the writes)
-        #   - one "synced" + one "error"  (the realistic race outcome)
+        # code silently swallowed it and reported "linked", which is
+        # exactly the C1 bug). Phase 3 also added a re-entrancy guard
+        # (``claim_sync_slot``) so the second call may observe state
+        # "syncing" and short-circuit. So the valid post-Phase-3
+        # outcomes are:
+        #   - both "linked"  (timing happened to serialize the writes)
+        #   - one "linked" + one "syncing"  (re-entrancy guard caught)
+        #   - one "linked" + one "error"  (C1 race outcome)
         # What we MUST NOT see: any crash, exception propagation, or
         # both "error" (the service is at-least-once correct under
         # contention — at least one of the calls must succeed).
         statuses = sorted(r["status"] for r in results)
-        assert statuses in (["synced", "synced"], ["error", "synced"]), (
-            f"Expected [synced,synced] or [error,synced], got {statuses}"
+        valid_outcomes = (
+            ["linked", "linked"],
+            ["error", "linked"],
+            ["linked", "syncing"],
+        )
+        assert statuses in valid_outcomes, (
+            f"Expected {valid_outcomes}, got {statuses}"
         )
 
     def test_tool_concurrent_calls_after_cooldown_expired_both_succeed(
@@ -1741,7 +1799,7 @@ class TestEdgeCaseConcurrentSync:
             instance.is_available.return_value = True
             instance.sync_project = AsyncMock(
                 return_value={
-                    "status": "synced",
+                    "status": "linked",
                     "action": "updated",
                     "plane_project_id": "plane-x",
                     "synced_at": "2026-08-14T00:00:00+00:00",
@@ -1766,7 +1824,7 @@ class TestEdgeCaseConcurrentSync:
             # At most one should be rate-limited (the second, after the
             # first sets the cooldown). But neither should crash.
             assert len(results) == 2
-            assert all(r["status"] in ("synced", "rate_limited") for r in results)
+            assert all(r["status"] in ("linked", "rate_limited") for r in results)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1831,7 +1889,7 @@ class TestEdgeCaseMetadataUpdateWithNameChange:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "updated"
         assert result["plane_project_id"] == "plane-existing"
         # Verify the new name was sent to Plane via the UPDATE path.
@@ -1880,7 +1938,7 @@ class TestEdgeCaseMetadataUpdateWithNameChange:
         svc = PlaneSyncService(repo, http_client=mock)
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "updated"
         assert result["plane_project_id"] == "plane-known"
 
@@ -1889,7 +1947,7 @@ class TestEdgeCaseMetadataUpdateWithNameChange:
         with Session(repo.engine) as session:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
-        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "synced"
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "linked"
         assert meta[PLANE_SYNCED_AT_METADATA_KEY] != "2020-01-01T00:00:00+00:00"
         # Sanity: the new timestamp is parseable.
         from datetime import datetime
@@ -1992,7 +2050,7 @@ class TestC1MetadataWriteFailure:
         result = asyncio.run(svc.sync_project(project.project_id))
 
         # Non-critical failures must NOT block success.
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["plane_project_id"] == "plane-456"
         assert result["action"] == "created"
 
@@ -2015,7 +2073,7 @@ class TestC1MetadataWriteFailure:
 
         result = asyncio.run(svc.sync_project(project.project_id))
 
-        assert result["status"] == "synced"
+        assert result["status"] == "linked"
         assert result["action"] == "created"
         assert result["plane_project_id"] == "plane-789"
 
@@ -2024,7 +2082,7 @@ class TestC1MetadataWriteFailure:
             records = repo.list_metadata_records(session, project.project_id)
         meta = {r.meta_key: r.meta_value for r in records}
         assert meta[PLANE_PROJECT_ID_METADATA_KEY] == "plane-789"
-        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "synced"
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == "linked"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

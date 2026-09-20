@@ -226,7 +226,7 @@ def create_plane_sync_tools(
         if not PlaneSyncService.is_available():
             return {
                 "status": "disabled",
-                "message": "Plane sync not configured (PLANE_BASE_URL not set)",
+                "message": "Plane sync not configured (PLANE_API_KEY not set)",
             }
 
         service = PlaneSyncService(store)
