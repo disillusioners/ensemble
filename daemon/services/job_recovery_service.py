@@ -1261,6 +1261,24 @@ class JobRecoveryService:
                 )
                 if updated is not None:
                     reconciled += 1
+                    # ── Engine phase (Shape (b) audit follow-up — fix
+                    # round 2): F10 force-complete is a silent
+                    # Task-terminal write (the JobItem is already done).
+                    # Notify the work_id with the canonical 'completed'
+                    # token — same-class gap surfaced by the extended
+                    # census walker.
+                    _f10_work_id = getattr(task, "work_id", None)
+                    if _f10_work_id and self._job_queue_service is not None:
+                        try:
+                            await self._job_queue_service.notify_watchers(
+                                _f10_work_id, "completed"
+                            )
+                        except Exception as notify_err:
+                            logger.warning(
+                                f"F10_zombie_task: notify_watchers failed "
+                                f"for {_f10_work_id[:8]}... (completed): "
+                                f"{notify_err}"
+                            )
                     details.append({
                         "pattern": "F10_zombie_task",
                         "job_id": job.job_id,

@@ -3867,6 +3867,81 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to publish lifecycle event for root {instance_id[:8]}...: {e}"
                     )
+            # ── Engine phase (Shape (b) follow-up — watch-notify fix
+            # round 2): root-completion watcher notify. The no-parent
+            # completion path finalizes the instance's Task + JobItem
+            # work with ZERO canonical notify (live incident
+            # 2026-09-20: stranded mission_terminal row 8ade5d22 —
+            # watch registered 20:18:47, terminal 20:18:54, never
+            # claimed, no [JOB_EVENT]). Fan out over the completed
+            # instance's work set (Task work_ids + JobItem receipts —
+            # the same candidate-set shape the observer's finalize
+            # fan-out uses) and fire the canonical facade per work_id;
+            # per-kind token via the work resolver (task rows →
+            # terminal outcome token; message mirrors → 'settled');
+            # non-terminal tokens never fire (§3 guard). The observer
+            # belt stays as the redundant second fire — the CAS claim
+            # dedups exactly-once (§5).
+            _notify_service = getattr(
+                self._manager, "_job_queue_service", None
+            )
+            if _notify_service is not None:
+                from daemon.services.work_status import (
+                    is_terminal as _work_status_is_terminal,
+                )
+
+                _work_ids: set[str] = set()
+                _root_task_repo = getattr(self._manager, "_task_repo", None)
+                if _root_task_repo is not None:
+                    try:
+                        _rows = await asyncio.to_thread(
+                            _root_task_repo.get_by_instance, instance_id
+                        )
+                        _work_ids.update(
+                            _row.work_id for _row in _rows if _row.work_id
+                        )
+                    except Exception as work_scan_err:
+                        logger.warning(
+                            f"root_completed: task work scan failed for "
+                            f"{instance_id[:8]}...: {work_scan_err}"
+                        )
+                try:
+                    _jobs = await asyncio.to_thread(
+                        _notify_service._repository.find_jobs_by_instance,
+                        instance_id,
+                        job_type=None,
+                    )
+                    _work_ids.update(
+                        _job.job_id for _job in _jobs if _job.job_id
+                    )
+                except Exception as job_scan_err:
+                    logger.warning(
+                        f"root_completed: job work scan failed for "
+                        f"{instance_id[:8]}...: {job_scan_err}"
+                    )
+                _resolver = getattr(_notify_service, "_work_resolver", None)
+                for _work_id in sorted(_work_ids):
+                    _token = "completed"
+                    if _resolver is not None:
+                        try:
+                            _token = _resolver.per_kind_status_for(
+                                _work_id, default="completed"
+                            )
+                        except Exception:
+                            _token = "completed"
+                    if not _work_status_is_terminal(_token):
+                        # §3 guard — never fire non-terminal.
+                        continue
+                    try:
+                        await _notify_service.notify_watchers(
+                            _work_id, _token
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"root_completed: notify_watchers failed for "
+                            f"{_work_id[:8]}... ({_token}): {e}"
+                        )
+
             self._trigger_title_generation(instance_id, completed_message_id)
 
             # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
