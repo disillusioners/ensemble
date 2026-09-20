@@ -97,7 +97,7 @@ def _sanitize_quoted_url(url: str) -> str:
     return _strip_wrapping_quotes(url.strip())
 
 
-def _sanitize_quoted_headers(headers: dict[str, str] | None) -> dict[str, str] | None:
+def _sanitize_quoted_headers(headers: dict[str, Any] | None) -> dict[str, Any] | None:
     """Normalize header values poisoned by quote-leaking ``.env`` loaders.
 
     Two shapes occur in the wild (both observed on a live ``plane``
@@ -109,11 +109,19 @@ def _sanitize_quoted_headers(headers: dict[str, str] | None) -> dict[str, str] |
        header (case-insensitive) to keep the blast radius minimal — a
        quoted token inside a non-auth header is left untouched unless the
        WHOLE value is quoted (shape 1).
+
+    Non-str VALUES are passed through untouched so pydantic core surfaces
+    a proper ``ValidationError`` (HTTP 422) instead of ``AttributeError``
+    escaping the ``mode="before"`` wrapping (HTTP 500). See W-1 in the
+    council fast-follow.
     """
     if not headers:
         return headers
-    sanitized: dict[str, str] = {}
+    sanitized: dict[str, Any] = {}
     for key, value in headers.items():
+        if not isinstance(value, str):
+            sanitized[key] = value
+            continue
         value = _strip_wrapping_quotes(value.strip())
         if key.lower() == "authorization":
             scheme, sep, credentials = value.partition(" ")
@@ -203,13 +211,28 @@ class McpSseConfig(BaseModel):
     @field_validator("url", mode="before")
     @classmethod
     def sanitize_quoted_url(cls, url: str) -> str:
-        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url)."""
+        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url).
+
+        W-1: non-str inputs (None / int / list / …) return untouched so pydantic
+        core surfaces the proper ``ValidationError`` (HTTP 422) instead of
+        ``AttributeError`` escaping the ``mode="before"`` wrapping (HTTP 500).
+        """
+        if not isinstance(url, str):
+            return url
         return _sanitize_quoted_url(url)
 
     @field_validator("headers", mode="before")
     @classmethod
     def sanitize_quoted_headers(cls, headers: dict[str, str] | None) -> dict[str, str] | None:
-        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers)."""
+        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers).
+
+        W-1: non-dict inputs (incl. ``None`` for the optional field) return
+        untouched so pydantic core surfaces the proper ``ValidationError``
+        (HTTP 422) instead of ``AttributeError`` escaping the ``mode="before"``
+        wrapping (HTTP 500). Non-str VALUES are handled in the helper.
+        """
+        if not isinstance(headers, dict):
+            return headers
         return _sanitize_quoted_headers(headers)
 
     @field_validator("url", mode="after")
@@ -229,13 +252,28 @@ class McpStreamableHttpConfig(BaseModel):
     @field_validator("url", mode="before")
     @classmethod
     def sanitize_quoted_url(cls, url: str) -> str:
-        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url)."""
+        """Heal URLs poisoned by quote-leaking .env loaders (see _sanitize_quoted_url).
+
+        W-1: non-str inputs (None / int / list / …) return untouched so pydantic
+        core surfaces the proper ``ValidationError`` (HTTP 422) instead of
+        ``AttributeError`` escaping the ``mode="before"`` wrapping (HTTP 500).
+        """
+        if not isinstance(url, str):
+            return url
         return _sanitize_quoted_url(url)
 
     @field_validator("headers", mode="before")
     @classmethod
     def sanitize_quoted_headers(cls, headers: dict[str, str] | None) -> dict[str, str] | None:
-        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers)."""
+        """Heal header values poisoned by quote-leaking .env loaders (see _sanitize_quoted_headers).
+
+        W-1: non-dict inputs (incl. ``None`` for the optional field) return
+        untouched so pydantic core surfaces the proper ``ValidationError``
+        (HTTP 422) instead of ``AttributeError`` escaping the ``mode="before"``
+        wrapping (HTTP 500). Non-str VALUES are handled in the helper.
+        """
+        if not isinstance(headers, dict):
+            return headers
         return _sanitize_quoted_headers(headers)
 
     @field_validator("url", mode="after")

@@ -35,8 +35,16 @@ import os
 import subprocess
 import sys
 
+import pytest
+from pydantic import ValidationError
+
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
-from daemon.mcp.config import McpStreamableHttpConfig, validate_mcp_server_config
+from daemon.mcp.config import (
+    McpConfigValidationError,
+    McpSseConfig,
+    McpStreamableHttpConfig,
+    validate_mcp_server_config,
+)
 
 # The exact poisoned shape persisted in the live mcp_servers row
 # (2026-09-20 API dump, values quoted verbatim):
@@ -113,6 +121,162 @@ class TestQuotedUrlSanitization:
 
         with pytest.raises(McpConfigValidationError):
             validate_mcp_server_config({"transport": "carrier-pigeon"})
+
+
+class TestMcpSseConfigQuoteSanitization:
+    """Advisory #4: McpSseConfig sanitization validators are byte-identical to
+    McpStreamableHttpConfig but had zero direct coverage — every quote test in
+    this file targets the streamable-http transport. Pin a minimal SSE pair.
+    """
+
+    def test_sse_quoted_url_is_unwrapped(self, allow_local):
+        validated = validate_mcp_server_config(
+            {"transport": "sse", "url": '"http://localhost:8080/sse"'}
+        )
+        assert isinstance(validated, McpSseConfig), (
+            "expected McpSseConfig discriminator, got %s" % type(validated).__name__
+        )
+        assert validated.url == "http://localhost:8080/sse"
+
+    def test_sse_quoted_headers_are_unwrapped(self, allow_local):
+        validated = validate_mcp_server_config(
+            {
+                "transport": "sse",
+                "url": "http://localhost:8080/sse",
+                "headers": {"Authorization": 'Bearer "tok"', "x-tag": '"v1"'},
+            }
+        )
+        assert validated.headers is not None
+        assert validated.headers["Authorization"] == "Bearer tok"
+        assert validated.headers["x-tag"] == "v1"
+
+
+class TestQuotedConfigBeforeValidatorTypeGuards:
+    """W-1 (council fast-follow): non-str ``url`` and non-dict ``headers`` must
+    surface as pydantic ``ValidationError`` (HTTP 422), NOT ``AttributeError``
+    escaping the ``mode="before"`` wrapping (HTTP 500).
+
+    Each test asserts the exception TYPE explicitly so a future regression to
+    ``AttributeError`` fails this pin.
+    """
+
+    @pytest.mark.parametrize("bad_url", [None, 42, ["http://x"], {"u": 1}])
+    def test_streamable_http_non_str_url_raises_validation_error(self, bad_url):
+        """Direct model validation: pydantic core rejects non-str url."""
+        with pytest.raises(ValidationError) as exc_info:
+            McpStreamableHttpConfig.model_validate(
+                {"transport": "streamable-http", "url": bad_url}
+            )
+        assert not isinstance(exc_info.value, AttributeError), (
+            "non-str url must raise ValidationError, not AttributeError: %r" % (exc_info.value,)
+        )
+
+    @pytest.mark.parametrize("bad_url", [None, 42, ["http://x"], {"u": 1}])
+    def test_sse_non_str_url_raises_validation_error(self, bad_url):
+        with pytest.raises(ValidationError):
+            McpSseConfig.model_validate({"transport": "sse", "url": bad_url})
+
+    @pytest.mark.parametrize("bad_headers", ["not-a-dict", 42, ["x"], ("x",)])
+    def test_streamable_http_non_dict_headers_raises_validation_error(self, bad_headers):
+        with pytest.raises(ValidationError):
+            McpStreamableHttpConfig.model_validate(
+                {
+                    "transport": "streamable-http",
+                    "url": "http://localhost:8080/mcp",
+                    "headers": bad_headers,
+                }
+            )
+
+    @pytest.mark.parametrize("bad_headers", ["not-a-dict", 42, ["x"], ("x",)])
+    def test_sse_non_dict_headers_raises_validation_error(self, bad_headers):
+        with pytest.raises(ValidationError):
+            McpSseConfig.model_validate(
+                {
+                    "transport": "sse",
+                    "url": "http://localhost:8080/sse",
+                    "headers": bad_headers,
+                }
+            )
+
+    def test_none_headers_still_accepted_optional_field(self):
+        """``headers`` is optional — ``None`` must remain a valid value, NOT a 422."""
+        validated = McpStreamableHttpConfig.model_validate(
+            {"transport": "streamable-http", "url": "http://localhost:8080/mcp", "headers": None}
+        )
+        assert validated.headers is None
+
+    @pytest.mark.parametrize("bad_value", [42, None, ["x"], {"k": 1}])
+    def test_non_str_header_value_raises_validation_error(self, bad_value):
+        """Non-str header VALUES must propagate to pydantic core (422), not crash in the helper."""
+        with pytest.raises(ValidationError):
+            McpStreamableHttpConfig.model_validate(
+                {
+                    "transport": "streamable-http",
+                    "url": "http://localhost:8080/mcp",
+                    "headers": {"x-foo": bad_value},
+                }
+            )
+
+    def test_validate_mcp_server_config_wraps_non_str_url_as_mcp_validation_error(self):
+        """Public wrapper: non-str url surfaces as ``McpConfigValidationError`` (422)."""
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            validate_mcp_server_config({"transport": "streamable-http", "url": None})
+        assert not isinstance(exc_info.value, AttributeError), (
+            "wrapper must convert to McpConfigValidationError, not leak AttributeError"
+        )
+
+    def test_validate_mcp_server_config_wraps_non_dict_headers_as_mcp_validation_error(self):
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            validate_mcp_server_config(
+                {
+                    "transport": "streamable-http",
+                    "url": "http://localhost:8080/mcp",
+                    "headers": "not-a-dict",
+                }
+            )
+        assert not isinstance(exc_info.value, AttributeError)
+
+
+class TestQuotedSSRFNegativePin:
+    """Advisory #1: pin the sanitize-then-validate invariant. A quoted SSRF URL
+    must be healed by the ``mode="before"`` sanitization, THEN caught by the
+    ``mode="after"`` SSRF check. A future re-ordering of validators that lets
+    the quoted URL reach the SSRF check before unwrapping would break this pin
+    (the SSRF regex would not see the wrapping quotes and would either pass or
+    fail differently).
+    """
+
+    def test_quoted_link_local_aws_metadata_url_blocked_by_ssrf_after_sanitize(
+        self,
+    ):
+        """``'"http://169.254.169.254/latest/meta-data/"'`` must be sanitized to
+        ``http://169.254.169.254/latest/meta-data/`` and then blocked by the SSRF
+        check (link-local is ALWAYS blocked — even with ``allow_local``)."""
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            validate_mcp_server_config(
+                {
+                    "transport": "streamable-http",
+                    "url": '"http://169.254.169.254/latest/meta-data/"',
+                }
+            )
+        assert "restricted address" in str(exc_info.value), (
+            "expected SSRF block after sanitize, got: %s" % (exc_info.value,)
+        )
+
+    def test_quoted_loopback_blocked_by_ssrf_after_sanitize_under_strict_local(
+        self, strict_local
+    ):
+        """Quoted loopback under ``MCP_ALLOW_LOCAL=false`` must be sanitized and
+        then blocked. Pins that the SSRF check sees the UNQUOTED url, not the
+        raw quoted value."""
+        with pytest.raises(McpConfigValidationError) as exc_info:
+            validate_mcp_server_config(
+                {
+                    "transport": "streamable-http",
+                    "url": '"http://127.0.0.1:8080/x"',
+                }
+            )
+        assert "restricted address" in str(exc_info.value)
 
 
 class TestPlaneBuiltinEnvSanitization:
