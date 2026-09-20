@@ -520,6 +520,14 @@ class McpService:
         Non-pooled servers fall through to ``_discover_schemas_cold``
         (slow but only once per server, and now off the user path).
 
+        D5 (2026-09-20): built-in servers are gated per-server through the
+        SAME ``is_available()`` seam the bootstrap and warmup-pool layers
+        use — a built-in whose availability is OFF (e.g. the
+        ``PLANE_MCP_ENABLED=false`` kill-switch, a missing required
+        package, or missing env config) is NOT warmed, with one notice
+        line per skipped server. See the gate comment below for why an
+        active DB row alone is not proof of availability.
+
         Returns:
             Number of servers successfully primed (logged for visibility).
         """
@@ -534,13 +542,47 @@ class McpService:
         if not servers:
             return 0
 
+        # D5 (2026-09-20): per-server availability gate. Bootstrap skips
+        # CREATING a record for an unavailable built-in but never
+        # DEACTIVATES a pre-existing one (that path only exists for the
+        # ``MCP_DISABLE_BUILT_IN_*`` env), so a stale ACTIVE row survives
+        # a newly-off kill-switch — and pre-fix it still got schema-warmed
+        # (live observation: 177 plane tools primed with
+        # ``PLANE_MCP_ENABLED=false``). Gate through the builtin registry
+        # by NAME — the same name-keyed convention and the same
+        # ``is_available()`` seam consumed by
+        # ``InstanceManager._bootstrap_builtin_servers`` and the
+        # warmup-pool registration. User-created servers have no builtin
+        # definition and warm unconditionally, as before.
+        from daemon.mcp.builtin_servers import get_registry
+
+        registry = get_registry()
+        eligible: list[McpServer] = []
+        for server in servers:
+            definition = registry.get_by_name(server.name)
+            if definition is not None and not definition.is_available():
+                # ONE notice line per skipped server (the warm runs once
+                # per boot) — never per-tool spam. The plane definition's
+                # own ``is_available()`` additionally emits its canonical
+                # once-per-process kill-switch notice.
+                logger.info(
+                    f"eager_warm_schemas: builtin '{server.name}' not "
+                    f"available (kill-switch off or missing config) — "
+                    f"skipping schema warm"
+                )
+                continue
+            eligible.append(server)
+
+        if not eligible:
+            return 0
+
         primed = 0
         # Serialize with the per-instance preload lock semantics: ``asyncio.gather``
         # is safe here because ``get_schemas_for_server`` is itself guarded by
         # ``_schema_cache_lock`` — concurrent first-time calls for the same
         # server will only open one discovery connection.
         results = await asyncio.gather(
-            *(self.get_schemas_for_server(s) for s in servers),
+            *(self.get_schemas_for_server(s) for s in eligible),
             return_exceptions=True,
         )
         # Fix 3 (honest counting): a server whose schema set is EMPTY
@@ -550,7 +592,7 @@ class McpService:
         # server as "primed 5/5". Record per-server tool counts so a
         # failed/empty server is visible by name ("plane: 0 tools").
         per_server_counts: list[str] = []
-        for server, res in zip(servers, results, strict=False):
+        for server, res in zip(eligible, results, strict=False):
             if isinstance(res, Exception):
                 logger.debug(
                     f"eager_warm_schemas: {server.name} failed: {res}"
@@ -564,7 +606,7 @@ class McpService:
             per_server_counts.append(f"{server.name}: {len(res)} tool(s)")
 
         logger.info(
-            f"eager_warm_schemas: primed {primed}/{len(servers)} MCP "
+            f"eager_warm_schemas: primed {primed}/{len(eligible)} MCP "
             f"server schema(s) ({', '.join(per_server_counts)})"
         )
         return primed
