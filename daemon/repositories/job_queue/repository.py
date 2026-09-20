@@ -2677,6 +2677,16 @@ SET admission_state = 'queued',
     # ``"daemon/repositories/job_queue/repository.py:reap_legacy_mirror_zombies"``
     # — Phase 0 census gate enforces the registration.
 
+    # Notify carve-out (engine phase, Shape (b) §2 site 3 — EXEMPT from
+    # the terminal-write notify contract; see
+    # watch-notification-reliability/architecture-recommendation.md):
+    # this D2-exempt one-time cutover reap (≤3 legacy rows) writes
+    # ``terminal_reason='orphan_retired'``, which is NOT in
+    # ``_TERMINAL_STATUSES`` — firing the canonical notify here would
+    # require a misrepresenting token, so the site is classified
+    # ``exempt`` in the terminal-write census
+    # (tests/job_queue/test_terminal_write_census.py) instead of
+    # hooked.
     def reap_legacy_mirror_zombies(
         self,
         *,
@@ -2684,17 +2694,6 @@ SET admission_state = 'queued',
         instance_repository: Any,
     ) -> list["_ReapedLegacyZombie"]:
         """Fix B — one-time reconciliation reap for the 3 pre-Fix-B
-
-        Notify carve-out (engine phase, Shape (b) §2 site 3 — EXEMPT
-        from the terminal-write notify contract; see
-        watch-notification-reliability/architecture-recommendation.md):
-        this D2-exempt one-time cutover reap (≤3 legacy rows) writes
-        ``terminal_reason='orphan_retired'``, which is NOT in
-        ``_TERMINAL_STATUSES`` — firing the canonical notify here would
-        require a misrepresenting token, so the site is classified
-        ``exempt`` in the terminal-write census
-        (tests/job_queue/test_terminal_write_census.py) instead of
-        hooked.
         legacy zombie ACTIVE message JobItems.
 
         Predicate (ALL must hold — per the leader-decision design):

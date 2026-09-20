@@ -4,7 +4,8 @@ Engine phase (``watch-notification-reliability/architecture-recommendation.md``,
 "Engine Phase — Shape (b) Re-Cut" §2/§7): the structurally-silent terminal
 writes are hooked at their service/processor callers with the canonical
 ``JobQueueService.notify_watchers`` facade. These tests drive the REAL
-caller code against real repositories (file-backed SQLite) and a real
+caller code against real repositories (the conftest in-memory
+SQLite engine, StaticPool) and a real
 notify chain (real ``notify_work_watchers`` over real
 ``WorkResolverService`` + ``JobWatcherRepository``), asserting:
 

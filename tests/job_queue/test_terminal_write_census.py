@@ -24,6 +24,39 @@ inside those SQL blocks. The walker is the source of truth; the
 ``TERMINAL_WRITE_CENSUS`` fixture is the allow-list.
 
 Fast by contract: pure AST + regex, no DB, no daemon, < 2s.
+
+## How to update the census (the three paths)
+
+(a) NEW SITE discovered by the walker (RED with the remediation message):
+    hook it at the service/processor caller (pattern exemplar
+    ``job_recovery_service._fail_orphaned_job``), then add one
+    ``CensusEntry`` — ``file`` (repo-relative), ``site`` (the walker
+    shape id: method name or ``bulk_sql:<reason-literal>``), ``anchor``
+    (substring of the enclosing function name), ``classification``
+    (``hooked``/``exempt``), ``hooked_at`` (``<file>:<line>`` of the
+    ``notify_watchers`` call), and ``exempt_kind``/``reason`` when
+    exempt.
+
+(b) STALE ``hooked_at`` (``test_hooked_entries_point_at_live_notify_calls``
+    fails with "hooked_at entries no longer point at a notify_watchers
+    call" — this WILL recur when code above a hook shifts; precedent:
+    1081→1087 in the site-1 fix round): re-locate the notify with
+    ``grep -n "notify_watchers" <the entry's file>`` (or
+    ``grep -rn "notify_watchers" daemon/services/`` for the neighborhood),
+    then update that entry's ``hooked_at`` line number. No other field
+    changes.
+
+(c) HOOK REMOVED: flip the entry's ``classification`` to ``exempt``,
+    set ``exempt_kind`` + a ``reason`` breadcrumb, and clear
+    ``hooked_at``. If the site disappears entirely, delete the entry —
+    the walker is the source of truth; the fixture only allow-lists.
+
+## Exempt-kind taxonomy
+``D2`` — one-time cutover carve-out (site 3; misrepresenting token).
+``non-terminal`` — shape matched a method name but the transition is
+not a terminal write (queued→active, processing→paused).
+``dormant`` — boundary writer with zero in-tree callers; the notify
+contract attaches at callers when first wired.
 """
 from __future__ import annotations
 
@@ -63,10 +96,11 @@ class DiscoveredSite:
 class CensusEntry:
     file: str
     site: str
-    anchor: str          # regex sniffed inside the enclosing function to pin the site
+    anchor: str          # substring matched inside the enclosing function name to pin the site
     classification: str  # "hooked" | "exempt"
     hooked_at: str = ""  # "<file>:<line>" of the notify_watchers call
     reason: str = ""
+    exempt_kind: str = ""  # "D2" | "non-terminal" | "dormant" (exempt entries only)
 
 
 def _enclosing_function_map(tree: ast.AST) -> list[tuple[int, int, str]]:
@@ -236,13 +270,15 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="bulk_sql:orphan_retired",
         anchor="reap_legacy_mirror_zombies", classification="exempt",
+        exempt_kind="D2",
         reason="write side of checklist site 3 — same D2 carve-out "
                "('orphan_retired' ∉ _TERMINAL_STATUSES); docstring carries the carve-out.",
     ),
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="reap_legacy_mirror_zombies",
         anchor="reconcile_drift_states", classification="exempt",
-        reason="caller of the checklist site 3 exempt write — no notify by the same carve-out.",
+        exempt_kind="D2",
+        reason="D2 carve-out: caller of the checklist site 3 exempt write — no notify.",
     ),
     # ── Checklist site 4 — batch_cancel_queued (special shape) ──
     CensusEntry(
@@ -333,36 +369,55 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="atomic_transition",
         anchor="start_job_atomic", classification="exempt",
-        reason="non-terminal transition (queued→active) — matched on method name only",
+        exempt_kind="non-terminal",
+        reason="non-terminal:  (queued→active) — matched on method name only",
     ),
     CensusEntry(
         file="daemon/services/job_queue_service.py", site="atomic_transition",
         anchor="start_job", classification="exempt",
-        reason="non-terminal transition (queued→active dispatch) — matched on method name only",
+        exempt_kind="non-terminal",
+        reason="non-terminal:  (queued→active dispatch) — matched on method name only",
     ),
     CensusEntry(
         file="daemon/services/worker_pool.py", site="atomic_transition",
         anchor="_activate_message_jobitem_async_coro", classification="exempt",
-        reason="non-terminal transition (queued→active message activation) — matched on method name only",
+        exempt_kind="non-terminal",
+        reason="non-terminal: queued→active message activation — matched on method name only",
     ),
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="recover_on_startup", classification="exempt",
-        reason="non-terminal transition (processing→paused) — matched on method name only",
+        exempt_kind="non-terminal",
+        reason="non-terminal: processing→paused — matched on method name only",
     ),
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="atomic_transition",
         anchor="terminate_job", classification="exempt",
-        reason="dormant boundary writer — zero in-tree callers at census time; "
+        exempt_kind="dormant",
+        reason="dormant: boundary writer — zero in-tree callers at census time; "
                "notify contract attaches at callers when first wired",
     ),
 ]
 
 
 def _entry_for(site: DiscoveredSite) -> CensusEntry | None:
+    """Match a discovered site to its fixture entry.
+
+    File semantics: the fixture path matches on an EXACT name OR a
+    path-suffix (``site.file.endswith("/" + entry.file)``) so a module
+    move/rename keeps its classification visible to the walker (an
+    exact-``==`` match would silently drop renamed files — no RED, no
+    warning — defeating walker-as-source-of-truth). ``site`` matches
+    the walker shape id; ``anchor`` is a substring of the enclosing
+    function name.
+    """
     for entry in TERMINAL_WRITE_CENSUS:
+        file_match = (
+            site.file == entry.file
+            or site.file.endswith("/" + entry.file)
+        )
         if (
-            entry.file == site.file
+            file_match
             and entry.site == site.shape
             and entry.anchor in site.function
         ):

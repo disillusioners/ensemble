@@ -1357,9 +1357,9 @@ class JobQueueService:
                     orphaned_reaped += 1
                     # Engine phase (Shape (b) §2 site 5): post-commit
                     # notify — the orphan finalize is a structurally
-                    # silent terminal write. Token DERIVED from the
-                    # terminal_reason argument (canonical vocabulary;
-                    # sole caller passes 'cancelled' today).
+                    # silent terminal write. Token: the literal
+                    # ``orphan_terminal_reason`` above (canonical
+                    # vocabulary; sole caller value 'cancelled').
                     try:
                         await self.notify_watchers(
                             orphan.job_id, orphan_terminal_reason
@@ -1367,8 +1367,9 @@ class JobQueueService:
                     except Exception as notify_exc:  # noqa: BLE001 — best-effort
                         logger.warning(
                             "cleanup_non_terminal_jobs: notify_watchers "
-                            "failed for %s... (cancelled): %s",
-                            orphan.job_id[:8], notify_exc,
+                            "failed for %s... (%s): %s",
+                            orphan.job_id[:8], orphan_terminal_reason,
+                            notify_exc,
                         )
         except Exception as exc:  # noqa: BLE001 — best-effort
             logger.warning(
