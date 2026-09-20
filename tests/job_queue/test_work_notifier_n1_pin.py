@@ -47,6 +47,19 @@ couldn't help unless it ran BEFORE the ``enqueue_message`` loop.
    the notify but NEVER calls claim (read-only path); the watcher row
    remains in the DB for the eventual terminal event.
 
+Engine-phase pins (2026-09-20, watch-notification-reliability §3 —
+dead_letter HOLD firing-set gap):
+
+6. ``test_dead_letter_mission_terminal_fires`` — a dead_letter-terminal
+   mission with a ``mission_terminal`` watcher → notify FIRES and the
+   row is CAS-claimed (the exact held-forever stranding class: the
+   literal ``{completed, failed, cancelled}`` firing set excluded
+   ``dead_letter``, and BOTH the hook and the reconcile sweep route
+   through this gate).
+7. ``test_non_terminal_mission_still_held`` — preservation twin: a
+   non-terminal mission liveness still holds the row (no notify, no
+   claim) — the fix must not widen the gate past the terminal set.
+
 ## Test technique
 
 * file-backed SQLite + default ``QueuePool`` (the recipe from
@@ -772,3 +785,139 @@ class TestN1ClaimFirstNonTerminalNeverClaims:
             f"(terminal event hasn't fired yet); got {remaining}."
         )
         assert remaining[0].instance_id == "watcher-prog-1"
+
+
+class TestMissionTerminalDeadLetterFire:
+    """Engine-phase pins (§3): the ``mission_terminal`` HOLD firing set.
+
+    Pre-fix the gate was the literal ``mission_live not in
+    {"completed", "failed", "cancelled"}`` — a mission that reached
+    ``dead_letter`` left its ``mission_terminal`` watchers held FOREVER:
+    the event hook and the ``reconcile_terminal_watches`` sweep both
+    route through this same gate, so scheduling the sweep without this
+    fix would have been a silent no-op on dead-lettered missions. The
+    post-fix gate is ``not _is_terminal(mission_live)`` — the full
+    canonical terminal set fires, non-terminal liveness still holds.
+
+    Harness: the N1 recipe (file-backed SQLite, real repos, synthetic
+    ``WorkRecord`` patched into ``resolver.resolve_work``) — same
+    technique as ``TestN1ClaimFirstHeldMissionSurvives``.
+    """
+
+    @staticmethod
+    def _patch_record(resolver, *, wid, status, job_type):
+        from daemon.services.work_resolver import WorkRecord
+
+        record = WorkRecord(
+            work_id=wid,
+            kind="job",
+            status=status,
+            instance_id="inst-dl-1",
+            project_id="test-project",
+            agent_id="developer",
+            result_summary=None,
+            error=None,
+            created_at=datetime.now(timezone.utc),
+            job_type=job_type,
+            mission_liveness=None,
+        )
+        original = resolver.resolve_work
+        resolver.resolve_work = MagicMock(return_value=record)
+        return original
+
+    @pytest.mark.asyncio
+    async def test_dead_letter_mission_terminal_fires(self, n1_components):
+        """THE stranding-class pin: dead_letter-terminal mission +
+        ``mission_terminal`` watcher → notify FIRES, row CAS-claimed,
+        ``[JOB_EVENT]`` enqueued."""
+        engine = n1_components["engine"]
+        watcher_repo = n1_components["watcher_repo"]
+        resolver = n1_components["resolver"]
+        instance_manager = n1_components["instance_manager"]
+
+        wid = "wid-dead-letter-1"
+        _seed_instance(engine, instance_id="inst-dl-1")
+        _seed_instance(engine, instance_id="watcher-dl")
+
+        original = self._patch_record(
+            resolver, wid=wid, status="dead_letter", job_type="task"
+        )
+        try:
+            with Session(engine) as s:
+                s.add(JobWatcher(
+                    job_id=wid,
+                    instance_id="watcher-dl",
+                    watch_events=["mission_terminal"],
+                ))
+                s.commit()
+
+            notified = await notify_work_watchers(
+                wid,
+                "dead_letter",
+                error="dead-lettered after max retries",
+                instance_manager=instance_manager,
+                work_resolver=resolver,
+                watcher_repo=watcher_repo,
+            )
+        finally:
+            resolver.resolve_work = original
+
+        # FIRES — the pre-fix gate held this forever.
+        assert notified == 1, (
+            "dead_letter firing-set: a dead_letter-terminal mission must "
+            "FIRE its mission_terminal watcher (held-forever stranding "
+            "class); got 0 notifications."
+        )
+        assert instance_manager.enqueue_message.await_count == 1
+        # The row is consumed via the CAS claim path.
+        assert watcher_repo.get_watchers_for_job(wid) == []
+        # Envelope sanity: the canonical source string + dead_letter body.
+        call = instance_manager.enqueue_message.await_args
+        assert call.kwargs["source"] == (
+            f"internal_agent:job_event:{wid}:dead_letter"
+        )
+        assert "[JOB_EVENT]" in call.kwargs["message"]
+        assert "dead_letter" in call.kwargs["message"]
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_mission_still_held(self, n1_components):
+        """Preservation twin: non-terminal mission liveness still holds
+        the row — the widening must not pass the terminal boundary."""
+        engine = n1_components["engine"]
+        watcher_repo = n1_components["watcher_repo"]
+        resolver = n1_components["resolver"]
+        instance_manager = n1_components["instance_manager"]
+
+        wid = "wid-processing-hold-1"
+        _seed_instance(engine, instance_id="inst-dl-1")
+        _seed_instance(engine, instance_id="watcher-hold")
+
+        original = self._patch_record(
+            resolver, wid=wid, status="processing", job_type="task"
+        )
+        try:
+            with Session(engine) as s:
+                s.add(JobWatcher(
+                    job_id=wid,
+                    instance_id="watcher-hold",
+                    watch_events=["mission_terminal"],
+                ))
+                s.commit()
+
+            notified = await notify_work_watchers(
+                wid,
+                "processing",
+                error=None,
+                instance_manager=instance_manager,
+                work_resolver=resolver,
+                watcher_repo=watcher_repo,
+            )
+        finally:
+            resolver.resolve_work = original
+
+        assert notified == 0
+        assert instance_manager.enqueue_message.await_count == 0
+        # Held rows survive untouched (NOT claimed).
+        remaining = watcher_repo.get_watchers_for_job(wid)
+        assert len(remaining) == 1
+        assert remaining[0].instance_id == "watcher-hold"

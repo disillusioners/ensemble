@@ -366,11 +366,25 @@ async def notify_work_watchers(
                     )
                 else:
                     mission_live = getattr(work_record, "status", None)
-                if mission_live not in {"completed", "failed", "cancelled"}:
+                if not _is_terminal(mission_live):
                     # Mission not yet terminal — keep the watch alive
                     # for the future terminal event. Skip this
                     # notification; the watcher row stays in place
                     # (NOT in the step-3 claim WHERE clause).
+                    #
+                    # Engine phase (2026-09-20, design §3 of the
+                    # watch-notification-reliability recommendation):
+                    # the firing set was previously the literal
+                    # ``{completed, failed, cancelled}`` membership,
+                    # which EXCLUDED ``dead_letter`` — watchers of
+                    # dead-lettered missions were held forever (both
+                    # the event hook AND ``reconcile_terminal_watches``
+                    # route through this same gate). ``is_terminal``
+                    # covers the full canonical terminal set
+                    # (``completed`` / ``settled`` / ``failed`` /
+                    # ``cancelled`` / ``dead_letter``) while preserving
+                    # non-terminal holds (``pending`` / ``processing``
+                    # / ``paused`` fail closed as before).
                     held_for_mission += 1
                     continue
 
