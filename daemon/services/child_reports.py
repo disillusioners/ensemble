@@ -427,11 +427,15 @@ Provide a concise summary:"""
             # the pending_count query, so this gate ALWAYS returns False in normal
             # cascade traffic — ``pending_count>=1``. This is INTENTIONALLY
             # conservative: the cascade lane's role is to defer and wait, NOT to
-            # be load-bearing for the terminal decision. The load-bearing gates are
-            # the emission-time re-check at :~950 (this module) and the mirror at
-            # :~765-771 (root lane, added Round 2). The message-completed signal
-            # is the event-driven path that re-evaluates the gate and ultimately
-            # transitions the instance to COMPLETED via the root lane.
+            # be load-bearing for the terminal decision. In normal traffic the
+            # load-bearing completion path is the ROOT lane — decision at :~825
+            # plus the emission-time mirror at :~870 (added Round 2) — reached via
+            # the existing message-completed signal. The cascade emission-time
+            # re-check at :~1069 is a race-window DEFENSIVE guard for the rare
+            # case where this cascade decision returns a non-None
+            # ``completed_parent_id`` (see comment at :~1057). The message-completed
+            # signal re-evaluates the gate event-driven (no polling) and
+            # ultimately transitions the instance to COMPLETED via the root lane.
             #
             # Test coverage: TestCascadeCompletionGate in
             # tests/job_queue/test_job_result_summary_and_gate.py exercises the
@@ -1055,12 +1059,22 @@ Provide a concise summary:"""
             # message-completed signal can finish the job properly.
             #
             # COUNCIL FINDING 1 (Round 2 — which gate is load-bearing):
-            # The emission-time gate HERE is the load-bearing check for the
-            # cascade completion path. It runs in a fresh session (so it sees
-            # the committed report row, not a staged one — unlike the cascade
-            # decision at :~421 which is intentionally conservative due to
-            # autoflush skew). On failure, the parent is downgraded back to
-            # WAITING_CHILDREN; the message-completed signal will re-evaluate.
+            # This emission-time gate is RACE-WINDOW DEFENSIVE, not load-bearing
+            # for normal cascade traffic. In normal traffic the cascade decision
+            # at :~439 ALWAYS returns ``completed_parent_id=None`` (autoflush
+            # skew — the staged READY report from ``_create_completion_report``
+            # is visible to ``pending_count``), so this block is unreachable
+            # and the comment at :~423 documents that intentional conservatism.
+            # This gate fires only in a narrow race window where the cascade
+            # decision returned a non-None ``completed_parent_id`` (e.g. some
+            # sequencing quirk made the staged report invisible at decision
+            # time); when it does, the fresh-session re-check defends against
+            # a concurrent child completion regressing the predicate between
+            # decision and publish. On failure the parent is downgraded back
+            # to WAITING_CHILDREN; the message-completed signal will
+            # re-evaluate. The load-bearing completion path for BOTH lanes in
+            # normal traffic is the ROOT lane via the message-completed signal
+            # (:~827 decision + :~870 mirror).
             #
             # FAIL-OPEN wrap: the gate call itself must not crash the emit.
             # If the gate raises (corrupt DB row, etc.), log and proceed to
