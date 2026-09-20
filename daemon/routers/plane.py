@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from daemon.repositories import SQLModelProjectRepository
 from daemon.services.plane_sync_service import PlaneSyncService
@@ -122,8 +122,10 @@ async def sync_project(
     loop, so we let the coroutine drive natively.
     """
     # Feature gate: 503 with a clear disabled reason when the
-    # integration is off. We deliberately do NOT mutate project state
-    # here (no ``error`` marking) — the watchdog's no-key boot log
+    # integration is off — either by the PLANE_SYNC_ENABLED kill-switch
+    # (explicitly user-requested, sanctioned 2026-09-20) or by missing
+    # env config. We deliberately do NOT mutate project state
+    # here (no ``error`` marking) — the watchdog's boot log
     # line carries the same message.
     if not PlaneSyncService.is_available():
         raise HTTPException(
@@ -131,8 +133,8 @@ async def sync_project(
             detail=PlaneProjectSyncErrorResponse(
                 error="plane_disabled",
                 project_id=project_id,
-                message="Plane integration not configured "
-                "(PLANE_API_KEY not set). The watchdog will re-drive "
+                message=f"Plane integration {PlaneSyncService.unavailable_reason()}. "
+                "The watchdog will re-drive "
                 "this project once the integration is enabled.",
             ).model_dump(),
         )

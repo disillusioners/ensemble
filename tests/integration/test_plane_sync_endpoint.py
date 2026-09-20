@@ -115,6 +115,29 @@ class TestPlaneSyncEndpoint:
             records = repo.list_metadata_records(session, project.project_id)
         assert all(r.meta_key != PLANE_SYNC_STATE_METADATA_KEY for r in records)
 
+    def test_kill_switch_returns_503(
+        self, client, repo, mock_plane_env, monkeypatch
+    ):
+        """PLANE_SYNC_ENABLED=false → 503 with the SAME disabled shape,
+        message naming the kill-switch; no state mutation (Phase 4)."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+
+        project = repo.create(name="KillSwitchEndpointProj")
+
+        response = client.post(f"/api/plane/sync/{project.project_id}")
+        assert response.status_code == 503
+        body = response.json()
+        detail = body["detail"]
+        assert detail["error"] == "plane_disabled"
+        assert detail["project_id"] == project.project_id
+        assert "PLANE_SYNC_ENABLED" in detail["message"]
+        assert "kill-switch" in detail["message"]
+
+        # No state mutation.
+        with Session(repo.engine) as session:
+            records = repo.list_metadata_records(session, project.project_id)
+        assert all(r.meta_key != PLANE_SYNC_STATE_METADATA_KEY for r in records)
+
     def test_unknown_project_returns_404(self, client, mock_plane_env):
         """Unknown project_id → 404 with a stable error code."""
         response = client.post("/api/plane/sync/nonexistent-uuid")

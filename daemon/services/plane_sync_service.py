@@ -43,7 +43,11 @@ The sync engine runs on a 4-state machine::
 * ``syncing`` is written at the START of every attempt (the
   re-entrancy guard; HTTP endpoint returns 409 if a sync is already
   in flight). It is rolled back to ``error`` / ``linked`` / ``drift``
-  in the same flow.
+  in the same flow. The claim itself is a rowcount-guarded
+  conditional upsert (Phase 4) so concurrent claimers cannot both
+  win. A row stuck in ``syncing`` beyond
+  ``N x watchdog-interval`` is crash wreckage — the watchdog boot
+  sweep steals it back to ``error`` and re-drives (Phase 4).
 * ``drift`` is written when an attempt SUCCEEDS at the API level but
   identity-field comparison flags divergence (e.g. Plane has been
   edited out-of-band). The watchdog re-drives drift because the
@@ -59,6 +63,16 @@ Error contract
 a warning, and returns a structured result. The caller (HTTP router or
 agent tool) decides whether to surface the error to the user; the
 project itself is unaffected.
+
+Kill-switch (Phase 4)
+---------------------
+``PLANE_SYNC_ENABLED`` (default ON) is an explicitly user-requested
+integration kill-switch (sanctioned 2026-09-20) — the sanctioned
+exception to the no-flags policy. OFF produces the same surfaces as
+the no-key case across every sync-side consumer (endpoint 503,
+watchdog boot-log + no-op, create-hook no-op, tool ``disabled``) with
+NO error-state writes. The MCP plane server has an independent switch
+(``PLANE_MCP_ENABLED``) at ``daemon/mcp/builtin_servers/plane.py``.
 
 Re-drive idempotency (Phase 3 Step 4)
 -------------------------------------
@@ -85,6 +99,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -109,12 +124,37 @@ from daemon.constants import (
     PLANE_SYNC_STATE_SYNCED_ALIAS,
     PLANE_SYNC_STATE_SYNCING,
     PLANE_SYNC_STATES,
+    PLANE_SYNC_STATES_RETRYABLE,
+    PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS,
+    PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS,
+    PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS,
     PLANE_SYNCED_AT_METADATA_KEY,
 )
-from daemon.repositories.project.models import Project
+from daemon.repositories.project.models import Project, ProjectMetadataRecord
 from daemon.repositories.project.repository import SQLModelProjectRepository
 
 logger = logging.getLogger(__name__)
+
+
+def plane_sync_enabled() -> bool:
+    """Return False when ``PLANE_SYNC_ENABLED`` opts the REST sync path out.
+
+    ``PLANE_SYNC_ENABLED`` is an explicitly user-requested integration
+    kill-switch (sanctioned 2026-09-20, see Phase-4 mission report) — a
+    sanctioned exception to the project's no-flags policy (fix/flag
+    policy, enforced 7d5285aa). Default (unset) is enabled. Values
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive) disable;
+    any other non-empty value keeps the integration on.
+
+    This is the REST-sync side only (sync service + watchdog + POST
+    endpoint + create-hooks + agent tool). The MCP plane server has its
+    own independent switch (``PLANE_MCP_ENABLED``) at
+    ``daemon/mcp/builtin_servers/plane.py``.
+    """
+    raw = os.environ.get("PLANE_SYNC_ENABLED", "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
 
 
 def _now_iso() -> str:
@@ -309,12 +349,33 @@ class PlaneSyncService:
 
     @classmethod
     def is_available(cls) -> bool:
-        """Return True when the Plane integration is configured.
+        """Return True when the Plane integration is enabled AND configured.
 
-        Delegates to :meth:`PlaneHttpClient.is_available` so callers can
-        short-circuit before constructing the service.
+        Two gates, both must pass:
+
+        1. The ``PLANE_SYNC_ENABLED`` kill-switch (explicitly
+           user-requested integration kill-switch, sanctioned
+           2026-09-20 — see :func:`plane_sync_enabled`). Off → every
+           sync-side consumer (REST endpoint 503, watchdog boot-log +
+           no-op, create-hook no-op, agent tool disabled) no-ops with
+           NO error-state writes, exactly matching the no-key
+           discipline.
+        2. The client env config (``PLANE_BASE_URL`` +
+           ``PLANE_API_KEY``) via :meth:`PlaneHttpClient.is_available`.
+
+        Use :meth:`unavailable_reason` for a human-readable reason when
+        this returns False.
         """
-        return PlaneHttpClient.is_available()
+        return cls.unavailable_reason() is None
+
+    @classmethod
+    def unavailable_reason(cls) -> str | None:
+        """Return a human-readable unavailability reason, or None when up."""
+        if not plane_sync_enabled():
+            return "disabled by kill-switch (PLANE_SYNC_ENABLED=false)"
+        if not PlaneHttpClient.is_available():
+            return "not configured (PLANE_BASE_URL / PLANE_API_KEY not set)"
+        return None
 
     def _get_client(self) -> PlaneHttpClient | None:
         """Resolve the HTTP client, defaulting to ``PlaneHttpClient.create``.
@@ -358,18 +419,7 @@ class PlaneSyncService:
             )
             return False
 
-    def _mark_error(self, project_id: str) -> None:
-        """Record an ``error`` sync state — best-effort, never raises.
-
-        Increments ``plane_attempt_count`` (cap at the watchdog's
-        ``PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS`` ceiling so the counter never
-        grows unboundedly across long outages). Writes ``plane_last_error``
-        and ``plane_last_attempt`` alongside the state transition.
-        """
-        self._set_metadata(project_id, PLANE_SYNC_STATE_METADATA_KEY, PLANE_SYNC_STATE_ERROR)
-        self._set_metadata(project_id, PLANE_SYNCED_AT_METADATA_KEY, _now_iso())
-
-    def _bump_attempt_count(self, project_id: str) -> int:
+    def _bump_attempt_count(self, project_id: str) -> int | None:
         """Increment ``plane_attempt_count`` (saturating).
 
         Reads the current value, increments, writes back. Saturates at
@@ -378,15 +428,31 @@ class PlaneSyncService:
         treats anything at-or-above as "maxed"; we keep the cap in the
         data so the next attempt is forced through the operator path).
 
-        Returns the post-increment value (clamped).
-        """
-        from daemon.constants import PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS
+        Returns:
+            The post-increment value (clamped), or ``None`` when the
+            READ failed. A failed read is ambiguous (the stored counter
+            may hold any value) — returning ``None`` makes the caller
+            SKIP the write-back entirely, PRESERVING the stored value
+            instead of silently resetting it to 1. (Phase-4 advisory j:
+            the old code returned 0 on read failure, so the write-back
+            ``min(0+1, MAX)`` clobbered a stored counter of e.g. 4 back
+            down to 1 — the quarantine ceiling became unreachable on
+            any read hiccup.)
 
+        Note: the returned value is advisory telemetry for the response
+        body; the durable state is the metadata row itself.
+        """
         try:
             with Session(self._repo.engine) as session:
                 records = self._repo.list_metadata_records(session, project_id)
-        except Exception:
-            return 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plane sync: failed to read attempt count for %s — "
+                "preserving stored value (no increment): %s",
+                project_id,
+                exc,
+            )
+            return None
         current = _coerce_int(
             _read_metadata_value(records, PLANE_ATTEMPT_COUNT_METADATA_KEY),
             default=0,
@@ -433,30 +499,71 @@ class PlaneSyncService:
         }
 
     def claim_sync_slot(self, project_id: str) -> bool:
-        """Atomically transition the row to ``syncing`` for re-entrancy control.
+        """Atomically claim the sync slot (rowcount-guarded CAS).
 
-        Returns True when the caller now OWNS the sync slot. Returns False
-        when the row is already in ``syncing`` state — the caller should
-        return 409 (HTTP) or skip the work (watchdog).
+        Phase-4 advisory a(1): the claim is a SINGLE conditional
+        upsert — INSERT the ``plane_sync_state="syncing"`` record, or on
+        conflict UPDATE it only ``WHERE meta_value IS DISTINCT FROM
+        'syncing'`` — so a concurrent watchdog tick + manual POST can
+        never both claim. The previous read-check-write sequence had a
+        TOCTOU window: two claimers could both read a non-syncing state
+        and both proceed. The winner is now decided by the DB: exactly
+        one claimer's statement affects a row.
 
-        The CAS is "read current, write new" — safe enough here because
-        both Plane HTTP calls and the DB row lock make the window tight
-        in practice; the watchdog tick is the only "real" concurrent
-        caller (and it never spawns while a manual sync is in flight —
-        the manual endpoint's caller releases the slot via
-        :meth:`release_sync_slot`). The state-write goes through
-        ``_set_metadata`` so it remains best-effort — a DB hiccup does
-        not block the actual sync.
+        Returns:
+            True when the caller now OWNS the sync slot (row inserted
+            or updated). False when the row is already in ``syncing``
+            (another caller holds the slot — the HTTP caller surfaces
+            409, the watchdog skips) or when the guard write itself
+            failed (fail-closed: without a durable claim the sync must
+            not run, or a crash mid-sync could strand the row wedged).
+
+        The guard write stays inside a committed transaction; the
+        follow-up ``plane_last_attempt`` stamp after a successful claim
+        remains best-effort (crash-mid-sync then leaves an observable
+        trail via the ``syncing`` state + boot-sweep recovery).
         """
-        meta = self.get_state_metadata(project_id)
-        state = normalize_state(meta.get(PLANE_SYNC_STATE_METADATA_KEY))
-        if state == PLANE_SYNC_STATE_SYNCING:
+        now = _now_iso()
+        try:
+            with Session(self._repo.engine) as session:
+                insert_fn = self._repo._get_dialect_insert(session)
+                stmt = insert_fn(ProjectMetadataRecord).values(
+                    project_id=project_id,
+                    meta_key=PLANE_SYNC_STATE_METADATA_KEY,
+                    meta_value=PLANE_SYNC_STATE_SYNCING,
+                    created_at=now,
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["project_id", "meta_key"],
+                    set_={
+                        "meta_value": PLANE_SYNC_STATE_SYNCING,
+                        "updated_at": now,
+                    },
+                    # Evaluated against the EXISTING row: only steal the
+                    # slot when it is not already held ("syncing").
+                    # IS DISTINCT FROM (not !=) so a NULL-valued row
+                    # (should not happen for the state key, but be safe)
+                    # is claimable rather than wedged forever.
+                    where=(
+                        ProjectMetadataRecord.meta_value.is_distinct_from(
+                            PLANE_SYNC_STATE_SYNCING
+                        )
+                    ),
+                )
+                result = session.execute(stmt)
+                session.commit()
+                claimed = bool(result.rowcount)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plane sync: claim_sync_slot guard write failed for %s — "
+                "refusing to sync (fail-closed): %s",
+                project_id,
+                exc,
+            )
             return False
-        self._set_metadata(
-            project_id,
-            PLANE_SYNC_STATE_METADATA_KEY,
-            PLANE_SYNC_STATE_SYNCING,
-        )
+        if not claimed:
+            return False
         # Best-effort: stamp the attempt timestamp up front so even a
         # crash-mid-sync leaves an observable trail for the next boot.
         self._set_metadata(
@@ -498,6 +605,91 @@ class PlaneSyncService:
                 last_error[:500],
             )
 
+    def is_stale_syncing(
+        self,
+        project_id: str,
+        *,
+        stale_after_seconds: int,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return True when the row looks wedged in ``syncing``.
+
+        A row whose ``plane_last_attempt`` is older than
+        ``stale_after_seconds`` was most likely claimed by a process
+        that died mid-sync (crash / kill -9 between claim and release):
+        the slot-claim contract guarantees a live sync releases its own
+        slot in the same flow, so a syncing row with an ancient attempt
+        timestamp is a crash-recovery wedge (the class the Phase-3
+        incident history is full of).
+
+        A missing / unparseable ``plane_last_attempt`` counts as stale —
+        the claim stamps the attempt immediately after taking the slot,
+        so absence implies the claimer died between the two writes.
+        """
+        meta = self.get_state_metadata(project_id)
+        state = normalize_state(meta.get(PLANE_SYNC_STATE_METADATA_KEY))
+        if state != PLANE_SYNC_STATE_SYNCING:
+            return False
+        last_attempt_raw = meta.get(PLANE_LAST_ATTEMPT_METADATA_KEY)
+        if not last_attempt_raw:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(str(last_attempt_raw))
+        except (TypeError, ValueError):
+            return True
+        now_dt = now if now is not None else datetime.now(timezone.utc)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return (now_dt - last_dt).total_seconds() > stale_after_seconds
+
+    def fail_stale_syncing(self, project_id: str) -> bool:
+        """Steal a wedged ``syncing`` slot by marking it ``error`` (CAS).
+
+        Phase-4 advisory a(2) half of the boot-sweep recovery: the
+        caller (watchdog sweep) re-drives the row in the same tick — a
+        row marked ``error`` here is immediately retryable, so the sweep
+        feeds it straight back through :meth:`sync_project`.
+
+        Rowcount-guarded like :meth:`claim_sync_slot`: the conditional
+        UPDATE only fires ``WHERE meta_value == 'syncing'``, so a sync
+        that came ALIVE between the staleness check and this steal (slow
+        but healthy attempt) is not clobbered — its own release wins.
+
+        Returns True when this caller marked the row ``error``.
+        """
+        now = _now_iso()
+        try:
+            with Session(self._repo.engine) as session:
+                insert_fn = self._repo._get_dialect_insert(session)
+                stmt = insert_fn(ProjectMetadataRecord).values(
+                    project_id=project_id,
+                    meta_key=PLANE_SYNC_STATE_METADATA_KEY,
+                    meta_value=PLANE_SYNC_STATE_ERROR,
+                    created_at=now,
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["project_id", "meta_key"],
+                    set_={
+                        "meta_value": PLANE_SYNC_STATE_ERROR,
+                        "updated_at": now,
+                    },
+                    where=(
+                        ProjectMetadataRecord.meta_value
+                        == PLANE_SYNC_STATE_SYNCING
+                    ),
+                )
+                result = session.execute(stmt)
+                session.commit()
+                return bool(result.rowcount)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Plane sync: stale-syncing recovery write failed for %s: %s",
+                project_id,
+                exc,
+            )
+            return False
+
     def is_retry_eligible(self, project_id: str, *, now: datetime | None = None) -> bool:
         """Return True when the project's backoff window has elapsed.
 
@@ -510,13 +702,6 @@ class PlaneSyncService:
           exponential-backoff formula
           ``min(MAX, BASE * 2 ** (count - 2))``.
         """
-        from daemon.constants import (
-            PLANE_SYNC_STATES_RETRYABLE,
-            PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS,
-            PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS,
-            PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS,
-        )
-
         meta = self.get_state_metadata(project_id)
         state = normalize_state(meta.get(PLANE_SYNC_STATE_METADATA_KEY))
         if state not in PLANE_SYNC_STATES_RETRYABLE:
@@ -556,8 +741,10 @@ class PlaneSyncService:
 
         The algorithm (Phase 3 expansion):
 
-        1. **Feature gate** — short-circuit cleanly when env vars are missing
-           (returns ``status="disabled"`` without touching project state).
+        1. **Feature gate** — short-circuit cleanly when the
+            ``PLANE_SYNC_ENABLED`` kill-switch is off or env vars are
+            missing (returns ``status="disabled"`` without touching
+            project state).
         2. **Load project** — 404 / not-found returns ``status="error"``.
         3. **Re-entrancy claim** — atomically transition to ``syncing``;
            a row already in ``syncing`` returns ``status="syncing"``
@@ -595,18 +782,22 @@ class PlaneSyncService:
             Dict with ``status``
             (``"linked"`` | ``"drift"`` | ``"error"`` | ``"syncing"`` |
             ``"disabled"`` | ``"not_found"``), ``action``
-            (``"created"`` | ``"updated"`` | ``"recreated"``), and
+            (``"created"`` | ``"updated"``), and
             ``plane_project_id`` when known.
         """
-        # Feature gate — short-circuit cleanly when env vars are missing.
-        # Per Phase-3 Step 3 no-key behavior: we MUST NOT mark projects
+        # Feature gate — short-circuit cleanly when the PLANE_SYNC_ENABLED
+        # kill-switch is off (Phase 4; explicitly user-requested,
+        # sanctioned 2026-09-20) or env vars are missing. Per Phase-3
+        # Step 3 no-key behavior: we MUST NOT mark projects
         # ``error`` merely because the integration is off. A disabled
-        # return carries no state mutation.
+        # return carries no state mutation. (Primary gates live at the
+        # consumers via ``is_available()``; this is defense-in-depth for
+        # direct callers.)
         client = self._get_client()
-        if client is None:
+        if client is None or not plane_sync_enabled():
             return {
                 "status": "disabled",
-                "message": "Plane sync not configured (PLANE_API_KEY not set)",
+                "message": f"Plane sync {self.unavailable_reason()}",
             }
 
         # 1. Load project.
@@ -666,12 +857,9 @@ class PlaneSyncService:
                 # sync attempt was interrupted AFTER Plane had already
                 # created the row but BEFORE the metadata write landed;
                 # the listing path recovers that case.
-                plane_id, action = await self._create_or_adopt(
+                plane_id, action, plane_response = await self._create_or_adopt(
                     client, project
                 )
-                # CREATE has no prior Plane state to compare against,
-                # so drift detection is trivially "no drift".
-                plane_response = {}
         except PlaneAuthError as exc:
             logger.warning(
                 "Plane sync: auth error syncing project %s: %s",
@@ -785,19 +973,21 @@ class PlaneSyncService:
         # re-drive (the corrective sync is what heals drift).
         self._reset_attempt_count(project_id)
 
-        # Phase 3 Step 2 — drift check on UPDATE paths. CREATE has no
-        # prior Plane state to compare against, so it is always "linked"
-        # (a fresh project trivially agrees with itself).
+        # Phase 3 Step 2 — drift check on UPDATE paths (the UPDATE path
+        # and the ADOPT path both land here with action="updated").
+        # A fresh CREATE carries no prior Plane state to compare against
+        # (``plane_response`` is ``{}``), so it is always "linked" (a
+        # fresh project trivially agrees with itself).
         #
         # ``plane_response`` is the dict Plane returned from the UPDATE
-        # (or the fallback CREATE on 404-recovery) — no extra HTTP call
-        # needed. The drift check is intentionally lightweight: only
-        # name + description are compared (the identity fields the v1
-        # sync owns). A divergence here is logged + flagged but does
-        # NOT fail the sync — the API call succeeded, so the row is
-        # recoverable on the next corrective attempt.
+        # — no extra HTTP call needed. The drift check is intentionally
+        # lightweight: only name + description are compared (the
+        # identity fields the v1 sync owns). A divergence here is
+        # logged + flagged but does NOT fail the sync — the API call
+        # succeeded, so the row is recoverable on the next corrective
+        # attempt.
         new_state = PLANE_SYNC_STATE_LINKED
-        if action in ("updated", "recreated") and _is_drift(project, plane_response):
+        if action == "updated" and _is_drift(project, plane_response):
             new_state = PLANE_SYNC_STATE_DRIFT
 
         if not self._set_metadata(
@@ -885,7 +1075,7 @@ class PlaneSyncService:
         self,
         client: PlaneHttpClient,
         project: Project,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, dict[str, Any]]:
         """CREATE path with duplicate-by-name avoidance.
 
         Before creating, lists all Plane projects in the workspace and
@@ -893,7 +1083,15 @@ class PlaneSyncService:
         ID (UPDATE path) — this prevents duplicates when the same
         Ensemble project is re-synced after the metadata record was lost.
 
-        Returns ``(plane_id, "created" | "updated")``.
+        Returns:
+            ``(plane_id, action, plane_response)``. ``action`` is
+            ``"created"`` | ``"updated"``. ``plane_response`` is the
+            dict Plane returned for the adopt-path UPDATE (drift-check
+            input — Phase-4 advisory i: adoption previously discarded
+            it, so a Plane-side divergence at adoption time was
+            invisible and the row was mis-marked ``linked``); the
+            fresh-CREATE path returns ``{}`` (no prior Plane state to
+            compare against — the fresh row trivially agrees).
         """
         try:
             plane_projects = await client.list_projects()
@@ -909,12 +1107,16 @@ class PlaneSyncService:
                 existing_id,
                 project.name,
             )
-            await client.update_project(
+            response = await client.update_project(
                 existing_id,
                 name=project.name,
                 description=project.description,
             )
-            return existing_id, "updated"
+            return (
+                existing_id,
+                "updated",
+                response if isinstance(response, dict) else {},
+            )
 
         created = await client.create_project(
             name=project.name,
@@ -930,7 +1132,7 @@ class PlaneSyncService:
             project.project_id,
             new_id,
         )
-        return str(new_id), "created"
+        return str(new_id), "created", {}
 
 
 def _find_plane_id_by_name(
@@ -996,7 +1198,9 @@ def _is_drift(project: Project, plane_response: dict[str, Any]) -> bool:
         plane_desc = str(plane_desc_raw).strip()
         ens_desc = (project.description or "").strip()
         if plane_desc != ens_desc:
-            # Special case: both are whitespace-empty → agreement.
+            # Both sides are already stripped here, so whitespace-only
+            # differences were normalized away — reaching this branch
+            # means the CONTENT genuinely differs → drift.
             return True
     return False
 
@@ -1009,11 +1213,14 @@ def compute_backoff_seconds(
 ) -> float:
     """Return the per-project backoff window in seconds.
 
-    Formula: ``min(cap, base * 2 ** max(0, attempt_count - 2))``.
+    Real behavior: ``attempt_count <= 1`` returns ``0.0`` IMMEDIATELY
+    (early-out before the formula — first/second failure retry on the
+    next tick, no backoff). For ``attempt_count >= 2`` the window is
+    ``min(cap, base * 2 ** (attempt_count - 2))``.
 
     Per :data:`daemon.constants.PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS`
     defaults this yields:
-      - count=0/1 → 0s (no backoff; treat as immediate)
+      - count=0/1 → 0.0 (immediate — early-out, formula not applied)
       - count=2 → base (60s)
       - count=3 → 2*base (120s)
       - count=4 → 4*base (240s)
@@ -1035,16 +1242,21 @@ def iter_projects_in_states(
     *,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
-    """Return ``{project_id, name}`` for projects whose state is in ``states``.
+    """Return ``{project_id, name, state}`` for projects in ``states``.
 
     Single pass over the repo. Used by the watchdog to discover
-    retryable projects without per-row metadata scans. The states
-    filter is applied client-side because the repo does not expose a
-    indexed metadata-key query.
+    retryable and stale-syncing projects without per-row metadata
+    scans. The states filter is applied client-side because the repo
+    does not expose an indexed metadata-key query.
+
+    Each returned dict carries the row's NORMALIZED state
+    (:func:`normalize_state` output) so a caller that sweeps multiple
+    state classes in one walk can partition the results without a
+    second metadata read.
 
     The ``limit`` bounds the sweep to a sane upper bound — at most a
-    few thousand projects. When the limit is reached the sweep logs a
-    warning and the next tick picks up the rest.
+    few thousand projects; rows beyond the limit are picked up on the
+    next sweep tick.
     """
     projects = repo.list_projects(limit=limit)
     matching: list[dict[str, Any]] = []
@@ -1055,11 +1267,13 @@ def iter_projects_in_states(
         except Exception:
             continue
         raw_state = _read_metadata_value(records, PLANE_SYNC_STATE_METADATA_KEY)
-        if normalize_state(raw_state) in states:
+        normalized = normalize_state(raw_state)
+        if normalized in states:
             matching.append(
                 {
                     "project_id": project.project_id,
                     "name": project.name,
+                    "state": normalized,
                 }
             )
     return matching

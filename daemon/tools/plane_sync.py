@@ -95,7 +95,7 @@ Returns:
     Dictionary with:
       - ``status``: ``"synced"`` | ``"error"`` | ``"disabled"`` |
         ``"rate_limited"``
-      - ``action``: ``"created"`` | ``"updated"`` | ``"recreated"`` |
+      - ``action``: ``"created"`` | ``"updated"`` |
         ``None`` (on error/disabled/rate_limited)
       - ``plane_project_id``: Plane's UUID for the project (when synced)
       - ``synced_at``: ISO8601 timestamp of the sync
@@ -226,7 +226,10 @@ def create_plane_sync_tools(
         if not PlaneSyncService.is_available():
             return {
                 "status": "disabled",
-                "message": "Plane sync not configured (PLANE_API_KEY not set)",
+                "message": (
+                    "Plane sync disabled — "
+                    f"{PlaneSyncService.unavailable_reason()}"
+                ),
             }
 
         service = PlaneSyncService(store)

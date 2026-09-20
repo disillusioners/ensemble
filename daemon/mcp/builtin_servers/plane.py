@@ -19,10 +19,12 @@ without restarting with a different env:
 - ``PLANE_MCP_WORKSPACE_SLUG`` — workspace identifier sent as the
   ``x-workspace-slug`` header.
 
-Availability is gated entirely by ``PLANE_MCP_URL`` + ``PLANE_MCP_API_KEY``:
-when both are set the server registers; when either is absent the daemon
-silently skips it (no DB record, no connection). There is no separate
-disable toggle — absence of the required env vars IS the disable mechanism.
+Availability is gated by ``PLANE_MCP_ENABLED`` (kill-switch, default
+on) AND ``PLANE_MCP_URL`` + ``PLANE_MCP_API_KEY``: when all three pass
+the server registers; when the kill-switch is off — or either env var
+is absent — the daemon silently skips it (no DB record, no connection).
+``PLANE_MCP_ENABLED=false`` emits a ONE-line notice at the first
+availability check (which is the bootstrap registration pass).
 
 Resilience (Phase 4)
 --------------------
@@ -55,11 +57,36 @@ Tunable via env vars (overrides the defaults below):
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.config import _sanitize_quoted_url, _strip_wrapping_quotes
+
+logger = logging.getLogger(__name__)
+
+
+def _mcp_kill_switch_enabled() -> bool:
+    """Return False when ``PLANE_MCP_ENABLED`` opts the MCP plane out.
+
+    ``PLANE_MCP_ENABLED`` is an explicitly user-requested integration
+    kill-switch (sanctioned 2026-09-20, see Phase-4 mission report) — a
+    sanctioned exception to the project's no-flags policy. Default
+    (unset) is enabled. Values ``0`` / ``false`` / ``no`` / ``off``
+    (case-insensitive) disable. Deliberately mirrors the semantics of
+    the REST-sync switch (``PLANE_SYNC_ENABLED``) so operators use one
+    vocabulary for both; the two switches are INDEPENDENT (MCP vs
+    REST).
+    """
+    raw = os.environ.get("PLANE_MCP_ENABLED", "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+# One-shot flag for the kill-switch boot log (see ``_log_kill_switch_once``).
+_kill_switch_log_emitted: bool = False
 
 
 # Default Plane fallback message (returned as a JSON string to the agent
@@ -234,19 +261,57 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @classmethod
     def is_available(cls) -> bool:
-        """Plane is available only when BOTH URL and API key are set.
+        """Plane is available only when enabled AND BOTH URL and API key are set.
+
+        ``PLANE_MCP_ENABLED`` is an explicitly user-requested integration
+        kill-switch (sanctioned 2026-09-20, see Phase-4 mission report) —
+        a sanctioned exception to the project's no-flags policy. Default
+        (unset) is enabled; ``0`` / ``false`` / ``no`` / ``off``
+        (case-insensitive) disables the MCP plane integration at this,
+        the OUTERMOST availability/registration seam — no DB record is
+        created and no tool is discovered. It deliberately does NOT
+        touch any session/connection-layer code.
 
         The workspace slug is read inside ``get_base_config`` and its
         absence surfaces as a runtime header error — but a missing URL
         or API key means the server cannot function at all, so we refuse
         to register it (no DB record, no tool discovery).
 
-        There is intentionally NO disable toggle for this server:
-        absence of the required env vars IS the disable mechanism.
+        Historical note: the module docstring used to claim "there is
+        intentionally NO disable toggle" — superseded 2026-09-20 by the
+        sanctioned ``PLANE_MCP_ENABLED`` switch.
         """
+        if not _mcp_kill_switch_enabled():
+            cls._log_kill_switch_once()
+            return False
         url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
         api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
         return bool(url) and bool(api_key)
+
+    @classmethod
+    def _log_kill_switch_once(cls) -> None:
+        """Emit ONE log line per process when the kill-switch is OFF.
+
+        Surface choice (Phase 4): the bootstrap layer
+        (``InstanceManager._bootstrap_builtin_servers``) already logs a
+        generic skip line for unavailable built-ins, but its wording
+        ("missing environment configuration") would be FALSE for a
+        kill-switch-off — the config may be present while the switch is
+        deliberately off. Rather than deep-edit MCP bootstrap code for
+        a per-reason message, the precise one-line notice is logged
+        here, lazily at the first availability check (which IS a boot
+        anchor — bootstrap calls ``is_available()`` for every built-in
+        at daemon start). Module-level flag keeps it to ONE line per
+        process.
+        """
+        global _kill_switch_log_emitted
+        if _kill_switch_log_emitted:
+            return
+        _kill_switch_log_emitted = True
+        logger.info(
+            "Plane MCP server disabled by kill-switch "
+            "(PLANE_MCP_ENABLED=false) — builtin skipped at registration"
+        )
 
     def get_base_config(self) -> dict[str, Any]:
         """Return base configuration for the Plane streamable-http MCP.
