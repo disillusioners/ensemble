@@ -30,9 +30,11 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
 
+from daemon.clients.plane_http_client import PlaneAPIError
 from daemon.constants import (
     PLANE_ATTEMPT_COUNT_METADATA_KEY,
     PLANE_LAST_ATTEMPT_METADATA_KEY,
+    PLANE_LAST_ERROR_METADATA_KEY,
     PLANE_PROJECT_ID_METADATA_KEY,
     PLANE_SYNC_STATE_ERROR,
     PLANE_SYNC_STATE_DRIFT,
@@ -519,3 +521,206 @@ class TestAttemptCounterPreservation:
         assert result["status"] == "error"
         assert result["attempt"] is None
         assert calls["n"] == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wave-2 advisories — early-return slot release + list-failure guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEarlyReturnSlotRelease:
+    """Wave-2 advisory: when ``sync_project`` early-returns while the
+    CALLER holds the slot (``claim_slot=False`` — the HTTP router's
+    pattern), the slot MUST be released. The old code only released on
+    the success/error path through the create/update try/except, leaving
+    the row wedged in ``syncing`` for
+    ``STALE_SYNCING_INTERVAL_MULTIPLIER x interval`` (default 2 x 300s =
+    600s) waiting for the stale-steal pass to heal it.
+
+    The pre-claim ``plane_sync_state`` is unknown at the early-return
+    points (the metadata read happens AFTER them) — ``error`` with
+    ``plane_last_error`` set is the documented fallback (and the
+    watchdog retry pass is happy to re-drive an ``error`` row)."""
+
+    def test_disabled_path_releases_claim(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """``PLANE_SYNC_ENABLED=false`` + ``claim_slot=False`` ⇒ row
+        leaves ``syncing`` immediately (NOT wedged for the
+        stale-steal window)."""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="WedgeOnDisabled")
+        # Simulate the router having already claimed the slot.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_SYNCING,
+        )
+
+        mock = _make_client_mock()
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "must not be called on disabled early-return"
+            )
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(
+            svc.sync_project(project.project_id, claim_slot=False)
+        )
+
+        assert result["status"] == "disabled"
+        meta = _read_meta(repo, project.project_id)
+        # The slot was released to error; the row is no longer wedged.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        # plane_last_error explains why the row left syncing.
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        assert (
+            "claim_slot=False" in meta[PLANE_LAST_ERROR_METADATA_KEY]
+        )
+        # A subsequent claim succeeds immediately — the watchdog /
+        # operator path is unblocked.
+        assert svc.claim_sync_slot(project.project_id) is True
+
+    def test_not_found_path_releases_claim(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """Caller held the claim + project deleted between router's
+        existence check and sync_project's → row leaves ``syncing``
+        immediately rather than waiting for stale-steal."""
+        project = repo.create(name="DeletedMidSync")
+        # Simulate the router having already claimed the slot for a
+        # project that has since been removed.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_SYNCING,
+        )
+        # Replace the repo's ``get`` so sync_project sees the project
+        # as gone (the race: router's existence check passed earlier,
+        # but the project is deleted by the time sync_project's
+        # internal check fires).
+        def no_get(project_id):
+            return None
+
+        monkeypatch.setattr(repo, "get", no_get)
+
+        svc = PlaneSyncService(repo, http_client=_make_client_mock())
+        result = asyncio.run(
+            svc.sync_project(project.project_id, claim_slot=False)
+        )
+
+        assert result["status"] == "not_found"
+        meta = _read_meta(repo, project.project_id)
+        # Row left 'syncing' — would have been wedged without the fix.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        assert (
+            "claim_slot=False" in meta[PLANE_LAST_ERROR_METADATA_KEY]
+        )
+
+    def test_claim_slot_true_does_not_release_on_early_return(
+        self, repo, mock_plane_env, monkeypatch
+    ):
+        """``claim_slot=True`` is the watchdog / fire-and-forget
+        pattern — the slot is held by the SAME flow that owns the
+        early-return, and the claim hasn't fired yet at the
+        disabled/not_found early-return points. The fix MUST NOT
+        release a slot this caller never claimed. (Without the
+        ``if not claim_slot`` guard the watchdog would clobber a
+        stale read on a row it does not own.)"""
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "false")
+        project = repo.create(name="WatcherNoOp")
+        # Pre-seed state to 'error' — the watchdog's natural re-drive
+        # target. The fix must NOT touch it on the disabled early-return.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_ERROR,
+        )
+
+        mock = _make_client_mock()
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+        # claim_slot=True (default) — early-return leaves the row alone.
+        assert result["status"] == "disabled"
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+
+class TestIdempotencyListFailureGuard:
+    """Wave-2 advisory: a transient ``list_projects()`` failure MUST
+    NOT fall through to ``create_project``. The list is the only
+    idempotency guard before CREATE; if we cannot enumerate, creating
+    is unsafe (a Plane-side duplicate is the cost). The fix re-raises
+    ``PlaneAPIError`` so the outer ``sync_project``'s ``except
+    PlaneAPIError`` handler stamps ``error`` + bumps ``attempt_count``
+    + sets ``plane_last_error`` — the watchdog re-drives on the next
+    sweep."""
+
+    def test_list_failure_errors_out_without_calling_create(
+        self, repo, mock_plane_env
+    ):
+        """``list_projects`` raises ``PlaneAPIError`` ⇒ ``create_project``
+        is NEVER called; status is ``error``; the row is
+        retry-eligible (state=error, attempt>=1)."""
+        project = repo.create(name="ListFailProj")
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            side_effect=PlaneAPIError("plane list 503 transient")
+        )
+        mock.create_project = AsyncMock(
+            side_effect=AssertionError(
+                "must not CREATE when list_projects fails "
+                "(list is the idempotency guard)"
+            )
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        # No CREATE was attempted.
+        mock.create_project.assert_not_called()
+        # Slot released to error so it is retry-eligible.
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+        assert PLANE_LAST_ERROR_METADATA_KEY in meta
+        # The attempt counter was bumped (existing error-path contract).
+        assert PLANE_ATTEMPT_COUNT_METADATA_KEY in meta
+        assert int(meta[PLANE_ATTEMPT_COUNT_METADATA_KEY]) >= 1
+
+    def test_list_failure_does_not_wedge_existing_claim(
+        self, repo, mock_plane_env
+    ):
+        """A transient list failure during CREATE MUST release the
+        sync slot — if we never released, the row would be wedged
+        in ``syncing`` until the stale-steal pass recovered it.
+        Pre-seed ``error`` (a retryable state — the watchdog's
+        normal re-drive target) so the claim succeeds; the list
+        fails AFTER the claim, simulating the production race.
+        """
+        project = repo.create(name="SyncingListFail")
+        # Retryable state → watchdog's normal re-drive target → the
+        # claim acquires the slot cleanly.
+        _seed_state(
+            repo,
+            project.project_id,
+            PLANE_SYNC_STATE_METADATA_KEY,
+            PLANE_SYNC_STATE_ERROR,
+        )
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(
+            side_effect=PlaneAPIError("plane list 503 transient")
+        )
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        meta = _read_meta(repo, project.project_id)
+        # The outer PlaneAPIError handler released the slot — the row
+        # is no longer wedged in 'syncing'.
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR

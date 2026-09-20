@@ -795,6 +795,29 @@ class PlaneSyncService:
         # direct callers.)
         client = self._get_client()
         if client is None or not plane_sync_enabled():
+            if not claim_slot:
+                # Wave-2 advisory: the caller already holds the slot
+                # (``claim_slot=False`` path used by the HTTP router,
+                # which claims BEFORE invoking sync_project). If the
+                # caller released the slot on early-return, the row
+                # would stay wedged in ``syncing`` for up to
+                # ``STALE_SYNCING_INTERVAL_MULTIPLIER x interval``
+                # (default 2 x 300s = 600s) waiting for the watchdog's
+                # stale-steal pass to heal it. Release here to
+                # ``error`` so the next call is immediately retryable.
+                # Pre-claim state is unknown at this point (the
+                # ``prior_state`` capture happens AFTER this branch);
+                # ``error`` is the documented fallback (set
+                # ``plane_last_error`` so the operator log explains
+                # why the row is no longer ``syncing``).
+                self.release_sync_slot(
+                    project_id,
+                    PLANE_SYNC_STATE_ERROR,
+                    last_error=(
+                        "early-return: sync disabled while caller "
+                        "held the claim (claim_slot=False)"
+                    ),
+                )
             return {
                 "status": "disabled",
                 "message": f"Plane sync {self.unavailable_reason()}",
@@ -806,6 +829,22 @@ class PlaneSyncService:
             logger.warning(
                 "Plane sync: project %s not found — skipping", project_id
             )
+            if not claim_slot:
+                # Wave-2 advisory (mirror of the disabled-path branch
+                # above): release the slot the caller is holding so
+                # the next caller is not blocked behind a stale
+                # ``syncing`` row for the stale-steal window. Same
+                # rationale: pre-claim state is unknown here;
+                # ``error`` + ``plane_last_error`` is the documented
+                # fallback.
+                self.release_sync_slot(
+                    project_id,
+                    PLANE_SYNC_STATE_ERROR,
+                    last_error=(
+                        "early-return: project not found while "
+                        "caller held the claim (claim_slot=False)"
+                    ),
+                )
             return {
                 "status": "not_found",
                 "action": None,
@@ -1096,9 +1135,20 @@ class PlaneSyncService:
         try:
             plane_projects = await client.list_projects()
         except PlaneAPIError:
-            # If listing fails, fall through to a direct CREATE attempt.
-            # The error will surface there if it persists.
-            plane_projects = []
+            # Wave-2 advisory: a transient list failure MUST NOT fall
+            # through to CREATE — a duplicate Plane row can be produced
+            # when the project already exists in Plane but the listing
+            # call hit a transient error (Plane-side outage, rate
+            # limit, network blip). The list is the only idempotency
+            # guard before CREATE; if we cannot enumerate we MUST NOT
+            # create. Re-raise so the outer ``sync_project``'s
+            # ``except PlaneAPIError`` handler stamps ``error`` on the
+            # row (status='error', plane_last_error set,
+            # plane_attempt_count bumped) — the watchdog re-drives on
+            # the next sweep, retrying cleanly. The slot is released
+            # to ``error`` in that handler, so a wedged ``syncing``
+            # row is also healed here.
+            raise
 
         existing_id = _find_plane_id_by_name(plane_projects, project.name)
         if existing_id:
