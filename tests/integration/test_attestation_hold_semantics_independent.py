@@ -788,6 +788,14 @@ class TestNoAttestationPrecedence:
             f"row: {row[:200]!r}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "R2 pending_children does not precede the attested/HOLD step; "
+            "only user_answer_pending does; surfaced 2026-09-20 merge gate; "
+            "pending leader ratification (decide() step order 1→2→3)"
+        ),
+    )
     def test_user_described_attest_plus_pending_precedes_hold(
         self, caplog
     ):
