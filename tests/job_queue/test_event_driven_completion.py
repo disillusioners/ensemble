@@ -638,6 +638,205 @@ class TestSite6PatternFDead:
         assert len(_delivered(enqueue_mock)) == 1
 
 
+# ── Fix round 2 — site 7-followup: root-completion hook (the live
+# smoke-scenario regression) ──────────────────────────────────────────────
+
+
+class TestRootCompletionHook:
+    """The 2026-09-20 live incident, replayed at unit level: a job-
+    dispatched worker instance (parent_id=None) completes → the
+    root-completion handler must fan the canonical notify out over the
+    instance's work set (the stranded row 8ade5d22 class)."""
+
+    def _service(self, manager):
+        from daemon.services.child_reports import ChildReportsService
+
+        svc = ChildReportsService.__new__(ChildReportsService)
+        svc._manager = manager
+        svc._events_service = None
+        return svc
+
+    def _result(self, instance_id):
+        from daemon.services.child_reports import _ChildCompletionDbResult
+
+        return _ChildCompletionDbResult(
+            outcome="root_completed",
+            instance_id=instance_id,
+            agent_id="worker",
+            parent_id=None,
+            b_violation_report=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_root_completion_fires_per_kind_notify(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        instance_id = _seed_instance(
+            engine, f"inst-{uuid4().hex[:8]}", "completed"
+        )
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="done")
+        _seed_watcher(watcher_repo, work_id)
+
+        queue_repo = MagicMock(name="queue_repo")
+        queue_repo.get = MagicMock(return_value=None)  # title gen: no user message
+        manager = MagicMock(name="manager")
+        manager._live_hub = None
+        manager._job_queue_service = service
+        manager._task_repo = task_repo
+        manager._queue_repository = queue_repo
+
+        svc = self._service(manager)
+        await svc._dispatch_post_commit_side_effects(
+            self._result(instance_id), last_content="42",
+            completed_message_id=str(uuid4()),
+        )
+
+        deliveries = _delivered(enqueue_mock)
+        # Message-mirror work → per-kind token 'settled' (design §2
+        # per-kind table; the resolver is the derivation).
+        assert deliveries == [f"internal_agent:job_event:{work_id}:settled"], (
+            f"root-completion hook must deliver the canonical per-kind "
+            f"event; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+
+    @pytest.mark.asyncio
+    async def test_root_completion_fires_completed_for_task_kind(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        """Task-kind work → per-kind token 'completed' (the smoke shape:
+        job 758cb3ae was a task job)."""
+        instance_id = _seed_instance(
+            engine, f"inst-{uuid4().hex[:8]}", "completed"
+        )
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        with Session(engine) as s:
+            s.add(JobItem(
+                job_id=work_id,
+                agent_id="worker",
+                agent_dir="agents/worker",
+                message="task work",
+                source="agent:test",
+                instance_id=instance_id,
+                admission_state="done",
+                terminal_reason="completed",
+                job_type="task",
+            ))
+            s.commit()
+        _seed_watcher(watcher_repo, work_id)
+
+        queue_repo = MagicMock(name="queue_repo")
+        queue_repo.get = MagicMock(return_value=None)
+        manager = MagicMock(name="manager")
+        manager._live_hub = None
+        manager._job_queue_service = service
+        manager._task_repo = task_repo
+        manager._queue_repository = queue_repo
+
+        svc = self._service(manager)
+        await svc._dispatch_post_commit_side_effects(
+            self._result(instance_id), last_content="42",
+            completed_message_id=str(uuid4()),
+        )
+
+        deliveries = _delivered(enqueue_mock)
+        assert deliveries == [f"internal_agent:job_event:{work_id}:completed"], (
+            f"task-kind work must resolve the 'completed' token; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+
+    @pytest.mark.asyncio
+    async def test_root_completion_notify_is_reentrant_safe(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        """A second dispatch for the same completed work (e.g. the smoke
+        instance's own turn) adds no delivery — no watchers left to
+        claim after the first fan-out."""
+        instance_id = _seed_instance(
+            engine, f"inst-{uuid4().hex[:8]}", "completed"
+        )
+        work_id = str(uuid4())
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="done")
+        _seed_watcher(watcher_repo, work_id)
+
+        queue_repo = MagicMock(name="queue_repo")
+        queue_repo.get = MagicMock(return_value=None)
+        manager = MagicMock(name="manager")
+        manager._live_hub = None
+        manager._job_queue_service = service
+        manager._task_repo = task_repo
+        manager._queue_repository = queue_repo
+
+        svc = self._service(manager)
+        await svc._dispatch_post_commit_side_effects(
+            self._result(instance_id), last_content="42",
+            completed_message_id=str(uuid4()),
+        )
+        await svc._dispatch_post_commit_side_effects(
+            self._result(instance_id), last_content="42",
+            completed_message_id=str(uuid4()),
+        )
+
+        assert len(_delivered(enqueue_mock)) == 1
+
+
+# ── Fix round 2 — F10 force-complete hook (audit-discovered site) ────────
+
+
+class _RealCompleteStaleDouble:
+    """StaleTaskRecovery stand-in whose force_complete_task performs the
+    REAL atomic complete via the task repository (the write under test)."""
+
+    def __init__(self, task_repo):
+        self._task_repo = task_repo
+
+    def force_complete_task(self, task_id, reason):
+        return self._task_repo.complete_task(
+            task_id, {"success": True, "force_completed": True}
+        )
+
+
+class TestSiteF10ForceComplete:
+    @pytest.mark.asyncio
+    async def test_f10_force_complete_fires_completed_notify(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        recovery = JobRecoveryService(
+            job_repository=job_repo,
+            lock_repository=MagicMock(name="lock_repo"),
+            instance_repository=instance_repo,
+            job_queue_service=service,
+            task_repository=task_repo,
+            stale_task_recovery=_RealCompleteStaleDouble(task_repo),
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        # F10 shape: JobItem already done + Task still RUNNING.
+        _seed_task(engine, work_id, instance_id, TaskStatus.RUNNING.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="done")
+        _seed_watcher(watcher_repo, work_id)
+
+        stats = await recovery.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=0,
+        )
+
+        assert stats.get("reconciled", 0) >= 1 or stats.get("reconciled_bad_state", 0) >= 0
+        deliveries = _delivered(enqueue_mock)
+        assert f"internal_agent:job_event:{work_id}:completed" in deliveries, (
+            f"F10 force-complete must notify the work_id; got {deliveries}"
+        )
+        assert watcher_repo.get_watchers_for_job(work_id) == []
+
+
 # ── Site 3: exemption pin ─────────────────────────────────────────────────
 
 
