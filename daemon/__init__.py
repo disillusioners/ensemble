@@ -1,3 +1,3 @@
 """Persistent Multi-Session Agent Daemon"""
 
-__version__ = "0.13.6"
+__version__ = "0.13.7"
