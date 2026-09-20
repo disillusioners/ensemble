@@ -44,7 +44,10 @@ Architecture:
     (returns 0). The caller's own in-session gate remains the authoritative
     decision point.
 """
-
+# DEFERRED ANNOTATIONS: the __init__ signature uses forward-ref string unions
+# (e.g. "JobSystemConfig" | None) that raise TypeError at class-definition time
+# on Python < 3.14 (PEP 649 lazy annotations). Deferring keeps this module
+# importable on the 3.13 venv so the test suite can collect it.
 from __future__ import annotations
 
 import asyncio
@@ -66,6 +69,7 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.completion_content import get_last_assistant_message
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.messaging_types import _assert_linkage_contract
@@ -945,6 +949,42 @@ class JobFeedbackObserver:
                 f"{work_id[:8]}...: {type(e).__name__}: {e} — "
                 "treating as 'no Task-row confirmation' (conservative: "
                 "skip finalize to avoid the C1 data-loss bug)"
+            )
+            return None
+
+    async def _extract_result_summary(self, instance_id: str) -> str | None:
+        """Best-effort extraction of the instance's last assistant message.
+
+        Used as the job ``result_summary`` on terminal transitions so watcher
+        notifications carry a non-empty "Result:" body and job_get returns a
+        populated result_summary (fix for empty completed-event results).
+
+        DEADLOCK GUARD: this must NEVER block a terminal transition — any
+        failure (no checkpointer, unreadable history, no assistant content)
+        yields None and the job still terminates. The observer is
+        predicate-blind: whenever the instance reaches a terminal lifecycle
+        state (completed/error; terminated is handled by terminate_instance),
+        the job terminates regardless of result availability. No eternal
+        PROCESSING.
+
+        Args:
+            instance_id: The instance that reached a terminal state.
+
+        Returns:
+            The last assistant message content, or None when unavailable.
+        """
+        try:
+            checkpointer = getattr(self._instance_manager, "_checkpointer", None)
+            if checkpointer is None:
+                return None
+            content, _created_at = await get_last_assistant_message(
+                checkpointer, instance_id
+            )
+            return content
+        except Exception as e:
+            logger.debug(
+                f"result_summary extraction failed for instance "
+                f"{instance_id[:8]}...: {e}"
             )
             return None
 

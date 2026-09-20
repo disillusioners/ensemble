@@ -1790,6 +1790,133 @@ Provide a concise summary:"""
         # per C2-NR-4 (TestMarkerPredicatePinnedToTruncationShortCircuit).
         return len(assistant_msgs) < 2
 
+    # ── Root-completion predicate (DEFECT-2 fix: premature terminal emission) ──
+
+    async def _assistant_message_fresh(self, session, instance_id: str) -> tuple[bool, str | None]:
+        """Check the instance produced an assistant message after its last child_completed.
+
+        The root may only complete a task job once it has responded AFTER every
+        child completion report — otherwise its "final" message predates the
+        last child's report and the subtree isn't truly done (job 5e197a30).
+
+        Args:
+            session: Open DB session (used for the child_completed lookup).
+            instance_id: The instance (root/parent) to check.
+
+        Returns:
+            (is_fresh, reason): reason is a short diagnostic when not fresh.
+            Fail-open (True) when the instance has no child_completed events
+            (nothing to be fresh after — also the fast path for childless
+            roots) or when checkpoint timestamps are unreadable: a missing
+            timestamp must never wedge the job into eternal PROCESSING
+            (see DEADLOCK GUARD in the fix design).
+        """
+        last_child_completed_at = session.exec(
+            select(func.max(Event.created_at))
+            .where(Event.instance_id == instance_id)
+            .where(Event.kind == EventKind.CHILD_COMPLETED.value)
+        ).scalar_one_or_none()
+
+        if last_child_completed_at is None:
+            # No child ever reported to this instance — freshness is vacuous.
+            return True, None
+
+        try:
+            _content, last_assistant_ts = await get_last_assistant_message(
+                self._checkpointer, instance_id
+            )
+
+            last_assistant_dt = parse_checkpoint_ts(last_assistant_ts)
+        except Exception as e:
+            # Fail-open: an unusable checkpointer must never wedge the job into
+            # eternal PROCESSING (DEADLOCK GUARD). The waiting_for/pending legs
+            # above remain authoritative; this leg is anti-premature-emission
+            # belt-and-suspenders.
+            logger.warning(
+                "Freshness check failed for instance %s... (%s); treating as "
+                "fresh (fail-open)",
+                instance_id[:8], e,
+            )
+            return True, None
+
+        if last_assistant_dt is None:
+            # Unreadable/absent checkpoint timestamp — fail open (no deadlock).
+            logger.warning(
+                "Instance %s... has child_completed events but no readable "
+                "assistant timestamp; treating freshness as satisfied",
+                instance_id[:8],
+            )
+            return True, None
+
+        last_child_dt = event_created_at_as_utc(last_child_completed_at)
+        if last_assistant_dt >= last_child_dt:
+            return True, None
+
+        return False, (
+            f"last assistant message ({last_assistant_ts}) predates last "
+            f"child_completed ({last_child_dt.isoformat()})"
+        )
+
+    async def _root_completion_gate(
+        self,
+        session,
+        instance_id: str,
+        waiting_for: int | None = None,
+    ) -> tuple[bool, str | None]:
+        """Full emission predicate for marking a root/parent's job terminal.
+
+        A terminal "completed" lifecycle event (which JobFeedbackObserver maps
+        to job completion) may only be published when ALL of:
+          1. waiting_for == 0 — no outstanding children
+          2. pending_count == 0 — no queued/processing messages
+          3. fresh assistant message after the last child_completed event —
+             the instance has responded to every child report
+
+        Suppressed instances are held in WAITING_CHILDREN; the predicate is
+        re-evaluated on the existing message-completed signal (each completed
+        message for the instance re-invokes _process_child_completion_and_
+        notify_parent via task_processor / message_job_handler). This is an
+        event-driven re-check on signal — NOT a poll loop.
+
+        Args:
+            session: Open DB session; when None an ephemeral session is opened.
+            instance_id: The instance to evaluate.
+            waiting_for: In-session waiting_for value; read from DB when None.
+
+        Returns:
+            (allowed, block_reason): block_reason is a diagnostic when blocked.
+        """
+        owns_session = session is None
+        if owns_session:
+            session = Session(self._manager._engine)
+
+        try:
+            if waiting_for is None:
+                instance = session.get(Instance, instance_id)
+                waiting_for = (instance.waiting_for or 0) if instance else 0
+
+            if waiting_for > 0:
+                return False, f"waiting_for={waiting_for}"
+
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalar_one()
+
+            if pending_count > 0:
+                return False, f"pending_count={pending_count}"
+
+            return await self._assistant_message_fresh(session, instance_id)
+        finally:
+            if owns_session:
+                session.close()
+
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
         
