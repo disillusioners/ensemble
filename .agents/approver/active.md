@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: Chat-Source Worker Lane — dedicated 2-worker lane for chat-source instances, isolated from the default worker pool (5-file package: plan-overview.md + decisions.md + phase1/2/3-plan.md)
-Slug: chat-source-worker-lane
+Plan: Clipboard-Image-Chat — web-chatbox clipboard image paste → daemon tmp image store (30-day auto-clear) → image-reader text conversion before agent turn (no vision switch) → thumbnails + popup viewer (9-file package: plan-overview + phase1–6-plan.md + decisions.md + architecture-recommendation.md; 2,386 lines)
+Slug: clipboard-image-chat
 Status: APPROVED
-Iteration: 003 (001 REJECTED 2026-09-18 — 2 blocking, resolved; 002 REJECTED 2026-09-19 — 1 blocking, resolved; 003 APPROVED 2026-09-19 — both workers APPROVED, 0 blocking. See chat-source-worker-lane-tracking.md)
-Started: 2026-09-18T21:23:00Z
-Last Verdict: APPROVED (iteration 003, 2026-09-19 — workers 1b3a62d8 + 9995b439, skill plan-approval)
-Note: closed APPROVED at iteration 003 (final before escalation cap — cap not needed). Previous active plan (service-tool) closed APPROVED 2026-09-15 iteration 001 — tracking file preserved. Prior: critical-notes-retrieval closed APPROVED 2026-09-15 iteration 002; spawn-intelligence-override closed APPROVED 2026-09-13.
+Iteration: 001 (001 APPROVED 2026-09-19 — 3/3 section workers APPROVED, 0 blocking; merged notes in clipboard-image-chat-tracking.md)
+Started: 2026-09-19T18:55:00Z
+Last Verdict: APPROVED (iteration 001, 2026-09-19 — workers 312d5ff0 backend + 94c36f07 frontend + 675f3ed1 decisions, skill plan-approval)
+Note: closed APPROVED iteration 001. Pre-merge polish notes (non-blocking): phase4 Exit-Criterion rewrite, 3 missed chat.component.ts image_refs sites, phase6 Task-2 architect pick, phase-1 probe (#36) before phase-2 dispatch. Previous: chat-source-worker-lane closed APPROVED iteration 003 2026-09-19.

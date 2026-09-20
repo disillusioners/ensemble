@@ -19,3 +19,7 @@ decision time.
   `Error: Charter is paused; resume it or pass fresh=True for a new charter.`
   See `agents/_prompt_system/innate-skills/chart/skill.md` for the full
   contract.
+- **File-serving of user content is public-by-obscurity** (clipboard-image-chat
+  architecture recommendation, 2026-09-19): self-hosted `/api/tmp_images/`
+  refs are public-by-obscurity — the daemon has no auth layer; future
+  file-serving of sensitive content MUST add auth before merge.

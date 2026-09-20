@@ -431,61 +431,46 @@ Edit-Source modal agent selection fix (WeakMap memoization of toSelectOptions + 
 - **Result**: PASS (pack ~25s; health 200/200)
 - **Report**: `RESULTS/2026-09-16-lca-stage2-flip-verification.md` (Job 7)
 
-## Mock Test: LCA attest-first BOOT SMOKE variant B — Delegated mission HOLD-state test
+
+## Mock Test: Job-Queue Panel Idle-Hiding UI Smoke (FE, feature/job-queue-hide-idle-instances @ 93bd86eb)
 
 ### Metadata
-- **Created**: 2026-09-20
-- **Script**: `/tmp/lca-smoke/variant-b/boot_smoke.py` (+ dynamically generated `/tmp/lca-smoke/variant-b/mock_llm_server.py`)
-- **Language**: Python
-- **Status**: ACTIVE (variant B gate artifact for `feature/lca-attest-first-contract` @ `01d0e3a9`)
-- **Variant A sibling**: `/tmp/lca-smoke/boot_smoke.py` (no-delegation happy path)
+- **Created**: 2026-09-19
+- **Script**: `test/packs-fe-smoke-mock/mock_be.py` (untracked smoke asset) + `frontend/proxy.conf.mock.json` (untracked)
+- **Language**: Python 3 stdlib (mock BE) + Angular dev server (real FE) + browser automation
+- **Status**: ACTIVE (first run 2026-09-19 PASS)
 
 ### Configuration
-- **Timeout**: 300s outer `timeout 300` + 240s internal SIGALRM (script-internal)
-- **Daemon Port**: 8090 (uvicorn `daemon.api:app`, NO --reload, never dev.sh)
-- **Mock Ports**: 18080 (stdlib `http.server` HTTPServer, OpenAI-compatible mock LLM)
-- **DB**: disposable PG14 on port 15433 (initdb -A trust; per-field POSTGRES_* set; `POSTGRES_URL` explicitly unset; split-brain guard); fresh tmp DATA_DIR
-- **Cleanup**: SIGTERM uvicorn (verified bound to :8090) → wait ≤30s; pg_ctl stop -m fast; rm -rf datadir; port-freedom asserted (15433/8090/18080); protected 8088/8079 never touched
-- **HEAD pin**: `01d0e3a9` = `0b8f4de2` + single test-only commit on `tests/unit/tools/test_attestation_surface_chain.py` (merge-base ancestor verified; diff name-only shows only tests/ paths; daemon code unchanged)
+- **Timeout**: browser-drive portion ≤ 300 s (pack cap); mock BE self-timeout 600 s; FE boot wait ≤ 120 s
+- **Service Port**: 4199 (FE dev server, `ng serve`)
+- **Mock Ports**: 10080 (mock BE; FE proxy pointed at it via untracked `proxy.conf.mock.json` — real proxy target 8079 left untouched/free)
+- **Cleanup**: kill only spawned PIDs (mock python + ng serve/node) after per-PID cmdline verification; verify 10080/4199 freed. NEVER touch 8088 (self-system), 9797 (prod daemon), 8079.
 
 ### What It Tests
-- Variant A's contract (`attestation_required=True` — only reachable via DELEGATION) is verified live in this delegated-mission flow (variant A proved happy path but reached the no-delegation branch with `attestation_required=False`)
-- BUNDLED shape (c5d9a38a violation — text + `attest_completion` tool_call in ONE AIMessage) recorded in transcript + leader's clean-attest correction + standalone report → gate fires ALLOWED with `attestation_required=True`
-- Counter-independence: `attestation_denied_count == 0` throughout
-- Default mode = `enforce` (no mode env set; DEFAULT_MODE = `enforce` per `daemon/services/attestation_resolver.py:111`)
+- Real rendered DOM of the job-queue indicator panel ("Live conversations"): idle rows hidden (root + child), live child of idle parent orphan-promoted to root, terminal statuses (completed/error) visible, receipts (incl. receipt bound to a hidden idle instance) still surfaced, all-idle dataset → graceful empty state, no crash.
+- Exercises BOTH fetch legs through the `instanceRoots` seam (8s poll `listInstanceTree` + menu-open `listInstanceTreeFull`) because the panel is the real component.
 
 ### Mock Services Required
-- OpenAI-compatible LLM: mock on port 18080 (per-instance state keyed by `sha256(system_prompt[:300] + "|" + model + "|" + n_tools)`)
-- Role discriminator: `model=quick` OR `n_tools=0` → title-gen; `n_tools >= 50` → leader; else → child
-- Leader sequence: `send_message(to=<pre-spawned child_id>)` → BUNDLED shape → clean attest (empty content) → standalone report (≥200 words)
+- Mock BE on 10080 serving canned wire-shaped JSON for the indicator's forkJoin legs (`/api/instances` tree, `/api/missions` liveness, jobs legs — exact paths discovered from `instance.service.ts` / `mission.service.ts` / `job.service.ts`); unknown paths → 404 JSON.
+- DATASET env switch: `mixed` (6-instance matrix + receipts incl. one bound to hidden IDLE-ROOT) / `allidle` (all roots idle, no jobs → empty state). Mock restart switches datasets; ≤2 poll ticks (16 s) to refresh.
 
 ### Test Scenarios
-1. Disposable PG boots, `ensemble_smoke` DB created — verified via `psql -c "SELECT 1"`
-2. Daemon boots in enforce mode, `/readyz` returns 200, attestation boot line captured
-3. Pre-spawn `developer` child instance via API; verify idle state
-4. Spawn leader instance; send user message ("Delegate a trivial no-op task to a child and finish.")
-5. Mock drives leader through 4-call sequence; leader reaches `completed` status
-6. Assertions verify transcript shape + counter + gate row + boot line
+1. MIXED: RUN-ROOT + ORPHAN-CHILD (promoted root) + DONE-ROOT + ERR-ROOT visible; IDLE-ROOT + IDLE-CHILD absent from entire panel; receipts render.
+2. ALLIDLE: empty state shown, app responsive, no uncaught console errors (404s for unmocked endpoints like notifications SSE are acceptable).
 
 ### Success Criteria
-- [x] All scenarios pass
-- [x] Transcript contains BUNDLED AIMessage with attest_completion tool_call (196 words)
-- [x] Transcript contains clean attest AIMessage (empty content + attest_completion tool_call)
-- [x] Final AIMessage is standalone report (199 words, 0 tool_calls)
-- [x] `attestation_denied_count = 0` throughout
-- [x] Gate log row has `attestation_required=True` (variant A's branch)
-- [x] Boot log shows `mode=enforce`
-- [x] All ports freed after test
-- [ ] HOLD-state decision=hold + reminder injection — **DOCUMENTED LIMITATION** (langgraph re-invokes agent after each tool_call; the bundled is never the LAST AI when the gate evaluates; spec escape clause allows `attestation_required=True` as the primary contract)
+- [ ] All MIXED name-presence/absence assertions hold in real DOM
+- [ ] Empty state renders without crash on ALLIDLE
+- [ ] No uncaught JS errors beyond expected 404s
+- [ ] Ports 10080/4199 freed after; zero commits; zero tracked-file edits
 
 ### Implementation Notes
-- **Variant A env overrides carried forward**: `OPENAI_REQUEST_GZIP=false` (parent shell has `OPENAI_REQUEST_GZIP=true` which caused gzip-decoded crash); `OPENAI_BASE_URL_BACKUP=""` (no failover); venv python (Homebrew python lacks `psycopg`)
-- Mock stderr captured to `/tmp/lca-smoke/variant-b/mock_stderr.log` (lesson learned from variant A where `instance_key()` arg mismatch silently broke the mock)
+- No real daemon boot (8079 left down deliberately — avoids any prod-PG risk); FE-only + mock BE.
+- Untracked assets kept for reproducibility; not registered as a permanent pack.
 
 ### Last Run
-- **Date**: 2026-09-20
-- **Result**: PASS WITH DOCUMENTED LIMITATION (~12s wall-clock; PG 1s + daemon boot 5s + pre-spawn 2s + scripted flow 1s + assertions <1s + cleanup 2s)
-- **Quick Fixes**: 
-  1. Fixed `instance_key(sys_prompt)` → `instance_key(sys_prompt, model, n_tools)` (mock crashed silently on every POST)
-  2. Discriminator changed from system-prompt-fingerprint to `(model, n_tools)` for stability across langgraph's per-turn system-prompt additions
-- **Report**: `/tmp/lca-smoke/variant-b/RESULTS_2026-09-20.md`
+- **Date**: 2026-09-19
+- **Worker Instance**: cdc756fc-6b5a-4169-9dc1-85ac7efca124 (e2e-test skill)
+- **Result**: **PASS** — MIXED 11/11 (IDLE-ROOT + IDLE-CHILD absent panel-wide; RUN-ROOT visible aria-level=1; ORPHAN-CHILD promoted root aria-level=1; DONE-ROOT/ERR-ROOT in RECENT; receipts incl. MOCK-RCPT-IDLEPARENT Z4 bound to hidden idle root surfaced via recentFlat) + ALLIDLE 4/4 ("No jobs" + "Queue is currently idle", app responsive). 0 uncaught pageerrors (expected 404 noise: notifications SSE, /api/projects, /api/settings/*, /api/health, /api/agents, /api/migration/availability). Playwright-as-library 1.60.0 headless Chromium; browser-drive ~23s. Ports 10080/4199 verified freed; 8088/9797/8079 untouched.
+- **Quick Fixes**: none (smoke)
+- **Report**: `.agents/tester/RESULTS/2026-09-19-fe-job-queue-hide-idle-instances.md`; evidence `test/packs-fe-smoke-mock/evidence/`

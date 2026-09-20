@@ -1,0 +1,152 @@
+{
+  "scenarios": {
+    "R1": "PASS",
+    "R2": "PASS",
+    "R3": "PASS",
+    "R4": "PASS"
+  },
+  "details": {
+    "R1": {
+      "mission_id": "inst-8c6e163db62a",
+      "receipt_a": "56bef10d-d7de-451c-bade-3e51d2ab2597",
+      "receipt_b": "ae83aaf4-ca86-4c5d-a556-35495ee9706b",
+      "r1a_result": "Mission watch registered: 2 receipt(s) of mission inst-8c6... (events: mission_terminal). Will notify at mission-terminal. Re-call watch_mission after job_continue \u2014 new receipts are not auto-watched.",
+      "r1a_watched_job_ids": [
+        "56bef10d-d7de-451c-bade-3e51d2ab2597",
+        "ae83aaf4-ca86-4c5d-a556-35495ee9706b"
+      ],
+      "r1a_notify_await_count": 0,
+      "r1a_pass": true,
+      "r1b_result": "Mission watch registered: 2 receipt(s) of mission inst-8c6... (events: mission_terminal). Will notify at mission-terminal. Re-call watch_mission after job_continue \u2014 new receipts are not auto-watched.",
+      "r1b_watched_job_ids": [
+        "56bef10d-d7de-451c-bade-3e51d2ab2597",
+        "ae83aaf4-ca86-4c5d-a556-35495ee9706b"
+      ],
+      "r1b_pass": true,
+      "verdict": "PASS"
+    },
+    "R2": {
+      "mission_id": "inst-d017e9229ecd",
+      "receipt_a": "c3b78b94-a8af-46ac-87f8-333d72fec49a",
+      "receipt_b": "90ff0f95-16fc-42ee-bf5b-c4cfd2503340",
+      "register_result": "Mission inst-d01... is already terminal (completed). 2 receipt watch(es) registered; immediate notification sent on 0 receipt(s).",
+      "rows_after_register": [
+        "90ff0f95-16fc-42ee-bf5b-c4cfd2503340",
+        "c3b78b94-a8af-46ac-87f8-333d72fec49a"
+      ],
+      "lookup_a_count": 1,
+      "lookup_b_count": 1,
+      "lookup_a_instances": [
+        "replay-caller-0000-0000-000000000001"
+      ],
+      "lookup_b_instances": [
+        "replay-caller-0000-0000-000000000001"
+      ],
+      "lookup_a_events": [
+        [
+          "mission_terminal"
+        ]
+      ],
+      "lookup_b_events": [
+        [
+          "mission_terminal"
+        ]
+      ],
+      "i_pass": true,
+      "claim_a_count": 1,
+      "claim_a_second_count": 0,
+      "claim_b_count": 1,
+      "post_claim_watched": [],
+      "ii_pass": true,
+      "notify_depth": "CAS-claim primitive (real JobWatcherRepository.claim_watchers_for_job_for_instances) \u2014 the lowest real engine component the SQLite fixture allows. The actual [JOB_EVENT] envelope build + InstanceManager.enqueue_message delivery lives in work_notifier.notify_work_watchers (daemon/services/work_notifier.py:118-470) and requires a fully-wired InstanceManager + WorkResolverService \u2014 out of scope for the standalone SQLite fixture.",
+      "verdict": "PASS"
+    },
+    "R3": {
+      "mission_id": "inst-f52fff9848e5",
+      "receipt_a": "7f4ffd8d-05f1-4a3d-bc91-5deb2fde37c4",
+      "receipt_b": "884e7557-cc76-416e-b2cc-4a39beb02ecd",
+      "result": "Mission inst-f52... is already terminal (completed). 2 receipt watch(es) registered; immediate notification sent on 2 receipt(s).",
+      "watched_job_ids": [
+        "7f4ffd8d-05f1-4a3d-bc91-5deb2fde37c4",
+        "884e7557-cc76-416e-b2cc-4a39beb02ecd"
+      ],
+      "notify_await_count": 2,
+      "notify_calls": [
+        [
+          "884e7557-cc76-416e-b2cc-4a39beb02ecd",
+          "completed"
+        ],
+        [
+          "7f4ffd8d-05f1-4a3d-bc91-5deb2fde37c4",
+          "completed"
+        ]
+      ],
+      "all_rows_mission_terminal": true,
+      "verdict": "PASS"
+    },
+    "R4": {
+      "r4a_response": {
+        "job_id": "b4a105c6-82b8-472a-a2a2-37613fad7f10",
+        "agent_id": "developer",
+        "agent_dir": "agents/developer",
+        "agent_tag": null,
+        "message": "replay seed",
+        "source": "agent:test",
+        "project_id": "replay-project",
+        "queue_id": null,
+        "priority": 5,
+        "admission_state": "done",
+        "created_at": "2026-09-19T19:09:13.427659+00:00",
+        "instance_id": "inst-312d25fcfc4d",
+        "metadata": {},
+        "deleted_at": null,
+        "retry_count": 0,
+        "max_retries": 3,
+        "idempotency_key": null,
+        "job_type": "message",
+        "next_retry_at": null,
+        "failed_at": null,
+        "terminal_reason": "completed",
+        "mission_id": "inst-312d25fcfc4d"
+      },
+      "r4a_has_job_id": true,
+      "r4a_has_mission_id": true,
+      "r4a_mission_id_matches": true,
+      "r4a_pass": true,
+      "r4b_response": {
+        "job_id": "88b0bf99-59be-4f5f-9b47-4d90f43fc646",
+        "agent_id": "developer",
+        "agent_dir": "agents/developer",
+        "agent_tag": null,
+        "message": "replay seed",
+        "source": "agent:test",
+        "project_id": "replay-project",
+        "queue_id": null,
+        "priority": 5,
+        "admission_state": "queued",
+        "created_at": "2026-09-19T19:09:13.429452+00:00",
+        "instance_id": null,
+        "metadata": {},
+        "deleted_at": null,
+        "retry_count": 0,
+        "max_retries": 3,
+        "idempotency_key": null,
+        "job_type": "task",
+        "next_retry_at": null,
+        "failed_at": null,
+        "terminal_reason": null
+      },
+      "r4b_has_job_id": true,
+      "r4b_has_mission_id": false,
+      "r4b_pass": true,
+      "r4c_result": "Watch registered on receipt 88b0bf99... (mission not yet dispatched). Will notify when admission AND mission liveness are both terminal.",
+      "r4c_watched_job_ids": [
+        "88b0bf99-59be-4f5f-9b47-4d90f43fc646"
+      ],
+      "r4c_pass": true,
+      "verdict": "PASS"
+    }
+  },
+  "runtime_seconds": 0.34060712484642863,
+  "watchdog_seconds": 280
+}
