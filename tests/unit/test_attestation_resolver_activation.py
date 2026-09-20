@@ -831,6 +831,589 @@ def _tree_rows(n: int) -> list[dict]:
     ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Dual-autopsy B1 stale-A fix (2026-09-20) — newest-only per child,
+# operator-action scoping, cross-resolution vs C, B-clip 2500.
+#
+# Grounded in incidents acbf5627 (4/4 final advisories stale — giter
+# phase-stop protocol language ×3 + operator-scope "still pending
+# (rebuild+restart)") and fba90db8 (reviewer "still pending on my
+# ledger" for work later APPROVED). Band structure unchanged —
+# a_suspicion stays a band; only its evidence quality changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNewestReportOnlyPerChild:
+    """B1 item 1: each child's LATEST internal_report is the ONLY one
+    scanned; superseded reports from the same child drop wholesale."""
+
+    def test_superseded_phase_stop_reports_drop_when_final_clean(self):
+        """INCIDENT acbf5627 shape: giter-style phase-stop protocol
+        language ×2 superseded by a clean final report → NO stale
+        advisories survive in A."""
+        r1 = _internal_report_message(
+            "Phase 1 done, will report back after phase 2.",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        r2 = _internal_report_message(
+            "Phase 2 done, then I aggregate the ledger.",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        final = _internal_report_message(
+            "Done. 5/5 tests pass. All shipped, no follow-ups."
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [r1, r2, final]
+        )
+        assert signals.advisory_present is False
+        assert signals.phrase_match is False
+        assert signals.contradiction_flag is False
+        assert signals.evidence == ()
+
+    def test_only_latest_report_scanned_terms_are_latest_not_union(self):
+        """The operative evidence carries ONLY the newest report's
+        matched terms — the superseded report's terms do NOT union in."""
+        r1 = _internal_report_message(
+            "Integration still pending on my side.",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        r2 = _internal_report_message(
+            "Merged. I will report back after the follow-up merge."
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [r1, r2]
+        )
+        assert len(signals.evidence) == 1
+        ev = signals.evidence[0]
+        assert ev.matched_terms == ("will report back",)
+        assert "still pending" not in ev.matched_terms
+        # The newest report has no contradiction marker → flag down
+        # (the superseded "still pending" must not resurrect it).
+        assert signals.contradiction_flag is False
+
+    def test_earlier_only_contradiction_does_not_resurface_when_latest_clean(
+        self,
+    ):
+        """PINNED EDGE SEMANTICS (B1 item 1 + item 2 boundary): an
+        EARLIER report's contradiction that the LATEST report does not
+        repeat does NOT resurface when the child delivered a clean
+        final report — delivery supersedes promise. The lie must live
+        in the child's NEWEST report to surface (see
+        TestCrossResolveAgainstTreeRows.test_child_lie_completed_
+        without_delivery_still_fires for the surfacing half)."""
+        r1 = _internal_report_message(
+            "Still pending integration, ending turn.",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        final = _internal_report_message(
+            "Integration complete. All checks green. Shipped."
+        )
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "completed",
+                "agent_id": "giter",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [r1, final],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_per_child_independence(self):
+        """Newest-only is PER CHILD: child A's clean final must not
+        erase child B's live advisory."""
+        child_b = "22222222-3333-4444-5555-666666666666"
+        a_clean = _internal_report_message("Done. All shipped.")
+        a_stale = _internal_report_message(
+            "still pending review",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        b_hit = _internal_report_message(
+            "Will report back after the merge.", child_id=child_b
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [a_stale, a_clean, b_hit]
+        )
+        assert signals.advisory_present is True
+        assert len(signals.evidence) == 1
+        assert signals.evidence[0].child_instance_id == child_b
+
+    def test_idless_reports_group_under_none_newest_wins(self):
+        """Reports whose child id cannot be parsed share the ``None``
+        bucket — newest wins (id-less reports are indistinguishable)."""
+        import uuid as _uuid
+
+        def _idless(content):
+            msg = HumanMessage(
+                content=content,
+                id=str(_uuid.uuid4()),
+                additional_kwargs={
+                    "injected_message": True,
+                    "source": "internal_report:not-a-uuid",
+                },
+            )
+            return msg
+
+        first = _idless("still pending integration")
+        newest = _idless("Done. All shipped.")
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [first, newest]
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_reviewer_pending_then_approved_suppressed(self):
+        """INCIDENT fba90db8 shape: reviewer's "still pending on my
+        ledger" superseded by a later APPROVED report → suppressed."""
+        pending = _internal_report_message(
+            "Still pending on my ledger — awaiting the merge decision.",
+            completed_message_id=str(uuid.uuid4()),
+        )
+        approved = _internal_report_message(
+            "Approved and merged (abc123). Ledger clear, nothing pending."
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [pending, approved]
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+
+class TestOperatorScopedHits:
+    """B1 item 3: catalog hits whose sentence names an operator action
+    (rebuild/restart/redeploy) are the OPERATOR's pending action —
+    excluded from ``contradiction_flag``, never a child-work lie."""
+
+    def test_operator_pending_sentence_excluded_from_contradiction_flag(self):
+        """The canonical incident sentence "pending: rebuild+restart
+        activation" is DEMOTED (advisory stays visible for the judge)
+        but does NOT raise ``contradiction_flag``."""
+        signals = collect_source_a_signals(
+            _delegated_mission_state()
+            + [
+                _internal_report_message(
+                    "Phase 1 merged. Still pending: rebuild+restart "
+                    "activation (operator action)."
+                )
+            ]
+        )
+        assert signals.advisory_present is True  # demoted, not excluded
+        assert signals.contradiction_flag is False
+        assert signals.evidence[0].operator_scoped_terms == ("still pending",)
+
+    def test_genuine_pending_outside_operator_sentence_still_contradicts(self):
+        """A "still pending" sentence WITHOUT an operator token keeps
+        the old contradiction semantic even when the report mentions
+        rebuild elsewhere (sentence-scope, not report-scope)."""
+        signals = collect_source_a_signals(
+            _delegated_mission_state()
+            + [
+                _internal_report_message(
+                    "Integration still pending - will report back. "
+                    "The operator can rebuild+restart afterwards."
+                )
+            ]
+        )
+        assert signals.contradiction_flag is True
+        assert signals.evidence[0].operator_scoped_terms == ()
+
+    def test_mixed_operator_and_genuine_terms(self):
+        """Operator-scoped + genuine hits in ONE report: the genuine
+        hit drives ``contradiction_flag``; the operator hit is recorded
+        on the evidence for the judge."""
+        signals = collect_source_a_signals(
+            _delegated_mission_state()
+            + [
+                _internal_report_message(
+                    "Still pending: rebuild+restart activation. "
+                    "Interim state until the operator acts."
+                )
+            ]
+        )
+        assert signals.advisory_present is True
+        assert signals.contradiction_flag is True  # "interim" is genuine
+        assert signals.evidence[0].operator_scoped_terms == ("still pending",)
+        assert "interim" in signals.evidence[0].matched_terms
+
+    def test_operator_token_in_different_sentence_does_not_scope(self):
+        """Sentence-boundary discipline: [.!?\\n;] separates — an
+        operator token in the NEXT sentence cannot scope the hit
+        (colon deliberately does NOT split: "pending: rebuild+restart"
+        stays one span)."""
+        signals = collect_source_a_signals(
+            _delegated_mission_state()
+            + [
+                _internal_report_message(
+                    "Still pending. Rebuild+restart required afterwards."
+                )
+            ]
+        )
+        assert signals.contradiction_flag is True
+        assert signals.evidence[0].operator_scoped_terms == ()
+
+
+class TestCrossResolveAgainstTreeRows:
+    """B1 item 2: advisories from a child whose tree status is
+    ``completed`` are suppressed UNLESS the child's newest report still
+    carries a GENUINE hit (the later-contradiction exception — a
+    completed child that lied at the end must still surface)."""
+
+    def test_child_lie_completed_without_delivery_still_fires(self):
+        """FLAGSHIP REGRESSION (the child-lie class pin): a child whose
+        FINAL report promises future work ("will report back after the
+        follow-up merge") and NEVER delivers it, completed-without-
+        delivery → the advisory STILL surfaces, a_suspicion still fires,
+        and the A/C-subordination still applies (a_suspicion remains a
+        band; the judge prompt retains genuine-advisory subordination).
+        This pin closed the child-lie class — it must NOT regress."""
+        lie = _internal_report_message(
+            "Merged the branch. I will report back after the "
+            "follow-up merge."
+        )
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "completed",
+                "agent_id": "coder",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [lie],
+            tree_rows_provider=lambda: rows,
+        )
+        # The later-contradiction exception keeps the lie.
+        assert signals.advisory_present is True
+        assert len(signals.evidence) == 1
+        assert "will report back" in signals.evidence[0].matched_terms
+        assert signals.contradiction_flag is False  # promise, not marker
+        # Band structure unchanged: with a live descendant (¬quiet, b
+        # quiet) a_suspicion fires ALONE as its own band (Δ2 stays).
+        result = _pred(a=signals, b=_b(), c=_c(live=1))
+        assert result.fired is True
+        assert result.band == BAND_A_SUSPICION
+        assert ara.TERM_A_SUSPICION in result.terms_fired
+        # Quiet-tree variant: the deny band still engages (the judge,
+        # not the band, now adjudicates — with the softened prompt that
+        # still subordinates GENUINE unresolved advisories).
+        result_quiet = _pred(a=signals, b=_b(), c=_c())
+        assert result_quiet.fired is True
+        assert result_quiet.band == BAND_DENY
+
+    def test_completed_child_operator_pending_suppressed(self):
+        """INCIDENT acbf5627 final shape: completed child whose newest
+        report's only hit is operator-scoped → suppressed wholesale."""
+        report = _internal_report_message(
+            "Phase work merged. Still pending: rebuild+restart "
+            "activation (operator action)."
+        )
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "completed",
+                "agent_id": "giter",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_running_child_operator_pending_kept(self):
+        """Non-completed child: NO suppression (only the delivered
+        status cross-resolves) — the operator-scoped advisory stays
+        visible (demoted from contradiction_flag by item 3 only)."""
+        report = _internal_report_message(
+            "Still pending: rebuild+restart activation."
+        )
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "running",
+                "agent_id": "giter",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is True
+        assert signals.contradiction_flag is False
+
+    def test_child_absent_from_rows_kept(self):
+        """A child missing from the tree rows cannot be cross-resolved
+        → conservative keep."""
+        report = _internal_report_message("Will report back after merge.")
+        rows = [
+            {
+                "instance_id": "99999999-8888-7777-6666-555555555555",
+                "status": "completed",
+                "agent_id": "other",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is True
+
+    def test_terminated_error_failed_statuses_do_not_suppress(self):
+        """Only ``completed`` suppresses — terminated/error/failed
+        children with advisories keep them (work genuinely unfinished)."""
+        report = _internal_report_message("Still pending the final run.")
+        for status in ("terminated", "error", "failed"):
+            rows = [
+                {
+                    "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                    "status": status,
+                    "agent_id": "giter",
+                }
+            ]
+            signals = collect_source_a_signals(
+                _delegated_mission_state() + [report],
+                tree_rows_provider=lambda rows=rows: rows,
+            )
+            assert signals.advisory_present is True, status
+
+    def test_completed_status_case_insensitive(self):
+        report = _internal_report_message("Still pending: rebuild+restart.")
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "Completed",
+                "agent_id": "giter",
+            }
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is False
+
+    def test_provider_failure_keeps_advisories(self):
+        """Best-effort: a raising provider ⇒ no rows ⇒ suppression
+        no-ops (mirrors the C-provider fail-open discipline)."""
+        def _boom():
+            raise RuntimeError("db down")
+
+        report = _internal_report_message(
+            "Still pending: rebuild+restart activation."
+        )
+        rows = [
+            {
+                "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                "status": "completed",
+                "agent_id": "giter",
+            }
+        ]
+        signals_with_rows = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals_with_rows.advisory_present is False
+        signals_boom = collect_source_a_signals(
+            _delegated_mission_state() + [report],
+            tree_rows_provider=_boom,
+        )
+        assert signals_boom.advisory_present is True
+
+    def test_note_path_suppressed_for_completed_child_with_clean_final(self):
+        """Legacy note entries participate in the cross-resolution: a
+        completed child's note is suppressed when the child's newest
+        live report is clean (delivered)."""
+        child = "33333333-4444-5555-6666-777777777777"
+        note = _child_report_check_note(child_id=child)
+        final = _internal_report_message(
+            "Done. All shipped.", child_id=child
+        )
+        rows = [
+            {"instance_id": child, "status": "completed", "agent_id": "giter"}
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [note, final],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is False
+        assert signals.evidence == ()
+
+    def test_note_path_kept_when_no_live_report_exists(self):
+        """A completed child with a note but NO live report in the
+        transcript: conservative keep (nothing proves delivery)."""
+        child = "33333333-4444-5555-6666-777777777777"
+        note = _child_report_check_note(child_id=child)
+        rows = [
+            {"instance_id": child, "status": "completed", "agent_id": "giter"}
+        ]
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [note],
+            tree_rows_provider=lambda: rows,
+        )
+        assert signals.advisory_present is True
+        assert len(signals.evidence) == 1
+
+    def test_no_provider_no_suppression_backcompat(self):
+        """Default (no provider) → NO cross-resolution — direct
+        callers keep the pre-B1 semantics."""
+        report = _internal_report_message(
+            "Still pending: rebuild+restart activation."
+        )
+        signals = collect_source_a_signals(
+            _delegated_mission_state() + [report]
+        )
+        assert signals.advisory_present is True
+        assert len(signals.evidence) == 1
+
+    def test_evaluate_resolver_activation_provider_fetched_once(self):
+        """Wiring: the fetch-once cache shares the provider between the
+        A-scan cross-resolution and the bundle's C-section — at most
+        ONE provider call per evaluation; lazy (never called without
+        advisory candidates)."""
+        calls: list[int] = []
+
+        def _counting_provider():
+            calls.append(1)
+            return [
+                {
+                    "instance_id": _INTERNAL_REPORT_FIXTURE_CHILD_ID,
+                    "status": "completed",
+                    "agent_id": "giter",
+                }
+            ]
+
+        report = _internal_report_message(
+            "Still pending: rebuild+restart activation."
+        )
+        snapshot = ara.evaluate_resolver_activation(
+            instance_id="b1-cache-1",
+            gate_location="end_candidate",
+            leader_prompt_version="v1",
+            messages=_delegated_mission_state() + [report],
+            mode="enforce",
+            attestation_enabled=True,
+            scope_applicable=True,
+            attestation_required=True,
+            attested=False,
+            user_answer_pending=False,
+            c_values=_c(),
+            b_values=_b(),
+            denied_count=0,
+            deny_bound=3,
+            old_decision=Decision.DENIED,
+            c_tree_rows_provider=_counting_provider,
+        )
+        # Delivered child + operator-scoped-only → suppressed → the
+        # A-band is GONE (clean quiet-tree deny stands on C alone).
+        assert snapshot.result.a_signals is not None
+        assert snapshot.result.a_signals.advisory_present is False
+        assert snapshot.result.a_signals.evidence == ()
+        assert snapshot.result.fired is True
+        assert snapshot.result.band == BAND_DENY
+        # Provider ran EXACTLY ONCE (shared cache: A-scan + bundle).
+        assert len(calls) == 1
+        # And the bundle's C-section still got the rows.
+        assert "SOURCE C: tree status" in snapshot.result.bundle.text
+
+    def test_evaluate_resolver_activation_provider_lazy_without_advisories(
+        self,
+    ):
+        """Lazy contract: a transcript with NO advisory candidates never
+        invokes the provider during the A-scan; it runs only at bundle
+        assembly (the predicate fired on the quiet tree)."""
+        calls: list[int] = []
+
+        def _counting_provider():
+            calls.append(1)
+            return []
+
+        snapshot = ara.evaluate_resolver_activation(
+            instance_id="b1-cache-2",
+            gate_location="end_candidate",
+            leader_prompt_version="v1",
+            messages=_delegated_mission_state("All done, shipped."),
+            mode="enforce",
+            attestation_enabled=True,
+            scope_applicable=True,
+            attestation_required=True,
+            attested=False,
+            user_answer_pending=False,
+            c_values=_c(),
+            b_values=_b(),
+            denied_count=0,
+            deny_bound=3,
+            old_decision=Decision.DENIED,
+            c_tree_rows_provider=_counting_provider,
+        )
+        assert snapshot.result.fired is True
+        assert snapshot.result.band == BAND_DENY
+        assert len(calls) == 1  # bundle assembly only — never the A-scan
+
+
+class TestBSectionClip2500:
+    """B1 item 5: the B-section per-message clip raised 1500 → 2500
+    (incident acbf5627: the final report's evidence tail + activation
+    note were lost at 1500/2372 chars)."""
+
+    def test_clip_constant_and_wiring(self):
+        assert ara._B_MESSAGE_CLIP == 2500
+        import inspect
+
+        src = inspect.getsource(ara._build_b_section)
+        assert "_B_MESSAGE_CLIP" in src, (
+            "B1 item 5: _build_b_section must clip at the named "
+            "constant (no bare literal regressions)"
+        )
+
+    @staticmethod
+    def _bundle_with_tail(*contents: str) -> ara.FusedBundle:
+        return assemble_fused_bundle(
+            a_signals=SourceASignals(advisory_present=False, phrase_match=False),
+            b_signals=_b(),
+            c_signals=_c(),
+            c_tree_rows=[],
+            ai_tail_messages=[AIMessage(content=c) for c in contents],
+        )
+
+    def test_2500_char_message_rendered_in_full(self):
+        bundle = self._bundle_with_tail("X" * 2500)
+        lines = bundle.text.splitlines()
+        rendered = [ln for ln in lines if ln.startswith("[1] ")]
+        assert len(rendered) == 1
+        body = rendered[0][len("[1] "):]
+        assert body == "X" * 2500  # full — no ellipsis at the old cap
+
+    def test_2501_char_message_clipped_at_2500(self):
+        long = "X" * 2501 + "TAIL_SENTINEL_BEYOND_CLIP"
+        bundle = self._bundle_with_tail(long)
+        lines = bundle.text.splitlines()
+        rendered = [ln for ln in lines if ln.startswith("[1] ")][0]
+        body = rendered[len("[1] "):]
+        assert len(body) == 2500  # clip bound inclusive of the ellipsis
+        assert body.endswith("…")
+        assert "TAIL_SENTINEL_BEYOND_CLIP" not in bundle.text
+
+    def test_1501_char_message_no_longer_clipped(self):
+        """The OLD boundary (1500) no longer truncates — the B1 fix's
+        whole point (evidence tail between 1500 and 2500 survives)."""
+        long = "Y" * 1501 + "ACTIVATION_NOTE_TAIL"
+        bundle = self._bundle_with_tail(long)
+        assert "ACTIVATION_NOTE_TAIL" in bundle.text
+        lines = bundle.text.splitlines()
+        rendered = [ln for ln in lines if ln.startswith("[1] ")][0]
+        assert len(rendered) == len("[1] ") + 1501 + len("ACTIVATION_NOTE_TAIL")
+
+    def test_three_maxed_messages_still_within_section_cap(self):
+        """3 × (2500 + label) > BUNDLE_B_SECTION_MAX (6000): the
+        external per-section cap remains the binding budget — the B1
+        raise moves ONLY the per-message truncation point."""
+        bundle = self._bundle_with_tail(*["Q" * 2600 for _ in range(3)])
+        assert bundle.b_chars <= BUNDLE_B_SECTION_MAX
+        assert bundle.total_chars <= BUNDLE_TOTAL_MAX
+
+
 class TestFusedBundle:
     def _assemble(self, rows=None, notes=None, ai_tail=None):
         a = SourceASignals(
@@ -1412,9 +1995,15 @@ class TestDCTD7ASignalPathPins:
             "D-CTD-7: a_source= lambda wiring missing from "
             "evaluate_resolver_activation — A-band severed"
         )
-        assert "collect_source_a_signals(messages)" in src, (
+        assert "collect_source_a_signals(" in src, (
             "D-CTD-7: a_source lambda body no longer calls "
-            "collect_source_a_signals(messages) — A-band severed"
+            "collect_source_a_signals — A-band severed"
+        )
+        assert "tree_rows_provider=_cached_tree_rows" in src, (
+            "dual-autopsy B1 item 2 (2026-09-20): the a_source lambda "
+            "must pass the fetch-once tree-rows provider into the "
+            "A-scan — without it the delivered-child cross-resolution "
+            "(stale-A suppression) is severed"
         )
 
     def test_activation_predicate_a_suspicion_term_intact(self):

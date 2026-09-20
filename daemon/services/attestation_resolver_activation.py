@@ -40,8 +40,11 @@ Components
     graph.py ``nothing_pending`` composition) else ``would_allow``).
 
 ``assemble_fused_bundle`` (pure)
-    Spec §4.1 bundle: A child-report evidence ≤3000 chars + B leader
-    signals / last-3-AIMessages ≤6000 + C first-10 per-descendant tree rows
+    Spec §4.1 bundle: A child-report evidence ≤3000 chars (NEWEST
+    internal_report ONLY per child, cross-resolved against the C tree
+    rows — dual-autopsy B1 items 1+2, 2026-09-20) + B leader
+    signals / last-3-AIMessages ≤6000 (each clipped at 2500 — B1
+    item 5) + C first-10 per-descendant tree rows
     (id-redacted) + scalar counts ≤3000 + U the user's original request
     ≤2000 (incident 4dfded83, 2026-09-18 — the judge was intent-blind
     without it), total ≤14000 (U additive). U reuses the delegation
@@ -200,6 +203,47 @@ _UUID_TOKEN_RE: re.Pattern[str] = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
 
+#: Per-message clip (chars) for each B-section AIMessage excerpt
+#: (dual-autopsy B1 item 5, 2026-09-20: raised 1500 → 2500 — incident
+#: acbf5627's final leader report was clipped at 1500 of 2372 chars,
+#: losing the evidence tail + activation note from the judge bundle).
+#: 3 × (2500 + label) still exceeds :data:`BUNDLE_B_SECTION_MAX` (6000),
+#: so the external per-section cap remains the binding budget — only the
+#: per-message truncation point moves.
+_B_MESSAGE_CLIP: int = 2500
+
+#: Operator-action sentence tokens (dual-autopsy B1 item 3, 2026-09-20).
+#: A catalog hit whose containing sentence ALSO names one of these tokens
+#: describes the OPERATOR's pending action (rebuild / restart / redeploy
+#: activation), not undelivered child work — excluded from
+#: ``contradiction_flag`` on :class:`SourceASignals` and disqualified from
+#: the later-contradiction exception on the completed-child suppression.
+#: Kept deliberately TIGHT (no bare ``deploy``/``activation`` — children
+#: legitimately deploy and activate things themselves); the canonical
+#: incident shape "pending: rebuild+restart activation" carries both
+#: leading tokens.
+_OPERATOR_ACTION_TOKENS: tuple[str, ...] = (
+    "rebuild",
+    "restart",
+    "re-deploy",
+    "redeploy",
+)
+
+#: Sentence splitter for operator-action scoping: [.!?\n;] end sentences
+#: and clauses; colon deliberately does NOT (the canonical incident
+#: sentence "pending: rebuild+restart activation" must stay one span).
+_SENTENCE_SPLIT_RE: re.Pattern[str] = re.compile(r"[.!?\n;]+")
+
+#: The single tree-row status that qualifies a child as DELIVERED for the
+#: A-vs-C cross-resolution (dual-autopsy B1 item 2, 2026-09-20). Only the
+#: clean-delivered status suppresses: terminated/error/failed children
+#: with advisories keep them (their work genuinely did not finish), and a
+#: child ABSENT from the rows keeps its advisories (cannot cross-resolve —
+#: conservative). Mirrors the lowercase runtime vocabulary of
+#: ``InstanceStatus`` (daemon/constants.py ``TERMINAL_INSTANCE_STATUSES``
+#: lists the full terminal family; only ``completed`` suppresses).
+_CROSS_RESOLVE_DELIVERED_STATUS: str = "completed"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Typed signal structs
@@ -235,6 +279,16 @@ class ChildReportCheckEvidence:
     #: the delivered message; False when detection fell back to the
     #: content prefix.
     kwargs_surface_seen: bool
+    #: The subset of ``matched_terms`` whose containing sentence ALSO
+    #: names an operator action (rebuild / restart / redeploy —
+    #: :data:`_OPERATOR_ACTION_TOKENS`). Dual-autopsy B1 item 3
+    #: (2026-09-20): such hits describe the OPERATOR's pending action,
+    #: not undelivered child work — they are EXCLUDED from
+    #: ``contradiction_flag`` on :class:`SourceASignals` and disqualified
+    #: from the later-contradiction exception on the completed-child
+    #: suppression. Empty on the legacy note path (server-authored note
+    #: text — no child-report content to sentence-scope).
+    operator_scoped_terms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -261,9 +315,11 @@ class SourceASignals:
     * ``phrase_match`` — at least one catalog-hit has matched terms
       (≡ ``advisory_present`` on the live producer; see the
       field-mapping table on :func:`collect_source_a_signals`).
-    * ``contradiction_flag`` — at least one matched_terms set
-      contains an explicit-contradiction marker
-      (see :data:`_CONTRADICTION_MARKERS`).
+    * ``contradiction_flag`` — at least one SURVIVING matched_terms
+      set contains a GENUINE explicit-contradiction marker
+      (see :data:`_CONTRADICTION_MARKERS`; operator-scoped hits —
+      sentence names rebuild/restart/redeploy — are excluded,
+      dual-autopsy B1 item 3).
     * ``word_count_below_threshold`` — at least one matched
       child-report's raw word count is below 150 (Source B's
       ``length_trigger`` mirror).
@@ -525,6 +581,54 @@ def _excerpt(text: str, limit: int = 400) -> str:
     return text[:limit] + "…"
 
 
+def _operator_scoped_terms(content: str, matched_terms: tuple[str, ...]) -> tuple[str, ...]:
+    """Split catalog hits into operator-scoped vs genuine (B1 item 3).
+
+    A hit is OPERATOR-SCOPED when its containing sentence (split on
+    ``[.!?\\n;]``) also names an operator-action token
+    (:data:`_OPERATOR_ACTION_TOKENS`) — e.g. ``"Still pending: "
+    "rebuild+restart activation (operator action)."`` describes the
+    OPERATOR's next step, not undelivered child work. Hits whose
+    sentence carries no operator token are genuine (the default).
+    """
+    if not matched_terms or not content:
+        return ()
+    lower = content.lower()
+    scoped: list[str] = []
+    for term in matched_terms:
+        for sentence in _SENTENCE_SPLIT_RE.split(lower):
+            if term in sentence and any(
+                token in sentence for token in _OPERATOR_ACTION_TOKENS
+            ):
+                scoped.append(term)
+                break
+    return tuple(scoped)
+
+
+def _completed_child_ids(tree_rows: Sequence[dict[str, Any]] | None) -> frozenset[str]:
+    """Extract the delivered-child id set from C tree rows (B1 item 2).
+
+    A row qualifies when its ``status`` is
+    :data:`_CROSS_RESOLVE_DELIVERED_STATUS` (``completed``) — the clean
+    delivered status ONLY. Rows with missing/malformed fields are
+    skipped (cross-resolution is conservative by construction).
+    """
+    completed: set[str] = set()
+    for row in tree_rows or ():
+        if not isinstance(row, dict):
+            continue
+        iid = row.get("instance_id")
+        status = row.get("status")
+        if not isinstance(iid, str) or not iid:
+            continue
+        if (
+            isinstance(status, str)
+            and status.strip().lower() == _CROSS_RESOLVE_DELIVERED_STATUS
+        ):
+            completed.add(iid)
+    return frozenset(completed)
+
+
 def _build_evidence_from_report_message(
     message: BaseMessage,
 ) -> tuple[ChildReportCheckEvidence, int] | None:
@@ -537,6 +641,9 @@ def _build_evidence_from_report_message(
     answers the catalogue-shot heuristic on the original text (not the
     400-char excerpt). When the scan finds no promise marker, returns
     ``None`` and the message is skipped (no evidence row, no signal).
+    The evidence's ``operator_scoped_terms`` carry the sentence-scoped
+    operator-action subset (B1 item 3 — excluded from
+    ``contradiction_flag`` downstream).
     """
     if not isinstance(message, HumanMessage):
         return None
@@ -560,6 +667,9 @@ def _build_evidence_from_report_message(
             stable_id=stable_id if isinstance(stable_id, str) else None,
             kwargs_surface_seen=isinstance(source, str)
             and source.startswith("internal_report:"),
+            operator_scoped_terms=_operator_scoped_terms(
+                content, scan.matched_terms
+            ),
         ),
         _word_count(content),
     )
@@ -567,6 +677,7 @@ def _build_evidence_from_report_message(
 
 def collect_source_a_signals(
     messages: Sequence[BaseMessage],
+    tree_rows_provider: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> SourceASignals:
     """Scan the leader's message history for Source-A triggers.
 
@@ -580,6 +691,41 @@ def collect_source_a_signals(
     IDENTICAL to the deleted Stage-0 producer contract (existing
     ``test_catalog_byte_identical`` identity pin stays green).
 
+    **Dual-autopsy B1 stale-A fix (2026-09-20)** — advisories previously
+    NEVER cleared: superseded phase-stop reports accumulated and held
+    ``a_suspicion`` into final quiet-tree evals (incident acbf5627:
+    4/4 final advisories stale; incident fba90db8: "still pending on my
+    ledger" for work later APPROVED). Three evidence-quality changes,
+    predicate band structure UNCHANGED (``a_suspicion`` stays a band —
+    only its evidence quality changes):
+
+    * **Newest-report-only per child** (B1 item 1) — each child's
+      LATEST ``internal_report`` message (transcript order) is the ONLY
+      one scanned; superseded reports from the same child drop
+      wholesale. An earlier report's catalog hit that the newest
+      report does not repeat does NOT resurface (delivery supersedes
+      promise — pinned in ``TestNewestReportOnlyPerChild``).
+    * **Operator-action scoping** (B1 item 3) — a catalog hit whose
+      containing sentence also names an operator action (rebuild /
+      restart / redeploy — :data:`_OPERATOR_ACTION_TOKENS`) is
+      operator-scoped: EXCLUDED from ``contradiction_flag``
+      ("pending: rebuild+restart activation" is the OPERATOR's action,
+      not undelivered child work) and disqualified from the
+      later-contradiction exception below. Genuine hits keep every
+      old semantic.
+    * **Cross-resolution vs C tree rows** (B1 item 2) — when
+      ``tree_rows_provider`` is wired (the real path via
+      :func:`evaluate_resolver_activation`), advisories from a child
+      whose tree-row status is :data:`_CROSS_RESOLVE_DELIVERED_STATUS`
+      (``completed``) are suppressed UNLESS that child's newest report
+      still carries a GENUINE (non-operator-scoped) hit — a completed
+      child that lied at the end must still surface (the
+      later-contradiction exception; the child-lie class pin).
+      Provider invocation is LAZY (only when advisory candidates
+      exist) and best-effort (any raise ⇒ no rows ⇒ suppression
+      no-ops); without a provider (default) NO suppression happens —
+      back-compat for direct callers.
+
     Field mapping (old note-stamped → new scan-derived) — preserved
     4-field OR shape on :class:`SourceASignals` (the predicate wire
     contract is unchanged; D2 semantics STAY — A-band not
@@ -589,25 +735,23 @@ def collect_source_a_signals(
     | Field (SourceASignals)    | New meaning (evaluation-time scan of transcript)   |
     +===========================+====================================================+
     | ``advisory_present``      | True iff at least one catalog-hit child-report     |
-    |                           | message in the window (preserves old ≡ phrase      |
-    |                           | semantic).                                         |
+    |                           | SURVIVES newest-only + cross-resolution (old ≡     |
+    |                           | phrase semantic preserved on survivors).           |
     +---------------------------+----------------------------------------------------+
-    | ``phrase_match``          | True iff at least one catalog-hit child-report     |
-    |                           | has a non-empty ``matched_terms`` set (primary     |
-    |                           | trigger; old semantic preserved).                  |
+    | ``phrase_match``          | True iff at least one SURVIVING catalog-hit        |
+    |                           | child-report has a non-empty ``matched_terms`` set |
+    |                           | (primary trigger; old semantic preserved).         |
     +---------------------------+----------------------------------------------------+
-    | ``contradiction_flag``    | True iff any catalog-hit's ``matched_terms``       |
+    | ``contradiction_flag``    | True iff any SURVIVING catalog-hit's GENUINE       |
+    |                           | ``matched_terms`` (operator-scoped hits excluded)  |
     |                           | include an explicit-contradiction marker           |
     |                           | (:data:`_CONTRADICTION_MARKERS`). Raises the       |
     |                           | strongest "claimed-done-but-isn't" sub-signal.     |
-    |                           | Was always False in the deleted producer; now     |
-    |                           | live (forward-compatible — predicate was already   |
-    |                           | OR'ing it).                                        |
     +---------------------------+----------------------------------------------------+
-    | ``word_count_below_       | True iff any catalog-hit child-report's raw word   |
-    | threshold``               | count is < :data:`_SHORT_REPORT_WORD_THRESHOLD`    |
-    |                           | (150). Mirror of Source B's ``length_trigger`` —  |
-    |                           | a "suspiciously short + contradiction" signal.     |
+    | ``word_count_below_       | True iff any SURVIVING catalog-hit child-report's  |
+    | threshold``               | raw word count is <                                |
+    |                           | :data:`_SHORT_REPORT_WORD_THRESHOLD` (150). Mirror |
+    |                           | of Source B's ``length_trigger``.                  |
     +---------------------------+----------------------------------------------------+
 
     Defense-in-depth: the legacy note path (:func:`_is_child_report_check_note`)
@@ -615,10 +759,18 @@ def collect_source_a_signals(
     that survived the removal upgrade (they're ``context_kind``-
     hoisted above compaction). The LIVE A-signal source is the
     transcript scan; the note-path adds no new evidence rows in
-    production.
+    production. Note-path entries participate in the cross-resolution
+    too: a completed child's note is suppressed unless that child's
+    newest live report carries a genuine hit (or no live report exists
+    for the child — conservative keep; the note text carries no
+    child-report content to sentence-scope, so its own terms cannot
+    prove the exception by themselves).
 
-    Pure function; no I/O, no LLM, no DB. Reads the
-    ``state["messages"]`` projection the gate already walks.
+    Pure over ``messages``; the ONLY I/O is the optional lazily-invoked
+    ``tree_rows_provider`` (the same best-effort provider the bundle's
+    C-section consumes — shared, fetch-once per evaluation). No LLM,
+    no direct DB. Reads the ``state["messages"]`` projection the gate
+    already walks.
     """
     evidence: list[ChildReportCheckEvidence] = []
     raw_word_counts: list[int] = []
@@ -663,12 +815,31 @@ def collect_source_a_signals(
         # below is honest if it ever trips on an unusual note body.
         raw_word_counts.append(_word_count(body))
 
-    # ── Pass 2 — live child-report scan (the 2026-09-18 source) ──────
+    # ── Pass 2 — live child-report scan, NEWEST-REPORT-ONLY per child ─
+    # B1 item 1: walk ALL internal_report messages FIRST and keep only
+    # each child's LAST one (transcript order = delivery order), THEN
+    # scan that newest report. A child whose newest report is CLEAN
+    # (delivered) yields NO evidence even when its superseded reports
+    # carried catalog hits (the acbf5627 phase-stop accumulation).
+    # Reports whose child id cannot be parsed group under the ``None``
+    # key (id-less reports are indistinguishable — newest wins).
+    newest_report_by_child: dict[str | None, BaseMessage] = {}
     for message in messages:
-        if len(evidence) >= A_EVIDENCE_NOTES_CAP:
-            break
         if not _is_child_report_message(message):
             continue
+        kwargs = getattr(message, "additional_kwargs", None) or {}
+        source = kwargs.get("source")
+        child_id = (
+            _extract_child_id_from_source(source)
+            if isinstance(source, str)
+            else None
+        )
+        newest_report_by_child[child_id] = message
+
+    live_report_entry_ids: set[int] = set()
+    for child_id, message in newest_report_by_child.items():
+        if len(evidence) >= A_EVIDENCE_NOTES_CAP:
+            break
         # Skip duplicates on stable_id when a note-path entry already
         # recorded the same row (rare — a parent that survived the
         # upgrade carries both shapes) — defense-in-depth bookkeeping.
@@ -683,6 +854,64 @@ def collect_source_a_signals(
         ev, raw_word_count = built
         evidence.append(ev)
         raw_word_counts.append(raw_word_count)
+        live_report_entry_ids.add(id(ev))
+
+    # ── Cross-resolution vs C tree rows (B1 item 2) ──────────────────
+    # Suppress advisories from a DELIVERED child (tree status
+    # ``completed``) unless the later-contradiction exception holds:
+    # the child's newest report still carries a GENUINE (non-
+    # operator-scoped) hit — a completed child that lied at the end
+    # must still surface. Lazily invoked ONLY when advisory candidates
+    # exist; any provider failure ⇒ no rows ⇒ suppression no-ops.
+    if evidence and tree_rows_provider is not None:
+        try:
+            tree_rows = tree_rows_provider()
+        except Exception:  # noqa: BLE001 — best-effort, mirrors the C provider
+            tree_rows = []
+        completed = _completed_child_ids(tree_rows)
+        if completed:
+            # Per child: the GENUINE hit set of the newest live report —
+            # an EMPTY frozenset means "has a newest live report and it
+            # carries no genuine hit" (delivered); an ABSENT key means
+            # no live report exists for that child (nothing proves
+            # delivery — conservative keep for its note entries).
+            newest_genuine_terms: dict[str | None, frozenset[str]] = {}
+            for cid, message in newest_report_by_child.items():
+                built = _build_evidence_from_report_message(message)
+                newest_genuine_terms[cid] = (
+                    frozenset(built[0].matched_terms).difference(
+                        built[0].operator_scoped_terms
+                    )
+                    if built is not None
+                    else frozenset()
+                )
+            kept: list[ChildReportCheckEvidence] = []
+            kept_counts: list[int] = []
+            for idx, ev in enumerate(evidence):
+                cid = ev.child_instance_id
+                if cid in completed:
+                    if id(ev) in live_report_entry_ids:
+                        # Live entry: the exception reads THIS entry
+                        # (it IS the child's newest report).
+                        survives = bool(
+                            frozenset(ev.matched_terms).difference(
+                                ev.operator_scoped_terms
+                            )
+                        )
+                    else:
+                        # Note entry: the exception reads the child's
+                        # newest LIVE report; when NO live report exists
+                        # for the child, keep the note (conservative).
+                        survives = (
+                            cid not in newest_genuine_terms
+                            or bool(newest_genuine_terms[cid])
+                        )
+                    if not survives:
+                        continue
+                kept.append(ev)
+                kept_counts.append(raw_word_counts[idx])
+            evidence = kept
+            raw_word_counts = kept_counts
 
     if not evidence:
         return SourceASignals(
@@ -692,8 +921,10 @@ def collect_source_a_signals(
 
     has_match = any(bool(ev.matched_terms) for ev in evidence)
     has_explicit_contradiction = has_match and any(
-        any(t in _CONTRADICTION_MARKERS for t in ev.matched_terms)
+        t in _CONTRADICTION_MARKERS
         for ev in evidence
+        for t in ev.matched_terms
+        if t not in ev.operator_scoped_terms
     )
     has_short_word_count = has_match and any(
         wc < _SHORT_REPORT_WORD_THRESHOLD for wc in raw_word_counts
@@ -1013,7 +1244,9 @@ def _build_b_section(
         content = message.content if isinstance(message.content, str) else str(
             message.content or ""
         )
-        lines.append(f"[{shown + 1}] {redact_ids(_clip(content, 1500), 'leader')}")
+        lines.append(
+            f"[{shown + 1}] {redact_ids(_clip(content, _B_MESSAGE_CLIP), 'leader')}"
+        )
         shown += 1
     if shown == 0:
         lines.append("(no AIMessages)")
@@ -1112,10 +1345,13 @@ def assemble_fused_bundle(
     a final hard clip with a truncation marker).
     ALL id-bearing text is redacted (:func:`redact_ids`): the
     structural fields (A-section child/stable ids, C-section tree
-    rows), the B-section leader-prose excerpts (≤3 × 1500 chars —
-    the leader may quote instance ids in its own prose; Stage-3
-    ledger item (a), 2026-09-17), AND the U-section user prose
-    (incident 4dfded83, 2026-09-18).
+    rows), the B-section leader-prose excerpts (last-3 AIMessages, each
+    clipped at :data:`_B_MESSAGE_CLIP` = 2500 chars — dual-autopsy B1
+    item 5, 2026-09-20, raised from 1500 so a final report's evidence
+    tail + activation note survive into the judge bundle; incident
+    acbf5627 clipped at 1500/2372 — the leader may quote instance ids
+    in its own prose; Stage-3 ledger item (a), 2026-09-17), AND the
+    U-section user prose (incident 4dfded83, 2026-09-18).
     ``user_intent_message`` is the CONTENT of the last real user
     message (the delegation scanner's anchor — extracted by the gate
     from its already-computed ``last_real_user_index``). Anchor absent
@@ -1291,7 +1527,29 @@ def evaluate_resolver_activation(
     ``delegation_scan.last_real_user_index`` anchor (zero re-walk, zero
     new DB reads) and the bundle renders it as section U (incident
     4dfded83). ``None`` ⇒ U omitted.
+
+    **Tree-rows provider sharing (dual-autopsy B1, 2026-09-20):** the
+    best-effort ``c_tree_rows_provider`` now has TWO consumers — the
+    A-scan's cross-resolution (suppress delivered children's advisories,
+    B1 item 2) and the bundle's C-section. A fetch-once cache wraps the
+    provider so it runs at most ONE time per evaluation, and only when
+    a consumer actually needs rows (A-scan: advisory candidates exist;
+    bundle: the predicate fired). The DB cost still does not exist on
+    clean no-advisory evaluations.
     """
+    # Fetch-once cache shared by the A-scan cross-resolution + the
+    # bundle's C-section (see docstring).
+    tree_rows_cache: list[list[dict[str, Any]] | None] = [None]
+
+    def _cached_tree_rows() -> list[dict[str, Any]]:
+        if tree_rows_cache[0] is None:
+            tree_rows_cache[0] = (
+                c_tree_rows_provider()
+                if c_tree_rows_provider is not None
+                else []
+            )
+        return tree_rows_cache[0]
+
     result = activation_predicate(
         attestation_enabled=attestation_enabled,
         scope_applicable=scope_applicable,
@@ -1299,7 +1557,9 @@ def evaluate_resolver_activation(
         attestation_required=attestation_required,
         attested=attested,
         user_answer_pending=user_answer_pending,
-        a_source=lambda: collect_source_a_signals(messages),
+        a_source=lambda: collect_source_a_signals(
+            messages, tree_rows_provider=_cached_tree_rows
+        ),
         b_source=lambda: b_values,
         c_source=lambda: c_values,
     )
@@ -1308,14 +1568,11 @@ def evaluate_resolver_activation(
 
     bundle: FusedBundle | None = None
     if result.fired:
-        tree_rows: list[dict[str, Any]] = []
-        if c_tree_rows_provider is not None:
-            tree_rows = c_tree_rows_provider()
         bundle = assemble_fused_bundle(
             a_signals=result.a_signals,
             b_signals=result.b_signals,
             c_signals=result.c_signals,
-            c_tree_rows=tree_rows,
+            c_tree_rows=_cached_tree_rows(),
             ai_tail_messages=messages,
             user_intent_message=user_intent_message,
         )
