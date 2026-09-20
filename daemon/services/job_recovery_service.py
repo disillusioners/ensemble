@@ -882,6 +882,25 @@ class JobRecoveryService:
             )
             return []
 
+        # Engine phase (Shape (b) §2 site 2): per-row post-commit
+        # notify — the F-1 backstop's mirror transitions are
+        # structurally silent terminal writes. Canonical facade,
+        # per-kind mirror token 'settled'. Re-entrancy-safe: notify
+        # uses asyncio.to_thread internally and the CAS claim makes
+        # re-entrant sweeps exactly-once per (job_id, instance_id).
+        if self._job_queue_service is not None:
+            for mirror in terminal_mirrors:
+                try:
+                    await self._job_queue_service.notify_watchers(
+                        mirror.job_id, "settled"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"_reconcile_terminal_message_mirrors: "
+                        f"notify_watchers failed for "
+                        f"{mirror.job_id[:8]}... (settled): {e}"
+                    )
+
         details: list[dict[str, Any]] = []
         for mirror in terminal_mirrors:
             details.append({
@@ -3855,6 +3874,23 @@ class JobRecoveryService:
                 f"{job_id[:8]}...: "
                 f"{type(trans_err).__name__}: {trans_err}",
             )
+
+        # Engine phase (Shape (b) §2 site 6): the f1-DEAD
+        # ``atomic_transition`` is a structurally silent terminal
+        # write (zero notify anywhere in the function before this
+        # hook). Fire the canonical facade post-transition with the
+        # canonical 'dead_letter' token. Notify failures must not
+        # mask the landed transition — log + continue.
+        if self._job_queue_service is not None:
+            try:
+                await self._job_queue_service.notify_watchers(
+                    job_id, "dead_letter"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"_pattern_f_finalize_dead: notify_watchers "
+                    f"failed for {job_id[:8]}... (dead_letter): {e}"
+                )
 
         return (
             True,

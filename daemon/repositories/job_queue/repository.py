@@ -2677,6 +2677,16 @@ SET admission_state = 'queued',
     # ``"daemon/repositories/job_queue/repository.py:reap_legacy_mirror_zombies"``
     # — Phase 0 census gate enforces the registration.
 
+    # Notify carve-out (engine phase, Shape (b) §2 site 3 — EXEMPT from
+    # the terminal-write notify contract; see
+    # watch-notification-reliability/architecture-recommendation.md):
+    # this D2-exempt one-time cutover reap (≤3 legacy rows) writes
+    # ``terminal_reason='orphan_retired'``, which is NOT in
+    # ``_TERMINAL_STATUSES`` — firing the canonical notify here would
+    # require a misrepresenting token, so the site is classified
+    # ``exempt`` in the terminal-write census
+    # (tests/job_queue/test_terminal_write_census.py) instead of
+    # hooked.
     def reap_legacy_mirror_zombies(
         self,
         *,
@@ -3842,6 +3852,52 @@ SET admission_state = 'queued',
                 # and re-read. Surface as "not found" for symmetry.
                 return None
             return job
+
+    def find_batch_cancel_queued_ids(self) -> list[str]:
+        """Pre-SELECT the queued job_ids matching the batch-cancel predicate.
+
+        Site-4 companion read for the engine-phase event-driven
+        completion hook (watch-notification-reliability
+        architecture-recommendation.md, Shape (b) §2/§3): the caller
+        captures the candidate ids BEFORE :meth:`batch_cancel_queued`
+        runs, then re-verifies via :meth:`find_terminal_among_ids` which
+        of them actually transitioned. ``RETURNING`` is rejected
+        (PG-only; breaks the SQLite boot test path).
+
+        The predicate MUST stay byte-identical to
+        :meth:`batch_cancel_queued`'s WHERE clause (``queued`` +
+        non-mirror + non-deleted) — a drift here would capture ids the
+        UPDATE never intended to touch. Pure read; no writes.
+        """
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                select(JobItem.job_id)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.job_type != "message")
+                .where(JobItem.deleted_at.is_(None))
+            )
+            return [row for row in session.exec(stmt)]
+
+    def find_terminal_among_ids(self, job_ids: list[str]) -> list[str]:
+        """Re-SELECT which of ``job_ids`` are now in terminal admission.
+
+        Site-4 race guard (Shape (b) §3): a captured id that did NOT
+        transition — a concurrent actor moved it out of ``queued``
+        between the pre-SELECT and the bulk UPDATE — must NOT be
+        notified: a false terminal deletes real watcher rows and
+        delivers a phantom ``[JOB_EVENT]``. Only ids currently in
+        ``admission_state='done'`` (the bulk cancel's target state) are
+        returned. Pure read; no writes.
+        """
+        if not job_ids:
+            return []
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                select(JobItem.job_id)
+                .where(JobItem.job_id.in_(job_ids))
+                .where(JobItem.admission_state == AdmissionState.DONE.value)
+            )
+            return [row for row in session.exec(stmt)]
 
     def batch_cancel_queued(self) -> int:
         """Atomically cancel ALL queued (admission_state='queued') jobs in one UPDATE.

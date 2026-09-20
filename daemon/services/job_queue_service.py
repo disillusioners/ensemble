@@ -1274,10 +1274,33 @@ class JobQueueService:
             ``task`` for bad-state, ``instances`` for zombies), not
             the JobItem rows the first two buckets handle.
         """
-        # 1) Queued batch — single SQL UPDATE, no per-row logic needed.
+        # 1) Queued batch — SPECIAL SHAPE (engine phase, Shape (b) §2
+        # site 4): pre-SELECT the queued ids matching the UPDATE
+        # predicate → single atomic UPDATE (unchanged) → re-SELECT the
+        # captured ids now in terminal state → notify ONLY those. The
+        # re-check closes the SELECT↔UPDATE race: a captured id that
+        # did not transition must NOT be notified (a false terminal
+        # deletes real watcher rows and delivers a phantom
+        # [JOB_EVENT]). RETURNING is rejected (PG-only).
+        captured_queued_ids = await asyncio.to_thread(
+            self._repository.find_batch_cancel_queued_ids
+        )
         cancelled_queued = await asyncio.to_thread(
             self._repository.batch_cancel_queued
         )
+        fired_queued_ids = await asyncio.to_thread(
+            self._repository.find_terminal_among_ids, captured_queued_ids
+        )
+        # ── Site-4 hook (Shape (b) §2): notify ONLY the re-SELECT-
+        # verified terminal ids, canonical token 'cancelled'.
+        for fired_job_id in fired_queued_ids:
+            try:
+                await self.notify_watchers(fired_job_id, "cancelled")
+            except Exception as e:  # noqa: BLE001 — notify is best-effort
+                logger.warning(
+                    f"cleanup_non_terminal_jobs: notify_watchers failed "
+                    f"for {fired_job_id[:8]}... (cancelled): {e}"
+                )
 
         # 2) Active side — cancel each row through the existing
         # ``cancel_job`` so the instance termination cascade runs.
@@ -1312,6 +1335,7 @@ class JobQueueService:
         # the ghost rows. The orphan-reaper is its own best-effort
         # loop — failures here must not block the main counters.
         orphaned_reaped = 0
+        orphan_terminal_reason = "cancelled"
         try:
             orphans = await asyncio.to_thread(
                 self._repository.find_orphan_active_jobs
@@ -1321,7 +1345,7 @@ class JobQueueService:
                     reaped = await asyncio.to_thread(
                         self._repository.force_finalize_orphan,
                         orphan.job_id,
-                        "cancelled",
+                        orphan_terminal_reason,
                     )
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.warning(
@@ -1332,6 +1356,21 @@ class JobQueueService:
                     continue
                 if reaped is not None:
                     orphaned_reaped += 1
+                    # Engine phase (Shape (b) §2 site 5): post-commit
+                    # notify — the orphan finalize is a structurally
+                    # silent terminal write. Token: the literal
+                    # ``orphan_terminal_reason`` above (canonical
+                    # vocabulary; sole caller value 'cancelled').
+                    try:
+                        await self.notify_watchers(
+                            orphan.job_id, orphan_terminal_reason
+                        )
+                    except Exception as e:  # noqa: BLE001 — best-effort
+                        logger.warning(
+                            f"cleanup_non_terminal_jobs: notify_watchers "
+                            f"failed for {orphan.job_id[:8]}... "
+                            f"({orphan_terminal_reason}): {e}"
+                        )
         except Exception as exc:  # noqa: BLE001 — best-effort
             logger.warning(
                 "cleanup_non_terminal_jobs: orphan reap pass failed: %s",

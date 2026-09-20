@@ -1038,6 +1038,13 @@ class ProcessMessageProcessor(BaseProcessor):
             # ``getattr`` so unit tests that wire a partial
             # ``InstanceManager`` do not crash.
             job_repo = None
+            # Engine phase (Shape (b) site 1): bind OUTSIDE the
+            # conditional below — when the Task is already terminal
+            # (concurrent-finalizer race, complete_task → None) the
+            # block is skipped entirely, and the post-block notify read
+            # would raise UnboundLocalError (merge-blocker fix round
+            # 2026-09-20).
+            finalized_mirror = None
             job_queue_service = getattr(
                 instance_manager, "_job_queue_service", None
             )
@@ -1049,7 +1056,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 and getattr(completed_task, "work_id", None) is not None
             ):
                 try:
-                    await asyncio.to_thread(
+                    finalized_mirror = await asyncio.to_thread(
                         job_repo.finalize_mirror_job_at_completion,
                         completed_task.work_id,
                     )
@@ -1066,6 +1073,25 @@ class ProcessMessageProcessor(BaseProcessor):
                         f"pre-cutover-only, and the observer may also race "
                         f"as a terminal writer",
                         exc_info=True,
+                    )
+
+            # Engine phase (Shape (b) §2 site 1): post-commit mirror
+            # notify. The Fix-B inline finalize is a structurally silent
+            # terminal write (no observer lifecycle event exists on this
+            # path). Canonical facade, mirror token 'settled' — the
+            # row's terminal_reason='completed' is the per-kind bridge
+            # input, never the notify token. Guard: the write returns
+            # None on race-loss / task-kind ⇒ no notify (phantom-event
+            # guard).
+            if finalized_mirror is not None and job_queue_service is not None:
+                try:
+                    await job_queue_service.notify_watchers(
+                        completed_task.work_id, "settled"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"on_success: notify_watchers failed for "
+                        f"{completed_task.work_id[:8]}... (settled): {e}"
                     )
 
             # W6 — usage-limit anchor clear (success ENDS the episode):
