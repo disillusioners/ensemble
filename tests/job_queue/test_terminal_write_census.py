@@ -174,6 +174,31 @@ def _notify_near(rel_path: str, line: int, window: int = 5) -> bool:
     return any("notify_watchers" in l for l in lines[lo:hi])
 
 
+# ── Documented exemptions INVISIBLE to the walker (notes, not entries —
+# an entry the walker never discovers is vacuous and rots silently;
+# council fix round 2026-09-20):
+#
+# * reconcile_turn_mirror CASE (daemon/repositories/task/repository.py
+#   ~:1281-1325 — checklist site 7) — EXEMPT. ⚠️ CAVEAT: this exemption
+#   rests on the same-work_id-handle ARGUMENT + CAS-equivalence, NOT on
+#   a pin: the CASE follows an ALREADY-terminal Task on the SAME
+#   work_id handle whose delivery is owned by the canonical
+#   task-terminal notify (task_processor on_success per-kind
+#   'settled'/'completed'; complete/fail/cancel all notify). In-method
+#   hooking is blocked by the §3 facade-only + repo-purity constraints
+#   (task repository has no JobQueueService reach); a caller-side hook
+#   would be a guaranteed CAS-noop (noise). The CASE's terminal_reason
+#   is a bound param (not a literal), so shape S3 cannot see it — do
+#   NOT loosen S3 to match (reason-string false positives would flood
+#   the census). Re-open if a different-handle consumer ever appears.
+#
+# * reap_legacy_mirror_zombies DEFINITION (daemon/repositories/
+#   job_queue/repository.py — checklist site 3) — invisible to shape M1
+#   (fires on ast.Call only). The discovered forms are classified
+#   exempt above: the WRITE (bulk_sql:orphan_retired) and the CALLER
+#   (job_recovery_service.reconcile_drift_states), both carrying the
+#   D2 carve-out reason.
+
 # ── The fixture: the allow-list. Walker is the source of truth. ──────────
 # One entry per discovered site. `anchor` is a substring of the
 # enclosing function name (refactor-tolerant site pin). `hooked_at` is
@@ -185,13 +210,13 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/task_processor.py", site="finalize_mirror_job_at_completion",
         anchor="on_success", classification="hooked",
-        hooked_at="daemon/services/task_processor.py:1081",
+        hooked_at="daemon/services/task_processor.py:1087",
         reason="checklist site 1; post-commit mirror notify 'settled' (per-kind mirror token)",
     ),
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="bulk_sql:completed",
         anchor="finalize_mirror_job_at_completion", classification="hooked",
-        hooked_at="daemon/services/task_processor.py:1081",
+        hooked_at="daemon/services/task_processor.py:1087",
         reason="write side of checklist site 1; §3 placement = caller-level notify",
     ),
     # ── Checklist site 2 — F-1 terminal message mirrors ──
@@ -208,13 +233,6 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         reason="write side of checklist site 2; §3 placement = caller-level notify",
     ),
     # ── Checklist site 3 — legacy zombie reap (EXEMPT) ──
-    CensusEntry(
-        file="daemon/repositories/job_queue/repository.py", site="reap_legacy_mirror_zombies",
-        anchor="reconcile_drift_states", classification="exempt",
-        reason="D2-exempt one-time cutover reap (≤3 rows); 'orphan_retired' ∉ "
-               "_TERMINAL_STATUSES — firing would require a misrepresenting token. "
-               "See architecture-recommendation.md Shape (b) §2 site 3.",
-    ),
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="bulk_sql:orphan_retired",
         anchor="reap_legacy_mirror_zombies", classification="exempt",
@@ -253,18 +271,6 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         anchor="_pattern_f_finalize_dead", classification="hooked",
         hooked_at="daemon/services/job_recovery_service.py:3886",
         reason="checklist site 6; in-function post-transition notify 'dead_letter'",
-    ),
-    # ── Checklist site 7 — reconcile_turn_mirror CASE (see reason) ──
-    CensusEntry(
-        file="daemon/repositories/task/repository.py", site="bulk_sql:completed",
-        anchor="reconcile_turn_mirror", classification="exempt",
-        reason="turn-mirror CASE follows an ALREADY-terminal Task on the SAME work_id handle; "
-               "delivery for that handle is owned by the canonical task-terminal notify "
-               "(task_processor on_success per-kind 'settled'/'completed'; complete/fail/cancel "
-               "all notify). In-method hooking is blocked by the §3 facade-only + repo-purity "
-               "constraints (task repository has no JobQueueService reach), and a caller-side "
-               "hook would be a guaranteed CAS-noop (noise). Re-open if a different-handle "
-               "consumer ever appears.",
     ),
     # ── Canonical boundary writers (notify-wired before this phase) ──
     CensusEntry(

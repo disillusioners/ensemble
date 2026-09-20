@@ -1038,6 +1038,13 @@ class ProcessMessageProcessor(BaseProcessor):
             # ``getattr`` so unit tests that wire a partial
             # ``InstanceManager`` do not crash.
             job_repo = None
+            # Engine phase (Shape (b) site 1): bind OUTSIDE the
+            # conditional below — when the Task is already terminal
+            # (concurrent-finalizer race, complete_task → None) the
+            # block is skipped entirely, and the post-block notify read
+            # would raise UnboundLocalError (merge-blocker fix round
+            # 2026-09-20).
+            finalized_mirror = None
             job_queue_service = getattr(
                 instance_manager, "_job_queue_service", None
             )
@@ -1048,7 +1055,6 @@ class ProcessMessageProcessor(BaseProcessor):
                 and job_repo is not None
                 and getattr(completed_task, "work_id", None) is not None
             ):
-                finalized_mirror = None
                 try:
                     finalized_mirror = await asyncio.to_thread(
                         job_repo.finalize_mirror_job_at_completion,

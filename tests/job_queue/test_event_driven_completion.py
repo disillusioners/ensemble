@@ -258,6 +258,68 @@ class TestSite1InlineMirrorFinalize:
         assert watcher_repo.get_watchers_for_job(work_id) == []
 
     @pytest.mark.asyncio
+    async def test_pre_terminal_task_completes_on_success_fully(
+        self, engine, task_repo, job_repo, watcher_repo, enqueue_mock,
+        service, instance_repo,
+    ):
+        """CRITICAL regression (merge-blocker round 2026-09-20): a Task
+        that is ALREADY terminal when ``on_success`` runs (the designed-
+        for concurrent-finalizer race — ``complete_task`` → None) must
+        NOT raise ``UnboundLocalError`` from the mirror hook's binding.
+        ``on_success`` must run to completion INCLUDING the W6
+        usage-limit anchor clear that follows the hook."""
+        from daemon.services.usage_limit_schedule import (
+            USAGE_LIMIT_FIRST_SEEN_METADATA_KEY,
+        )
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        # Pre-seed the W6 episode anchor — its CLEAR is the tail work
+        # the UnboundLocalError used to abort.
+        with Session(engine) as s:
+            inst = s.get(Instance, instance_id)
+            inst.instance_metadata = {
+                USAGE_LIMIT_FIRST_SEEN_METADATA_KEY: datetime.now(
+                    timezone.utc
+                ).isoformat()
+            }
+            s.add(inst)
+            s.commit()
+
+        work_id = str(uuid4())
+        # ALREADY terminal: complete_task will return None and the
+        # finalize block is skipped entirely.
+        _seed_task(engine, work_id, instance_id, TaskStatus.COMPLETED.value)
+        _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
+        _seed_watcher(watcher_repo, work_id)
+
+        tp = ProcessMessageProcessor.__new__(ProcessMessageProcessor)
+        tp._task_repo = task_repo
+        tp._work_resolver = service._work_resolver
+        tp._watcher_repo = watcher_repo
+        tp._manager = SimpleNamespace(
+            _job_queue_service=service, _instance_repository=instance_repo
+        )
+        tp._contention_counts = {}
+        tp._last_info_at = {}
+
+        callbacks = tp._build_callbacks(
+            Session(engine).get(Task, _task_pk(engine, work_id))
+        )
+        # MUST NOT raise (pre-fix: UnboundLocalError: finalized_mirror).
+        await callbacks.on_success(MagicMock(name="ProcessingResult"))
+
+        # on_success reached the W6 anchor clear — the code AFTER the
+        # hook site — and cleared the episode anchor.
+        with Session(engine) as s:
+            inst = s.get(Instance, instance_id)
+            metadata = inst.instance_metadata or {}
+        assert USAGE_LIMIT_FIRST_SEEN_METADATA_KEY not in metadata, (
+            "W6 anchor clear did not run — on_success was aborted before "
+            "its tail (the UnboundLocalError regression)"
+        )
+        # The skipped finalize block also means no mirror event fired.
+        assert _delivered(enqueue_mock) == []
+
+    @pytest.mark.asyncio
     async def test_hook_skips_when_finalize_races_to_none(
         self, engine, task_repo, job_repo, watcher_repo, enqueue_mock, service
     ):
@@ -393,6 +455,26 @@ class TestSite4BatchCancelQueued:
         deliveries = _delivered(enqueue_mock)
         assert f"internal_agent:job_event:{work_id}:cancelled" in deliveries
         assert watcher_repo.get_watchers_for_job(work_id) == []
+
+    @pytest.mark.asyncio
+    async def test_double_cleanup_empty_capture_notifies_nothing(
+        self, engine, job_repo, task_repo, instance_repo, watcher_repo,
+        enqueue_mock, service,
+    ):
+        """Re-entrancy (minor #4): the SECOND cleanup pass has an empty
+        pre-SELECT capture (nothing queued left) → zero notifications —
+        double-cleanup is trivially the empty-capture case."""
+        instance_id = _seed_instance(engine, f"inst-{uuid4().hex[:8]}")
+        work_id = str(uuid4())
+        _seed_task_job(engine, work_id, instance_id, admission_state="queued")
+        _seed_watcher(watcher_repo, work_id)
+
+        await service.cleanup_non_terminal_jobs()
+        await service.cleanup_non_terminal_jobs()
+
+        # Exactly one delivery total — the second pass captured nothing.
+        assert len(_delivered(enqueue_mock)) == 1
+        assert job_repo.find_batch_cancel_queued_ids() == []
 
     @pytest.mark.asyncio
     async def test_race_guard_stale_capture_never_notified(

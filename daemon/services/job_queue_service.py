@@ -1340,10 +1340,11 @@ class JobQueueService:
             )
             for orphan in orphans:
                 try:
+                    orphan_terminal_reason = "cancelled"
                     reaped = await asyncio.to_thread(
                         self._repository.force_finalize_orphan,
                         orphan.job_id,
-                        "cancelled",
+                        orphan_terminal_reason,
                     )
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.warning(
@@ -1356,11 +1357,12 @@ class JobQueueService:
                     orphaned_reaped += 1
                     # Engine phase (Shape (b) §2 site 5): post-commit
                     # notify — the orphan finalize is a structurally
-                    # silent terminal write. Token from the
-                    # terminal_reason argument (canonical vocabulary).
+                    # silent terminal write. Token DERIVED from the
+                    # terminal_reason argument (canonical vocabulary;
+                    # sole caller passes 'cancelled' today).
                     try:
                         await self.notify_watchers(
-                            orphan.job_id, "cancelled"
+                            orphan.job_id, orphan_terminal_reason
                         )
                     except Exception as notify_exc:  # noqa: BLE001 — best-effort
                         logger.warning(
