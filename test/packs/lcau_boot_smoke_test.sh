@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MOCK_LLM_SCRIPT="$SCRIPT_DIR/lca2_helpers/mock_llm.py"
 
-PIN_COMMIT="47b56df8"
+PIN_COMMIT="e0d15e93"   # stale-A-fix tip (was 47b56df8 user-intent tip); BASE_COMMIT a6442bff is still ancestor
 BASE_COMMIT="a6442bff"
 DAEMON_PORT=18079
 PG_USER=ensemble

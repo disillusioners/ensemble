@@ -968,11 +968,28 @@ class TestFalseRescueChannelClosed:
     def test_u_fulfilled_a_advisory_c_live_judged_not_complete_honored(
         self, monkeypatch, caplog
     ):
-        # The subordination sentence exists at prompt level, verbatim.
+        # The SUBORDINATION contract at prompt level (dual-autopsy B1
+        # re-contract, 2026-09-20): the softened line keeps subordination
+        # for GENUINE unresolved advisories (the false-rescue guard does
+        # NOT regress) while carving out the two stale-advisory classes
+        # (later-delivered supersession + operator-action pending).
         prompt = judge_mod.FUSED_JUDGE_SYSTEM_PROMPT
         assert (
             "SOURCE A advisories and SOURCE C live/pending descendants "
             "still indicate NOT_COMPLETE even when SOURCE U appears "
+            "fulfilled - but an advisory is NOT evidence of undelivered "
+            "work when its child later delivered a newer report that "
+            "supersedes it, or when the pending item the advisory names "
+            "is an OPERATOR action such as a rebuild+restart activation "
+            "(the operator's step, not the child's undelivered work)."
+            in prompt
+        )
+        # The false-rescue guard survives verbatim: genuine unresolved
+        # advisories still subordinate SOURCE U.
+        assert (
+            "A GENUINE unresolved advisory - a child promising future "
+            "work that never arrived, or a live/pending descendant - "
+            "still indicates NOT_COMPLETE even when SOURCE U appears "
             "fulfilled." in prompt
         )
 

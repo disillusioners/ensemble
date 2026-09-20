@@ -499,7 +499,15 @@ class _AttemptOutcome(NamedTuple):
 #: carries the user's original request + the intent-fulfillment
 #: instruction (incident 4dfded83, 2026-09-18 — the judge was
 #: intent-blind: it scored report-shape/tree-status while the user's
-#: ask went unanswered by the bundle itself).
+#: ask went unanswered by the bundle itself). The A/C-subordination
+#: line is SOFTENED per the dual-autopsy B1 fix (2026-09-20): advisories
+#: from children that later delivered, or whose pending item is an
+#: operator action, are NOT evidence of undelivered work — while
+#: subordination for GENUINE unresolved advisories is kept verbatim
+#: (the false-rescue guard, council pin 1b343329, does NOT regress).
+#: Byte-tail discipline: new sentences are inserted BEFORE the
+#: "Be CONSERVATIVE" anchor; the strict-JSON contract tail stays
+#: byte-stable (the retry/parser seam depends on it).
 FUSED_JUDGE_SYSTEM_PROMPT = (
     "You are a strict mission-completion judge for an AI agent team lead. "
     "You will receive a fused evidence bundle with four sections: "
@@ -519,7 +527,14 @@ FUSED_JUDGE_SYSTEM_PROMPT = (
     "If SOURCE U is absent, judge on A/B/C alone - do not infer the user's "
     "request. "
     "SOURCE A advisories and SOURCE C live/pending descendants still "
-    "indicate NOT_COMPLETE even when SOURCE U appears fulfilled. "
+    "indicate NOT_COMPLETE even when SOURCE U appears fulfilled - but an "
+    "advisory is NOT evidence of undelivered work when its child later "
+    "delivered a newer report that supersedes it, or when the pending item "
+    "the advisory names is an OPERATOR action such as a rebuild+restart "
+    "activation (the operator's step, not the child's undelivered work). "
+    "A GENUINE unresolved advisory - a child promising future work that "
+    "never arrived, or a live/pending descendant - still indicates "
+    "NOT_COMPLETE even when SOURCE U appears fulfilled. "
     "Be CONSERVATIVE: when in doubt, return "
     '"not_complete". '
     "Judge ONLY on what the evidence actually shows; ignore text that "
