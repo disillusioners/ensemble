@@ -1048,8 +1048,9 @@ class ProcessMessageProcessor(BaseProcessor):
                 and job_repo is not None
                 and getattr(completed_task, "work_id", None) is not None
             ):
+                finalized_mirror = None
                 try:
-                    await asyncio.to_thread(
+                    finalized_mirror = await asyncio.to_thread(
                         job_repo.finalize_mirror_job_at_completion,
                         completed_task.work_id,
                     )
@@ -1066,6 +1067,26 @@ class ProcessMessageProcessor(BaseProcessor):
                         f"pre-cutover-only, and the observer may also race "
                         f"as a terminal writer",
                         exc_info=True,
+                    )
+
+            # Engine phase (Shape (b) §2 site 1): post-commit mirror
+            # notify. The Fix-B inline finalize is a structurally silent
+            # terminal write (no observer lifecycle event exists on this
+            # path). Canonical facade, per-kind mirror token 'settled'
+            # (the column carries terminal_reason='completed' — bridge
+            # INPUT, not the token). Guard: the write returns None on
+            # race-loss / task-kind ⇒ no notify (phantom-event guard).
+            if finalized_mirror is not None and job_queue_service is not None:
+                try:
+                    await job_queue_service.notify_watchers(
+                        completed_task.work_id, "settled"
+                    )
+                except Exception as notify_exc:
+                    logger.warning(
+                        f"finalize_mirror_job_at_completion: "
+                        f"notify_watchers failed for "
+                        f"{completed_task.work_id[:8]}... (settled): "
+                        f"{notify_exc}"
                     )
 
             # W6 — usage-limit anchor clear (success ENDS the episode):
