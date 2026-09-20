@@ -38,11 +38,17 @@ Fast by contract: pure AST + regex, no DB, no daemon, < 2s.
     hook it at the service/processor caller (pattern exemplar
     ``job_recovery_service._fail_orphaned_job``), then add one
     ``CensusEntry`` — ``file`` (repo-relative), ``site`` (the walker
-    shape id: method name or ``bulk_sql:<reason-literal>``), ``anchor``
-    (substring of the enclosing function name), ``classification``
+    shape id: method name from ``TERMINAL_WRITE_METHODS`` or
+    ``INSTANCE_COMPLETION_METHODS``, or ``bulk_sql:<reason-literal>``,
+    or ``instance_completion:root_completed``), ``anchor`` (substring
+    of the enclosing function name), ``classification``
     (``hooked``/``exempt``), ``hooked_at`` (``<file>:<line>`` of the
     ``notify_watchers`` call), and ``exempt_kind``/``reason`` when
-    exempt.
+    exempt. Mechanism: the M-surface matches direct calls AND
+    ``asyncio.to_thread(repo.method, ...)`` argument references over
+    the ``TERMINAL_WRITE_METHODS ∪ INSTANCE_COMPLETION_METHODS`` union;
+    the S4 root_completed literal scan (fix round 2) covers the
+    child_reports no-parent completion shape.
 
 (b) STALE ``hooked_at`` (``test_hooked_entries_point_at_live_notify_calls``
     fails with "hooked_at entries no longer point at a notify_watchers
@@ -64,6 +70,9 @@ Fast by contract: pure AST + regex, no DB, no daemon, < 2s.
 not a terminal write (queued→active, processing→paused).
 ``dormant`` — boundary writer with zero in-tree callers; the notify
 contract attaches at callers when first wired.
+``layering`` — the write lives at a layer with no facade reach
+(repo-purity); delivery is owned by a hooked caller (documented in the
+entry's reason).
 """
 from __future__ import annotations
 
@@ -88,6 +97,17 @@ TERMINAL_WRITE_METHODS = frozenset({
     "force_finalize_orphan",
     "atomic_transition",
 })
+
+# Instance-completion surface (fix round 2): the root-completion
+# handler whose no-parent branch finalized Task + JobItem with zero
+# notify (live incident: stranded row 8ade5d22), and the F10
+# force-complete writer discovered by the extended audit.
+INSTANCE_COMPLETION_METHODS = frozenset({
+    "_process_child_completion_and_notify_parent",
+    "force_complete_task",
+})
+
+ROOT_COMPLETED_LITERAL = re.compile(r'outcome=["\']root_completed["\']')
 
 TERMINAL_ADMISSION_TOKENS = ("'done'", '"done"', "'dead'", '"dead"', "DONE", "DEAD")
 
@@ -157,10 +177,11 @@ def discover_terminal_write_sites(root: Path = DAEMON_ROOT) -> list[DiscoveredSi
             continue
         spans = _enclosing_function_map(tree)
         lines = src.splitlines()
+        surface = TERMINAL_WRITE_METHODS | INSTANCE_COMPLETION_METHODS
         for node in ast.walk(tree):
             # M1 — direct call to a terminal-write method.
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr in TERMINAL_WRITE_METHODS:
+                if node.func.attr in surface:
                     key = (rel, node.lineno, node.func.attr)
                     if key not in seen:
                         seen.add(key)
@@ -172,7 +193,7 @@ def discover_terminal_write_sites(root: Path = DAEMON_ROOT) -> list[DiscoveredSi
             # (asyncio.to_thread(repo.method, ...) wrap).
             if isinstance(node, ast.Call):
                 for arg in node.args:
-                    if isinstance(arg, ast.Attribute) and arg.attr in TERMINAL_WRITE_METHODS:
+                    if isinstance(arg, ast.Attribute) and arg.attr in surface:
                         key = (rel, arg.lineno, arg.attr)
                         if key not in seen:
                             seen.add(key)
@@ -204,6 +225,18 @@ def discover_terminal_write_sites(root: Path = DAEMON_ROOT) -> list[DiscoveredSi
                                 rel, lo, f"bulk_sql:{token}",
                                 _enclosing(spans, lo),
                             ))
+        # S4 — instance root-completion shape: the
+        # ``outcome="root_completed"`` literal (the mint in the sync
+        # helper and the post-commit handler that owns the notify).
+        for i, line_text in enumerate(lines, 1):
+            if ROOT_COMPLETED_LITERAL.search(line_text):
+                key = (rel, i, "instance_completion:root_completed")
+                if key not in seen:
+                    seen.add(key)
+                    discovered.append(DiscoveredSite(
+                        rel, i, "instance_completion:root_completed",
+                        _enclosing(spans, i),
+                    ))
     return discovered
 
 
@@ -225,18 +258,32 @@ def _notify_near(rel_path: str, line: int, window: int = 5) -> bool:
 # council fix round 2026-09-20):
 #
 # * reconcile_turn_mirror CASE (daemon/repositories/task/repository.py
-#   ~:1281-1325 — checklist site 7) — EXEMPT. ⚠️ CAVEAT: this exemption
-#   rests on the same-work_id-handle ARGUMENT + CAS-equivalence, NOT on
-#   a pin: the CASE follows an ALREADY-terminal Task on the SAME
-#   work_id handle whose delivery is owned by the canonical
-#   task-terminal notify (task_processor on_success per-kind
-#   'settled'/'completed'; complete/fail/cancel all notify). In-method
-#   hooking is blocked by the §3 facade-only + repo-purity constraints
-#   (task repository has no JobQueueService reach); a caller-side hook
-#   would be a guaranteed CAS-noop (noise). The CASE's terminal_reason
-#   is a bound param (not a literal), so shape S3 cannot see it — do
-#   NOT loosen S3 to match (reason-string false positives would flood
-#   the census). Re-open if a different-handle consumer ever appears.
+#   ~:1281-1325 — checklist site 7) — EXEMPT. ⚠️ RE-AUDITED fix round 2
+#   (2026-09-20): the earlier class claim ("Task-side writes all
+#   notify") is FALSIFIED. Required caveat: this exemption
+#   rests on the same-work_id-handle ARGUMENT + CAS-equivalence, NOT on a pin —
+#   the pins are the per-flow hooked notifies in (2) below. — the child_reports no-parent completion
+#   completed a Task + JobItem with zero notify (stranded row 8ade5d22)
+#   and is now HOOKED (site 7-followup entry above), as is the F10
+#   force-complete caller. The exemption stands ONLY on these
+#   site-specific facts: (1) LAYERING — the CASE write lives in the
+#   task repository, which has no JobQueueService reach; the §3
+#   facade-only + repo-purity rules block an in-method hook, and the
+#   event-time caller set spans worker-pool, turn-transitions, and
+#   observer layers with no single facade-bearing vantage point;
+#   (2) COVERAGE — every completion flow that reaches the CASE now
+#   passes a hooked notify first: worker-pool turns (N8 per-kind notify
+#   + site 1), job-dispatch turns (the new root-completion fan-out in
+#   child_reports), and F10 drift finalizations (hook B) — the live
+#   smoke shape replays green against the round-2 tree (regression
+#   test test_root_completion_fires_per_kind_notify);
+#   (3) the CASE's terminal_reason is a bound param, so shape S3 cannot
+#   see it — do NOT loosen S3 to match (reason-string false positives
+#   would flood the census). Residual: a future completion flow that
+#   reaches the CASE without passing a hooked notify would strand —
+#   the walker's M-surface on the four event-time callers is the
+#   guard; re-open the hook if a facade-bearing vantage point ever
+#   exists inside the task repository.
 #
 # * reap_legacy_mirror_zombies DEFINITION (daemon/repositories/
 #   job_queue/repository.py — checklist site 3) — invisible to shape M1
@@ -278,6 +325,52 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         hooked_at="daemon/services/job_recovery_service.py:894",
         reason="write side of checklist site 2; §3 placement = caller-level notify",
     ),
+    # ── Fix round 2 — root-completion hook (the 7th site) ──
+    CensusEntry(
+        file="daemon/services/child_reports.py", site="instance_completion:root_completed",
+        anchor="_dispatch_post_commit_side_effects", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:3941",
+        reason="checklist site 7-followup (live incident: stranded row 8ade5d22 — "
+               "no-parent root completion had zero notify); per-instance work-set "
+               "fan-out, per-kind token, terminal-filtered",
+    ),
+    CensusEntry(
+        file="daemon/services/child_reports.py", site="instance_completion:root_completed",
+        anchor="_process_child_completion_db_sync", classification="exempt",
+        exempt_kind="layering",
+        reason="sync DB helper (repo-purity: no await/facade at this layer); the "
+               "notify lives at the async caller's root_completed handler (hooked "
+               "entry above)",
+    ),
+    CensusEntry(
+        file="daemon/manager.py", site="_process_child_completion_and_notify_parent",
+        anchor="_process_child_completion_and_notify_parent", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:3941",
+        reason="dispatch wrapper — delivery owned by the hooked root-completion handler",
+    ),
+    CensusEntry(
+        file="daemon/manager.py", site="_process_child_completion_and_notify_parent",
+        anchor="_reenter_completion_async", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:3941",
+        reason="re-entrant dispatch caller — same hooked handler",
+    ),
+    CensusEntry(
+        file="daemon/manager.py", site="_process_child_completion_and_notify_parent",
+        anchor="_resume_processing_background", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:3941",
+        reason="resume-path dispatch caller — same hooked handler",
+    ),
+    # ── Fix round 2 — F10 force-complete (audit-discovered) ──
+    CensusEntry(
+        file="daemon/services/job_recovery_service.py", site="force_complete_task",
+        anchor="reconcile_drift_states", classification="hooked",
+        hooked_at="daemon/services/job_recovery_service.py:1294",
+        reason="F10 zombie-task force-complete is a silent Task-terminal write "
+               "(JobItem already done); notify 'completed' at the caller. The "
+               "write itself (stale_task_recovery.force_complete_task -> "
+               "complete_task) is invisible to the walker (def-shape; M1 fires "
+               "on calls) — covered by this caller entry.",
+    ),
     # ── Checklist site 3 — legacy zombie reap (EXEMPT) ──
     CensusEntry(
         file="daemon/repositories/job_queue/repository.py", site="bulk_sql:orphan_retired",
@@ -317,7 +410,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_dead", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:3886",
+        hooked_at="daemon/services/job_recovery_service.py:3925",
         reason="checklist site 6; in-function post-transition notify 'dead_letter'",
     ),
     # ── Canonical boundary writers (notify-wired before this phase) ──
@@ -368,13 +461,13 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_done", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:4074",
+        hooked_at="daemon/services/job_recovery_service.py:4112",
         reason="f2-DONE finalize; watcher fire/cancel notify wired in-function",
     ),
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_failed_terminal", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:4217",
+        hooked_at="daemon/services/job_recovery_service.py:4255",
         reason="f-failed-terminal finalize; notify wired in-function",
     ),
     # ── Non-terminal transitions (shape-matched, not terminal writes) ──
@@ -463,6 +556,50 @@ def _assert_sites_classified(sites: list[DiscoveredSite]) -> None:
 
 
 class TestTerminalWriteCensus:
+
+    def test_site7_exemption_note_stands_on_specific_evidence(self):
+        """Site-7 re-audit pin (rebuilt per council M1): the note must
+        carry the re-audit markers + the required caveat, and the
+        RETIRED 61cdfb28-era class-claim fragments must be gone.
+
+        Every needle is concatenation-split: this pin scans the very
+        file it lives in, so a verbatim needle literal would be
+        self-satisfying (the old pin could not fail on the positive
+        arms)."""
+        census_src = Path(__file__).resolve().parent.joinpath(
+            "test_terminal_write_census.py"
+        ).read_text()
+        # Whitespace-normalized: the note wraps across comment lines.
+        census_flat = re.sub(r"\s+", " ", census_src)
+
+        def _present(*parts):
+            joined = "".join(parts)
+            assert joined in census_flat, (
+                "site-7 note missing required fragment: " + joined
+            )
+
+        def _absent(*parts):
+            joined = "".join(parts)
+            assert joined not in census_flat, (
+                "RETIRED site-7 fragment reappeared: " + joined
+            )
+
+        # Re-audit markers + the required caveat (present, split).
+        _present("RE-AUDITED fix ", "round 2")
+        _present("rests on the same-work_id-handle ARGUMENT + CAS-equ",
+                 "ivalence, NOT on a pin")
+        _present("the child_reports no-parent ", "completion")
+        _present("is now ", "HOOKED")
+        _present("(1) ", "LAYERING")
+        _present("(2) ", "COVERAGE")
+
+        # Retired 61cdfb28-era fragments (forbidden, split).
+        _absent("whose delivery is owned by the canonical ",
+                "task-terminal notify")
+        _absent("delivery for that handle is owned by the canonical ",
+                "task-terminal notify")
+        _absent("Task-side writes ", "all notify")
+
     def test_every_terminal_write_site_is_classified(self):
         """Walker is the source of truth; the fixture is the allow-list.
 

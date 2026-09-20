@@ -1261,6 +1261,45 @@ class JobRecoveryService:
                 )
                 if updated is not None:
                     reconciled += 1
+                    # ── Engine phase (Shape (b) audit follow-up — fix
+                    # round 2 / M3 pre-merge fix): F10 force-complete is
+                    # a silent Task-terminal write (the JobItem is
+                    # already terminal). Token DERIVED per-kind via the
+                    # work resolver — done+failed/cancelled and
+                    # mirror-settled shapes resolve their own canonical
+                    # token, 'completed' is only the default.
+                    _f10_work_id = getattr(task, "work_id", None)
+                    if _f10_work_id and self._job_queue_service is not None:
+                        _f10_token = "completed"
+                        _f10_resolver = getattr(
+                            self._job_queue_service,
+                            "_work_resolver",
+                            None,
+                        )
+                        if _f10_resolver is not None:
+                            try:
+                                _f10_token = (
+                                    _f10_resolver.per_kind_status_for(
+                                        _f10_work_id, default="completed"
+                                    )
+                                )
+                            except Exception as token_err:
+                                logger.warning(
+                                    f"F10_zombie_task: per-kind resolve "
+                                    f"failed for {_f10_work_id[:8]}...: "
+                                    f"{token_err} — defaulting to "
+                                    f"'completed'"
+                                )
+                        try:
+                            await self._job_queue_service.notify_watchers(
+                                _f10_work_id, _f10_token
+                            )
+                        except Exception as notify_err:
+                            logger.warning(
+                                f"F10_zombie_task: notify_watchers failed "
+                                f"for {_f10_work_id[:8]}... "
+                                f"({_f10_token}): {notify_err}"
+                            )
                     details.append({
                         "pattern": "F10_zombie_task",
                         "job_id": job.job_id,
