@@ -59,6 +59,7 @@ import os
 from typing import Any
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+from daemon.mcp.config import _sanitize_quoted_url, _strip_wrapping_quotes
 
 
 # Default Plane fallback message (returned as a JSON string to the agent
@@ -98,7 +99,18 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @property
     def schema_version(self) -> str:
-        return "1"
+        """Bumped 1 → 2 (2026-09-20): the quote-leak sanitization.
+
+        The live ``mcp_servers`` row carries literal ``"`` characters in
+        ``url`` / ``headers`` (persisted 2026-08-13 by a quote-leaking
+        env loader). This bump makes the next bootstrap that runs with
+        the env available rebuild the config from sanitized defaults via
+        the existing schema-drift refresh in
+        ``InstanceManager._bootstrap_builtin_servers``. Boots WITHOUT
+        the env skip plane entirely — those keep being healed at
+        session-creation time by the config validators instead.
+        """
+        return "2"
 
     @property
     def tool_name_prefix(self) -> str:
@@ -232,8 +244,8 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         There is intentionally NO disable toggle for this server:
         absence of the required env vars IS the disable mechanism.
         """
-        url = os.environ.get("PLANE_MCP_URL", "").strip()
-        api_key = os.environ.get("PLANE_MCP_API_KEY", "").strip()
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
         return bool(url) and bool(api_key)
 
     def get_base_config(self) -> dict[str, Any]:
@@ -243,10 +255,21 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         can be imported even when the vars are absent. Bootstrap
         layers call ``is_available()`` first and skip when the URL
         is missing.
+
+        Every value passes through the quote-leak sanitizers
+        (``_sanitize_quoted_url`` / ``_strip_wrapping_quotes``) because
+        shell loaders like ``export $(cat .env | xargs)`` leave the
+        surrounding quote characters in ``os.environ`` verbatim. A
+        quoted URL was persisted into the ``mcp_servers`` row on
+        2026-08-13 and stranded every plane session at
+        ``McpError: Connection closed`` until the config-layer
+        sanitization landed (tests/unit/test_mcp_quote_sanitization.py).
         """
-        url = os.environ.get("PLANE_MCP_URL", "").strip()
-        api_key = os.environ.get("PLANE_MCP_API_KEY", "")
-        workspace_slug = os.environ.get("PLANE_MCP_WORKSPACE_SLUG", "")
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
+        workspace_slug = _strip_wrapping_quotes(
+            os.environ.get("PLANE_MCP_WORKSPACE_SLUG", "")
+        )
         return {
             "transport": "streamable-http",
             "url": url,
