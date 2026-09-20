@@ -7,8 +7,9 @@ FINDING 1+5 (bundled — cascade gate reality + root/cascade symmetry):
 - Tests exercise the REAL production sequence without mocking the gate.
 - Verifies the cascade lane at _update_parent_on_child_complete always
   returns WAITING_CHILDREN in normal traffic (autoflush skew).
-- Verifies the cascade emission-time gate (load-bearing) wraps the call in
-  fail-open try/except and downgrades on regression.
+- Verifies the cascade emission-time gate (race-window defensive — the
+  load-bearing path is the ROOT lane via the message-completed signal)
+  wraps the call in fail-open try/except and downgrades on regression.
 - Verifies the root lane mirror emission-time gate (new in Round 2) is a
   fail-open check that downgrades to WAITING_CHILDREN on regression.
 
@@ -193,7 +194,8 @@ def add_queued_report(job_engine, instance_id: str, message_id: str,
 
 
 def add_terminal_message(job_engine, instance_id: str, message_id: str,
-                          status: str, completed_at: datetime):
+                          status: str, completed_at: datetime,
+                          error_message: str | None = None):
     """Insert a message with a TERMINAL status (COMPLETED or FAILED)."""
     with Session(job_engine) as session:
         session.add(MessageQueue(
@@ -205,6 +207,7 @@ def add_terminal_message(job_engine, instance_id: str, message_id: str,
             status=status,
             priority=0,
             completed_at=completed_at,
+            error_message=error_message,
         ))
         session.commit()
 
@@ -278,7 +281,9 @@ class TestCascadeGateRealityAutoflushSkew:
             session.commit()
 
         # Cascade lane is intentionally conservative: WAITING_CHILDREN, never
-        # completes inline. The load-bearing gate is the emission-time re-check.
+        # completes inline. The emission-time re-check is race-window
+        # defensive; the load-bearing path is the ROOT lane via the
+        # message-completed signal (see child_reports.py:1059-1067).
         assert transitioned is True
         assert completed_parent_id is None
         assert get_instance_row(job_engine, "parent-1").status == (
@@ -290,10 +295,12 @@ class TestCascadeGateRealityAutoflushSkew:
 class TestCascadeEmissionGateFailOpen:
     """Finding 1: emission-time gate at cascade publish wraps in fail-open.
 
-    The cascade emission-time re-gate at :~950 is the LOAD-BEARING gate. It
-    runs in a fresh session (sees the committed report, not the staged one)
-    and must be wrapped in fail-open try/except for parity with the adjacent
-    publish.
+    The cascade emission-time re-gate at :~950 is RACE-WINDOW DEFENSIVE, not
+    load-bearing — in normal traffic the load-bearing completion path for
+    both lanes is the ROOT lane via the message-completed signal
+    (child_reports.py:1059-1067). The gate runs in a fresh session (sees the
+    committed report, not the staged one) and must be wrapped in fail-open
+    try/except for parity with the adjacent publish.
     """
 
     @pytest.mark.asyncio
@@ -415,9 +422,13 @@ class TestRootMirrorGate:
     async def test_root_mirror_downgrades_when_pending_message_arrives(
         self, job_engine
     ):
-        """Race: between the root-lane gate evaluation and the emission-time
-        mirror, a new READY message arrives. The mirror gate regresses; the
-        instance is downgraded back to WAITING_CHILDREN."""
+        """Race: the decision gate passes and the root commits to COMPLETED,
+        but by emission time the mirror gate regresses (a new READY message
+        arrived in the window). Drives the REAL handler path via the round-1
+        side_effect pattern — decision gate (True, None), emission-time
+        mirror (False, "pending_count=1") — so the PRODUCTION downgrade
+        branch (child_reports.py:886-915) executes: the row is downgraded
+        back to WAITING_CHILDREN and the completed publish is suppressed."""
         with Session(job_engine) as session:
             session.add(Instance(
                 instance_id="root-instance-1", agent_id="leader",
@@ -432,52 +443,28 @@ class TestRootMirrorGate:
             job_engine, make_history("fresh response", T_FRESH_ASSISTANT)
         )
 
-        # First call: gate passes, instance → COMPLETED.
-        with patcher, patch(
-            "daemon.services.child_reports.MainLoopBridge.run_async_no_wait"
-        ):
+        # Decision gate passes; emission-time mirror regresses (simulated
+        # race). No manual SQL replication — the REAL downgrade branch runs.
+        gate_effects = [(True, None), (False, "pending_count=1")]
+        with patcher, \
+             patch("daemon.services.child_reports.MainLoopBridge.run_async_no_wait"), \
+             patch.object(
+                 service, "_root_completion_gate",
+                 new_callable=AsyncMock, side_effect=gate_effects,
+             ) as gate_mock:
             await service._process_child_completion_and_notify_parent(
                 "root-instance-1", "root-turn-1"
             )
-
-        row1 = get_instance_row(job_engine, "root-instance-1")
-        assert row1.status == InstanceStatus.COMPLETED.value
-
-        # Now test the mirror downgrade path. Reset to RUNNING (simulate that
-        # the row was downgraded between commit and mirror).
-        with Session(job_engine) as session:
-            row = session.get(Instance, "root-instance-1")
-            row.status = InstanceStatus.COMPLETED.value  # re-stage as COMPLETED
-            session.commit()
-
-        # Inject a fresh READY message AFTER commit (race). The mirror gate
-        # must see pending_count>=1 → block → downgrade.
-        add_queued_report(
-            job_engine, "root-instance-1", "race-msg-1",
-            status=MessageStatus.READY.value,
-        )
-
-        # Call the mirror gate directly to verify it blocks.
-        allowed, block_reason = await service._root_completion_gate(
-            None, "root-instance-1"
-        )
-        assert allowed is False
-        assert "pending_count" in (block_reason or "")
-
-        # Manually trigger the mirror downgrade path (the actual code calls
-        # this after commit). Verify it downgrades the row.
-        from sqlmodel import Session as _DowngradeSession
-        from datetime import datetime as _DT, timezone as _TZ
-        with _DowngradeSession(job_engine) as downgrade_session:
-            row = downgrade_session.get(Instance, "root-instance-1")
-            assert row.status == InstanceStatus.COMPLETED.value
-            row.status = InstanceStatus.WAITING_CHILDREN.value
-            row.version = (row.version or 1) + 1
-            downgrade_session.commit()
-
+            # Both gate effects consumed: decision passed, mirror blocked, and
+            # the production downgrade branch did the downgrade (not this test).
+            assert gate_mock.await_count == 2
+        events_service._publish_instance_lifecycle_event.assert_not_awaited()
         assert get_instance_row(
             job_engine, "root-instance-1"
         ).status == InstanceStatus.WAITING_CHILDREN.value
+        # The completed SSE for the root must not have been emitted either
+        for call in manager._live_hub.stream_status_change.await_args_list:
+            assert call.args[:2] != ("root-instance-1", "completed")
 
     @pytest.mark.asyncio
     async def test_root_mirror_passes_when_no_regression(self, job_engine):
@@ -670,15 +657,20 @@ class TestWedgeResolverEmptyFinalTurn:
 
 
 class TestWedgeResolverDeadLetter:
-    """Finding 2(c): DEAD-LETTER wedge.
+    """Finding 2(c): DEAD-LETTER wedge + terminal-state semantics.
 
     Completion report message transitions to FAILED after max retries. The
     wedge resolver allows the gate to pass when this is the most recent
-    terminal-state message for the instance.
+    terminal-state message for the instance — and the publish site branches
+    on that message's ACTUAL state: terminal FAILED → "failed" event WITH
+    the error body from the message row; terminal non-FAILED → "completed"
+    as before.
     """
 
     @pytest.mark.asyncio
-    async def test_dead_letter_terminal_message_allows_completion(self, job_engine):
+    async def test_dead_letter_failed_terminal_emits_failed_with_error_body(
+        self, job_engine
+    ):
         with Session(job_engine) as session:
             session.add(Instance(
                 instance_id="root-instance-1", agent_id="leader",
@@ -693,6 +685,7 @@ class TestWedgeResolverDeadLetter:
             job_engine, "root-instance-1", "report-msg-1",
             status=MessageStatus.FAILED.value,
             completed_at=T_CHILD_COMPLETED + _td(seconds=120),
+            error_message="max retries exceeded",
         )
 
         service, events_service, manager, patcher = make_child_reports(
@@ -706,10 +699,54 @@ class TestWedgeResolverDeadLetter:
                 "root-instance-1", "root-turn-1"
             )
 
-        # Wedge closed via dead-letter message: instance → COMPLETED.
+        # Wedge closed via dead-letter message: instance → COMPLETED, and the
+        # terminal event is "failed" WITH the error body from the message row
+        # — never an empty "completed" for a FAILED terminal.
+        events_service._publish_instance_lifecycle_event.assert_awaited_once()
+        call = events_service._publish_instance_lifecycle_event.call_args
+        assert call.kwargs["status"] == "failed"
+        assert call.kwargs["error"] == "max retries exceeded"
+        assert get_instance_row(
+            job_engine, "root-instance-1"
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_dead_letter_non_failed_terminal_emits_completed(
+        self, job_engine
+    ):
+        """Control branch: terminal message is COMPLETED (not FAILED) — the
+        wedge still closes, and the terminal event stays "completed" with no
+        error body."""
+        with Session(job_engine) as session:
+            session.add(Instance(
+                instance_id="root-instance-1", agent_id="leader",
+                agent_dir="./agents/leader", parent_id=None,
+                status=InstanceStatus.RUNNING.value, waiting_for=0,
+            ))
+            session.commit()
+
+        add_child_completed_event(job_engine, "root-instance-1", T_CHILD_COMPLETED)
+        add_terminal_message(
+            job_engine, "root-instance-1", "report-msg-1",
+            status=MessageStatus.COMPLETED.value,
+            completed_at=T_CHILD_COMPLETED + _td(seconds=120),
+        )
+
+        service, events_service, manager, patcher = make_child_reports(
+            job_engine, make_history("stale response", T_STALE_ASSISTANT),
+        )
+
+        with patcher, patch(
+            "daemon.services.child_reports.MainLoopBridge.run_async_no_wait"
+        ):
+            await service._process_child_completion_and_notify_parent(
+                "root-instance-1", "root-turn-1"
+            )
+
         events_service._publish_instance_lifecycle_event.assert_awaited_once()
         call = events_service._publish_instance_lifecycle_event.call_args
         assert call.kwargs["status"] == "completed"
+        assert call.kwargs["error"] is None
         assert get_instance_row(
             job_engine, "root-instance-1"
         ).status == InstanceStatus.COMPLETED.value
@@ -808,10 +845,12 @@ class TestStaleTaskRecoveryWedgeHook:
             import asyncio
             asyncio.get_event_loop().run_until_complete(await_run)
 
-        # Wedge closed via dead-letter message: instance → COMPLETED.
+        # Wedge closed via dead-letter message: instance → COMPLETED, and the
+        # terminal event carries the FAILED terminal's state ("failed", no
+        # error body since this fixture's message row has none).
         assert events_service._publish_instance_lifecycle_event.await_count == 1
         call = events_service._publish_instance_lifecycle_event.call_args
-        assert call.kwargs["status"] == "completed"
+        assert call.kwargs["status"] == "failed"
         assert get_instance_row(
             job_engine, "root-instance-1"
         ).status == InstanceStatus.COMPLETED.value

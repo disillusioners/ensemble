@@ -150,7 +150,11 @@ def _resolve_finalize_status(
         instance_id: The parent instance id whose sticky error flag
             to consult.
         default_status: The status to return when no error override
-            applies.
+            applies. ``"failed"`` is normalized to
+            ``InstanceStatus.ERROR.value`` here so downstream
+            ``_finalize_job`` only needs to discriminate COMPLETED vs
+            ERROR — see v0.13.9 fix for dead-letter failed-terminal
+            events carrying the error body through ``atomic_transition``.
         default_error: The error string to return when no error
             override applies (may be ``None``).
 
@@ -158,6 +162,13 @@ def _resolve_finalize_status(
         A ``(status, error)`` tuple suitable for passing directly to
         :meth:`JobFeedbackObserver._finalize_job`.
     """
+    # v0.13.9 (cherry-pick of 5368a12d intent): the root-lane publish
+    # site in child_reports emits a ``"failed"`` lifecycle event when
+    # the most recent terminal message is FAILED. ``_finalize_job`` only
+    # discriminates COMPLETED vs ERROR, so we normalize ``"failed"`` to
+    # ``InstanceStatus.ERROR.value`` at the single entry point.
+    if default_status == "failed":
+        default_status = InstanceStatus.ERROR.value
     if bus is not None and bus.had_parent_error(instance_id):
         status = InstanceStatus.ERROR.value
         error = bus.parent_error_message(instance_id) or CHILD_AGENT_ERROR_FALLBACK
