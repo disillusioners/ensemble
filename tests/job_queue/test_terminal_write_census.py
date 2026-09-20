@@ -15,6 +15,13 @@ Gates the event-driven completion contract
   remediations (hook it / classify hooked with ``hooked_at`` / classify
   exempt with reason).
 
+Scope: the walker's universe is the silent-site checklist families
+(finalize / transition / bulk-cancel methods) plus the canonical
+boundary writers and structurally-silent bulk-SQL writers; exemptions
+invisible to the walker (e.g. the reconcile_turn_mirror CASE, whose
+``terminal_reason`` is a bound param) live as documented notes above
+the fixture — not as entries.
+
 Mechanism: AST walk over ``daemon/`` collecting terminal-write shapes —
 direct/to_thread-wrapped calls to the known terminal-write methods, plus
 bulk-SQL blocks (``.values(...)`` / ``text(...)``) that write a terminal
@@ -62,7 +69,7 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -141,7 +148,13 @@ def discover_terminal_write_sites(root: Path = DAEMON_ROOT) -> list[DiscoveredSi
         src = py.read_text()
         try:
             tree = ast.parse(src)
-        except SyntaxError:  # pragma: no cover — daemon/ is importable
+        except SyntaxError as exc:  # pragma: no cover — daemon/ is importable
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "terminal-write census: skipping unparseable file %s: %s",
+                rel, exc,
+            )
             continue
         spans = _enclosing_function_map(tree)
         lines = src.splitlines()
@@ -205,7 +218,7 @@ def _notify_near(rel_path: str, line: int, window: int = 5) -> bool:
     lines = _read(rel_path).splitlines()
     lo = max(0, line - 1 - window)
     hi = min(len(lines), line + window)
-    return any("notify_watchers" in l for l in lines[lo:hi])
+    return any("notify_watchers" in line for line in lines[lo:hi])
 
 
 # ── Documented exemptions INVISIBLE to the walker (notes, not entries —

@@ -1291,14 +1291,15 @@ class JobQueueService:
         fired_queued_ids = await asyncio.to_thread(
             self._repository.find_terminal_among_ids, captured_queued_ids
         )
+        # ── Site-4 hook (Shape (b) §2): notify ONLY the re-SELECT-
+        # verified terminal ids, canonical token 'cancelled'.
         for fired_job_id in fired_queued_ids:
             try:
                 await self.notify_watchers(fired_job_id, "cancelled")
-            except Exception as notify_exc:  # noqa: BLE001 — notify is best-effort
+            except Exception as e:  # noqa: BLE001 — notify is best-effort
                 logger.warning(
-                    "cleanup_non_terminal_jobs: notify_watchers failed "
-                    "for %s... (cancelled): %s",
-                    fired_job_id[:8], notify_exc,
+                    f"cleanup_non_terminal_jobs: notify_watchers failed "
+                    f"for {fired_job_id[:8]}... (cancelled): {e}"
                 )
 
         # 2) Active side — cancel each row through the existing
@@ -1334,13 +1335,13 @@ class JobQueueService:
         # the ghost rows. The orphan-reaper is its own best-effort
         # loop — failures here must not block the main counters.
         orphaned_reaped = 0
+        orphan_terminal_reason = "cancelled"
         try:
             orphans = await asyncio.to_thread(
                 self._repository.find_orphan_active_jobs
             )
             for orphan in orphans:
                 try:
-                    orphan_terminal_reason = "cancelled"
                     reaped = await asyncio.to_thread(
                         self._repository.force_finalize_orphan,
                         orphan.job_id,
@@ -1364,12 +1365,11 @@ class JobQueueService:
                         await self.notify_watchers(
                             orphan.job_id, orphan_terminal_reason
                         )
-                    except Exception as notify_exc:  # noqa: BLE001 — best-effort
+                    except Exception as e:  # noqa: BLE001 — best-effort
                         logger.warning(
-                            "cleanup_non_terminal_jobs: notify_watchers "
-                            "failed for %s... (%s): %s",
-                            orphan.job_id[:8], orphan_terminal_reason,
-                            notify_exc,
+                            f"cleanup_non_terminal_jobs: notify_watchers "
+                            f"failed for {orphan.job_id[:8]}... "
+                            f"({orphan_terminal_reason}): {e}"
                         )
         except Exception as exc:  # noqa: BLE001 — best-effort
             logger.warning(

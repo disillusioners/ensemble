@@ -894,11 +894,11 @@ class JobRecoveryService:
                     await self._job_queue_service.notify_watchers(
                         mirror.job_id, "settled"
                     )
-                except Exception as notify_exc:
+                except Exception as e:
                     logger.warning(
-                        "reconcile_terminal_message_mirrors: "
-                        "notify_watchers failed for %s... (settled): %s",
-                        mirror.job_id[:8], notify_exc,
+                        f"_reconcile_terminal_message_mirrors: "
+                        f"notify_watchers failed for "
+                        f"{mirror.job_id[:8]}... (settled): {e}"
                     )
 
         details: list[dict[str, Any]] = []
@@ -3886,11 +3886,10 @@ class JobRecoveryService:
                 await self._job_queue_service.notify_watchers(
                     job_id, "dead_letter"
                 )
-            except Exception as notify_err:
+            except Exception as e:
                 logger.warning(
                     f"_pattern_f_finalize_dead: notify_watchers "
-                    f"failed for {job_id[:8]}... (dead_letter): "
-                    f"{notify_err}"
+                    f"failed for {job_id[:8]}... (dead_letter): {e}"
                 )
 
         return (

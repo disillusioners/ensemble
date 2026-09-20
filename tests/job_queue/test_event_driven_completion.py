@@ -18,15 +18,15 @@ notify chain (real ``notify_work_watchers`` over real
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.engine import Engine
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
@@ -201,6 +201,25 @@ def _seed_watcher(watcher_repo, job_id, events=None):
     return job_id
 
 
+def _task_pk(engine: Engine, work_id: str) -> int:
+    with Session(engine) as s:
+        row = s.exec(select(Task).where(Task.work_id == work_id)).first()
+        return row.id
+
+
+def _build_task_processor(task_repo, resolver, watcher_repo, manager):
+    """Minimal ``ProcessMessageProcessor`` carrying exactly the
+    attributes the ``on_success`` closure reads."""
+    tp = ProcessMessageProcessor.__new__(ProcessMessageProcessor)
+    tp._task_repo = task_repo
+    tp._work_resolver = resolver
+    tp._watcher_repo = watcher_repo
+    tp._manager = manager
+    tp._contention_counts = {}
+    tp._last_info_at = {}
+    return tp
+
+
 def _delivered(enqueue_mock) -> list[str]:
     """The canonical source strings of every delivered [JOB_EVENT]."""
     return [
@@ -227,17 +246,14 @@ class TestSite1InlineMirrorFinalize:
         _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
         _seed_watcher(watcher_repo, work_id)
 
-        tp = ProcessMessageProcessor.__new__(ProcessMessageProcessor)
-        tp._task_repo = task_repo
-        tp._work_resolver = service._work_resolver
-        tp._watcher_repo = watcher_repo
         # instance_manager reach: on_success reads _job_queue_service
         # (the hook) and _instance_repository (W6 anchor clear).
-        tp._manager = SimpleNamespace(
+        manager = SimpleNamespace(
             _job_queue_service=service, _instance_repository=None
         )
-        tp._contention_counts = {}
-        tp._last_info_at = {}
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
 
         callbacks = tp._build_callbacks(
             Session(engine).get(Task, _task_pk(engine, work_id))
@@ -292,15 +308,12 @@ class TestSite1InlineMirrorFinalize:
         _seed_mirror_job(engine, work_id, instance_id, admission_state="active")
         _seed_watcher(watcher_repo, work_id)
 
-        tp = ProcessMessageProcessor.__new__(ProcessMessageProcessor)
-        tp._task_repo = task_repo
-        tp._work_resolver = service._work_resolver
-        tp._watcher_repo = watcher_repo
-        tp._manager = SimpleNamespace(
+        manager = SimpleNamespace(
             _job_queue_service=service, _instance_repository=instance_repo
         )
-        tp._contention_counts = {}
-        tp._last_info_at = {}
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
 
         callbacks = tp._build_callbacks(
             Session(engine).get(Task, _task_pk(engine, work_id))
@@ -345,15 +358,14 @@ class TestSite1InlineMirrorFinalize:
             s.commit()
         _seed_watcher(watcher_repo, work_id)
 
-        tp = ProcessMessageProcessor.__new__(ProcessMessageProcessor)
-        tp._task_repo = task_repo
-        tp._work_resolver = service._work_resolver
-        tp._watcher_repo = watcher_repo
-        tp._manager = SimpleNamespace(
+        # instance_manager reach: on_success reads _job_queue_service
+        # (the hook) and _instance_repository (W6 anchor clear).
+        manager = SimpleNamespace(
             _job_queue_service=service, _instance_repository=None
         )
-        tp._contention_counts = {}
-        tp._last_info_at = {}
+        tp = _build_task_processor(
+            task_repo, service._work_resolver, watcher_repo, manager
+        )
 
         callbacks = tp._build_callbacks(
             Session(engine).get(Task, _task_pk(engine, work_id))
@@ -371,14 +383,6 @@ class TestSite1InlineMirrorFinalize:
             f"phantom 'settled' event from the mirror hook on a None "
             f"write: {deliveries}"
         )
-
-
-def _task_pk(engine: Engine, work_id: str) -> int:
-    with Session(engine) as s:
-        row = s.exec(
-            __import__("sqlmodel").select(Task).where(Task.work_id == work_id)
-        ).first()
-        return row.id
 
 
 # ── Site 2: F-1 reconcile_terminal_message_mirrors (recovery caller) ─────
@@ -640,12 +644,17 @@ class TestSite6PatternFDead:
 
 class TestSite3Exemption:
     def test_reap_legacy_mirror_zombies_docstring_carve_out(self):
-        from daemon.repositories.job_queue.repository import (
-            JobRepository as _JR,
+        """The site-3 carve-out lives as a ``#`` block above the def
+        (medium #1 relocation) — pin it at its new home."""
+        repo_src = (Path(__file__).resolve().parents[2] /
+                    "daemon/repositories/job_queue/repository.py").read_text()
+        marker = repo_src.find("# Notify carve-out")
+        assert marker != -1, (
+            "site-3 carve-out comment missing from repository.py — the "
+            "census breadcrumb must live at the site"
         )
-        doc = _JR.reap_legacy_mirror_zombies.__doc__ or ""
-        assert "Notify carve-out" in doc, (
-            "site-3 carve-out missing from reap_legacy_mirror_zombies "
-            "docstring — the census breadcrumb must live at the site"
+        def_block = repo_src[marker:marker + 900]
+        assert "def reap_legacy_mirror_zombies(" in def_block, (
+            "carve-out block no longer sits directly above the def"
         )
-        assert "orphan_retired" in doc
+        assert "orphan_retired" in def_block

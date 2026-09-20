@@ -1078,21 +1078,20 @@ class ProcessMessageProcessor(BaseProcessor):
             # Engine phase (Shape (b) §2 site 1): post-commit mirror
             # notify. The Fix-B inline finalize is a structurally silent
             # terminal write (no observer lifecycle event exists on this
-            # path). Canonical facade, per-kind mirror token 'settled'
-            # (the column carries terminal_reason='completed' — bridge
-            # INPUT, not the token). Guard: the write returns None on
-            # race-loss / task-kind ⇒ no notify (phantom-event guard).
+            # path). Canonical facade, mirror token 'settled' — the
+            # row's terminal_reason='completed' is the per-kind bridge
+            # input, never the notify token. Guard: the write returns
+            # None on race-loss / task-kind ⇒ no notify (phantom-event
+            # guard).
             if finalized_mirror is not None and job_queue_service is not None:
                 try:
                     await job_queue_service.notify_watchers(
                         completed_task.work_id, "settled"
                     )
-                except Exception as notify_exc:
+                except Exception as e:
                     logger.warning(
-                        f"finalize_mirror_job_at_completion: "
-                        f"notify_watchers failed for "
-                        f"{completed_task.work_id[:8]}... (settled): "
-                        f"{notify_exc}"
+                        f"on_success: notify_watchers failed for "
+                        f"{completed_task.work_id[:8]}... (settled): {e}"
                     )
 
             # W6 — usage-limit anchor clear (success ENDS the episode):
