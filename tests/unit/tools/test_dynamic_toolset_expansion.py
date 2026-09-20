@@ -342,3 +342,220 @@ class TestDenyAndGenericity:
             )
 
         assert result == {"jira_search", "jira_create"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-seam pin: drives ``create_instance_tools`` end-to-end (no mock at the
+# filter surface). Closes the reviewer-flagged D1 gap — the expansion only
+# works if the real spawn path threads ``mcp_tool_names`` (and thus
+# ``all_tool_names``) all the way down to ``resolve_tool_filter``.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRealSpawnSeamForDynamicExpansion:
+    """REAL-seam pin: ``create_instance_tools()`` (the public spawn-path
+    entry point, called from ``instance_lifecycle.py:1766``) with a plane
+    server row present and ``tools.allow=['plane']`` must surface
+    ``plane_*`` tools in the resolved toolset.
+
+    Mirrors the ``_build_instance_tools`` pattern from
+    ``tests/unit/tools/test_service_registration.py`` — drives the real
+    factory with a synthetic agent staged on disk + a MagicMock manager
+    whose ``_mcp_service.get_mcp_tools`` returns stub plane tools (no
+    live MCP server, no DB, no network).
+
+    The D1 expansion loop at ``daemon/tools/instance.py:362-375``
+    populates the ``plane`` category from ``all_tool_names``; if the
+    real path drops ``mcp_tool_names`` anywhere between
+    ``_load_mcp_tools`` (instance.py:4835) and the
+    ``resolve_tool_filter`` call (instance.py:4959), the plane tools
+    silently vanish — exactly the live-observed pre-fix defect.
+
+    To isolate the D1 expansion from the name-prefix-inference
+    side-effect of ``scan_tools_for_full_docs`` (which infers
+    ``category="plane"`` from a tool name's first underscore-separated
+    token at ``_tool_registry.py:478-480`` and would otherwise mask
+    the expansion as a no-op), we patch
+    ``daemon.tools.instance.list_tools_by_category`` to return an
+    empty registry — the canonical pre-D1 production shape (per
+    ``.agents/tester/RESULTS/2026-09-20-plane-revival-verification.md``,
+    ``tool_categories["plane"]`` was ``[]``). The D1 expansion is
+    what closes the gap when no other mechanism populates the
+    category.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parents[3]
+
+    @staticmethod
+    def _stage_synthetic_agent(
+        agents_dir: Path,
+        agent_id: str,
+        tools_allow: list[str],
+    ) -> Path:
+        """Clone watcher/meta.json's shape; replace id + tools.allow."""
+        import json
+
+        repo_root = Path(__file__).resolve().parents[3]
+        real_meta = json.loads(
+            (repo_root / "agents" / "watcher" / "meta.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        real_meta.pop("watchover", None)
+        real_meta["id"] = agent_id
+        real_meta["name"] = agent_id.title()
+        real_meta["team_members"] = []
+        real_meta["innate_skills"] = []
+        real_meta["tools"] = {"allow": tools_allow, "deny": None}
+        agent_dir = agents_dir / agent_id
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / "meta.json").write_text(
+            json.dumps(real_meta), encoding="utf-8"
+        )
+        return agents_dir
+
+    @staticmethod
+    def _install_registry(
+        agents_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Real AgentRegistry pointed at the synthetic agents_dir."""
+        import daemon.registry as dr
+        from daemon.registry import AgentRegistry
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        monkeypatch.setattr(dr, "_registry", registry)
+        return registry
+
+    def test_create_instance_tools_threads_plane_through_real_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end through the REAL factory: synthetic PM-shaped
+        agent (``tools.allow=['plane']``) + manager whose MCP service
+        reports a plane server row + empty registry (canonical
+        pre-D1 shape) → ``create_instance_tools`` returns ``plane_*``
+        tools in the resolved toolset.
+
+        Pre-D1, this returned no plane tools: the ``_apply_tool_filter``
+        membership test (``tool_name in allowed_tools``) saw
+        ``allowed_tools == {"plane"}`` (literal-name matching) and
+        dropped every ``plane_*`` tool. The fix threads
+        ``mcp_tool_names`` → ``all_tool_names`` → ``resolve_tool_filter``
+        expansion loop, populating the plane category from the live
+        surface so the membership test passes.
+
+        Drives the REAL ``create_instance_tools`` call site — no
+        patching of ``_apply_tool_filter`` or ``resolve_tool_filter``
+        at the surface. Mirrors
+        ``test_service_registration._build_instance_tools``.
+
+        The ``list_tools_by_category`` patch is the key to
+        isolating the D1 expansion — without it, the
+        name-prefix inference in ``scan_tools_for_full_docs``
+        (``_tool_registry.py:478-480``) silently populates the
+        plane category from the plane tool names, masking the
+        expansion. The empty-registry patch reproduces the
+        canonical pre-D1 production shape.
+        """
+        from daemon.tools.instance import create_instance_tools
+
+        agents_dir = tmp_path / "agents"
+        self._stage_synthetic_agent(agents_dir, "syn-pm-plane", ["plane"])
+        self._install_registry(agents_dir, monkeypatch)
+
+        # Stub MCP service row — no live MCP server needed. Plane
+        # server exposes tools under the "plane_" prefix (per
+        # PlaneServerDefinition.tool_name_prefix at plane.py:159).
+        plane_tool_names = [
+            "plane_list_issues",
+            "plane_get_issue",
+            "plane_search_issues",
+        ]
+        mcp_service = MagicMock(name="McpService")
+        mcp_service.get_mcp_tools.return_value = [
+            _MockTool(n) for n in plane_tool_names
+        ]
+
+        manager = MagicMock(name="InstanceManager")
+        manager.config.daemon.port = 0
+        manager.config.limits.max_children_per_instance = 0
+        manager.config.llm.allowed_models = []
+        manager._mcp_service = mcp_service
+
+        # Canonical pre-D1 production shape: empty registry, no
+        # plane category. See the test class docstring for the
+        # isolation rationale.
+        from daemon.tools import instance as instance_module
+
+        monkeypatch.setattr(
+            instance_module,
+            "list_tools_by_category",
+            lambda: {},
+        )
+
+        tools = create_instance_tools(
+            manager, "inst-syn-pm-plane", "syn-pm-plane"
+        )
+
+        resolved_names = {getattr(t, "name", None) for t in tools}
+        for name in plane_tool_names:
+            assert name in resolved_names, (
+                f"D1 expansion failed at the REAL spawn seam: "
+                f"{name!r} missing from create_instance_tools() output "
+                f"(resolved={sorted(n for n in resolved_names if n)})"
+            )
+
+    def test_no_plane_server_row_yields_no_phantom_tools(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative companion: with the MCP service reporting NO plane
+        tools (server row absent) and an empty registry, ``allow=['plane']``
+        resolves to the empty set — no phantom tools injected. Same
+        real seam, same mocking style; differs only in the MCP stub."""
+        from daemon.tools.instance import create_instance_tools
+
+        agents_dir = tmp_path / "agents"
+        self._stage_synthetic_agent(agents_dir, "syn-pm-no-row", ["plane"])
+        self._install_registry(agents_dir, monkeypatch)
+
+        # MCP service present but reports NO plane tools (other servers
+        # only — or empty). Combined with the empty registry below,
+        # the D1 expansion has no source names to populate from.
+        mcp_service = MagicMock(name="McpService")
+        mcp_service.get_mcp_tools.return_value = [
+            _MockTool("mcp_ctx7_get_docs"),
+        ]
+
+        manager = MagicMock(name="InstanceManager")
+        manager.config.daemon.port = 0
+        manager.config.limits.max_children_per_instance = 0
+        manager.config.llm.allowed_models = []
+        manager._mcp_service = mcp_service
+
+        from daemon.tools import instance as instance_module
+
+        monkeypatch.setattr(
+            instance_module,
+            "list_tools_by_category",
+            lambda: {},
+        )
+
+        tools = create_instance_tools(
+            manager, "inst-syn-pm-no-row", "syn-pm-no-row"
+        )
+
+        resolved_names = {getattr(t, "name", None) for t in tools}
+        # Assert: NO MCP-plane tool names (the ones the MCP service
+        # would have returned). ``plane_sync_project`` is the static
+        # sync tool that ``create_plane_sync_tools`` adds directly to
+        # every instance — it is NOT an MCP-fetched plane_* tool, so
+        # its appearance here is expected and unrelated to the D1
+        # expansion seam.
+        mcp_plane_names = {"plane_list_issues", "plane_get_issue",
+                           "plane_search_issues", "plane_create_issue"}
+        leaked = mcp_plane_names & resolved_names
+        assert not leaked, (
+            f"no-row path produced phantom MCP-plane tools: "
+            f"{sorted(leaked)} — the D1 expansion is using a non-empty "
+            f"all_tool_names source it shouldn't have"
+        )
