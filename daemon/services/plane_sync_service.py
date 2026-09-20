@@ -109,7 +109,9 @@ from daemon.clients.plane_http_client import (
     PlaneAPIError,
     PlaneAuthError,
     PlaneHttpClient,
+    PlaneIdentifierCollisionError,
     PlaneNotFoundError,
+    derive_plane_identifier,
 )
 from daemon.constants import (
     PLANE_ATTEMPT_COUNT_METADATA_KEY,
@@ -1168,10 +1170,54 @@ class PlaneSyncService:
                 response if isinstance(response, dict) else {},
             )
 
-        created = await client.create_project(
-            name=project.name,
-            description=project.description,
-        )
+        # Fresh CREATE path. Plane ``identifier`` is REQUIRED
+        # (verified live 2026-09-20 — POST without ``identifier``
+        # returns 400 ``{"identifier":["This field is required."]}``).
+        # We derive a deterministic identifier from the ensemble
+        # project: prefer ``shortnames[0]`` (already short + human-set),
+        # fall back to ``name``; sanitization rule lives in the client
+        # (see ``derive_plane_identifier``).
+        base_name = _project_identifier_base(project)
+        new_id: str | None = None
+        for attempt in range(1, _PLANE_IDENTIFIER_MAX_ATTEMPTS + 1):
+            identifier = derive_plane_identifier(base_name, attempt=attempt)
+            try:
+                created = await client.create_project(
+                    name=project.name,
+                    description=project.description,
+                    identifier=identifier,
+                )
+                break
+            except PlaneIdentifierCollisionError:
+                # 409 — Plane has another project with this identifier.
+                # Deterministic suffix scheme: bump attempt; the suffix
+                # never collides with attempt 1 because the base is
+                # truncated to fit (see ``derive_plane_identifier``).
+                logger.info(
+                    "Plane sync: identifier %r taken for %s, retrying "
+                    "with attempt=%d/%d",
+                    identifier,
+                    project.name,
+                    attempt + 1,
+                    _PLANE_IDENTIFIER_MAX_ATTEMPTS,
+                )
+                if attempt >= _PLANE_IDENTIFIER_MAX_ATTEMPTS:
+                    # Exhausted the deterministic retry budget — let
+                    # the outer error handler stamp ``error`` and the
+                    # watchdog re-drive on the next sweep.
+                    raise PlaneAPIError(
+                        f"Plane identifier collision on all "
+                        f"{_PLANE_IDENTIFIER_MAX_ATTEMPTS} deterministic "
+                        f"attempts (last tried: {identifier!r})"
+                    ) from None
+                continue
+        else:
+            # Unreachable: the loop either breaks on success or raises
+            # on the final attempt. Belt-and-braces explicit guard.
+            raise PlaneAPIError(
+                "Plane create_project exhausted retries without success"
+            )
+
         new_id = created.get("id")
         if not new_id:
             raise PlaneAPIError(
@@ -1204,6 +1250,37 @@ def _find_plane_id_by_name(
             if pid is not None:
                 return str(pid)
     return None
+
+
+# How many deterministic attempts before giving up on CREATE and
+# letting the watchdog re-drive. Bound guards against pathological
+# identifier-poisoning by another team accidentally squatting all
+# derived identifiers.
+_PLANE_IDENTIFIER_MAX_ATTEMPTS: int = 5
+
+
+def _project_identifier_base(project: Project) -> str:
+    """Pick the human-readable seed for ``derive_plane_identifier``.
+
+    Preference order (verified against the existing 3 workspace
+    projects — ``NEA``/``Ensemble``/``LLM Proxy`` — and against
+    Ensemble's own naming convention):
+
+    1. ``shortnames[0]`` — already a short human-set slug; usually
+       the closest match to the desired Plane ``identifier``.
+    2. ``name`` — full project name (works for projects without
+       shortnames); sanitization in the derivation helper handles
+       spaces and special chars.
+
+    The returned string is NOT sanitized — that's the derivation
+    helper's job. This keeps the policy in ONE place.
+    """
+    shortnames = getattr(project, "shortnames", None) or []
+    if shortnames:
+        first = shortnames[0]
+        if first and first.strip():
+            return first
+    return project.name or ""
 
 
 def _is_drift(project: Project, plane_response: dict[str, Any]) -> bool:

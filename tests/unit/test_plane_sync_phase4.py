@@ -30,7 +30,10 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from daemon.clients.plane_http_client import PlaneAPIError
+from daemon.clients.plane_http_client import (
+    PlaneAPIError,
+    PlaneIdentifierCollisionError,
+)
 from daemon.constants import (
     PLANE_ATTEMPT_COUNT_METADATA_KEY,
     PLANE_LAST_ATTEMPT_METADATA_KEY,
@@ -724,3 +727,253 @@ class TestIdempotencyListFailureGuard:
         # The outer PlaneAPIError handler released the slot — the row
         # is no longer wedged in 'syncing'.
         assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D3 — create_payload_identifier + deterministic collision fallback
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Live evidence: POST without ``identifier`` returns HTTP 400
+# ``{"identifier":["This field is required."]}`` (verified against
+# plane.ensem.dev on 2026-09-20). The CREATE path can NEVER reach
+# linked without a valid identifier. The fix: derive a deterministic
+# identifier from the ensemble project (shortname preferred, name
+# fallback), uppercase + alphanumeric + ≤12 chars (Plane's max);
+# on PlaneIdentifierCollisionError (409) retry with a deterministic
+# suffix (attempt+1 → ENSEMBLE2, ENSEMBLE3, ...).
+#
+# Pure-function pins (derive_plane_identifier, _env) live in
+# tests/unit/test_plane_identifier.py. These are the integration pins
+# that exercise the actual sync-service retry loop.
+
+
+class TestCreatePayloadIdentifier:
+    """The CREATE payload MUST include a Plane-valid ``identifier``.
+
+    Pre-fix: ``create_project`` was called with ``name`` +
+    ``description`` only. Plane returned 400 ``{"identifier": …}`` on
+    every fresh sync → ``syncing`` → ``error`` → re-drive forever.
+    """
+
+    def test_create_payload_includes_identifier(self, repo, mock_plane_env):
+        """First-attempt CREATE sends ``identifier`` derived from the
+        project's shortname (preferred) or name (fallback). Without
+        this, Plane returns 400 — verified live 2026-09-20."""
+        project = repo.create(name="AgentsEnsemble")
+        # No plane_project_id → CREATE path. Plane has no match.
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        # The create_project call MUST carry a valid ``identifier``.
+        assert mock.create_project.call_count == 1
+        kwargs = mock.create_project.call_args.kwargs
+        assert "identifier" in kwargs, (
+            "create_project must receive an ``identifier`` kwarg — "
+            "Plane returns 400 if missing (verified live 2026-09-20)"
+        )
+        identifier = kwargs["identifier"]
+        # Identifier conforms to the live-verified Plane rules.
+        assert 1 <= len(identifier) <= 12, identifier
+        assert identifier.isalnum(), identifier
+        assert identifier.isupper(), identifier
+        # The seed for "AgentsEnsemble" → "AGENTSENSEMBLE" (12 chars).
+        assert identifier == "AGENTSENSEMB"
+
+    def test_create_payload_identifier_uses_shortname_when_present(
+        self, repo, mock_plane_env
+    ):
+        """``shortnames[0]`` is the preferred seed — already short and
+        human-set. ``name`` is the fallback only when shortnames is
+        empty."""
+        project = repo.create(name="A Very Long Project Name")
+        # Seed shortname on the freshly-created project via the
+        # repository's add_shortname path (mirrors real creation flow).
+        repo.add_shortname(project.project_id, "avlp")
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        kwargs = mock.create_project.call_args.kwargs
+        assert kwargs["identifier"] == "AVLP"
+
+    def test_create_payload_identifier_is_deterministic_across_retries(
+        self, repo, mock_plane_env
+    ):
+        """Two CREATE flows for the same project MUST yield the same
+        identifier — retries converge, no random churn.
+
+        Without this, the watchdog's re-drive would mint a fresh
+        identifier per attempt, polluting Plane with one-off rows.
+
+        Setup: a single CREATE flow. The determinism contract is
+        checked against the pure ``derive_plane_identifier`` (a
+        second CREATE on the same project would take the adopt/UPDATE
+        path because the first sync persisted ``plane_project_id``,
+        which is itself proof that the second flow would NOT mint a
+        fresh identifier)."""
+        from daemon.clients.plane_http_client import (
+            derive_plane_identifier,
+        )
+
+        project = repo.create(name="DetProj")
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(return_value={"id": "plane-new"})
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        id_1 = mock.create_project.call_args.kwargs["identifier"]
+        # The identifier matches the pure deterministic derivation —
+        # same project, same attempt (1), same input → same output,
+        # by construction.
+        assert id_1 == derive_plane_identifier("DetProj", attempt=1)
+        # Calling the helper again produces the same output (the
+        # actual "across retries" contract).
+        assert id_1 == derive_plane_identifier("DetProj", attempt=1)
+
+
+class TestCreateIdentifierCollisionRetry:
+    """On HTTP 409 (PlaneIdentifierCollisionError), the sync service
+    MUST retry with a deterministic suffixed identifier — same
+    ensemble project + same attempt index → same suffix, never
+    random."""
+
+    def test_collision_triggers_deterministic_suffix_retry(
+        self, repo, mock_plane_env
+    ):
+        """First call: 409 (identifier taken). Second call: 201 with
+        the suffixed identifier. The suffix is deterministic — same
+        project, same attempt, same identifier across processes."""
+        # ≤12 char base → no truncation; collision → retry with
+        # suffixed identifier.
+        project = repo.create(name="CollideProj")
+
+        call_identifiers: list[str] = []
+
+        async def flaky_create(**kwargs):
+            call_identifiers.append(kwargs.get("identifier"))
+            if kwargs.get("identifier") == "COLLIDEPROJ":
+                raise PlaneIdentifierCollisionError(
+                    "Plane identifier conflict",
+                    status_code=409,
+                    body='{"identifier":["already exists"]}',
+                )
+            return {"id": "plane-after-retry"}
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=flaky_create)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # First attempt used the base identifier (taken → 409).
+        # Second attempt used the suffixed identifier (succeeded).
+        assert call_identifiers[0] == "COLLIDEPROJ"
+        assert len(call_identifiers) >= 2
+        assert call_identifiers[1] != call_identifiers[0]
+        assert call_identifiers[1].endswith("2"), (
+            f"Retry suffix MUST be deterministic decimal attempt "
+            f"number — got {call_identifiers[1]!r}"
+        )
+        # The sync succeeded after retry.
+        assert result["status"] == PLANE_SYNC_STATE_LINKED
+        assert result["action"] == "created"
+
+    def test_collision_retry_uses_shortname_seed(
+        self, repo, mock_plane_env
+    ):
+        """The retry path uses the same seed (shortnames[0]) as the
+        first attempt — the only thing that changes is the attempt
+        counter (which drives the deterministic suffix)."""
+        project = repo.create(name="Full Project Name")
+        repo.add_shortname(project.project_id, "fpn")
+
+        call_identifiers: list[str] = []
+
+        async def flaky_create(**kwargs):
+            ident = kwargs.get("identifier")
+            call_identifiers.append(ident)
+            if ident == "FPN":
+                raise PlaneIdentifierCollisionError(
+                    "taken", status_code=409
+                )
+            return {"id": "plane-after-retry"}
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=flaky_create)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        asyncio.run(svc.sync_project(project.project_id))
+
+        # First attempt: ``FPN`` (taken).
+        assert call_identifiers[0] == "FPN"
+        # Second attempt: ``FPN2`` (base truncated to fit "2" suffix;
+        # here FPN + "2" = 4 chars, no truncation needed).
+        assert call_identifiers[1] == "FPN2"
+
+    def test_collision_budget_exhaustion_records_error(
+        self, repo, mock_plane_env
+    ):
+        """If Plane rejects every deterministic identifier through
+        the retry budget, the sync must stamp ``error`` and let the
+        watchdog re-drive — the row is NOT wedged in ``syncing``."""
+        from daemon.services.plane_sync_service import (
+            _PLANE_IDENTIFIER_MAX_ATTEMPTS,
+        )
+
+        project = repo.create(name="AlwaysCollides")
+
+        async def always_collide(**_kwargs):
+            raise PlaneIdentifierCollisionError(
+                "taken", status_code=409
+            )
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=always_collide)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Budget exhausted exactly.
+        assert mock.create_project.call_count == _PLANE_IDENTIFIER_MAX_ATTEMPTS
+        # Sync recorded an error — NOT a wedged ``syncing``.
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
+        meta = _read_meta(repo, project.project_id)
+        assert meta[PLANE_SYNC_STATE_METADATA_KEY] == PLANE_SYNC_STATE_ERROR
+
+    def test_non_collision_plane_api_error_does_not_retry(
+        self, repo, mock_plane_env
+    ):
+        """A non-collision ``PlaneAPIError`` (e.g. 400 bad payload,
+        500 server) MUST propagate without retrying — the retry loop
+        is for identifier-collision ONLY. The outer error handler
+        stamps ``error`` on the row."""
+        project = repo.create(name="BadPayloadProj")
+        call_count = {"n": 0}
+
+        async def bad_request(**_kwargs):
+            call_count["n"] += 1
+            raise PlaneAPIError("bad payload", status_code=400)
+
+        mock = _make_client_mock()
+        mock.list_projects = AsyncMock(return_value=[])
+        mock.create_project = AsyncMock(side_effect=bad_request)
+
+        svc = PlaneSyncService(repo, http_client=mock)
+        result = asyncio.run(svc.sync_project(project.project_id))
+
+        # Exactly one attempt — no retry on non-collision errors.
+        assert call_count["n"] == 1
+        assert result["status"] == PLANE_SYNC_STATE_ERROR
