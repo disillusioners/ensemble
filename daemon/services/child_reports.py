@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, text
 from sqlmodel import Session
+from sqlmodel import select as sqlmodel_select
 
 from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
@@ -684,9 +685,39 @@ Provide a concise summary:"""
 
         # Wedge detected: freshness failed but pending_count is already 0
         # (gate's pending_count leg already passed). Check the most recent
-        # terminal-state message for this instance.
-        last_terminal_msg_id = session.exec(
-            select(MessageQueue.message_id)
+        # terminal-state message for this instance. The FULL row is fetched
+        # so its status is available — the publish site branches on it
+        # (terminal FAILED → "failed" event with error body).
+        last_terminal_msg = self._latest_terminal_message(session, instance_id)
+
+        if last_terminal_msg is not None:
+            logger.warning(
+                "Wedge-resolver: instance %s... freshness failed but most "
+                "recent message is terminal (message_id=%s, status=%s); "
+                "allowing completion with best-effort empty result",
+                instance_id[:8],
+                last_terminal_msg.message_id[:8],
+                last_terminal_msg.status,
+            )
+            return True, None
+
+        return False, reason
+
+    @staticmethod
+    def _latest_terminal_message(session, instance_id: str) -> MessageQueue | None:
+        """Most recent terminal (COMPLETED/FAILED) message for an instance.
+
+        Shared by the wedge resolver (does a terminal message close the
+        wedge?) and the root-lane terminal publish site (did that terminal
+        message FAIL? → the job's terminal event must carry the error body
+        instead of an empty "completed").
+
+        Uses sqlmodel's select (aliased — module-level ``select`` is
+        sqlalchemy's) so ``session.exec(...).first()`` yields actual
+        MessageQueue instances, per the message_queue repository convention.
+        """
+        return session.exec(
+            sqlmodel_select(MessageQueue)
             .where(MessageQueue.instance_id == instance_id)
             .where(MessageQueue.status.in_([
                 MessageStatus.COMPLETED.value,
@@ -695,18 +726,6 @@ Provide a concise summary:"""
             .order_by(MessageQueue.completed_at.desc())
             .limit(1)
         ).first()
-
-        if last_terminal_msg_id is not None:
-            logger.warning(
-                "Wedge-resolver: instance %s... freshness failed but most "
-                "recent message is terminal (message_id=%s); allowing "
-                "completion with best-effort empty result",
-                instance_id[:8],
-                last_terminal_msg_id[:8],
-            )
-            return True, None
-
-        return False, reason
 
     async def _root_completion_gate(
         self,
@@ -926,10 +945,24 @@ Provide a concise summary:"""
                 get_completion_registry().complete(instance_id, result=last_content)
 
                 if self._events_service:
+                    # Terminal-state semantics (Round 3): branch DIRECTLY on the
+                    # actual state of the most recent terminal message. When the
+                    # wedge closed via a dead-letter (terminal FAILED) message,
+                    # emitting "completed" with no error body would resurrect the
+                    # empty-terminal-event bug class this branch kills — emit
+                    # "failed" WITH the error body instead. Non-FAILED terminals
+                    # stay "completed" as before. This does NOT route through
+                    # _send_error_report or the error lane (Finding 3 stays out
+                    # of scope per adjudication).
+                    terminal_msg = self._latest_terminal_message(session, instance_id)
+                    terminal_failed = (
+                        terminal_msg is not None
+                        and terminal_msg.status == MessageStatus.FAILED.value
+                    )
                     await self._events_service._publish_instance_lifecycle_event(
                         instance_id=instance_id,
-                        status="completed",
-                        error=None,
+                        status="failed" if terminal_failed else "completed",
+                        error=terminal_msg.error_message if terminal_failed else None,
                         parent_id=None,
                     )
                 

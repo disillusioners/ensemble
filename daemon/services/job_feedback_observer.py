@@ -313,9 +313,14 @@ class JobFeedbackObserver:
                 # Notify watchers after successful transition
                 await self._job_queue_service.notify_watchers(job.job_id, "completed")
 
-            elif status == "error":
+            elif status in ("error", "failed"):
                 # DEFECT-1 FIX: keep error_message AND add best-effort
                 # result_summary from the instance's last assistant message.
+                # "failed" is the dead-letter terminal token emitted by the
+                # root-lane publish site (child_reports.py) when the most
+                # recent terminal message FAILED — same failure semantics
+                # as an "error" event, so the job must terminate FAILED
+                # with the error body.
                 error_message = error if error else "Unknown error"
                 result_summary = await self._extract_result_summary(instance_id)
                 # Use atomic_transition for PROCESSING -> FAILED with error
