@@ -685,6 +685,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "list_instances",
     "list_missions",
     "list_watched_jobs",
+    "mid_flight_report",
     "plane_sync_project",
     "proc_list",
     "proc_logs",

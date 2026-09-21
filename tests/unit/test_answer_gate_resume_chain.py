@@ -935,12 +935,29 @@ def _make_answer_manager(
     manager = MagicMock()
     manager.is_write_paused = False
 
-    async def _get_instance(iid: str):
-        return MagicMock(instance_id=iid)
-    manager.get_instance = _get_instance
+    # Mid-flight QA channel (2026-09-21): the shared
+    # ``answer_questions_via_instance`` helper reads the asker row via
+    # ``manager._instance_repository.get`` (sync) for the T3 terminal
+    # pre-check, and needs the work-id enumeration lanes disabled.
+    instance_repo = MagicMock()
+    instance_repo.get.return_value = MagicMock(
+        instance_id=instance_id, status="paused"
+    )
+    instance_repo.get_metadata_value.return_value = None
+    manager._instance_repository = instance_repo
+    manager._work_resolver = None
+    manager._task_repo = None
+    manager._watcher_repo = None
+    manager._event_bus = None
 
     manager._question_manager = MagicMock()
-    manager._question_manager.set_answers = MagicMock(return_value=pending_pack)
+    # OQ-3 tuple CAS: (pack, transitioned) — a real pack wins the CAS.
+    manager._question_manager.set_answers = MagicMock(
+        return_value=(pending_pack, pending_pack is not None)
+    )
+    manager._question_manager.get_question_pack = MagicMock(
+        return_value=pending_pack
+    )
 
     manager.resume_processing_job = AsyncMock(
         return_value=resume_processing_return,

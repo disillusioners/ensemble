@@ -1304,7 +1304,10 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
         Returns:
             Result dictionary for the worker log.
         """
-        from daemon.constants import STUCK_HEARTBEAT_ESCALATION_INDEX
+        from daemon.constants import (
+            STUCK_HEARTBEAT_AFTER_SECONDS,
+            STUCK_HEARTBEAT_ESCALATION_INDEX,
+        )
         from daemon.repositories.instance.models import InstanceStatus
         from daemon.repositories.task.models import SuspensionReason
         from daemon.services.midflight_qa import (

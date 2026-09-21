@@ -842,7 +842,27 @@ class TestAllWatchableEventsConstant:
         assert "in_progress" not in ALL_TERMINAL_STATES
 
     def test_watchable_is_terminal_plus_in_progress(self):
-        assert set(ALL_WATCHABLE_EVENTS) == set(ALL_TERMINAL_STATES) | {"in_progress"}
+        """Pins the ALL_WATCHABLE_EVENTS composition.
+
+        Mid-flight QA channel (2026-09-21, approver item H1): the four
+        non-terminal question-channel statuses joined the watchable
+        vocabulary — without them, ``watch_job``'s events validation
+        rejects them and ``notify_work_watchers``' per-watcher filter
+        silently drops every question/answer/report/stuck notification.
+        ``mission_terminal`` stays OUT (opt-in only, M2) and
+        ``child_question_still_pending`` stays OUT (dispatched via
+        EventBus + LiveEventHub only — never the work_notifier status
+        map, design R1).
+        """
+        midflight = {
+            "question_requested",
+            "answer_received",
+            "midflight_report",
+            "stuck_awaiting_answer",
+        }
+        assert set(ALL_WATCHABLE_EVENTS) == (
+            set(ALL_TERMINAL_STATES) | {"in_progress"} | midflight
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

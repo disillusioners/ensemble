@@ -194,6 +194,20 @@ async def answer_questions_via_instance(
             restored = qm.rehydrate_from_payloads({instance_id: payload})
             if restored:
                 pack = qm.get_question_pack(instance_id)
+        elif isinstance(payload, dict):
+            # A durable shadow EXISTS but is not pending (answered /
+            # dismissed before the RAM store was lost) — the instance
+            # has no pack in status='pending'.
+            raise _http(
+                404,
+                ErrorCodes.NO_PENDING_QUESTION,
+                (
+                    f"No pending question pack for instance "
+                    f"{instance_id[:8]}... (durable shadow status="
+                    f"{payload.get('status')!r})."
+                ),
+                details={"instance_id": instance_id},
+            )
         if pack is None:
             raise _http(
                 410,
@@ -206,20 +220,10 @@ async def answer_questions_via_instance(
                 details={"instance_id": instance_id},
             )
 
-    if pack.status != "pending":
-        # Instance exists, pack already answered → distinct 404 (fixes
-        # today's mislabeled INSTANCE_NOT_FOUND).
-        raise _http(
-            404,
-            ErrorCodes.NO_PENDING_QUESTION,
-            (
-                f"No pending question pack for instance "
-                f"{instance_id[:8]}... (pack status={pack.status!r}). "
-                f"The user can only answer a question that was "
-                f"actually asked."
-            ),
-            details={"instance_id": instance_id, "pack_status": pack.status},
-        )
+    # NOTE: a RAM pack with status='answered' deliberately FALLS
+    # THROUGH to the CAS below — the duplicate-answer contract (OQ-3 /
+    # §8.5) is ``200 resume_route:"already_delivered"``, not a 404. The
+    # CAS arbitrates; the loser short-circuits.
 
     # ── 4. T1″ pack correlation (pre-CAS; strict-check-when-present) ─
     if question_pack_id is not None and question_pack_id != pack.id:
