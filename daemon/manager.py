@@ -2498,7 +2498,8 @@ class InstanceManager:
         except Exception as e:  # noqa: BLE001 — boot must never fail on this
             logger.warning(
                 f"Question-pack boot rehydration failed (non-fatal): "
-                f"{type(e).__name__}: {e}"
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
             )
 
         # Initialize maintenance service with checkpoint cleanup
@@ -3431,7 +3432,11 @@ class InstanceManager:
                 handle = await asyncio.to_thread(
                     self._task_repo.find_suspended_turn_for_answer, iid
                 )
-            except Exception:  # noqa: BLE001 — per-instance best-effort
+            except Exception as e:  # noqa: BLE001 — per-instance best-effort
+                logger.warning(
+                    f"Question-pack boot rehydration: suspended-turn "
+                    f"lookup failed for {iid[:8]}...: {e}"
+                )
                 continue
             if handle is not None:
                 paused_instances.add(iid)
@@ -3446,7 +3451,11 @@ class InstanceManager:
                     iid,
                     QUESTION_PACK_PAYLOAD_METADATA_KEY,
                 )
-            except Exception:  # noqa: BLE001 — per-instance best-effort
+            except Exception as e:  # noqa: BLE001 — per-instance best-effort
+                logger.warning(
+                    f"Question-pack boot rehydration: pack payload read "
+                    f"failed for {iid[:8]}...: {e}"
+                )
                 continue
             if isinstance(payload, dict):
                 payloads[iid] = payload

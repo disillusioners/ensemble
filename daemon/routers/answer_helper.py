@@ -165,6 +165,11 @@ async def _load_asker(
         instance_row = await asyncio.to_thread(
             manager._instance_repository.get, instance_id
         )
+    except KeyError:
+        # Defensive backstop: RAM-shaped repositories may signal a
+        # missing row by KeyError instead of returning None — an
+        # expected miss, same 404 outcome, no warn-spam.
+        instance_row = None
     except Exception as e:  # noqa: BLE001
         logger.warning(
             f"answer_questions_via_instance: instance read failed for "
@@ -233,7 +238,12 @@ async def _resolve_pack_or_raise(
             payload = manager._instance_repository.get_metadata_value(
                 instance_id, QUESTION_PACK_PAYLOAD_METADATA_KEY
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"answer_questions_via_instance: pack payload read "
+                f"failed for {instance_id[:8]}...: {e} — treating as "
+                f"no durable shadow"
+            )
             payload = None
         if isinstance(payload, dict) and payload.get("status") == "pending":
             restored = qm.rehydrate_from_payloads({instance_id: payload})
@@ -367,7 +377,7 @@ async def _emit_answer_events(
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
                 f"answer_received fan-out failed for work_id="
-                f"{work_id[:8] if work_id else '<none>'}: {e}"
+                f"{work_id[:8] if work_id else '<none>'}...: {e}"
             )
 
 
@@ -459,7 +469,8 @@ async def _fallback_enqueue_or_raise(
     except Exception as enqueue_err:  # noqa: BLE001
         logger.error(
             f"answer_questions_via_instance: Defect-3 fallback enqueue "
-            f"failed for {instance_id[:8]}...: {enqueue_err}"
+            f"failed for {instance_id[:8]}...: {enqueue_err}",
+            exc_info=True,
         )
         raise _http(
             500,
