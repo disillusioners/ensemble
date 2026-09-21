@@ -1970,13 +1970,16 @@ Provide a concise summary:"""
         self,
         session,
         instance_id: str,
-        waiting_for: int | None = None,
     ) -> tuple[bool, str | None]:
         """Full emission predicate for marking a root/parent's job terminal.
 
         A terminal "completed" lifecycle event (which JobFeedbackObserver maps
         to job completion) may only be published when ALL of:
-          1. waiting_for == 0 — no outstanding children
+          1. bus pending == 0 — no outstanding PENDING ``DependencyWatcher``
+             rows targeting this instance (the Dependency Bus is the SOLE
+             pending-children authority post-D10; the legacy
+             ``Instance.waiting_for`` column was dropped by migration
+             ``20260621_000002_drop_legacy_completion_columns.sql``).
           2. pending_count == 0 — no queued/processing messages
           3. fresh assistant message after the last child_completed event —
              the instance has responded to every child report. Wedge-resolved
@@ -1989,10 +1992,21 @@ Provide a concise summary:"""
         notify_parent via task_processor / message_job_handler). This is an
         event-driven re-check on signal — NOT a poll loop.
 
+        The bus-pending leg uses the existing fail-OPEN helper
+        :meth:`_bus_count_pending_for_target_sync` — same as the observer
+        bus-defer path at ``job_feedback_observer.py:3364``. Bus singleton
+        missing or DB error → returns 0 → gate proceeds to the
+        freshness/pending legs. This composes with the two runtime-proven
+        mechanisms (sync-helper deferral at
+        ``_process_child_completion_db_sync`` and observer bus-defer) without
+        double-counting: each gate operates on a distinct transition point
+        (helper-thread stamp, sync job-finalize, async root-emission), and
+        all three consult the same ``dependency_watchers`` table — so a
+        pending watcher blocks ALL three gates in lockstep, not redundantly.
+
         Args:
             session: Open DB session; when None an ephemeral session is opened.
             instance_id: The instance to evaluate.
-            waiting_for: In-session waiting_for value; read from DB when None.
 
         Returns:
             (allowed, block_reason): block_reason is a diagnostic when blocked.
@@ -2002,12 +2016,17 @@ Provide a concise summary:"""
             session = Session(self._manager._engine)
 
         try:
-            if waiting_for is None:
-                instance = session.get(Instance, instance_id)
-                waiting_for = (instance.waiting_for or 0) if instance else 0
-
-            if waiting_for > 0:
-                return False, f"waiting_for={waiting_for}"
+            # Bus-pending leg (replaces the dropped ``Instance.waiting_for``
+            # column). The bus DB is the authoritative source of
+            # pending-children truth — see
+            # ``daemon/migrations/versions/20260621_000002_drop_legacy_completion_columns.sql``.
+            # Fail-OPEN contract via the helper matches the observer bus-defer
+            # path; the caller wrap at child_reports.py:4133-4143 catches any
+            # unexpected exception and fails the gate open too, so a missing
+            # bus or DB hiccup cannot block the publish permanently.
+            bus_pending = self._bus_count_pending_for_target_sync(instance_id)
+            if bus_pending > 0:
+                return False, f"bus_pending={bus_pending}"
 
             pending_count = session.exec(
                 select(func.count())

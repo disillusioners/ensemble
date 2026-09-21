@@ -22,7 +22,7 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sqlmodel import Session, select
+from sqlmodel import Session, SQLModel, select
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance, InstanceStatus
@@ -779,3 +779,182 @@ class TestCompletionContentHelper:
         from daemon.services.completion_content import get_last_assistant_message
         content, ts = await get_last_assistant_message(None, "inst-1")
         assert content is None and ts is None
+
+
+# ─── D2 REMEDIATION: real-gate HOLD test (post-D10 vacuity fix) ───────────────
+
+
+class TestRootCompletionGateBusPendingHold:
+    """Hold the emission-time gate on REAL bus pending watchers (post-D10).
+
+    v0.13.9 Phase D2 remediation: the pre-fix ``_root_completion_gate``
+    read ``Instance.waiting_for`` (a column dropped by migration
+    ``daemon/migrations/versions/20260621_000002_drop_legacy_completion_columns.sql``).
+    Every real invocation raised ``AttributeError``; the production
+    fail-open wrap at child_reports.py:4133-4143 swallowed it → the
+    emission-time gate was structurally VACUOUS and the publish fired
+    even when child watchers were still pending.
+
+    This test exercises the REAL production gate (no ``patch.object`` on
+    ``_root_completion_gate``, no mock on ``bus.count_pending_for_target_sync``
+    beyond fixture data). The dependency bus is a REAL ``DependencyBus``
+    bound to the test engine; the pending count is a REAL
+    ``COUNT(*)`` against ``dependency_watchers``. Pre-fix the gate raises
+    AttributeError → fail-open wrap (NOT exercised here — we call the
+    gate directly, not the wrap) → (True, None) → the gate is vacuous.
+    Post-fix the gate consults the bus → (False, "bus_pending=N").
+
+    Acceptance criterion: the new HOLD test catches the regression by
+    being RED pre-fix and GREEN post-fix — confirmed in the verification
+    log (``git show ed9dcf83:daemon/services/child_reports.py`` reverted
+    in place, test run RED, fix re-applied, test run GREEN).
+    """
+
+    @pytest.fixture
+    def real_bus(self, job_engine):
+        """A real ``DependencyBus`` bound to the test engine.
+
+        The conftest's autouse ``dependency_bus`` fixture wires a
+        MagicMock bus; this fixture installs the REAL bus for the
+        duration of the test so the gate's ``bus.count_pending_for_target_sync``
+        call hits a real ``COUNT(*)`` on the real ``dependency_watchers``
+        table.
+
+        The autouse fixture's teardown (``set_dependency_bus(None)``)
+        still runs after this test, so the mock bus does not leak into
+        the next test.
+        """
+        # Register the dependency_watchers model on SQLModel.metadata
+        # (the engine fixture created the schema before this module was
+        # imported, so the table is absent from the in-memory DB).
+        import daemon.repositories.dependency_bus.models  # noqa: F401
+        SQLModel.metadata.create_all(job_engine)
+
+        from daemon.repositories.dependency_bus.repository import (
+            DependencyWatcherRepository,
+        )
+        from daemon.services.dependency_bus import (
+            DependencyBus,
+            set_dependency_bus,
+        )
+
+        bus = DependencyBus(DependencyWatcherRepository(engine=job_engine))
+        set_dependency_bus(bus)
+        try:
+            yield bus
+        finally:
+            set_dependency_bus(None)
+
+    @pytest.mark.asyncio
+    async def test_real_gate_held_by_bus_pending_released_on_clear(
+        self, job_engine, real_bus,
+    ):
+        """Real gate (no patches on gate path or bus-count seam) is HELD
+        while a PENDING ``DependencyWatcher`` targets the instance, and
+        RELEASED once the watcher is removed.
+
+        Drives the REAL production sequence:
+
+        1. Seed a PENDING watcher via raw ``DependencyWatcher`` INSERT
+           (NOT a bus API call — the gate's contract is the DB shape,
+           so fixture data via SQL is the strongest possible test).
+        2. Call the REAL ``_root_completion_gate(None, instance_id)``.
+           No ``patch.object(service, "_root_completion_gate", ...)``.
+           No ``patch.object(bus, "count_pending_for_target_sync", ...)``.
+           The gate's bus-pending leg goes through the real helper →
+           real bus → real ``COUNT(*)``.
+        3. Assert ``(False, "bus_pending=1")`` — held.
+        4. Delete the watcher row (raw SQL — same rationale).
+        5. Call the gate again. Assert ``(True, None)`` — released.
+
+        No child_completed events are added: the freshness leg is vacuous
+        (no events → ``_assistant_message_fresh`` returns True early per
+        ``child_reports.py:1832-1834``), so the bus-pending leg is the
+        ONLY blocking leg — the test asserts on it in isolation.
+        """
+        from daemon.services.dependency_bus import FollowUp
+        from daemon.repositories.dependency_bus.models import (
+            DependencyWatcher,
+            DependencyWatcherState,
+        )
+
+        # Seed the root instance.
+        with Session(job_engine) as session:
+            session.add(Instance(
+                instance_id="root-instance-1", agent_id="leader",
+                agent_dir="./agents/leader", parent_id=None,
+                status=InstanceStatus.RUNNING.value,
+            ))
+            session.commit()
+
+        # ─── TURN 1: pending watcher → gate holds ─────────────────────
+        # Fixture DATA only — no bus API call. The test asserts on the
+        # gate's actual behavior against a real PENDING row.
+        watch_id = "watch-hold-1"
+        with Session(job_engine) as session:
+            session.add(DependencyWatcher(
+                watch_id=watch_id,
+                source_task_id="src-task-1",
+                target_instance_id="root-instance-1",
+                follow_up_payload=FollowUp(
+                    target_instance_id="root-instance-1",
+                    message="child report",
+                    source="dependency_bus",
+                    metadata={},
+                ).to_payload(),
+                state=DependencyWatcherState.PENDING.value,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            ))
+            session.commit()
+
+        service, events_service, manager, _patcher = make_child_reports(
+            job_engine, make_history("any", T_FRESH_ASSISTANT)
+        )
+        # NO patch on _root_completion_gate. NO patch on
+        # bus.count_pending_for_target_sync. Real gate over real bus
+        # over real DB count.
+
+        allowed, reason = await service._root_completion_gate(
+            None, "root-instance-1"
+        )
+
+        # Pre-fix: AttributeError swallowed by the wrap → (True, None).
+        # Post-fix: real bus count → (False, "bus_pending=N").
+        assert allowed is False, (
+            f"Gate MUST be held while a PENDING DependencyWatcher "
+            f"targets the instance. Pre-fix: the gate read "
+            f"Instance.waiting_for (column dropped by D10) → "
+            f"AttributeError → wrap swallowed → vacuous (True, None). "
+            f"Post-fix: bus.count_pending_for_target_sync reports "
+            f"the pending watcher → gate blocks. Got: "
+            f"{(allowed, reason)!r}"
+        )
+        assert reason is not None and "bus_pending" in reason, (
+            f"Block reason MUST cite the bus-pending leg. Got: {reason!r}"
+        )
+        assert "bus_pending=1" in reason, (
+            f"Block reason MUST report the count. Got: {reason!r}"
+        )
+
+        # ─── TURN 2: remove the watcher → gate releases ─────────────
+        # Delete the watcher row directly. The gate then sees zero
+        # pending watchers and proceeds through the freshness/pending
+        # legs (both vacuous here — no events, no MessageQueue rows).
+        with Session(job_engine) as session:
+            row = session.get(DependencyWatcher, watch_id)
+            assert row is not None, "watcher row must exist pre-delete"
+            session.delete(row)
+            session.commit()
+
+        allowed_2, reason_2 = await service._root_completion_gate(
+            None, "root-instance-1"
+        )
+
+        assert allowed_2 is True, (
+            f"Gate MUST release once bus pending clears. "
+            f"Got: {(allowed_2, reason_2)!r}"
+        )
+        assert reason_2 is None, (
+            f"Release reason MUST be None when gate passes. "
+            f"Got: {reason_2!r}"
+        )
