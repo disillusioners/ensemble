@@ -168,6 +168,9 @@ watch registration survives them (the terminal event still fires later).
 | **MID-FLIGHT REPORT** ⟳ | The watched instance surfaced a progress note or decision point WITHOUT pausing | Forward to the chat source as a non-modal update. Do NOT block; do NOT call /answer. If `decision_required` appears in the payload, surface it prominently but keep going. |
 | **STUCK_AWAITING_ANSWER** ⏳ | The wedge guard heartbeat — the asker has been paused awaiting an answer for 30+ min | Log at WARNING and relay to the human AGAIN with a `(_reminder)` suffix — the question may have scrolled away. The payload carries `waiting_for_seconds`, `emission_index`, and `wedge_chain` (paused ancestry). After 3 emissions (~60 min) the guard terminates the asker — treat the reminder as urgent. |
 
+
+**Mid-flight payload lines:** on `question requested ❓` the `Result:` line carries the question pack (questions with ids, options, and the `pack_id` to echo back on answer); on `answer received ✓` it carries the answered pack. `stuck awaiting answer ⏳` notifications carry a `Progress:` line (waiting time + emission index). These are payload contents of the EXISTING line types — the envelope structure itself is unchanged.
+
 ---
 
 ## Notification Format
@@ -196,8 +199,7 @@ When watching a job, notifications arrive as plain text with this structure:
 
 **Body:** Plain text lines:
 - `Agent:` line is always present
-- `Result:` line is present on completion (may be multi-line); also present on `question requested ❓` (carries the question pack payload — questions with ids, options, and the `pack_id` to echo back on answer) and on `answer received ✓` (the answered pack)
-- `Progress:` line is present on `in progress ⟳` and `stuck awaiting answer ⏳` notifications
+- `Result:` line is present on completion (may be multi-line)
 - `Error:` line is present only on failure (absent — not "Error: None" — when there is no error)
 - There is no JSON block at the end of the message
 
