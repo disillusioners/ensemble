@@ -742,7 +742,7 @@ FRESH30="$(date -ju -v-30S +%Y-%m-%dT%H:%M:%SZ)"
 adopt_fixture "$AD_OPT_DIR/t1" "$STALE700" true vP 0 999999 true
 adopt_run "$AD_OPT_DIR/t1"
 assert_eq "8a stale flipped adopt: rc 0" "0" "$?"
-assert_eq "8a current REPOINTED to previous (mv -h flip)" "releases/vP" "$(readlink "$AD_OPT_DIR/t1/current")"
+assert_eq "8a current REPOINTED to previous (atomic_flip)" "releases/vP" "$(readlink "$AD_OPT_DIR/t1/current")"
 assert_eq "8a journal current updated" "vP" "$(afield "$AD_OPT_DIR/t1" '_json_field "$(journal_read)" current')"
 assert_eq "8a in_flight cleared" "null" "$(afield "$AD_OPT_DIR/t1" '_json_field "$(journal_read)" in_flight')"
 assert_contains "8a history event is sweep_rollback (m2)" '"event":"sweep_rollback"' "$(aj "$AD_OPT_DIR/t1")"
