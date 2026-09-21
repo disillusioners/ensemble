@@ -156,6 +156,18 @@ When a job reaches a terminal status, I must decide how to react:
 | **TERMINATED** | Job forcefully stopped | Report termination, do NOT retry |
 | **DEAD_LETTER** | Moved to dead letter queue | Report as critical failure immediately |
 
+### Mid-flight non-terminal statuses (question / answer channel)
+
+Non-terminal notifications arrive on the SAME `[JOB_EVENT]` header; the
+watch registration survives them (the terminal event still fires later).
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| **QUESTION_REQUESTED** ❓ | The watched instance paused and asked the human a structured question | Extract the question pack from the `Result:` line. Relay the questions (text + options) to the human via the chat source. When the human replies, call `POST /api/jobs/{work_id}/answer` with body `{"answers": {<question_id>: <answer>}, "question_pack_id": "<pack_id>"}` — echo the `question_pack_id` from the pack so stale answers are rejected (400 QUESTION_PACK_MISMATCH). Do NOT call job_continue / job_inject on a question-paused instance. |
+| **ANSWER_RECEIVED** ✓ | The human's answer was accepted and the asker is resuming | Informational — log it. The watch row survives for the eventual terminal event. No action needed. |
+| **MID-FLIGHT REPORT** ⟳ | The watched instance surfaced a progress note or decision point WITHOUT pausing | Forward to the chat source as a non-modal update. Do NOT block; do NOT call /answer. If `decision_required` appears in the payload, surface it prominently but keep going. |
+| **STUCK_AWAITING_ANSWER** ⏳ | The wedge guard heartbeat — the asker has been paused awaiting an answer for 30+ min | Log at WARNING and relay to the human AGAIN with a `(_reminder)` suffix — the question may have scrolled away. The payload carries `waiting_for_seconds`, `emission_index`, and `wedge_chain` (paused ancestry). After 3 emissions (~60 min) the guard terminates the asker — treat the reminder as urgent. |
+
 ---
 
 ## Notification Format
@@ -184,7 +196,8 @@ When watching a job, notifications arrive as plain text with this structure:
 
 **Body:** Plain text lines:
 - `Agent:` line is always present
-- `Result:` line is present on completion (may be multi-line)
+- `Result:` line is present on completion (may be multi-line); also present on `question requested ❓` (carries the question pack payload — questions with ids, options, and the `pack_id` to echo back on answer) and on `answer received ✓` (the answered pack)
+- `Progress:` line is present on `in progress ⟳` and `stuck awaiting answer ⏳` notifications
 - `Error:` line is present only on failure (absent — not "Error: None" — when there is no error)
 - There is no JSON block at the end of the message
 
@@ -199,7 +212,7 @@ Extract from the notification text:
 | `job_id` | Header | Identify which job this is for |
 | `status` | Header | Determine action (completed, failed, etc.) |
 | `agent_id` | `Agent:` line | Know which agent executed it |
-| `result` | `Result:` line | Include in final report (only on completion) |
+| `result` | `Result:` line | Include in final report (only on completion); on `question requested ❓` it is the question pack to relay |
 | `error` | `Error:` line | Determine failure type for retry decisions (only on failure) |
 
 ---
