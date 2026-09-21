@@ -44,7 +44,7 @@ from sqlalchemy.pool import StaticPool
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.message_queue.models import (
@@ -119,7 +119,7 @@ def processing_task_job(repository):
         instance_id="root-instance-1",
     )
     started = repository.start_job_atomic(job.job_id, "root-instance-1")
-    assert started is not None and started.status == JobStatus.PROCESSING.value
+    assert started is not None and started.admission_state == AdmissionState.ACTIVE.value
     return repository, job
 
 
@@ -160,7 +160,7 @@ def make_child_reports(job_engine, history):
     events_service._publish_instance_lifecycle_event = AsyncMock()
     service = ChildReportsService(manager=manager, events_service=events_service)
     patcher = patch(
-        "daemon.services.completion_content.get_instance_messages",
+        "daemon.services.child_reports.get_instance_messages",
         new_callable=AsyncMock,
         return_value=history,
     )
@@ -622,7 +622,7 @@ class TestWedgeResolverEmptyFinalTurn:
 
         # Direct unit check of _assistant_message_fresh
         with patch(
-            "daemon.services.completion_content.get_instance_messages",
+            "daemon.services.child_reports.get_instance_messages",
             new_callable=AsyncMock,
             return_value=make_history_with_empty_assistant(empty_ts),
         ):
@@ -659,7 +659,7 @@ class TestWedgeResolverEmptyFinalTurn:
         )
 
         with patch(
-            "daemon.services.completion_content.get_instance_messages",
+            "daemon.services.child_reports.get_instance_messages",
             new_callable=AsyncMock,
             return_value=make_history_with_empty_assistant(empty_ts),
         ), patch(
@@ -997,7 +997,7 @@ class TestMessageJobDeferral:
 
         # Job now COMPLETED with populated result_summary from the first message
         row = job_repo.get(job.job_id)
-        assert row.status == JobStatus.COMPLETED.value
+        assert row.admission_state == AdmissionState.DONE.value
         assert row.result_summary == "FIRST MESSAGE RESPONSE", (
             "MESSAGE job result_summary must be populated via the observer "
             "after the instance transitions to COMPLETED"

@@ -29,7 +29,7 @@ from sqlmodel import Session, select
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
@@ -95,7 +95,7 @@ def processing_task_job(repository):
         instance_id="root-instance-1",
     )
     started = repository.start_job_atomic(job.job_id, "root-instance-1")
-    assert started is not None and started.status == JobStatus.PROCESSING.value
+    assert started is not None and started.admission_state == AdmissionState.ACTIVE.value
     return repository, job
 
 
@@ -218,7 +218,7 @@ class TestObserverResultSummary:
             })
 
         row = job_repo.get(job.job_id)
-        assert row.status == JobStatus.COMPLETED.value
+        assert row.admission_state == AdmissionState.DONE.value
         assert row.result_summary == "FINAL REPORT BODY"
         # job_get parity: the tool returns job_item.to_dict()
         assert row.to_dict()["result_summary"] == "FINAL REPORT BODY"
@@ -242,7 +242,7 @@ class TestObserverResultSummary:
             })
 
         row = job_repo.get(job.job_id)
-        assert row.status == JobStatus.FAILED.value
+        assert row.admission_state == AdmissionState.DONE.value
         assert row.error_message == "child exploded"
         assert row.result_summary == "partial progress notes"
         d = row.to_dict()
@@ -277,7 +277,7 @@ class TestObserverResultSummary:
         })
 
         row = job_repo.get(job.job_id)
-        assert row.status == JobStatus.COMPLETED.value
+        assert row.admission_state == AdmissionState.DONE.value
         assert row.result_summary is None  # best-effort/empty result, job terminated
 
     @pytest.mark.asyncio
