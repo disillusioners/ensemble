@@ -463,7 +463,7 @@ class TestNoPollingIntroduced:
         src = self._read("daemon/services/instance_lifecycle.py")
         anchor = src.index("mint_stuck_heartbeat_one_shot")
         region = src[anchor - 2000 : anchor + 2000]
-        assert "STUCK_HEARTBEAT_AFTER_SECONDS" not in region or True
+        assert "STUCK_HEARTBEAT_AFTER_SECONDS" in region
         assert "while True" not in region
 
 
