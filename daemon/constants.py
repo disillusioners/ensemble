@@ -29,6 +29,22 @@ SSE_PING_INTERVAL: int = 30  # SSE keepalive ping interval (seconds)
 SSE_QUEUE_MAXSIZE: int = 50  # Max size for SSE event queue
 EVENT_STREAM_POLL_INTERVAL: int = 2  # Job SSE poll interval (seconds)
 
+# ── Mid-flight QA channel (2026-09-21, feature/midflight-qa-channel) ─────────────
+# Single source of truth for the wedge-guard one-shot chain timing.
+# Each link of the chain is a single future-dated Task row
+# (``next_retry_at``) — NOT a periodic sweep. The chain is finite
+# (3 emissions): #1 at pause time (t=0), #2 at t=+1800s, #3 at
+# t=+3600s; at emission_index=3 the processor escalates (terminate +
+# NotificationBroadcaster fan-out) and mints NO successor. Total
+# wedge-detection window: ~60 minutes.
+STUCK_HEARTBEAT_AFTER_SECONDS: int = 1800
+
+# Wedge-guard escalation threshold: the processor terminates the asker
+# and fans out to NotificationBroadcaster when the derived
+# ``emission_index`` reaches this value. No successor one-shot is
+# minted at or above this index.
+STUCK_HEARTBEAT_ESCALATION_INDEX: int = 3
+
 # ── Timeouts (seconds) ───────────────────────────────────────────────────────────
 REQUEST_TIMEOUT_S: int = 610  # LLM request timeout (11 minutes)
 INSTANCE_TIMEOUT_S: int = 60  # Instance timeout (minutes converted to seconds)

@@ -426,6 +426,88 @@ class LiveEventHub:
         await self._stream_to_connections(instance_id, event)
 
     # -------------------------------------------------------------------------
+    # Mid-flight QA channel streams (2026-09-21, feature/midflight-qa-channel)
+    # -------------------------------------------------------------------------
+    #
+    # Four best-effort FE banner streams mirroring ``stream_question_pack``.
+    # None of these are load-bearing for the agent-facing pipeline (the
+    # load-bearing lanes are EventBus + work_notifier → [JOB_EVENT]);
+    # they surface optional FE banners. All follow the same envelope:
+    # ``{"instance_id", "event_type", "payload"}``.
+
+    async def stream_midflight_report(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stream a mid-flight report banner (non-modal, informational).
+
+        Emitted by the ``mid_flight_report`` tool. Never pauses the
+        instance — the FE renders it as a banner only.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "midflight_report",
+            "payload": payload,
+        }
+        await self._stream_to_connections(instance_id, event)
+
+    async def stream_stuck_awaiting_answer(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stream a stuck-awaiting-answer banner (wedge-guard heartbeat).
+
+        Emitted at pause time (transition-time emission #1) and by the
+        one-shot wedge-guard wake. ``payload`` carries ``waiting_for_seconds``,
+        ``emission_index``, and ``wedge_chain`` per design §3.3.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "stuck_awaiting_answer",
+            "payload": payload,
+        }
+        await self._stream_to_connections(instance_id, event)
+
+    async def stream_child_question_still_pending(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stream a child-question-still-pending banner (OQ-2 decision B).
+
+        Emitted post-commit in ``_resume_cascade_db_sync`` for each
+        resumed instance whose question pack is still ``pending`` —
+        the child's awaiting-answer handle was wiped by the cascade
+        resume while its pack stays pending in RAM.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "child_question_still_pending",
+            "payload": payload,
+        }
+        await self._stream_to_connections(instance_id, event)
+
+    async def stream_answer_received(
+        self,
+        instance_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stream an answer-received banner (T1 CAS winner path only).
+
+        Emitted by the shared answer helper AFTER the CAS wins — the
+        losing duplicate short-circuits to ``already_delivered`` and
+        never reaches this stream.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "answer_received",
+            "payload": payload,
+        }
+        await self._stream_to_connections(instance_id, event)
+
+    # -------------------------------------------------------------------------
     # Cleanup
     # -------------------------------------------------------------------------
 

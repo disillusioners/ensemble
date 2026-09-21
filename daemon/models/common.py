@@ -43,6 +43,15 @@ class ErrorCodes(str, Enum):
     # when the store byte cap is exceeded — the router turns this
     # into HTTP 507 + a rate-limited WARNING log.
     TMP_IMAGE_STORE_FULL = "TMP_IMAGE_STORE_FULL"
+    # Mid-flight QA channel (2026-09-21, feature/midflight-qa-channel).
+    # Answer-path error codes — live in the shared
+    # ``_answer_questions_via_instance`` helper so BOTH surfaces
+    # (instance-addressed + job-addressed) inherit them.
+    NO_PENDING_QUESTION = "NO_PENDING_QUESTION"
+    QUESTION_PACK_LOST = "QUESTION_PACK_LOST"
+    ANSWER_TARGET_TERMINAL = "ANSWER_TARGET_TERMINAL"
+    QUESTION_PACK_MISMATCH = "QUESTION_PACK_MISMATCH"
+    JOB_NOT_FOUND = "JOB_NOT_FOUND"
 
 
 class ErrorResponse(BaseModel):

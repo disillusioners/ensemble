@@ -723,6 +723,16 @@ class _CascadeUpdateResult(NamedTuple):
     # The field is retained as an empty list for backward compatibility
     # with test assertions and external callers.
     reconciled_message_ids: list[str] = []
+    # Mid-flight QA channel (2026-09-21, design §4.3): the
+    # (instance_id, work_id) pairs of tasks suspended with
+    # ``suspension_reason='awaiting_answer'`` by THIS pause — the
+    # post-commit outbox the async caller consumes to fire the
+    # transition-time ``STUCK_AWAITING_ANSWER`` emission #1 and mint
+    # the first wedge-guard one-shot successor. Only the ORIGINATOR's
+    # own task carries ``awaiting_answer``; cascade-inherited
+    # artifacts are stamped ``paused_by_parent`` (leader decision 2)
+    # and deliberately do NOT enter this outbox.
+    awaiting_answer_suspensions: list[tuple[str, str]] = []
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -3267,6 +3277,11 @@ class InstanceLifecycleService:
                 skipped_ids.append(node_id)
 
         # Single batched UPDATE — L14 transaction-boundary fix.
+        # ``originator_instance_id`` threads the asker identity down so
+        # the db-sync can stamp ``paused_by_parent`` on cascade
+        # artifacts (mid-flight QA channel, leader decision 2) — only
+        # when the reason is ``awaiting_answer``; all other reasons
+        # keep the legacy tree-wide single-reason behavior.
         db_result = await asyncio.to_thread(
             self._pause_cascade_db_sync,
             self._manager.engine,
@@ -3275,7 +3290,44 @@ class InstanceLifecycleService:
             paused_at_iso=paused_at_iso,
             paused_instances_data=paused_instances_data,
             suspension_reason=suspension_reason,
+            originator_instance_id=instance_id,
         )
+
+        # Mid-flight QA channel (design §4.3 — transition-time emission
+        # #1 + first one-shot mint). Fires ONCE at pause for every task
+        # suspended with ``awaiting_answer`` (the originator's own
+        # turn): STUCK_AWAITING_ANSWER rides the push lanes (EventBus +
+        # LiveEventHub + work_notifier non-terminal fan-out), and ONE
+        # future-dated ``heartbeat_emit_stuck`` Task row is minted at
+        # ``now + STUCK_HEARTBEAT_AFTER_SECONDS`` (1800s). This is NOT
+        # a loop — the chain is finite (3 links) and each link is a
+        # one-shot DB row the standard worker claim wakes exactly once.
+        if suspension_reason == SuspensionReason.AWAITING_ANSWER.value:
+            for stuck_instance_id, _stuck_work_id in (
+                getattr(db_result, "awaiting_answer_suspensions", None) or []
+            ):
+                try:
+                    from daemon.services.midflight_qa import (
+                        emit_stuck_awaiting_answer as _emit_stuck,
+                        mint_stuck_heartbeat_one_shot as _mint_one_shot,
+                        read_question_pack_id_from_metadata as _read_pack_id,
+                    )
+
+                    pack_id = _read_pack_id(self._manager, stuck_instance_id)
+                    await _emit_stuck(
+                        self._manager,
+                        stuck_instance_id,
+                        pack_id,
+                        waiting_for_seconds=0,
+                        paused_at=paused_at_iso,
+                    )
+                    _mint_one_shot(self._manager, stuck_instance_id)
+                except Exception as e:  # noqa: BLE001 — §8.6: emission/mint failure must not break the pause
+                    logger.warning(
+                        f"pause_instance_cascade: stuck-emission #1 / one-shot "
+                        f"mint failed for asker {stuck_instance_id[:8]}...: "
+                        f"{type(e).__name__}: {e}"
+                    )
 
         # Post-commit side effects: SSE status_change per paused node.
         # Phase 2 (pause/resume redesign, 2026-06-25): the pause flow
@@ -3685,6 +3737,49 @@ class InstanceLifecycleService:
                     f"for {node_id[:8]}...: {e}"
                 )
             logger.info(f"Resumed instance {node_id[:8]}...")
+
+        # Mid-flight QA channel (OQ-2 decision B, design §8.3):
+        # post-commit ``child_question_still_pending`` emission. The
+        # resume db-sync selected EVERY paused task in the tree with no
+        # suspension-reason filter and ``ResumeTurn`` wiped each
+        # handle — a child paused for ITS OWN question (own pending
+        # pack) would otherwise be silently orphaned: handle gone,
+        # pack still pending, orchestrator unaware. Detection is the
+        # QuestionManager read API over the resumed tree; each match
+        # rides EventBus + LiveEventHub (informational — no pause; the
+        # child is RUNNING and recoverable via the Defect-3 fresh-
+        # message branch of the answer route).
+        if resumed_ids:
+            try:
+                from daemon.services.midflight_qa import (
+                    emit_child_question_still_pending as _emit_child_pending,
+                    read_question_pack_id_from_metadata as _read_pack_id,
+                )
+
+                pending_packs = (
+                    self._manager._question_manager.get_pending_packs_for_instances(
+                        resumed_ids
+                    )
+                )
+                for child_id, _pack in pending_packs.items():
+                    try:
+                        await _emit_child_pending(
+                            self._manager,
+                            child_id,
+                            _read_pack_id(self._manager, child_id),
+                            parent_id=instance_id if child_id != instance_id else None,
+                        )
+                    except Exception as e:  # noqa: BLE001 — §8.6
+                        logger.warning(
+                            f"resume_instance_cascade: child_question_still_"
+                            f"pending emission failed for {child_id[:8]}...: "
+                            f"{type(e).__name__}: {e}"
+                        )
+            except Exception as e:  # noqa: BLE001 — the read API itself must never break resume
+                logger.warning(
+                    f"resume_instance_cascade: pending-pack detection failed "
+                    f"for tree of {instance_id[:8]}...: {type(e).__name__}: {e}"
+                )
 
         # Phase 1 (2026-06-24, report-lane decoupling): Wake the worker
         # pool on a successful resume so any tasks that were queued
@@ -4879,6 +4974,7 @@ status=InstanceStatus.IDLE.value,
         paused_at_iso: str,
         paused_instances_data: list[tuple[str, str | None]],
         suspension_reason: str | None = None,
+        originator_instance_id: str | None = None,
     ) -> _CascadeUpdateResult:
         """Persist a tree pause and suspend each in-flight turn.
 
@@ -4887,6 +4983,19 @@ status=InstanceStatus.IDLE.value,
         :class:`SuspendTurn`; keeping the two operations in one guarded
         session preserves the all-or-nothing pause boundary.  The transition
         results are the post-commit outbox records (wakeup/SSE payloads).
+
+        Mid-flight QA channel (leader decision 2, 2026-09-21): when the
+        cascade reason is ``awaiting_answer``, the ORIGINATOR's own task
+        keeps ``awaiting_answer`` while every OTHER suspended task in the
+        tree is stamped with the distinct ``paused_by_parent`` reason —
+        cascade-inherited artifacts can never be consumed by an answer
+        aimed at the originator (``find_suspended_turn_for_answer``
+        filters only ``awaiting_answer``; cascade RESUME is
+        reason-agnostic so children still resume on answer). Read APIs
+        that enumerate packs do not filter on the new reason (MAJOR-4).
+        The (instance_id, work_id) pairs suspended with
+        ``awaiting_answer`` are returned in the outbox for the
+        transition-time STUCK emission #1 + one-shot mint (§4.3).
         """
         if not paused_instances_data:
             return _CascadeUpdateResult(
@@ -4928,6 +5037,14 @@ status=InstanceStatus.IDLE.value,
         effective_suspension_reason = (
             suspension_reason or SuspensionReason.PAUSED_EXTERNAL.value
         )
+        # Mid-flight QA channel: for an answer pause, only the
+        # ORIGINATOR's own task carries ``awaiting_answer``; every
+        # other suspended task in the tree is a cascade artifact and
+        # gets the distinct ``paused_by_parent`` reason.
+        is_answer_pause = (
+            effective_suspension_reason == SuspensionReason.AWAITING_ANSWER.value
+        )
+        awaiting_answer_suspensions: list[tuple[str, str]] = []
 
         with WriteGuardSession(Session(engine), write_guard) as session:
             session.execute(
@@ -4964,9 +5081,12 @@ status=InstanceStatus.IDLE.value,
             ).mappings().all()
 
             for row in task_rows:
+                row_reason = effective_suspension_reason
+                if is_answer_pause and row["instance_id"] != originator_instance_id:
+                    row_reason = SuspensionReason.PAUSED_BY_PARENT.value
                 result = SuspendTurn(
                     work_id=str(row["work_id"]),
-                    reason=effective_suspension_reason,
+                    reason=row_reason,
                     resume_target_turn_id=str(row["work_id"]),
                     task_repo=transition_task_repo,
                     instance_id=row["instance_id"],
@@ -4979,6 +5099,10 @@ status=InstanceStatus.IDLE.value,
                     ).scalar_one_or_none()
                     if status_row == TaskStatus.PAUSED.value:
                         suspended_work_ids.append(str(row["work_id"]))
+                        if row_reason == SuspensionReason.AWAITING_ANSWER.value:
+                            awaiting_answer_suspensions.append(
+                                (str(row["instance_id"]), str(row["work_id"]))
+                            )
 
             session.commit()
 
@@ -5008,6 +5132,7 @@ status=InstanceStatus.IDLE.value,
             updated_ids=updated_ids,
             skipped_ids=skipped_ids,
             agent_ids_by_instance=agent_ids_by_instance,
+            awaiting_answer_suspensions=awaiting_answer_suspensions,
         )
 
     def _compact_fired_watchers_for_paused(

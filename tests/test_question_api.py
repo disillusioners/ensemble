@@ -228,10 +228,11 @@ def test_get_question_returns_200_with_null_when_pack_answered(client_and_state)
         [{"id": "q-1", "text": "Pick a color"}],
     )
     assert created is not None
-    answered = manager._question_manager.set_answers(
+    answered, transitioned = manager._question_manager.set_answers(
         "inst-abc", {"q-1": "blue"},
     )
     assert answered is not None
+    assert transitioned is True
     assert answered.status == "answered"
 
     resp = client.get("/instances/inst-abc/question")

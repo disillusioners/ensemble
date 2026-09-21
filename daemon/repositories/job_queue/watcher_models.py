@@ -12,8 +12,28 @@ from daemon.repositories.infra.types import JSONBType
 
 ALL_TERMINAL_STATES: list[str] = ["completed", "settled", "failed", "cancelled", "dead_letter"]
 
+# Mid-flight QA channel (2026-09-21, ``feature/midflight-qa-channel``) —
+# four NEW NON-TERMINAL watchable events. Without registering them here,
+# ``watch_job``'s events validation (daemon/tools/job_queue.py — the
+# ``accepted_events`` gate) rejects them, and ``notify_work_watchers``'
+# per-watcher ``status in watcher.watch_events`` filter would silently
+# drop every non-terminal notification. They are non-terminal by
+# definition: the notifier's non-terminal branch never claims the row,
+# so the watch survives for the eventual terminal event.
+# ``child_question_still_pending`` (the 5th EventKind) is deliberately
+# NOT here — it is dispatched via EventBus + LiveEventHub only and never
+# enters the work_notifier status map (design §3.1 / R1).
+MIDFLIGHT_QA_WATCHABLE_EVENTS: list[str] = [
+    "question_requested",
+    "answer_received",
+    "midflight_report",
+    "stuck_awaiting_answer",
+]
+
 # All events a watcher can receive, including non-terminal (progress) events
-ALL_WATCHABLE_EVENTS: list[str] = ALL_TERMINAL_STATES + ["in_progress"]
+ALL_WATCHABLE_EVENTS: list[str] = (
+    ALL_TERMINAL_STATES + ["in_progress"] + MIDFLIGHT_QA_WATCHABLE_EVENTS
+)
 
 # M2 (mission-class, 2026-09-02, ``feature/mission-class``) — opt-in
 # mission-side terminal event per contract draft §3.5. Fires ONLY when
@@ -30,6 +50,13 @@ ALL_WATCHABLE_EVENTS: list[str] = ALL_TERMINAL_STATES + ["in_progress"]
 # ``ALL_WATCHABLE_EVENTS`` set stays transport-only by default — the
 # new event is strictly opt-in (a caller who wants dual-terminal
 # semantics adds ``"mission_terminal"`` explicitly).
+#
+# Mid-flight QA channel (2026-09-21): the four new non-terminal
+# statuses ride ``ALL_WATCHABLE_EVENTS`` (above). They must NOT be
+# added here — ``mission_live`` derivation is untouched by the QA
+# channel; new kinds are non-mission-terminal by construction
+# (work_notifier.py:357-389 derives mission liveness from the stored
+# WorkRecord state, never from the input status).
 ALL_MISSION_TERMINAL_WATCHABLE_EVENTS: list[str] = ALL_WATCHABLE_EVENTS + [
     "mission_terminal"
 ]
