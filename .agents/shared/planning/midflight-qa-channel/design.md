@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — planning-only artifact (no code changes, no commits) |
+| **Status** | IMPLEMENTED on `feature/midflight-qa-channel` (2026-09-21) — H1–H7 approver touch-ups folded in below; see git history for the implementation commits. Originally DRAFT planning-only. |
 | **Worktree** | `feature/midflight-qa-channel` @ `246b7325` (v0.13.9) |
 | **Goal** | Make a mid-flight `ask_questions("...")` surface to the human via the existing push lanes, route the human's answer back to the paused asker, and emit non-blocking mid-flight reports on the same substrate. |
 | **Scope** | MEDIUM-LARGE — ~9-12 daemon files (event schemas, work_notifier, watch_job, ask_questions, new `mid_flight_report` tool, two HTTP routes, one new TaskType for the wedge-guard one-shot wake). No polling introduced; no new services; no schema migration beyond additive. |
@@ -26,7 +26,7 @@ Two live incidents on 2026-09-21:
 |---|---|---|
 | `question_pack` SSE is fire-and-forget | `live_event_hub.py:1-5` — "If no client is listening, events are dropped silently" | The wizard never opened on the FE because no agent-facing unpause exposed the question; even if the FE did open, the wizard UX would only know "the instance asked" without knowing which job to deliver the answer into. |
 | Question is not a job event | `work_notifier.py:118-503` only fires for terminal / `in_progress` work statuses; `EventKind` (`repositories/event/models.py:12-23`) has no `QUESTION_REQUESTED` | `watch_job` does not deliver question events. Orchestrator (`job-orchestration/skill.md:163-188` parses `[JOB_EVENT]` headers) never sees the question. |
-| Answer is instance-addressed | `routers/instances.py:1053-1228` — `POST /api/instances/{id}/answer` requires the asker's instance id, but the question never told anyone which instance that is | The orchestrator (job creator) has the `work_id`, not the `instance_id`. It cannot call the existing endpoint. |
+| Answer is instance-addressed | `routers/instances.py:1053-1305` — `POST /api/instances/{id}/answer` requires the asker's instance id, but the question never told anyone which instance that is | The orchestrator (job creator) has the `work_id`, not the `instance_id`. It cannot call the existing endpoint. |
 | In-memory QuestionPack | `question_manager.py:11-13` "NOT persisted — lifetime of the daemon process"; handle is durable (`task.suspension_reason='awaiting_answer'`) | Daemon restart orphans the answer path: handle survives, pack is gone, POST /answer 404s (`routers/instances.py:1097-1109`). The wedge is silent because there is no event the watcher would see — just a row in `task` table. |
 
 ---
@@ -176,8 +176,15 @@ The icon set matches the existing glyph vocabulary (`✓ ✗ ⟳ ⏸ ❓ ⏳`).
   ],
   "suspension_reason": "awaiting_answer",
   "paused_at":         "iso-8601",
-  "child_count":       0,                          // for the wedge-guard reasoning
-  "fan_out_count":     2                           // number of work_ids fanned to (operator-visibility)
+  "child_count":       0,                          // CONCRETE (H6): number of DIRECT children
+                                                  //   (InstanceRepository.get_children(asker)) whose
+                                                  //   instance status is NOT terminal
+                                                  //   (completed/error/terminated/failed) — the live-
+                                                  //   dependent count the wedge guard reasons about
+  "fan_out_count":     2                           // CONCRETE (H6): len(job_id) — the number of live
+                                                  //   work_ids fanned to (active JobItem, get_by_instance
+                                                  //   fallback, + current Task), i.e. the number of
+                                                  //   notify_work_watchers calls this emission makes
 }
 ```
 
@@ -362,12 +369,14 @@ AND (
 
 | File | Change | Lines (approx) |
 |---|---|---|
-| `daemon/repositories/event/models.py` | Extend `EventKind` (4 new enum members) | +4 lines |
+| `daemon/repositories/event/models.py` | Extend `EventKind` (5 new enum members — the 4 lane kinds + `CHILD_QUESTION_STILL_PENDING`) | +5 lines |
+| `daemon/repositories/job_queue/watcher_models.py` | **(H1)** Register the 4 new status words in `ALL_WATCHABLE_EVENTS` (:16) — without this, `watch_job`'s events validation (`job_queue.py:1693-1701`) REJECTS them and `notify_work_watchers`' per-watcher `status in watch_events` filter silently drops every non-terminal notification. The mission-terminal set (`ALL_MISSION_TERMINAL_WATCHABLE_EVENTS`, :33-35) is NOT extended — new kinds are non-mission-terminal | +6 lines |
+| `daemon/repositories/task/models.py` | **(H4)** Add `HEARTBEAT_EMIT_STUCK` to `TaskType` AND `PAUSED_BY_PARENT` to `SuspensionReason` (both pure-Python members — `suspension_reason`/`task_type` are TEXT columns, zero SQL migration) | +2 lines |
 | `daemon/services/work_notifier.py` | Extend `_STATUS_DISPLAY_MAP` | +4 lines |
 | `daemon/services/live_event_hub.py` | New `stream_midflight_report()`, `stream_stuck_awaiting_answer()`, `stream_child_question_still_pending()`, `stream_answer_received()` | +60 lines |
 | `daemon/tools/question_tools.py` | Add the `notify_work_watchers` + `event_bus.create_event` calls after the existing SSE emission (steps [3]+[4] of §4.1); stamp `question_pack_id` into `instance_metadata`; **fan-out iteration over live work_ids** (JobItemRepository.get_active_by_instance + TaskRepository.get_by_instance, per MAJOR-1) | +40 lines |
 | `daemon/services/instance_lifecycle.py` | Inside `_pause_cascade_db_sync` post-commit: emit stuck/heartbeat event #1 for `awaiting_answer` tasks (stamping `paused_by_parent` distinct suspension_reason on cascade-inherited children — leader decision 2); schedule the one-shot future Task row via direct `Task(...)` construction. Inside `_resume_cascade_db_sync` post-commit: emit `child_question_still_pending` event for each resumed instance with a still-pending pack. Clear `question_pack_payload`/`question_pack_id` from `instance_metadata` on answer consumption (per R3 fix) | +70 lines |
-| `daemon/services/task_processor.py` | Register `HeartbeatEmitStuckProcessor` for the new TaskType in the dispatcher table (`task_processor.py:1285-1306, :1347`); processor calls `manager.terminate_instance` directly at `emission_index=3`; `HeartbeatEmitStuckProcessor` no-op predicate uses `find_suspended_turn_for_answer` (NOT in-RAM pack status) | +40 lines |
+| `daemon/services/task_processor.py` | **(H7)** Register `HeartbeatEmitStuckProcessor(instance_manager, task_repo, event_repo)` for the literal `heartbeat_emit_stuck` in the dispatcher table (`task_processor.py:1285-1306, :1347`); signature mirrors `SendReportProcessor`/`CleanupProcessor`. Concurrency-gate interaction: the row's `instance_id` IS the asker — when the asker has RESUMED and another of its tasks is RUNNING, the per-instance concurrency gate (`claim_pending_task`'s `status='running'`-only guard, UNTOUCHED by the carve-out) holds the heartbeat PENDING for that turn's duration (bounded ~ms interference, accepted per OQ-4 #3); the processor consumes no asker slot beyond its own claimed row. Processor calls `manager.terminate_instance` directly at `emission_index=3`; the durable no-op predicate uses `find_suspended_turn_for_answer` (NOT in-RAM pack status) | +140 lines |
 | `daemon/repositories/task/models.py` | Add `HEARTBEAT_EMIT_STUCK` to `TaskType` enum | +1 line |
 | `daemon/repositories/task/repository.py` | **(a)** Add type-scoped disjunct at `:1931-1952` (wrap the pause gate — exactly the §1.4 spec). **(b)** Add a new repo method (e.g. `create_one_shot_heartbeat(task_type, instance_id, next_retry_at)`) OR document the direct `Task(...)` construction path (no `metadata` kwarg on `create()`). **(c)** Register `heartbeat_emit_stuck` for exclusion in `list_pending_tasks_older_than` (`:1007-1046`) to suppress drift-reconciler noise | +30 lines |
 | `daemon/services/question_manager.py` | **(a)** `set_answers` returns `(pack \| None, transitioned: bool)` tuple under existing lock (CAS — pending→answered exactly-once, no overwrite on `status='answered'`). **(b)** New `_get_pending_packs_for_instances(tree_ids)` read API under lock, used by `_resume_cascade_db_sync` for the OQ-2 child-question detection. **(c)** Clear `instance_metadata['question_pack_payload']` / `['question_pack_id']` on `status='answered'` (R3 fix — moved off `set_question_pack`). **(d)** Boot-time rehydration pass in `manager.__init__` reads `idx_task_status_type_created` `status='paused'` prefix with Python post-filter on `suspension_reason` (no index change) | +80 lines |
@@ -698,6 +707,8 @@ Pre-T2b status check (new guard in shared helper):
 
 **Why the COMPLETED/TERMINATED tightening is intentional:** today's behavior silently restarts a finished asker (`instance_messaging.py:1904-1915`) when an answer arrives after the job was already wrapped. This is a latent data-loss hazard — the new instance has no LangGraph checkpoint, so it runs from scratch. Tightening to explicit `410 ANSWER_TARGET_TERMINAL` prevents this. The existing instance-addressed route inherits the tightening via the shared `_answer_questions_via_instance` helper.
 
+**FE dependency finding (MAJOR-3, grep 2026-09-21):** no frontend or wizard code relies on the silent-revive. The wizard (`frontend/src/app/components/question-wizard/question-wizard.component.ts`) is NON-OPTIMISTIC — `submit()` waits on the API, hides via the `question_pack` SSE (`status='answered'`), and on ANY HTTP error surfaces `err?.error?.message` in a toast while keeping the wizard open for retry; the FE's only answer surface is `api.service.ts:answerQuestions` → `POST /api/instances/{id}/answer` (no job-addressed call existed). The new `410 ANSWER_TARGET_TERMINAL` / `400 QUESTION_PACK_MISMATCH` bodies therefore render through the wizard's EXISTING error handler with zero FE changes; the `already_delivered` 200 is a success shape the wizard already tolerates. Released in the changelog entry (see release notes).
+
 **Idempotency:** the CAS at T1 closes §8.5's race before this guard runs — a duplicate answer is rejected at T1′ (`already_delivered`) before status checks.
 
 ### 8.5 Answer while asker already resumed (race) — CAS at T1 closes it
@@ -758,7 +769,7 @@ The `stuck_awaiting_answer` event + one-shot future wake (per §4.3) is the wedg
 | **(a)** | Question surfaces as event to watcher | `test_midflight_qa.py::test_question_surfaces_to_watcher` — leader calls `ask_questions`; jober has `watch_job(work_id)` registered; jober's context receives a `[JOB_EVENT] Job ... question_requested ❓` line within 100ms; the `Result:` line carries the `question_pack_payload`. |
 | **(b)** | Answer resumes asker with answer in-context | `test_midflight_qa.py::test_answer_resumes_asker` — same setup; HTTP `POST /api/jobs/{work_id}/answer` with answers; assert asker's instance transitions PAUSED → RUNNING within 200ms; assert the next assistant turn echoes the answer text (F7 compaction safety). |
 | **(c)** | Report event non-blocking | `test_midflight_qa.py::test_report_non_blocking` — leader calls `mid_flight_report(summary="50% done")`; instance stays RUNNING (no pause flag set); jober receives `[JOB_EVENT] Job ... midflight_report ⟳` line; orchestrator can call another tool in the same turn. |
-| **(d)** | No polling introduced | **grep-clean checks** (run in CI): `grep -rn 'asyncio.sleep' daemon/services/midflight_qa.py daemon/tools/midflight_report.py daemon/tools/question_tools.py` → 0 hits in NEW code; `grep -rn 'EVENT_STREAM_POLL_INTERVAL' daemon/` → unchanged (still only `jobs_streaming.py:362-363`); `grep -rn 'next_retry_at' daemon/services/instance_lifecycle.py | grep 'stuck\|wedge'` → only the §4.3 one-shot scheduling, no `while True:` loops. |
+| **(d)** | No polling introduced | **Real test functions** (NIT-16 — implemented in `tests/job_queue/test_midflight_qa.py::TestNoPollingIntroduced`): (1) no `asyncio.sleep` in `daemon/services/midflight_qa.py` / `daemon/tools/midflight_report.py` / `daemon/tools/question_tools.py`; (2) the `HeartbeatEmitStuckProcessor` CLASS BODY (via `inspect.getsource`) has no `asyncio.sleep` / `time.sleep` / `while True`; (3) `midflight_qa.py` has no `while True`; (4) `EVENT_STREAM_POLL_INTERVAL` consumers pinned to the pre-change set (on this lineage the constant lives only in `constants.py` — `jobs_streaming.py` hardcodes the 2s literal); (5) the `task/repository.py` carve-out site asserts the type-scoped disjunct + bind literal are present and the claim SQL contains no `while True`; (6) the instance_lifecycle stuck-mint region has no loop construct. |
 | **(e)** | Completed-event Result bodies still work | `test_midflight_qa.py::test_completed_event_regression` — full job lifecycle: jober creates job → leader runs → completes; assert the terminal `[JOB_EVENT] Job ... completed ✓` carries the `Result:` line with the leader's final assistant text. Re-uses the v0.13.9 release-gate fixture. |
 
 ### 9.2 Failure-mode tests
@@ -816,7 +827,7 @@ The `stuck_awaiting_answer` event + one-shot future wake (per §4.3) is the wedg
 
 ### Internal research
 
-- Explorer REPORT 1: `ask/answer surface` (plan-explorer-asktool, HIGH confidence) — incident 1 root cause map. Provides file:line citations for `question_tools.py:315-439`, `manager.py:962-973`, `instance_messaging.py:4406-4478`, `routers/instances.py:1053-1228`.
+- Explorer REPORT 1: `ask/answer surface` (plan-explorer-asktool, HIGH confidence) — incident 1 root cause map. Provides file:line citations for `question_tools.py:315-439`, `manager.py:962-973`, `instance_messaging.py:4406-4478`, `routers/instances.py:1053-1305`.
 - Explorer REPORT 2: `event lanes + v0.13.9 Result-body fix` — LiveEventHub + work_notifier + EventBus pipeline. Provides file:line citations for `live_event_hub.py:384-426`, `work_notifier.py:101-107, 118-503`, `event_bus.py:155-191, 286-352`, `repositories/event/models.py:12-23`.
 - Explorer REPORT 3: `messaging lanes + pause/resume` — `messages.py:198-249` PAUSED-branch fan-out, `instance_lifecycle.py:4873-4983` `_pause_cascade_db_sync`, `manager.py:9222-9226, 9540-9640` `find_suspended_turn_for_answer` + `ResumeTurn` chain.
 
@@ -865,7 +876,7 @@ The `stuck_awaiting_answer` event + one-shot future wake (per §4.3) is the wedg
 - `daemon/services/worker_pool.py:302, :371, :982` — claim seam (`claim_pending_task`), condition-timeout claim loop (≤3s wake latency), `schedule_retry` future-dating precedent.
 - `daemon/services/instance_messaging.py:1904-1915` — `enqueue_message` to TERMINATED instance REVIVES it (the §8.1 mechanism; §8.4 intentionally tightens for the answer path).
 - `daemon/services/instance_messaging.py:1934-1975` — attestation reset (user/HUMAN-origin only; §8.1).
-- `daemon/repositories/job_queue/watcher_models.py:33-35` — `ALL_MISSION_LIVE_WATCHABLE_EVENTS` (do NOT add new kinds here; new kinds are non-mission-terminal).
+- `daemon/repositories/job_queue/watcher_models.py:33-35` — `ALL_MISSION_TERMINAL_WATCHABLE_EVENTS` (do NOT add the new kinds here; new kinds are non-mission-terminal — mission liveness derives from the stored WorkRecord state, never the input status).
 - `daemon/constants.py:30, :540-680` — `EVENT_STREAM_POLL_INTERVAL` (do NOT extend; new lanes are push), `RESERVED_SOURCE_PREFIXES` (no new prefix needed).
 - `daemon/retry_scheduler.py:70,84,162` — 60s poll loop (one of the §1.3 grounds for rejecting the JobItem future-dating alternative).
 
