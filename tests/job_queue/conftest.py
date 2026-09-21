@@ -1,7 +1,9 @@
 """Pytest configuration and fixtures for job queue tests."""
 
+import asyncio
 import pytest
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
@@ -20,6 +22,7 @@ from daemon.repositories.instance.models import Instance  # noqa: F401
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services import project_normalizer
+from daemon.services.dependency_bus import set_dependency_bus
 from daemon import constants
 
 # ── Shared Test Constants ────────────────────────────────────────────────────────
@@ -436,3 +439,143 @@ def low_priority_job_data_service():
         "priority": 1,  # Lowest priority
         "metadata": None,
     }
+
+
+# ── ADR-011 DependencyBus fixture ──────────────────────────────────────────────
+
+
+def _make_test_dependency_bus():
+    """Build a Mock DependencyBus singleton for unit tests.
+
+    The production bus tracks pending watchers via DB-backed state
+    (Phase 2+: the bus is the SOLE completion authority per
+    ``child_reports.py:1081-1090`` and the gate at
+    ``job_feedback_observer.py:3558-3564`` requires the singleton).
+    Unit tests that don't exercise the bus's DB-backed behavior need
+    a stand-in that:
+
+    - Returns 0 for ``count_pending_for_target[_sync]`` (no pending
+      watchers), so the cascade lane ``is_parent_complete`` check at
+      ``child_reports.py:1090`` is satisfied.
+    - Returns False/None for ``had_parent_error`` /
+      ``parent_error_message`` so ``_resolve_finalize_status`` does
+      not override the default status.
+    - Returns ``[]`` from ``emit_terminal`` /
+      ``emit_terminal_for_child_instance`` so no follow-up tasks are
+      enqueued.
+    - Returns an ``asyncio.Lock`` from ``_get_parent_lock`` so the
+      ``async with await bus._get_parent_lock(...)`` block at
+      ``child_reports.py:2139`` doesn't deadlock.
+
+    The fixture resets the singleton on teardown so a failed test
+    cannot leak the mock into the next test (the production invariant
+    is "bus initialized at startup"; tests start fresh).
+    """
+    bus = MagicMock()
+
+    async def _lock_factory(parent_id):
+        return asyncio.Lock()
+
+    # Sync helpers used inside DB sync threads
+    bus.count_pending_for_target_sync = MagicMock(return_value=0)
+    bus.count_pending_for_target = AsyncMock(return_value=0)
+
+    # Parent-error override consulted by ``_resolve_finalize_status``
+    bus.had_parent_error = MagicMock(return_value=False)
+    bus.parent_error_message = MagicMock(return_value=None)
+
+    # Orphan-race generation re-arm (job_feedback_observer.py:1684):
+    # ``post_gen > pre_gen`` triggers a re-arm so late children's
+    # resolves find a PROCESSING job. The mock returns 0 / 0 by
+    # default so the re-arm is a no-op for tests that don't drive the
+    # orphan-race path.
+    bus.get_generation = MagicMock(return_value=0)
+
+    # Terminal hooks — no-op (no follow-ups)
+    bus.emit_terminal = AsyncMock(return_value=[])
+    bus.emit_terminal_for_child_instance = AsyncMock(return_value=[])
+
+    # Per-parent async lock — real lock (the wrapping
+    # ``async with await bus._get_parent_lock(...)`` pattern needs a
+    # real async context manager; AsyncMock doesn't natively support
+    # ``async with`` on its return value).
+    bus._get_parent_lock = _lock_factory
+
+    # No-op mark-enqueued side effects
+    bus.mark_enqueued_by_source_target = AsyncMock(return_value=None)
+
+    return bus
+
+
+@pytest.fixture(autouse=True)
+def dependency_bus():
+    """Provide a mock DependencyBus via ``set_dependency_bus`` for tests.
+
+    Acceptance tests under ``tests/job_queue/`` exercise production code
+    that hard-requires the bus singleton (ADR-011):
+    ``_finalize_job_db_sync`` raises ``RuntimeError: DependencyBus is None ...``
+    at ``job_feedback_observer.py:3560`` and ``child_reports.py:1107`` if
+    the singleton is unset. This fixture installs a mock bus so the gate
+    code paths exercise their real decision logic (not the None-error
+    short-circuit) — preserving production semantics in tests.
+
+    The bus's ``count_pending_for_target`` returns 0 so the cascade
+    lane's ``is_parent_complete`` check at ``child_reports.py:1090`` is
+    satisfied and tests focus on the freshness/gate semantics (the
+    decision this acceptance set is meant to verify).
+    """
+    bus = _make_test_dependency_bus()
+    set_dependency_bus(bus)
+    try:
+        yield bus
+    finally:
+        set_dependency_bus(None)
+
+
+# ── Acceptance-set helpers ─────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def observer_manager_setup(engine):
+    """Configure a Mock ``InstanceManager`` with the real engine + write_guard.
+
+    Acceptance tests under ``tests/job_queue/`` construct their manager
+    as ``MagicMock()`` (per the round-1 fix pattern), but production
+    code in ``JobFeedbackObserver._finalize_job_db_sync`` accesses
+    ``self._instance_manager.engine`` and ``self._instance_manager.write_guard``
+    to open the in-session ``WriteGuardSession`` that performs the
+    terminal JobItem UPDATE. With a bare ``MagicMock`` for the manager,
+    the WriteGuardSession wraps a Mock engine/guard and the in-session
+    UPDATE becomes a no-op — the test then observes the JobItem stuck
+    in ``ACTIVE`` instead of ``DONE``.
+
+    This fixture pre-configures the engine + write_guard on a fresh
+    ``MagicMock`` manager, and disables the report-repair branch (so a
+    Mock ``config.report_repair`` does not blow up at the integer /
+    MagicMock comparison in ``_get_last_assistant_message_raw``).
+
+    Returns a callable ``(manager_mock=None) -> manager_mock`` that
+    applies the configuration in place. Tests that already have a
+    manager (e.g., the ``observer_env`` fixture) call this helper to
+    patch the manager in place.
+    """
+    from daemon.write_pause_guard import WritePauseGuard
+
+    guard = WritePauseGuard()
+
+    def _setup(manager):
+        # Real engine — required for WriteGuardSession to do real SQL.
+        manager.engine = engine
+        manager.write_guard = guard
+        # Disable report-repair so the report_repair_cfg.size_ratio_threshold
+        # path at child_reports.py:1726 short-circuits before any
+        # comparison (MagicMock-vs-int would raise TypeError).
+        manager.config = MagicMock()
+        manager.config.report_repair = MagicMock()
+        manager.config.report_repair.enabled = False
+        manager.config.report_repair.repair_excluded_agents = []
+        manager.config.report_repair.size_ratio_threshold = 5.0
+        manager.config.report_repair.lookback_messages = 3
+        return manager
+
+    return _setup
