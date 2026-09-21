@@ -331,6 +331,40 @@ class TaskRepository:
             db_session.refresh(task)
             return task
 
+    def has_pending_of_type_for_instance(
+        self, instance_id: str, task_type: str
+    ) -> bool:
+        """True if a PENDING row of ``task_type`` exists for ``instance_id``.
+
+        Mid-flight QA channel fix pass (MINOR-2/MINOR-3, 2026-09-21):
+        the wedge-guard PENDING-row cap. ``mint_stuck_heartbeat_one_shot``
+        consults this before minting so an asker never carries MORE THAN
+        ONE pending ``heartbeat_emit_stuck`` row at a time — the re-ask
+        stale-link fix (a second chain would double-fire emissions for
+        the new pack id → early escalation) and the finiteness bound on
+        the chain. Deliberately scoped to status ``pending`` ONLY: a
+        claimed (``running``) row does not count, so the re-arm site's
+        successor mint (which runs while the CURRENT link is still
+        ``running``) is never self-blocked.
+
+        Args:
+            instance_id: The ASKER instance the row observes.
+            task_type: Task type literal (``TaskType.HEARTBEAT_EMIT_STUCK.value``
+                for the wedge guard).
+
+        Returns:
+            True if at least one PENDING row of that type exists.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(func.count())
+                .select_from(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.task_type == task_type)
+                .where(Task.status == TaskStatus.PENDING.value)
+            )
+            return bool(db_session.exec(stmt).one())
+
     def get(self, task_id: int) -> Task | None:
         """Get a task by ID.
 

@@ -733,10 +733,48 @@ def mint_stuck_heartbeat_one_shot(
     Not a loop: each call mints exactly one link; the processor's
     re-arm clause mints the next link only while ``emission_index < 3``
     and the wedge is still alive.
+
+    Fix pass (MINOR-2/MINOR-3, 2026-09-21) — PENDING-row cap: the mint
+    is SKIPPED when a PENDING ``heartbeat_emit_stuck`` row already
+    exists for the asker, so an asker never carries more than one
+    pending wedge-guard link. This closes two holes:
+
+    * the re-ask stale link: a NEW pause-site mint while an old
+      chain's link is still pending would leave two live chains; both
+      fire, both read the CURRENT pack id from metadata, emissions
+      double per interval → EARLY escalation (terminating the asker
+      before the designed ~60 min);
+    * finiteness: minting is idempotent-per-pending-row, bounding the
+      chain even when ``derive_emission_index`` degrades to 1 on
+      event-persistence failure (index never reaching the escalation
+      threshold can no longer compound the row population).
+
+    The cap deliberately matches status ``pending`` ONLY — a claimed
+    (``running``) link does not count, so the re-arm site's successor
+    mint (issued while the CURRENT link is still ``running``) is never
+    self-blocked.
     """
     task_repo = getattr(manager, "_task_repo", None)
     if task_repo is None:
         return None
+    try:
+        if task_repo.has_pending_of_type_for_instance(
+            asker_instance_id, TaskType.HEARTBEAT_EMIT_STUCK.value
+        ):
+            logger.info(
+                "midflight_qa: PENDING wedge-guard row already exists for "
+                "asker %s — skipping one-shot mint (MINOR-2/3 cap)",
+                asker_instance_id[:8],
+            )
+            return None
+    except Exception as e:  # noqa: BLE001 — cap check failure must not kill the chain
+        logger.warning(
+            "midflight_qa: PENDING-row cap check failed for asker %s "
+            "(%s: %s) — fail-open, minting anyway",
+            asker_instance_id[:8],
+            type(e).__name__,
+            e,
+        )
     delay = (
         fire_after_seconds
         if fire_after_seconds is not None

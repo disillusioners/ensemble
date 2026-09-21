@@ -1384,8 +1384,16 @@ class HeartbeatEmitStuckProcessor(BaseProcessor):
 
         # ── 2. Wedge alive → emit ────────────────────────────────────
         pack_id = read_question_pack_id_from_metadata(self._manager, asker_id)
+        # Fix pass MINOR-1: report ``1800 × prior`` — the number of
+        # PERSISTED prior stuck events for this pack IS the number of
+        # full 1800s intervals elapsed since pause (emission #1 fires
+        # at pause time with waiting_for_seconds=0, heartbeat #k lands
+        # at t = k×1800s with k prior rows). The old ``× (prior+1)``
+        # double-counted the current interval (heartbeat #2 at t=1800s
+        # reported 3600s) and drifted from the "~60 min escalation"
+        # prose (escalation fires at heartbeat #3, t≈3600s).
         waiting_for_seconds = STUCK_HEARTBEAT_AFTER_SECONDS * (
-            (await self._derive_prior_emissions(asker_id, pack_id)) + 1
+            await self._derive_prior_emissions(asker_id, pack_id)
         )
         emission_index, _notified = await emit_stuck_awaiting_answer(
             self._manager,

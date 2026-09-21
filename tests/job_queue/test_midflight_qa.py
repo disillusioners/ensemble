@@ -780,7 +780,6 @@ class TestQuestionPackMismatch:
         assert exc_info.value.detail["code"] == ErrorCodes.QUESTION_PACK_MISMATCH.value
         # The pack is still pending — the hijack did NOT stamp it.
         assert harness.qm.get_question_pack(asker).status == "pending"
-        assert pack.id != str(uuid.uuid4())
 
     def test_matching_pack_id_accepted(self, harness):
         from daemon.routers.answer_helper import answer_questions_via_instance
@@ -1310,3 +1309,106 @@ class TestInRequestRehydration:
         assert result["question_pack"]["status"] == "answered"
         restored = harness.qm.get_question_pack(asker)
         assert restored is not None and restored.status == "answered"
+
+
+class TestWedgeGuardFixPassPins:
+    """MINOR-1 (telemetry truth) + MINOR-2/3 (PENDING-row cap)."""
+
+    def test_waiting_for_seconds_matches_elapsed_intervals(self, harness):
+        """MINOR-1: heartbeat #2 (ONE prior persisted event = ONE elapsed
+        1800s interval) reports 1800s — the old ``× (prior+1)`` reported
+        3600s and drifted from the ~60-min escalation prose."""
+        from daemon.services.task_processor import HeartbeatEmitStuckProcessor
+
+        processor = HeartbeatEmitStuckProcessor(
+            harness.manager, harness.task_repo, harness.event_repo
+        )
+        asker, _, pack = self._wedge_asker(harness)
+        # Pause-time emission #1 already persisted (transition-time site).
+        harness.event_repo.create_event(
+            instance_id=asker,
+            kind=EventKind.STUCK_AWAITING_ANSWER.value,
+            data={"question_pack_id": pack.id, "emission_index": 1},
+        )
+        harness.task_repo.create_one_shot_heartbeat(
+            TaskType.HEARTBEAT_EMIT_STUCK.value, asker,
+            datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        task = harness.task_repo.claim_pending_task("w-minor1")
+        assert task is not None
+        result = asyncio.run(processor.process(task))
+        assert result["emission_index"] == 2
+
+        # The EMITTED payload reports the true elapsed wait: 1 interval.
+        import json as _json
+
+        with Session(harness.engine) as session:
+            rows = session.exec(
+                _select(Event).where(Event.instance_id == asker)
+            ).all()
+
+        def _data_of(e):
+            d = e.data
+            if isinstance(d, str):
+                try:
+                    d = _json.loads(d)
+                except Exception:  # noqa: BLE001
+                    d = {}
+            return d or {}
+
+        stuck = [
+            e
+            for e in rows
+            if getattr(e.kind, "value", e.kind) == EventKind.STUCK_AWAITING_ANSWER.value
+            and _data_of(e).get("emission_index") == 2
+        ]
+        assert len(stuck) == 1
+        assert _data_of(stuck[0])["waiting_for_seconds"] == STUCK_HEARTBEAT_AFTER_SECONDS
+
+    def test_mint_cap_skips_when_pending_row_exists(self, harness):
+        """MINOR-2/3: at most ONE pending wedge-guard row per asker — a
+        re-mint while a PENDING row exists is skipped (re-ask stale-link
+        fix + chain finiteness bound)."""
+        from daemon.services.midflight_qa import mint_stuck_heartbeat_one_shot
+
+        asker, _, _ = self._wedge_asker(harness)
+        # Pause-site mint (first link) — future-dated, PENDING.
+        first = mint_stuck_heartbeat_one_shot(
+            harness.manager, asker,
+            fire_after_seconds=STUCK_HEARTBEAT_AFTER_SECONDS,
+        )
+        assert first is not None
+        # Re-ask before the first link fired: the cap SKIPS the second
+        # mint (two live chains would double-fire emissions for the new
+        # pack id → early escalation).
+        second = mint_stuck_heartbeat_one_shot(harness.manager, asker)
+        assert second is None
+        pending = [
+            t
+            for t in harness.task_repo.get_by_instance(asker)
+            if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
+            and t.status == TaskStatus.PENDING.value
+        ]
+        assert len(pending) == 1
+
+    # Reuse the wedge seeding helper from TestWedgeGuardOneShot.
+    def _wedge_asker(self, harness):
+        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+        work_id = _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        with Session(harness.engine) as session:
+            from sqlalchemy import text as _t
+
+            session.execute(
+                _t(
+                    "UPDATE task SET suspension_reason='awaiting_answer', "
+                    "resume_target_turn_id=:w WHERE work_id=:w"
+                ),
+                {"w": work_id},
+            )
+            session.commit()
+        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            asker, "question_pack_payload", pack_to_dict(pack)
+        )
+        return asker, work_id, pack
