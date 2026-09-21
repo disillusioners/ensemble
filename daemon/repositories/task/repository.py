@@ -2059,7 +2059,11 @@ class TaskRepository:
                         -- concurrency gate above is UNTOUCHED
                         -- (status='running'-only) — it is what makes
                         -- the resume race deterministic (OQ-4 #3).
-                        -- RUNNING-asker protection lives in the per-instance concurrency gate above; this disjunct widens claim eligibility ONLY for the heartbeat_emit_stuck type over PAUSED/TERMINATED instances.
+                        -- RUNNING-asker protection lives in the
+                        -- per-instance concurrency gate above; this
+                        -- disjunct widens claim eligibility ONLY for
+                        -- the heartbeat_emit_stuck type over
+                        -- PAUSED/TERMINATED instances.
                         task.task_type = :heartbeat_emit_stuck
                         OR instance_id NOT IN (
                             -- Phase 1 (2026-06-24, report-lane decoupling):
