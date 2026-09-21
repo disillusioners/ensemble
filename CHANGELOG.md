@@ -83,12 +83,6 @@ share one helper with a tightened, exactly-once contract:
   payloads, and the `[JOB_EVENT]` body) gained a `pack_id` key;
   consumers that pattern-match on known keys are unaffected.
 
-### Fixed
-
-Cherry-picked from `fix/empty-job-completed-event` (round-1 + round-2 + round-3 council fixes) onto the `release/prepare-v0.13.9` lineage (`origin/latest` @ `ea6a3944`, plus the four round-1/2/3 cherry-picks). job-completed events now carry Result body; result_summary written at completion; premature terminal emission gated on true subtree completion; failed/dead-letter events carry Error body — event-driven, no polling.
-
----
-
 ## [0.13.9] — 2026-09-21
 
 ### Fixed

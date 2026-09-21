@@ -159,7 +159,7 @@ async def _load_asker(
     # ── 1. Instance existence (uniform 404 contract) ─────────────────
     instance_row = None
     try:
-        # NIT-9 (fix pass): the repository read is a blocking sync DB
+        # NIT-8 (fix pass): the repository read is a blocking sync DB
         # call — wrap in asyncio.to_thread (sibling precedent:
         # HeartbeatEmitStuckProcessor / jobs_management answer route).
         instance_row = await asyncio.to_thread(
