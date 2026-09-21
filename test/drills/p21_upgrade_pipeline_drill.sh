@@ -374,7 +374,7 @@ if [ -d "$SBX4/releases/rollback.lock.d" ]; then ok "pre-sweep: lock held by dea
 # per T7 — the only way to cross the gate in drill time is rewriting
 # started_at via journal_update itself; logged fixture manipulation, same
 # class as the cooldown clears above)
-jget "$SBX4" 'ts="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"; inf="$(_json_sub "$(journal_read)" in_flight)"; k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"; journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":true,\"owner_pid\":$o}"' > /dev/null
+jget "$SBX4" 'ts="$(date -u -d "700 seconds ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"; inf="$(_json_sub "$(journal_read)" in_flight)"; k="$(_json_field "$inf" kind)"; t="$(_json_field "$inf" target)"; o="$(_json_field "$inf" owner_pid)"; journal_update in_flight "{\"kind\":\"$k\",\"target\":\"$t\",\"started_at\":\"$ts\",\"flipped\":true,\"owner_pid\":$o}"' > /dev/null
 printf 'DRILL: aged the REAL txn started_at to -700s (fixture manipulation to cross the 600s sweep gate in drill time)\n'
 # start the REAL launcher (promote's launcher_swap staged it at the sandbox
 # root in the stopped window; resolve_install_dir picks the sandbox up from
