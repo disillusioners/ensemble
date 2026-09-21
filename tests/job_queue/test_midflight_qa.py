@@ -33,13 +33,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session
 from sqlmodel import select as _select
@@ -64,10 +68,22 @@ from daemon.repositories.task.models import (
     TaskType,
 )
 from daemon.repositories.task.repository import TaskRepository
+from daemon.routers.answer_helper import answer_questions_via_instance
+from daemon.routers.instances import router as _instances_router
 from daemon.services.event_bus import EventBus
+from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.midflight_qa import (
+    emit_question_requested,
+    mint_stuck_heartbeat_one_shot,
+)
 from daemon.services.question_manager import QuestionManager, pack_to_dict
+from daemon.services.task_processor import HeartbeatEmitStuckProcessor
 from daemon.services.work_resolver import WorkResolverService
 from daemon.services.work_notifier import notify_work_watchers
+from daemon.tools.midflight_report import create_midflight_tools
+from daemon.tools.question_tools import create_question_tools
+from daemon.write_pause_guard import WritePauseGuard
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,6 +140,72 @@ def _seed_task(engine, iid, work_id=None, status=TaskStatus.RUNNING.value,
         )
         session.commit()
     return work_id
+
+
+def _consume_handle(engine, work_id, *, to_pending=False):
+    """Clear the awaiting_answer handle the way ResumeTurn does; with
+    ``to_pending`` also flip the task back to PENDING."""
+    sql = (
+        "UPDATE task SET status='pending', "
+        "suspension_reason=NULL, resume_target_turn_id=NULL "
+        "WHERE work_id=:w"
+        if to_pending
+        else "UPDATE task SET suspension_reason=NULL, "
+        "resume_target_turn_id=NULL WHERE work_id=:w"
+    )
+    with Session(engine) as session:
+        session.execute(text(sql), {"w": work_id})
+        session.commit()
+
+
+def _fast_forward_pending_heartbeats(engine):
+    """Fast-forward future-dated PENDING wedge-guard rows to due (the
+    claim's next_retry_at gate holds them until then)."""
+    with Session(engine) as session:
+        session.execute(
+            text(
+                "UPDATE task SET next_retry_at=:past WHERE task_type="
+                "'heartbeat_emit_stuck' AND status='pending'"
+            ),
+            {"past": "2000-01-01T00:00:00.000000+0000"},
+        )
+        session.commit()
+
+
+def _pending_wedge_rows(task_repo, asker):
+    """The asker's PENDING heartbeat_emit_stuck rows."""
+    return [
+        t
+        for t in task_repo.get_by_instance(asker)
+        if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
+        and t.status == TaskStatus.PENDING.value
+    ]
+
+
+def _seed_wedge_asker(harness):
+    """Seed a wedged asker: PAUSED instance + PAUSED task stamped with
+    the awaiting_answer handle + the durable pack shadow."""
+    asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+    work_id = _seed_task(
+        harness.engine, asker, status=TaskStatus.PAUSED.value
+    )
+    # Stamp the awaiting_answer handle the way SuspendTurn does.
+    with Session(harness.engine) as session:
+        session.execute(
+            text(
+                "UPDATE task SET suspension_reason='awaiting_answer', "
+                "resume_target_turn_id=:w WHERE work_id=:w"
+            ),
+            {"w": work_id},
+        )
+        session.commit()
+    # Stamp the durable pack-id shadow (context carrier).
+    pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+    harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
+    harness.instance_repo.set_metadata(
+        asker, "question_pack_payload", pack_to_dict(pack)
+    )
+    return asker, work_id, pack
 
 
 @pytest.fixture
@@ -188,7 +270,15 @@ def harness(engine):
     )
 
 
-from types import SimpleNamespace  # noqa: E402  (used by the harness fixture)
+@pytest.fixture
+def paused_asker(harness):
+    """The standard answer-path prologue: a PAUSED asker with a PAUSED
+    task (the awaiting_answer carrier) and one pending question pack.
+    Returns ``(asker, work_id, pack)``."""
+    asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+    work_id = _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+    pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+    return asker, work_id, pack
 
 
 # =============================================================================
@@ -200,8 +290,6 @@ class TestQuestionSurfacesToWatcher:
     def test_question_surfaces_to_watcher(self, harness):
         """ask_questions emission → [JOB_EVENT] question requested ❓ in the
         watcher's instance, with the pack payload in the body."""
-        from daemon.services.midflight_qa import emit_question_requested
-
         asker = _seed_instance(harness.engine)
         work_id = _seed_task(harness.engine, asker)
         watcher_iid = _seed_instance(harness.engine, status=InstanceStatus.IDLE.value)
@@ -267,8 +355,6 @@ class TestQuestionSurfacesToWatcher:
         harness.watcher_repo.add_watch(task_work, watcher_a, None)
         harness.watcher_repo.add_watch(job_work, watcher_b, None)
 
-        from daemon.services.midflight_qa import emit_question_requested
-
         pack = harness.qm.set_question_pack(asker, [{"text": "Proceed?"}])
         asyncio.run(emit_question_requested(harness.manager, asker, pack))
 
@@ -289,8 +375,6 @@ class TestAnswerResumesAsker:
     def test_answer_resumes_asker(self, harness):
         """POST-answer helper stores answers, notifies, and resumes the
         asker with the Q↔A payload in-context (NIT-17)."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
         _seed_task(  # the awaiting_answer handle
             harness.engine,
@@ -323,16 +407,10 @@ class TestAnswerResumesAsker:
         kinds = [e.kind for e in harness.event_repo.get_by_instance(asker)]
         assert EventKind.QUESTION_ANSWERED.value in kinds
 
-    def test_answer_via_job_route_resolves_work_id(self, harness):
+    def test_answer_via_job_route_resolves_work_id(self, paused_asker, harness):
         """The job-addressed surface resolves work_id → instance before
         delegating to the shared helper."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        work_id = _seed_task(
-            harness.engine, asker, status=TaskStatus.PAUSED.value
-        )
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Proceed?"}])
+        asker, work_id, _ = paused_asker
 
         record = harness.work_resolver.resolve_work(work_id)
         assert record is not None
@@ -357,8 +435,6 @@ class TestAnswerResumesAsker:
 
 class TestReportNonBlocking:
     def test_report_non_blocking(self, harness):
-        from daemon.tools.midflight_report import create_midflight_tools
-
         asker = _seed_instance(harness.engine)
         work_id = _seed_task(harness.engine, asker)
         watcher_iid = _seed_instance(harness.engine, status=InstanceStatus.IDLE.value)
@@ -420,8 +496,6 @@ class TestNoPollingIntroduced:
 
     def test_no_sleep_loops_in_wedge_guard_processor(self):
         """The HeartbeatEmitStuckProcessor class body has no sleep/loop."""
-        from daemon.services.task_processor import HeartbeatEmitStuckProcessor
-
         body = inspect.getsource(HeartbeatEmitStuckProcessor)
         assert "asyncio.sleep" not in body
         assert "while True" not in body
@@ -529,8 +603,6 @@ class TestCompletedEventRegression:
         """Lane-safety invariant: JobFeedbackObserver._process_event
         hard-filters non-instance_lifecycle — the 5 new kinds return
         before any transition logic."""
-        from daemon.services.job_feedback_observer import JobFeedbackObserver
-
         src = inspect.getsource(JobFeedbackObserver._process_event)
         assert '!= "instance_lifecycle"' in src
 
@@ -552,20 +624,14 @@ class TestCompletedEventRegression:
 
 
 class TestWatcherTerminatedMidFlight:
-    def test_answer_path_is_watcher_independent(self, harness):
+    def test_answer_path_is_watcher_independent(self, paused_asker, harness):
         """A TERMINATED watcher does not affect answer delivery — the
         pack lives on the asker; the resolver maps work_id → asker."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        work_id = _seed_task(
-            harness.engine, asker, status=TaskStatus.PAUSED.value
-        )
+        asker, work_id, _ = paused_asker
         watcher_iid = _seed_instance(
             harness.engine, status=InstanceStatus.TERMINATED.value
         )
         harness.watcher_repo.add_watch(work_id, watcher_iid, None)
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Proceed?"}])
 
         result = asyncio.run(
             answer_questions_via_instance(
@@ -577,8 +643,6 @@ class TestWatcherTerminatedMidFlight:
 
 class TestDuplicatePendingPackRejected:
     def test_second_ask_questions_rejected(self, harness):
-        from daemon.tools.question_tools import create_question_tools
-
         asker = _seed_instance(harness.engine)
         tool = create_question_tools(harness.manager, asker)[0]
         first = asyncio.run(
@@ -595,9 +659,6 @@ class TestQuestionWithRunningChildren:
     def test_pause_cascade_stamps_paused_by_parent_on_artifacts(self, engine):
         """MAJOR-4: only the originator's task keeps awaiting_answer;
         cascade-inherited children get the distinct paused_by_parent."""
-        from daemon.services.instance_lifecycle import InstanceLifecycleService
-        from daemon.write_pause_guard import WritePauseGuard
-
         parent = _seed_instance(engine)
         child = _seed_instance(engine, parent_id=parent)
         parent_work = _seed_task(engine, parent)
@@ -635,9 +696,6 @@ class TestQuestionWithRunningChildren:
     def test_resume_cascade_emits_child_question_still_pending(self, harness):
         """OQ-2 decision B: parent resume wipes the child's handle while
         its pack is pending → CHILD_QUESTION_STILL_PENDING fires."""
-        from daemon.services.instance_lifecycle import InstanceLifecycleService
-        from daemon.write_pause_guard import WritePauseGuard
-
         parent = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
         child = _seed_instance(
             harness.engine, status=InstanceStatus.PAUSED.value, parent_id=parent
@@ -669,14 +727,10 @@ class TestQuestionWithRunningChildren:
 
 
 class TestDuplicateAnswerCasNoop:
-    def test_duplicate_answer_returns_already_delivered(self, harness):
+    def test_duplicate_answer_returns_already_delivered(self, paused_asker, harness):
         """First POST wins the CAS and resumes; the second short-circuits
         to 200 already_delivered with NO second resume/events."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Proceed?"}])
+        asker, _, _ = paused_asker
 
         first = asyncio.run(
             answer_questions_via_instance(
@@ -703,35 +757,20 @@ class TestDuplicateAnswerCasNoop:
 
 
 class TestCasWinnerLostHandle:
-    def test_winner_resume_and_loser_noop_on_lost_handle(self, harness):
+    def test_winner_resume_and_loser_noop_on_lost_handle(self, paused_asker, harness):
         """§9.2 CAS-winner/lost-handle race: A wins CAS + consumes the
         handle; B (concurrent) loses the entry CAS → no-op, never
         reaches the finder, never double-delivers."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        work_id = _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Proceed?"}])
+        asker, work_id, _ = paused_asker
 
         # Simulate A winning and the handle being consumed by its
         # ResumeTurn (status flips PAUSED → PENDING, handle cleared).
         def a_resume(iid, **kwargs):
-            row = harness.task_repo.get_by_work_id(work_id)
-            harness.task_repo.force_cancel_and_schedule_retry  # attr check
+            assert hasattr(
+                harness.task_repo, "force_cancel_and_schedule_retry"
+            )
             # Consume the handle the way ResumeTurn does.
-            with Session(harness.engine) as session:
-                from sqlalchemy import text as _t
-
-                session.exec  # noqa: B018
-                session.execute(
-                    _t(
-                        "UPDATE task SET status='pending', "
-                        "suspension_reason=NULL, resume_target_turn_id=NULL "
-                        "WHERE work_id=:w"
-                    ),
-                    {"w": work_id},
-                )
-                session.commit()
+            _consume_handle(harness.engine, work_id, to_pending=True)
             return {"status": "resumed"}
 
         harness.manager.resume_processing_job = AsyncMock(side_effect=a_resume)
@@ -757,14 +796,9 @@ class TestCasWinnerLostHandle:
 
 
 class TestQuestionPackMismatch:
-    def test_stale_pack_id_rejected_400(self, harness):
+    def test_stale_pack_id_rejected_400(self, paused_asker, harness):
         """T1″: body question_pack_id ≠ current pack id → 400 hijack guard."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "New Q?"}])
+        asker, _, pack = paused_asker
 
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(
@@ -781,12 +815,8 @@ class TestQuestionPackMismatch:
         # The pack is still pending — the hijack did NOT stamp it.
         assert harness.qm.get_question_pack(asker).status == "pending"
 
-    def test_matching_pack_id_accepted(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+    def test_matching_pack_id_accepted(self, paused_asker, harness):
+        asker, _, pack = paused_asker
         result = asyncio.run(
             answer_questions_via_instance(
                 harness.manager, asker, {"q1": "yes"}, pack.id, None
@@ -796,13 +826,16 @@ class TestQuestionPackMismatch:
 
 
 class TestTerminalAskerGuards:
-    def test_completed_asker_410(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
-        asker = _seed_instance(
-            harness.engine, status=InstanceStatus.COMPLETED.value
-        )
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [InstanceStatus.COMPLETED, InstanceStatus.TERMINATED],
+        ids=["completed", "terminated"],
+    )
+    def test_terminal_asker_410(self, harness, terminal_status):
+        """T3 pre-check: a COMPLETED/TERMINATED asker is refused with
+        410 ANSWER_TARGET_TERMINAL (leader decision 1) — never silently
+        revived."""
+        asker = _seed_instance(harness.engine, status=terminal_status.value)
         harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(
@@ -815,25 +848,7 @@ class TestTerminalAskerGuards:
             exc_info.value.detail["code"] == ErrorCodes.ANSWER_TARGET_TERMINAL.value
         )
 
-    def test_terminated_asker_410(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
-        asker = _seed_instance(
-            harness.engine, status=InstanceStatus.TERMINATED.value
-        )
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
-        with pytest.raises(HTTPException) as exc_info:
-            asyncio.run(
-                answer_questions_via_instance(
-                    harness.manager, asker, {"q1": "late"}, None, None
-                )
-            )
-        assert exc_info.value.status_code == 410
-
     def test_error_asker_revived_with_flag(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.ERROR.value)
         _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
         harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
@@ -852,8 +867,6 @@ class TestEventEmissionFailure:
     def test_asker_still_stores_pack_when_event_bus_fails(self, harness):
         """§8.6: EventBus failure never breaks the asker — pack stored,
         tool returns the normal echo."""
-        from daemon.tools.question_tools import create_question_tools
-
         asker = _seed_instance(harness.engine)
         harness.manager._event_bus.create_event = AsyncMock(
             side_effect=RuntimeError("bus down")
@@ -865,35 +878,10 @@ class TestEventEmissionFailure:
 
 
 class TestWedgeGuardOneShot:
-    def _wedge_asker(self, harness):
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        work_id = _seed_task(
-            harness.engine, asker, status=TaskStatus.PAUSED.value
-        )
-        # Stamp the awaiting_answer handle the way SuspendTurn does.
-        with Session(harness.engine) as session:
-            from sqlalchemy import text as _t
-
-            session.execute(
-                _t(
-                    "UPDATE task SET suspension_reason='awaiting_answer', "
-                    "resume_target_turn_id=:w WHERE work_id=:w"
-                ),
-                {"w": work_id},
-            )
-            session.commit()
-        # Stamp the durable pack-id shadow (context carrier).
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
-        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
-        harness.instance_repo.set_metadata(
-            asker, "question_pack_payload", pack_to_dict(pack)
-        )
-        return asker, work_id, pack
-
     def test_heartbeat_claimable_while_asker_paused(self, harness):
         """R2: the carve-out lets the one-shot claim while the asker is
         PAUSED; ordinary task types stay excluded."""
-        asker, _, _ = self._wedge_asker(harness)
+        asker, _, _ = _seed_wedge_asker(harness)
         harness.task_repo.create_one_shot_heartbeat(
             TaskType.HEARTBEAT_EMIT_STUCK.value, asker,
             datetime.now(timezone.utc) - timedelta(seconds=1),
@@ -903,7 +891,7 @@ class TestWedgeGuardOneShot:
         assert claimed.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
 
     def test_ordinary_task_still_blocked_for_paused_instance(self, harness):
-        asker, _, _ = self._wedge_asker(harness)
+        asker, _, _ = _seed_wedge_asker(harness)
         _seed_task(harness.engine, asker, status=TaskStatus.PENDING.value)
         harness.task_repo.create_one_shot_heartbeat(
             TaskType.HEARTBEAT_EMIT_STUCK.value, asker,
@@ -918,12 +906,10 @@ class TestWedgeGuardOneShot:
         """Full chain: emission with index derivation, exactly-one
         successor re-arm while index<3, escalation at 3 (terminate +
         broadcaster + NO successor)."""
-        from daemon.services.task_processor import HeartbeatEmitStuckProcessor
-
         processor = HeartbeatEmitStuckProcessor(
             harness.manager, harness.task_repo, harness.event_repo
         )
-        asker, _, pack = self._wedge_asker(harness)
+        asker, _, pack = _seed_wedge_asker(harness)
 
         async def claim_and_run():
             task = harness.task_repo.claim_pending_task("w1")
@@ -945,12 +931,7 @@ class TestWedgeGuardOneShot:
         assert result["emission_index"] == 2
         assert result["re_armed"] is True
         # Exactly ONE successor minted (PENDING, future-dated).
-        pending = [
-            t
-            for t in harness.task_repo.get_by_instance(asker)
-            if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
-            and t.status == TaskStatus.PENDING.value
-        ]
+        pending = _pending_wedge_rows(harness.task_repo, asker)
         assert len(pending) == 1
 
         # ── Emission #3 → escalation ────────────────────────────────
@@ -961,17 +942,7 @@ class TestWedgeGuardOneShot:
         )
         # The successor is future-dated at now+1800s — fast-forward it
         # to due (the claim's next_retry_at gate holds it until then).
-        with Session(harness.engine) as session:
-            from sqlalchemy import text as _t
-
-            session.execute(
-                _t(
-                    "UPDATE task SET next_retry_at=:past WHERE task_type="
-                    "'heartbeat_emit_stuck' AND status='pending'"
-                ),
-                {"past": "2000-01-01T00:00:00.000000+0000"},
-            )
-            session.commit()
+        _fast_forward_pending_heartbeats(harness.engine)
         task = harness.task_repo.claim_pending_task("w2")
         assert task is not None and task.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
         result = asyncio.run(processor.process(task))
@@ -981,34 +952,17 @@ class TestWedgeGuardOneShot:
         )
         harness.manager._notification_broadcaster.emit_question_escalation.assert_awaited()
         # NO successor after escalation.
-        pending = [
-            t
-            for t in harness.task_repo.get_by_instance(asker)
-            if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
-            and t.status == TaskStatus.PENDING.value
-        ]
+        pending = _pending_wedge_rows(harness.task_repo, asker)
         assert pending == []
 
     def test_noop_when_handle_consumed(self, harness):
         """Answered asker (handle cleared) → the heartbeat self-cancels."""
-        from daemon.services.task_processor import HeartbeatEmitStuckProcessor
-
         processor = HeartbeatEmitStuckProcessor(
             harness.manager, harness.task_repo, harness.event_repo
         )
-        asker, work_id, _ = self._wedge_asker(harness)
+        asker, work_id, _ = _seed_wedge_asker(harness)
         # Consume the handle (answer landed).
-        with Session(harness.engine) as session:
-            from sqlalchemy import text as _t
-
-            session.execute(
-                _t(
-                    "UPDATE task SET suspension_reason=NULL, "
-                    "resume_target_turn_id=NULL WHERE work_id=:w"
-                ),
-                {"w": work_id},
-            )
-            session.commit()
+        _consume_handle(harness.engine, work_id)
 
         harness.task_repo.create_one_shot_heartbeat(
             TaskType.HEARTBEAT_EMIT_STUCK.value, asker,
@@ -1018,17 +972,12 @@ class TestWedgeGuardOneShot:
         result = asyncio.run(processor.process(task))
         assert result["emission"] == "no_op"
         harness.manager.terminate_instance.assert_not_awaited()
-        pending = [
-            t
-            for t in harness.task_repo.get_by_instance(asker)
-            if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
-            and t.status == TaskStatus.PENDING.value
-        ]
+        pending = _pending_wedge_rows(harness.task_repo, asker)
         assert pending == []
 
     def test_drift_reconciler_excludes_heartbeat_rows(self, harness):
         """Leader decision 3: heartbeat rows don't surface as drift."""
-        asker, _, _ = self._wedge_asker(harness)
+        asker, _, _ = _seed_wedge_asker(harness)
         harness.task_repo.create_one_shot_heartbeat(
             TaskType.HEARTBEAT_EMIT_STUCK.value, asker,
             datetime.now(timezone.utc) + timedelta(hours=1),
@@ -1041,8 +990,6 @@ class TestDaemonRestartKeepsPack:
     def test_rehydration_from_metadata_then_answer_200(self, harness):
         """§9.2: RAM pack gone (restart) → rehydrate from the durable
         shadow → the answer succeeds (not 404/410)."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
         _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
         # Pre-restart state: pack was shadowed into metadata, then the
@@ -1070,9 +1017,6 @@ class TestDaemonRestartKeepsPack:
         assert result["status"] == "answered"
 
     def test_lost_pack_after_restart_is_410(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
         # No RAM pack, no metadata shadow.
         with pytest.raises(HTTPException) as exc_info:
@@ -1084,13 +1028,9 @@ class TestDaemonRestartKeepsPack:
         assert exc_info.value.status_code == 410
         assert exc_info.value.detail["code"] == ErrorCodes.QUESTION_PACK_LOST.value
 
-    def test_metadata_cleared_on_answer_consumption(self, harness):
+    def test_metadata_cleared_on_answer_consumption(self, paused_asker, harness):
         """R3: both shadow keys are cleared when the answer lands."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        asker, _, pack = paused_asker
         harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
 
         asyncio.run(
@@ -1110,10 +1050,6 @@ def _mount_instances_router(harness):
     """Mount ONLY the instances router on a bare app with the harness
     manager injected — the lightweight pattern from
     tests/test_question_dismiss.py (middleware state injection)."""
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from daemon.routers.instances import router
-
     # The endpoints' existence check awaits manager.get_instance —
     # the MagicMock auto-attribute is not awaitable.
     harness.manager.get_instance = AsyncMock(
@@ -1121,7 +1057,7 @@ def _mount_instances_router(harness):
     )
 
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(_instances_router)
 
     @app.middleware("http")
     async def _inject(request, call_next):
@@ -1137,13 +1073,8 @@ class TestDismissClearsDurableShadow:
     shadow, not just the RAM pack — a late answer after dismiss must NOT
     rehydrate/CAS-win/inject into the running dismissed-past agent."""
 
-    def test_dismiss_clears_shadow_then_late_answer_is_410(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+    def test_dismiss_clears_shadow_then_late_answer_is_410(self, paused_asker, harness):
+        asker, _, pack = paused_asker
         # The durable shadow exists (stamped at ask time, §5.4).
         harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
         harness.instance_repo.set_metadata(
@@ -1184,10 +1115,8 @@ class TestGateSupersessionClearsDurableShadow:
     """M1 pin (second unwind site): POST /resume gate-supersession must
     clear the durable metadata shadow alongside the RAM pack."""
 
-    def test_resume_gate_supersession_clears_shadow(self, harness):
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+    def test_resume_gate_supersession_clears_shadow(self, paused_asker, harness):
+        asker, _, pack = paused_asker
         harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
         harness.instance_repo.set_metadata(
             asker, "question_pack_payload", pack_to_dict(pack)
@@ -1216,9 +1145,6 @@ class TestFallbackTerminalTOCTOU:
     (instance_messaging.py:1898-1925 revive-on-terminal)."""
 
     def test_fallback_with_late_terminated_asker_410_no_revive(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-        from fastapi import HTTPException
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.RUNNING.value)
         _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
         harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
@@ -1257,14 +1183,10 @@ class TestFallbackTerminalTOCTOU:
         # answered in RAM, shadow cleared) — durable, just undeliverable.
         assert harness.qm.get_question_pack(asker).status == "answered"
 
-    def test_fallback_still_enqueues_for_live_asker(self, harness):
+    def test_fallback_still_enqueues_for_live_asker(self, paused_asker, harness):
         """Control: the re-read guard does not break the sanctioned
         fallback for a LIVE (non-terminal) asker."""
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        asker, _, _ = paused_asker
         harness.manager.resume_processing_job = AsyncMock(return_value=None)
 
         result = asyncio.run(
@@ -1283,8 +1205,6 @@ class TestInRequestRehydration:
     test_rehydration_from_metadata_then_answer_200, which pre-hydrates)."""
 
     def test_shadow_only_rehydrates_in_request_and_proceeds(self, harness):
-        from daemon.routers.answer_helper import answer_questions_via_instance
-
         asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
         _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
         # Seed ONLY the durable shadow — a pre-restart manager held the
@@ -1318,12 +1238,10 @@ class TestWedgeGuardFixPassPins:
         """MINOR-1: heartbeat #2 (ONE prior persisted event = ONE elapsed
         1800s interval) reports 1800s — the old ``× (prior+1)`` reported
         3600s and drifted from the ~60-min escalation prose."""
-        from daemon.services.task_processor import HeartbeatEmitStuckProcessor
-
         processor = HeartbeatEmitStuckProcessor(
             harness.manager, harness.task_repo, harness.event_repo
         )
-        asker, _, pack = self._wedge_asker(harness)
+        asker, _, pack = _seed_wedge_asker(harness)
         # Pause-time emission #1 already persisted (transition-time site).
         harness.event_repo.create_event(
             instance_id=asker,
@@ -1340,8 +1258,6 @@ class TestWedgeGuardFixPassPins:
         assert result["emission_index"] == 2
 
         # The EMITTED payload reports the true elapsed wait: 1 interval.
-        import json as _json
-
         with Session(harness.engine) as session:
             rows = session.exec(
                 _select(Event).where(Event.instance_id == asker)
@@ -1351,7 +1267,7 @@ class TestWedgeGuardFixPassPins:
             d = e.data
             if isinstance(d, str):
                 try:
-                    d = _json.loads(d)
+                    d = json.loads(d)
                 except Exception:  # noqa: BLE001
                     d = {}
             return d or {}
@@ -1369,9 +1285,7 @@ class TestWedgeGuardFixPassPins:
         """MINOR-2/3: at most ONE pending wedge-guard row per asker — a
         re-mint while a PENDING row exists is skipped (re-ask stale-link
         fix + chain finiteness bound)."""
-        from daemon.services.midflight_qa import mint_stuck_heartbeat_one_shot
-
-        asker, _, _ = self._wedge_asker(harness)
+        asker, _, _ = _seed_wedge_asker(harness)
         # Pause-site mint (first link) — future-dated, PENDING.
         first = mint_stuck_heartbeat_one_shot(
             harness.manager, asker,
@@ -1383,32 +1297,6 @@ class TestWedgeGuardFixPassPins:
         # pack id → early escalation).
         second = mint_stuck_heartbeat_one_shot(harness.manager, asker)
         assert second is None
-        pending = [
-            t
-            for t in harness.task_repo.get_by_instance(asker)
-            if t.task_type == TaskType.HEARTBEAT_EMIT_STUCK.value
-            and t.status == TaskStatus.PENDING.value
-        ]
+        pending = _pending_wedge_rows(harness.task_repo, asker)
         assert len(pending) == 1
 
-    # Reuse the wedge seeding helper from TestWedgeGuardOneShot.
-    def _wedge_asker(self, harness):
-        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
-        work_id = _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
-        with Session(harness.engine) as session:
-            from sqlalchemy import text as _t
-
-            session.execute(
-                _t(
-                    "UPDATE task SET suspension_reason='awaiting_answer', "
-                    "resume_target_turn_id=:w WHERE work_id=:w"
-                ),
-                {"w": work_id},
-            )
-            session.commit()
-        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
-        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
-        harness.instance_repo.set_metadata(
-            asker, "question_pack_payload", pack_to_dict(pack)
-        )
-        return asker, work_id, pack
