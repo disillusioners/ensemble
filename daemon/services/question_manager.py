@@ -486,6 +486,16 @@ class QuestionManager:
                     status="pending",
                     answers={},
                 )
+                # Fix pass (MINOR-5 verification surfaced this): preserve
+                # the ORIGINAL pack id from the durable shadow. A fresh
+                # uuid here would break the T1″ correlation contract
+                # (§5.4 stamps ``question_pack_id`` precisely so a
+                # post-restart answer echoing it passes the
+                # QUESTION_PACK_MISMATCH guard) and desync the wedge
+                # guard's metadata pack-id reads from the RAM pack.
+                shadowed_id = payload.get("pack_id")
+                if isinstance(shadowed_id, str) and shadowed_id:
+                    pack.id = shadowed_id
                 created_at = payload.get("created_at")
                 if isinstance(created_at, str) and created_at:
                     pack.created_at = created_at

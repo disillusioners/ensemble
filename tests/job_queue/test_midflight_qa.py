@@ -42,6 +42,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session
+from sqlmodel import select as _select
 
 from daemon.constants import STUCK_HEARTBEAT_AFTER_SECONDS
 from daemon.models.common import ErrorCodes
@@ -1099,3 +1100,213 @@ class TestDaemonRestartKeepsPack:
             )
         )
         assert harness.instance_repo.get_metadata_value(asker, "question_pack_id") is None
+
+
+# =============================================================================
+# Fix-pass regression pins (code-review adjudicated, 2026-09-21)
+# =============================================================================
+
+
+def _mount_instances_router(harness):
+    """Mount ONLY the instances router on a bare app with the harness
+    manager injected — the lightweight pattern from
+    tests/test_question_dismiss.py (middleware state injection)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from daemon.routers.instances import router
+
+    # The endpoints' existence check awaits manager.get_instance —
+    # the MagicMock auto-attribute is not awaitable.
+    harness.manager.get_instance = AsyncMock(
+        return_value=SimpleNamespace(instance_id="exists")
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+
+    @app.middleware("http")
+    async def _inject(request, call_next):
+        request.app.state.manager = harness.manager
+        request.app.state.live_hub = None
+        return await call_next(request)
+
+    return TestClient(app)
+
+
+class TestDismissClearsDurableShadow:
+    """M1 pin (council-verified): dismiss must clear the DURABLE metadata
+    shadow, not just the RAM pack — a late answer after dismiss must NOT
+    rehydrate/CAS-win/inject into the running dismissed-past agent."""
+
+    def test_dismiss_clears_shadow_then_late_answer_is_410(self, harness):
+        from daemon.routers.answer_helper import answer_questions_via_instance
+        from fastapi import HTTPException
+
+        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        # The durable shadow exists (stamped at ask time, §5.4).
+        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            asker, "question_pack_payload", pack_to_dict(pack)
+        )
+        harness.manager._deferred_question_pause = set()
+
+        client = _mount_instances_router(harness)
+        resp = client.post(f"/instances/{asker}/question/dismiss")
+        assert resp.status_code == 200
+        # M1: BOTH shadow keys are gone after dismiss — the pack cannot
+        # be resurrected from instance_metadata.
+        assert harness.instance_repo.get_metadata_value(
+            asker, "question_pack_id"
+        ) is None
+        assert harness.instance_repo.get_metadata_value(
+            asker, "question_pack_payload"
+        ) is None
+
+        # Late answer after dismiss: RAM pack gone AND shadow gone →
+        # 410 QUESTION_PACK_LOST. NO rehydration, NO CAS win, NO
+        # injection into the dismissed-past (now resumed) agent.
+        harness.manager.resume_processing_job.reset_mock()
+        harness.manager.enqueue_message.reset_mock()
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                answer_questions_via_instance(
+                    harness.manager, asker, {"q1": "late"}, None, None
+                )
+            )
+        assert exc_info.value.status_code == 410
+        assert exc_info.value.detail["code"] == ErrorCodes.QUESTION_PACK_LOST.value
+        harness.manager.enqueue_message.assert_not_awaited()
+        harness.manager.resume_processing_job.assert_not_awaited()
+
+
+class TestGateSupersessionClearsDurableShadow:
+    """M1 pin (second unwind site): POST /resume gate-supersession must
+    clear the durable metadata shadow alongside the RAM pack."""
+
+    def test_resume_gate_supersession_clears_shadow(self, harness):
+        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        pack = harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            asker, "question_pack_payload", pack_to_dict(pack)
+        )
+        harness.manager._deferred_question_pause = set()
+
+        client = _mount_instances_router(harness)
+        resp = client.post(f"/instances/{asker}/resume")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body.get("gate_superseded") is True
+        # M1: the superseded pack's durable shadow is gone.
+        assert harness.instance_repo.get_metadata_value(
+            asker, "question_pack_id"
+        ) is None
+        assert harness.instance_repo.get_metadata_value(
+            asker, "question_pack_payload"
+        ) is None
+
+
+class TestFallbackTerminalTOCTOU:
+    """M2 pin (council-verified): the Defect-3 fallback re-reads the
+    asker status before enqueueing — an asker that reached a terminal
+    state in the pre-check→fallback window gets 410
+    ANSWER_TARGET_TERMINAL, never a silent enqueue_message revive
+    (instance_messaging.py:1898-1925 revive-on-terminal)."""
+
+    def test_fallback_with_late_terminated_asker_410_no_revive(self, harness):
+        from daemon.routers.answer_helper import answer_questions_via_instance
+        from fastapi import HTTPException
+
+        asker = _seed_instance(harness.engine, status=InstanceStatus.RUNNING.value)
+        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        # No resumable handle → resume_processing_job returns None →
+        # the request walks into the Defect-3 fallback.
+        harness.manager.resume_processing_job = AsyncMock(return_value=None)
+
+        # Terminal TOCTOU: read #1 (the step-2 pre-check) sees the
+        # seeded RUNNING row; EVERY later read — including the fallback
+        # re-read — sees TERMINATED (e.g. the wedge-guard escalation
+        # terminated the chain at t≈3600s, exactly when late answers
+        # land).
+        real_get = harness.instance_repo.get
+        calls = {"n": 0}
+
+        def _get_flipping(iid):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                return SimpleNamespace(status=InstanceStatus.TERMINATED.value)
+            return real_get(iid)
+
+        harness.instance_repo.get = _get_flipping
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                answer_questions_via_instance(
+                    harness.manager, asker, {"q1": "late"}, None, None
+                )
+            )
+        assert exc_info.value.status_code == 410
+        assert exc_info.value.detail["code"] == ErrorCodes.ANSWER_TARGET_TERMINAL.value
+        # The critical pin: NO enqueue → no silent revive of the
+        # terminated asker.
+        harness.manager.enqueue_message.assert_not_awaited()
+        # The answer itself was CAS-consumed before the refusal (pack
+        # answered in RAM, shadow cleared) — durable, just undeliverable.
+        assert harness.qm.get_question_pack(asker).status == "answered"
+
+    def test_fallback_still_enqueues_for_live_asker(self, harness):
+        """Control: the re-read guard does not break the sanctioned
+        fallback for a LIVE (non-terminal) asker."""
+        from daemon.routers.answer_helper import answer_questions_via_instance
+
+        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        harness.qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        harness.manager.resume_processing_job = AsyncMock(return_value=None)
+
+        result = asyncio.run(
+            answer_questions_via_instance(
+                harness.manager, asker, {"q1": "yes"}, None, None
+            )
+        )
+        assert result["resume_route"] == "enqueue_as_fresh_message"
+        harness.manager.enqueue_message.assert_awaited_once()
+
+
+class TestInRequestRehydration:
+    """MINOR-5: the helper's OWN on-the-fly rehydration branch
+    (answer_helper §3, the :184-196 area) — metadata shadow seeded ONLY,
+    RAM empty, and NO boot-time pre-hydration pass (unlike
+    test_rehydration_from_metadata_then_answer_200, which pre-hydrates)."""
+
+    def test_shadow_only_rehydrates_in_request_and_proceeds(self, harness):
+        from daemon.routers.answer_helper import answer_questions_via_instance
+
+        asker = _seed_instance(harness.engine, status=InstanceStatus.PAUSED.value)
+        _seed_task(harness.engine, asker, status=TaskStatus.PAUSED.value)
+        # Seed ONLY the durable shadow — a pre-restart manager held the
+        # pack; THIS daemon's RAM store never saw it.
+        old_qm = QuestionManager()
+        pack = old_qm.set_question_pack(asker, [{"id": "q1", "text": "Q?"}])
+        harness.instance_repo.set_metadata(asker, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            asker, "question_pack_payload", pack_to_dict(pack)
+        )
+        assert harness.qm.get_question_pack(asker) is None  # RAM empty
+
+        result = asyncio.run(
+            answer_questions_via_instance(
+                harness.manager, asker, {"q1": "restored"}, None, None
+            )
+        )
+        # The rehydration-success branch restored the pack mid-request
+        # and the normal answer path proceeded through it.
+        assert result["status"] == "answered"
+        assert result["question_pack"]["pack_id"] == pack.id
+        assert result["question_pack"]["status"] == "answered"
+        restored = harness.qm.get_question_pack(asker)
+        assert restored is not None and restored.status == "answered"

@@ -798,6 +798,15 @@ async def resume_instance(
 
         # Unwind question state — mirror dismiss_question (lines ~1280-1290)
         manager._question_manager.clear_question_pack(instance_id)
+        # M1 (fix pass, council-verified): ALSO clear the DURABLE
+        # metadata shadow. ``clear_question_pack`` is RAM-only; a
+        # surviving ``question_pack_payload`` shadow would let a late
+        # answer (or a daemon restart's boot hydration) resurrect the
+        # dismissed/superseded pack and rehydrate/CAS-win/inject into
+        # the resumed, dismissed-past agent.
+        from daemon.services.midflight_qa import clear_question_pack_metadata
+
+        clear_question_pack_metadata(manager, instance_id)
         manager.clear_question_pause_requested(instance_id)
         manager._deferred_question_pause.discard(instance_id)
 
@@ -1260,6 +1269,15 @@ async def dismiss_question(
     #    (graph_task / pending_injections / request_registry).
     #    The instance is being resumed, NOT terminated.
     manager._question_manager.clear_question_pack(instance_id)
+    # M1 (fix pass, council-verified): ALSO clear the DURABLE metadata
+    # shadow — same rationale as the gate-supersession site above.
+    # Without this, a late answer after dismiss rehydrates the pack
+    # from ``instance_metadata`` (answer_helper §3) and injects into
+    # the running dismissed-past agent; a daemon restart's boot
+    # hydration would resurrect it the same way.
+    from daemon.services.midflight_qa import clear_question_pack_metadata
+
+    clear_question_pack_metadata(manager, instance_id)
     manager.clear_question_pause_requested(instance_id)
     # C2 fix — drop the deferred-pause marker. Without this discard the
     # post-graph completion path in instance_messaging would still fire

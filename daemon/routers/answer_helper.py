@@ -22,7 +22,10 @@ Error codes (both surfaces inherit):
 =========================  =====  =======================================
 Code                       HTTP   Meaning
 =========================  =====  =======================================
-QUESTIONS_NOT_FOUND        404    Instance unknown to the manager.
+INSTANCE_NOT_FOUND         404    Instance unknown to the manager. (The
+                                  jobs surface pre-empts this with
+                                  ``JOB_NOT_FOUND`` at work_id resolve
+                                  time, before delegating here.)
 NO_PENDING_QUESTION        404    Instance exists, no pack pending. Was
                                   mislabeled ``INSTANCE_NOT_FOUND``.
 QUESTION_PACK_LOST         410    Durable handle but neither RAM pack nor
@@ -42,6 +45,7 @@ WRITE_PAUSED               503    Daemon migration mode.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -130,7 +134,12 @@ async def answer_questions_via_instance(
     # ── 1. Instance existence (uniform 404 contract) ─────────────────
     instance_row = None
     try:
-        instance_row = manager._instance_repository.get(instance_id)
+        # NIT-9 (fix pass): the repository read is a blocking sync DB
+        # call — wrap in asyncio.to_thread (sibling precedent:
+        # HeartbeatEmitStuckProcessor / jobs_management answer route).
+        instance_row = await asyncio.to_thread(
+            manager._instance_repository.get, instance_id
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning(
             f"answer_questions_via_instance: instance read failed for "
@@ -243,6 +252,16 @@ async def answer_questions_via_instance(
         )
 
     # ── 5. T1 CAS — exactly-once pending → answered ──────────────────
+    # MINOR-6 (fix pass) — accepted benign race, pre-check → CAS window:
+    # the asker's status can CHANGE between the step-2 terminal
+    # pre-check above and this CAS (e.g. it completes, crashes, or the
+    # wedge-guard escalates). That is ACCEPTED behavior: the CAS itself
+    # is the arbitration point — it flips the pack to ``answered`` (the
+    # answer is DURABLE in the RAM store, and the metadata shadow is
+    # cleared right below), the resume paths are idempotent, and the
+    # Defect-3 fallback re-checks terminality before enqueueing (M2
+    # below) so a late-terminated asker is refused with 410 instead of
+    # being silently revived. No TOCTOU guard is added here.
     pack, transitioned = qm.set_answers(instance_id, answers)
 
     # R3: the durable metadata shadow is cleared at ANSWER CONSUMPTION
@@ -359,6 +378,51 @@ async def answer_questions_via_instance(
             f"enqueueing answer as fresh user message"
             + (" (revived_error_target)" if reviving_error_target else "")
         )
+        # M2 (fix pass, council-verified) — terminal TOCTOU guard: the
+        # asker's status was pre-checked at step 2, but the fallback is
+        # reached SECONDS later (resume attempt + SSE + event fan-out).
+        # In that window the asker can reach a terminal state — most
+        # notably the wedge-guard escalation, which terminates the chain
+        # at t≈3600s, exactly when late answers tend to land.
+        # ``enqueue_message``'s source-agnostic revive-on-terminal
+        # (instance_messaging.py:1898-1925) would then silently revive
+        # a TERMINATED asker from scratch (no checkpoint — the latent
+        # data-loss hazard leader decision 1 closed at the pre-check).
+        # Re-read the status; refuse with 410 instead of enqueueing.
+        # ``reviving_error_target`` is the sanctioned revive path
+        # (ERROR/FAILED pre-checked at step 2) and stays exempt.
+        late_status: str | None = None
+        try:
+            late_row = await asyncio.to_thread(
+                manager._instance_repository.get, instance_id
+            )
+            late_status = getattr(late_row, "status", None) if late_row else None
+        except Exception as e:  # noqa: BLE001 — fail-open to today's behavior
+            logger.warning(
+                f"answer_questions_via_instance: fallback terminal "
+                f"re-read failed for {instance_id[:8]}...: {e}"
+            )
+        if (
+            late_status in ANSWER_TERMINAL_STATUSES
+            and not reviving_error_target
+        ):
+            raise _http(
+                410,
+                ErrorCodes.ANSWER_TARGET_TERMINAL,
+                (
+                    f"Asker instance {instance_id[:8]}... became "
+                    f"{late_status!r} while the answer was being "
+                    f"delivered (terminal TOCTOU, Defect-3 fallback) — "
+                    f"the answer was stored but cannot be injected; "
+                    f"refusing to enqueue onto (or revive) a terminal "
+                    f"asker."
+                ),
+                details={
+                    "instance_id": instance_id,
+                    "status": late_status,
+                    "resume_route": "defect3_refused_terminal",
+                },
+            )
         try:
             fallback_result = await manager.enqueue_message(
                 instance_id=instance_id,
